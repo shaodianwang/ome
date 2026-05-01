@@ -1,0 +1,120 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.pyc
+*.egg-info/
+bin
+.venv/
+venv/
+# Test binary, built with `go test -c`
+*.test
+.serena
+.claude
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# Kubernetes Generated files - skip generated files, except for vendored files
+vendor
+!vendor/**/zz_generated.*
+
+# Mac file system
+**/.DS_Store
+
+# editor and IDE paraphernalia
+.idea
+.editorconfig
+.vscode
+.project
+*.swp
+*.swo
+*~
+*.iml
+
+# Python dev
+.mypy_cache
+
+# Notebook Checkpoints
+.ipynb_checkpoints
+
+.gitlab-ci.yml
+.openapi-generator-ignore
+.openapi-generator/
+
+
+# Downloaded by hack install
+hack/istio-*
+
+# iTerm config
+.itermconfig
+
+# Docker config
+docker-compose.yml
+coverage.cov
+
+# Istio installer downloaded by quick install
+istio-*
+
+# Node.js / npm / yarn / pnpm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-store/
+
+# Next.js
+.next/
+out/
+dist/
+build/
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Frontend environment files
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Testing
+coverage/
+.nyc_output/
+
+# Vercel
+.vercel
+
+java-client/target
+java-client/crd
+# Debug binaries from Go debugging
+**/__debug_bin*
+coverage-*.out
+coverage-*.html
+*target
+*Cargo.lock
+
+# static library
+*.a
+
+hack/python-sdk/openapi-generator-cli-*.jar
+
+# Go build cache directories
+.cache/

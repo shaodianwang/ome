@@ -1,0 +1,289 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches: [ main, release-* ]
+    types: [ opened, synchronize, reopened ]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  security-events: write  # Required for uploading SARIF files if we add security scanning
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit-checks:
+    name: Pre-commit Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Cache Go modules
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        run: |
+          make controller-gen
+          make envtest
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit
+        id: pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure
+
+      - name: Post failure comment on PR
+        if: failure() && steps.pre-commit.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `⚠️ **Pre-commit checks failed**\n\nPlease run the following locally and commit the fixes:\n\`\`\`bash\npre-commit run --all-files\ngit add -u && git commit\n\`\`\`\nSee [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md#pre-commit-check) for setup instructions.`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+  test-and-build:
+    name: Test and Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Remove dependency so tests always run independently
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache test dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            bin/
+            ~/.cargo/registry
+            ~/.cargo/git
+            pkg/xet/target
+          key: ${{ runner.os }}-test-${{ hashFiles('**/go.sum', 'pkg/xet/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-test-
+            ${{ runner.os }}-go-
+            ${{ runner.os }}-rust-
+
+      - name: Run tests
+        run: |
+          make test
+
+      - name: Check coverage threshold
+        run: |
+          echo "::group::Coverage Report"
+          make coverage
+          echo "::endgroup::"
+
+      - name: Upload test coverage
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-report
+          path: |
+            coverage-*.out
+          retention-days: 7
+
+      - name: Build binaries
+        run: |
+          make ome-manager
+          make model-agent
+
+  docker-validation:
+    name: Docker Build Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: pre-commit-checks
+    strategy:
+      matrix:
+        image: [ome-image, model-agent-image, multinode-prober-image, ome-agent-image]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Setup Rust
+        if: matrix.image == 'ome-agent-image'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        if: matrix.image == 'ome-agent-image'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            pkg/xet/target
+          key: ${{ runner.os }}-rust-${{ hashFiles('pkg/xet/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (amd64 only)
+        run: |
+          # Build only for amd64 to save time in PR validation
+          # Multi-arch builds are done during release
+          make ${{ matrix.image }}
+        env:
+          TAG: pr-${{ github.event.pull_request.number }}-${{ github.run_number }}
+          REGISTRY: local
+          ARCH: linux/amd64
+
+  # Optional multi-arch validation - only runs when 'test-multiarch' label is present
+  docker-multiarch-validation:
+    name: Docker Multi-Arch Build Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: pre-commit-checks
+    if: contains(github.event.pull_request.labels.*.name, 'test-multiarch')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            pkg/xet/target
+          key: ${{ runner.os }}-rust-${{ hashFiles('pkg/xet/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build multi-arch images (no push)
+        run: |
+          echo "🌍 Building multi-arch images for validation..."
+          # Build but don't push - just validate the build works
+          docker buildx build --platform=linux/amd64,linux/arm64 \
+            --build-arg VERSION=pr-test \
+            --build-arg GIT_TAG=pr-${{ github.event.pull_request.number }} \
+            --build-arg GIT_COMMIT=${{ github.sha }} \
+            . -f dockerfiles/manager.Dockerfile \
+            -t local/ome-manager:pr-test
+
+          docker buildx build --platform=linux/amd64,linux/arm64 \
+            --build-arg VERSION=pr-test \
+            --build-arg GIT_TAG=pr-${{ github.event.pull_request.number }} \
+            --build-arg GIT_COMMIT=${{ github.sha }} \
+            . -f dockerfiles/model-agent.Dockerfile \
+            -t local/model-agent:pr-test
+          echo "✅ Multi-arch build validation successful"
+
+  summary:
+    name: PR Validation Summary
+    runs-on: ubuntu-latest
+    needs: [pre-commit-checks, test-and-build, docker-validation]
+    if: always()
+    steps:
+      - name: PR Status Summary
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const needs = context.payload.workflow_run ?
+              context.payload.workflow_run.pull_requests[0].number :
+              context.issue.number;
+
+            const jobs = {
+              'pre-commit-checks': '${{ needs.pre-commit-checks.result }}',
+              'test-and-build': '${{ needs.test-and-build.result }}',
+              'docker-validation': '${{ needs.docker-validation.result }}'
+            };
+
+            let allPassed = true;
+            let summary = '## 📋 PR Validation Summary\n\n';
+
+            for (const [job, status] of Object.entries(jobs)) {
+              const emoji = status === 'success' ? '✅' : status === 'skipped' ? '⏭️' : '❌';
+              summary += `${emoji} **${job}**: ${status}\n`;
+              if (status !== 'success' && status !== 'skipped') {
+                allPassed = false;
+              }
+            }
+
+            summary += '\n';
+            summary += allPassed ?
+              '### ✅ All checks passed! Ready for review.' :
+              '### ❌ Some checks failed. Please review the errors above.';
+
+            core.summary.addRaw(summary).write();

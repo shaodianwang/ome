@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ome-model-agent-daemonset
+  namespace: ome
+spec:
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: "ome-model-agent-daemonset"
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: "ome-model-agent-daemonset"
+        control-plane: ome-model-agent-daemonset
+        logging-forward: enabled
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      priorityClassName: system-node-critical
+      serviceAccountName: ome-model-agent
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu
+                    operator: In
+                    values:
+                      - "true"
+      volumes:
+      - name: host-models
+        hostPath:
+          path: /raid/models
+          type: DirectoryOrCreate
+      containers:
+      - name: model-agent
+        image: ghcr.io/moirai-internal/model-agent:v0.1.4
+        imagePullPolicy: Always
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
+        args:
+        - --models-root-dir
+        - /raid/models
+        - --num-download-worker
+        - '2'
+        - --concurrency
+        - '2'
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: INSTANCE_TYPE_MAP
+          valueFrom:
+            configMapKeyRef:
+              name: model-agent-config-map
+              key: instance-type-map
+        volumeMounts:
+        - name: host-models
+          readOnly: false
+          mountPath: /raid/models
+        startupProbe:
+          httpGet:
+            path: /livez
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 5
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: 8080
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: '10'
+            memory: 100Gi
+          requests:
+            cpu: '10'
+            memory: 100Gi
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule

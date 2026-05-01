@@ -1,0 +1,46 @@
+name: Generate OpenVEX
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to generate OpenVEX for'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  security-events: write
+
+jobs:
+  generate-vex:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
+
+      - name: Generate VEX document
+        uses: openvex/generate-vex@c59881b41451d7ccba5c3b74cd195382b8971fcd
+        with:
+          product: pkg:github/sgl-project/ome@${{ github.event.release.tag_name || inputs.tag }}
+          file: /tmp/ome-${{ github.event.release.tag_name || inputs.tag }}.vex.json
+
+      - name: Upload VEX to release
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          gh release upload "$TAG" /tmp/ome-${TAG}.vex.json
+
+      - name: Upload VEX as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: vex-${{ github.event.release.tag_name || inputs.tag }}
+          path: |
+            /tmp/ome-*.vex.json
