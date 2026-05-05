@@ -10,25 +10,28 @@
 
 # .github
 /.github/ @slin1237
-/.github/workflows/ @slin1237 @XinyueZhang369
+/.github/workflows/ @slin1237 @jihuiyang
+
+# .buildkite
+/.buildkite/ @slin1237 @jihuiyang
 
 # charts
-/charts/ @slin1237 @XinyueZhang369
+/charts/ @slin1237 @jihuiyang
 
 # cmd
-/cmd/ @slin1237 @pallasathena92 @beiguo218
+/cmd/ @slin1237
 
 # config
-/config/ @slin1237 @CatherineSue @XinyueZhang369
+/config/ @slin1237
 
 # dockerfiles
-/dockerfiles/ @slin1237 @pallasathena92 @beiguo218
+/dockerfiles/ @slin1237
 
 # hack
 /hack/ @slin1237
 
 # internal
-/internal/ @slin1237 @pallasathena92 @beiguo218
+/internal/ @slin1237
 
 # oeps (OME Enhancement Proposals)
 /oeps/ @slin1237
@@ -37,7 +40,7 @@
 /pkg/ @slin1237
 /pkg/acceleratorclassselector/ @slin1237
 /pkg/afero/ @slin1237
-/pkg/apis/ @slin1237 @pallasathena92 @beiguo218
+/pkg/apis/ @slin1237
 /pkg/auth/ @slin1237
 /pkg/auth/aws/ @slin1237
 /pkg/auth/azure/ @slin1237
@@ -49,29 +52,29 @@
 /pkg/controller/v1beta1/ @slin1237
 /pkg/controller/v1beta1/acceleratorclass/ @slin1237
 /pkg/controller/v1beta1/basemodel/ @slin1237
-/pkg/controller/v1beta1/benchmark/ @slin1237 @CatherineSue
+/pkg/controller/v1beta1/benchmark/ @slin1237
 /pkg/controller/v1beta1/controllerconfig/ @slin1237
-/pkg/controller/v1beta1/inferenceservice/ @slin1237 @CatherineSue @YouNeedCryDear @pallasathena92 @beiguo218
+/pkg/controller/v1beta1/inferenceservice/ @slin1237
 
-/pkg/hfutil/ @slin1237 @pallasathena92 @beiguo218
+/pkg/hfutil/ @slin1237
 /pkg/imds/ @slin1237
 /pkg/logging/ @slin1237
-/pkg/modelagent/ @slin1237 @pallasathena92 @beiguo218 @truddy0
-/pkg/modelver/ @slin1237 @pallasathena92 @beiguo218
-/pkg/ociobjectstore/ @slin1237 @pallasathena92 @speedmancs @chengjieyao @davidsnahm @heymrbox @frankzhouhr @beiguo218
-/pkg/principals/ @slin1237 @pallasathena92 @speedmancs @chengjieyao @davidsnahm @heymrbox @frankzhouhr @beiguo218
-/pkg/runtimeselector/ @slin1237 @pallasathena92
+/pkg/modelagent/ @slin1237
+/pkg/modelver/ @slin1237
+/pkg/ociobjectstore/ @slin1237
+/pkg/principals/ @slin1237
+/pkg/runtimeselector/ @slin1237
 /pkg/storage/ @slin1237
 /pkg/utils/ @slin1237
-/pkg/utils/storage/ @slin1237 @beiguo218
-/pkg/vault/ @slin1237 @pallasathena92 @speedmancs @chengjieyao @davidsnahm @heymrbox @frankzhouhr @beiguo218
+/pkg/utils/storage/ @slin1237
+/pkg/vault/ @slin1237
 /pkg/version/ @slin1237
-/pkg/webhook/ @slin1237 @pallasathena92 @beiguo218
-/pkg/xet/ @slin1237 @pallasathena92 @beiguo218
+/pkg/webhook/ @slin1237
+/pkg/xet/ @slin1237
 /pkg/zipper/ @slin1237
 
 # site (documentation)
-/site/ @slin1237 @pallasathena92 @beiguo218
+/site/ @slin1237
 
 # web-console
 /web-console/ @slin1237
