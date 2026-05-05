@@ -125,6 +125,22 @@ def ci_steps() -> str:
               # test log so we can see why the control plane fails to start.
               export KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true
               make xet-build
+              # The mks-cpu pod's external interface is IPv6. kube-apiserver
+              # auto-detects it as the external host, then refuses to start
+              # because the IPv6 host doesn't match the IPv4 service-cluster
+              # IP range envtest passes (10.0.0.0/24). Wrap the binary with a
+              # shim that pins --advertise-address to 127.0.0.1 so the
+              # auto-detection is skipped.
+              ./bin/setup-envtest use 1.30
+              ENVTEST_ASSETS="$(./bin/setup-envtest use 1.30 -p path)"
+              if [ ! -f "$ENVTEST_ASSETS/kube-apiserver.real" ]; then
+                mv "$ENVTEST_ASSETS/kube-apiserver" "$ENVTEST_ASSETS/kube-apiserver.real"
+                cat > "$ENVTEST_ASSETS/kube-apiserver" <<'WRAP'
+              #!/bin/sh
+              exec "$(dirname "$0")/kube-apiserver.real" --advertise-address=127.0.0.1 "$@"
+              WRAP
+                chmod +x "$ENVTEST_ASSETS/kube-apiserver"
+              fi
               make test-no-xet
             agents:
               queue: "{DEFAULT_QUEUE}"
