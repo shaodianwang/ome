@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
-"""Generate one of OME's Buildkite pipelines.
+"""Generate the Buildkite pipeline for OME.
 
-Each pipeline name maps to a separate BuildKite pipeline that's wired to
-the GitHub repo independently, so each shows as its own commit-status
-check on PRs and runs in parallel.
+Image builds and chart packaging always run; the per-step scripts only
+push to ECR when BUILDKITE_BRANCH=main, so PR builds validate without
+publishing.
 
 Usage:
-    bash .buildkite/upload_pipeline.sh <pipeline>
-
-Pipelines:
-    ci      lint + vet + unit tests + helm-lint   (BuildKite pipeline: ome)
-    images  cf-docker-image plugin builds         (BuildKite pipeline: ome-images)
-
-Add new pipelines (e.g. integration tests) by adding a function below
-and registering it in PIPELINES.
+    bash .buildkite/upload_pipeline.sh
 
 Environment variables read at runtime:
     BUILDKITE_BRANCH          – current branch name
@@ -70,13 +63,15 @@ IMAGES = [
     ("multinode-prober", "ome-multinode-prober", "dockerfiles/multinode-prober.Dockerfile"),
 ]
 
+CHARTS = ["ome-crd", "ome-resources"]
+
 
 # ---------------------------------------------------------------------------
-# CI pipeline (BuildKite pipeline: ome)
+# CI pipeline (runs on every commit / PR)
 # ---------------------------------------------------------------------------
 
 
-def ci_pipeline() -> str:
+def ci_steps() -> str:
     return textwrap.dedent(
         f"""\
         steps:
@@ -136,7 +131,7 @@ def ci_pipeline() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Images pipeline (BuildKite pipeline: ome-images)
+# CD pipeline (build always; push only when run_*.sh sees BUILDKITE_BRANCH=main)
 # ---------------------------------------------------------------------------
 
 
@@ -150,6 +145,7 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
         f"""\
           - label: ":docker: Build {label}"
             key: "build-{label}"
+            depends_on: "test"
             agents:
               queue: "{BUILD_QUEUE}"
             plugins:
@@ -172,29 +168,50 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
     )
 
 
-def images_pipeline() -> str:
-    parts = [_build_image_step(*row) for row in IMAGES]
-    return "steps:\n" + "\n".join(parts)
+def _push_chart_step(chart: str) -> str:
+    # TODO: helm OCI push to ECR needs the same AWS auth path the
+    # cf-docker-image plugin sets up; fix in a follow-up.
+    return textwrap.dedent(
+        f"""\
+          - label: ":helm: Package {chart}"
+            key: "chart-{chart}"
+            depends_on: "test"
+            command: |
+              sh .buildkite/push_chart.sh {chart}
+            agents:
+              queue: "{BUILD_QUEUE}"
+            plugins:
+              - kubernetes:
+                  podSpec:
+                    containers:
+                      - name: container-0
+                        image: "{CI_IMAGE}"
+        """
+    )
+
+
+def cd_steps() -> str:
+    parts: list[str] = []
+    for label, ecr_name, dockerfile in IMAGES:
+        parts.append(_build_image_step(label, ecr_name, dockerfile))
+    for chart in CHARTS:
+        parts.append(_push_chart_step(chart))
+    return textwrap.indent("\n".join(parts), "  ")
 
 
 # ---------------------------------------------------------------------------
-# Dispatch
+# Main
 # ---------------------------------------------------------------------------
 
 
-PIPELINES = {
-    "ci": ci_pipeline,
-    "images": images_pipeline,
-}
+def generate_pipeline() -> str:
+    pipeline = ci_steps()
+    pipeline += "\n" + cd_steps()
+    return pipeline
 
 
 def main() -> None:
-    name = sys.argv[1] if len(sys.argv) > 1 else "ci"
-    if name not in PIPELINES:
-        valid = ", ".join(sorted(PIPELINES))
-        sys.stderr.write(f"unknown pipeline {name!r}; valid: {valid}\n")
-        sys.exit(2)
-    sys.stdout.write(PIPELINES[name]())
+    sys.stdout.write(generate_pipeline())
 
 
 if __name__ == "__main__":
