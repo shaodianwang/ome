@@ -44,7 +44,7 @@ Clone the repository and install the OME-Agent CLI.
 ```bash
 mkdir -p ${GOPATH}/src/github.com/sgl-project/ome
 cd ${GOPATH}/src/github.com/sgl-project/ome
-git clone https://github.com/sgl-project/ome.git
+git clone https://github.com/ome-projects/ome.git
 cd ome
 make ome-agent
 ```

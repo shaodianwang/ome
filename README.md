@@ -1,6 +1,6 @@
 # OME (Open Model Engine) — Kubernetes Operator for LLM Serving
 
-Forked from [sgl-project/ome](https://github.com/sgl-project/ome).
+Forked from [ome-projects/ome](https://github.com/ome-projects/ome).
 
 ## What is OME?
 
