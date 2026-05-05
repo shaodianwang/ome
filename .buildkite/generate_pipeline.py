@@ -123,6 +123,17 @@ def ci_steps() -> str:
 # ---------------------------------------------------------------------------
 
 
+# MKS identity annotations: bind the pod to the default cluster identity
+# and inject AWS auth tooling so `aws ecr get-login-password` works
+# without static credentials. Same pattern as prod_inference's k8s_plugin.
+_MKS_IDENTITY_ANNOTATIONS = (
+    "                  metadata:\n"
+    "                    annotations:\n"
+    "                      identity.mks.meta.com/default: \"true\"\n"
+    "                      identity.mks.meta.com/inject-auth-tools: \"true\"\n"
+)
+
+
 def _build_image_step(name: str, dockerfile: str) -> str:
     return textwrap.dedent(
         f"""\
@@ -139,7 +150,7 @@ def _build_image_step(name: str, dockerfile: str) -> str:
                     containers:
                       - name: container-0
                         image: "{DOCKER_IMAGE}"
-        """
+{_MKS_IDENTITY_ANNOTATIONS}        """
     )
 
 
@@ -159,7 +170,7 @@ def _push_chart_step(chart: str) -> str:
                     containers:
                       - name: container-0
                         image: "{CI_IMAGE}"
-        """
+{_MKS_IDENTITY_ANNOTATIONS}        """
     )
 
 
