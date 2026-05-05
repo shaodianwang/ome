@@ -109,7 +109,6 @@ java-client/crd
 coverage-*.out
 coverage-*.html
 *target
-*Cargo.lock
 
 # static library
 *.a

@@ -117,7 +117,10 @@ def ci_steps() -> str:
               # manager binary no longer depends on libxet.
               curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
               sh /tmp/rustup.sh -y --default-toolchain stable --profile minimal
-              export PATH="$HOME/.cargo/bin:$PATH"
+              # Buildkite's k8s plugin injects its own PATH that omits the
+              # golang image's /usr/local/go/bin and /go/bin, so re-add them
+              # explicitly alongside cargo.
+              export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/go/bin:$PATH"
               make xet-build
               make test-no-xet
             agents:
