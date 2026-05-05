@@ -33,7 +33,9 @@ ECR_REGISTRY = os.environ.get(
 )
 
 CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.25-bookworm"
-DOCKER_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/docker:27-dind"
+# Ubuntu-based dind because the official docker:27-dind is alpine and
+# BuildKite's agent pre-command hook requires /bin/bash.
+DOCKER_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/cruizba/ubuntu-dind:latest"
 
 DEFAULT_QUEUE = "mks-cpu"
 BUILD_QUEUE = "mks-cpu"

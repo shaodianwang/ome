@@ -24,11 +24,10 @@ IMAGE_TAG="${DATE_TAG}-${SHORT_SHA}"
 FULL_TAG="${IMAGE_REPO}/${NAME}:${IMAGE_TAG}"
 LATEST_TAG="${IMAGE_REPO}/${NAME}:latest"
 
-# The dind image is Alpine-based and has docker but not aws CLI. Install
-# it here so we can fetch ECR credentials. apk-cache is per-pod so this
-# only runs once per build.
+# Install aws CLI on demand. Ubuntu's `awscli` package is v1 which is
+# fine for ECR get-login-password.
 if ! command -v aws >/dev/null 2>&1; then
-  apk add --no-cache aws-cli
+  apt-get update && apt-get install -y --no-install-recommends awscli
 fi
 
 aws ecr get-login-password --region "$AWS_REGION" \
