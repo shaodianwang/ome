@@ -33,9 +33,13 @@ ECR_REGISTRY = os.environ.get(
 )
 
 CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.25-bookworm"
-# Ubuntu-based dind because the official docker:27-dind is alpine and
-# BuildKite's agent pre-command hook requires /bin/bash.
-DOCKER_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/cruizba/ubuntu-dind:latest"
+
+# cf-docker-image plugin handles ECR auth + multi-arch builds. The plugin
+# is fetched from mslsrc/dev at job-submit time. See prod_inference for
+# precedent.
+CF_DOCKER_IMAGE_PLUGIN = (
+    "https://github.com/mslsrc/dev.git/buildkite/plugins/cf-docker-image#main"
+)
 
 DEFAULT_QUEUE = "mks-cpu"
 BUILD_QUEUE = "mks-cpu"
@@ -43,12 +47,13 @@ BUILD_QUEUE = "mks-cpu"
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
 
-# (image-name, Dockerfile path)
+# (label-suffix, ECR repo name under msl_infra/, Dockerfile)
+# Drop redundant "ome-" prefix in ECR names so we don't get "ome-ome-*".
 IMAGES = [
-    ("ome-manager", "dockerfiles/manager.Dockerfile"),
-    ("model-agent", "dockerfiles/model-agent.Dockerfile"),
-    ("ome-agent", "dockerfiles/ome-agent.Dockerfile"),
-    ("multinode-prober", "dockerfiles/multinode-prober.Dockerfile"),
+    ("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile"),
+    ("model-agent", "ome-model-agent", "dockerfiles/model-agent.Dockerfile"),
+    ("ome-agent", "ome-agent", "dockerfiles/ome-agent.Dockerfile"),
+    ("multinode-prober", "ome-multinode-prober", "dockerfiles/multinode-prober.Dockerfile"),
 ]
 
 CHARTS = ["ome-crd", "ome-resources"]
@@ -123,25 +128,17 @@ def ci_steps() -> str:
 # ---------------------------------------------------------------------------
 
 
-# MKS identity annotations: bind the pod to the default cluster identity
-# and inject AWS auth tooling so `aws ecr get-login-password` works
-# without static credentials. Same pattern as prod_inference's k8s_plugin.
-_MKS_IDENTITY_ANNOTATIONS = (
-    "                  metadata:\n"
-    "                    annotations:\n"
-    "                      identity.mks.meta.com/default: \"true\"\n"
-    "                      identity.mks.meta.com/inject-auth-tools: \"true\"\n"
-)
+def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
+    """Emit a cf-docker-image plugin step.
 
-
-def _build_image_step(name: str, dockerfile: str) -> str:
+    Builds on every branch (validates the Dockerfile); pushes only on
+    main via push-branches. The plugin handles ECR auth + tagging.
+    """
     return textwrap.dedent(
         f"""\
-          - label: ":docker: Build {name}"
-            key: "build-{name}"
+          - label: ":docker: Build {label}"
+            key: "build-{label}"
             depends_on: "test"
-            command: |
-              sh .buildkite/build_image.sh {name} {dockerfile}
             agents:
               queue: "{BUILD_QUEUE}"
             plugins:
@@ -149,12 +146,24 @@ def _build_image_step(name: str, dockerfile: str) -> str:
                   podSpec:
                     containers:
                       - name: container-0
-                        image: "{DOCKER_IMAGE}"
-{_MKS_IDENTITY_ANNOTATIONS}        """
+                        image: "{CI_IMAGE}"
+              - "{CF_DOCKER_IMAGE_PLUGIN}":
+                  ecr-name: "msl_infra/{ecr_name}"
+                  environment: "dev"
+                  region: "{AWS_REGION}"
+                  dockerfile: "{dockerfile}"
+                  build-context: "."
+                  platforms: ["linux/amd64"]
+                  push-branches: "main"
+                  tags: ["latest"]
+                  login: true
+        """
     )
 
 
 def _push_chart_step(chart: str) -> str:
+    # TODO: helm OCI push to ECR needs the same AWS auth path the
+    # cf-docker-image plugin sets up; fix in a follow-up.
     return textwrap.dedent(
         f"""\
           - label: ":helm: Package {chart}"
@@ -170,14 +179,14 @@ def _push_chart_step(chart: str) -> str:
                     containers:
                       - name: container-0
                         image: "{CI_IMAGE}"
-{_MKS_IDENTITY_ANNOTATIONS}        """
+        """
     )
 
 
 def cd_steps() -> str:
     parts: list[str] = []
-    for name, dockerfile in IMAGES:
-        parts.append(_build_image_step(name, dockerfile))
+    for label, ecr_name, dockerfile in IMAGES:
+        parts.append(_build_image_step(label, ecr_name, dockerfile))
     for chart in CHARTS:
         parts.append(_push_chart_step(chart))
     return textwrap.indent("\n".join(parts), "  ")
