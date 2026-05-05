@@ -100,11 +100,14 @@ def ci_steps() -> str:
           - label: ":test_tube: Unit Tests"
             key: "test"
             command: |
-              set -euo pipefail
+              set -eu
+              # The Buildkite k8s plugin runs commands under /bin/sh (dash on
+              # bookworm), so avoid bashisms like `pipefail`.
+              #
               # System deps:
               #   - jq: required by `make manifests` CRD post-processing.
               #   - libssl-dev / pkg-config / build-essential: needed to link libxet.
-              #   - curl: bootstraps rustup.
+              #   - curl + ca-certificates: bootstraps rustup.
               apt-get update
               apt-get install -y --no-install-recommends jq libssl-dev pkg-config build-essential curl ca-certificates
               # Rust toolchain for `pkg/xet` (CGo wrapper around a Rust staticlib).
@@ -112,7 +115,8 @@ def ci_steps() -> str:
               # "no-xet" target still requires it at link time today. Tracked for
               # follow-up: extract the model controller out of cmd/manager so the
               # manager binary no longer depends on libxet.
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
+              sh /tmp/rustup.sh -y --default-toolchain stable --profile minimal
               export PATH="$HOME/.cargo/bin:$PATH"
               make xet-build
               make test-no-xet
