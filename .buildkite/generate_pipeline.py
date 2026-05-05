@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Generate the Buildkite pipeline for OME.
 
-Two modes:
-  - PR / branch push:  lint + test to validate the commit
-  - Merge to main:     build images, package Helm charts, push to ECR
+Image builds and chart packaging always run; the per-step scripts only
+push to ECR when BUILDKITE_BRANCH=main, so PR builds validate without
+publishing.
 
 Usage:
     bash .buildkite/upload_pipeline.sh
@@ -21,7 +21,6 @@ from __future__ import annotations
 import os
 import sys
 import textwrap
-from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -34,32 +33,37 @@ ECR_REGISTRY = os.environ.get(
 )
 
 CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.25-bookworm"
-DOCKER_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/docker:27-dind"
+
+# cf-docker-image plugin handles ECR auth + multi-arch builds. The plugin
+# is fetched from mslsrc/dev at job-submit time. See prod_inference for
+# precedent.
+CF_DOCKER_IMAGE_PLUGIN = (
+    "https://github.com/mslsrc/dev.git/buildkite/plugins/cf-docker-image#main"
+)
+# Runtime image for the cf-docker-image plugin's command hook. Needs
+# bash + docker CLI + buildx + aws CLI + uv. We reuse prod_inference's
+# ci-base since it has all of those, until we build our own.
+CF_DOCKER_PLUGIN_RUNTIME_IMAGE = (
+    f"{ECR_REGISTRY}/msl_infra/prod-inference-ci-base"
+    "@sha256:fd2e3c825cd063a8b4cd3d7440bf00696c9f8a7f8132e5a7d1e38a3df2f542e8"
+)
 
 DEFAULT_QUEUE = "mks-cpu"
 BUILD_QUEUE = "mks-cpu"
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
-SHORT_SHA = COMMIT[:8] if len(COMMIT) >= 8 else COMMIT
-DATE_TAG = datetime.now(timezone.utc).strftime("%Y%m%d")
-IMAGE_TAG = f"{DATE_TAG}-{SHORT_SHA}"
 
-CHART_REPO = f"oci://{ECR_REGISTRY}/ome/charts"
-IMAGE_REPO = f"{ECR_REGISTRY}/ome"
-
+# (label-suffix, ECR repo name under msl_infra/, Dockerfile)
+# Drop redundant "ome-" prefix in ECR names so we don't get "ome-ome-*".
 IMAGES = [
-    ("ome-manager", "dockerfiles/manager.Dockerfile", "./cmd/manager"),
-    ("model-agent", "dockerfiles/model-agent.Dockerfile", "./cmd/model-agent"),
-    ("ome-agent", "dockerfiles/ome-agent.Dockerfile", "./cmd/ome-agent"),
-    ("multinode-prober", "dockerfiles/multinode-prober.Dockerfile", "./cmd/multinode-prober"),
+    ("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile"),
+    ("model-agent", "ome-model-agent", "dockerfiles/model-agent.Dockerfile"),
+    ("ome-agent", "ome-agent", "dockerfiles/ome-agent.Dockerfile"),
+    ("multinode-prober", "ome-multinode-prober", "dockerfiles/multinode-prober.Dockerfile"),
 ]
 
 CHARTS = ["ome-crd", "ome-resources"]
-
-
-def is_main_branch() -> bool:
-    return BRANCH == "main"
 
 
 # ---------------------------------------------------------------------------
@@ -127,29 +131,21 @@ def ci_steps() -> str:
 
 
 # ---------------------------------------------------------------------------
-# CD pipeline (runs on merge to main)
+# CD pipeline (build always; push only when run_*.sh sees BUILDKITE_BRANCH=main)
 # ---------------------------------------------------------------------------
 
 
-def _build_image_step(name: str, dockerfile: str, context: str) -> str:
-    full_tag = f"{IMAGE_REPO}/{name}:{IMAGE_TAG}"
-    latest_tag = f"{IMAGE_REPO}/{name}:latest"
+def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
+    """Emit a cf-docker-image plugin step.
+
+    Builds on every branch (validates the Dockerfile); pushes only on
+    main via push-branches. The plugin handles ECR auth + tagging.
+    """
     return textwrap.dedent(
         f"""\
-          - label: ":docker: Build & Push {name}"
-            key: "build-{name}"
+          - label: ":docker: Build {label}"
+            key: "build-{label}"
             depends_on: "test"
-            command: |
-              aws ecr get-login-password --region {AWS_REGION} | docker login --username AWS --password-stdin {ECR_REGISTRY}
-              docker build \\
-                --build-arg GIT_TAG={IMAGE_TAG} \\
-                --build-arg GIT_COMMIT={COMMIT} \\
-                -f {dockerfile} \\
-                -t {full_tag} \\
-                -t {latest_tag} \\
-                .
-              docker push {full_tag}
-              docker push {latest_tag}
             agents:
               queue: "{BUILD_QUEUE}"
             plugins:
@@ -157,23 +153,31 @@ def _build_image_step(name: str, dockerfile: str, context: str) -> str:
                   podSpec:
                     containers:
                       - name: container-0
-                        image: "{DOCKER_IMAGE}"
+                        image: "{CF_DOCKER_PLUGIN_RUNTIME_IMAGE}"
+              - "{CF_DOCKER_IMAGE_PLUGIN}":
+                  ecr-name: "msl_infra/{ecr_name}"
+                  environment: "dev"
+                  region: "{AWS_REGION}"
+                  dockerfile: "{dockerfile}"
+                  build-context: "."
+                  platforms: ["linux/amd64"]
+                  push-branches: "main"
+                  tags: ["latest"]
+                  login: true
         """
     )
 
 
 def _push_chart_step(chart: str) -> str:
+    # TODO: helm OCI push to ECR needs the same AWS auth path the
+    # cf-docker-image plugin sets up; fix in a follow-up.
     return textwrap.dedent(
         f"""\
-          - label: ":helm: Package & Push {chart}"
+          - label: ":helm: Package {chart}"
             key: "chart-{chart}"
             depends_on: "test"
             command: |
-              aws ecr get-login-password --region {AWS_REGION} | helm registry login --username AWS --password-stdin {ECR_REGISTRY}
-              sed -i 's/^version:.*/version: {IMAGE_TAG}/' charts/{chart}/Chart.yaml
-              sed -i 's/^appVersion:.*/appVersion: "{IMAGE_TAG}"/' charts/{chart}/Chart.yaml
-              helm package charts/{chart}
-              helm push {chart}-{IMAGE_TAG}.tgz {CHART_REPO}
+              sh .buildkite/push_chart.sh {chart}
             agents:
               queue: "{BUILD_QUEUE}"
             plugins:
@@ -188,8 +192,8 @@ def _push_chart_step(chart: str) -> str:
 
 def cd_steps() -> str:
     parts: list[str] = []
-    for name, dockerfile, context in IMAGES:
-        parts.append(_build_image_step(name, dockerfile, context))
+    for label, ecr_name, dockerfile in IMAGES:
+        parts.append(_build_image_step(label, ecr_name, dockerfile))
     for chart in CHARTS:
         parts.append(_push_chart_step(chart))
     return textwrap.indent("\n".join(parts), "  ")
@@ -202,8 +206,7 @@ def cd_steps() -> str:
 
 def generate_pipeline() -> str:
     pipeline = ci_steps()
-    if is_main_branch():
-        pipeline += "\n" + cd_steps()
+    pipeline += "\n" + cd_steps()
     return pipeline
 
 
