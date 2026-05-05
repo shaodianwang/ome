@@ -8,14 +8,16 @@ name = "xet"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
-# Use upstream xet-core from GitHub
-xet-core-data = { git = "https://github.com/huggingface/xet-core", package = "data" }
-cas-client = { git = "https://github.com/huggingface/xet-core", package = "cas_client" }
-cas-object = { git = "https://github.com/huggingface/xet-core", package = "cas_object" }
-utils = { git = "https://github.com/huggingface/xet-core", package = "utils" }
-xet-runtime = { git = "https://github.com/huggingface/xet-core", package = "xet_runtime" }
-progress-tracking = { git = "https://github.com/huggingface/xet-core", package = "progress_tracking" }
-merklehash = { git = "https://github.com/huggingface/xet-core", package = "merklehash" }
+# Use upstream xet-core from GitHub.
+# Pin to a known-good revision; xet-core HEAD has renamed/removed packages
+# (e.g. cas_client) without notice. Bump deliberately when updating.
+xet-core-data = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "data" }
+cas-client = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "cas_client" }
+cas-object = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "cas_object" }
+utils = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "utils" }
+xet-runtime = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "xet_runtime" }
+progress-tracking = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "progress_tracking" }
+merklehash = { git = "https://github.com/huggingface/xet-core", rev = "fa030edcd5edc7b18af1c7073bcc3dcf2f9cfc48", package = "merklehash" }
 
 # Standard dependencies
 ulid = "1.1"
