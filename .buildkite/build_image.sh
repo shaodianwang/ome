@@ -34,6 +34,17 @@ if ! command -v aws >/dev/null 2>&1; then
   /tmp/aws/install
 fi
 
+echo "--- pod identity diagnostics ---"
+echo "AWS_* env:"
+env | grep -E '^AWS_|^IDENTITY_|^MKS_' | sort || true
+echo "Files under /var/run/secrets:"
+find /var/run/secrets -maxdepth 4 2>/dev/null | head -20 || true
+echo "Pod annotations (via downward API mount, if present):"
+ls /etc/podinfo 2>/dev/null && cat /etc/podinfo/* 2>/dev/null || echo "  (no /etc/podinfo)"
+echo "aws sts get-caller-identity:"
+aws sts get-caller-identity --region "$AWS_REGION" 2>&1 || true
+echo "--- end diagnostics ---"
+
 aws ecr get-login-password --region "$AWS_REGION" \
   | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
