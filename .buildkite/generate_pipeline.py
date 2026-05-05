@@ -121,6 +121,9 @@ def ci_steps() -> str:
               # golang image's /usr/local/go/bin and /go/bin, so re-add them
               # explicitly alongside cargo.
               export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/go/bin:$PATH"
+              # Forward envtest's kube-apiserver/etcd stdout+stderr into the
+              # test log so we can see why the control plane fails to start.
+              export KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true
               make xet-build
               make test-no-xet
             agents:
