@@ -135,10 +135,14 @@ def ci_steps() -> str:
               # shim that pins --advertise-address to 127.0.0.1 so the
               # auto-detection is skipped.
               #
-              # Parse the path from the human-readable `use` output rather
-              # than `-p path` — the latter returned empty in CI for
-              # reasons that didn't reproduce locally.
-              ENVTEST_ASSETS="$(./bin/setup-envtest use 1.30 | awk '/^Path:/ {{print $2}}')"
+              # Capture stdout + stderr so we can see why setup-envtest
+              # silently produces no output sometimes. Parse the path from
+              # the human-readable `Path:` line.
+              SETUP_OUT="$(./bin/setup-envtest use 1.30 2>&1 || true)"
+              echo "--- setup-envtest output ---"
+              echo "$SETUP_OUT"
+              echo "--- end setup-envtest output ---"
+              ENVTEST_ASSETS="$(echo "$SETUP_OUT" | awk '/^Path:/ {{print $2}}')"
               echo "envtest assets at: $ENVTEST_ASSETS"
               if [ -z "$ENVTEST_ASSETS" ] || [ ! -d "$ENVTEST_ASSETS" ]; then
                 echo "failed to resolve envtest assets path" >&2
