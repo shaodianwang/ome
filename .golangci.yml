@@ -32,16 +32,22 @@ issues:
       linters:
         - unused
 
-    # SA4006 — ineffectual assignment reported by staticcheck (not the
-    # ineffassign linter). Two upstream-inherited sites.
+    # Ineffectual assignment — fires from both staticcheck (SA4006) and
+    # the ineffassign linter on the same line. Two upstream-inherited sites.
     - path: pkg/hfutil/modelconfig/interface\.go
+      linters:
+        - staticcheck
+      text: "SA4006"
+    - path: pkg/hfutil/modelconfig/interface\.go
+      linters:
+        - ineffassign
+    - path: pkg/modelagent/gopher\.go
       linters:
         - staticcheck
       text: "SA4006"
     - path: pkg/modelagent/gopher\.go
       linters:
-        - staticcheck
-      text: "SA4006"
+        - ineffassign
 
     # SA6002 (passing []byte to sync.Pool.Put causes header allocation).
     # Real but small perf issue we can fix later.
