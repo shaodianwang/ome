@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Generate the Buildkite pipeline for OME.
 
-Two modes:
-  - PR / branch push:  lint + test to validate the commit
-  - Merge to main:     build images, package Helm charts, push to ECR
+Image builds and chart packaging always run; the per-step scripts only
+push to ECR when BUILDKITE_BRANCH=main, so PR builds validate without
+publishing.
 
 Usage:
     bash .buildkite/upload_pipeline.sh
@@ -21,7 +21,6 @@ from __future__ import annotations
 import os
 import sys
 import textwrap
-from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -41,25 +40,16 @@ BUILD_QUEUE = "mks-cpu"
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
-SHORT_SHA = COMMIT[:8] if len(COMMIT) >= 8 else COMMIT
-DATE_TAG = datetime.now(timezone.utc).strftime("%Y%m%d")
-IMAGE_TAG = f"{DATE_TAG}-{SHORT_SHA}"
 
-CHART_REPO = f"oci://{ECR_REGISTRY}/ome/charts"
-IMAGE_REPO = f"{ECR_REGISTRY}/ome"
-
+# (image-name, Dockerfile path)
 IMAGES = [
-    ("ome-manager", "dockerfiles/manager.Dockerfile", "./cmd/manager"),
-    ("model-agent", "dockerfiles/model-agent.Dockerfile", "./cmd/model-agent"),
-    ("ome-agent", "dockerfiles/ome-agent.Dockerfile", "./cmd/ome-agent"),
-    ("multinode-prober", "dockerfiles/multinode-prober.Dockerfile", "./cmd/multinode-prober"),
+    ("ome-manager", "dockerfiles/manager.Dockerfile"),
+    ("model-agent", "dockerfiles/model-agent.Dockerfile"),
+    ("ome-agent", "dockerfiles/ome-agent.Dockerfile"),
+    ("multinode-prober", "dockerfiles/multinode-prober.Dockerfile"),
 ]
 
 CHARTS = ["ome-crd", "ome-resources"]
-
-
-def is_main_branch() -> bool:
-    return BRANCH == "main"
 
 
 # ---------------------------------------------------------------------------
@@ -127,29 +117,18 @@ def ci_steps() -> str:
 
 
 # ---------------------------------------------------------------------------
-# CD pipeline (runs on merge to main)
+# CD pipeline (build always; push only when run_*.sh sees BUILDKITE_BRANCH=main)
 # ---------------------------------------------------------------------------
 
 
-def _build_image_step(name: str, dockerfile: str, context: str) -> str:
-    full_tag = f"{IMAGE_REPO}/{name}:{IMAGE_TAG}"
-    latest_tag = f"{IMAGE_REPO}/{name}:latest"
+def _build_image_step(name: str, dockerfile: str) -> str:
     return textwrap.dedent(
         f"""\
-          - label: ":docker: Build & Push {name}"
+          - label: ":docker: Build {name}"
             key: "build-{name}"
             depends_on: "test"
             command: |
-              aws ecr get-login-password --region {AWS_REGION} | docker login --username AWS --password-stdin {ECR_REGISTRY}
-              docker build \\
-                --build-arg GIT_TAG={IMAGE_TAG} \\
-                --build-arg GIT_COMMIT={COMMIT} \\
-                -f {dockerfile} \\
-                -t {full_tag} \\
-                -t {latest_tag} \\
-                .
-              docker push {full_tag}
-              docker push {latest_tag}
+              sh .buildkite/build_image.sh {name} {dockerfile}
             agents:
               queue: "{BUILD_QUEUE}"
             plugins:
@@ -165,15 +144,11 @@ def _build_image_step(name: str, dockerfile: str, context: str) -> str:
 def _push_chart_step(chart: str) -> str:
     return textwrap.dedent(
         f"""\
-          - label: ":helm: Package & Push {chart}"
+          - label: ":helm: Package {chart}"
             key: "chart-{chart}"
             depends_on: "test"
             command: |
-              aws ecr get-login-password --region {AWS_REGION} | helm registry login --username AWS --password-stdin {ECR_REGISTRY}
-              sed -i 's/^version:.*/version: {IMAGE_TAG}/' charts/{chart}/Chart.yaml
-              sed -i 's/^appVersion:.*/appVersion: "{IMAGE_TAG}"/' charts/{chart}/Chart.yaml
-              helm package charts/{chart}
-              helm push {chart}-{IMAGE_TAG}.tgz {CHART_REPO}
+              sh .buildkite/push_chart.sh {chart}
             agents:
               queue: "{BUILD_QUEUE}"
             plugins:
@@ -188,8 +163,8 @@ def _push_chart_step(chart: str) -> str:
 
 def cd_steps() -> str:
     parts: list[str] = []
-    for name, dockerfile, context in IMAGES:
-        parts.append(_build_image_step(name, dockerfile, context))
+    for name, dockerfile in IMAGES:
+        parts.append(_build_image_step(name, dockerfile))
     for chart in CHARTS:
         parts.append(_push_chart_step(chart))
     return textwrap.indent("\n".join(parts), "  ")
@@ -202,8 +177,7 @@ def cd_steps() -> str:
 
 def generate_pipeline() -> str:
     pipeline = ci_steps()
-    if is_main_branch():
-        pipeline += "\n" + cd_steps()
+    pipeline += "\n" + cd_steps()
     return pipeline
 
 
