@@ -23,7 +23,11 @@ helm package "charts/${CHART}"
 
 if [ "${BUILDKITE_BRANCH:-}" = "main" ]; then
   if ! command -v aws >/dev/null 2>&1; then
-    apt-get update && apt-get install -y --no-install-recommends awscli
+    apt-get update
+    apt-get install -y --no-install-recommends curl unzip ca-certificates
+    curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+    unzip -q /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install
   fi
   aws ecr get-login-password --region "$AWS_REGION" \
     | helm registry login --username AWS --password-stdin "$ECR_REGISTRY"
