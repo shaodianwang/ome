@@ -138,7 +138,7 @@ def ci_steps() -> str:
               # Parse the path from the human-readable `use` output rather
               # than `-p path` — the latter returned empty in CI for
               # reasons that didn't reproduce locally.
-              ENVTEST_ASSETS="$(./bin/setup-envtest use 1.30 | awk '/^Path:/ {print $2}')"
+              ENVTEST_ASSETS="$(./bin/setup-envtest use 1.30 | awk '/^Path:/ {{print $2}}')"
               echo "envtest assets at: $ENVTEST_ASSETS"
               if [ -z "$ENVTEST_ASSETS" ] || [ ! -d "$ENVTEST_ASSETS" ]; then
                 echo "failed to resolve envtest assets path" >&2
