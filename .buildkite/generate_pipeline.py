@@ -6,7 +6,7 @@ Two modes:
   - Merge to main:     build images, package Helm charts, push to ECR
 
 Usage:
-    cd .buildkite && uv run python generate_pipeline.py | buildkite-agent pipeline upload
+    bash .buildkite/upload_pipeline.sh
 
 Environment variables read at runtime:
     BUILDKITE_BRANCH          – current branch name
@@ -100,7 +100,7 @@ def ci_steps() -> str:
           - label: ":test_tube: Unit Tests"
             key: "test"
             command: |
-              make test-no-xet
+              sh .buildkite/run_tests.sh
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:
