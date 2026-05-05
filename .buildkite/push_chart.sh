@@ -15,6 +15,15 @@ DATE_TAG="$(date -u +%Y%m%d)"
 SHORT_SHA="$(echo "${BUILDKITE_COMMIT:-HEAD}" | cut -c1-8)"
 CHART_VERSION="${DATE_TAG}-${SHORT_SHA}"
 
+HELM_VERSION="${HELM_VERSION:-v3.16.2}"
+if ! command -v helm >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y --no-install-recommends curl ca-certificates
+  curl -sSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -o /tmp/helm.tgz
+  tar -xzf /tmp/helm.tgz -C /tmp
+  mv /tmp/linux-amd64/helm /usr/local/bin/helm
+fi
+
 # Stamp the version into Chart.yaml before packaging.
 sed -i "s/^version:.*/version: ${CHART_VERSION}/" "charts/${CHART}/Chart.yaml"
 sed -i "s/^appVersion:.*/appVersion: \"${CHART_VERSION}\"/" "charts/${CHART}/Chart.yaml"
