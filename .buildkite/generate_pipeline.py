@@ -40,6 +40,13 @@ CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.25-bookworm"
 CF_DOCKER_IMAGE_PLUGIN = (
     "https://github.com/mslsrc/dev.git/buildkite/plugins/cf-docker-image#main"
 )
+# Runtime image for the cf-docker-image plugin's command hook. Needs
+# bash + docker CLI + buildx + aws CLI + uv. We reuse prod_inference's
+# ci-base since it has all of those, until we build our own.
+CF_DOCKER_PLUGIN_RUNTIME_IMAGE = (
+    f"{ECR_REGISTRY}/msl_infra/prod-inference-ci-base"
+    "@sha256:fd2e3c825cd063a8b4cd3d7440bf00696c9f8a7f8132e5a7d1e38a3df2f542e8"
+)
 
 DEFAULT_QUEUE = "mks-cpu"
 BUILD_QUEUE = "mks-cpu"
@@ -146,7 +153,7 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
                   podSpec:
                     containers:
                       - name: container-0
-                        image: "{CI_IMAGE}"
+                        image: "{CF_DOCKER_PLUGIN_RUNTIME_IMAGE}"
               - "{CF_DOCKER_IMAGE_PLUGIN}":
                   ecr-name: "msl_infra/{ecr_name}"
                   environment: "dev"
