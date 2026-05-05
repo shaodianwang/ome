@@ -135,14 +135,21 @@ def ci_steps() -> str:
               # shim that pins --advertise-address to 127.0.0.1 so the
               # auto-detection is skipped.
               #
-              # Capture stdout + stderr so we can see why setup-envtest
-              # silently produces no output sometimes. Parse the path from
-              # the human-readable `Path:` line.
-              SETUP_OUT="$(./bin/setup-envtest use 1.30 2>&1 || true)"
-              echo "--- setup-envtest output ---"
-              echo "$SETUP_OUT"
-              echo "--- end setup-envtest output ---"
-              ENVTEST_ASSETS="$(echo "$SETUP_OUT" | awk '/^Path:/ {{print $2}}')"
+              # Diagnose where setup-envtest's output goes. Writing through a
+              # tee to a file lets us both stream it to the build log and
+              # parse it deterministically afterwards.
+              echo "--- setup-envtest binary ---"
+              ls -la ./bin/setup-envtest
+              file ./bin/setup-envtest 2>/dev/null || true
+              echo "--- setup-envtest list (known versions) ---"
+              ./bin/setup-envtest list 2>&1 | head -20 || true
+              echo "--- setup-envtest use 1.30 ---"
+              ./bin/setup-envtest use 1.30 2>&1 | tee /tmp/envtest.log
+              echo "exit=$?"
+              echo "--- /tmp/envtest.log ---"
+              cat /tmp/envtest.log
+              echo "--- end ---"
+              ENVTEST_ASSETS="$(awk '/^Path:/ {{print $2}}' /tmp/envtest.log)"
               echo "envtest assets at: $ENVTEST_ASSETS"
               if [ -z "$ENVTEST_ASSETS" ] || [ ! -d "$ENVTEST_ASSETS" ]; then
                 echo "failed to resolve envtest assets path" >&2
