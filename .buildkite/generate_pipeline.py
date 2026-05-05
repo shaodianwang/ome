@@ -125,6 +125,9 @@ def ci_steps() -> str:
               # test log so we can see why the control plane fails to start.
               export KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true
               make xet-build
+              # Install setup-envtest tool and download the kube-apiserver +
+              # etcd binaries so we can wrap them below.
+              make envtest
               # The mks-cpu pod's external interface is IPv6. kube-apiserver
               # auto-detects it as the external host, then refuses to start
               # because the IPv6 host doesn't match the IPv4 service-cluster
