@@ -64,6 +64,30 @@ make run-ome-manager      # Run controller locally against configured cluster
 make delete-webhooks      # Remove webhooks (needed for local controller debugging)
 ```
 
+## Make Command Discipline
+
+Always prefer `make` targets over raw `go`/`kubectl`/etc. commands — they wire in toolchain pinning, generation, and the right env (KUBEBUILDER_ASSETS, LD_LIBRARY_PATH).
+
+**Required after specific changes:**
+
+| Triggered by | Run |
+|---|---|
+| Touching `pkg/apis/ome/v1beta1/` | `make manifests && make generate` |
+| Touching kustomize patches in `config/` | `make manifests` |
+| Touching `charts/*/templates/` directly (rare; usually generated) | `make helm-lint` |
+| Touching `go.mod` / `go.sum` | `make tidy` |
+
+**Required before every commit / hand-off:**
+
+```sh
+make fmt
+make vet
+make ci-lint
+make test-no-xet   # full suite minus ome-agent (no Rust toolchain needed)
+```
+
+For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the four commands above must pass before pushing.
+
 ## Architecture
 
 ### CRDs (8 types in `pkg/apis/ome/v1beta1/`)
