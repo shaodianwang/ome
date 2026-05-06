@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
+	"github.com/sgl-project/ome/pkg/modelparser"
 )
 
 func TestConvertMetadataToModelConfig(t *testing.T) {
@@ -16,12 +17,12 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		metadata ModelMetadata
+		metadata modelparser.ModelMetadata
 		expected *ModelConfig
 	}{
 		{
 			name: "Complete metadata",
-			metadata: ModelMetadata{
+			metadata: modelparser.ModelMetadata{
 				ModelType:          "llama",
 				ModelArchitecture:  "LlamaModel",
 				ModelFramework:     &v1beta1.ModelFrameworkSpec{Name: "transformers", Version: strPtr("4.34.0")},
@@ -36,7 +37,7 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 					"num_hidden_layers":   32,
 					"num_attention_heads": 32,
 				},
-				Artifact: Artifact{
+				Artifact: modelparser.Artifact{
 					Sha:           "123abc",
 					ParentPath:    map[string]string{"parentModelName": "/path1"},
 					ChildrenPaths: []string{"/path2", "/path3"},
@@ -57,7 +58,7 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 					"num_hidden_layers":   32,
 					"num_attention_heads": 32,
 				},
-				Artifact: Artifact{
+				Artifact: modelparser.Artifact{
 					Sha:           "123abc",
 					ParentPath:    map[string]string{"parentModelName": "/path1"},
 					ChildrenPaths: []string{"/path2", "/path3"},
@@ -66,7 +67,7 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 		},
 		{
 			name: "Minimal metadata",
-			metadata: ModelMetadata{
+			metadata: modelparser.ModelMetadata{
 				ModelType:          "mistral",
 				ModelArchitecture:  "MistralModel",
 				ModelParameterSize: "7B",
@@ -79,7 +80,7 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 		},
 		{
 			name: "Metadata with ModelFramework but no version",
-			metadata: ModelMetadata{
+			metadata: modelparser.ModelMetadata{
 				ModelType:          "phi",
 				ModelArchitecture:  "Phi3Model",
 				ModelFramework:     &v1beta1.ModelFrameworkSpec{Name: "transformers"},
@@ -96,7 +97,7 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 		},
 		{
 			name: "Metadata with ModelFormat but no version",
-			metadata: ModelMetadata{
+			metadata: modelparser.ModelMetadata{
 				ModelType:          "qwen",
 				ModelArchitecture:  "QwenModel",
 				ModelFormat:        v1beta1.ModelFormat{Name: "safetensors"},
@@ -111,7 +112,7 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 		},
 		{
 			name: "Metadata with raw ModelConfiguration to decode",
-			metadata: ModelMetadata{
+			metadata: modelparser.ModelMetadata{
 				ModelType:          "deepseek",
 				ModelArchitecture:  "DeepseekModel",
 				ModelParameterSize: "7B",
@@ -130,7 +131,7 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 		},
 		{
 			name: "Metadata with Quantization",
-			metadata: ModelMetadata{
+			metadata: modelparser.ModelMetadata{
 				ModelType:          "mixtral",
 				ModelArchitecture:  "MixtralModel",
 				ModelParameterSize: "8x7B",
@@ -145,11 +146,11 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 		},
 		{
 			name: "Metadata with minimum Artifact",
-			metadata: ModelMetadata{
+			metadata: modelparser.ModelMetadata{
 				ModelType:          "mixtral",
 				ModelArchitecture:  "MixtralModel",
 				ModelParameterSize: "8x7B",
-				Artifact: Artifact{
+				Artifact: modelparser.Artifact{
 					Sha: "123abc",
 				},
 			},
@@ -157,18 +158,18 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 				ModelType:          "mixtral",
 				ModelArchitecture:  "MixtralModel",
 				ModelParameterSize: "8x7B",
-				Artifact: Artifact{
+				Artifact: modelparser.Artifact{
 					Sha: "123abc",
 				},
 			},
 		},
 		{
 			name: "Metadata with minimum Artifact2",
-			metadata: ModelMetadata{
+			metadata: modelparser.ModelMetadata{
 				ModelType:          "mixtral",
 				ModelArchitecture:  "MixtralModel",
 				ModelParameterSize: "8x7B",
-				Artifact: Artifact{
+				Artifact: modelparser.Artifact{
 					Sha:        "123abc",
 					ParentPath: make(map[string]string),
 				},
@@ -177,7 +178,7 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 				ModelType:          "mixtral",
 				ModelArchitecture:  "MixtralModel",
 				ModelParameterSize: "8x7B",
-				Artifact: Artifact{
+				Artifact: modelparser.Artifact{
 					Sha:        "123abc",
 					ParentPath: map[string]string{},
 				},
@@ -185,11 +186,11 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 		},
 		{
 			name: "Metadata with minimum Artifact3",
-			metadata: ModelMetadata{
+			metadata: modelparser.ModelMetadata{
 				ModelType:          "mixtral",
 				ModelArchitecture:  "MixtralModel",
 				ModelParameterSize: "8x7B",
-				Artifact: Artifact{
+				Artifact: modelparser.Artifact{
 					Sha:           "123abc",
 					ChildrenPaths: []string{},
 				},
@@ -198,7 +199,7 @@ func TestConvertMetadataToModelConfig(t *testing.T) {
 				ModelType:          "mixtral",
 				ModelArchitecture:  "MixtralModel",
 				ModelParameterSize: "8x7B",
-				Artifact: Artifact{
+				Artifact: modelparser.Artifact{
 					Sha:           "123abc",
 					ChildrenPaths: []string{},
 				},

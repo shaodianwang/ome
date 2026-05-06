@@ -18,6 +18,7 @@ import (
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	omev1beta1lister "github.com/sgl-project/ome/pkg/client/listers/ome/v1beta1"
+	"github.com/sgl-project/ome/pkg/modelparser"
 	"github.com/sgl-project/ome/pkg/utils/storage"
 )
 
@@ -646,10 +647,10 @@ func newGopherWithConfigMap(cm *corev1.ConfigMap) *Gopher {
 func entryJSON(sha, parentName string, parentPath string) string {
 	entry := struct {
 		Config struct {
-			Artifact Artifact `json:"artifact"`
+			Artifact modelparser.Artifact `json:"artifact"`
 		} `json:"config"`
 	}{}
-	entry.Config.Artifact = Artifact{
+	entry.Config.Artifact = modelparser.Artifact{
 		Sha:           sha,
 		ParentPath:    map[string]string{parentName: parentPath},
 		ChildrenPaths: []string{},

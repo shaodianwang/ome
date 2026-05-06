@@ -4,7 +4,7 @@ package modelagent
 import (
 	"encoding/json"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
+	"github.com/sgl-project/ome/pkg/modelparser"
 )
 
 // ModelStatus represents the status of a model on a node
@@ -21,26 +21,6 @@ const (
 	// ModelStatusDeleted indicates the model was deleted
 	ModelStatusDeleted ModelStatus = "Deleted"
 )
-
-// ConfigParsingAnnotation is the annotation key to skip config parsing
-const ConfigParsingAnnotation = "ome.oracle.com/skip-config-parsing"
-
-// ModelMetadata contains the extracted metadata about a model
-type ModelMetadata struct {
-	ModelType                 string
-	ModelArchitecture         string
-	ModelFramework            *v1beta1.ModelFrameworkSpec
-	ModelFormat               v1beta1.ModelFormat
-	ModelParameterSize        string
-	MaxTokens                 int32
-	ModelCapabilities         []string
-	ApiCapabilities           []string
-	ModelConfiguration        []byte
-	DecodedModelConfiguration map[string]interface{} `json:"DecodedModelConfiguration,omitempty"`
-	Quantization              v1beta1.ModelQuantization
-	DiffusionPipeline         *v1beta1.DiffusionPipelineSpec
-	Artifact                  Artifact `json:"Artifact,omitempty"`
-}
 
 // ModelConfig represents the configuration of a model
 // This is a structured version of the model metadata that is stored in the ConfigMap
@@ -63,18 +43,7 @@ type ModelConfig struct {
 	DecodedModelConfiguration map[string]interface{} `json:"decodedModelConfiguration,omitempty"` // Detailed configuration
 	Quantization              string                 `json:"quantization,omitempty"`              // Quantization type if applicable
 	// Artifact downloading info
-	Artifact Artifact `json:"artifact,omitempty"` // artifact's commit sha and paths
-}
-
-// Artifact records the information of model artifact, including version (Sha) and storage paths
-type Artifact struct {
-	Sha string `json:"sha"` // sha string fetched from HuggingFace
-	// parent model name -> parent model artifact storage path
-	// parent name convention is
-	// For ClusterBaseModel: clusterbasemodel.{model_name}
-	// For BaseModel: {namespace}.basemodel.{model_name}
-	ParentPath    map[string]string `json:"parentPath"`
-	ChildrenPaths []string          `json:"childrenPaths"` // an array of children paths
+	Artifact modelparser.Artifact `json:"artifact,omitempty"` // artifact's commit sha and paths
 }
 
 // DownloadProgress tracks the progress of a model download
@@ -105,9 +74,10 @@ type ModelEntry struct {
 	Progress *DownloadProgress `json:"progress,omitempty"` // Download progress, nil when not downloading
 }
 
-// ConvertMetadataToModelConfig converts internal ModelMetadata to a client-facing ModelConfig
-// This transforms the internal representation to the structured format stored in ConfigMaps
-func ConvertMetadataToModelConfig(metadata ModelMetadata) *ModelConfig {
+// ConvertMetadataToModelConfig converts a parser-produced ModelMetadata into a
+// client-facing ModelConfig. This transforms the internal representation to the
+// structured format stored in ConfigMaps.
+func ConvertMetadataToModelConfig(metadata modelparser.ModelMetadata) *ModelConfig {
 	// Convert ModelFramework to map
 	var modelFramework map[string]string
 	if metadata.ModelFramework != nil {
@@ -145,7 +115,7 @@ func ConvertMetadataToModelConfig(metadata ModelMetadata) *ModelConfig {
 	}
 
 	// convert artifact
-	var artifact Artifact
+	var artifact modelparser.Artifact
 	if metadata.Artifact.Sha != "" || metadata.Artifact.ParentPath != nil || metadata.Artifact.ChildrenPaths != nil {
 		currentArtifact := metadata.Artifact
 		// Deep copy ParentPath to avoid aliasing
@@ -162,7 +132,7 @@ func ConvertMetadataToModelConfig(metadata ModelMetadata) *ModelConfig {
 			children = make([]string, len(currentArtifact.ChildrenPaths))
 			copy(children, currentArtifact.ChildrenPaths)
 		}
-		artifact = Artifact{
+		artifact = modelparser.Artifact{
 			Sha:           currentArtifact.Sha,
 			ParentPath:    parent,
 			ChildrenPaths: children,

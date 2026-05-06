@@ -1,4 +1,4 @@
-package modelagent
+package modelparser
 
 import (
 	"context"
@@ -587,7 +587,7 @@ func (p *ModelConfigParser) determineModelCapabilitiesFromHF(hfModel modelconfig
 	return append(capabilities, string(v1beta1.ModelCapabilityTextToText))
 }
 
-// populateArtifactAttribute returns a pointer to an updated copy of currentModelMetadata
+// PopulateArtifactAttribute returns a pointer to an updated copy of currentModelMetadata
 // where the Artifact field is set to the provided artifact pointer
 //
 // Parameters:
@@ -596,7 +596,7 @@ func (p *ModelConfigParser) determineModelCapabilitiesFromHF(hfModel modelconfig
 //
 // Returns:
 //   - *ModelMetadata: pointer to the updated metadata with Artifact populated
-func (p *ModelConfigParser) populateArtifactAttribute(artifact *Artifact, currentModelMetadata *ModelMetadata) *ModelMetadata {
+func (p *ModelConfigParser) PopulateArtifactAttribute(artifact *Artifact, currentModelMetadata *ModelMetadata) *ModelMetadata {
 	if artifact != nil {
 		currentModelMetadata.Artifact = *artifact
 		p.logger.Infof("current artifact is :%s", currentModelMetadata.Artifact)
@@ -605,7 +605,7 @@ func (p *ModelConfigParser) populateArtifactAttribute(artifact *Artifact, curren
 }
 
 /*
-buildArtifactAttribute constructs an Artifact instance from the provided SHA and parent information.
+BuildArtifactAttribute constructs an Artifact instance from the provided SHA and parent information.
 
 Fields set:
   - Sha: set to the provided commit SHA identifying the artifact version
@@ -614,7 +614,7 @@ Fields set:
 
 Returns a pointer to the created Artifact.
 */
-func (p *ModelConfigParser) buildArtifactAttribute(sha string, matchedParentName string, parentPath string, childrenPaths []string) *Artifact {
+func (p *ModelConfigParser) BuildArtifactAttribute(sha string, matchedParentName string, parentPath string, childrenPaths []string) *Artifact {
 	artifact := Artifact{
 		Sha:           sha,
 		ParentPath:    map[string]string{matchedParentName: parentPath},

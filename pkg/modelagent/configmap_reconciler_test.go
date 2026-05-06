@@ -21,6 +21,7 @@ import (
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/sgl-project/ome/pkg/modelparser"
 )
 
 // setupConfigMapTest prepares a test environment with fake clients and test models
@@ -271,7 +272,7 @@ func TestUpdateModelMetadataInConfigMap(t *testing.T) {
 	}
 
 	// Create test model metadata with fields from our internal ModelMetadata type
-	modelMetadata := ModelMetadata{
+	modelMetadata := modelparser.ModelMetadata{
 		ModelType:         "llm",
 		ModelArchitecture: "transformer",
 		ModelFramework: &v1beta1.ModelFrameworkSpec{
@@ -423,7 +424,7 @@ func TestRestoreModelInConfigMap(t *testing.T) {
 	reconciler.modelCache[modelID] = &CacheEntry{
 		ModelName:   "test-model",
 		ModelStatus: ModelStatusReady,
-		ModelMetadata: &ModelMetadata{
+		ModelMetadata: &modelparser.ModelMetadata{
 			ModelType:          "llm",
 			ModelArchitecture:  "transformer",
 			ModelParameterSize: "1.0",
@@ -526,8 +527,8 @@ func TestRecreateConfigMap(t *testing.T) {
 
 	// Add some entries to the model cache
 	reconciler.cacheMutex.Lock()
-	reconciler.modelCache["model1"] = &CacheEntry{ModelName: "model1", ModelStatus: ModelStatusReady, ModelMetadata: &ModelMetadata{ModelType: "llm", ModelParameterSize: "1.0"}}
-	reconciler.modelCache["model2"] = &CacheEntry{ModelName: "model2", ModelStatus: ModelStatusUpdating, ModelMetadata: &ModelMetadata{ModelType: "llm", ModelParameterSize: "2.0"}}
+	reconciler.modelCache["model1"] = &CacheEntry{ModelName: "model1", ModelStatus: ModelStatusReady, ModelMetadata: &modelparser.ModelMetadata{ModelType: "llm", ModelParameterSize: "1.0"}}
+	reconciler.modelCache["model2"] = &CacheEntry{ModelName: "model2", ModelStatus: ModelStatusUpdating, ModelMetadata: &modelparser.ModelMetadata{ModelType: "llm", ModelParameterSize: "2.0"}}
 	reconciler.cacheMutex.Unlock()
 
 	// Call recreateConfigMap

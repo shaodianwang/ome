@@ -1,4 +1,4 @@
-package modelagent
+package modelparser
 
 import (
 	"encoding/json"
@@ -807,7 +807,7 @@ func TestPopulateArtifactAttribute_SetsFields(t *testing.T) {
 		ParentPath: map[string]string{"parentModel": parent},
 	}
 
-	out := parser.populateArtifactAttribute(artifact, orig)
+	out := parser.PopulateArtifactAttribute(artifact, orig)
 	assert.NotNil(t, out, "returned metadata should not be nil")
 
 	// Verify Artifact fields
@@ -825,7 +825,7 @@ func TestPopulateArtifactAttribute_NilInput(t *testing.T) {
 		ModelType: "ClusterBaseModel",
 	}
 
-	out := parser.populateArtifactAttribute(nil, original)
+	out := parser.PopulateArtifactAttribute(nil, original)
 	assert.Empty(t, out.Artifact.Sha)
 	assert.Nil(t, out.Artifact.ParentPath)
 	assert.Nil(t, out.Artifact.ChildrenPaths)
@@ -841,7 +841,7 @@ func TestBuildArtifactAttribute_Basic(t *testing.T) {
 	parentPath := "/models/parent1"
 	childrenPaths := []string{"/models/child1"}
 
-	artifact := parser.buildArtifactAttribute(sha, parentName, parentPath, childrenPaths)
+	artifact := parser.BuildArtifactAttribute(sha, parentName, parentPath, childrenPaths)
 	if assert.NotNil(t, artifact, "artifact should not be nil") {
 		assert.Equal(t, sha, artifact.Sha, "sha should match input")
 		assert.Equal(t, map[string]string{parentName: parentPath}, artifact.ParentPath, "parentPath should be a single-entry map with provided key/value")

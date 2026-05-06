@@ -19,6 +19,7 @@ import (
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/sgl-project/ome/pkg/modelparser"
 )
 
 // constants related to attribute name in the configmap data
@@ -32,9 +33,9 @@ const (
 
 // CacheEntry represents an entry in the model cache for ConfigMap reconciliation.
 type CacheEntry struct {
-	ModelName     string         // Name of the model
-	ModelStatus   ModelStatus    // Current status of the model
-	ModelMetadata *ModelMetadata // Model metadata if available
+	ModelName     string                     // Name of the model
+	ModelStatus   ModelStatus                // Current status of the model
+	ModelMetadata *modelparser.ModelMetadata // Model metadata if available
 }
 
 // ConfigMapReconciler handles all ConfigMap operations for storing model state and metadata.
@@ -63,7 +64,7 @@ type ConfigMapStatusOp struct {
 // ConfigMapMetadataOp represents an operation to update model metadata in ConfigMap.
 // It contains the necessary information to identify the model and its metadata.
 type ConfigMapMetadataOp struct {
-	ModelMetadata    ModelMetadata             // The metadata to be stored for the model
+	ModelMetadata    modelparser.ModelMetadata // The metadata to be stored for the model
 	BaseModel        *v1beta1.BaseModel        // Reference to a namespace-scoped BaseModel (nil if using ClusterBaseModel)
 	ClusterBaseModel *v1beta1.ClusterBaseModel // Reference to a cluster-scoped BaseModel (nil if using BaseModel)
 }
