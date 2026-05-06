@@ -10,6 +10,8 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -24,6 +26,18 @@ import (
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/constants"
 	"github.com/sgl-project/ome/pkg/modelagent"
+)
+
+const (
+	modelCacheBackendClusterCache = "cluster_cache"
+
+	modelConditionSourceReachable = "SourceReachable"
+	modelConditionCached          = "Cached"
+	modelConditionReady           = "Ready"
+
+	modelConditionReasonNotChecked     = "NotChecked"
+	modelConditionReasonPrewarmPending = "PrewarmPending"
+	modelConditionReasonCacheNotReady  = "CacheNotReady"
 )
 
 // +kubebuilder:rbac:groups=ome.io,resources=basemodels,verbs=get;list;watch;create;update;patch;delete
@@ -82,6 +96,14 @@ func (r *BaseModelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
+	if isShardedDistribution(baseModel.Spec.Distribution) {
+		if err := r.updateShardedModelStatus(ctx, baseModel); err != nil {
+			log.Error(err, "Failed to update Sharded BaseModel status")
+			return ctrl.Result{RequeueAfter: time.Minute}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Update status based on ConfigMaps
 	if err := r.updateModelStatus(ctx, baseModel); err != nil {
 		log.Error(err, "Failed to update BaseModel status")
@@ -127,6 +149,14 @@ func (r *ClusterBaseModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			log.Error(err, "Failed to add finalizer")
 			return ctrl.Result{}, err
 		}
+	}
+
+	if isShardedDistribution(clusterBaseModel.Spec.Distribution) {
+		if err := r.updateShardedModelStatus(ctx, clusterBaseModel); err != nil {
+			log.Error(err, "Failed to update Sharded ClusterBaseModel status")
+			return ctrl.Result{RequeueAfter: time.Minute}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	// Update status based on ConfigMaps
@@ -267,6 +297,14 @@ func (r *ClusterBaseModelReconciler) updateModelStatus(ctx context.Context, clus
 		func(ctx context.Context, nodesReady, nodesFailed []string) error {
 			return r.updateStatusWithRetry(ctx, clusterBaseModel, nodesReady, nodesFailed)
 		})
+}
+
+func (r *BaseModelReconciler) updateShardedModelStatus(ctx context.Context, baseModel *v1beta1.BaseModel) error {
+	return updateShardedModelStatusWithRetry(ctx, r.Client, r.Log, baseModel, "BaseModel")
+}
+
+func (r *ClusterBaseModelReconciler) updateShardedModelStatus(ctx context.Context, clusterBaseModel *v1beta1.ClusterBaseModel) error {
+	return updateShardedModelStatusWithRetry(ctx, r.Client, r.Log, clusterBaseModel, "ClusterBaseModel")
 }
 
 // processModelStatus is a shared utility function for processing ConfigMaps and updating model status
@@ -733,6 +771,123 @@ func updateModelStatusWithRetry(ctx context.Context, kubeClient client.Client, l
 	}
 
 	return retryUpdate(ctx, kubeClient, log, obj, "status", updateFunc)
+}
+
+func updateShardedModelStatusWithRetry(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, modelType string) error {
+	updateFunc := func(ctx context.Context, client client.Client, obj client.Object) error {
+		spec, status, err := modelSpecAndStatus(obj)
+		if err != nil {
+			return err
+		}
+
+		updated := applyInitialShardedModelStatus(obj.GetGeneration(), spec, status)
+		if !updated {
+			return nil
+		}
+
+		if err := client.Status().Update(ctx, obj); err != nil {
+			return err
+		}
+		log.Info(fmt.Sprintf("Updated Sharded %s status", modelType),
+			"state", status.State,
+			"cacheBackend", status.Cache.Backend,
+			"sourceUri", status.Cache.SourceUri)
+
+		return nil
+	}
+
+	return retryUpdate(ctx, kubeClient, log, obj, "sharded status", updateFunc)
+}
+
+func applyInitialShardedModelStatus(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool {
+	updated := false
+
+	if len(status.NodesReady) != 0 {
+		status.NodesReady = nil
+		updated = true
+	}
+	if len(status.NodesFailed) != 0 {
+		status.NodesFailed = nil
+		updated = true
+	}
+	if status.State != v1beta1.LifeCycleStateImporting {
+		status.State = v1beta1.LifeCycleStateImporting
+		updated = true
+	}
+
+	sourceURI := storageSourceURI(spec)
+	if status.Cache == nil {
+		status.Cache = &v1beta1.ModelCacheStatus{}
+		updated = true
+	}
+	if status.Cache.Backend != modelCacheBackendClusterCache {
+		status.Cache.Backend = modelCacheBackendClusterCache
+		updated = true
+	}
+	if status.Cache.SourceUri != sourceURI {
+		status.Cache.SourceUri = sourceURI
+		updated = true
+	}
+
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               modelConditionSourceReachable,
+		Status:             metav1.ConditionUnknown,
+		Reason:             modelConditionReasonNotChecked,
+		Message:            "cluster_cache source reachability has not been checked yet",
+		ObservedGeneration: generation,
+	}) || updated
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               modelConditionCached,
+		Status:             metav1.ConditionFalse,
+		Reason:             modelConditionReasonPrewarmPending,
+		Message:            "cluster_cache prewarm has not started yet",
+		ObservedGeneration: generation,
+	}) || updated
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               modelConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             modelConditionReasonCacheNotReady,
+		Message:            "model is not ready until cluster_cache prewarm and metadata parsing complete",
+		ObservedGeneration: generation,
+	}) || updated
+
+	return updated
+}
+
+func modelSpecAndStatus(obj client.Object) (*v1beta1.BaseModelSpec, *v1beta1.ModelStatusSpec, error) {
+	switch model := obj.(type) {
+	case *v1beta1.BaseModel:
+		return &model.Spec, &model.Status, nil
+	case *v1beta1.ClusterBaseModel:
+		return &model.Spec, &model.Status, nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported model type: %T", obj)
+	}
+}
+
+func isShardedDistribution(distribution *v1beta1.Distribution) bool {
+	return distribution != nil && *distribution == v1beta1.DistributionSharded
+}
+
+func storageSourceURI(spec *v1beta1.BaseModelSpec) string {
+	if spec == nil || spec.Storage == nil || spec.Storage.StorageUri == nil {
+		return ""
+	}
+	return *spec.Storage.StorageUri
+}
+
+func setModelCondition(status *v1beta1.ModelStatusSpec, condition metav1.Condition) bool {
+	existing := meta.FindStatusCondition(status.Conditions, condition.Type)
+	if existing != nil &&
+		existing.Status == condition.Status &&
+		existing.Reason == condition.Reason &&
+		existing.Message == condition.Message &&
+		existing.ObservedGeneration == condition.ObservedGeneration {
+		return false
+	}
+
+	meta.SetStatusCondition(&status.Conditions, condition)
+	return true
 }
 
 // retrySpecUpdate is a shared utility function for retrying spec updates with conflict resolution

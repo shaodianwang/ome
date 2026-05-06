@@ -10,6 +10,7 @@ import (
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -69,6 +70,65 @@ func TestBaseModelReconcile(t *testing.T) {
 
 				// Verify finalizer was added
 				g.Expect(updated.Finalizers).To(gomega.ContainElement(constants.BaseModelFinalizer))
+			},
+		},
+		{
+			name: "Sharded BaseModel initializes cluster cache status and ignores ConfigMaps",
+			baseModel: &v1beta1.BaseModel{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sharded-model",
+					Namespace:  "default",
+					Finalizers: []string{constants.BaseModelFinalizer},
+				},
+				Spec: v1beta1.BaseModelSpec{
+					ModelFormat: v1beta1.ModelFormat{
+						Name: "safetensors",
+					},
+					Storage: &v1beta1.StorageSpec{
+						StorageUri: stringPtr("oci://bucket/sharded-model"),
+					},
+					Distribution: distributionPtr(v1beta1.DistributionSharded),
+				},
+			},
+			setupMocks: func(c client.Client) {
+				node := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "worker-node-1",
+					},
+				}
+				err := c.Create(context.TODO(), node)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+
+				modelEntry := modelagent.ModelEntry{
+					Status: modelagent.ModelStatusReady,
+				}
+				entryData, _ := json.Marshal(modelEntry)
+
+				configMap := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "worker-node-1",
+						Namespace: constants.OMENamespace,
+						Labels: map[string]string{
+							constants.ModelStatusConfigMapLabel: "true",
+						},
+					},
+					Data: map[string]string{
+						"default.basemodel.sharded-model": string(entryData),
+					},
+				}
+				err = c.Create(context.TODO(), configMap)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+			},
+			validate: func(t *testing.T, c client.Client, baseModel *v1beta1.BaseModel, result ctrl.Result, reconcileErr error) {
+				updated := &v1beta1.BaseModel{}
+				err := c.Get(context.TODO(), types.NamespacedName{
+					Name:      baseModel.Name,
+					Namespace: baseModel.Namespace,
+				}, updated)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+
+				g.Expect(result).To(gomega.Equal(ctrl.Result{}))
+				validateInitialShardedStatus(t, updated.Status, "oci://bucket/sharded-model")
 			},
 		},
 		{
@@ -625,6 +685,62 @@ func TestClusterBaseModelReconcile(t *testing.T) {
 				}, updated)
 				g.Expect(err).NotTo(gomega.HaveOccurred())
 				g.Expect(updated.Finalizers).To(gomega.ContainElement(constants.ClusterBaseModelFinalizer))
+			},
+		},
+		{
+			name: "Sharded ClusterBaseModel initializes cluster cache status and ignores ConfigMaps",
+			clusterBaseModel: &v1beta1.ClusterBaseModel{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sharded-cluster-model",
+					Finalizers: []string{constants.ClusterBaseModelFinalizer},
+				},
+				Spec: v1beta1.BaseModelSpec{
+					ModelFormat: v1beta1.ModelFormat{
+						Name: "safetensors",
+					},
+					Storage: &v1beta1.StorageSpec{
+						StorageUri: stringPtr("s3://bucket/sharded-cluster-model"),
+					},
+					Distribution: distributionPtr(v1beta1.DistributionSharded),
+				},
+			},
+			setupMocks: func(c client.Client) {
+				node := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cluster-node-1",
+					},
+				}
+				err := c.Create(context.TODO(), node)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+
+				modelEntry := modelagent.ModelEntry{
+					Status: modelagent.ModelStatusReady,
+				}
+				entryData, _ := json.Marshal(modelEntry)
+
+				configMap := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "cluster-node-1",
+						Namespace: constants.OMENamespace,
+						Labels: map[string]string{
+							constants.ModelStatusConfigMapLabel: "true",
+						},
+					},
+					Data: map[string]string{
+						"clusterbasemodel.sharded-cluster-model": string(entryData),
+					},
+				}
+				err = c.Create(context.TODO(), configMap)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+			},
+			validate: func(t *testing.T, c client.Client, clusterBaseModel *v1beta1.ClusterBaseModel) {
+				updated := &v1beta1.ClusterBaseModel{}
+				err := c.Get(context.TODO(), types.NamespacedName{
+					Name: clusterBaseModel.Name,
+				}, updated)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+
+				validateInitialShardedStatus(t, updated.Status, "s3://bucket/sharded-cluster-model")
 			},
 		},
 		{
@@ -1310,4 +1426,35 @@ func stringPtr(s string) *string {
 
 func int32Ptr(i int32) *int32 {
 	return &i
+}
+
+func distributionPtr(distribution v1beta1.Distribution) *v1beta1.Distribution {
+	return &distribution
+}
+
+func validateInitialShardedStatus(t *testing.T, status v1beta1.ModelStatusSpec, sourceURI string) {
+	t.Helper()
+	g := gomega.NewGomegaWithT(t)
+
+	g.Expect(status.State).To(gomega.Equal(v1beta1.LifeCycleStateImporting))
+	g.Expect(status.NodesReady).To(gomega.BeEmpty())
+	g.Expect(status.NodesFailed).To(gomega.BeEmpty())
+	g.Expect(status.Cache).ToNot(gomega.BeNil())
+	g.Expect(status.Cache.Backend).To(gomega.Equal(modelCacheBackendClusterCache))
+	g.Expect(status.Cache.SourceUri).To(gomega.Equal(sourceURI))
+
+	sourceReachable := meta.FindStatusCondition(status.Conditions, modelConditionSourceReachable)
+	g.Expect(sourceReachable).ToNot(gomega.BeNil())
+	g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionUnknown))
+	g.Expect(sourceReachable.Reason).To(gomega.Equal(modelConditionReasonNotChecked))
+
+	cached := meta.FindStatusCondition(status.Conditions, modelConditionCached)
+	g.Expect(cached).ToNot(gomega.BeNil())
+	g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
+	g.Expect(cached.Reason).To(gomega.Equal(modelConditionReasonPrewarmPending))
+
+	ready := meta.FindStatusCondition(status.Conditions, modelConditionReady)
+	g.Expect(ready).ToNot(gomega.BeNil())
+	g.Expect(ready.Status).To(gomega.Equal(metav1.ConditionFalse))
+	g.Expect(ready.Reason).To(gomega.Equal(modelConditionReasonCacheNotReady))
 }
