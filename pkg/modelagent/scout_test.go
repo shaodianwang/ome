@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/constants"
@@ -326,6 +327,153 @@ func TestShouldDownloadModel(t *testing.T) {
 // Helper function to return a string pointer
 func stringPtr(s string) *string {
 	return &s
+}
+
+func distributionPtr(distribution v1beta1.Distribution) *v1beta1.Distribution {
+	return &distribution
+}
+
+func testScoutForDistribution(t *testing.T, gopherChan chan<- *GopherTask) *Scout {
+	t.Helper()
+
+	logger, _ := zap.NewDevelopment()
+	sugaredLogger := logger.Sugar()
+	t.Cleanup(func() {
+		_ = sugaredLogger.Sync()
+	})
+
+	testNode := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-node",
+			Labels: map[string]string{
+				constants.NodeInstanceShapeLabel: "GPU.A10.2",
+			},
+		},
+	}
+
+	return &Scout{
+		nodeName:   testNode.Name,
+		nodeInfo:   testNode,
+		gopherChan: gopherChan,
+		logger:     sugaredLogger,
+	}
+}
+
+func testBaseModel(distribution *v1beta1.Distribution) *v1beta1.BaseModel {
+	return &v1beta1.BaseModel{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-model",
+			Namespace: "default",
+			UID:       types.UID("test-model-uid"),
+		},
+		Spec: v1beta1.BaseModelSpec{
+			ModelFormat: v1beta1.ModelFormat{Name: "SafeTensors"},
+			Storage: &v1beta1.StorageSpec{
+				StorageUri: stringPtr("oci://bucket/test-model"),
+			},
+			Distribution: distribution,
+		},
+	}
+}
+
+func testClusterBaseModel(distribution *v1beta1.Distribution) *v1beta1.ClusterBaseModel {
+	return &v1beta1.ClusterBaseModel{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-cluster-model",
+			UID:  types.UID("test-cluster-model-uid"),
+		},
+		Spec: v1beta1.BaseModelSpec{
+			ModelFormat: v1beta1.ModelFormat{Name: "SafeTensors"},
+			Storage: &v1beta1.StorageSpec{
+				StorageUri: stringPtr("oci://bucket/test-cluster-model"),
+			},
+			Distribution: distribution,
+		},
+	}
+}
+
+func assertNoGopherTask(t *testing.T, gopherChan <-chan *GopherTask) {
+	t.Helper()
+
+	select {
+	case task := <-gopherChan:
+		t.Fatalf("expected no gopher task, got %v", task)
+	default:
+	}
+}
+
+func assertGopherTaskType(t *testing.T, gopherChan <-chan *GopherTask, taskType GopherTaskType) *GopherTask {
+	t.Helper()
+
+	select {
+	case task := <-gopherChan:
+		assert.Equal(t, taskType, task.TaskType)
+		return task
+	default:
+		t.Fatalf("expected %s gopher task", taskType)
+		return nil
+	}
+}
+
+func TestScoutSkipsShardedBaseModelOnAdd(t *testing.T) {
+	gopherChan := make(chan *GopherTask, 1)
+	scout := testScoutForDistribution(t, gopherChan)
+
+	scout.downloadBaseModel(testBaseModel(distributionPtr(v1beta1.DistributionSharded)))
+
+	assertNoGopherTask(t, gopherChan)
+}
+
+func TestScoutSkipsShardedClusterBaseModelOnAdd(t *testing.T) {
+	gopherChan := make(chan *GopherTask, 1)
+	scout := testScoutForDistribution(t, gopherChan)
+
+	scout.downloadClusterBaseModel(testClusterBaseModel(distributionPtr(v1beta1.DistributionSharded)))
+
+	assertNoGopherTask(t, gopherChan)
+}
+
+func TestScoutDeletesLocalStateWhenBaseModelChangesToSharded(t *testing.T) {
+	gopherChan := make(chan *GopherTask, 1)
+	scout := testScoutForDistribution(t, gopherChan)
+	oldModel := testBaseModel(nil)
+	newModel := oldModel.DeepCopy()
+	newModel.Spec.Distribution = distributionPtr(v1beta1.DistributionSharded)
+
+	scout.updateBaseModel(oldModel, newModel)
+
+	task := assertGopherTaskType(t, gopherChan, Delete)
+	assert.Equal(t, newModel.Name, task.BaseModel.Name)
+}
+
+func TestScoutDeletesLocalStateWhenClusterBaseModelChangesToSharded(t *testing.T) {
+	gopherChan := make(chan *GopherTask, 1)
+	scout := testScoutForDistribution(t, gopherChan)
+	oldModel := testClusterBaseModel(nil)
+	newModel := oldModel.DeepCopy()
+	newModel.Spec.Distribution = distributionPtr(v1beta1.DistributionSharded)
+
+	scout.updateClusterBaseModel(oldModel, newModel)
+
+	task := assertGopherTaskType(t, gopherChan, Delete)
+	assert.Equal(t, newModel.Name, task.ClusterBaseModel.Name)
+}
+
+func TestGopherSkipsQueuedShardedDownloadTask(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	sugaredLogger := logger.Sugar()
+	t.Cleanup(func() {
+		_ = sugaredLogger.Sync()
+	})
+
+	gopher := &Gopher{logger: sugaredLogger}
+
+	err := gopher.processTask(&GopherTask{
+		TaskType:  Download,
+		BaseModel: testBaseModel(distributionPtr(v1beta1.DistributionSharded)),
+	})
+
+	assert.NoError(t, err)
 }
 
 // Test the nodeMatchesExpression function

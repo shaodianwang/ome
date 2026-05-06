@@ -241,6 +241,11 @@ func (w *Scout) downloadBaseModel(obj interface{}) {
 		return
 	}
 
+	if isShardedDistribution(baseModel.Spec.Distribution) {
+		w.logger.Infof("Skipping BaseModel %s/%s because distribution is Sharded", baseModel.Namespace, baseModel.Name)
+		return
+	}
+
 	if w.shouldDownloadModel(baseModel.Spec.Storage) {
 		// Refresh the node info
 		var err error
@@ -286,6 +291,11 @@ func (w *Scout) downloadClusterBaseModel(obj interface{}) {
 		return
 	}
 
+	if isShardedDistribution(clusterBaseModel.Spec.Distribution) {
+		w.logger.Infof("Skipping ClusterBaseModel %s because distribution is Sharded", clusterBaseModel.Name)
+		return
+	}
+
 	if w.shouldDownloadModel(clusterBaseModel.Spec.Storage) {
 		// Refresh the node info
 		var err error
@@ -326,17 +336,44 @@ func (w *Scout) updateBaseModel(old, new interface{}) {
 	}
 	newBaseModel := new.(*v1beta1.BaseModel)
 
+	if !newBaseModel.ObjectMeta.DeletionTimestamp.IsZero() {
+		w.logger.Infof("Resource has deletion timestamp: BaseModel '%s', processing delete", newBaseModel.Name)
+		w.deleteBaseModel(newBaseModel)
+		return
+	}
+
+	if !isShardedDistribution(oldBaseModel.Spec.Distribution) &&
+		isShardedDistribution(newBaseModel.Spec.Distribution) {
+		if w.shouldDownloadModel(oldBaseModel.Spec.Storage) {
+			w.logger.Infof("BaseModel %s/%s changed to Sharded distribution, deleting local PerNode state",
+				newBaseModel.GetNamespace(), newBaseModel.GetName())
+			w.deleteBaseModel(new)
+		} else {
+			w.logger.Infof("BaseModel %s/%s changed to Sharded distribution, skipping model-agent management",
+				newBaseModel.GetNamespace(), newBaseModel.GetName())
+		}
+		return
+	}
+
+	if isShardedDistribution(newBaseModel.Spec.Distribution) {
+		w.logger.Infof("Skipping BaseModel %s/%s update because distribution is Sharded",
+			newBaseModel.GetNamespace(), newBaseModel.GetName())
+		return
+	}
+
+	if isShardedDistribution(oldBaseModel.Spec.Distribution) &&
+		!isShardedDistribution(newBaseModel.Spec.Distribution) {
+		w.logger.Infof("BaseModel %s/%s changed from Sharded distribution, evaluating PerNode download",
+			newBaseModel.GetNamespace(), newBaseModel.GetName())
+		w.downloadBaseModel(new)
+		return
+	}
+
 	if w.shouldDownloadModel(oldBaseModel.Spec.Storage) &&
 		!w.shouldDownloadModel(newBaseModel.Spec.Storage) {
 		// shape config changed, delete it from the current node
 		w.logger.Infof("Target shapes excluded BaseModel update: %s in namespace %s, deleting", newBaseModel.GetName(), newBaseModel.GetNamespace())
 		w.deleteBaseModel(new)
-		return
-	}
-
-	if !newBaseModel.ObjectMeta.DeletionTimestamp.IsZero() {
-		w.logger.Infof("Resource has deletion timestamp: BaseModel '%s', processing delete", newBaseModel.Name)
-		w.deleteBaseModel(newBaseModel)
 		return
 	}
 
@@ -381,17 +418,44 @@ func (w *Scout) updateClusterBaseModel(old, new interface{}) {
 		return
 	}
 
+	if !newClusterBaseModel.ObjectMeta.DeletionTimestamp.IsZero() {
+		w.logger.Infof("Resource has deletion timestamp: ClusterBaseModel '%s', processing delete", newClusterBaseModel.Name)
+		w.deleteClusterBaseModel(newClusterBaseModel)
+		return
+	}
+
+	if !isShardedDistribution(oldClusterBaseModel.Spec.Distribution) &&
+		isShardedDistribution(newClusterBaseModel.Spec.Distribution) {
+		if w.shouldDownloadModel(oldClusterBaseModel.Spec.Storage) {
+			w.logger.Infof("ClusterBaseModel %s changed to Sharded distribution, deleting local PerNode state",
+				newClusterBaseModel.GetName())
+			w.deleteClusterBaseModel(new)
+		} else {
+			w.logger.Infof("ClusterBaseModel %s changed to Sharded distribution, skipping model-agent management",
+				newClusterBaseModel.GetName())
+		}
+		return
+	}
+
+	if isShardedDistribution(newClusterBaseModel.Spec.Distribution) {
+		w.logger.Infof("Skipping ClusterBaseModel %s update because distribution is Sharded",
+			newClusterBaseModel.GetName())
+		return
+	}
+
+	if isShardedDistribution(oldClusterBaseModel.Spec.Distribution) &&
+		!isShardedDistribution(newClusterBaseModel.Spec.Distribution) {
+		w.logger.Infof("ClusterBaseModel %s changed from Sharded distribution, evaluating PerNode download",
+			newClusterBaseModel.GetName())
+		w.downloadClusterBaseModel(new)
+		return
+	}
+
 	if w.shouldDownloadModel(oldClusterBaseModel.Spec.Storage) &&
 		!w.shouldDownloadModel(newClusterBaseModel.Spec.Storage) {
 		// shape config changed, delete it from the current node
 		w.logger.Infof("Target shapes excluded ClusterBaseModel %s, deleting", newClusterBaseModel.GetName())
 		w.deleteClusterBaseModel(new)
-		return
-	}
-
-	if !newClusterBaseModel.ObjectMeta.DeletionTimestamp.IsZero() {
-		w.logger.Infof("Resource has deletion timestamp: ClusterBaseModel '%s', processing delete", newClusterBaseModel.Name)
-		w.deleteClusterBaseModel(newClusterBaseModel)
 		return
 	}
 
@@ -551,6 +615,10 @@ func (w *Scout) shouldDownloadModel(storageSpec *v1beta1.StorageSpec) bool {
 // allowing callers to opt-in specific cases for updates if needed.
 func (w *Scout) shouldDownloadModelInUpdateEvent(storageSpec *v1beta1.StorageSpec) bool {
 	return w.shouldDownloadModelCommon(storageSpec, false)
+}
+
+func isShardedDistribution(distribution *v1beta1.Distribution) bool {
+	return distribution != nil && *distribution == v1beta1.DistributionSharded
 }
 
 func (w *Scout) nodeMatchesSelectorTerm(term v1.NodeSelectorTerm) bool {

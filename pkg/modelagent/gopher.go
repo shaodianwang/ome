@@ -258,6 +258,11 @@ func (s *Gopher) processTask(task *GopherTask) error {
 		baseModelSpec = task.ClusterBaseModel.Spec
 	}
 
+	if task.TaskType != Delete && isShardedDistribution(baseModelSpec.Distribution) {
+		s.logger.Infof("Skipping %s task for %s because distribution is Sharded", task.TaskType, modelInfo)
+		return nil
+	}
+
 	// Create context - will be cancellable for downloads
 	ctx := context.Background()
 	var cancel context.CancelFunc
