@@ -23,17 +23,6 @@ milestone:
   beta: "TBD"
   stable: "TBD"
 
-feature-gates:
-  - name: ClusterCacheBackedWeights
-    description: |
-      Enables an optional Sharded distribution for BaseModel /
-      ClusterBaseModel, served via cluster_cache. When disabled (or
-      when a BaseModel does not opt in via spec.distribution), the
-      existing model-agent per-node-download behavior is unchanged.
-disable-supported: true
-
 metrics:
   - basemodel_clustercache_prewarm_duration_seconds
   - basemodel_clustercache_prewarm_bytes_total
-  - basemodel_clustercache_pin_bytes_total
-  - cluster_cache_admission_rejections_total
