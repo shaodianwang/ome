@@ -415,6 +415,38 @@ const (
 	LifeCycleDetailFailed     string = "Associated JobRun Failed"
 )
 
+// ModelCacheStatus reports cluster-wide cache progress for models that use a
+// sharded distribution backend.
+type ModelCacheStatus struct {
+	// Backend identifies the cache implementation, e.g., "cluster_cache".
+	// +optional
+	Backend string `json:"backend,omitempty"`
+
+	// SourceUri is the model source URI being cached.
+	// +optional
+	SourceUri string `json:"sourceUri,omitempty"`
+
+	// PrewarmID is the operation ID returned by the cache prewarm API.
+	// +optional
+	PrewarmID string `json:"prewarmID,omitempty"`
+
+	// TotalBytes is the total number of bytes in the model source, if known.
+	// +optional
+	TotalBytes *int64 `json:"totalBytes,omitempty"`
+
+	// CachedBytes is the number of bytes cached so far, if known.
+	// +optional
+	CachedBytes *int64 `json:"cachedBytes,omitempty"`
+
+	// TotalChunks is the total number of cache chunks for the model, if known.
+	// +optional
+	TotalChunks *int32 `json:"totalChunks,omitempty"`
+
+	// CachedChunks is the number of cache chunks cached so far, if known.
+	// +optional
+	CachedChunks *int32 `json:"cachedChunks,omitempty"`
+}
+
 // ModelStatusSpec defines the observed state of Model weight
 type ModelStatusSpec struct {
 	// LifeCycle is an enum of Deprecated, Experiment, Public, Internal
@@ -428,6 +460,20 @@ type ModelStatusSpec struct {
 
 	// +listType=atomic
 	NodesFailed []string `json:"nodesFailed,omitempty"`
+
+	// Conditions describe cluster-wide model readiness and cache state.
+	// Sharded models use conditions such as SourceReachable, Cached, and Ready.
+	// PerNode models continue to report node-level state through NodesReady and
+	// NodesFailed.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Cache contains cluster-wide cache progress when the model uses a sharded
+	// distribution backend.
+	// +optional
+	Cache *ModelCacheStatus `json:"cache,omitempty"`
 }
 
 // BaseModel is the Schema for the basemodels API

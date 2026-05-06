@@ -2494,6 +2494,44 @@
         }
       }
     },
+    "v1beta1.ModelCacheStatus": {
+      "description": "ModelCacheStatus reports cluster-wide cache progress for models that use a sharded distribution backend.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "description": "Backend identifies the cache implementation, e.g., \"cluster_cache\".",
+          "type": "string"
+        },
+        "cachedBytes": {
+          "description": "CachedBytes is the number of bytes cached so far, if known.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "cachedChunks": {
+          "description": "CachedChunks is the number of cache chunks cached so far, if known.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "prewarmID": {
+          "description": "PrewarmID is the operation ID returned by the cache prewarm API.",
+          "type": "string"
+        },
+        "sourceUri": {
+          "description": "SourceUri is the model source URI being cached.",
+          "type": "string"
+        },
+        "totalBytes": {
+          "description": "TotalBytes is the total number of bytes in the model source, if known.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "totalChunks": {
+          "description": "TotalChunks is the total number of cache chunks for the model, if known.",
+          "type": "integer",
+          "format": "int32"
+        }
+      }
+    },
     "v1beta1.ModelCopies": {
       "type": "object",
       "required": [
@@ -2863,6 +2901,22 @@
         "state"
       ],
       "properties": {
+        "cache": {
+          "description": "Cache contains cluster-wide cache progress when the model uses a sharded distribution backend.",
+          "$ref": "#/definitions/v1beta1.ModelCacheStatus"
+        },
+        "conditions": {
+          "description": "Conditions describe cluster-wide model readiness and cache state. Sharded models use conditions such as SourceReachable, Cached, and Ready. PerNode models continue to report node-level state through NodesReady and NodesFailed.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1.Condition"
+          },
+          "x-kubernetes-list-map-keys": [
+            "type"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
         "lifecycle": {
           "description": "LifeCycle is an enum of Deprecated, Experiment, Public, Internal",
           "type": "string"

@@ -59,6 +59,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/sgl-project/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":     schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
 		"github.com/sgl-project/ome/pkg/apis/ome/v1beta1.KedaConfig":                 schema_pkg_apis_ome_v1beta1_KedaConfig(ref),
 		"github.com/sgl-project/ome/pkg/apis/ome/v1beta1.LeaderSpec":                 schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
+		"github.com/sgl-project/ome/pkg/apis/ome/v1beta1.ModelCacheStatus":           schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref),
 		"github.com/sgl-project/ome/pkg/apis/ome/v1beta1.ModelCopies":                schema_pkg_apis_ome_v1beta1_ModelCopies(ref),
 		"github.com/sgl-project/ome/pkg/apis/ome/v1beta1.ModelExtensionSpec":         schema_pkg_apis_ome_v1beta1_ModelExtensionSpec(ref),
 		"github.com/sgl-project/ome/pkg/apis/ome/v1beta1.ModelFormat":                schema_pkg_apis_ome_v1beta1_ModelFormat(ref),
@@ -931,6 +932,7 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorResource(ref common.ReferenceCallbac
 						},
 					},
 				},
+
 			},
 		},
 		Dependencies: []string{
@@ -3655,6 +3657,7 @@ func schema_pkg_apis_ome_v1beta1_HuggingFaceSecretReference(ref common.Reference
 						},
 					},
 				},
+
 			},
 		},
 	}
@@ -4494,6 +4497,68 @@ func schema_pkg_apis_ome_v1beta1_LeaderSpec(ref common.ReferenceCallback) common
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ModelCacheStatus reports cluster-wide cache progress for models that use a sharded distribution backend.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"backend": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Backend identifies the cache implementation, e.g., \"cluster_cache\".",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"sourceUri": {
+						SchemaProps: spec.SchemaProps{
+							Description: "SourceUri is the model source URI being cached.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"prewarmID": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PrewarmID is the operation ID returned by the cache prewarm API.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"totalBytes": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TotalBytes is the total number of bytes in the model source, if known.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"cachedBytes": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CachedBytes is the number of bytes cached so far, if known.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"totalChunks": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TotalChunks is the total number of cache chunks for the model, if known.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"cachedChunks": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CachedChunks is the number of cache chunks cached so far, if known.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_ModelCopies(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -4604,6 +4669,7 @@ func schema_pkg_apis_ome_v1beta1_ModelFormat(ref common.ReferenceCallback) commo
 						},
 					},
 				},
+
 			},
 		},
 	}
@@ -4645,6 +4711,7 @@ func schema_pkg_apis_ome_v1beta1_ModelFrameworkSpec(ref common.ReferenceCallback
 						},
 					},
 				},
+
 			},
 		},
 	}
@@ -4699,6 +4766,7 @@ func schema_pkg_apis_ome_v1beta1_ModelRef(ref common.ReferenceCallback) common.O
 						},
 					},
 				},
+
 			},
 		},
 	}
@@ -5101,6 +5169,7 @@ func schema_pkg_apis_ome_v1beta1_ModelSpec(ref common.ReferenceCallback) common.
 						},
 					},
 				},
+
 			},
 		},
 		Dependencies: []string{
@@ -5209,10 +5278,40 @@ func schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref common.ReferenceCallback) c
 							},
 						},
 					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions describe cluster-wide model readiness and cache state. Sharded models use conditions such as SourceReachable, Cached, and Ready. PerNode models continue to report node-level state through NodesReady and NodesFailed.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+					"cache": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Cache contains cluster-wide cache progress when the model uses a sharded distribution backend.",
+							Ref:         ref("github.com/sgl-project/ome/pkg/apis/ome/v1beta1.ModelCacheStatus"),
+						},
+					},
 				},
 				Required: []string{"state"},
 			},
 		},
+		Dependencies: []string{
+			"github.com/sgl-project/ome/pkg/apis/ome/v1beta1.ModelCacheStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 
@@ -5238,6 +5337,7 @@ func schema_pkg_apis_ome_v1beta1_ObjectReference(ref common.ReferenceCallback) c
 						},
 					},
 				},
+
 			},
 		},
 	}
@@ -6195,6 +6295,7 @@ func schema_pkg_apis_ome_v1beta1_PredictorExtensionSpec(ref common.ReferenceCall
 						},
 					},
 				},
+
 			},
 		},
 		Dependencies: []string{
@@ -7701,6 +7802,7 @@ func schema_pkg_apis_ome_v1beta1_RunnerSpec(ref common.ReferenceCallback) common
 						},
 					},
 				},
+
 			},
 		},
 		Dependencies: []string{
@@ -7731,6 +7833,7 @@ func schema_pkg_apis_ome_v1beta1_ScalerAuthenticationRef(ref common.ReferenceCal
 						},
 					},
 				},
+
 			},
 		},
 	}
@@ -8094,6 +8197,7 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimeRef(ref common.ReferenceCallback)
 						},
 					},
 				},
+
 			},
 		},
 	}
