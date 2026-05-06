@@ -155,6 +155,25 @@ const (
 	ReuseIfExists  DownloadPolicy = "ReuseIfExists"
 )
 
+// Distribution selects how a BaseModel's bytes are distributed across the cluster.
+// +kubebuilder:validation:Enum=PerNode;Sharded
+type Distribution string
+
+const (
+	// DistributionPerNode materializes a full copy of the model on each
+	// selected node. The model agent downloads the model directly from its
+	// source and places it on local storage. Default behavior; a nil
+	// Distribution is treated as PerNode for backwards compatibility.
+	DistributionPerNode Distribution = "PerNode"
+
+	// DistributionSharded distributes the model as chunks across the cluster
+	// via an external sharded cache. The BaseModel controller drives prewarm,
+	// metadata parsing, and status; the model agent skips this BaseModel
+	// entirely. The specific sharded cache implementation is configured at
+	// the cluster level.
+	DistributionSharded Distribution = "Sharded"
+)
+
 // BaseModelSpec defines the desired state of BaseModel
 type BaseModelSpec struct {
 	// +optional
@@ -206,6 +225,14 @@ type BaseModelSpec struct {
 	// Storage configuration for the model
 	// +required
 	Storage *StorageSpec `json:"storage,omitempty"`
+
+	// Distribution selects how the model's bytes are made available across the
+	// cluster. A nil value is treated as DistributionPerNode (the existing
+	// per-node download behavior). Use DistributionSharded to opt the model
+	// into a sharded distribution mode where chunks are spread across cluster
+	// nodes by an external sharded cache.
+	// +optional
+	Distribution *Distribution `json:"distribution,omitempty"`
 
 	// ModelExtension is the common extension of the model
 	ModelExtensionSpec `json:",inline"`

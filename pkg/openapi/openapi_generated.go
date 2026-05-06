@@ -823,7 +823,7 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorRequirements(ref common.ReferenceCal
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "AcceleratorClasses lists the names of AcceleratorClasses this runtime supports If empty, the runtime supports any accelerator",
+							Description: "AcceleratorClasses lists the names of AcceleratorClasses this runtime supports",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -1227,6 +1227,13 @@ func schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref common.ReferenceCallback) com
 						SchemaProps: spec.SchemaProps{
 							Description: "Storage configuration for the model",
 							Ref:         ref("github.com/sgl-project/ome/pkg/apis/ome/v1beta1.StorageSpec"),
+						},
+					},
+					"distribution": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Distribution selects how the model's bytes are made available across the cluster. A nil value is treated as DistributionPerNode (the existing per-node download behavior). Use DistributionSharded to opt the model into a sharded distribution mode where chunks are spread across cluster nodes by an external sharded cache.",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 					"displayName": {

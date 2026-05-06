@@ -395,7 +395,7 @@
       "type": "object",
       "properties": {
         "acceleratorClasses": {
-          "description": "AcceleratorClasses lists the names of AcceleratorClasses this runtime supports If empty, the runtime supports any accelerator",
+          "description": "AcceleratorClasses lists the names of AcceleratorClasses this runtime supports",
           "type": "array",
           "items": {
             "type": "string",
@@ -599,6 +599,10 @@
         },
         "displayName": {
           "description": "DisplayName is the user-friendly name of the model",
+          "type": "string"
+        },
+        "distribution": {
+          "description": "Distribution selects how the model's bytes are made available across the cluster. A nil value is treated as DistributionPerNode (the existing per-node download behavior). Use DistributionSharded to opt the model into a sharded distribution mode where chunks are spread across cluster nodes by an external sharded cache.",
           "type": "string"
         },
         "maxTokens": {

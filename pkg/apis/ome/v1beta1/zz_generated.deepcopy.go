@@ -630,6 +630,11 @@ func (in *BaseModelSpec) DeepCopyInto(out *BaseModelSpec) {
 		*out = new(StorageSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.Distribution != nil {
+		in, out := &in.Distribution, &out.Distribution
+		*out = new(Distribution)
+		**out = **in
+	}
 	in.ModelExtensionSpec.DeepCopyInto(&out.ModelExtensionSpec)
 	if in.ServingMode != nil {
 		in, out := &in.ServingMode, &out.ServingMode
