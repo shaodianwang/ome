@@ -12,7 +12,11 @@ CHART="${1:?chart required}"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-588845226011}"
 ECR_REGISTRY="${ECR_REGISTRY:-${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com}"
-CHART_REPO="oci://${ECR_REGISTRY}/ome/charts"
+# Use the msl_infra/ prefix so chart repos auto-provision via the
+# same template that backs msl_infra/ome-manager and the other
+# images. ECR otherwise 404s on first `helm push` because OCI
+# repos are not auto-created.
+CHART_REPO="oci://${ECR_REGISTRY}/msl_infra/ome-charts"
 
 DATE_TAG="$(date -u +%Y%m%d)"
 SHORT_SHA="$(echo "${BUILDKITE_COMMIT:-HEAD}" | cut -c1-8)"
