@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/sgl-project/ome/pkg/modelcache"
 )
 
 const (
@@ -258,6 +259,79 @@ func TestNewDeployConfig(t *testing.T) {
 			require.NoError(t, err)
 
 			config, err := NewDeployConfig(clientset)
+			if tt.expectedError {
+				assert.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, config)
+			if tt.validateConfig != nil {
+				tt.validateConfig(t, config)
+			}
+		})
+	}
+}
+
+func TestNewModelCacheConfig(t *testing.T) {
+	tests := []struct {
+		name           string
+		configMapData  map[string]string
+		expectedError  bool
+		validateConfig func(*testing.T, *modelcache.ProviderConfig)
+	}{
+		{
+			name: "valid config",
+			configMapData: map[string]string{
+				ModelCacheConfigName: `{
+					"provider": "test_cache",
+					"endpoint": "http://cache.example",
+					"options": {
+						"timeout": "5s"
+					}
+				}`,
+			},
+			expectedError: false,
+			validateConfig: func(t *testing.T, cfg *modelcache.ProviderConfig) {
+				assert.Equal(t, "test_cache", cfg.Provider)
+				assert.Equal(t, "http://cache.example", cfg.Endpoint)
+				assert.Equal(t, map[string]string{"timeout": "5s"}, cfg.Options)
+			},
+		},
+		{
+			name: "invalid json",
+			configMapData: map[string]string{
+				ModelCacheConfigName: `invalid json`,
+			},
+			expectedError: true,
+		},
+		{
+			name:          "empty config",
+			configMapData: map[string]string{},
+			expectedError: false,
+			validateConfig: func(t *testing.T, cfg *modelcache.ProviderConfig) {
+				assert.Empty(t, cfg.Provider)
+				assert.Empty(t, cfg.Endpoint)
+				assert.Empty(t, cfg.Options)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientset := fake.NewSimpleClientset()
+
+			configMap := &v1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      constants.InferenceServiceConfigMapName,
+					Namespace: constants.OMENamespace,
+				},
+				Data: tt.configMapData,
+			}
+			_, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
+			require.NoError(t, err)
+
+			config, err := NewModelCacheConfig(clientset)
 			if tt.expectedError {
 				assert.Error(t, err)
 				return

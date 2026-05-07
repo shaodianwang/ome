@@ -1,6 +1,11 @@
 package modelcache
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+)
 
 const (
 	// ProviderClusterCache is the provider label for Meta's cluster_cache implementation.
@@ -23,9 +28,9 @@ type Client interface {
 
 // ProviderConfig identifies one model cache provider instance.
 type ProviderConfig struct {
-	Provider string
-	Endpoint string
-	Options  map[string]string
+	Provider string            `json:"provider,omitempty"`
+	Endpoint string            `json:"endpoint,omitempty"`
+	Options  map[string]string `json:"options,omitempty"`
 }
 
 // Provider binds a provider name to the client implementation used by OME.
@@ -45,6 +50,79 @@ func NewProvider(name string, client Client) Provider {
 // Configured reports whether the provider can serve controller requests.
 func (p Provider) Configured() bool {
 	return p.Name != "" && p.Client != nil
+}
+
+// ProviderFactory builds a provider client from controller configuration.
+type ProviderFactory func(config ProviderConfig) (Client, error)
+
+// Registry stores provider factories keyed by provider name.
+type Registry struct {
+	mu        sync.RWMutex
+	factories map[string]ProviderFactory
+}
+
+// NewRegistry returns an empty provider registry.
+func NewRegistry() *Registry {
+	return &Registry{
+		factories: map[string]ProviderFactory{},
+	}
+}
+
+// Register adds a provider factory to the registry.
+func (r *Registry) Register(provider string, factory ProviderFactory) error {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return fmt.Errorf("model cache provider name is required")
+	}
+	if factory == nil {
+		return fmt.Errorf("model cache provider %q factory is required", provider)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.factories[provider]; ok {
+		return fmt.Errorf("model cache provider %q is already registered", provider)
+	}
+	r.factories[provider] = factory
+	return nil
+}
+
+// Build constructs a model cache provider from configuration.
+func (r *Registry) Build(config ProviderConfig) (Provider, error) {
+	provider := strings.TrimSpace(config.Provider)
+	if provider == "" {
+		return Provider{}, nil
+	}
+
+	r.mu.RLock()
+	factory, ok := r.factories[provider]
+	r.mu.RUnlock()
+	if !ok {
+		return Provider{}, fmt.Errorf("model cache provider %q is not registered", provider)
+	}
+
+	config.Provider = provider
+	client, err := factory(config)
+	if err != nil {
+		return Provider{}, fmt.Errorf("create model cache provider %q: %w", provider, err)
+	}
+	if client == nil {
+		return Provider{}, fmt.Errorf("model cache provider %q returned nil client", provider)
+	}
+
+	return NewProvider(provider, client), nil
+}
+
+var defaultRegistry = NewRegistry()
+
+// RegisterProvider adds a provider factory to the default registry.
+func RegisterProvider(provider string, factory ProviderFactory) error {
+	return defaultRegistry.Register(provider, factory)
+}
+
+// BuildProvider constructs a provider from the default registry.
+func BuildProvider(config ProviderConfig) (Provider, error) {
+	return defaultRegistry.Build(config)
 }
 
 // Source identifies a model source that should be handled by a cache backend.

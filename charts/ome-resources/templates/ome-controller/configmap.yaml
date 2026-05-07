@@ -45,6 +45,14 @@ data:
       "enableMetricAggregation": "{{ .Values.ome.metricsaggregator.enableMetricAggregation }}",
       "enablePrometheusScraping" : "{{ .Values.ome.metricsaggregator.enablePrometheusScraping }}"
     }
+{{ if .Values.ome.modelCache.provider }}
+  modelCache: |-
+    {
+      "provider": "{{ .Values.ome.modelCache.provider }}",
+      "endpoint": "{{ .Values.ome.modelCache.endpoint }}",
+      "options": {{ .Values.ome.modelCache.options | default dict | toJson }}
+    }
+{{ end }}
   modelInit: |-
     {
         "image":  "{{ include "ome.imageWithHub" (dict "values" .Values "repository" .Values.ome.omeAgent.image "tag" .Values.ome.omeAgent.tag) }}",

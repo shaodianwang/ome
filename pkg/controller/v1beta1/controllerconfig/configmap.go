@@ -11,6 +11,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/sgl-project/ome/pkg/modelcache"
 )
 
 const (
@@ -18,6 +19,7 @@ const (
 	DeployConfigName       = "deploy"
 	MultiNodeProberName    = "multinodeProber"
 	BenchmarkJobConfigName = "benchmarkjob"
+	ModelCacheConfigName   = "modelCache"
 
 	DefaultDomainTemplate = "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"
 	DefaultIngressDomain  = "example.com"
@@ -181,6 +183,21 @@ func NewDeployConfig(clientset kubernetes.Interface) (*DeployConfig, error) {
 		}
 	}
 	return deployConfig, nil
+}
+
+func NewModelCacheConfig(clientset kubernetes.Interface) (*modelcache.ProviderConfig, error) {
+	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	modelCacheConfig := &modelcache.ProviderConfig{}
+	if modelCache, ok := configMap.Data[ModelCacheConfigName]; ok {
+		err := json.Unmarshal([]byte(modelCache), modelCacheConfig)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse model cache config json: %w", err)
+		}
+	}
+	return modelCacheConfig, nil
 }
 
 func NewMultiNodeProberConfig(clientset kubernetes.Interface) (*MultiNodeProberConfig, error) {

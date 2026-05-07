@@ -44,6 +44,7 @@ import (
 	v1beta1benchmarkjobcontroller "github.com/sgl-project/ome/pkg/controller/v1beta1/benchmark"
 	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
 	v1beta1isvccontroller "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice"
+	"github.com/sgl-project/ome/pkg/modelcache"
 	"github.com/sgl-project/ome/pkg/runtimeselector"
 	"github.com/sgl-project/ome/pkg/utils"
 	"github.com/sgl-project/ome/pkg/version"
@@ -209,6 +210,21 @@ func main() {
 		setupLog.Error(err, "Failed to initialize ingress configuration")
 		os.Exit(1)
 	}
+	modelCacheConfig, err := controllerconfig.NewModelCacheConfig(clientSet)
+	if err != nil {
+		setupLog.Error(err, "Failed to initialize model cache configuration")
+		os.Exit(1)
+	}
+	modelCacheProvider, err := modelcache.BuildProvider(*modelCacheConfig)
+	if err != nil {
+		setupLog.Error(err, "Failed to initialize model cache provider")
+		os.Exit(1)
+	}
+	if modelCacheProvider.Configured() {
+		setupLog.Info("Configured model cache provider", "provider", modelCacheProvider.Name)
+	} else {
+		setupLog.Info("Model cache provider is not configured")
+	}
 
 	// Register optional schemes based on CRD availability
 	setupLog.Info("Registering optional CRD schemes")
@@ -260,9 +276,10 @@ func main() {
 	// Setup BaseModel and ClusterBaseModel controllers with the manager
 	setupLog.Info("Setting up BaseModel controller")
 	if err = (&v1beta1basemodelcontroller.BaseModelReconciler{
-		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("BaseModel"),
-		Scheme: mgr.GetScheme(),
+		Client:     mgr.GetClient(),
+		Log:        ctrl.Log.WithName("BaseModel"),
+		Scheme:     mgr.GetScheme(),
+		ModelCache: modelCacheProvider,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create BaseModel controller")
 		os.Exit(1)
@@ -270,9 +287,10 @@ func main() {
 
 	setupLog.Info("Setting up ClusterBaseModel controller")
 	if err = (&v1beta1basemodelcontroller.ClusterBaseModelReconciler{
-		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("ClusterBaseModel"),
-		Scheme: mgr.GetScheme(),
+		Client:     mgr.GetClient(),
+		Log:        ctrl.Log.WithName("ClusterBaseModel"),
+		Scheme:     mgr.GetScheme(),
+		ModelCache: modelCacheProvider,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create ClusterBaseModel controller")
 		os.Exit(1)

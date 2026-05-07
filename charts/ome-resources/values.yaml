@@ -12,6 +12,10 @@ ome:
   metricsaggregator:
     enableMetricAggregation: "false"
     enablePrometheusScraping: "false"
+  modelCache:
+    provider: ""
+    endpoint: ""
+    options: {}
   benchmarkJob:
     image: genai-bench
     tag: 0.1.113
