@@ -14,6 +14,7 @@
 - [Design Details](#design-details)
   - [CRD and status changes](#crd-and-status-changes)
   - [Model agent change (PerNode mode)](#model-agent-change-pernode-mode)
+  - [cluster_cache integration surfaces](#cluster_cache-integration-surfaces)
   - [cluster_cache API contract](#cluster_cache-api-contract)
   - [Cluster_cache LRU and re-fetch behavior](#cluster_cache-lru-and-re-fetch-behavior)
   - [Auth flow](#auth-flow)
@@ -35,7 +36,7 @@
 
 ## Summary
 
-This OEP adds an optional cluster-cache-backed download path for `BaseModel` / `ClusterBaseModel` in OME. The existing model-agent behavior is unchanged and remains the default. Operators opt in per model via a new `spec.distribution` field. When opted in, cluster_cache holds the model as chunks distributed across cache pods; the BaseModel controller drives prewarm, status, and metadata parsing; the per-node download path is bypassed for that model. Compatible engines consume Sharded models through a generic cluster_cache weight-loading contract; unsupported engines are rejected until their `ServingRuntime` declares that capability.
+This OEP adds an optional cluster-cache-backed download path for `BaseModel` / `ClusterBaseModel` in OME. The existing model-agent behavior is unchanged and remains the default. Operators opt in per model via a new `spec.distribution` field. When opted in, cluster_cache holds the model as chunks distributed across cache pods; the BaseModel controller drives prewarm, status, and metadata parsing through cluster_cache's daemon server API; the per-node download path is bypassed for that model. Compatible engines consume Sharded models through the in-process cluster_cache client so high-throughput weight loading can keep its ring fan-out, RDMA, NUMA/HCA affinity, and direct buffer/tensor access. Unsupported engines are rejected until their `ServingRuntime` declares that capability.
 
 This is **additive**: nothing in OME's existing model-distribution behavior is removed for `PerNode` BaseModels (the default). `nodeSelector` injection on inference pods, the per-node ConfigMap status protocol, the HostPath mount in pods, and the `model-init` flow for encrypted models all stay the same when `distribution` is unset or set to `PerNode`. Only `Sharded` BaseModels take the new code path.
 
@@ -61,9 +62,9 @@ A second motivation is **HuggingFace source coverage**. Cluster_cache today supp
 - **Not replacing the model agent.** Default behavior stays. Operators who don't opt in see no change.
 - **Not removing `nodeSelector` injection** on inference pods for `PerNode` BaseModels. It's a feature, not a bug.
 - **Not removing the per-node ConfigMap status protocol** for `PerNode` BaseModels.
-- **Not modifying inference engines for `PerNode`.** Engines continue to read files from HostPath in `PerNode` mode. `Sharded` mode requires an engine to declare support for the cluster_cache weight-loading contract.
+- **Not modifying inference engines for `PerNode`.** Engines continue to read files from HostPath in `PerNode` mode. `Sharded` mode requires an engine to declare support for in-process cluster_cache weight loading.
 - **Not modifying the encrypted-model flow** for `PerNode` BaseModels. `model-init` continues to operate exactly as today.
-- **Not adding Sharded consumption to every runtime.** Engines that do not implement the cluster_cache weight-loading contract remain unsupported for `Sharded` BaseModels and are rejected by OME validation.
+- **Not adding Sharded consumption to every runtime.** Engines that do not implement in-process cluster_cache weight loading remain unsupported for `Sharded` BaseModels and are rejected by OME validation.
 - **Not adding multi-cloud support beyond S3 and HF** (no OCI/GCP/Azure cluster_cache backends in this OEP).
 - **Not Stage 1 contract negotiation** with MSL TBD lab or MSL FAIR. Out of scope; this OEP works with whatever Stage 1 produces today.
 
@@ -74,7 +75,7 @@ The proposal is a single new field on `BaseModel.spec` plus matching cluster_cac
 At a high level:
 
 - `PerNode` (default): existing model-agent behavior, unchanged.
-- `Sharded` (opt-in): cluster_cache holds the model as chunks; the BaseModel controller drives prewarm, status, and metadata parsing; model agent skips this BaseModel entirely; compatible engines read weights from cluster_cache through the runtime-declared weight-loading contract.
+- `Sharded` (opt-in): cluster_cache holds the model as chunks; the BaseModel controller drives prewarm, status, and metadata parsing through a thin Go client to cluster_cache's daemon server API; model agent skips this BaseModel entirely; compatible engines read weights from cluster_cache through the runtime-declared, in-process cluster_cache client integration.
 
 ### User Stories
 
@@ -99,6 +100,8 @@ An operator wants to serve a model hosted in a HuggingFace repo. They set `stora
   - All engine images and runtimes.
 - **`Sharded` pod consumption is runtime-gated.** ISVCs referencing `Sharded` BaseModels are accepted only when their selected runtime declares cluster_cache weight-loading support; other runtimes are rejected with a clear error.
 - **HuggingFace tokens are scoped.** Per-source override via Secret reference in `BaseModel.spec.storage.parameters` is supported; cluster_cache pods also accept a default token in their config.
+- **OME does not port or embed the cluster_cache fat client.** The existing Rust client owns hot-path ring lookup, fan-out, RDMA, NUMA/HCA selection, and direct buffer/tensor writes. OME uses only a thin control-plane client to cluster_cache's daemon API.
+- **No OME-specific cluster_cache gateway is required for Alpha.** The existing cluster_cache DaemonSet already runs an HTTP server. OEP-0009 extends that daemon API for OME control-plane operations instead of adding another server solely for OME.
 
 ### Risks and Mitigations
 
@@ -112,7 +115,9 @@ An operator wants to serve a model hosted in a HuggingFace repo. They set `stora
 
 5. **Controller-side parsing diverges from per-node parsing.** Two parser paths could behave differently for the same model. Mitigation: extract the existing model-agent parser into a shared package called by both `PerNode` (per-node, on the agent) and `Sharded` (cluster-wide, on the controller); only the byte source differs.
 
-6. **cluster_cache extension maintenance.** cluster_cache changes for OEP-0009 (HF backend, listing contract, and async prewarm/status API) must be maintained as part of cluster_cache's own API. Mitigation: extensions land behind a clean API boundary and are additive — they don't alter cluster_cache's existing chunk semantics.
+6. **cluster_cache extension maintenance.** cluster_cache changes for OEP-0009 (HF backend, listing contract, and async prewarm/status API) must be maintained as part of cluster_cache's own daemon API. Mitigation: extensions land behind a clean API boundary and are additive — they don't alter cluster_cache's existing chunk semantics or the engine data path.
+
+7. **Two integration surfaces can be confusing.** OME and engines intentionally use different cluster_cache surfaces. Mitigation: keep the split explicit: OME is control plane and talks to the daemon API; engines are data plane and use the in-process Rust client.
 
 ## Design Details
 
@@ -189,18 +194,41 @@ For `distribution == PerNode` (default): no change. Model agent runs exactly as 
 
 For `distribution == Sharded`: model agent skips the BaseModel. Scout reads `spec.distribution`; if `Sharded`, no Gopher task is enqueued. Sharded BaseModels are not the model agent's responsibility; the BaseModel controller drives them end-to-end (see [End-to-end flow (Sharded mode)](#end-to-end-flow-sharded-mode)).
 
+### cluster_cache integration surfaces
+
+cluster_cache has two distinct consumers in this design:
+
+| Consumer | Surface | Responsibilities |
+|----------|---------|------------------|
+| OME BaseModel controller | Thin Go client to the existing cluster_cache daemon server API | Source validation/list/head, async prewarm submission, prewarm status polling, small metadata range reads for parsing, status/condition writes in OME. |
+| Engine process | In-process cluster_cache Rust client/binding | Hot-path weight loading, ring lookup, multi-owner fan-out, HTTP/RDMA transport, NUMA/HCA/GPU-local behavior, direct writes into engine-owned buffers or tensors. |
+
+The split is intentional. The existing cluster_cache client is a fat data-plane
+client: it computes ring ownership, talks to many cache nodes, handles chunk
+fan-out, maintains transport/RDMA state, and can write directly into memory
+owned by the engine process. OME should not reimplement that logic in Go and
+should not link it into the controller through cgo/FFI. Doing so would duplicate
+cluster_cache behavior, increase manager build complexity, and put
+engine-local transport/runtime concerns inside the Kubernetes control plane.
+
+OME only needs control-plane operations. For Alpha, those operations should be
+added to the existing cluster_cache daemon server rather than creating a new
+OME-specific gateway. A separate coordinator/gateway can be revisited later if
+operation ownership, restart recovery, or multi-cluster API shape becomes
+awkward in the DaemonSet server model.
+
 ### cluster_cache API contract
 
 Cluster_cache is treated as an independent cache component. OME depends on a
-small source/list/head/range/prewarm contract, not on any engine-specific
-implementation detail.
+small daemon-server source/list/head/range/prewarm contract, not on the fat
+engine data-plane client and not on any engine-specific implementation detail.
 
 The current cluster_cache API already exposes these read-through primitives:
 
 | Existing API / client method | Purpose |
 |------------------------------|---------|
 | `GET /head?path=...` / `CacheClient.head_one(path)` | Returns `(size, mtime)` for one object. |
-| `GET /chunk_by_key?...` / `CacheClient.fetch_byte_range(path, mtime, size, offset, length)` | Fetches arbitrary ranges by routing chunk-aligned reads through the cache ring. |
+| `GET /chunk_by_key?...` / `CacheClient.fetch_byte_range(path, mtime, size, offset, length)` | Owner-side chunk reads plus a fat client method that routes chunk-aligned reads through the cache ring and assembles the requested range. |
 | `POST /prefetch_owned_chunks` | Internal owner-side warm call for specific chunks. |
 | `CacheClient.prewarm(paths)` | Blocking client-side fan-out: HEADs object paths, groups chunks by owner, and POSTs `/prefetch_owned_chunks` to warm the ring. |
 
@@ -208,10 +236,16 @@ Required cluster_cache code updates for OEP-0009:
 
 | Needed contract | Purpose |
 |-----------------|---------|
-| Prefix listing | Enumerates files under a model prefix. OME needs a stable cluster_cache-owned equivalent, either as `GET /list?prefix=...` or as a typed cluster_cache client API. |
+| Prefix listing | Enumerates files under a model prefix. OME needs a stable cluster_cache-owned daemon API, for example `GET /list?prefix=...`, so OME does not need source-backend-specific listing logic. |
+| Controller-safe range read | Fetches small metadata byte ranges by path/offset/length through the daemon API. cluster_cache owns owner routing and assembly; OME uses this for `config.json` and safetensors headers, not for full tensor loading. |
 | HuggingFace backend | Adds `hf://org/model` support alongside S3. This likely requires a stable source-backend interface inside cluster_cache rather than S3-specific fetch logic. |
 | HF authentication | Supports a default HF token per cache deployment plus per-source overrides from `BaseModel.spec.storage.parameters` / Secret references. |
-| Async prewarm/status API | Adds daemon-side `POST /prewarm` + `GET /prewarm/<id>` operations. OME stores the returned operation ID in `status.cache.prewarmID` and polls status until completion. |
+| Async prewarm/status API | Adds daemon-side `POST /prewarm` + `GET /prewarm/<id>` operations to the existing cluster_cache daemon server. OME stores the returned operation ID in `status.cache.prewarmID` and polls status until completion. |
+
+`POST /prewarm` may internally call the same Rust logic used by
+`CacheClient.prewarm(paths)` or a daemon-native equivalent. The important OME
+contract is that the cluster_cache daemon API owns ring/fan-out decisions and
+operation state; OME only submits work and observes progress.
 
 Not added to cluster_cache (intentional): KMS/Vault decryption for `PerNode`
 models, engine-aware runtime selection logic, or OME-specific CRD behavior.
@@ -247,10 +281,14 @@ cluster-wide distribution mechanism exists. For this OEP, the capability means:
 
 - The engine understands the cluster_cache discovery/configuration passed by
   OME.
-- The engine can read model weight bytes from cluster_cache using the stable
-  cluster_cache range-read/client contract.
+- The engine can read model weight bytes from cluster_cache using the
+  in-process cluster_cache client/binding appropriate for that engine.
 - The engine does not require OME to inject a model-ready nodeSelector or a
   model HostPath volume for this BaseModel.
+
+The engine path is deliberately not proxied through OME's control-plane client.
+High-throughput loads need process-local access to buffers/tensors and may rely
+on RDMA sessions pinned to the process's NUMA/HCA/GPU placement.
 
 When an ISVC references a `Sharded` BaseModel, OME validates the resolved
 runtime before pod creation. Runtimes without this capability remain valid for
@@ -266,30 +304,32 @@ The `PerNode` mode lifecycle is the existing OME flow and is not duplicated here
 sequenceDiagram
     actor U as User
     participant BMC as BaseModel controller
-    participant CC as cluster_cache
+    participant CCAPI as cluster_cache daemon API
+    participant CC as cluster_cache daemons
     participant SRC as Model source
     participant ISVC as ISVC controller
     participant ENG as Engine pod
 
     U->>BMC: create BaseModel (distribution Sharded)
-    BMC->>CC: list/head source prefix
+    BMC->>CCAPI: list/head source prefix
     Note over BMC: SourceReachable=true
-    BMC->>CC: prewarm source objects
+    BMC->>CCAPI: prewarm source objects
+    CCAPI->>CC: coordinate ring owners
     CC->>SRC: fetch chunk owner ranges
     SRC-->>CC: chunks sharded across cache pods
-    BMC->>CC: observe prewarm completion
+    BMC->>CCAPI: observe prewarm completion
     Note over BMC: prewarm complete
 
-    BMC->>CC: list source prefix
-    CC-->>BMC: file list
-    BMC->>CC: head + range reads for config and safetensors headers
-    CC-->>BMC: metadata bytes
+    BMC->>CCAPI: list source prefix
+    CCAPI-->>BMC: file list
+    BMC->>CCAPI: head + range reads for config and safetensors headers
+    CCAPI-->>BMC: metadata bytes
     Note over BMC: parse, populate spec, set Cached and Ready
 
     U->>ISVC: create InferenceService
     Note over ISVC: validate runtime cluster_cache capability
     ISVC->>ENG: spawn with cluster_cache config
-    ENG->>CC: load weights through cluster_cache client contract
+    ENG->>CC: load weights through in-process cluster_cache client
 ```
 
 #### Step-by-step
@@ -309,9 +349,9 @@ sequenceDiagram
 
 3. **BaseModel controller reconciles.** Informer fires. Sees `distribution: Sharded` and takes the new code path. Lists and HEADs the source URI via cluster_cache to validate auth + reachability. Sets `SourceReachable=true`.
 
-4. **Controller calls the cluster_cache async prewarm API.** `POST /prewarm` receives the model source prefix plus any source auth reference. cluster_cache returns an operation ID, which OME stores in `BaseModel.status.cache.prewarmID`.
+4. **Controller calls the cluster_cache async prewarm API.** `POST /prewarm` on the cluster_cache daemon server receives the model source prefix plus any source auth reference. cluster_cache returns an operation ID, which OME stores in `BaseModel.status.cache.prewarmID`.
 
-5. **cluster_cache prewarm runs.** cluster_cache enumerates model files (`config.json`, tokenizer files, index files, `*.safetensors` shards), HEADs each file for `(size, mtime)`, computes chunk layout, and assigns chunks to cache owners via the consistent hash ring. Owner pods fetch their assigned chunks from the source backend using the auth passed for that source and store chunks on local NVMe. **No per-node full copies anywhere** — a 200 GB model becomes chunks distributed across cluster_cache pods.
+5. **cluster_cache prewarm runs.** The daemon API uses cluster_cache-owned logic to enumerate model files (`config.json`, tokenizer files, index files, `*.safetensors` shards), HEAD each file for `(size, mtime)`, compute chunk layout, and assign chunks to cache owners via the consistent hash ring. Owner pods fetch their assigned chunks from the source backend using the auth passed for that source and store chunks on local NVMe. **No per-node full copies anywhere** — a 200 GB model becomes chunks distributed across cluster_cache pods.
 
 6. **Controller observes prewarm progress.** The controller polls `GET /prewarm/<id>` and writes progress into `BaseModel.status.cache` and the `Cached` condition. When prewarm completes, `Cached=True`; on failure, `Cached=False` with a reason and message from cluster_cache.
 
@@ -334,19 +374,20 @@ sequenceDiagram
 
 9. **User creates an InferenceService** referencing the BaseModel.
 
-10. **ISVC controller reconciles.** Resolves the BaseModel reference, sees `distribution: Sharded`, and validates that the resolved runtime declares cluster_cache weight-loading support. It **does NOT** call `AddNodeSelectorForModelReadyNode` and **does NOT** inject the model HostPath volume. Instead, it injects the cluster_cache discovery/configuration required by the generic engine contract.
+10. **ISVC controller reconciles.** Resolves the BaseModel reference, sees `distribution: Sharded`, and validates that the resolved runtime declares cluster_cache weight-loading support. It **does NOT** call `AddNodeSelectorForModelReadyNode` and **does NOT** inject the model HostPath volume. Instead, it injects the cluster_cache discovery/configuration required by the engine's in-process cluster_cache integration.
 
 11. **K8s scheduler places the pod.** No model-keyed nodeSelector to satisfy. Pod scheduled based on GPU class, anti-affinity, accelerator class.
 
-12. **Pod starts.** The engine reads model weights through the cluster_cache client contract. Any engine-local metadata cache or manifest is engine-owned; OME only passes cluster_cache configuration and the model source identity.
+12. **Pod starts.** The engine reads model weights through the in-process cluster_cache client/binding. Any engine-local metadata cache, manifest, RDMA session, or tensor-write path is engine-owned; OME only passes cluster_cache configuration and the model source identity.
 
 13. **Engine becomes ready** and serves traffic.
 
 #### Required cluster_cache code updates
 
-OME will update cluster_cache to expose an async prewarm/status API. This is a
-required cluster_cache code change for OEP-0009, not an OME-side wrapper around
-the existing blocking client call.
+OME will update cluster_cache to expose an async prewarm/status API on the
+existing cluster_cache daemon server. This is a required cluster_cache code
+change for OEP-0009, not an OME-side wrapper around the existing blocking
+client call and not a new server solely for OME.
 
 The new API shape is:
 
@@ -358,8 +399,12 @@ The new API shape is:
 
 cluster_cache owns operation state because it owns chunk assignment, source
 fetching, and cache-pod restart behavior. The existing blocking
-`CacheClient.prewarm(paths)` can remain as a convenience client, but OME should
-depend on the async daemon API.
+`CacheClient.prewarm(paths)` can remain as a convenience client for engines or
+tools, but OME should depend on the async daemon API. The operation ID must be
+pollable after controller restarts. It may encode the owning daemon endpoint, or
+cluster_cache may make operation state visible from any daemon. A separate
+coordinator/gateway is a future option only if daemon-owned operation state
+proves too awkward.
 
 ### Failure modes
 
@@ -386,6 +431,7 @@ depend on the async daemon API.
 - `cluster_cache::backends::hf` — HuggingFace backend correctness: token auth, range fetch, repo listing, error handling.
 - `cluster_cache::api::prewarm` — async prewarm job lifecycle: create, poll, complete, fail, cancel/cleanup if implemented, and cache-pod restart.
 - `cluster_cache::api::list` — `GET /list?prefix=...` for both S3 and HF backends.
+- `cluster_cache::api::range` — controller-safe metadata range reads route to owners and assemble small byte ranges without requiring OME to run ring logic.
 - `pkg/modelagent::parser` (refactored shared package) — config.json + safetensors header parsing; same tests as today, just relocated.
 - `pkg/controller/v1beta1/basemodel` — Sharded reconcile path: prewarm trigger, status polling, parse invocation, condition writes (`SourceReachable`, `Cached`, `Ready`).
 - `pkg/controller/v1beta1/inferenceservice` — Sharded BaseModel: validates runtime capability, skips `AddNodeSelectorForModelReadyNode`, skips HostPath injection, and injects cluster_cache configuration.
@@ -408,13 +454,14 @@ depend on the async daemon API.
 - cluster_cache HuggingFace backend implemented; passes integration tests against public HF repos.
 - cluster_cache async prewarm + status API implemented.
 - cluster_cache `GET /list` endpoint implemented.
+- cluster_cache controller-safe metadata range-read endpoint implemented.
 - BaseModel controller capable of prewarm + parse + condition writes for `Sharded` BaseModels.
 - ISVCs referencing `Sharded` BaseModels are accepted only when the resolved runtime declares cluster_cache weight-loading support.
 - Backward compatibility verified — `PerNode` BaseModels behave identically to today's deployments.
 
 #### Beta
 
-- At least one engine-compatible runtime can load and serve a `Sharded` BaseModel through the generic cluster_cache contract.
+- At least one engine-compatible runtime can load and serve a `Sharded` BaseModel through the in-process cluster_cache client integration.
 - Prewarm API hardened for retries, restart recovery, and large-model progress reporting.
 - Performance baseline: cloud-egress reduction quantified for representative workloads (target ≥10× for a 50-node deployment).
 - Cluster_cache failure-mode operational playbook documented (re-fetch behavior, eviction handling, auth rotation).
@@ -424,16 +471,18 @@ depend on the async daemon API.
 
 - 6 months of Beta operation with no critical bugs or data-loss incidents.
 - Documented migration path for moving BaseModels between `PerNode` and `Sharded` modes.
-- Cluster_cache extensions for this OEP (HF backend, prewarm/status, list endpoint) in stable release of cluster_cache.
+- Cluster_cache extensions for this OEP (HF backend, prewarm/status, list endpoint, metadata range-read endpoint) in stable release of cluster_cache.
 
 ## Implementation History
 
 - 2026-05-04: OEP-0009 initial draft.
 - 2026-05-06: `BaseModel.spec.distribution` field landed.
 - 2026-05-06: Existing model config parser extracted into a shared package.
+- 2026-05-06: Clarified OME control-plane daemon API vs. engine in-process cluster_cache client split.
 - TBD: cluster_cache HuggingFace backend implementation.
 - TBD: cluster_cache async prewarm + status API.
 - TBD: cluster_cache `GET /list` endpoint.
+- TBD: cluster_cache controller-safe metadata range-read endpoint.
 - TBD: OME status schema and condition/cache writes.
 - TBD: Shared parser source abstraction for cluster_cache range reads.
 - TBD: BaseModel controller `Sharded` reconcile path.
@@ -445,7 +494,8 @@ depend on the async daemon API.
 - **Cluster_cache's NVMe is a shared resource.** Capacity must be planned at deployment time. Over-pressure manifests as eviction plus re-fetch on next pod load, which can make a later first load slower even though the model remains logically usable.
 - **`Cached=true` is a soft guarantee.** It means "prewarm completed at some point" — not "chunks are still in cache right now." Active models stay warm via LRU; idle models may need re-fetch. Acceptable for the workloads this OEP targets; revisit if real-time SLOs need stronger guarantees.
 - **HuggingFace auth surface in cluster_cache.** A new HF backend module + token handling. Smaller than a full multi-cloud expansion, but still new code that needs maintenance.
-- **Sharded mode depends on engine support.** OME can prewarm and parse a `Sharded` BaseModel without changing every engine, but serving traffic requires a runtime that explicitly implements the cluster_cache weight-loading contract.
+- **Sharded mode depends on engine support.** OME can prewarm and parse a `Sharded` BaseModel without changing every engine, but serving traffic requires a runtime that explicitly implements in-process cluster_cache weight loading.
+- **Two cluster_cache surfaces.** OME uses a daemon control API, while engines use the in-process Rust client for data-plane loading. This is more nuanced than a single universal client, but avoids putting ring/RDMA/tensor memory logic in the OME controller.
 - **Two parser code paths.** Even with a shared parser package, `PerNode` invokes it on each agent node from disk, while `Sharded` invokes it from the controller via cluster_cache range reads. Operators have to understand both invocation contexts when debugging.
 
 ## Alternatives
@@ -459,3 +509,5 @@ depend on the async daemon API.
 | **Use cluster_cache only as a multi-cloud download library** (linked into the model agent process directly, no DaemonSet) | Considered. Loses the cluster-wide chunk caching benefit; each agent would still pull from cloud per node. The DaemonSet shape is what enables the bandwidth savings.            |
 | **Reserve cache capacity for `Sharded` BaseModels**                                                                       | Deferred. LRU plus re-fetch is sufficient for the workloads targeted by this OEP; stronger cache residency guarantees can be considered later if real-time SLOs require them.    |
 | **Add OCI / GCP / Azure backends to cluster_cache as part of this OEP**                                                   | Rejected. HF is the immediate need for testing; other clouds can be added in follow-up OEPs as use cases arise.                                                                  |
+| **Port the fat cluster_cache client to Go or link it into OME through cgo/FFI**                                           | Rejected. The fat client owns ring fan-out, RDMA/transport state, and process-local buffer/tensor writes. Duplicating it in Go or embedding it in the manager would increase build complexity and put data-plane concerns in the control plane. |
+| **Add a separate cluster_cache gateway solely for OME**                                                                    | Deferred. The existing cluster_cache DaemonSet already exposes a server. OEP-0009 extends that daemon API first; a coordinator/gateway can be revisited if daemon-owned async operation state becomes difficult. |
