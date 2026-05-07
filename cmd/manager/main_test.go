@@ -25,6 +25,7 @@ import (
 
 	"github.com/sgl-project/ome/pkg/constants"
 	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/sgl-project/ome/pkg/modelcache"
 )
 
 func TestGetOptions(t *testing.T) {
@@ -101,6 +102,17 @@ func TestDefaultOptions(t *testing.T) {
 	assert.False(t, opts.enableWebhook)
 	assert.Equal(t, ":8081", opts.probeAddr)
 	assert.Equal(t, LeaderElectionNamespace, opts.leaderElectionNamespace)
+}
+
+func TestClusterCacheProviderRegistered(t *testing.T) {
+	provider, err := modelcache.BuildProvider(modelcache.ProviderConfig{
+		Provider: modelcache.ProviderClusterCache,
+		Endpoint: "http://cluster-cache.example:10090",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, modelcache.ProviderClusterCache, provider.Name)
+	assert.True(t, provider.Configured())
 }
 
 // Mock for testing CRD availability
@@ -207,8 +219,8 @@ func TestManagerSetup(t *testing.T) {
 		{
 			name: "valid configuration",
 			opts: Options{
-				metricsAddr:             ":18080",
-				probeAddr:               ":18081",
+				metricsAddr:             "127.0.0.1:0",
+				probeAddr:               "127.0.0.1:0",
 				webhookPort:             18443,
 				leaderElectionNamespace: LeaderElectionNamespace,
 			},
@@ -217,8 +229,8 @@ func TestManagerSetup(t *testing.T) {
 		{
 			name: "custom metrics port",
 			opts: Options{
-				metricsAddr:             ":19090",
-				probeAddr:               ":19081",
+				metricsAddr:             "127.0.0.1:0",
+				probeAddr:               "127.0.0.1:0",
 				webhookPort:             19443,
 				leaderElectionNamespace: LeaderElectionNamespace,
 			},

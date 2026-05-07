@@ -45,6 +45,7 @@ import (
 	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
 	v1beta1isvccontroller "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice"
 	"github.com/sgl-project/ome/pkg/modelcache"
+	_ "github.com/sgl-project/ome/pkg/modelcache/providers/clustercache"
 	"github.com/sgl-project/ome/pkg/runtimeselector"
 	"github.com/sgl-project/ome/pkg/utils"
 	"github.com/sgl-project/ome/pkg/version"
@@ -379,7 +380,18 @@ func main() {
 
 	// Start the Cmd
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(signals.SetupSignalHandler()); err != nil {
+	managerCtx := signals.SetupSignalHandler()
+	if modelCacheProvider.Configured() {
+		if closeable, ok := modelCacheProvider.Client.(interface{ Close() error }); ok {
+			go func() {
+				<-managerCtx.Done()
+				if err := closeable.Close(); err != nil {
+					setupLog.Error(err, "Failed to close model cache provider")
+				}
+			}()
+		}
+	}
+	if err := mgr.Start(managerCtx); err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
 	}
