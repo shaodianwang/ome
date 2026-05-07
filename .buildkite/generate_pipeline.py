@@ -169,8 +169,9 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
 
 
 def _push_chart_step(chart: str) -> str:
-    # TODO: helm OCI push to ECR needs the same AWS auth path the
-    # cf-docker-image plugin sets up; fix in a follow-up.
+    # MKS identity annotations bind the pod to the cluster's default
+    # IAM role so `aws ecr get-login-password` works without static
+    # creds; same path the cf-docker-image plugin uses for image push.
     return textwrap.dedent(
         f"""\
           - label: ":helm: Package {chart}"
@@ -182,10 +183,14 @@ def _push_chart_step(chart: str) -> str:
               queue: "{BUILD_QUEUE}"
             plugins:
               - kubernetes:
+                  metadata:
+                    annotations:
+                      identity.mks.meta.com/default: "true"
+                      identity.mks.meta.com/inject-auth-tools: "true"
                   podSpec:
                     containers:
                       - name: container-0
-                        image: "{CI_IMAGE}"
+                        image: "{CF_DOCKER_PLUGIN_RUNTIME_IMAGE}"
         """
     )
 

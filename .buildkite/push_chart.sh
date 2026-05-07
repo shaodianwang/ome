@@ -2,6 +2,9 @@
 # Package (and on main, push) one Helm chart to OCI ECR.
 #
 # Usage: sh .buildkite/push_chart.sh <chart-name>
+#
+# Runs in the prod-inference-ci-base image with MKS pod-identity
+# annotations on the job pod (set by .buildkite/generate_pipeline.py).
 set -eu
 
 CHART="${1:?chart required}"
@@ -17,8 +20,8 @@ CHART_VERSION="${DATE_TAG}-${SHORT_SHA}"
 
 HELM_VERSION="${HELM_VERSION:-v3.16.2}"
 if ! command -v helm >/dev/null 2>&1; then
-  apt-get update
-  apt-get install -y --no-install-recommends curl ca-certificates
+  # Runtime image is not Debian-based (no apt). curl + tar ship with
+  # the prod-inference-ci-base image, so download helm directly.
   curl -sSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -o /tmp/helm.tgz
   tar -xzf /tmp/helm.tgz -C /tmp
   mv /tmp/linux-amd64/helm /usr/local/bin/helm
@@ -31,15 +34,22 @@ sed -i "s/^appVersion:.*/appVersion: \"${CHART_VERSION}\"/" "charts/${CHART}/Cha
 helm package "charts/${CHART}"
 
 if [ "${BUILDKITE_BRANCH:-}" = "main" ]; then
-  if ! command -v aws >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y --no-install-recommends curl unzip ca-certificates
-    curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
-    unzip -q /tmp/awscliv2.zip -d /tmp
-    /tmp/aws/install
+  # Mirrors the cf-docker-image plugin's three-tier ECR auth so chart
+  # pushes use the same credential path as image pushes:
+  #   1. Meta cloud_oss + x509 identity (the path that runs in prod)
+  #   2. Pre-baked ECR_AUTH_TOKEN env var
+  #   3. aws CLI fallback (resolved via MKS pod-identity annotations)
+  if [ -x /shared/cloud_oss ] && [ -f /var/facebook/x509_identities/combined.pem ]; then
+    /shared/cloud_oss ecr get-credentials --dev \
+        --role SSOContainerRegistryReadWrite --region "$AWS_REGION" --outform text \
+      | helm registry login --username AWS --password-stdin "$ECR_REGISTRY"
+  elif [ -n "${ECR_AUTH_TOKEN:-}" ]; then
+    echo "$ECR_AUTH_TOKEN" \
+      | helm registry login --username AWS --password-stdin "$ECR_REGISTRY"
+  else
+    aws ecr get-login-password --region "$AWS_REGION" \
+      | helm registry login --username AWS --password-stdin "$ECR_REGISTRY"
   fi
-  aws ecr get-login-password --region "$AWS_REGION" \
-    | helm registry login --username AWS --password-stdin "$ECR_REGISTRY"
   helm push "${CHART}-${CHART_VERSION}.tgz" "$CHART_REPO"
   echo "pushed ${CHART}-${CHART_VERSION}.tgz to ${CHART_REPO}"
 else
