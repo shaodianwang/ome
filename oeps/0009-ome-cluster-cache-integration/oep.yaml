@@ -1,4 +1,4 @@
-title: OME and Cluster Cache Integration
+title: OME Model Cache Provider Integration
 oep-number: 0009
 authors:
   - "@slin1237"
@@ -24,5 +24,5 @@ milestone:
   stable: "TBD"
 
 metrics:
-  - basemodel_clustercache_prewarm_duration_seconds
-  - basemodel_clustercache_prewarm_bytes_total
+  - basemodel_modelcache_prewarm_duration_seconds
+  - basemodel_modelcache_prewarm_bytes_total
