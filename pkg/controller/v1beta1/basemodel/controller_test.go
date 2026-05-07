@@ -23,6 +23,7 @@ import (
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/constants"
 	"github.com/sgl-project/ome/pkg/modelagent"
+	"github.com/sgl-project/ome/pkg/modelcache"
 )
 
 func TestBaseModelReconcile(t *testing.T) {
@@ -1440,7 +1441,7 @@ func validateInitialShardedStatus(t *testing.T, status v1beta1.ModelStatusSpec, 
 	g.Expect(status.NodesReady).To(gomega.BeEmpty())
 	g.Expect(status.NodesFailed).To(gomega.BeEmpty())
 	g.Expect(status.Cache).ToNot(gomega.BeNil())
-	g.Expect(status.Cache.Backend).To(gomega.Equal(modelCacheBackendClusterCache))
+	g.Expect(status.Cache.Backend).To(gomega.Equal(modelcache.BackendClusterCache))
 	g.Expect(status.Cache.SourceUri).To(gomega.Equal(sourceURI))
 
 	sourceReachable := meta.FindStatusCondition(status.Conditions, modelConditionSourceReachable)

@@ -26,11 +26,10 @@ import (
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/constants"
 	"github.com/sgl-project/ome/pkg/modelagent"
+	"github.com/sgl-project/ome/pkg/modelcache"
 )
 
 const (
-	modelCacheBackendClusterCache = "cluster_cache"
-
 	modelConditionSourceReachable = "SourceReachable"
 	modelConditionCached          = "Cached"
 	modelConditionReady           = "Ready"
@@ -52,15 +51,17 @@ const (
 // BaseModelReconciler reconciles BaseModel objects
 type BaseModelReconciler struct {
 	client.Client
-	Log    logr.Logger
-	Scheme *runtime.Scheme
+	Log        logr.Logger
+	Scheme     *runtime.Scheme
+	ModelCache modelcache.Client
 }
 
 // ClusterBaseModelReconciler reconciles ClusterBaseModel objects
 type ClusterBaseModelReconciler struct {
 	client.Client
-	Log    logr.Logger
-	Scheme *runtime.Scheme
+	Log        logr.Logger
+	Scheme     *runtime.Scheme
+	ModelCache modelcache.Client
 }
 
 // Reconcile handles BaseModel reconciliation
@@ -820,8 +821,8 @@ func applyInitialShardedModelStatus(generation int64, spec *v1beta1.BaseModelSpe
 		status.Cache = &v1beta1.ModelCacheStatus{}
 		updated = true
 	}
-	if status.Cache.Backend != modelCacheBackendClusterCache {
-		status.Cache.Backend = modelCacheBackendClusterCache
+	if status.Cache.Backend != modelcache.BackendClusterCache {
+		status.Cache.Backend = modelcache.BackendClusterCache
 		updated = true
 	}
 	if status.Cache.SourceUri != sourceURI {
