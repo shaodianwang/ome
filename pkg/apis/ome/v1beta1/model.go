@@ -415,6 +415,36 @@ const (
 	LifeCycleDetailFailed     string = "Associated JobRun Failed"
 )
 
+const (
+	// ModelConditionSourceReachable reports whether OME can access the model source.
+	ModelConditionSourceReachable = "SourceReachable"
+	// ModelConditionCached reports whether model weights are available through the cache backend.
+	ModelConditionCached = "Cached"
+	// ModelConditionReady reports whether the model status is ready for serving consumers.
+	ModelConditionReady = "Ready"
+
+	// ModelConditionReasonNotChecked means the controller has not checked this condition yet.
+	ModelConditionReasonNotChecked = "NotChecked"
+	// ModelConditionReasonSourceReachable means the model source is reachable.
+	ModelConditionReasonSourceReachable = "SourceReachable"
+	// ModelConditionReasonSourceNotReachable means the model source is not reachable.
+	ModelConditionReasonSourceNotReachable = "SourceNotReachable"
+	// ModelConditionReasonPrewarmPending means cache prewarm has not started or is queued.
+	ModelConditionReasonPrewarmPending = "PrewarmPending"
+	// ModelConditionReasonPrewarmRunning means cache prewarm is in progress.
+	ModelConditionReasonPrewarmRunning = "PrewarmRunning"
+	// ModelConditionReasonPrewarmSucceeded means cache prewarm completed successfully.
+	ModelConditionReasonPrewarmSucceeded = "PrewarmSucceeded"
+	// ModelConditionReasonPrewarmFailed means cache prewarm failed.
+	ModelConditionReasonPrewarmFailed = "PrewarmFailed"
+	// ModelConditionReasonPrewarmCanceled means cache prewarm was canceled.
+	ModelConditionReasonPrewarmCanceled = "PrewarmCanceled"
+	// ModelConditionReasonCacheNotReady means cache state still blocks model readiness.
+	ModelConditionReasonCacheNotReady = "CacheNotReady"
+	// ModelConditionReasonMetadataPending means cache is ready but model metadata has not been parsed.
+	ModelConditionReasonMetadataPending = "MetadataPending"
+)
+
 // ModelCacheStatus reports cluster-wide cache progress for models that use a
 // sharded distribution backend.
 type ModelCacheStatus struct {

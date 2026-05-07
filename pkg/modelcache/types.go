@@ -61,8 +61,11 @@ type MetadataRangeRequest struct {
 
 // PrewarmRequest asks the model cache to prewarm a source or known objects.
 type PrewarmRequest struct {
-	Source  Source
-	Objects []ObjectRef
+	Source Source
+	// IdempotencyKey identifies one logical prewarm request. Implementations should
+	// return the existing operation when the same key is submitted again.
+	IdempotencyKey string
+	Objects        []ObjectRef
 }
 
 // PrewarmOperation identifies an async prewarm operation.
