@@ -4504,7 +4504,7 @@ func schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref common.ReferenceCallback) 
 				Properties: map[string]spec.Schema{
 					"backend": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Backend identifies the cache implementation, e.g., \"cluster_cache\".",
+							Description: "Backend identifies the configured cache provider.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

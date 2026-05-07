@@ -41,7 +41,7 @@ type BaseModelReconciler struct {
 	client.Client
 	Log        logr.Logger
 	Scheme     *runtime.Scheme
-	ModelCache modelcache.Client
+	ModelCache modelcache.Provider
 }
 
 // ClusterBaseModelReconciler reconciles ClusterBaseModel objects
@@ -49,7 +49,7 @@ type ClusterBaseModelReconciler struct {
 	client.Client
 	Log        logr.Logger
 	Scheme     *runtime.Scheme
-	ModelCache modelcache.Client
+	ModelCache modelcache.Provider
 }
 
 // Reconcile handles BaseModel reconciliation

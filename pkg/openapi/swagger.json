@@ -2499,7 +2499,7 @@
       "type": "object",
       "properties": {
         "backend": {
-          "description": "Backend identifies the cache implementation, e.g., \"cluster_cache\".",
+          "description": "Backend identifies the configured cache provider.",
           "type": "string"
         },
         "cachedBytes": {

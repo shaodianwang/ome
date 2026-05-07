@@ -443,12 +443,14 @@ const (
 	ModelConditionReasonCacheNotReady = "CacheNotReady"
 	// ModelConditionReasonMetadataPending means cache is ready but model metadata has not been parsed.
 	ModelConditionReasonMetadataPending = "MetadataPending"
+	// ModelConditionReasonProviderNotConfigured means no model cache provider is configured for the controller.
+	ModelConditionReasonProviderNotConfigured = "ProviderNotConfigured"
 )
 
 // ModelCacheStatus reports cluster-wide cache progress for models that use a
 // sharded distribution backend.
 type ModelCacheStatus struct {
-	// Backend identifies the cache implementation, e.g., "cluster_cache".
+	// Backend identifies the configured cache provider.
 	// +optional
 	Backend string `json:"backend,omitempty"`
 

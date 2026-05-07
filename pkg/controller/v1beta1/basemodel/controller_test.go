@@ -75,7 +75,7 @@ func TestBaseModelReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "Sharded BaseModel initializes cluster cache status and ignores ConfigMaps",
+			name: "Sharded BaseModel reports missing model cache provider and ignores ConfigMaps",
 			baseModel: &v1beta1.BaseModel{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "sharded-model",
@@ -130,7 +130,7 @@ func TestBaseModelReconcile(t *testing.T) {
 				g.Expect(err).NotTo(gomega.HaveOccurred())
 
 				g.Expect(result).To(gomega.Equal(ctrl.Result{}))
-				validateInitialShardedStatus(t, updated.Status, "oci://bucket/sharded-model")
+				validateProviderNotConfiguredShardedStatus(t, updated.Status, "oci://bucket/sharded-model")
 			},
 		},
 		{
@@ -690,7 +690,7 @@ func TestClusterBaseModelReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "Sharded ClusterBaseModel initializes cluster cache status and ignores ConfigMaps",
+			name: "Sharded ClusterBaseModel reports missing model cache provider and ignores ConfigMaps",
 			clusterBaseModel: &v1beta1.ClusterBaseModel{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "sharded-cluster-model",
@@ -742,7 +742,7 @@ func TestClusterBaseModelReconcile(t *testing.T) {
 				}, updated)
 				g.Expect(err).NotTo(gomega.HaveOccurred())
 
-				validateInitialShardedStatus(t, updated.Status, "s3://bucket/sharded-cluster-model")
+				validateProviderNotConfiguredShardedStatus(t, updated.Status, "s3://bucket/sharded-cluster-model")
 			},
 		},
 		{
@@ -880,14 +880,16 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 	cachedChunks := int32(4)
 
 	tests := []struct {
-		name        string
-		status      v1beta1.ModelStatusSpec
-		modelCache  *modelcachefake.Client
-		validate    func(*testing.T, client.Client, *modelcachefake.Client, ctrl.Result)
-		wantRequeue time.Duration
+		name         string
+		status       v1beta1.ModelStatusSpec
+		providerName string
+		modelCache   *modelcachefake.Client
+		validate     func(*testing.T, client.Client, *modelcachefake.Client, ctrl.Result)
+		wantRequeue  time.Duration
 	}{
 		{
-			name: "source check success sets SourceReachable",
+			name:         "source check success sets SourceReachable",
+			providerName: "test_cache",
 			modelCache: &modelcachefake.Client{
 				CheckSourceFunc: func(ctx context.Context, source modelcache.Source) (*modelcache.SourceStatus, error) {
 					return &modelcache.SourceStatus{Reachable: true}, nil
@@ -901,6 +903,7 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 				g.Expect(sourceReachable).ToNot(gomega.BeNil())
 				g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionTrue))
 				g.Expect(sourceReachable.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonSourceReachable))
+				g.Expect(updated.Status.Cache.Backend).To(gomega.Equal("test_cache"))
 				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.BeEmpty())
 				g.Expect(cache.CheckSourceCalls()).To(gomega.Equal([]modelcache.Source{{URI: "s3://bucket/cached-model"}}))
 				g.Expect(cache.StartPrewarmCalls()).To(gomega.BeEmpty())
@@ -949,6 +952,38 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 				updated := getBaseModelForTest(t, c, "default", "cached-model")
 
 				g.Expect(updated.Status.Cache).ToNot(gomega.BeNil())
+				g.Expect(updated.Status.Cache.SourceUri).To(gomega.Equal("s3://bucket/cached-model"))
+				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.BeEmpty())
+				g.Expect(updated.Status.Cache.TotalBytes).To(gomega.BeNil())
+				g.Expect(updated.Status.Cache.CachedBytes).To(gomega.BeNil())
+				g.Expect(updated.Status.Cache.TotalChunks).To(gomega.BeNil())
+				g.Expect(updated.Status.Cache.CachedChunks).To(gomega.BeNil())
+
+				sourceReachable := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionSourceReachable)
+				g.Expect(sourceReachable).ToNot(gomega.BeNil())
+				g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionUnknown))
+				g.Expect(sourceReachable.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonNotChecked))
+				cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
+				g.Expect(cached).ToNot(gomega.BeNil())
+				g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
+				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmPending))
+				g.Expect(cache.CheckSourceCalls()).To(gomega.BeEmpty())
+				g.Expect(cache.StartPrewarmCalls()).To(gomega.BeEmpty())
+				g.Expect(cache.GetPrewarmStatusCalls()).To(gomega.BeEmpty())
+				g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
+			},
+		},
+		{
+			name:         "provider change resets stale prewarm status",
+			status:       shardedCachedStatusForSource("s3://bucket/cached-model"),
+			providerName: "test_cache",
+			modelCache:   &modelcachefake.Client{},
+			wantRequeue:  5 * time.Second,
+			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
+				updated := getBaseModelForTest(t, c, "default", "cached-model")
+
+				g.Expect(updated.Status.Cache).ToNot(gomega.BeNil())
+				g.Expect(updated.Status.Cache.Backend).To(gomega.Equal("test_cache"))
 				g.Expect(updated.Status.Cache.SourceUri).To(gomega.Equal("s3://bucket/cached-model"))
 				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.BeEmpty())
 				g.Expect(updated.Status.Cache.TotalBytes).To(gomega.BeNil())
@@ -1085,10 +1120,14 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 				WithStatusSubresource(baseModel).
 				Build()
 
+			providerName := tt.providerName
+			if providerName == "" {
+				providerName = modelcache.ProviderClusterCache
+			}
 			reconciler := &BaseModelReconciler{
 				Client:     c,
 				Scheme:     c.Scheme(),
-				ModelCache: tt.modelCache,
+				ModelCache: modelcache.NewProvider(providerName, tt.modelCache),
 			}
 
 			result, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
@@ -1675,7 +1714,7 @@ func distributionPtr(distribution v1beta1.Distribution) *v1beta1.Distribution {
 func shardedStatusWithPrewarmID(prewarmID string) v1beta1.ModelStatusSpec {
 	return v1beta1.ModelStatusSpec{
 		Cache: &v1beta1.ModelCacheStatus{
-			Backend:   modelcache.BackendClusterCache,
+			Backend:   modelcache.ProviderClusterCache,
 			SourceUri: "s3://bucket/cached-model",
 			PrewarmID: prewarmID,
 		},
@@ -1698,7 +1737,7 @@ func shardedCachedStatusForSource(sourceURI string) v1beta1.ModelStatusSpec {
 	return v1beta1.ModelStatusSpec{
 		State: v1beta1.LifeCycleStateImporting,
 		Cache: &v1beta1.ModelCacheStatus{
-			Backend:      modelcache.BackendClusterCache,
+			Backend:      modelcache.ProviderClusterCache,
 			SourceUri:    sourceURI,
 			PrewarmID:    "op-old",
 			TotalBytes:   &totalBytes,
@@ -1736,7 +1775,7 @@ func getBaseModelForTest(t *testing.T, c client.Client, namespace, name string) 
 	return baseModel
 }
 
-func validateInitialShardedStatus(t *testing.T, status v1beta1.ModelStatusSpec, sourceURI string) {
+func validateProviderNotConfiguredShardedStatus(t *testing.T, status v1beta1.ModelStatusSpec, sourceURI string) {
 	t.Helper()
 	g := gomega.NewGomegaWithT(t)
 
@@ -1744,21 +1783,21 @@ func validateInitialShardedStatus(t *testing.T, status v1beta1.ModelStatusSpec, 
 	g.Expect(status.NodesReady).To(gomega.BeEmpty())
 	g.Expect(status.NodesFailed).To(gomega.BeEmpty())
 	g.Expect(status.Cache).ToNot(gomega.BeNil())
-	g.Expect(status.Cache.Backend).To(gomega.Equal(modelcache.BackendClusterCache))
+	g.Expect(status.Cache.Backend).To(gomega.BeEmpty())
 	g.Expect(status.Cache.SourceUri).To(gomega.Equal(sourceURI))
 
 	sourceReachable := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionSourceReachable)
 	g.Expect(sourceReachable).ToNot(gomega.BeNil())
 	g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionUnknown))
-	g.Expect(sourceReachable.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonNotChecked))
+	g.Expect(sourceReachable.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonProviderNotConfigured))
 
 	cached := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionCached)
 	g.Expect(cached).ToNot(gomega.BeNil())
 	g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
-	g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmPending))
+	g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonProviderNotConfigured))
 
 	ready := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionReady)
 	g.Expect(ready).ToNot(gomega.BeNil())
 	g.Expect(ready.Status).To(gomega.Equal(metav1.ConditionFalse))
-	g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonCacheNotReady))
+	g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonProviderNotConfigured))
 }

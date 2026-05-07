@@ -3,8 +3,12 @@ package modelcache
 import "context"
 
 const (
-	// BackendClusterCache is the status backend label for cluster_cache.
-	BackendClusterCache = "cluster_cache"
+	// ProviderClusterCache is the provider label for Meta's cluster_cache implementation.
+	ProviderClusterCache = "cluster_cache"
+
+	// BackendClusterCache is kept for compatibility with earlier status code.
+	// Deprecated: use ProviderClusterCache.
+	BackendClusterCache = ProviderClusterCache
 )
 
 // Client is the high-level OME control-plane contract for a model cache.
@@ -15,6 +19,32 @@ type Client interface {
 	ReadMetadataRange(ctx context.Context, req MetadataRangeRequest) ([]byte, error)
 	StartPrewarm(ctx context.Context, req PrewarmRequest) (*PrewarmOperation, error)
 	GetPrewarmStatus(ctx context.Context, operation PrewarmOperation) (*PrewarmStatus, error)
+}
+
+// ProviderConfig identifies one model cache provider instance.
+type ProviderConfig struct {
+	Provider string
+	Endpoint string
+	Options  map[string]string
+}
+
+// Provider binds a provider name to the client implementation used by OME.
+type Provider struct {
+	Name   string
+	Client Client
+}
+
+// NewProvider returns a configured model cache provider.
+func NewProvider(name string, client Client) Provider {
+	return Provider{
+		Name:   name,
+		Client: client,
+	}
+}
+
+// Configured reports whether the provider can serve controller requests.
+func (p Provider) Configured() bool {
+	return p.Name != "" && p.Client != nil
 }
 
 // Source identifies a model source that should be handled by a cache backend.

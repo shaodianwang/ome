@@ -22,20 +22,24 @@ const shardedModelCachePollInterval = 5 * time.Second
 
 type shardedStatusTransition func(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool
 
-func reconcileShardedModelCacheStatus(ctx context.Context, kubeClient client.Client, log logr.Logger, cacheClient modelcache.Client, obj client.Object, modelType string) (ctrl.Result, error) {
+func reconcileShardedModelCacheStatus(ctx context.Context, kubeClient client.Client, log logr.Logger, provider modelcache.Provider, obj client.Object, modelType string) (ctrl.Result, error) {
 	spec, status, err := modelSpecAndStatus(obj)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	source := modelCacheSource(spec)
-	if cacheClient == nil {
-		return ctrl.Result{}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, nil)
+	if !provider.Configured() {
+		transition := func(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool {
+			return applyProviderNotConfiguredStatus(generation, status)
+		}
+		return ctrl.Result{}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, transition)
 	}
-	if shardedCacheSourceChanged(status, source.URI) {
-		return ctrl.Result{RequeueAfter: shardedModelCachePollInterval}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, nil)
+	if shardedCacheIdentityChanged(status, source.URI, provider.Name) {
+		return ctrl.Result{RequeueAfter: shardedModelCachePollInterval}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, nil)
 	}
 
+	cacheClient := provider.Client
 	sourceCondition := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionSourceReachable)
 	if sourceCondition == nil || sourceCondition.Status != metav1.ConditionTrue {
 		sourceStatus, err := cacheClient.CheckSource(ctx, source)
@@ -51,12 +55,12 @@ func reconcileShardedModelCacheStatus(ctx context.Context, kubeClient client.Cli
 		transition := func(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool {
 			return applySourceStatus(generation, status, sourceStatus)
 		}
-		return result, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, transition)
+		return result, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, transition)
 	}
 
 	cachedCondition := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionCached)
 	if cachedCondition != nil && cachedCondition.Status == metav1.ConditionTrue {
-		return ctrl.Result{}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, nil)
+		return ctrl.Result{}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, nil)
 	}
 
 	prewarmID := ""
@@ -78,7 +82,7 @@ func reconcileShardedModelCacheStatus(ctx context.Context, kubeClient client.Cli
 		transition := func(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool {
 			return applyPrewarmStarted(generation, status, operation.ID)
 		}
-		return ctrl.Result{RequeueAfter: shardedModelCachePollInterval}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, transition)
+		return ctrl.Result{RequeueAfter: shardedModelCachePollInterval}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, transition)
 	}
 
 	prewarmStatus, err := cacheClient.GetPrewarmStatus(ctx, modelcache.PrewarmOperation{ID: prewarmID})
@@ -93,17 +97,17 @@ func reconcileShardedModelCacheStatus(ctx context.Context, kubeClient client.Cli
 	transition := func(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool {
 		return applyPrewarmStatus(generation, status, prewarmStatus)
 	}
-	return result, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, transition)
+	return result, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, transition)
 }
 
-func updateShardedModelStatusWithRetry(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, modelType string, transition shardedStatusTransition) error {
+func updateShardedModelStatusWithRetry(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, modelType string, backend string, transition shardedStatusTransition) error {
 	updateFunc := func(ctx context.Context, client client.Client, obj client.Object) error {
 		spec, status, err := modelSpecAndStatus(obj)
 		if err != nil {
 			return err
 		}
 
-		updated := applyInitialShardedModelStatus(obj.GetGeneration(), spec, status)
+		updated := applyInitialShardedModelStatus(obj.GetGeneration(), spec, status, backend)
 		if transition != nil {
 			updated = transition(obj.GetGeneration(), spec, status) || updated
 		}
@@ -125,7 +129,7 @@ func updateShardedModelStatusWithRetry(ctx context.Context, kubeClient client.Cl
 	return retryUpdate(ctx, kubeClient, log, obj, "sharded status", updateFunc)
 }
 
-func applyInitialShardedModelStatus(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool {
+func applyInitialShardedModelStatus(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec, backend string) bool {
 	updated := false
 
 	if len(status.NodesReady) != 0 {
@@ -146,12 +150,12 @@ func applyInitialShardedModelStatus(generation int64, spec *v1beta1.BaseModelSpe
 		status.Cache = &v1beta1.ModelCacheStatus{}
 		updated = true
 	}
-	sourceChanged := shardedCacheSourceChanged(status, sourceURI)
-	if status.Cache.Backend != modelcache.BackendClusterCache {
-		status.Cache.Backend = modelcache.BackendClusterCache
+	cacheIdentityChanged := shardedCacheIdentityChanged(status, sourceURI, backend)
+	if status.Cache.Backend != backend {
+		status.Cache.Backend = backend
 		updated = true
 	}
-	if sourceChanged {
+	if cacheIdentityChanged {
 		updated = resetShardedCacheProgress(status.Cache) || updated
 	}
 	if status.Cache.SourceUri != sourceURI {
@@ -159,25 +163,58 @@ func applyInitialShardedModelStatus(generation int64, spec *v1beta1.BaseModelSpe
 		updated = true
 	}
 
-	updated = setInitialModelCondition(status, sourceChanged, metav1.Condition{
+	updated = setInitialModelCondition(status, cacheIdentityChanged, metav1.Condition{
 		Type:               v1beta1.ModelConditionSourceReachable,
 		Status:             metav1.ConditionUnknown,
 		Reason:             v1beta1.ModelConditionReasonNotChecked,
-		Message:            "cluster_cache source reachability has not been checked yet",
+		Message:            "model cache source reachability has not been checked yet",
 		ObservedGeneration: generation,
 	}) || updated
-	updated = setInitialModelCondition(status, sourceChanged, metav1.Condition{
+	updated = setInitialModelCondition(status, cacheIdentityChanged, metav1.Condition{
 		Type:               v1beta1.ModelConditionCached,
 		Status:             metav1.ConditionFalse,
 		Reason:             v1beta1.ModelConditionReasonPrewarmPending,
-		Message:            "cluster_cache prewarm has not started yet",
+		Message:            "model cache prewarm has not started yet",
 		ObservedGeneration: generation,
 	}) || updated
-	updated = setInitialModelCondition(status, sourceChanged, metav1.Condition{
+	updated = setInitialModelCondition(status, cacheIdentityChanged, metav1.Condition{
 		Type:               v1beta1.ModelConditionReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             v1beta1.ModelConditionReasonCacheNotReady,
-		Message:            "model is not ready until cluster_cache prewarm and metadata parsing complete",
+		Message:            "model is not ready until model cache prewarm and metadata parsing complete",
+		ObservedGeneration: generation,
+	}) || updated
+
+	return updated
+}
+
+func applyProviderNotConfiguredStatus(generation int64, status *v1beta1.ModelStatusSpec) bool {
+	updated := false
+	if status.State != v1beta1.LifeCycleStateImporting {
+		status.State = v1beta1.LifeCycleStateImporting
+		updated = true
+	}
+
+	message := "model cache provider is not configured"
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionSourceReachable,
+		Status:             metav1.ConditionUnknown,
+		Reason:             v1beta1.ModelConditionReasonProviderNotConfigured,
+		Message:            message,
+		ObservedGeneration: generation,
+	}) || updated
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionCached,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonProviderNotConfigured,
+		Message:            message,
+		ObservedGeneration: generation,
+	}) || updated
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonProviderNotConfigured,
+		Message:            message,
 		ObservedGeneration: generation,
 	}) || updated
 
@@ -240,14 +277,14 @@ func applyPrewarmStarted(generation int64, status *v1beta1.ModelStatusSpec, oper
 		Type:               v1beta1.ModelConditionCached,
 		Status:             metav1.ConditionFalse,
 		Reason:             v1beta1.ModelConditionReasonPrewarmPending,
-		Message:            "cluster_cache prewarm has been submitted",
+		Message:            "model cache prewarm has been submitted",
 		ObservedGeneration: generation,
 	}) || updated
 	updated = setModelCondition(status, metav1.Condition{
 		Type:               v1beta1.ModelConditionReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             v1beta1.ModelConditionReasonCacheNotReady,
-		Message:            "model is not ready until cluster_cache prewarm and metadata parsing complete",
+		Message:            "model is not ready until model cache prewarm and metadata parsing complete",
 		ObservedGeneration: generation,
 	}) || updated
 
@@ -275,7 +312,7 @@ func applyPrewarmStatus(generation int64, status *v1beta1.ModelStatusSpec, prewa
 			Type:               v1beta1.ModelConditionCached,
 			Status:             metav1.ConditionTrue,
 			Reason:             reasonOrDefault(prewarmStatus.Reason, v1beta1.ModelConditionReasonPrewarmSucceeded),
-			Message:            messageOrDefault(prewarmStatus.Message, "cluster_cache prewarm completed"),
+			Message:            messageOrDefault(prewarmStatus.Message, "model cache prewarm completed"),
 			ObservedGeneration: generation,
 		}) || updated
 		updated = setModelCondition(status, metav1.Condition{
@@ -290,9 +327,9 @@ func applyPrewarmStatus(generation int64, status *v1beta1.ModelStatusSpec, prewa
 	case modelcache.PrewarmPhaseCanceled:
 		updated = applyTerminalPrewarmFailure(generation, status, v1beta1.ModelConditionReasonPrewarmCanceled, prewarmStatus) || updated
 	case modelcache.PrewarmPhasePending:
-		updated = applyActivePrewarmCondition(generation, status, v1beta1.ModelConditionReasonPrewarmPending, "cluster_cache prewarm is pending", prewarmStatus) || updated
+		updated = applyActivePrewarmCondition(generation, status, v1beta1.ModelConditionReasonPrewarmPending, "model cache prewarm is pending", prewarmStatus) || updated
 	default:
-		updated = applyActivePrewarmCondition(generation, status, v1beta1.ModelConditionReasonPrewarmRunning, "cluster_cache prewarm is running", prewarmStatus) || updated
+		updated = applyActivePrewarmCondition(generation, status, v1beta1.ModelConditionReasonPrewarmRunning, "model cache prewarm is running", prewarmStatus) || updated
 	}
 
 	return updated
@@ -338,7 +375,7 @@ func applyActivePrewarmCondition(generation int64, status *v1beta1.ModelStatusSp
 		Type:               v1beta1.ModelConditionReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             v1beta1.ModelConditionReasonCacheNotReady,
-		Message:            "model is not ready until cluster_cache prewarm and metadata parsing complete",
+		Message:            "model is not ready until model cache prewarm and metadata parsing complete",
 		ObservedGeneration: generation,
 	}) || updated
 
@@ -353,7 +390,7 @@ func applyTerminalPrewarmFailure(generation int64, status *v1beta1.ModelStatusSp
 	}
 
 	reason := reasonOrDefault(prewarmStatus.Reason, defaultReason)
-	message := messageOrDefault(prewarmStatus.Message, "cluster_cache prewarm did not complete")
+	message := messageOrDefault(prewarmStatus.Message, "model cache prewarm did not complete")
 	updated = setModelCondition(status, metav1.Condition{
 		Type:               v1beta1.ModelConditionCached,
 		Status:             metav1.ConditionFalse,
@@ -438,12 +475,26 @@ func shardedCacheSourceChanged(status *v1beta1.ModelStatusSpec, sourceURI string
 	if status.Cache == nil || status.Cache.SourceUri == sourceURI {
 		return false
 	}
-	return status.Cache.SourceUri != "" ||
-		status.Cache.PrewarmID != "" ||
-		status.Cache.TotalBytes != nil ||
-		status.Cache.CachedBytes != nil ||
-		status.Cache.TotalChunks != nil ||
-		status.Cache.CachedChunks != nil
+	return status.Cache.SourceUri != "" || shardedCacheProgressStarted(status.Cache)
+}
+
+func shardedCacheBackendChanged(status *v1beta1.ModelStatusSpec, backend string) bool {
+	if status.Cache == nil || status.Cache.Backend == backend {
+		return false
+	}
+	return status.Cache.Backend != "" || shardedCacheProgressStarted(status.Cache)
+}
+
+func shardedCacheIdentityChanged(status *v1beta1.ModelStatusSpec, sourceURI, backend string) bool {
+	return shardedCacheSourceChanged(status, sourceURI) || shardedCacheBackendChanged(status, backend)
+}
+
+func shardedCacheProgressStarted(cache *v1beta1.ModelCacheStatus) bool {
+	return cache.PrewarmID != "" ||
+		cache.TotalBytes != nil ||
+		cache.CachedBytes != nil ||
+		cache.TotalChunks != nil ||
+		cache.CachedChunks != nil
 }
 
 func resetShardedCacheProgress(status *v1beta1.ModelCacheStatus) bool {
