@@ -18,9 +18,9 @@ ECR_REGISTRY="${ECR_REGISTRY:-${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.
 # repos are not auto-created.
 CHART_REPO="oci://${ECR_REGISTRY}/msl_infra/ome-charts"
 
-DATE_TAG="$(date -u +%Y%m%d)"
+TIMESTAMP="$(date -u +%Y%m%d%H%M)"
 SHORT_SHA="$(echo "${BUILDKITE_COMMIT:-HEAD}" | cut -c1-8)"
-CHART_VERSION="${DATE_TAG}-${SHORT_SHA}"
+CHART_VERSION="1.0.0-${TIMESTAMP}.${SHORT_SHA}"
 
 HELM_VERSION="${HELM_VERSION:-v3.16.2}"
 if ! command -v helm >/dev/null 2>&1; then
