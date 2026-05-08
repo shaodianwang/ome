@@ -179,21 +179,26 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
                   build-context: "."
                   platforms: ["linux/amd64"]
                   push-branches: "main"
-                  tags: ["latest"]
+                  tags: ["latest", "{COMMIT[:8]}"]
                   login: true
         """
     )
 
 
-def _push_chart_step(chart: str) -> str:
+def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
     # MKS identity annotations bind the pod to the cluster's default
     # IAM role so `aws ecr get-login-password` works without static
     # creds; same path the cf-docker-image plugin uses for image push.
+    if isinstance(depends_on, list):
+        deps = "\n".join(f'              - "{d}"' for d in depends_on)
+        depends_block = f"depends_on:\n{deps}"
+    else:
+        depends_block = f'depends_on: "{depends_on}"'
     return textwrap.dedent(
         f"""\
           - label: ":helm: Package {chart}"
             key: "chart-{chart}"
-            depends_on: "test"
+            {depends_block}
             command: |
               sh .buildkite/push_chart.sh {chart}
             agents:
@@ -214,10 +219,15 @@ def _push_chart_step(chart: str) -> str:
 
 def cd_steps() -> str:
     parts: list[str] = []
+    image_keys = []
     for label, ecr_name, dockerfile in IMAGES:
         parts.append(_build_image_step(label, ecr_name, dockerfile))
+        image_keys.append(f"build-{label}")
     for chart in CHARTS:
-        parts.append(_push_chart_step(chart))
+        if chart == "ome-resources":
+            parts.append(_push_chart_step(chart, depends_on=image_keys))
+        else:
+            parts.append(_push_chart_step(chart))
     return textwrap.indent("\n".join(parts), "  ")
 
 
