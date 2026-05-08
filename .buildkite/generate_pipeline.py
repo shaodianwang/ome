@@ -165,6 +165,8 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
             depends_on: "test"
             agents:
               queue: "{BUILD_QUEUE}"
+            env:
+              BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
             plugins:
               - kubernetes:
                   podSpec:
