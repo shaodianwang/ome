@@ -179,7 +179,7 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
                   region: "{AWS_REGION}"
                   dockerfile: "{dockerfile}"
                   build-context: "."
-                  platforms: ["linux/amd64"]
+                  platforms: ["linux/amd64", "linux/arm64"]
                   push-branches: "main"
                   tags: ["latest", "{COMMIT[:8]}"]
                   login: true
