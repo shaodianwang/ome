@@ -37,7 +37,7 @@
 
 ## Summary
 
-This OEP adds an optional model-cache-backed distribution path for `BaseModel` / `ClusterBaseModel` in OME. The existing model-agent behavior is unchanged and remains the default. Operators opt in per model via `spec.distribution: Sharded`. When opted in, OME drives source validation, prewarm, status, and metadata parsing through a generic `modelcache.Client` contract. A concrete provider implements that contract. The initial provider is Meta's cluster_cache, but OME core must not assume cluster_cache is the only possible implementation.
+This OEP adds an optional model-cache-backed distribution path for `BaseModel` / `ClusterBaseModel` in OME. The existing model-agent behavior is unchanged and remains the default. Operators opt in per model via `spec.distribution: Sharded`. When opted in, OME drives source validation, metadata discovery, prewarm, status, and metadata parsing through a generic `modelcache.Client` contract. A concrete provider implements that contract. The initial provider is Meta's cluster_cache, but OME core must not assume cluster_cache is the only possible implementation.
 
 For `Sharded` models, the per-node download path is bypassed. Compatible engines consume weights through the selected cache provider's data-plane integration. For the initial cluster-cache provider, engines use the in-process cluster_cache client so high-throughput weight loading can keep its ring fan-out, RDMA, NUMA/HCA affinity, and direct buffer/tensor access. Unsupported engines are rejected until their `ServingRuntime` declares capability for the selected provider.
 
@@ -58,6 +58,8 @@ A second motivation is **HuggingFace source coverage**. The initial cluster-cach
 - Offer an **additional, opt-in** `distribution` field on `BaseModel` / `ClusterBaseModel`. `PerNode` (default) preserves current behavior; `Sharded` routes through a configured model cache provider.
 - Reduce external network bandwidth and cloud egress for opt-in models: each chunk is fetched from cloud once per cluster, not once per node.
 - Define a provider-neutral OME control-plane contract (`modelcache.Client`) so cluster_cache is the first provider, not a hard dependency baked into controllers.
+- Require a provider-neutral metadata discovery capability for cache providers that want OME to automatically parse `Sharded` models and perform runtime selection from model metadata.
+- Move source inspection out of engine-specific startup code and into the cache provider, so engines do not need direct source-listing credentials for `Sharded` models.
 - Add **HuggingFace** support to the initial cluster-cache provider alongside the existing S3 backend.
 - Preserve the existing model-agent behavior unchanged as the default for any `BaseModel` not opting in.
 
@@ -105,6 +107,7 @@ An operator wants to serve a model hosted in a HuggingFace repo. They set `stora
   - All engine images and runtimes.
 - **`Sharded` pod consumption is runtime-gated.** ISVCs referencing `Sharded` BaseModels are accepted only when their selected runtime declares support for the configured cache provider; other runtimes are rejected with a clear error.
 - **HuggingFace tokens are scoped.** Per-source override via Secret reference in `BaseModel.spec.storage.parameters` is supported; providers may also accept a default token in their deployment config.
+- **Metadata discovery is an OME control-plane requirement.** A cache backend does not need to expose the same HTTP routes as cluster_cache, but if it wants OME to automatically parse `Sharded` BaseModels, it must implement the semantic source-inspection capability in `modelcache.Client`.
 - **OME does not port or embed provider data-plane clients.** For cluster_cache, the existing Rust client owns hot-path ring lookup, fan-out, RDMA, NUMA/HCA selection, and direct buffer/tensor writes. OME uses only the control-plane `modelcache.Client` port.
 - **No OME-specific cluster_cache gateway is required for Alpha.** The initial cluster-cache provider extends its existing DaemonSet server API for OME control-plane operations instead of adding another server solely for OME.
 
@@ -120,9 +123,17 @@ An operator wants to serve a model hosted in a HuggingFace repo. They set `stora
 
 5. **Controller-side parsing diverges from per-node parsing.** Two parser paths could behave differently for the same model. Mitigation: extract the existing model-agent parser into a shared package called by both `PerNode` (per-node, on the agent) and `Sharded` (cluster-wide, on the controller); only the byte source differs.
 
-6. **Provider implementation maintenance.** cluster-cache changes for OEP-0009 (HF backend, listing contract, range reads, and async prewarm/status API) must be maintained as part of cluster_cache's own daemon API. Future OSS providers must meet the same OME contract. Mitigation: OME's provider interface is small, additive, and semantic; provider-specific transport and cache behavior stay outside OME controllers.
+6. **Provider implementation maintenance.** cluster-cache changes for OEP-0009 (HF backend, source inspection, and async prewarm/status API) must be maintained as part of cluster_cache's own daemon API. Future OSS providers must meet the same OME semantics if they want automatic `Sharded` metadata parsing. Mitigation: OME's provider interface is small, additive, and semantic; provider-specific transport and cache behavior stay outside OME controllers.
 
 7. **Two integration surfaces can be confusing.** OME and engines intentionally use different surfaces. Mitigation: keep the split explicit: OME is control plane and talks through `modelcache.Client`; engines are data plane and use provider-specific process-local integrations.
+
+8. **Engine integration still contains temporary source-inspection logic.** Risk:
+   until cluster_cache exposes source inspection, the initial engine
+   integration may keep source listing and metadata copy logic in-process.
+   Mitigation: document this as a migration target, not the desired contract;
+   OME should not depend on that engine-side implementation, and `Sharded`
+   runtimes should move to provider-produced manifests once the daemon API
+   exists.
 
 ## Design Details
 
@@ -221,7 +232,7 @@ There are two distinct consumers in this design:
 
 | Consumer | Surface | Responsibilities |
 |----------|---------|------------------|
-| OME BaseModel controller | `modelcache.Client` implementation selected by provider config | Source validation, source listing, object metadata reads, async prewarm submission, prewarm status polling, small metadata range reads for parsing, status/condition writes in OME. |
+| OME BaseModel controller | `modelcache.Client` implementation selected by provider config | Source validation, source inspection, metadata bundle retrieval for parsing, async prewarm submission, prewarm status polling, status/condition writes in OME. |
 | Engine process | Provider-specific data-plane integration declared by the selected runtime | Hot-path weight loading, cache fan-out, transport behavior, locality behavior, and direct writes into engine-owned buffers or tensors. |
 
 The split is intentional. For cluster_cache, the existing Rust client is a fat
@@ -233,12 +244,24 @@ providers may have different data-plane clients, but the same rule applies:
 engine-local transport/runtime concerns stay out of the Kubernetes control
 plane.
 
+The source-inspection boundary is also intentional. Listing the model source,
+copying small config/tokenizer/index files, reading safetensors headers, and
+building the concrete weight manifest are cache/source control-plane work, not
+engine work. Today the initial engine integration has to perform some of this
+logic in-process because the daemon API does not expose it yet. OEP-0009 moves
+that responsibility into the cache provider so both OME and engines can reuse
+one source-inspection implementation and so source credentials do not need to be
+duplicated into engine pods only for model discovery.
+
 OME only needs control-plane operations. For the initial cluster-cache provider,
 those operations should be added to the existing cluster_cache daemon server
-rather than creating a new OME-specific gateway. A separate
-coordinator/gateway can be revisited later if operation ownership, restart
-recovery, or multi-cluster API shape becomes awkward in the DaemonSet server
-model.
+rather than creating a new OME-specific gateway. Source inspection is a
+cluster-wide source operation, not a query against one daemon pod's local cache
+directory. OME should be able to call any healthy daemon through a normal
+ClusterIP service and receive the same source manifest/metadata answer. A
+separate coordinator/gateway can be revisited later if operation ownership,
+restart recovery, or multi-cluster API shape becomes awkward in the DaemonSet
+server model.
 
 ### Model cache provider contract
 
@@ -248,27 +271,59 @@ this interface; controllers do not call provider-specific APIs directly.
 ```go
 type Client interface {
     CheckSource(ctx context.Context, source Source) (*SourceStatus, error)
-    ListSource(ctx context.Context, source Source) ([]Object, error)
-    GetObject(ctx context.Context, ref ObjectRef) (*Object, error)
-    ReadMetadataRange(ctx context.Context, req MetadataRangeRequest) ([]byte, error)
+    InspectSource(ctx context.Context, source Source) (*SourceInspection, error)
     StartPrewarm(ctx context.Context, req PrewarmRequest) (*PrewarmOperation, error)
     GetPrewarmStatus(ctx context.Context, operation PrewarmOperation) (*PrewarmStatus, error)
 }
+
+type SourceInspection struct {
+    Objects  []Object
+    Metadata ModelMetadataInputs
+}
+
+type ModelMetadataInputs struct {
+    ConfigJSON          []byte
+    ModelIndexJSON      []byte
+    TokenizerConfigJSON []byte
+    SafetensorHeaders   []SafetensorHeader
+}
+
+type SafetensorHeader struct {
+    Path       string
+    Size       int64
+    Version    string
+    HeaderJSON []byte
+}
 ```
+
+`InspectSource` is the portable metadata discovery operation. It returns a
+provider-neutral source manifest plus the small metadata inputs needed by OME's
+shared model parser: model config bytes, optional model index bytes, tokenizer
+metadata when useful, safetensors header JSON for each shard, and concrete
+object references for files that should be prewarmed. The provider does not
+decide model architecture, capabilities, or runtime fit; OME still parses those
+metadata inputs using the same parser used by the per-node path.
+
+`InspectSource` is not the entire cache backend contract. It is the missing
+metadata half of the lifecycle. A provider that supports OEP-0009 Alpha still
+needs the full controller-facing set: source validation, source inspection,
+prewarm submission, and prewarm status polling.
 
 The operations are intentionally semantic:
 
 | Operation | Purpose |
 |-----------|---------|
 | `CheckSource` | Validate that the provider can reach the source and auth material. |
-| `ListSource` | Enumerate files/objects under a model source prefix. |
-| `GetObject` | Return backend-neutral object metadata such as path, size, and version. |
-| `ReadMetadataRange` | Read small byte ranges needed for metadata parsing; not used for full tensor loading. |
-| `StartPrewarm` | Start or resume an async prewarm operation. The request includes an idempotency key so retries do not create duplicate operations. |
+| `InspectSource` | Enumerate the model source, return backend-neutral object metadata, and return small metadata blobs needed for OME parsing. |
+| `StartPrewarm` | Start or resume an async prewarm operation for the concrete object references discovered by `InspectSource`. The request includes an idempotency key so retries do not create duplicate operations. |
 | `GetPrewarmStatus` | Poll operation phase, progress, and failure reason/message. |
 
 Provider requirements:
 
+- Implement `InspectSource` for automatic `Sharded` BaseModel parsing. A
+  provider may implement it with list/range calls, a manifest API, a source
+  metadata API, or another backend-native mechanism. OME does not require a
+  literal `/list` or `/range` HTTP route.
 - Implement `StartPrewarm` idempotently for a stable `IdempotencyKey`.
 - Preserve operation status across controller restarts. Provider restart
   recovery can be best-effort in Alpha, but the API must be pollable after an
@@ -276,6 +331,14 @@ Provider requirements:
 - Return provider-neutral errors/reasons suitable for
   `BaseModel.status.conditions`.
 - Keep full-weight data-plane loading outside the OME controller.
+
+For OEP-0009 Alpha, a provider that cannot implement `InspectSource` cannot
+support automatic `Sharded` BaseModel readiness in OME, because OME needs model
+metadata before runtime selection and before it can safely accept an ISVC for
+that model. Such a provider can still exist as a data-plane experiment, but it
+is not sufficient for the `Sharded` BaseModel lifecycle defined by this OEP.
+OME compatibility tests should assert the `modelcache.Client` semantics, not a
+particular provider's route names or transport shape.
 
 Provider selection is controller configuration, not a BaseModel field in Alpha.
 The first config shape can be a small manager config section or environment
@@ -302,35 +365,98 @@ Meta's cluster_cache daemon server API. Cluster_cache remains an independent
 component; OME does not import the fat engine client and does not own ring/fanout
 logic.
 
-The current cluster_cache API already exposes these read-through primitives:
+The current cluster_cache API is concrete-object oriented:
 
 | Existing API / client method | Purpose |
 |------------------------------|---------|
 | `GET /head?path=...` / `CacheClient.head_one(path)` | Returns `(size, mtime)` for one object. |
-| `POST /fetch` | Warms one or more paths and returns per-path cache/warm results. The initial OME provider wraps this blocking call in a controller-local async operation tracker. |
+| `POST /fetch` | Warms one or more concrete paths and returns per-path cache/warm results. The initial OME provider wraps this blocking call in a controller-local async operation tracker. |
 | `GET /chunk_by_key?...` / `CacheClient.fetch_byte_range(path, mtime, size, offset, length)` | Owner-side chunk reads plus a fat client method that routes chunk-aligned reads through the cache ring and assembles the requested range. |
 | `POST /prefetch_owned_chunks` | Internal owner-side warm call for specific chunks. |
 | `CacheClient.prewarm(paths)` | Blocking client-side fan-out: HEADs object paths, groups chunks by owner, and POSTs `/prefetch_owned_chunks` to warm the ring. |
 
-The Alpha OME adapter uses `GET /head` for source reachability and `POST /fetch`
-for prewarm. Because the daemon API currently exposes prewarm as a blocking
-operation, OME stores an operation ID that encodes the path list and tracks the
-in-flight request in the manager process. If the manager restarts, polling the
-same operation ID can reconstruct and resubmit the idempotent fetch. Completed
-operation statuses are retained for a bounded TTL.
+Those APIs do not currently let OME submit a model source prefix and discover
+the model files/metadata it needs. The current engine-side cluster_cache
+integration fills this gap by doing source inspection in the engine process: it
+lists source objects, copies small metadata files into a local directory, writes
+a manifest of concrete weight URIs, and then calls cluster_cache prewarm/load
+with those concrete weight paths. That proves the lifecycle shape is needed,
+but it is the wrong long-term ownership boundary. OME cannot rely on
+engine-side discovery because OME needs metadata before runtime selection, must
+remain provider-neutral, and should not embed a source-specific fat client in
+the controller. Engines also should not need source credentials only to list a
+model prefix and copy `config.json`.
 
-Future cluster-cache provider updates for broader OEP-0009 coverage:
+Future cluster-cache provider updates for OEP-0009 coverage:
 
 | Needed contract | Purpose |
 |-----------------|---------|
-| Prefix listing | Enumerates files under a model prefix. OME needs a stable provider-owned daemon API, for example `GET /list?prefix=...`, so OME does not need source-backend-specific listing logic. |
-| Controller-safe range read | Fetches small metadata byte ranges by path/offset/length through the daemon API. The provider owns owner routing and assembly; OME uses this for `config.json` and safetensors headers, not for full tensor loading. |
+| Source inspection | Accepts a model source root/prefix plus auth reference and returns a provider-neutral manifest, config/index bytes, safetensors header bytes, and concrete object references to prewarm. This is the semantic API OME requires; cluster_cache may implement it internally with listing and range reads, but those are not the OME contract. |
+| Concrete-object prewarm | Accepts the object references returned by source inspection, starts/cache-warms those objects, and returns pollable progress. |
 | HuggingFace backend | Adds `hf://org/model` support alongside S3. This likely requires a stable source-backend interface inside cluster_cache rather than S3-specific fetch logic. |
 | HF authentication | Supports a default HF token per cache deployment plus per-source overrides from `BaseModel.spec.storage.parameters` / Secret references. |
 | Daemon-native async prewarm/status API | Optional future hardening if the blocking `/fetch` wrapper is not enough. A daemon-owned `POST /prewarm` + `GET /prewarm/<id>` API would move operation state out of the OME manager while preserving the same `modelcache.Client` semantics. |
 
 Not added to cluster_cache (intentional): KMS/Vault decryption for `PerNode`
 models, engine-aware runtime selection logic, or OME-specific CRD behavior.
+
+#### Source inspection in a DaemonSet
+
+`InspectSource` can be implemented by the existing cluster_cache DaemonSet
+without querying every cache pod and without introducing an OME-only gateway.
+The key is that source inspection is a source-backend operation, not a local
+cache inventory operation.
+
+OME calls the cluster_cache service, and Kubernetes routes that request to one
+healthy daemon pod. That daemon uses the same source credentials/backends as the
+other daemon pods to inspect the upstream model source. It does not need to ask
+"which daemon currently has config.json?" because `config.json` and safetensors
+headers are read from the source backend for control-plane parsing. The
+distributed cache ring remains relevant for prewarm and engine weight reads,
+not for deciding which daemon can answer source metadata.
+
+A concrete cluster_cache implementation would look like:
+
+1. Add a source-backend abstraction inside cluster_cache, for example:
+   `list(prefix)`, `head(uri)`, and `read_range(uri, offset, length)`.
+   The initial implementation can wrap today's S3 client behavior; HF support
+   adds another backend behind the same abstraction.
+2. Add `POST /source/inspect` to the daemon server. The route accepts a model
+   source root/prefix plus optional auth reference.
+3. The selected daemon lists objects under the source prefix and classifies
+   files into small metadata files, tokenizer/config files, and weight files.
+4. It reads bounded small metadata files such as `config.json`,
+   `model.safetensors.index.json`, and tokenizer metadata. Responses should
+   enforce size limits so OME cannot accidentally request large blobs through
+   the metadata path.
+5. For each safetensors shard, it reads only the header:
+   first read bytes `[0, 8)` to get the little-endian header length, then read
+   bytes `[8, 8+N)` for the header JSON, with a maximum header-size guard.
+6. It returns a provider-neutral inspection response containing object refs
+   (`uri`, `size`, `mtime`/version where available), metadata file bytes, and
+   safetensors header JSON. It does not return tensor bodies.
+7. OME parses the returned metadata bundle using the shared parser, then calls
+   prewarm with the concrete weight object refs from the inspection response.
+
+This design keeps `InspectSource` stateless enough that any healthy daemon can
+serve it through the ClusterIP service. If cluster_cache later wants to return a
+manifest ID instead of the full object list, that ID must either be readable
+from any daemon or OME must call back to the same owner endpoint. Alpha can avoid
+that extra coordination by returning the object refs directly in the inspection
+response.
+
+Prewarm is separate. The daemon handling `POST /prewarm` or the existing
+blocking `/fetch` wrapper can use the object refs from `InspectSource`, compute
+chunk ownership with the ring, and fan out owner work through
+`/prefetch_owned_chunks`, which matches the current cluster_cache design.
+
+This same API is the migration path for engine integrations. Instead of
+performing their own source listing and metadata copy with source credentials,
+engines should consume the provider-produced inspection result: a local
+metadata directory, a manifest file, or a manifest ID/URI that can be resolved
+through the cache provider. The engine can still use the fat cluster_cache
+client for hot-path byte-range/RDMA reads; it should not need direct S3/HF
+listing credentials for `Sharded` mode.
 
 ### Cache LRU and re-fetch behavior
 
@@ -356,14 +482,15 @@ For the initial cluster-cache provider, cluster_cache pods bind AWS workload
 identity (IRSA on EKS, or static keys via Secret) for the S3 backend, and accept
 a default HF token (per-cache-pod config) for the HuggingFace backend.
 Per-source overrides come from the `BaseModel.spec.storage.parameters` Secret
-reference, passed through the prewarm/fetch request. The provider materializes
-credentials at fetch time and uses them only for that source.
+reference, passed through source-inspection and prewarm requests. The provider
+materializes credentials only as needed for that source.
 
 ### Engine weight consumption contract
 
-The configured model cache provider is responsible for source listing, object
-metadata, range reads, prewarm, cache ownership, and cache-miss refetch. It is
-not responsible for engine-specific tensor loading or runtime selection.
+The configured model cache provider is responsible for source inspection,
+metadata bundle retrieval, concrete-object prewarm, cache ownership, and
+cache-miss refetch. It is not responsible for engine-specific tensor loading or
+runtime selection.
 
 An engine is compatible with `Sharded` BaseModels when it can load model
 weights from the selected provider without requiring a full HostPath copy on
@@ -391,6 +518,16 @@ High-throughput loads need process-local access to buffers/tensors. For
 cluster_cache, they may rely on RDMA sessions pinned to the process's
 NUMA/HCA/GPU placement.
 
+The engine should not perform source inspection directly for `Sharded` models.
+OME passes the model source identity and provider discovery/configuration to the
+pod, and may also pass a provider manifest reference produced by
+`InspectSource`. The engine then uses that manifest/configuration to locate
+metadata and weight object refs through the provider. For cluster_cache this
+means the engine can continue using the process-local fat client for
+`head_one`, byte-range, and RDMA reads, but source listing and small metadata
+file reads move to the daemon/provider API. This keeps S3/HF credentials in the
+cache provider and keeps engine startup focused on loading weights.
+
 When an ISVC references a `Sharded` BaseModel, OME validates the resolved
 runtime before pod creation. Runtimes without this capability remain valid for
 `PerNode` models but are not valid for `Sharded` models.
@@ -412,24 +549,21 @@ sequenceDiagram
     participant ENG as Engine pod
 
     U->>BMC: create BaseModel (distribution Sharded)
-    BMC->>MCP: check/list source prefix
+    BMC->>MCP: check source
     Note over BMC: SourceReachable=true
-    BMC->>MCP: prewarm source objects
+    BMC->>MCP: inspect source
+    MCP-->>BMC: source manifest + metadata bundle
+    Note over BMC: parse metadata, populate spec
+    BMC->>MCP: prewarm concrete objects from manifest
     MCP->>CACHE: coordinate provider-owned cache workers
     CACHE->>SRC: fetch chunk/object ranges
     SRC-->>CACHE: chunks/objects cached provider-side
     BMC->>MCP: observe prewarm completion
-    Note over BMC: prewarm complete
-
-    BMC->>MCP: list source prefix
-    MCP-->>BMC: file list
-    BMC->>MCP: object metadata + range reads for config and safetensors headers
-    MCP-->>BMC: metadata bytes
-    Note over BMC: parse, populate spec, set Cached and Ready
+    Note over BMC: set Cached and Ready
 
     U->>ISVC: create InferenceService
     Note over ISVC: validate runtime provider capability
-    ISVC->>ENG: spawn with provider config
+    ISVC->>ENG: spawn with model source/manifest ref + provider config
     ENG->>CACHE: load weights through provider data-plane client
 ```
 
@@ -450,36 +584,56 @@ sequenceDiagram
 
 3. **BaseModel controller reconciles.** Informer fires. Sees `distribution: Sharded` and takes the new code path. Uses the configured `modelcache.Client` provider to validate auth + reachability. Sets `SourceReachable=true`.
 
-4. **Controller starts async prewarm.** `StartPrewarm` receives the model source prefix plus any source auth reference and an idempotency key. The provider returns an operation ID, which OME stores in `BaseModel.status.cache.prewarmID`.
+4. **Controller inspects the source and parses metadata.** `InspectSource`
+   receives the model source root/prefix plus any source auth reference. The
+   provider returns a source manifest and a metadata bundle:
 
-5. **Provider prewarm runs.** The provider uses implementation-owned logic to enumerate model files (`config.json`, tokenizer files, index files, `*.safetensors` shards), read object metadata, compute cache layout, and assign work to cache workers. For cluster_cache this means assigning chunks to ring owners. Cache workers fetch their assigned chunks/objects from the source backend using the auth passed for that source. **No per-node full copies anywhere** — a 200 GB model becomes chunks/objects distributed across the provider.
+   - Backend-neutral object references for model files that can be prewarmed.
+   - `config.json` bytes and optional model index/tokenizer metadata bytes.
+   - Safetensors header JSON bytes for each shard. The tensor bodies stay in
+     the cache provider and are not returned to OME.
 
-6. **Controller observes prewarm progress.** The controller polls `GetPrewarmStatus` and writes progress into `BaseModel.status.cache` and the `Cached` condition. When prewarm completes, `Cached=True`; on failure, `Cached=False` with a reason and message from the provider.
+   The provider may implement this by listing the source and performing small
+   range reads, or by another backend-native mechanism. OME only depends on the
+   semantic result. OME then parses the metadata bundle via the **shared parser
+   package** (the same parser used by the existing per-node path; only the byte
+   source differs), and populates `BaseModel.spec` enrichment fields
+   (`ModelType`, `ModelArchitecture`, `ModelParameterSize`,
+   `ModelCapabilities`, etc.).
 
-7. **Controller parses model metadata after prewarm completes.** This is the new piece, replacing the per-node parser that runs on each model-agent node in `PerNode` mode:
+5. **Controller starts async prewarm.** `StartPrewarm` receives the concrete
+   object references from `InspectSource`, any source auth reference, and an
+   idempotency key. The provider returns an operation ID, which OME stores in
+   `BaseModel.status.cache.prewarmID`.
 
-   - Use `modelcache.Client.ListSource` to enumerate files (or reuse the listing from step 5).
-   - For `config.json` (small whole file): `GetObject(path)` returns object metadata, then `ReadMetadataRange(path, 0, size)` returns the JSON bytes in memory.
-   - For each `*.safetensors` shard (header only — multi-GB tensor body stays in the provider cache):
-     - `GetObject(path)` → object metadata including total size/version.
-     - `ReadMetadataRange(path, 0, 8)` → first 8 bytes.
-     - Decode bytes 0-8 as little-endian `u64` → header size N (typically KB to MB).
-     - `ReadMetadataRange(path, 8, N)` → header JSON bytes.
-   - Parses these via a **shared parser package** (extracted from the existing `pkg/modelagent/...ModelConfigParser`, so both `PerNode` and `Sharded` modes use the same parser logic; only the byte source differs).
-   - Populates `BaseModel.spec` enrichment fields (`ModelType`, `ModelArchitecture`, `ModelParameterSize`, `ModelCapabilities`, etc.) — same fields the per-node parser populates today.
-   - Sets `Cached=true`, `Ready=true`. **No per-node ConfigMap writes. No per-node labels.**
+6. **Provider prewarm runs.** The provider uses implementation-owned logic to
+   compute cache layout and assign work to cache workers. For cluster_cache this
+   means assigning chunks to ring owners. Cache workers fetch their assigned
+   chunks/objects from the source backend using the auth passed for that source.
+   **No per-node full copies anywhere** — a 200 GB model becomes chunks/objects
+   distributed across the provider.
 
-   *(Alternative implementation: a one-shot Job runs step 7 instead of the controller doing it inline. Either works; controller-inline is simpler if the parse stays cheap.)*
+7. **Controller observes prewarm progress.** The controller polls
+   `GetPrewarmStatus` and writes progress into `BaseModel.status.cache` and the
+   `Cached` condition. When metadata has been parsed and prewarm completes,
+   OME sets `Cached=true` and `Ready=true`. On failure, `Cached=false` or
+   `Ready=false` is set with a reason and message from the provider/parser.
+
+   **No per-node ConfigMap writes. No per-node labels.**
+
+   *(Alternative implementation: a one-shot Job runs the source-inspection and
+   parsing step instead of the controller doing it inline. Either works;
+   controller-inline is simpler if the parse stays cheap.)*
 
 8. **Model agent skips the BaseModel.** Scout sees the BaseModel via informer, reads `spec.distribution`. If `Sharded`, no Gopher task is pushed — this BaseModel is not the model agent's responsibility. (For `PerNode` BaseModels, the existing model-agent flow runs unchanged.)
 
 9. **User creates an InferenceService** referencing the BaseModel.
 
-10. **ISVC controller reconciles.** Resolves the BaseModel reference, sees `distribution: Sharded`, and validates that the resolved runtime declares support for the configured cache provider. It **does NOT** call `AddNodeSelectorForModelReadyNode` and **does NOT** inject the model HostPath volume. Instead, it injects the provider discovery/configuration required by the engine's data-plane integration.
+10. **ISVC controller reconciles.** Resolves the BaseModel reference, sees `distribution: Sharded`, and validates that the resolved runtime declares support for the configured cache provider. It **does NOT** call `AddNodeSelectorForModelReadyNode` and **does NOT** inject the model HostPath volume. Instead, it injects the model source identity, any provider manifest/reference produced by source inspection, and the provider discovery/configuration required by the engine's data-plane integration.
 
 11. **K8s scheduler places the pod.** No model-keyed nodeSelector to satisfy. Pod scheduled based on GPU class, anti-affinity, accelerator class.
 
-12. **Pod starts.** The engine reads model weights through the provider-specific data-plane client/binding. Any engine-local metadata cache, manifest, RDMA session, or tensor-write path is engine-owned; OME only passes provider configuration and the model source identity.
+12. **Pod starts.** The engine reads model weights through the provider-specific data-plane client/binding. It consumes the provider manifest/configuration instead of listing the upstream source directly. Any engine-local metadata cache, RDMA session, or tensor-write path is engine-owned; OME only passes provider configuration, model source identity, and provider manifest/reference data.
 
 13. **Engine becomes ready** and serves traffic.
 
@@ -495,12 +649,16 @@ The new API shape is:
 
 | API | Purpose |
 |-----|---------|
-| `POST /prewarm` | Accepts a source prefix/object list plus optional auth reference and returns an operation ID. |
+| `POST /source/inspect` | Accepts a model source root/prefix plus optional auth reference and returns a source manifest, metadata bundle, and concrete object references. The route name is illustrative; the required contract is the semantic `InspectSource` operation. |
+| `POST /prewarm` | Accepts concrete object references, or a manifest ID from `InspectSource`, plus optional auth reference and returns an operation ID. |
 | `GET /prewarm/<id>` | Returns operation phase, progress bytes/chunks, failure reason/message, and completion time. |
 | `DELETE /prewarm/<id>` | Optional cancellation/cleanup endpoint. Useful but not required for Alpha. |
 
-The provider owns operation state because it owns chunk assignment, source
-fetching, and cache-pod restart behavior. For cluster_cache, the existing blocking
+`POST /source/inspect` is not a local-cache inventory call. It answers "what
+files and metadata exist for this model source?" from the source backend, so any
+healthy daemon should be able to serve it behind the cluster service. The
+provider owns operation state because it owns chunk assignment, source fetching,
+and cache-pod restart behavior. For cluster_cache, the existing blocking
 `CacheClient.prewarm(paths)` can remain as a convenience client for engines or
 tools, but OME should depend on the async daemon API. The operation ID must be
 pollable after controller restarts. It may encode the owning daemon endpoint, or
@@ -514,9 +672,9 @@ proves too awkward.
 |-------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
 | Cache provider pod death                                    | Provider-specific recovery runs. For cluster_cache, DNS removes it, ring rebuilds, ~1/N chunks become unowned, and the next read sees a cache miss and re-fetches from cloud. |
 | Prewarm fails                                               | `BaseModel.status.Cached=false` with reason. Operator can flip BaseModel to `PerNode` mode as a fallback, or retry.        |
-| `GetObject` / `ReadMetadataRange` fails during parse (step 7) | Controller retries with backoff. If repeatedly failing: `Ready=false` with reason; operator inspects provider health. |
+| `InspectSource` fails during parse setup                     | Controller retries with backoff. If repeatedly failing: `Ready=false` with reason; operator inspects provider health/source auth. |
 | Model cache provider unreachable from BaseModel controller  | `Sharded` reconcile fails. `PerNode` BaseModels unaffected. Operator can flip to `PerNode` mode as a fallback.             |
-| HF token expired or invalid                                 | Prewarm fails with auth error in status. Operator rotates the Secret.                                                      |
+| HF token expired or invalid                                 | Source inspection or prewarm fails with auth error in status. Operator rotates the Secret.                                 |
 
 ### Test Plan
 
@@ -532,19 +690,19 @@ proves too awkward.
 #### Unit Tests
 
 - `pkg/modelcache` — provider-neutral contract, fake/no-op provider behavior, idempotency key propagation.
-- `cluster_cache::backends::hf` — initial provider HuggingFace backend correctness: token auth, range fetch, repo listing, error handling.
+- `cluster_cache::backends::hf` — initial provider HuggingFace backend correctness: token auth, source inspection, repo listing, error handling.
 - `cluster_cache::api::prewarm` — initial provider async prewarm job lifecycle: create, poll, complete, fail, cancel/cleanup if implemented, and cache-pod restart.
-- `cluster_cache::api::list` — initial provider `GET /list?prefix=...` for both S3 and HF backends.
-- `cluster_cache::api::range` — initial provider controller-safe metadata range reads route to owners and assemble small byte ranges without requiring OME to run ring logic.
+- `cluster_cache::api::inspect` — initial provider source inspection for both S3 and HF backends, including config/index bytes, safetensors headers, and concrete object references.
 - `pkg/modelagent::parser` (refactored shared package) — config.json + safetensors header parsing; same tests as today, just relocated.
-- `pkg/controller/v1beta1/basemodel` — Sharded reconcile path: prewarm trigger, status polling, parse invocation, condition writes (`SourceReachable`, `Cached`, `Ready`).
+- `pkg/controller/v1beta1/basemodel` — Sharded reconcile path: source inspection, parse invocation, prewarm trigger, status polling, condition writes (`SourceReachable`, `Cached`, `Ready`).
 - `pkg/controller/v1beta1/inferenceservice` — Sharded BaseModel: validates runtime/provider capability, skips `AddNodeSelectorForModelReadyNode`, skips HostPath injection, and injects provider configuration.
 
 #### Integration Tests
 
 - **Backward compat e2e.** Create a `BaseModel` without `spec.distribution`. Confirm zero behavior change vs. existing OME deployments — model agent downloads, ConfigMap status writes, nodeSelector injection, pod load all work identically.
-- **Sharded e2e (controller side).** Create a `BaseModel` with `distribution: Sharded`. Observe controller prewarm against the configured model cache provider, observe condition transitions (`SourceReachable=true` → `Cached=true` → `Ready=true`), and observe `BaseModel.spec` enriched with parsed metadata.
+- **Sharded e2e (controller side).** Create a `BaseModel` with `distribution: Sharded`. Observe controller source inspection against the configured model cache provider, observe `BaseModel.spec` enriched with parsed metadata, observe prewarm, and observe condition transitions (`SourceReachable=true` -> `Cached=true` -> `Ready=true`).
 - **Sharded engine contract e2e.** Use a minimal runtime fixture that declares provider weight-loading support. Confirm the ISVC controller skips model-ready nodeSelector and HostPath injection, passes provider configuration to the pod, and the engine fixture can read expected bytes through the provider.
+- **Engine no-source-credential e2e.** Run a `Sharded` runtime without S3/HF source credentials in the engine pod. Confirm startup succeeds by consuming the provider manifest/configuration and loading weight bytes through the cache provider.
 - **HuggingFace source e2e.** Create a `BaseModel` with `storageUri: hf://org/model` and `distribution: Sharded`. Verify the initial cluster-cache HF backend handles auth and prewarm.
 - **Failure-mode e2e.** Provider reachable but prewarm fails (e.g., invalid auth) → `Cached=false` with reason; operator switches to `PerNode` and BaseModel transitions to existing flow successfully.
 - **Bandwidth observability.** Deploy `Sharded` BaseModel to N nodes; confirm cloud-side egress metrics show ~1× model size pulled (cluster-wide) instead of N×.
@@ -558,10 +716,9 @@ proves too awkward.
 - Provider-neutral `pkg/modelcache.Client` port and provider factory implemented in OME.
 - Initial cluster-cache provider wired behind the `modelcache.Client` port.
 - Initial cluster-cache provider HuggingFace backend implemented; passes integration tests against public HF repos.
+- Initial cluster-cache provider source inspection API implemented.
 - Initial cluster-cache provider async prewarm + status API implemented.
-- Initial cluster-cache provider `GET /list` endpoint implemented.
-- Initial cluster-cache provider controller-safe metadata range-read endpoint implemented.
-- BaseModel controller capable of prewarm + parse + condition writes for `Sharded` BaseModels.
+- BaseModel controller capable of source inspection + parse + prewarm + condition writes for `Sharded` BaseModels.
 - ISVCs referencing `Sharded` BaseModels are accepted only when the resolved runtime declares support for the configured provider.
 - Backward compatibility verified — `PerNode` BaseModels behave identically to today's deployments.
 
@@ -577,7 +734,7 @@ proves too awkward.
 
 - 6 months of Beta operation with no critical bugs or data-loss incidents.
 - Documented migration path for moving BaseModels between `PerNode` and `Sharded` modes.
-- Initial cluster-cache provider extensions for this OEP (HF backend, prewarm/status, list endpoint, metadata range-read endpoint) in stable release of cluster_cache.
+- Initial cluster-cache provider extensions for this OEP (HF backend, source inspection, prewarm/status) in stable release of cluster_cache.
 
 ## Implementation History
 
@@ -588,13 +745,14 @@ proves too awkward.
 - 2026-05-06: Added provider-neutral `pkg/modelcache` controller port and fake client.
 - 2026-05-06: Added Sharded BaseModel controller cache status state machine.
 - 2026-05-06: Reframed OEP around a model cache provider contract with cluster-cache as the initial provider.
+- 2026-05-07: Clarified that automatic Sharded metadata parsing requires a provider-neutral source inspection contract, not cluster-cache-specific list/range APIs.
+- 2026-05-07: Clarified that source inspection should move from engine-specific startup code into cluster_cache so OME and engines can share provider-owned metadata discovery.
 - TBD: OME model cache provider factory/configuration.
 - TBD: initial cluster-cache provider HuggingFace backend implementation.
+- TBD: initial cluster-cache provider source inspection API.
 - TBD: initial cluster-cache provider async prewarm + status API.
-- TBD: initial cluster-cache provider `GET /list` endpoint.
-- TBD: initial cluster-cache provider controller-safe metadata range-read endpoint.
 - TBD: OME status schema and condition/cache writes.
-- TBD: Shared parser source abstraction for provider range reads.
+- TBD: Shared parser source abstraction for provider metadata bundles.
 - TBD: BaseModel controller `Sharded` reconcile path.
 - TBD: ISVC controller `Sharded` runtime capability validation and injection behavior.
 
@@ -606,7 +764,7 @@ proves too awkward.
 - **HuggingFace auth surface in the initial provider.** A new HF backend module + token handling in cluster_cache. Smaller than a full multi-cloud expansion, but still new code that needs maintenance.
 - **Sharded mode depends on engine support.** OME can prewarm and parse a `Sharded` BaseModel without changing every engine, but serving traffic requires a runtime that explicitly implements provider-specific weight loading.
 - **Two provider surfaces.** OME uses a control-plane API, while engines use provider-specific data-plane loading. This is more nuanced than a single universal client, but avoids putting ring/RDMA/tensor memory logic in the OME controller.
-- **Two parser code paths.** Even with a shared parser package, `PerNode` invokes it on each agent node from disk, while `Sharded` invokes it from the controller via provider range reads. Operators have to understand both invocation contexts when debugging.
+- **Two parser invocation paths.** Even with a shared parser package, `PerNode` invokes it on each agent node from disk, while `Sharded` invokes it from the controller using a provider metadata bundle. Operators have to understand both invocation contexts when debugging.
 
 ## Alternatives
 
