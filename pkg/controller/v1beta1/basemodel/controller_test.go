@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/sgl-project/ome/pkg/modelagent"
 	"github.com/sgl-project/ome/pkg/modelcache"
 	modelcachefake "github.com/sgl-project/ome/pkg/modelcache/fake"
+	"github.com/sgl-project/ome/pkg/modelcache/providers/clustercache"
 )
 
 func TestBaseModelReconcile(t *testing.T) {
@@ -1142,6 +1145,145 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 			tt.validate(t, c, tt.modelCache, result)
 		})
 	}
+}
+
+func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	const sourceURI = "s3://bucket/cached-model"
+	headPaths := make(chan string, 1)
+	fetchPaths := make(chan []string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/head":
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			headPaths <- r.URL.Query().Get("path")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"size":100,"mtime":123}`))
+		case "/fetch":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Paths []string `json:"paths"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			fetchPaths <- req.Paths
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"results": [{
+					"path": "s3://bucket/cached-model",
+					"status": "warmed",
+					"total_size": 100,
+					"total_chunks": 10,
+					"cached_chunks": 4,
+					"warmed_chunks": 6
+				}]
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cacheClient, err := clustercache.NewClient(modelcache.ProviderConfig{
+		Endpoint: server.URL,
+		Options: map[string]string{
+			"timeout":             "5s",
+			"operation_retention": "1m",
+		},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	defer func() {
+		closeable, ok := cacheClient.(interface{ Close() error })
+		g.Expect(ok).To(gomega.BeTrue())
+		g.Expect(closeable.Close()).NotTo(gomega.HaveOccurred())
+	}()
+
+	baseModel := &v1beta1.BaseModel{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cached-model",
+			Namespace:  "default",
+			Finalizers: []string{constants.BaseModelFinalizer},
+		},
+		Spec: v1beta1.BaseModelSpec{
+			ModelFormat: v1beta1.ModelFormat{Name: "safetensors"},
+			Storage: &v1beta1.StorageSpec{
+				StorageUri: stringPtr(sourceURI),
+			},
+			Distribution: distributionPtr(v1beta1.DistributionSharded),
+		},
+	}
+	kubeClient := ctrlclientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(baseModel).
+		WithStatusSubresource(baseModel).
+		Build()
+
+	reconciler := &BaseModelReconciler{
+		Client:     kubeClient,
+		Scheme:     kubeClient.Scheme(),
+		ModelCache: modelcache.NewProvider(modelcache.ProviderClusterCache, cacheClient),
+	}
+	reconcile := func() ctrl.Result {
+		result, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: baseModel.Namespace,
+				Name:      baseModel.Name,
+			},
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		return result
+	}
+
+	result := reconcile()
+	g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
+	g.Eventually(headPaths, time.Second).Should(gomega.Receive(gomega.Equal(sourceURI)))
+	updated := getBaseModelForTest(t, kubeClient, "default", "cached-model")
+	sourceReachable := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionSourceReachable)
+	g.Expect(sourceReachable).ToNot(gomega.BeNil())
+	g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionTrue))
+
+	result = reconcile()
+	g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
+	g.Eventually(fetchPaths, time.Second).Should(gomega.Receive(gomega.Equal([]string{sourceURI})))
+	updated = getBaseModelForTest(t, kubeClient, "default", "cached-model")
+	g.Expect(updated.Status.Cache).ToNot(gomega.BeNil())
+	g.Expect(updated.Status.Cache.PrewarmID).ToNot(gomega.BeEmpty())
+	prewarmID := updated.Status.Cache.PrewarmID
+
+	g.Eventually(func() modelcache.PrewarmPhase {
+		status, err := cacheClient.GetPrewarmStatus(context.TODO(), modelcache.PrewarmOperation{ID: prewarmID})
+		if err != nil {
+			return ""
+		}
+		return status.Phase
+	}, time.Second, 10*time.Millisecond).Should(gomega.Equal(modelcache.PrewarmPhaseSucceeded))
+
+	result = reconcile()
+	g.Expect(result).To(gomega.Equal(ctrl.Result{}))
+	updated = getBaseModelForTest(t, kubeClient, "default", "cached-model")
+	cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
+	g.Expect(cached).ToNot(gomega.BeNil())
+	g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionTrue))
+	g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmSucceeded))
+	g.Expect(updated.Status.Cache.Backend).To(gomega.Equal(modelcache.ProviderClusterCache))
+	g.Expect(updated.Status.Cache.SourceUri).To(gomega.Equal(sourceURI))
+	g.Expect(*updated.Status.Cache.TotalBytes).To(gomega.Equal(int64(100)))
+	g.Expect(*updated.Status.Cache.CachedBytes).To(gomega.Equal(int64(100)))
+	g.Expect(*updated.Status.Cache.TotalChunks).To(gomega.Equal(int32(10)))
+	g.Expect(*updated.Status.Cache.CachedChunks).To(gomega.Equal(int32(10)))
 }
 
 func TestMapConfigMapToModelRequests(t *testing.T) {

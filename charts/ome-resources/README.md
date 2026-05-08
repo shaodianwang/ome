@@ -64,6 +64,9 @@ OME Resources and Controller
 | ome.kedaConfig.scalingThreshold | string | `"10"` |  |
 | ome.metricsaggregator.enableMetricAggregation | string | `"false"` |  |
 | ome.metricsaggregator.enablePrometheusScraping | string | `"false"` |  |
+| ome.modelCache.endpoint | string | `""` | HTTP endpoint for the optional model cache provider control-plane API. |
+| ome.modelCache.options | object | `{}` | Provider-specific options. For `cluster_cache`, supported keys include `timeout` and `operation_retention`. |
+| ome.modelCache.provider | string | `""` | Optional model cache provider name. Use `cluster_cache` for sharded model distribution through cluster_cache. |
 | ome.multinodeProber.cpuLimit | string | `"100m"` |  |
 | ome.multinodeProber.cpuRequest | string | `"100m"` |  |
 | ome.multinodeProber.image | string | `"multinode-prober"` |  |

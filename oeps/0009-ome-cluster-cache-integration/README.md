@@ -284,9 +284,10 @@ variables, for example:
 ```yaml
 modelCache:
   provider: cluster_cache
-  endpoint: http://cluster-cache.ome.svc.cluster.local
+  endpoint: http://cluster-cache.ome.svc.cluster.local:10090
   options:
-    namespace: ome
+    timeout: 5m
+    operation_retention: 10m
 ```
 
 The controller constructs one `modelcache.Client` from that config and injects
@@ -306,11 +307,19 @@ The current cluster_cache API already exposes these read-through primitives:
 | Existing API / client method | Purpose |
 |------------------------------|---------|
 | `GET /head?path=...` / `CacheClient.head_one(path)` | Returns `(size, mtime)` for one object. |
+| `POST /fetch` | Warms one or more paths and returns per-path cache/warm results. The initial OME provider wraps this blocking call in a controller-local async operation tracker. |
 | `GET /chunk_by_key?...` / `CacheClient.fetch_byte_range(path, mtime, size, offset, length)` | Owner-side chunk reads plus a fat client method that routes chunk-aligned reads through the cache ring and assembles the requested range. |
 | `POST /prefetch_owned_chunks` | Internal owner-side warm call for specific chunks. |
 | `CacheClient.prewarm(paths)` | Blocking client-side fan-out: HEADs object paths, groups chunks by owner, and POSTs `/prefetch_owned_chunks` to warm the ring. |
 
-Required cluster-cache provider updates for OEP-0009:
+The Alpha OME adapter uses `GET /head` for source reachability and `POST /fetch`
+for prewarm. Because the daemon API currently exposes prewarm as a blocking
+operation, OME stores an operation ID that encodes the path list and tracks the
+in-flight request in the manager process. If the manager restarts, polling the
+same operation ID can reconstruct and resubmit the idempotent fetch. Completed
+operation statuses are retained for a bounded TTL.
+
+Future cluster-cache provider updates for broader OEP-0009 coverage:
 
 | Needed contract | Purpose |
 |-----------------|---------|
@@ -318,12 +327,7 @@ Required cluster-cache provider updates for OEP-0009:
 | Controller-safe range read | Fetches small metadata byte ranges by path/offset/length through the daemon API. The provider owns owner routing and assembly; OME uses this for `config.json` and safetensors headers, not for full tensor loading. |
 | HuggingFace backend | Adds `hf://org/model` support alongside S3. This likely requires a stable source-backend interface inside cluster_cache rather than S3-specific fetch logic. |
 | HF authentication | Supports a default HF token per cache deployment plus per-source overrides from `BaseModel.spec.storage.parameters` / Secret references. |
-| Async prewarm/status API | Adds daemon-side `POST /prewarm` + `GET /prewarm/<id>` operations to the existing cluster_cache daemon server. OME stores the returned operation ID in `status.cache.prewarmID` and polls status until completion. |
-
-`POST /prewarm` may internally call the same Rust logic used by
-`CacheClient.prewarm(paths)` or a daemon-native equivalent. The important OME
-contract is that the provider owns ring/fan-out decisions and operation state;
-OME only submits work and observes progress.
+| Daemon-native async prewarm/status API | Optional future hardening if the blocking `/fetch` wrapper is not enough. A daemon-owned `POST /prewarm` + `GET /prewarm/<id>` API would move operation state out of the OME manager while preserving the same `modelcache.Client` semantics. |
 
 Not added to cluster_cache (intentional): KMS/Vault decryption for `PerNode`
 models, engine-aware runtime selection logic, or OME-specific CRD behavior.

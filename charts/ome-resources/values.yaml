@@ -12,9 +12,19 @@ ome:
   metricsaggregator:
     enableMetricAggregation: "false"
     enablePrometheusScraping: "false"
+  # modelCache configures the optional cluster-wide model cache provider used
+  # by BaseModel and ClusterBaseModel resources with spec.distribution: Sharded.
+  # Leave provider empty to keep the default PerNode/model-agent behavior.
   modelCache:
+    # Provider implementation name. The built-in provider is "cluster_cache".
     provider: ""
+    # HTTP endpoint for the provider control-plane API.
+    # Example: http://cluster-cache.ome.svc.cluster.local:10090
     endpoint: ""
+    # Provider-specific options passed to OME's model cache client.
+    # Supported cluster_cache options:
+    #   timeout: per-request timeout, e.g. 5m
+    #   operation_retention: completed prewarm status retention, e.g. 10m
     options: {}
   benchmarkJob:
     image: genai-bench
