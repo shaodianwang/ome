@@ -629,9 +629,7 @@ coverage: ## Show coverage summary and enforce threshold
 .PHONY: integration-test
 integration-test: fmt vet manifests envtest ## 🧪 Run integration tests
 	@echo "🧪 Running integration tests..."
-	LD_LIBRARY_PATH="$(shell pwd)/pkg/xet/target/release:$$LD_LIBRARY_PATH" \
-	DYLD_LIBRARY_PATH="$(shell pwd)/pkg/xet/target/release:$$DYLD_LIBRARY_PATH" \
-	go test -v ./tests/... -ginkgo.v -ginkgo.trace
+	@$(TEST_ENV) go test -v ./tests/... -ginkgo.v -ginkgo.trace
 	@echo "✅ Integration tests passed"
 
 

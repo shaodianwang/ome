@@ -1,0 +1,20 @@
+# Namespaced BaseModel backed by a pre-existing PVC in the same namespace.
+#
+# OEP-0004 PVC URI format:
+#   pvc://{pvc-name}/{sub-path}
+#
+# The PVC must already exist and be Bound. Validation, metadata extraction,
+# and InferenceService pod scheduling are all handled by the BaseModel
+# controller — the model agent ignores PVC storage entirely.
+apiVersion: ome.io/v1beta1
+kind: BaseModel
+metadata:
+  name: llama-3-1-8b-instruct-pvc
+  namespace: models
+spec:
+  modelCapabilities:
+    - TEXT_TO_TEXT
+  vendor: meta
+  displayName: meta.llama-3.1-8b-instruct (pvc)
+  storage:
+    storageUri: pvc://shared-models-pvc/meta/llama-3.1-8b-instruct

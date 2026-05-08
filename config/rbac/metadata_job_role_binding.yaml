@@ -1,0 +1,17 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ome-model-metadata
+  labels:
+    app.kubernetes.io/component: ome-model-metadata-job
+    app.kubernetes.io/managed-by: ome-controller-manager
+    app.kubernetes.io/name: ome-model-metadata
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ome-model-metadata
+subjects:
+  - kind: ServiceAccount
+    name: ome-model-metadata
+    # Namespace is filled in by the parent kustomization's `namespace:`
+    # directive (see config/default/kustomization.yaml).

@@ -18,6 +18,7 @@ const (
 	IngressConfigKeyName   = "ingress"
 	DeployConfigName       = "deploy"
 	MultiNodeProberName    = "multinodeProber"
+	OmeAgentConfigName     = "omeAgent"
 	BenchmarkJobConfigName = "benchmarkjob"
 	ModelCacheConfigName   = "modelCache"
 
@@ -90,6 +91,40 @@ type DeployConfig struct {
 	DefaultDeploymentMode string `json:"defaultDeploymentMode,omitempty"`
 }
 
+// +kubebuilder:object:generate=false
+// OmeAgentConfig configures the metadata-extraction Job spawned by the
+// BaseModel/ClusterBaseModel controller for PVC-backed models. The Job runs
+// `ome-agent model-metadata` against the PVC.
+type OmeAgentConfig struct {
+	// Image is the ome-agent container image. Required.
+	Image string `json:"image"`
+	// ServiceAccount the metadata Job pod runs as. Must have RBAC to
+	// get/list/create/update/patch ConfigMaps in the OME namespace —
+	// the agent surfaces extracted metadata via a per-model status
+	// ConfigMap, not via direct CR updates.
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+	// CPURequest/MemoryRequest/CPULimit/MemoryLimit follow the same shape
+	// as MultiNodeProberConfig; empty strings fall back to the K8s default.
+	CPURequest    string `json:"cpuRequest,omitempty"`
+	MemoryRequest string `json:"memoryRequest,omitempty"`
+	CPULimit      string `json:"cpuLimit,omitempty"`
+	MemoryLimit   string `json:"memoryLimit,omitempty"`
+	// BackoffLimit caps Job retries. Default 2 if zero.
+	BackoffLimit int32 `json:"backoffLimit,omitempty"`
+	// TTLSecondsAfterFinished controls cleanup of completed Jobs.
+	// Default 3600 if zero.
+	TTLSecondsAfterFinished int32 `json:"ttlSecondsAfterFinished,omitempty"`
+
+	// NodeSelector / Tolerations / Affinity / PriorityClassName are
+	// pass-through scheduling hints applied to the metadata Job pod.
+	// Necessary when the PVC's CSI driver only mounts on a subset of
+	// nodes, or when the cluster taints GPU nodes that hold the models.
+	NodeSelector      map[string]string `json:"nodeSelector,omitempty"`
+	Tolerations       []v1.Toleration   `json:"tolerations,omitempty"`
+	Affinity          *v1.Affinity      `json:"affinity,omitempty"`
+	PriorityClassName string            `json:"priorityClassName,omitempty"`
+}
+
 func NewInferenceServicesConfig(clientset kubernetes.Interface) (*InferenceServicesConfig, error) {
 	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
 	if err != nil {
@@ -104,6 +139,24 @@ func NewInferenceServicesConfig(clientset kubernetes.Interface) (*InferenceServi
 		}
 	}
 	return icfg, nil
+}
+
+// NewOmeAgentConfig loads the ome-agent block from the inferenceservice
+// ConfigMap. Returns a zero-value config (with no Image) if the block is
+// absent so the BaseModel reconciler can surface a clearer error to the
+// user via the model status when a PVC-backed model needs the Job.
+func NewOmeAgentConfig(clientset kubernetes.Interface) (*OmeAgentConfig, error) {
+	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	cfg := &OmeAgentConfig{}
+	if data, ok := configMap.Data[OmeAgentConfigName]; ok {
+		if err := json.Unmarshal([]byte(data), cfg); err != nil {
+			return nil, fmt.Errorf("unable to parse omeAgent config json: %w", err)
+		}
+	}
+	return cfg, nil
 }
 
 func NewIngressConfig(clientset kubernetes.Interface) (*IngressConfig, error) {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/sgl-project/ome/pkg/modelagent"
 	"github.com/sgl-project/ome/pkg/modelcache"
 )
@@ -35,21 +37,26 @@ import (
 // +kubebuilder:rbac:groups=ome.io,resources=clusterbasemodels/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;update;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs/status,verbs=get
 
 // BaseModelReconciler reconciles BaseModel objects
 type BaseModelReconciler struct {
 	client.Client
-	Log        logr.Logger
-	Scheme     *runtime.Scheme
-	ModelCache modelcache.Provider
+	Log            logr.Logger
+	Scheme         *runtime.Scheme
+	ModelCache     modelcache.Provider
+	OmeAgentConfig *controllerconfig.OmeAgentConfig
 }
 
 // ClusterBaseModelReconciler reconciles ClusterBaseModel objects
 type ClusterBaseModelReconciler struct {
 	client.Client
-	Log        logr.Logger
-	Scheme     *runtime.Scheme
-	ModelCache modelcache.Provider
+	Log            logr.Logger
+	Scheme         *runtime.Scheme
+	ModelCache     modelcache.Provider
+	OmeAgentConfig *controllerconfig.OmeAgentConfig
 }
 
 // Reconcile handles BaseModel reconciliation
@@ -69,9 +76,14 @@ func (r *BaseModelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	log.Info("Reconciling BaseModel")
 
-	// Handle deletion
+	// Handle deletion. PVC-backed models go through a dedicated cleanup
+	// (one ConfigMap, looked up by name) instead of the per-node deletion
+	// handshake handleModelDeletion expects.
 	if !baseModel.DeletionTimestamp.IsZero() {
 		log.Info("Handling BaseModel deletion")
+		if isPVCStorage(&baseModel.Spec) {
+			return handlePVCModelDeletion(ctx, r.Client, log, baseModel, false, constants.BaseModelFinalizer)
+		}
 		return r.handleDeletion(ctx, baseModel)
 	}
 
@@ -92,6 +104,15 @@ func (r *BaseModelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{RequeueAfter: time.Minute}, err
 		}
 		return result, nil
+	}
+
+	if isPVCStorage(&baseModel.Spec) {
+		// PVC-backed models do NOT participate in the per-node
+		// processModelStatus flow. reconcilePVCStorage handles validation,
+		// Job ensure, and applies status from the per-PVC ConfigMap by
+		// direct Get — no wide List, no synthetic "node" entries in
+		// Status.NodesReady.
+		return reconcilePVCStorage(ctx, r.Client, r.Scheme, log, baseModel, &baseModel.Spec, false, r.metadataJobConfig())
 	}
 
 	// Update status based on ConfigMaps
@@ -125,9 +146,13 @@ func (r *ClusterBaseModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	log.Info("Reconciling ClusterBaseModel")
 
-	// Handle deletion
+	// Handle deletion. PVC-backed models go through the dedicated PVC
+	// cleanup path; per-node-style models go through the existing handshake.
 	if !clusterBaseModel.DeletionTimestamp.IsZero() {
 		log.Info("Handling ClusterBaseModel deletion")
+		if isPVCStorage(&clusterBaseModel.Spec) {
+			return handlePVCModelDeletion(ctx, r.Client, log, clusterBaseModel, true, constants.ClusterBaseModelFinalizer)
+		}
 		return r.handleDeletion(ctx, clusterBaseModel)
 	}
 
@@ -148,6 +173,11 @@ func (r *ClusterBaseModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{RequeueAfter: time.Minute}, err
 		}
 		return result, nil
+	}
+
+	if isPVCStorage(&clusterBaseModel.Spec) {
+		// Direct read of the per-PVC ConfigMap — see BaseModel branch.
+		return reconcilePVCStorage(ctx, r.Client, r.Scheme, log, clusterBaseModel, &clusterBaseModel.Spec, true, r.metadataJobConfig())
 	}
 
 	// Update status based on ConfigMaps
@@ -219,22 +249,25 @@ func handleModelDeletion(ctx context.Context, kubeClient client.Client, obj clie
 		var modelsNotDeleted []string
 		nodesWithModel := 0
 
-		for _, configMap := range configMaps.Items {
+		for i := range configMaps.Items {
+			configMap := &configMaps.Items[i]
 			// Check if the model exists in this ConfigMap
-			if data, exists := configMap.Data[modelKey]; exists {
-				nodesWithModel++
+			data, exists := configMap.Data[modelKey]
+			if !exists {
+				continue
+			}
+			nodesWithModel++
 
-				// Check if it's already marked for deletion
-				var modelEntry modelagent.ModelEntry
-				if err := json.Unmarshal([]byte(data), &modelEntry); err == nil {
-					// If model entry is present but not marked as deleted, add it to the list
-					if modelEntry.Status != modelagent.ModelStatusDeleted {
-						modelsNotDeleted = append(modelsNotDeleted, configMap.Name)
-					}
-				} else {
-					// Can't parse the entry, consider it not deleted for safety
+			// Check if it's already marked for deletion
+			var modelEntry modelagent.ModelEntry
+			if err := json.Unmarshal([]byte(data), &modelEntry); err == nil {
+				// If model entry is present but not marked as deleted, add it to the list
+				if modelEntry.Status != modelagent.ModelStatusDeleted {
 					modelsNotDeleted = append(modelsNotDeleted, configMap.Name)
 				}
+			} else {
+				// Can't parse the entry, consider it not deleted for safety
+				modelsNotDeleted = append(modelsNotDeleted, configMap.Name)
 			}
 		}
 
@@ -328,11 +361,13 @@ func processModelStatus(ctx context.Context, kubeClient client.Client, log logr.
 	var nodesFailed []string
 	var specUpdateErrors []string
 
-	// Process each ConfigMap to find this model's status
+	// Process each ConfigMap to find this model's status. PVC-backed
+	// models do NOT use this path — they read their per-PVC ConfigMap
+	// directly via reconcilePVCStorage. Per-node ConfigMaps require a
+	// live Node here.
 	for _, configMap := range configMaps.Items {
 		processedNodes++
 
-		// Verify the node still exists
 		node := &corev1.Node{}
 		if err := kubeClient.Get(ctx, types.NamespacedName{Name: configMap.Name}, node); err != nil {
 			if errors.IsNotFound(err) {
@@ -430,16 +465,54 @@ func updateModelSpecWithConfig(ctx context.Context, kubeClient client.Client, lo
 	return nil
 }
 
+// metadataJobConfig converts the controllerconfig OmeAgentConfig to the
+// internal MetadataJobConfig the Job builder consumes. Returns a zero-value
+// config (with no Image) if no config is supplied; reconcilePVCStorage
+// surfaces a clear error to the user via the model status in that case.
+func (r *BaseModelReconciler) metadataJobConfig() MetadataJobConfig {
+	return omeAgentConfigToMetadataJobConfig(r.OmeAgentConfig)
+}
+
+func (r *ClusterBaseModelReconciler) metadataJobConfig() MetadataJobConfig {
+	return omeAgentConfigToMetadataJobConfig(r.OmeAgentConfig)
+}
+
+func omeAgentConfigToMetadataJobConfig(c *controllerconfig.OmeAgentConfig) MetadataJobConfig {
+	if c == nil {
+		return MetadataJobConfig{}
+	}
+	return MetadataJobConfig{
+		Image:                   c.Image,
+		ServiceAccount:          c.ServiceAccount,
+		CPURequest:              c.CPURequest,
+		MemoryRequest:           c.MemoryRequest,
+		CPULimit:                c.CPULimit,
+		MemoryLimit:             c.MemoryLimit,
+		BackoffLimit:            c.BackoffLimit,
+		TTLSecondsAfterFinished: c.TTLSecondsAfterFinished,
+		NodeSelector:            c.NodeSelector,
+		Tolerations:             c.Tolerations,
+		Affinity:                c.Affinity,
+		PriorityClassName:       c.PriorityClassName,
+	}
+}
+
 // SetupWithManager sets up the BaseModel controller with the Manager
 func (r *BaseModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.BaseModel{}).
+		Owns(&batchv1.Job{}).
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				return r.mapConfigMapToBaseModels(obj)
 			}),
-			builder.WithPredicates(createModelStatusConfigMapPredicate()),
+			// Two predicates OR'd: per-node basemodel-status ConfigMaps
+			// (agent flow) AND per-PVC pvc-status ConfigMaps (extraction
+			// Job's output). Both shapes carry one or more Data entries
+			// keyed by GetModelConfigMapKey, so the same mapper works for
+			// both.
+			builder.WithPredicates(predicate.Or(createModelStatusConfigMapPredicate(), createPVCStatusConfigMapPredicate())),
 		).
 		Watches(
 			&corev1.Node{},
@@ -447,6 +520,13 @@ func (r *BaseModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return handleNodeDeletion(ctx, r.Client, r.Log, obj)
 			}),
 			builder.WithPredicates(createNodeDeletionPredicate()),
+		).
+		Watches(
+			&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				return mapPVCToBaseModels(ctx, r.Client, r.Log, obj)
+			}),
+			builder.WithPredicates(createPVCPhasePredicate()),
 		).
 		Complete(r)
 }
@@ -455,12 +535,13 @@ func (r *BaseModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *ClusterBaseModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.ClusterBaseModel{}).
+		Owns(&batchv1.Job{}).
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				return r.mapConfigMapToClusterBaseModels(obj)
 			}),
-			builder.WithPredicates(createModelStatusConfigMapPredicate()),
+			builder.WithPredicates(predicate.Or(createModelStatusConfigMapPredicate(), createPVCStatusConfigMapPredicate())),
 		).
 		Watches(
 			&corev1.Node{},
@@ -469,7 +550,31 @@ func (r *ClusterBaseModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 			builder.WithPredicates(createNodeDeletionPredicate()),
 		).
+		Watches(
+			&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				return mapPVCToClusterBaseModels(ctx, r.Client, r.Log, obj)
+			}),
+			builder.WithPredicates(createPVCPhasePredicate()),
+		).
 		Complete(r)
+}
+
+// createPVCStatusConfigMapPredicate fires on ConfigMaps in the OME
+// namespace that carry the PVC-status label. Lets the controller observe
+// the agent's writes immediately, without the 30s timer backstop.
+func createPVCStatusConfigMapPredicate() predicate.Predicate {
+	isPVC := func(obj client.Object) bool {
+		if obj.GetNamespace() != constants.OMENamespace {
+			return false
+		}
+		return obj.GetLabels()[constants.PVCStorageConfigMapLabel] == "true"
+	}
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool { return isPVC(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool { return isPVC(e.ObjectNew) },
+		DeleteFunc: func(e event.DeleteEvent) bool { return isPVC(e.Object) },
+	}
 }
 
 // createNodeDeletionPredicate creates a predicate that only triggers on Node deletions

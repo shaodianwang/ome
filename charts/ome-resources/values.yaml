@@ -97,6 +97,21 @@ ome:
       memoryLimit: 320Gi
       cpuRequest: 15
       cpuLimit: 15
+    metadataJob:
+      serviceAccount: ome-model-metadata
+      memoryRequest: 256Mi
+      memoryLimit: 512Mi
+      cpuRequest: 100m
+      cpuLimit: 500m
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 3600
+      # Pass-through scheduling hints applied to the metadata Job pod.
+      # Use these when the PVC's CSI driver only mounts on a subset of
+      # nodes or when models live on tainted nodes (e.g., GPU nodes).
+      nodeSelector: {}
+      tolerations: []
+      affinity: {}
+      priorityClassName: ""
   kedaConfig:
     enableKeda: true
     promServerAddress: "http://prometheus-operated.monitoring.svc.cluster.local:9090"

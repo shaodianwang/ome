@@ -21,6 +21,49 @@ import (
 // VALIDATOR INTERFACE TESTS
 // =============================================================================
 
+func TestValidateClusterBaseModelPVCNamespace(t *testing.T) {
+	pvc := func(uri string) *v1beta1.BaseModelSpec {
+		return &v1beta1.BaseModelSpec{Storage: &v1beta1.StorageSpec{StorageUri: stringPtr(uri)}}
+	}
+	clusterMeta := &metav1.ObjectMeta{Name: "shared-llama"}
+	namespacedMeta := &metav1.ObjectMeta{Name: "llama", Namespace: "models"}
+	isvc := func(ns string) *v1beta1.InferenceService {
+		return &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: ns},
+			Spec:       v1beta1.InferenceServiceSpec{Model: &v1beta1.ModelRef{Name: "shared-llama"}},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		spec    *v1beta1.BaseModelSpec
+		meta    *metav1.ObjectMeta
+		isvc    *v1beta1.InferenceService
+		wantErr bool
+	}{
+		{name: "namespaced BaseModel: skip", spec: pvc("pvc://my-pvc/p"), meta: namespacedMeta, isvc: isvc("models")},
+		{name: "ClusterBaseModel non-PVC: skip", spec: pvc("oci://n/ns/b/bucket/o/path"), meta: clusterMeta, isvc: isvc("team-foo")},
+		{name: "ClusterBaseModel PVC same ns: ok", spec: pvc("pvc://team-foo:my-pvc/p"), meta: clusterMeta, isvc: isvc("team-foo")},
+		{name: "ClusterBaseModel PVC missing ns prefix: defer to BaseModel webhook", spec: pvc("pvc://my-pvc/p"), meta: clusterMeta, isvc: isvc("team-foo")},
+		{name: "ClusterBaseModel PVC cross-ns: reject", spec: pvc("pvc://shared:my-pvc/p"), meta: clusterMeta, isvc: isvc("team-foo"), wantErr: true},
+		{name: "spec nil: skip", spec: nil, meta: clusterMeta, isvc: isvc("team-foo")},
+		{name: "spec storage nil: skip", spec: &v1beta1.BaseModelSpec{}, meta: clusterMeta, isvc: isvc("team-foo")},
+		{name: "spec storage uri nil: skip", spec: &v1beta1.BaseModelSpec{Storage: &v1beta1.StorageSpec{}}, meta: clusterMeta, isvc: isvc("team-foo")},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateClusterBaseModelPVCNamespace(tc.spec, tc.meta, tc.isvc)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestInferenceServiceValidator_ValidateCreate(t *testing.T) {
 	tests := []struct {
 		name    string

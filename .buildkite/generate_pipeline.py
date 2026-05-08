@@ -114,6 +114,23 @@ def ci_steps() -> str:
                       - name: container-0
                         image: "{CI_IMAGE}"
 
+          - label: ":test_tube: Integration Tests"
+            key: "integration-test"
+            # No depends_on: integration tests share no state with unit
+            # tests (each step bootstraps its own envtest + xet under a
+            # fresh container) so they run in parallel with everything
+            # else in the CI fan-out.
+            command: |
+              sh .buildkite/run_integration_tests.sh
+            agents:
+              queue: "{DEFAULT_QUEUE}"
+            plugins:
+              - kubernetes:
+                  podSpec:
+                    containers:
+                      - name: container-0
+                        image: "{CI_IMAGE}"
+
           - label: ":helm: Helm Lint"
             key: "helm-lint"
             command: |

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -18,6 +19,7 @@ import (
 	"github.com/sgl-project/ome/pkg/constants"
 	isvcutils "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/sgl-project/ome/pkg/runtimeselector"
+	"github.com/sgl-project/ome/pkg/utils/storage"
 )
 
 // regular expressions for validation of isvc name
@@ -350,14 +352,50 @@ func validateEngineDecoderConfiguration(isvc *v1beta1.InferenceService) error {
 func (v *InferenceServiceValidator) validateModelExists(ctx context.Context, isvc *v1beta1.InferenceService) error {
 	// Check new architecture model reference (isvc.Spec.Model)
 	if isvc.Spec.Model != nil && isvc.Spec.Model.Name != "" {
-		_, _, err := isvcutils.GetBaseModel(v.Client, isvc.Spec.Model.Name, isvc.Namespace)
+		spec, meta, err := isvcutils.GetBaseModel(v.Client, isvc.Spec.Model.Name, isvc.Namespace)
 		if err != nil {
 			return fmt.Errorf("referenced model %q not found in namespace %q: ensure a BaseModel exists in this namespace or a ClusterBaseModel exists cluster-wide with this name",
 				isvc.Spec.Model.Name, isvc.Namespace)
 		}
+		if err := validateClusterBaseModelPVCNamespace(spec, meta, isvc); err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+// validateClusterBaseModelPVCNamespace rejects InferenceServices that
+// reference a ClusterBaseModel whose PVC URI points to a namespace other
+// than the InferenceService's own namespace. Kubernetes does not allow a
+// pod to mount a PVC from a different namespace, so without this check the
+// generated ISVC pods would fail at scheduling with a confusing
+// "persistentvolumeclaim ... not found" error and no upstream signal.
+//
+// Skipped for namespaced BaseModel (already same-namespace by construction)
+// and for non-PVC URIs.
+func validateClusterBaseModelPVCNamespace(spec *v1beta1.BaseModelSpec, meta *metav1.ObjectMeta, isvc *v1beta1.InferenceService) error {
+	if meta == nil || meta.Namespace != "" {
+		// namespaced BaseModel — same-namespace by construction
+		return nil
+	}
+	if spec == nil || spec.Storage == nil || spec.Storage.StorageUri == nil {
+		return nil
+	}
+	uri := *spec.Storage.StorageUri
+	storageType, err := storage.GetStorageType(uri)
+	if err != nil || storageType != storage.StorageTypePVC {
+		return nil
+	}
+	components, err := storage.ParsePVCStorageURI(uri)
+	if err != nil || components.Namespace == "" || components.Namespace == isvc.Namespace {
+		return nil
+	}
+	return fmt.Errorf(
+		"ClusterBaseModel %q references PVC in namespace %q, but InferenceService is in namespace %q; "+
+			"Kubernetes does not allow pods to mount PVCs from another namespace. "+
+			"Either move the InferenceService to namespace %q or replicate the PVC into namespace %q.",
+		isvc.Spec.Model.Name, components.Namespace, isvc.Namespace, components.Namespace, isvc.Namespace)
 }
 
 // validateRuntimeAndModelResolution validates runtime and model resolution for new architecture

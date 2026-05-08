@@ -508,6 +508,19 @@ var (
 	ModelStatusConfigMapLabel        = "models.ome/basemodel-status"
 	ReserveModelArtifact             = "models.ome/reserve-model-artifact"
 
+	// PVCStorageConfigMapLabel marks a model status ConfigMap as belonging
+	// to a PVC-backed BaseModel (rather than to a node). The BaseModel
+	// controller skips its per-node existence check on these.
+	PVCStorageConfigMapLabel = "models.ome/pvc-status"
+	// PVCMetadataModelNameLabel records the BaseModel/ClusterBaseModel name
+	// the PVC ConfigMap belongs to (for human filtering).
+	PVCMetadataModelNameLabel = "models.ome/model-name"
+	// PVCMetadataScopeLabel is "namespaced" or "cluster".
+	PVCMetadataScopeLabel = "models.ome/model-scope"
+	// PVCMetadataLastErrorAnnotation captures the last extraction error
+	// message on the PVC ConfigMap, for operator debugging.
+	PVCMetadataLastErrorAnnotation = "models.ome/pvc-metadata-last-error"
+
 	ModelLabelDomain          = "models.ome.io"
 	ClusterBaseModelLabelType = "clusterbasemodel"
 	BaseModelLabelType        = "basemodel"
@@ -907,6 +920,32 @@ func GetModelConfigMapKey(namespace, modelName string, isClusterBaseModel bool) 
 	truncatedModelName := truncateModelName(modelName, modelNameMaxLength)
 
 	return fmt.Sprintf("%s.%s.%s", truncatedNamespace, BaseModelLabelType, truncatedModelName)
+}
+
+// pvcMetadataConfigMapPrefix and PVCMetadataNameHashLen together define the
+// shape of the per-PVC-model status ConfigMap name, shared between the
+// BaseModel controller (reads) and the metadata-extraction agent (writes).
+const (
+	pvcMetadataConfigMapPrefix = "pvc-metadata-"
+	PVCMetadataNameHashLen     = 8
+)
+
+// GetPVCMetadataConfigMapName returns the deterministic, ≤63-char name of
+// the per-PVC-model status ConfigMap. Unlike per-node ConfigMaps (which
+// are named after the node and host one entry per model), the PVC variant
+// is one ConfigMap per PVC-backed model — there is no node concept for
+// PVC storage.
+//
+// Both the controller and the agent compute this name independently so
+// the agent can write and the controller can read by exact name (no List
+// scan needed).
+func GetPVCMetadataConfigMapName(modelName, modelNamespace string, isClusterScoped bool) string {
+	keySource := modelName
+	if !isClusterScoped {
+		keySource = modelNamespace + "/" + modelName
+	}
+	sum := sha256.Sum256([]byte(keySource))
+	return pvcMetadataConfigMapPrefix + hex.EncodeToString(sum[:])[:PVCMetadataNameHashLen]
 }
 
 // TruncateNameWithMaxLength return a valid DNS name

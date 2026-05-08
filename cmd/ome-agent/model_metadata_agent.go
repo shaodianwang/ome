@@ -6,7 +6,6 @@ import (
 	"go.uber.org/fx"
 
 	modelmetadata "github.com/sgl-project/ome/internal/ome-agent/model-metadata"
-	aferoModule "github.com/sgl-project/ome/pkg/afero"
 	"github.com/sgl-project/ome/pkg/logging"
 )
 
@@ -27,7 +26,8 @@ func (m *ModelMetadataAgent) ShortDescription() string {
 
 // LongDescription returns a detailed description of the agent
 func (m *ModelMetadataAgent) LongDescription() string {
-	return "Model metadata agent mounts PVCs and extracts model metadata to update BaseModel/ClusterBaseModel CRs"
+	return "Model metadata agent parses a PVC-mounted model directory and writes a per-model status ConfigMap " +
+		"that the BaseModel/ClusterBaseModel controller consumes to update the CR spec and lifecycle state."
 }
 
 // ConfigureCommand configures the agent command
@@ -56,7 +56,6 @@ func (m *ModelMetadataAgent) ConfigureCommand(cmd *cobra.Command) {
 // FxModules returns the fx modules needed by this agent
 func (m *ModelMetadataAgent) FxModules() []fx.Option {
 	return []fx.Option{
-		aferoModule.Module,
 		logging.Module,
 		fx.Provide(NewK8sClient),
 		modelmetadata.Module,

@@ -49,6 +49,7 @@ import (
 	"github.com/sgl-project/ome/pkg/runtimeselector"
 	"github.com/sgl-project/ome/pkg/utils"
 	"github.com/sgl-project/ome/pkg/version"
+	basemodelwebhook "github.com/sgl-project/ome/pkg/webhook/admission/basemodel"
 	"github.com/sgl-project/ome/pkg/webhook/admission/benchmark"
 	"github.com/sgl-project/ome/pkg/webhook/admission/isvc"
 	"github.com/sgl-project/ome/pkg/webhook/admission/pod"
@@ -226,6 +227,11 @@ func main() {
 	} else {
 		setupLog.Info("Model cache provider is not configured")
 	}
+	omeAgentConfig, err := controllerconfig.NewOmeAgentConfig(clientSet)
+	if err != nil {
+		setupLog.Error(err, "Failed to initialize ome-agent configuration")
+		os.Exit(1)
+	}
 
 	// Register optional schemes based on CRD availability
 	setupLog.Info("Registering optional CRD schemes")
@@ -277,10 +283,11 @@ func main() {
 	// Setup BaseModel and ClusterBaseModel controllers with the manager
 	setupLog.Info("Setting up BaseModel controller")
 	if err = (&v1beta1basemodelcontroller.BaseModelReconciler{
-		Client:     mgr.GetClient(),
-		Log:        ctrl.Log.WithName("BaseModel"),
-		Scheme:     mgr.GetScheme(),
-		ModelCache: modelCacheProvider,
+		Client:         mgr.GetClient(),
+		Log:            ctrl.Log.WithName("BaseModel"),
+		Scheme:         mgr.GetScheme(),
+		ModelCache:     modelCacheProvider,
+		OmeAgentConfig: omeAgentConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create BaseModel controller")
 		os.Exit(1)
@@ -288,10 +295,11 @@ func main() {
 
 	setupLog.Info("Setting up ClusterBaseModel controller")
 	if err = (&v1beta1basemodelcontroller.ClusterBaseModelReconciler{
-		Client:     mgr.GetClient(),
-		Log:        ctrl.Log.WithName("ClusterBaseModel"),
-		Scheme:     mgr.GetScheme(),
-		ModelCache: modelCacheProvider,
+		Client:         mgr.GetClient(),
+		Log:            ctrl.Log.WithName("ClusterBaseModel"),
+		Scheme:         mgr.GetScheme(),
+		ModelCache:     modelCacheProvider,
+		OmeAgentConfig: omeAgentConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create ClusterBaseModel controller")
 		os.Exit(1)
@@ -347,6 +355,16 @@ func main() {
 		setupLog.Info("Registering benchmark job validator webhook to the webhook server")
 		hookServer.Register("/validate-ome-io-v1beta1-benchmarkjob", &webhook.Admission{
 			Handler: &benchmark.BenchmarkJobValidator{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())},
+		})
+
+		setupLog.Info("Registering BaseModel validator webhook to the webhook server")
+		hookServer.Register("/validate-ome-io-v1beta1-basemodel", &webhook.Admission{
+			Handler: &basemodelwebhook.BaseModelValidator{Decoder: admission.NewDecoder(mgr.GetScheme())},
+		})
+
+		setupLog.Info("Registering ClusterBaseModel validator webhook to the webhook server")
+		hookServer.Register("/validate-ome-io-v1beta1-clusterbasemodel", &webhook.Admission{
+			Handler: &basemodelwebhook.ClusterBaseModelValidator{Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
 		if err = ctrl.NewWebhookManagedBy(mgr).

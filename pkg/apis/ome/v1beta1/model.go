@@ -445,6 +445,32 @@ const (
 	ModelConditionReasonMetadataPending = "MetadataPending"
 	// ModelConditionReasonProviderNotConfigured means no model cache provider is configured for the controller.
 	ModelConditionReasonProviderNotConfigured = "ProviderNotConfigured"
+
+	// ModelConditionReasonPVCInvalid means the PVC storage URI is malformed
+	// or violates the BaseModel/ClusterBaseModel namespace rules.
+	ModelConditionReasonPVCInvalid = "PVCInvalid"
+	// ModelConditionReasonPVCNotFound means the referenced PVC does not exist.
+	ModelConditionReasonPVCNotFound = "PVCNotFound"
+	// ModelConditionReasonPVCNotBound means the referenced PVC exists but is not Bound.
+	ModelConditionReasonPVCNotBound = "PVCNotBound"
+	// ModelConditionReasonPVCValidated means the referenced PVC exists and is Bound.
+	ModelConditionReasonPVCValidated = "PVCValidated"
+	// ModelConditionReasonPVCMetadataPending means the PVC is valid but model
+	// metadata has not yet been extracted.
+	ModelConditionReasonPVCMetadataPending = "PVCMetadataPending"
+	// ModelConditionReasonPVCMetadataExtracting means the metadata-extraction
+	// Job is currently running against the PVC.
+	ModelConditionReasonPVCMetadataExtracting = "PVCMetadataExtracting"
+	// ModelConditionReasonPVCMetadataExtractionFailed means the metadata
+	// extraction Job failed; reconcile will surface the Job's failure message.
+	ModelConditionReasonPVCMetadataExtractionFailed = "PVCMetadataExtractionFailed"
+	// ModelConditionReasonPVCMetadataReady means the metadata-extraction Job
+	// completed successfully and the model is ready to serve.
+	ModelConditionReasonPVCMetadataReady = "PVCMetadataReady"
+	// ModelConditionReasonPVCConfigMissing means the controller has no
+	// ome-agent image configured and therefore cannot spawn the metadata
+	// extraction Job.
+	ModelConditionReasonPVCConfigMissing = "PVCConfigMissing"
 )
 
 // ModelCacheStatus reports cluster-wide cache progress for models that use a

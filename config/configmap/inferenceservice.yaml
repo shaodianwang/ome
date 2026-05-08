@@ -61,6 +61,22 @@ data:
       "unavailableThresholdSeconds": 1800
     }
 
+  omeAgent: |-
+    {
+      "image": "ghcr.io/moirai-internal/ome-agent:v0.1.5",
+      "serviceAccount": "ome-model-metadata",
+      "cpuRequest": "100m",
+      "memoryRequest": "256Mi",
+      "cpuLimit": "500m",
+      "memoryLimit": "512Mi",
+      "backoffLimit": 2,
+      "ttlSecondsAfterFinished": 3600,
+      "nodeSelector": {},
+      "tolerations": [],
+      "affinity": {},
+      "priorityClassName": ""
+    }
+
   kedaConfig: |-
     {
       "enableKeda" : true,

@@ -115,6 +115,80 @@ func TestNewInferenceServicesConfig(t *testing.T) {
 	}
 }
 
+func TestNewOmeAgentConfig(t *testing.T) {
+	tests := []struct {
+		name          string
+		configMapData map[string]string
+		expectedError bool
+		validate      func(*testing.T, *OmeAgentConfig)
+	}{
+		{
+			name: "valid config",
+			configMapData: map[string]string{
+				OmeAgentConfigName: `{
+					"image": "ghcr.io/example/ome-agent:v1.0.0",
+					"serviceAccount": "ome-model-metadata",
+					"cpuRequest": "100m",
+					"memoryRequest": "256Mi",
+					"cpuLimit": "500m",
+					"memoryLimit": "512Mi",
+					"backoffLimit": 3,
+					"ttlSecondsAfterFinished": 600
+				}`,
+			},
+			validate: func(t *testing.T, cfg *OmeAgentConfig) {
+				assert.Equal(t, "ghcr.io/example/ome-agent:v1.0.0", cfg.Image)
+				assert.Equal(t, "ome-model-metadata", cfg.ServiceAccount)
+				assert.Equal(t, "100m", cfg.CPURequest)
+				assert.Equal(t, "256Mi", cfg.MemoryRequest)
+				assert.Equal(t, int32(3), cfg.BackoffLimit)
+				assert.Equal(t, int32(600), cfg.TTLSecondsAfterFinished)
+			},
+		},
+		{
+			name:          "missing block returns zero-value config",
+			configMapData: map[string]string{},
+			validate: func(t *testing.T, cfg *OmeAgentConfig) {
+				assert.Empty(t, cfg.Image)
+				assert.Empty(t, cfg.ServiceAccount)
+			},
+		},
+		{
+			name: "malformed json fails",
+			configMapData: map[string]string{
+				OmeAgentConfigName: `{not-json`,
+			},
+			expectedError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientset := fake.NewSimpleClientset()
+			configMap := &v1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      constants.InferenceServiceConfigMapName,
+					Namespace: constants.OMENamespace,
+				},
+				Data: tt.configMapData,
+			}
+			_, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
+			require.NoError(t, err)
+
+			cfg, err := NewOmeAgentConfig(clientset)
+			if tt.expectedError {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, cfg)
+			if tt.validate != nil {
+				tt.validate(t, cfg)
+			}
+		})
+	}
+}
+
 func TestNewIngressConfig(t *testing.T) {
 	tests := []struct {
 		name           string
