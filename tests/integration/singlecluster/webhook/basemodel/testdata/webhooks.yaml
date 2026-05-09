@@ -1,0 +1,52 @@
+# Test-only webhook fixture: a stripped-down copy of
+# config/webhook/manifests.yaml containing ONLY the BaseModel and
+# ClusterBaseModel ValidatingWebhookConfigurations. We can't use the
+# full manifests.yaml in envtest because it would install all 8 OME
+# webhooks (Pod mutator, ISVC, ServingRuntime, BenchmarkJob, …),
+# requiring every corresponding handler to be registered in this
+# suite's manager — too much for a focused BaseModel-validation suite.
+#
+# envtest patches the placeholder caBundle / clientConfig.service →
+# clientConfig.url at install time; this file's values are only
+# scaffolding.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: basemodel.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-basemodel
+    failurePolicy: Fail
+    name: basemodel.ome-webhook-server.validator
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["basemodels"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: clusterbasemodel.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-clusterbasemodel
+    failurePolicy: Fail
+    name: clusterbasemodel.ome-webhook-server.validator
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["clusterbasemodels"]

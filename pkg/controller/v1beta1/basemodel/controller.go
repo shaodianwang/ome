@@ -115,6 +115,15 @@ func (r *BaseModelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return reconcilePVCStorage(ctx, r.Client, r.Scheme, log, baseModel, &baseModel.Spec, false, r.metadataJobConfig())
 	}
 
+	// Storage URI is non-PVC (or unset). If the model was previously
+	// PVC-backed, clean up the orphaned Job + per-PVC ConfigMap +
+	// stale PVC-specific conditions before falling through to the
+	// per-node flow. Idempotent / no-op when no PVC artifacts exist.
+	if err := cleanupStalePVCArtifacts(ctx, r.Client, log, baseModel, false); err != nil {
+		log.Error(err, "Failed to clean up stale PVC artifacts after URI swap")
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+	}
+
 	// Update status based on ConfigMaps
 	if err := r.updateModelStatus(ctx, baseModel); err != nil {
 		log.Error(err, "Failed to update BaseModel status")
@@ -178,6 +187,12 @@ func (r *ClusterBaseModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if isPVCStorage(&clusterBaseModel.Spec) {
 		// Direct read of the per-PVC ConfigMap — see BaseModel branch.
 		return reconcilePVCStorage(ctx, r.Client, r.Scheme, log, clusterBaseModel, &clusterBaseModel.Spec, true, r.metadataJobConfig())
+	}
+
+	// Same URI-swap cleanup as the namespaced BaseModel branch.
+	if err := cleanupStalePVCArtifacts(ctx, r.Client, log, clusterBaseModel, true); err != nil {
+		log.Error(err, "Failed to clean up stale PVC artifacts after URI swap")
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 	}
 
 	// Update status based on ConfigMaps

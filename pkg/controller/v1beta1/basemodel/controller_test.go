@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -38,6 +39,10 @@ func TestBaseModelReconcile(t *testing.T) {
 	scheme := runtime.NewScheme()
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	// batchv1 needed for cleanupStalePVCArtifacts which lists Jobs on
+	// every non-PVC reconcile (idempotent no-op when none exist; the
+	// List itself still requires the scheme).
+	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
 	tests := []struct {
 		name       string
@@ -663,6 +668,10 @@ func TestClusterBaseModelReconcile(t *testing.T) {
 	scheme := runtime.NewScheme()
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	// batchv1 needed for cleanupStalePVCArtifacts which lists Jobs on
+	// every non-PVC reconcile (idempotent no-op when none exist; the
+	// List itself still requires the scheme).
+	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
 	tests := []struct {
 		name             string
@@ -877,6 +886,10 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 	scheme := runtime.NewScheme()
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	// batchv1 needed for cleanupStalePVCArtifacts which lists Jobs on
+	// every non-PVC reconcile (idempotent no-op when none exist; the
+	// List itself still requires the scheme).
+	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
 	totalBytes := int64(100)
 	cachedBytes := int64(40)
@@ -1193,6 +1206,10 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 	scheme := runtime.NewScheme()
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	// batchv1 needed for cleanupStalePVCArtifacts which lists Jobs on
+	// every non-PVC reconcile (idempotent no-op when none exist; the
+	// List itself still requires the scheme).
+	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
 	const sourceURI = "s3://bucket/cached-model"
 	configPath := sourceURI + "/config.json"
@@ -1815,6 +1832,10 @@ func TestHandleNodeDeletion(t *testing.T) {
 	scheme := runtime.NewScheme()
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	// batchv1 needed for cleanupStalePVCArtifacts which lists Jobs on
+	// every non-PVC reconcile (idempotent no-op when none exist; the
+	// List itself still requires the scheme).
+	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
 	tests := []struct {
 		name       string

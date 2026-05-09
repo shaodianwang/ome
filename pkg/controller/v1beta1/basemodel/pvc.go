@@ -390,6 +390,99 @@ func handlePVCModelDeletion(ctx context.Context, kubeClient client.Client, log l
 	return ctrl.Result{}, nil
 }
 
+// cleanupStalePVCArtifacts deletes any per-PVC ConfigMap, any
+// metadata extraction Jobs, and strips PVC-specific stale conditions
+// from a BaseModel/ClusterBaseModel that is no longer PVC-backed.
+//
+// Called when a model whose previous spec was pvc:// has its
+// storage URI changed to a non-PVC backend (oci://, hf://, etc.).
+// Without this, the orphaned Job keeps running, the orphaned
+// ConfigMap stays in the OME namespace forever, and stale
+// SourceReachable/Ready conditions confuse downstream consumers.
+//
+// Idempotent: safe to call on every non-PVC reconcile (no-op when
+// no PVC artifacts exist for this model). The List + per-CR
+// condition trim is the cost of the no-op path; both are O(per-model)
+// label-selector queries.
+func cleanupStalePVCArtifacts(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, isClusterScoped bool) error {
+	// 1. Delete metadata extraction Jobs labeled for this model.
+	jobs := &batchv1.JobList{}
+	scope := metadataJobScopeNamespaced
+	if isClusterScoped {
+		scope = metadataJobScopeCluster
+	}
+	if err := kubeClient.List(ctx, jobs,
+		client.MatchingLabels{
+			constants.PVCMetadataModelNameLabel: obj.GetName(),
+			constants.PVCMetadataScopeLabel:     scope,
+		},
+	); err != nil {
+		return fmt.Errorf("list stale PVC metadata Jobs: %w", err)
+	}
+	for i := range jobs.Items {
+		propagation := metav1.DeletePropagationBackground
+		if err := kubeClient.Delete(ctx, &jobs.Items[i], &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("delete stale PVC metadata Job %s/%s: %w", jobs.Items[i].Namespace, jobs.Items[i].Name, err)
+		}
+		log.Info("Deleted orphaned PVC metadata Job after non-PVC reconcile",
+			"job", jobs.Items[i].Name, "namespace", jobs.Items[i].Namespace)
+	}
+
+	// 2. Delete the per-PVC status ConfigMap.
+	if err := deletePVCStatusConfigMap(ctx, kubeClient, log, obj, isClusterScoped); err != nil {
+		return fmt.Errorf("delete stale per-PVC ConfigMap: %w", err)
+	}
+
+	// 3. Strip PVC-specific conditions from the CR's status. We re-fetch
+	// inside retryUpdate to avoid clobbering concurrent edits. No-op if
+	// no PVC conditions are present.
+	return retryUpdate(ctx, kubeClient, log, obj, "pvc-condition-cleanup", func(ctx context.Context, c client.Client, latest client.Object) error {
+		var conditions *[]metav1.Condition
+		switch m := latest.(type) {
+		case *v1beta1.BaseModel:
+			conditions = &m.Status.Conditions
+		case *v1beta1.ClusterBaseModel:
+			conditions = &m.Status.Conditions
+		default:
+			return fmt.Errorf("cleanupStalePVCArtifacts: unsupported type %T", latest)
+		}
+		filtered := make([]metav1.Condition, 0, len(*conditions))
+		removed := false
+		for _, cnd := range *conditions {
+			if isPVCConditionReason(cnd.Reason) {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, cnd)
+		}
+		if !removed {
+			return nil
+		}
+		*conditions = filtered
+		return c.Status().Update(ctx, latest)
+	})
+}
+
+// isPVCConditionReason reports whether the supplied condition Reason
+// is part of the PVC reconcile branch's reason set. Used by
+// cleanupStalePVCArtifacts to identify stale conditions left behind
+// after a URI swap from pvc:// to non-PVC.
+func isPVCConditionReason(reason string) bool {
+	switch reason {
+	case v1beta1.ModelConditionReasonPVCInvalid,
+		v1beta1.ModelConditionReasonPVCNotFound,
+		v1beta1.ModelConditionReasonPVCNotBound,
+		v1beta1.ModelConditionReasonPVCValidated,
+		v1beta1.ModelConditionReasonPVCMetadataPending,
+		v1beta1.ModelConditionReasonPVCMetadataExtracting,
+		v1beta1.ModelConditionReasonPVCMetadataExtractionFailed,
+		v1beta1.ModelConditionReasonPVCMetadataReady,
+		v1beta1.ModelConditionReasonPVCConfigMissing:
+		return true
+	}
+	return false
+}
+
 // deletePVCStatusConfigMap removes the per-PVC status ConfigMap.
 func deletePVCStatusConfigMap(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, isClusterScoped bool) error {
 	cmName := constants.GetPVCMetadataConfigMapName(obj.GetName(), obj.GetNamespace(), isClusterScoped)

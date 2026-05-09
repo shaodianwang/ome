@@ -1,0 +1,30 @@
+package components_test
+
+import (
+	"context"
+
+	"github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/sgl-project/ome/tests/integration/components"
+	"github.com/sgl-project/ome/tests/integration/framework"
+)
+
+// SetupInferenceService smoke test: registering the reconciler must
+// not error and the manager must start cleanly. End-to-end reconcile
+// behavior is covered in tests/integration/singlecluster/controller/
+// inferenceservice/ (lands in P2.4+).
+var _ = ginkgo.Describe("components.SetupInferenceService", func() {
+	ginkgo.It("registers the InferenceServiceReconciler and manager starts cleanly", func() {
+		s, err := framework.NewSuite(&framework.Framework{})
+		Expect(err).NotTo(HaveOccurred())
+		ginkgo.DeferCleanup(func() { _ = s.Fwk.Teardown() })
+
+		mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
+			return components.SetupInferenceService(ctx, mgr)
+		}
+		Expect(s.Fwk.StartManager(s.Ctx, s.Cfg, mgrSetup)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = s.Fwk.StopManager(s.Ctx) })
+	})
+})

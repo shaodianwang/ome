@@ -626,10 +626,53 @@ coverage: ## Show coverage summary and enforce threshold
 		echo "❌ Average coverage $$avg_cov% is below threshold of 48%"; \
 		exit 1; \
 	fi
+.PHONY: dep-crds
+dep-crds: knative-crds lws-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
+
+DEP_CRDS_DIR := tests/integration/dep-crds
+
+# Each <bundle>-crds target: copies CRD YAMLs from the corresponding
+# go.mod module into tests/integration/dep-crds/<bundle>/. Tests use
+# OptionalCRDBundle entries pointing at these directories. CI does NOT
+# run dep-crds — the directories are committed. Maintainers run this
+# locally when bumping a vendored dep.
+#
+# Pattern follows kueue/Makefile-deps.mk: locate via `go list -m
+# -mod=readonly`, copy via `cp -f`, never write to GOPATH.
+
+.PHONY: knative-crds
+knative-crds: ## Vendor knative.dev/serving CRDs
+	@mkdir -p $(DEP_CRDS_DIR)/knative-serving
+	@KNATIVE_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" knative.dev/serving 2>/dev/null) ; \
+	if [ -z "$$KNATIVE_DIR" ]; then echo "knative.dev/serving not in go.mod; skipping knative-crds" >&2; exit 0; fi ; \
+	cp -f "$$KNATIVE_DIR/config/core/300-resources/"*.yaml $(DEP_CRDS_DIR)/knative-serving/ ; \
+	echo "✅ Vendored Knative CRDs to $(DEP_CRDS_DIR)/knative-serving/"
+
+.PHONY: lws-crds
+lws-crds: ## Vendor sigs.k8s.io/lws CRDs (leaderworkerset.x-k8s.io)
+	@mkdir -p $(DEP_CRDS_DIR)/lws
+	@LWS_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" sigs.k8s.io/lws 2>/dev/null) ; \
+	if [ -z "$$LWS_DIR" ]; then echo "sigs.k8s.io/lws not in go.mod; skipping lws-crds" >&2; exit 0; fi ; \
+	cp -f "$$LWS_DIR/config/crd/bases/"*.yaml $(DEP_CRDS_DIR)/lws/ ; \
+	echo "✅ Vendored LWS CRDs to $(DEP_CRDS_DIR)/lws/"
+
 .PHONY: integration-test
-integration-test: fmt vet manifests envtest ## 🧪 Run integration tests
+integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tests
 	@echo "🧪 Running integration tests..."
-	@$(TEST_ENV) go test -v ./tests/... -ginkgo.v -ginkgo.trace
+	@# All test packages under tests/ are Ginkgo suites (per
+	@# .claude/integration-test-framework-design.md §7). Each package has a
+	@# single TestXxx(t) entry that calls util.RunSuite which registers
+	@# Gomega's fail handler with ginkgo.RunSpecs.
+	@#
+	@# Verbosity policy: -ginkgo.v is OFF by default. With it on, Ginkgo
+	@# flushes the per-spec GinkgoWriter for every passing spec, which
+	@# turns the framework.SetupTestLogger output (controller-runtime
+	@# logs at ErrorLevel) into a wall of red text on green runs.
+	@# Without -ginkgo.v, passing specs collapse to "•" and Ginkgo still
+	@# dumps the full GinkgoWriter on failures — so the failure trace
+	@# you actually need is preserved via -ginkgo.trace.
+	@# Set GINKGO_VERBOSE=1 to opt back in (or TEST_LOG_LEVEL=-1 for debug).
+	@$(TEST_ENV) go test -v ./tests/... $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@echo "✅ Integration tests passed"
 
 
