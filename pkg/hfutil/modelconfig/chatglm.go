@@ -136,7 +136,5 @@ func (c *ChatGLMConfig) GetTorchDtype() string {
 
 // Register the ChatGLM model handler
 func init() {
-	RegisterModelLoader("chatglm", func(configPath string) (HuggingFaceModel, error) {
-		return LoadChatGLMConfig(configPath)
-	})
+	RegisterJSONModelLoader[ChatGLMConfig, *ChatGLMConfig]("chatglm")
 }

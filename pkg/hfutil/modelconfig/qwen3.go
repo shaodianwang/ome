@@ -158,4 +158,5 @@ func init() {
 		// If st config is not found, this is not an embedding model; that's OK.
 		return qwen3Config, nil
 	})
+	RegisterModelDataLoader("qwen3", parseJSONModelConfig[Qwen3Config, *Qwen3Config])
 }

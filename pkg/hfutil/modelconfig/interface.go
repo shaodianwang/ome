@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -49,6 +50,14 @@ type HuggingFaceModel interface {
 type HuggingFaceDiffusionModel interface {
 	HuggingFaceModel
 	GetDiffusionModel() *DiffusionPipelineSpec
+}
+
+// ModelConfigInput provides config JSON from either a local path or a
+// non-filesystem source. Path is used only as a logical label and to preserve
+// compatibility with model implementations that keep ConfigPath.
+type ModelConfigInput struct {
+	Path string
+	Data []byte
 }
 
 // AutoMap defines the mapping of model classes for custom Hugging Face models
@@ -221,8 +230,9 @@ func EstimateModelSizeBytes(paramCount int64, dtype string) int64 {
 // For transformer-style config.json, the key is model_type.
 // For diffusion model_index.json, the key is the pipeline class name.
 var (
-	modelLoadersMu sync.RWMutex
-	modelLoaders   = make(map[string]func(string) (HuggingFaceModel, error))
+	modelLoadersMu   sync.RWMutex
+	modelLoaders     = make(map[string]func(string) (HuggingFaceModel, error))
+	modelDataLoaders = make(map[string]func(ModelConfigInput) (HuggingFaceModel, error))
 )
 
 // GenericModelConfig is a fallback configuration for unsupported model types.
@@ -582,11 +592,12 @@ func (c *GenericDiffusionModelConfig) IsEmbedding() bool {
 	return false
 }
 
-// loadGenericModelConfig loads a generic model configuration as a fallback.
-// It also handles diffusers model_index.json files when model_type is absent.
-func loadGenericModelConfig(configPath string) (HuggingFaceModel, error) {
-	if filepath.Base(configPath) == "model_index.json" {
-		pipeline, err := LoadDiffusionPipelineSpec(configPath)
+func parseGenericModelConfig(input ModelConfigInput) (HuggingFaceModel, error) {
+	label := modelConfigInputLabel(input.Path)
+	data := SanitizeJSONBytes(input.Data)
+
+	if filepath.Base(input.Path) == "model_index.json" {
+		pipeline, err := ParseDiffusionPipelineSpec(data)
 		if err != nil {
 			return nil, err
 		}
@@ -595,7 +606,7 @@ func loadGenericModelConfig(configPath string) (HuggingFaceModel, error) {
 			DiffusersVersion:  pipeline.DiffusersVersion,
 			DiffusionPipeline: pipeline,
 		}
-		config.ConfigPath = configPath
+		config.ConfigPath = input.Path
 		config.ModelType = "diffusers"
 		if pipeline.ClassName != "" {
 			config.Architectures = []string{pipeline.ClassName}
@@ -603,21 +614,12 @@ func loadGenericModelConfig(configPath string) (HuggingFaceModel, error) {
 		return config, nil
 	}
 
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file '%s': %w", configPath, err)
-	}
-
-	// Sanitize JSON to handle non-standard values like Infinity, -Infinity, NaN
-	// which are valid in Python but not in standard JSON
-	data = SanitizeJSONBytes(data)
-
 	var config GenericModelConfig
 	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse config JSON from '%s': %w", configPath, err)
+		return nil, fmt.Errorf("failed to parse config JSON from '%s': %w", label, err)
 	}
 
-	config.ConfigPath = configPath
+	config.ConfigPath = input.Path
 
 	// Probe nested sub-configs (text_config, llm_config, language_config)
 	// to fill zero-valued fields for multimodal models
@@ -640,6 +642,117 @@ func RegisterModelLoader(modelKey string, loader func(string) (HuggingFaceModel,
 	modelLoadersMu.Lock()
 	defer modelLoadersMu.Unlock()
 	modelLoaders[modelKey] = loader
+}
+
+// RegisterModelDataLoader safely registers a model loader for in-memory config JSON.
+func RegisterModelDataLoader(modelKey string, loader func(ModelConfigInput) (HuggingFaceModel, error)) {
+	if modelKey == "" {
+		panic("model key cannot be empty")
+	}
+	if loader == nil {
+		panic("loader function cannot be nil")
+	}
+
+	modelLoadersMu.Lock()
+	defer modelLoadersMu.Unlock()
+	modelDataLoaders[modelKey] = loader
+}
+
+// RegisterJSONModelLoader registers a model config struct for both path-based
+// and byte-based loading. Model-specific files should call this from init
+// instead of maintaining parallel path/data registration code.
+func RegisterJSONModelLoader[T any, PT interface {
+	*T
+	HuggingFaceModel
+}](modelKey string) {
+	RegisterModelLoader(modelKey, func(configPath string) (HuggingFaceModel, error) {
+		if configPath == "" {
+			return nil, fmt.Errorf("config path cannot be empty")
+		}
+
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read model config file '%s': %w", configPath, err)
+		}
+
+		return parseJSONModelConfig[T, PT](ModelConfigInput{
+			Path: configPath,
+			Data: data,
+		})
+	})
+	RegisterModelDataLoader(modelKey, parseJSONModelConfig[T, PT])
+}
+
+func parseJSONModelConfig[T any, PT interface {
+	*T
+	HuggingFaceModel
+}](input ModelConfigInput) (HuggingFaceModel, error) {
+	label := modelConfigInputLabel(input.Path)
+	data := SanitizeJSONBytes(input.Data)
+
+	var config T
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse model config JSON from '%s': %w", label, err)
+	}
+
+	setConfigPath(&config, input.Path)
+	if postProcessor, ok := any(&config).(interface{ postProcessModelConfig() }); ok {
+		postProcessor.postProcessModelConfig()
+	}
+	if validator, ok := any(&config).(interface{ Validate() error }); ok {
+		if err := validator.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid model configuration in '%s': %w", label, err)
+		}
+	}
+
+	return PT(&config), nil
+}
+
+func setConfigPath(config any, configPath string) {
+	value := reflect.ValueOf(config)
+	if value.Kind() != reflect.Ptr || value.IsNil() {
+		return
+	}
+	elem := value.Elem()
+	if elem.Kind() != reflect.Struct {
+		return
+	}
+	field := elem.FieldByName("ConfigPath")
+	if field.IsValid() && field.CanSet() && field.Kind() == reflect.String {
+		field.SetString(configPath)
+	}
+}
+
+func modelConfigInputLabel(path string) string {
+	if path != "" {
+		return path
+	}
+	return "model config input"
+}
+
+func modelConfigKey(input ModelConfigInput) (string, []byte, error) {
+	label := modelConfigInputLabel(input.Path)
+	data := SanitizeJSONBytes(input.Data)
+
+	var baseConfig struct {
+		ModelType string `json:"model_type"`
+	}
+	if err := json.Unmarshal(data, &baseConfig); err != nil {
+		return "", nil, fmt.Errorf("failed to parse model config JSON from '%s': %w", label, err)
+	}
+
+	modelKey := baseConfig.ModelType
+	if modelKey == "" && filepath.Base(input.Path) == "model_index.json" {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err == nil {
+			modelKey = parseJSONStringField(raw, "_class_name", "class_name", "className")
+		}
+	}
+	if modelKey == "" {
+		return "", nil, fmt.Errorf("model_type or _class_name field is missing or empty in config file '%s'", label)
+	}
+
+	return modelKey, data, nil
 }
 
 // GetSupportedModelTypes returns a list of all registered model keys.
@@ -684,6 +797,41 @@ func SanitizeJSONBytes(data []byte) []byte {
 	return []byte(s)
 }
 
+// ParseModelConfig parses a model configuration from config.json or model_index.json bytes
+// and returns the appropriate model implementation based on the model key:
+// - transformer config.json: "model_type"
+// - diffusion model_index.json: "_class_name" (pipeline class name)
+func ParseModelConfig(input ModelConfigInput) (HuggingFaceModel, error) {
+	if len(input.Data) == 0 {
+		return nil, fmt.Errorf("model config data cannot be empty")
+	}
+
+	label := modelConfigInputLabel(input.Path)
+	modelKey, data, err := modelConfigKey(input)
+	if err != nil {
+		return nil, err
+	}
+
+	modelLoadersMu.RLock()
+	loader, exists := modelDataLoaders[modelKey]
+	modelLoadersMu.RUnlock()
+
+	if !exists {
+		log.Printf("Warning: model type '%s' is not fully supported, using generic config. "+
+			"Parameter count will be estimated from safetensors or architecture.",
+			modelKey)
+
+		return parseGenericModelConfig(ModelConfigInput{Path: input.Path, Data: data})
+	}
+
+	model, err := loader(ModelConfigInput{Path: input.Path, Data: data})
+	if err != nil {
+		return nil, fmt.Errorf("failed to load %s model from '%s': %w", modelKey, label, err)
+	}
+
+	return model, nil
+}
+
 // LoadModelConfig loads a model configuration from a config.json or model_index.json file
 // and returns the appropriate model implementation based on the model key:
 // - transformer config.json: "model_type"
@@ -708,54 +856,29 @@ func LoadModelConfig(configPath string) (HuggingFaceModel, error) {
 		return nil, fmt.Errorf("config path cannot be empty")
 	}
 
-	// Read the config file to determine model type
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read model config file '%s': %w", configPath, err)
 	}
 
-	// Sanitize JSON to handle non-standard values like Infinity, -Infinity, NaN
-	// which are valid in Python but not in standard JSON
-	data = SanitizeJSONBytes(data)
-
-	// Extract the model_type field
-	var baseConfig struct {
-		ModelType string `json:"model_type"`
+	modelKey, data, err := modelConfigKey(ModelConfigInput{
+		Path: configPath,
+		Data: data,
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	if err := json.Unmarshal(data, &baseConfig); err != nil {
-		return nil, fmt.Errorf("failed to parse model config JSON from '%s': %w", configPath, err)
-	}
-
-	modelKey := baseConfig.ModelType
-	diffusionClassName := ""
-	if modelKey == "" && filepath.Base(configPath) == "model_index.json" {
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(data, &raw); err == nil {
-			diffusionClassName = parseJSONStringField(raw, "_class_name", "class_name", "className")
-		}
-		if diffusionClassName != "" {
-			modelKey = diffusionClassName
-		}
-	}
-
-	if modelKey == "" {
-		return nil, fmt.Errorf("model_type or _class_name field is missing or empty in config file '%s'", configPath)
-	}
-
-	// Load using registered model loaders (thread-safe access)
 	modelLoadersMu.RLock()
 	loader, exists := modelLoaders[modelKey]
 	modelLoadersMu.RUnlock()
 
 	if !exists {
-		// Fallback to generic config for unsupported model types
-		// Log a warning but still return useful data
 		log.Printf("Warning: model type '%s' is not fully supported, using generic config. "+
 			"Parameter count will be estimated from safetensors or architecture.",
-			baseConfig.ModelType)
+			modelKey)
 
-		return loadGenericModelConfig(configPath)
+		return parseGenericModelConfig(ModelConfigInput{Path: configPath, Data: data})
 	}
 
 	model, err := loader(configPath)

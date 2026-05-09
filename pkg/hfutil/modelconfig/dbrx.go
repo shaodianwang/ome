@@ -155,7 +155,5 @@ func (c *DBRXConfig) GetArchitecture() string {
 
 // Register the DBRX model handler
 func init() {
-	RegisterModelLoader("dbrx", func(configPath string) (HuggingFaceModel, error) {
-		return LoadDBRXConfig(configPath)
-	})
+	RegisterJSONModelLoader[DBRXConfig, *DBRXConfig]("dbrx")
 }

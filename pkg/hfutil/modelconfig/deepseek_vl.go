@@ -202,13 +202,7 @@ func (c *DeepSeekVLConfig) GetArchitecture() string {
 
 // Register the DeepSeek VL model handlers
 func init() {
-	RegisterModelLoader("deepseek_vl_v2", func(configPath string) (HuggingFaceModel, error) {
-		return LoadDeepSeekVLConfig(configPath)
-	})
-	RegisterModelLoader("janus", func(configPath string) (HuggingFaceModel, error) {
-		return LoadDeepSeekVLConfig(configPath)
-	})
-	RegisterModelLoader("multi_modality", func(configPath string) (HuggingFaceModel, error) {
-		return LoadDeepSeekVLConfig(configPath)
-	})
+	RegisterJSONModelLoader[DeepSeekVLConfig, *DeepSeekVLConfig]("deepseek_vl_v2")
+	RegisterJSONModelLoader[DeepSeekVLConfig, *DeepSeekVLConfig]("janus")
+	RegisterJSONModelLoader[DeepSeekVLConfig, *DeepSeekVLConfig]("multi_modality")
 }

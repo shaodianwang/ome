@@ -150,7 +150,5 @@ func (c *Gemma3Config) IsEmbedding() bool {
 
 // Register the Gemma3 model handler
 func init() {
-	RegisterModelLoader("gemma3", func(configPath string) (HuggingFaceModel, error) {
-		return LoadGemma3Config(configPath)
-	})
+	RegisterJSONModelLoader[Gemma3Config, *Gemma3Config]("gemma3")
 }

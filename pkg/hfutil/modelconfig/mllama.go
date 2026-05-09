@@ -190,7 +190,5 @@ func (c *MLlamaConfig) IsEmbedding() bool {
 
 // Register the MLlama model handler
 func init() {
-	RegisterModelLoader("mllama", func(configPath string) (HuggingFaceModel, error) {
-		return LoadMLlamaConfig(configPath)
-	})
+	RegisterJSONModelLoader[MLlamaConfig, *MLlamaConfig]("mllama")
 }

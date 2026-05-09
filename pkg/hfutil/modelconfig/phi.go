@@ -123,7 +123,5 @@ func (c *PhiModelConfig) IsEmbedding() bool {
 
 // Register the Phi model handler
 func init() {
-	RegisterModelLoader("phi", func(configPath string) (HuggingFaceModel, error) {
-		return LoadPhiModelConfig(configPath)
-	})
+	RegisterJSONModelLoader[PhiModelConfig, *PhiModelConfig]("phi")
 }

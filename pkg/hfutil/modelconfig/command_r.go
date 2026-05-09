@@ -117,10 +117,6 @@ func (c *CommandRConfig) IsEmbedding() bool {
 
 // Register the Command-R model handler
 func init() {
-	RegisterModelLoader("cohere", func(configPath string) (HuggingFaceModel, error) {
-		return LoadCommandRConfig(configPath)
-	})
-	RegisterModelLoader("command-r", func(configPath string) (HuggingFaceModel, error) {
-		return LoadCommandRConfig(configPath)
-	})
+	RegisterJSONModelLoader[CommandRConfig, *CommandRConfig]("cohere")
+	RegisterJSONModelLoader[CommandRConfig, *CommandRConfig]("command-r")
 }

@@ -119,7 +119,5 @@ func (c *ExaoneConfig) IsEmbedding() bool {
 
 // Register the ExaONE model handler
 func init() {
-	RegisterModelLoader("exaone", func(configPath string) (HuggingFaceModel, error) {
-		return LoadExaoneConfig(configPath)
-	})
+	RegisterJSONModelLoader[ExaoneConfig, *ExaoneConfig]("exaone")
 }

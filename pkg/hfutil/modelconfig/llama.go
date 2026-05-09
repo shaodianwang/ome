@@ -215,7 +215,5 @@ func (c *LlamaConfig) IsEmbedding() bool {
 
 // Register the Llama model handler
 func init() {
-	RegisterModelLoader("llama", func(configPath string) (HuggingFaceModel, error) {
-		return LoadLlamaConfig(configPath)
-	})
+	RegisterJSONModelLoader[LlamaConfig, *LlamaConfig]("llama")
 }

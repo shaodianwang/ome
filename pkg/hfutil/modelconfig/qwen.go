@@ -130,7 +130,5 @@ func (c *QwenConfig) IsEmbedding() bool {
 
 // Register the Qwen v1 model handler
 func init() {
-	RegisterModelLoader("qwen", func(configPath string) (HuggingFaceModel, error) {
-		return LoadQwenConfig(configPath)
-	})
+	RegisterJSONModelLoader[QwenConfig, *QwenConfig]("qwen")
 }

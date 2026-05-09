@@ -103,7 +103,5 @@ func (c *StableLMConfig) IsEmbedding() bool {
 
 // Register the StableLM model handler
 func init() {
-	RegisterModelLoader("stablelm", func(configPath string) (HuggingFaceModel, error) {
-		return LoadStableLMConfig(configPath)
-	})
+	RegisterJSONModelLoader[StableLMConfig, *StableLMConfig]("stablelm")
 }

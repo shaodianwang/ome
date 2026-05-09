@@ -270,7 +270,5 @@ func estimateMoEParamCount(hiddenSize, layers, intermediateSize, numExperts, exp
 
 // Register the Llama4 model handler
 func init() {
-	RegisterModelLoader("llama4", func(configPath string) (HuggingFaceModel, error) {
-		return LoadLlama4Config(configPath)
-	})
+	RegisterJSONModelLoader[Llama4Config, *Llama4Config]("llama4")
 }

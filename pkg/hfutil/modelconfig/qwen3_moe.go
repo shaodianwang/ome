@@ -125,7 +125,5 @@ func (c *Qwen3MoeConfig) IsEmbedding() bool {
 }
 
 func init() {
-	RegisterModelLoader("qwen3_moe", func(configPath string) (HuggingFaceModel, error) {
-		return LoadQwen3MoeConfig(configPath)
-	})
+	RegisterJSONModelLoader[Qwen3MoeConfig, *Qwen3MoeConfig]("qwen3_moe")
 }

@@ -85,6 +85,20 @@ func TestUpdatePodSpecNodeSelector(t *testing.T) {
 			expectNodeSelector:                false,
 		},
 		{
+			name: "Skip model node selector for sharded model",
+			baseModel: &v1beta1.BaseModelSpec{
+				Distribution: distributionPtr(v1beta1.DistributionSharded),
+				ModelFormat: v1beta1.ModelFormat{
+					Name: "safetensors",
+				},
+			},
+			baseModelMeta: &metav1.ObjectMeta{
+				Name:      "sharded-model",
+				Namespace: "default",
+			},
+			expectNodeSelector: false,
+		},
+		{
 			name:               "No base model",
 			baseModel:          nil,
 			baseModelMeta:      nil,
@@ -169,6 +183,73 @@ func TestUpdatePodSpecNodeSelector(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUpdateEnvVariablesForShardedModel(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	storageURI := "s3://bucket/sharded-model"
+	b := &BaseComponentFields{
+		BaseModel: &v1beta1.BaseModelSpec{
+			Storage: &v1beta1.StorageSpec{
+				StorageUri: &storageURI,
+			},
+			Distribution: distributionPtr(v1beta1.DistributionSharded),
+		},
+		Log: ctrl.Log.WithName("test"),
+	}
+	container := &v1.Container{}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-isvc",
+			Namespace: "default",
+		},
+	}
+
+	UpdateEnvVariables(b, isvc, container, &metav1.ObjectMeta{})
+
+	g.Expect(container.Env).To(gomega.ContainElement(v1.EnvVar{
+		Name:  constants.ModelPathEnvVarKey,
+		Value: storageURI,
+	}))
+}
+
+func TestUpdateModelMountsSkipShardedModel(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	modelPath := "/models/sharded-model"
+	b := &BaseComponentFields{
+		BaseModel: &v1beta1.BaseModelSpec{
+			Storage: &v1beta1.StorageSpec{
+				Path: &modelPath,
+			},
+			Distribution: distributionPtr(v1beta1.DistributionSharded),
+		},
+		BaseModelMeta: &metav1.ObjectMeta{
+			Name:      "sharded-model",
+			Namespace: "default",
+		},
+		Log: ctrl.Log.WithName("test"),
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-isvc",
+			Namespace: "default",
+		},
+	}
+	objectMeta := &metav1.ObjectMeta{}
+	container := &v1.Container{}
+	podSpec := &v1.PodSpec{}
+
+	UpdateVolumeMounts(b, isvc, container, objectMeta)
+	UpdatePodSpecVolumes(b, isvc, podSpec, objectMeta)
+
+	g.Expect(container.VolumeMounts).To(gomega.BeEmpty())
+	g.Expect(podSpec.Volumes).To(gomega.BeEmpty())
+}
+
+func distributionPtr(distribution v1beta1.Distribution) *v1beta1.Distribution {
+	return &distribution
 }
 
 func TestProcessBaseLabels(t *testing.T) {

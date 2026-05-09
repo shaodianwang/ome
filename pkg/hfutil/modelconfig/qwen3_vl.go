@@ -98,14 +98,18 @@ func LoadQwen3VLConfig(configPath string) (*Qwen3VLConfig, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse Qwen3-VL config JSON from '%s': %w", configPath, err)
 	}
+	config.ConfigPath = configPath
+	config.postProcessModelConfig()
+	return &config, nil
+}
+
+func (c *Qwen3VLConfig) postProcessModelConfig() {
 	// Qwen3.5 configs keep dtype under text_config.dtype.
 	// Promote it to the common TorchDtype field so size estimation stays correct.
-	if (config.ModelType == "qwen3_5" || config.ModelType == "qwen3_5_moe") &&
-		config.TorchDtype == "" && config.TextConfig.Dtype != "" {
-		config.TorchDtype = config.TextConfig.Dtype
+	if (c.ModelType == "qwen3_5" || c.ModelType == "qwen3_5_moe") &&
+		c.TorchDtype == "" && c.TextConfig.Dtype != "" {
+		c.TorchDtype = c.TextConfig.Dtype
 	}
-	config.ConfigPath = configPath
-	return &config, nil
 }
 
 // GetParameterCount returns the total number of parameters in the model.
@@ -212,18 +216,10 @@ func estimateQwen3VLVisionParams(vc Qwen3VLVisionConfig) int64 {
 }
 
 func init() {
-	RegisterModelLoader("qwen3_vl_moe", func(configPath string) (HuggingFaceModel, error) {
-		return LoadQwen3VLConfig(configPath)
-	})
-	RegisterModelLoader("qwen3_vl", func(configPath string) (HuggingFaceModel, error) {
-		return LoadQwen3VLConfig(configPath)
-	})
+	RegisterJSONModelLoader[Qwen3VLConfig, *Qwen3VLConfig]("qwen3_vl_moe")
+	RegisterJSONModelLoader[Qwen3VLConfig, *Qwen3VLConfig]("qwen3_vl")
 	// Qwen3.5 models use the qwen3_5 / qwen3_5_moe model_type values and
 	// keep the same top-level multimodal shape (text_config + vision_config).
-	RegisterModelLoader("qwen3_5", func(configPath string) (HuggingFaceModel, error) {
-		return LoadQwen3VLConfig(configPath)
-	})
-	RegisterModelLoader("qwen3_5_moe", func(configPath string) (HuggingFaceModel, error) {
-		return LoadQwen3VLConfig(configPath)
-	})
+	RegisterJSONModelLoader[Qwen3VLConfig, *Qwen3VLConfig]("qwen3_5")
+	RegisterJSONModelLoader[Qwen3VLConfig, *Qwen3VLConfig]("qwen3_5_moe")
 }

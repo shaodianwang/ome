@@ -1,7 +1,10 @@
 package modelparser
 
 import (
+	"context"
+	"encoding/binary"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -771,6 +774,48 @@ func TestParseModelConfig_PrefersModelIndex(t *testing.T) {
 	assert.True(t, loadCalled, "loadModelConfig should be called when model_index.json is present")
 }
 
+func TestParseModelConfigFromFiles(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	parser := &ModelConfigParser{
+		logger:          logger,
+		loadModelConfig: modelconfig.LoadModelConfig,
+	}
+
+	modelDir := filepath.Join("..", "hfutil", "modelconfig", "testdata", "tiny-random-PhiModel")
+	files := []ModelConfigFileInput{
+		{Path: DefaultConfigFileName, Data: mustReadTestFile(t, filepath.Join(modelDir, DefaultConfigFileName))},
+		{Path: "model-1-of-2.safetensors", Data: mustReadSafetensorsHeader(t, filepath.Join(modelDir, "model-1-of-2.safetensors"))},
+		{Path: "model-2-of-2.safetensors", Data: mustReadSafetensorsHeader(t, filepath.Join(modelDir, "model-2-of-2.safetensors"))},
+	}
+
+	metadata, err := parser.ParseModelConfigFromFiles(context.Background(), files, nil, nil)
+	assert.NoError(t, err)
+	if assert.NotNil(t, metadata) {
+		assert.Equal(t, "phi", metadata.ModelType)
+		assert.Equal(t, "PhiModel", metadata.ModelArchitecture)
+		assert.Equal(t, modelconfig.FormatParamCount(92564), metadata.ModelParameterSize)
+		assert.Equal(t, int32(512), metadata.MaxTokens)
+		assert.NotNil(t, metadata.ModelFramework)
+		assert.Equal(t, "transformers", metadata.ModelFramework.Name)
+		assert.NotNil(t, metadata.ModelFramework.Version)
+		assert.Equal(t, "4.40.0.dev0", *metadata.ModelFramework.Version)
+		assert.Equal(t, "safetensors", metadata.ModelFormat.Name)
+	}
+}
+
+func TestParseModelConfigFromFilesRejectsEscapingPath(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	parser := &ModelConfigParser{logger: logger}
+
+	metadata, err := parser.ParseModelConfigFromFiles(context.Background(), []ModelConfigFileInput{
+		{Path: "../config.json", Data: []byte(`{}`)},
+	}, nil, nil)
+
+	assert.Error(t, err)
+	assert.Nil(t, metadata)
+	assert.Contains(t, err.Error(), "must stay under model root")
+}
+
 func TestFormatParamCount(t *testing.T) {
 	testCases := []struct {
 		input    int64
@@ -793,6 +838,38 @@ func TestFormatParamCount(t *testing.T) {
 			assert.Equal(t, tc.expected, result, "FormatParamCount failed for input %d", tc.input)
 		})
 	}
+}
+
+func mustReadTestFile(t *testing.T, filePath string) []byte {
+	t.Helper()
+
+	data, err := os.ReadFile(filePath)
+	assert.NoError(t, err)
+	return data
+}
+
+func mustReadSafetensorsHeader(t *testing.T, filePath string) []byte {
+	t.Helper()
+
+	file, err := os.Open(filePath)
+	assert.NoError(t, err)
+	defer func() {
+		assert.NoError(t, file.Close())
+	}()
+
+	headerLenBytes := make([]byte, 8)
+	_, err = io.ReadFull(file, headerLenBytes)
+	assert.NoError(t, err)
+
+	headerLen := binary.LittleEndian.Uint64(headerLenBytes)
+	header := make([]byte, headerLen)
+	_, err = io.ReadFull(file, header)
+	assert.NoError(t, err)
+
+	data := make([]byte, 0, 8+len(header))
+	data = append(data, headerLenBytes...)
+	data = append(data, header...)
+	return data
 }
 
 func TestPopulateArtifactAttribute_SetsFields(t *testing.T) {

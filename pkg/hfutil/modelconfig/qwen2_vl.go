@@ -161,10 +161,6 @@ func (c *Qwen2VLConfig) IsEmbedding() bool {
 
 // Register the Qwen2-VL and Qwen2.5-VL model handlers
 func init() {
-	RegisterModelLoader("qwen2_vl", func(configPath string) (HuggingFaceModel, error) {
-		return LoadQwen2VLConfig(configPath)
-	})
-	RegisterModelLoader("qwen2_5_vl", func(configPath string) (HuggingFaceModel, error) {
-		return LoadQwen2VLConfig(configPath)
-	})
+	RegisterJSONModelLoader[Qwen2VLConfig, *Qwen2VLConfig]("qwen2_vl")
+	RegisterJSONModelLoader[Qwen2VLConfig, *Qwen2VLConfig]("qwen2_5_vl")
 }

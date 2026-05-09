@@ -174,7 +174,5 @@ func (c *LLaVAConfig) IsEmbedding() bool {
 
 // Register the LLaVA model handler
 func init() {
-	RegisterModelLoader("llava", func(configPath string) (HuggingFaceModel, error) {
-		return LoadLLaVAConfig(configPath)
-	})
+	RegisterJSONModelLoader[LLaVAConfig, *LLaVAConfig]("llava")
 }

@@ -162,7 +162,5 @@ func (c *MixtralConfig) IsEmbedding() bool {
 
 // Register the Mixtral model handler
 func init() {
-	RegisterModelLoader("mixtral", func(configPath string) (HuggingFaceModel, error) {
-		return LoadMixtralConfig(configPath)
-	})
+	RegisterJSONModelLoader[MixtralConfig, *MixtralConfig]("mixtral")
 }

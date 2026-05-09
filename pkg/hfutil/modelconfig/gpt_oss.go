@@ -234,7 +234,5 @@ func (c *GptOssConfig) IsEmbedding() bool {
 
 // Register the GPT-OSS model handler
 func init() {
-	RegisterModelLoader("gpt_oss", func(configPath string) (HuggingFaceModel, error) {
-		return LoadGptOssConfig(configPath)
-	})
+	RegisterJSONModelLoader[GptOssConfig, *GptOssConfig]("gpt_oss")
 }

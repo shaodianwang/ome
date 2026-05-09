@@ -443,6 +443,8 @@ const (
 	ModelConditionReasonCacheNotReady = "CacheNotReady"
 	// ModelConditionReasonMetadataPending means cache is ready but model metadata has not been parsed.
 	ModelConditionReasonMetadataPending = "MetadataPending"
+	// ModelConditionReasonMetadataParsed means model metadata has been parsed.
+	ModelConditionReasonMetadataParsed = "MetadataParsed"
 	// ModelConditionReasonProviderNotConfigured means no model cache provider is configured for the controller.
 	ModelConditionReasonProviderNotConfigured = "ProviderNotConfigured"
 

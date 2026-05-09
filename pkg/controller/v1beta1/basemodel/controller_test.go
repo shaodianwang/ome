@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -925,6 +926,9 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 				},
 			},
 			modelCache: &modelcachefake.Client{
+				InspectSourceFunc: func(ctx context.Context, source modelcache.Source) (*modelcache.SourceInspection, error) {
+					return shardedInspectionForTest(t, source), nil
+				},
 				StartPrewarmFunc: func(ctx context.Context, req modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
 					return &modelcache.PrewarmOperation{ID: "op-1"}, nil
 				},
@@ -940,8 +944,13 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 				g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
 				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmPending))
 				g.Expect(cache.CheckSourceCalls()).To(gomega.BeEmpty())
+				g.Expect(cache.InspectSourceCalls()).To(gomega.Equal([]modelcache.Source{{URI: "s3://bucket/cached-model"}}))
 				g.Expect(cache.StartPrewarmCalls()).To(gomega.HaveLen(1))
 				g.Expect(cache.StartPrewarmCalls()[0].Source.URI).To(gomega.Equal("s3://bucket/cached-model"))
+				g.Expect(cache.StartPrewarmCalls()[0].Objects).To(gomega.Equal([]modelcache.ObjectRef{{
+					Source: modelcache.Source{URI: "s3://bucket/cached-model"},
+					Path:   "s3://bucket/cached-model/model-00001-of-00001.safetensors",
+				}}))
 				g.Expect(cache.StartPrewarmCalls()[0].IdempotencyKey).To(gomega.HavePrefix("BaseModel/default/cached-model/0/"))
 				g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
 			},
@@ -1042,7 +1051,7 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 			},
 		},
 		{
-			name:   "prewarm success leaves Ready false until metadata parsing",
+			name:   "prewarm success waits for metadata inputs when unavailable",
 			status: shardedStatusWithPrewarmID("op-1"),
 			modelCache: &modelcachefake.Client{
 				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
@@ -1052,6 +1061,7 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 					}, nil
 				},
 			},
+			wantRequeue: 5 * time.Second,
 			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
 				updated := getBaseModelForTest(t, c, "default", "cached-model")
 
@@ -1064,6 +1074,36 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 				g.Expect(ready).ToNot(gomega.BeNil())
 				g.Expect(ready.Status).To(gomega.Equal(metav1.ConditionFalse))
 				g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonMetadataPending))
+				g.Expect(ready.Message).To(gomega.ContainSubstring("metadata"))
+				g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
+			},
+		},
+		{
+			name:   "prewarm success parses metadata and marks Ready",
+			status: shardedStatusWithPrewarmID("op-1"),
+			modelCache: &modelcachefake.Client{
+				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
+					return &modelcache.PrewarmStatus{
+						Operation: operation,
+						Phase:     modelcache.PrewarmPhaseSucceeded,
+					}, nil
+				},
+				InspectSourceFunc: func(ctx context.Context, source modelcache.Source) (*modelcache.SourceInspection, error) {
+					return shardedInspectionForTest(t, source), nil
+				},
+			},
+			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
+				updated := getBaseModelForTest(t, c, "default", "cached-model")
+
+				g.Expect(updated.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateReady))
+				ready := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionReady)
+				g.Expect(ready).ToNot(gomega.BeNil())
+				g.Expect(ready.Status).To(gomega.Equal(metav1.ConditionTrue))
+				g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonMetadataParsed))
+				g.Expect(updated.Spec.ModelArchitecture).ToNot(gomega.BeNil())
+				g.Expect(*updated.Spec.ModelArchitecture).To(gomega.Equal("PhiModel"))
+				g.Expect(updated.Spec.ModelParameterSize).ToNot(gomega.BeNil())
+				g.Expect(cache.InspectSourceCalls()).To(gomega.Equal([]modelcache.Source{{URI: "s3://bucket/cached-model"}}))
 				g.Expect(result).To(gomega.Equal(ctrl.Result{}))
 			},
 		},
@@ -1155,18 +1195,67 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
 	const sourceURI = "s3://bucket/cached-model"
-	headPaths := make(chan string, 1)
-	fetchPaths := make(chan []string, 1)
+	configPath := sourceURI + "/config.json"
+	weightPath := sourceURI + "/model-00001-of-00001.safetensors"
+	fetchPaths := make(chan []string, 2)
+	fileMetadataPaths := make(chan string, 4)
+	configData := tinyPhiConfigForTest(t)
+	safetensorsData := safetensorsHeaderForTest(`{"weight":{"dtype":"F32","shape":[2,3],"data_offsets":[0,24]}}`)
+	configMTime := uint64(123)
+	weightMTime := uint64(124)
+	chunkSize := uint64(16)
+	var serverAddr string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/head":
+		case "/file_metadata":
 			if r.Method != http.MethodGet {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			headPaths <- r.URL.Query().Get("path")
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"size":100,"mtime":123}`))
+			fileMetadataPaths <- r.URL.Query().Get("path")
+			writeJSONForControllerTest(t, w, map[string]any{
+				"root": sourceURI,
+				"files": []map[string]any{
+					{"path": configPath, "relative_path": "config.json", "size": len(configData), "mtime": configMTime},
+					{"path": weightPath, "relative_path": "model-00001-of-00001.safetensors", "size": len(safetensorsData), "mtime": weightMTime},
+				},
+			})
+		case "/ring_info":
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			writeJSONForControllerTest(t, w, map[string]any{"nodes": []string{serverAddr}})
+		case "/packed_byte_ranges_by_key":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Ranges []struct {
+					Path        string `json:"path"`
+					ChunkOffset uint64 `json:"chunk_offset"`
+					RangeOffset uint64 `json:"range_offset"`
+					Length      uint64 `json:"length"`
+				} `json:"ranges"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			for _, rangeSpec := range req.Ranges {
+				data := map[string][]byte{
+					configPath: configData,
+					weightPath: safetensorsData,
+				}[rangeSpec.Path]
+				start := rangeSpec.ChunkOffset + rangeSpec.RangeOffset
+				end := start + rangeSpec.Length
+				if end > uint64(len(data)) {
+					http.Error(w, "range out of bounds", http.StatusBadRequest)
+					return
+				}
+				_, _ = w.Write(data[start:end])
+			}
 		case "/fetch":
 			if r.Method != http.MethodPost {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1180,22 +1269,32 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 				return
 			}
 			fetchPaths <- req.Paths
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{
-				"results": [{
-					"path": "s3://bucket/cached-model",
-					"status": "warmed",
-					"total_size": 100,
-					"total_chunks": 10,
-					"cached_chunks": 4,
-					"warmed_chunks": 6
-				}]
-			}`))
+			results := make([]map[string]any, 0, len(req.Paths))
+			for _, fetchPath := range req.Paths {
+				size := len(configData)
+				mtime := configMTime
+				if fetchPath == weightPath {
+					size = len(safetensorsData)
+					mtime = weightMTime
+				}
+				results = append(results, map[string]any{
+					"path":          fetchPath,
+					"status":        "warmed",
+					"total_size":    size,
+					"mtime":         mtime,
+					"chunk_size":    chunkSize,
+					"total_chunks":  1,
+					"cached_chunks": 0,
+					"warmed_chunks": 1,
+				})
+			}
+			writeJSONForControllerTest(t, w, map[string]any{"results": results})
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
+	serverAddr = server.Listener.Addr().String()
 
 	cacheClient, err := clustercache.NewClient(modelcache.ProviderConfig{
 		Endpoint: server.URL,
@@ -1249,7 +1348,7 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 
 	result := reconcile()
 	g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
-	g.Eventually(headPaths, time.Second).Should(gomega.Receive(gomega.Equal(sourceURI)))
+	g.Eventually(fileMetadataPaths, time.Second).Should(gomega.Receive(gomega.Equal(sourceURI)))
 	updated := getBaseModelForTest(t, kubeClient, "default", "cached-model")
 	sourceReachable := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionSourceReachable)
 	g.Expect(sourceReachable).ToNot(gomega.BeNil())
@@ -1257,7 +1356,8 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 
 	result = reconcile()
 	g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
-	g.Eventually(fetchPaths, time.Second).Should(gomega.Receive(gomega.Equal([]string{sourceURI})))
+	g.Eventually(fetchPaths, time.Second).Should(gomega.Receive(gomega.Equal([]string{configPath})))
+	g.Eventually(fetchPaths, time.Second).Should(gomega.Receive(gomega.ConsistOf(configPath, weightPath)))
 	updated = getBaseModelForTest(t, kubeClient, "default", "cached-model")
 	g.Expect(updated.Status.Cache).ToNot(gomega.BeNil())
 	g.Expect(updated.Status.Cache.PrewarmID).ToNot(gomega.BeEmpty())
@@ -1278,12 +1378,19 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 	g.Expect(cached).ToNot(gomega.BeNil())
 	g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionTrue))
 	g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmSucceeded))
+	ready := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionReady)
+	g.Expect(ready).ToNot(gomega.BeNil())
+	g.Expect(ready.Status).To(gomega.Equal(metav1.ConditionTrue))
+	g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonMetadataParsed))
+	g.Expect(updated.Spec.ModelArchitecture).ToNot(gomega.BeNil())
+	g.Expect(*updated.Spec.ModelArchitecture).To(gomega.Equal("PhiModel"))
 	g.Expect(updated.Status.Cache.Backend).To(gomega.Equal(modelcache.ProviderClusterCache))
 	g.Expect(updated.Status.Cache.SourceUri).To(gomega.Equal(sourceURI))
-	g.Expect(*updated.Status.Cache.TotalBytes).To(gomega.Equal(int64(100)))
-	g.Expect(*updated.Status.Cache.CachedBytes).To(gomega.Equal(int64(100)))
-	g.Expect(*updated.Status.Cache.TotalChunks).To(gomega.Equal(int32(10)))
-	g.Expect(*updated.Status.Cache.CachedChunks).To(gomega.Equal(int32(10)))
+	expectedTotalBytes := int64(len(configData) + len(safetensorsData))
+	g.Expect(*updated.Status.Cache.TotalBytes).To(gomega.Equal(expectedTotalBytes))
+	g.Expect(*updated.Status.Cache.CachedBytes).To(gomega.Equal(expectedTotalBytes))
+	g.Expect(*updated.Status.Cache.TotalChunks).To(gomega.Equal(int32(2)))
+	g.Expect(*updated.Status.Cache.CachedChunks).To(gomega.Equal(int32(2)))
 }
 
 func TestMapConfigMapToModelRequests(t *testing.T) {
@@ -1853,6 +1960,16 @@ func distributionPtr(distribution v1beta1.Distribution) *v1beta1.Distribution {
 	return &distribution
 }
 
+func tinyPhiConfigForTest(t *testing.T) []byte {
+	t.Helper()
+
+	data, err := os.ReadFile("../../../hfutil/modelconfig/testdata/tiny-random-PhiModel/config.json")
+	if err != nil {
+		t.Fatalf("failed to read tiny phi config fixture: %v", err)
+	}
+	return data
+}
+
 func shardedStatusWithPrewarmID(prewarmID string) v1beta1.ModelStatusSpec {
 	return v1beta1.ModelStatusSpec{
 		Cache: &v1beta1.ModelCacheStatus{
@@ -1907,6 +2024,32 @@ func shardedCachedStatusForSource(sourceURI string) v1beta1.ModelStatusSpec {
 	}
 }
 
+func shardedInspectionForTest(t *testing.T, source modelcache.Source) *modelcache.SourceInspection {
+	t.Helper()
+
+	safetensorsData := safetensorsHeaderForTest(`{"weight":{"dtype":"F32","shape":[2,3],"data_offsets":[0,24]}}`)
+	weightPath := source.URI + "/model-00001-of-00001.safetensors"
+	return &modelcache.SourceInspection{
+		Objects: []modelcache.Object{
+			{
+				Source:    source,
+				Path:      weightPath,
+				SizeBytes: int64(len(safetensorsData)) + 1024,
+			},
+		},
+		Metadata: modelcache.ModelMetadataInputs{
+			ConfigJSON: tinyPhiConfigForTest(t),
+			SafetensorHeaders: []modelcache.SafetensorHeader{
+				{
+					Path:       weightPath,
+					SizeBytes:  int64(len(safetensorsData)) + 1024,
+					HeaderJSON: safetensorsHeaderJSONForTest(safetensorsData),
+				},
+			},
+		},
+	}
+}
+
 func getBaseModelForTest(t *testing.T, c client.Client, namespace, name string) *v1beta1.BaseModel {
 	t.Helper()
 	g := gomega.NewGomegaWithT(t)
@@ -1915,6 +2058,13 @@ func getBaseModelForTest(t *testing.T, c client.Client, namespace, name string) 
 	err := c.Get(context.TODO(), types.NamespacedName{Namespace: namespace, Name: name}, baseModel)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	return baseModel
+}
+
+func writeJSONForControllerTest(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+
+	w.Header().Set("Content-Type", "application/json")
+	gomega.NewGomegaWithT(t).Expect(json.NewEncoder(w).Encode(value)).NotTo(gomega.HaveOccurred())
 }
 
 func validateProviderNotConfiguredShardedStatus(t *testing.T, status v1beta1.ModelStatusSpec, sourceURI string) {

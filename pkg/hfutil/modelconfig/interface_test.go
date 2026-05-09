@@ -82,6 +82,36 @@ func TestFormatSize(t *testing.T) {
 	}
 }
 
+func TestParseModelConfigFromBytes(t *testing.T) {
+	configPath := filepath.Join("testdata", "tiny-random-PhiModel", "config.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config fixture: %v", err)
+	}
+
+	model, err := ParseModelConfig(ModelConfigInput{
+		Path: "config.json",
+		Data: data,
+	})
+	if err != nil {
+		t.Fatalf("ParseModelConfig returned error: %v", err)
+	}
+
+	phi, ok := model.(*PhiModelConfig)
+	if !ok {
+		t.Fatalf("expected *PhiModelConfig, got %T", model)
+	}
+	if phi.ConfigPath != "config.json" {
+		t.Fatalf("expected logical config path to be preserved, got %q", phi.ConfigPath)
+	}
+	if phi.GetModelType() != "phi" {
+		t.Fatalf("expected model type phi, got %q", phi.GetModelType())
+	}
+	if phi.GetArchitecture() != "PhiModel" {
+		t.Fatalf("expected architecture PhiModel, got %q", phi.GetArchitecture())
+	}
+}
+
 func TestGenericModelLoading(t *testing.T) {
 	// Test cases for different model types
 	testCases := []struct {

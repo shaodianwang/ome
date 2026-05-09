@@ -3,12 +3,17 @@ package clustercache
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,6 +60,12 @@ type operationState struct {
 	completedAt time.Time
 }
 
+type operationIDPayload struct {
+	SourceURI string   `json:"source_uri,omitempty"`
+	PathsHash string   `json:"paths_hash,omitempty"`
+	Paths     []string `json:"paths,omitempty"`
+}
+
 type headResponse struct {
 	Size  uint64 `json:"size"`
 	MTime uint64 `json:"mtime"`
@@ -80,6 +91,37 @@ type fetchPathResult struct {
 	WarmedChunks *int     `json:"warmed_chunks"`
 	ElapsedSecs  *float64 `json:"elapsed_secs"`
 	Error        *string  `json:"error"`
+}
+
+type fileMetadataResponse struct {
+	Root  string              `json:"root"`
+	Files []fileMetadataEntry `json:"files"`
+}
+
+type fileMetadataEntry struct {
+	Path         string  `json:"path"`
+	Bucket       string  `json:"bucket,omitempty"`
+	Key          string  `json:"key,omitempty"`
+	RelativePath string  `json:"relative_path,omitempty"`
+	Size         uint64  `json:"size"`
+	MTime        *uint64 `json:"mtime,omitempty"`
+	CTime        *uint64 `json:"ctime,omitempty"`
+	ETag         *string `json:"etag,omitempty"`
+	StorageClass *string `json:"storage_class,omitempty"`
+}
+
+type endpointError struct {
+	endpoint   string
+	status     string
+	statusCode int
+	body       string
+}
+
+func (e *endpointError) Error() string {
+	if strings.TrimSpace(e.body) == "" {
+		return fmt.Sprintf("cluster_cache %s returned %s", e.endpoint, e.status)
+	}
+	return fmt.Sprintf("cluster_cache %s returned %s: %s", e.endpoint, e.status, e.body)
 }
 
 func NewClient(config modelcache.ProviderConfig) (modelcache.Client, error) {
@@ -134,6 +176,33 @@ func (c *Client) CheckSource(ctx context.Context, source modelcache.Source) (*mo
 		}, nil
 	}
 
+	metadata, err := c.fileMetadata(ctx, source.URI)
+	if err == nil {
+		if len(metadata.Files) == 0 {
+			return &modelcache.SourceStatus{
+				Reachable: false,
+				Reason:    reasonSourceNotReachable,
+				Message:   "cluster_cache file_metadata returned no files for model source",
+			}, nil
+		}
+		return &modelcache.SourceStatus{
+			Reachable: true,
+			Reason:    reasonSourceReachable,
+			Message:   "model source is reachable through cluster_cache",
+		}, nil
+	}
+	if !isEndpointStatus(err, http.StatusNotFound) {
+		return &modelcache.SourceStatus{
+			Reachable: false,
+			Reason:    reasonSourceNotReachable,
+			Message:   err.Error(),
+		}, nil
+	}
+
+	return c.checkSourceWithHead(ctx, source)
+}
+
+func (c *Client) checkSourceWithHead(ctx context.Context, source modelcache.Source) (*modelcache.SourceStatus, error) {
 	query := url.Values{}
 	query.Set("path", source.URI)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL("/head", query), nil)
@@ -167,16 +236,67 @@ func (c *Client) CheckSource(ctx context.Context, source modelcache.Source) (*mo
 	}, nil
 }
 
-func (c *Client) ListSource(ctx context.Context, source modelcache.Source) ([]modelcache.Object, error) {
-	return nil, fmt.Errorf("cluster_cache provider does not support ListSource")
+func (c *Client) InspectSource(ctx context.Context, source modelcache.Source) (*modelcache.SourceInspection, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(source.URI) == "" {
+		return nil, fmt.Errorf("cluster_cache source URI is required for source inspection")
+	}
+
+	metadata, err := c.fileMetadata(ctx, source.URI)
+	if err != nil {
+		return nil, err
+	}
+	return c.inspectSourceFromFileMetadata(ctx, source, metadata)
 }
 
-func (c *Client) GetObject(ctx context.Context, ref modelcache.ObjectRef) (*modelcache.Object, error) {
-	return nil, fmt.Errorf("cluster_cache provider does not support GetObject")
+func (c *Client) fileMetadata(ctx context.Context, sourceURI string) (*fileMetadataResponse, error) {
+	query := url.Values{}
+	query.Set("path", sourceURI)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL("/file_metadata", query), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, endpointStatusError("file_metadata", response)
+	}
+
+	var parsed fileMetadataResponse
+	if err := json.NewDecoder(response.Body).Decode(&parsed); err != nil {
+		return nil, fmt.Errorf("decode cluster_cache file_metadata response: %w", err)
+	}
+	return &parsed, nil
 }
 
-func (c *Client) ReadMetadataRange(ctx context.Context, req modelcache.MetadataRangeRequest) ([]byte, error) {
-	return nil, fmt.Errorf("cluster_cache provider does not support ReadMetadataRange")
+func (r *fileMetadataResponse) toModelCacheSourceInspection(source modelcache.Source) *modelcache.SourceInspection {
+	if r == nil {
+		return &modelcache.SourceInspection{}
+	}
+
+	inspection := &modelcache.SourceInspection{
+		Objects: make([]modelcache.Object, 0, len(r.Files)),
+	}
+	for _, file := range r.Files {
+		path := inspectPath(firstNonEmpty(r.Root, source.URI), file.Path, "", file.RelativePath)
+		if path == "" {
+			continue
+		}
+		inspection.Objects = append(inspection.Objects, modelcache.Object{
+			Source:    source,
+			Path:      path,
+			SizeBytes: uint64ToInt64(file.Size),
+			Version:   inspectVersion("", stringPtrValue(file.ETag), file.MTime),
+		})
+	}
+	return inspection
 }
 
 func (c *Client) StartPrewarm(ctx context.Context, req modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
@@ -192,7 +312,7 @@ func (c *Client) StartPrewarm(ctx context.Context, req modelcache.PrewarmRequest
 		return nil, fmt.Errorf("cluster_cache prewarm requires at least one source path")
 	}
 
-	operationID, err := encodeOperationID(paths)
+	operationID, err := encodeOperationID(req.Source, paths)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +338,7 @@ func (c *Client) GetPrewarmStatus(ctx context.Context, operation modelcache.Prew
 	}
 	c.mu.Unlock()
 
-	paths, err := decodeOperationID(operation.ID)
+	payload, err := decodeOperationID(operation.ID)
 	if err != nil {
 		return &modelcache.PrewarmStatus{
 			Operation: operation,
@@ -226,6 +346,10 @@ func (c *Client) GetPrewarmStatus(ctx context.Context, operation modelcache.Prew
 			Reason:    reasonOperationNotFound,
 			Message:   "cluster_cache prewarm operation was not found and could not be reconstructed",
 		}, nil
+	}
+	paths, err := c.reconstructPrewarmPaths(ctx, payload)
+	if err != nil {
+		return nil, err
 	}
 
 	c.startOperation(operation.ID, paths)
@@ -468,33 +592,80 @@ func fetchResultError(result fetchPathResult, fallback string) string {
 	return fmt.Sprintf("%s: %s", result.Path, fallback)
 }
 
-func encodeOperationID(paths []string) (string, error) {
-	data, err := json.Marshal(paths)
+func encodeOperationID(source modelcache.Source, paths []string) (string, error) {
+	payload := operationIDPayload{Paths: paths}
+	if strings.TrimSpace(source.URI) != "" {
+		payload = operationIDPayload{
+			SourceURI: source.URI,
+			PathsHash: pathsHash(paths),
+		}
+	}
+
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
 	return operationPrefix + base64.RawURLEncoding.EncodeToString(data), nil
 }
 
-func decodeOperationID(operationID string) ([]string, error) {
+func decodeOperationID(operationID string) (operationIDPayload, error) {
 	encoded, ok := strings.CutPrefix(operationID, operationPrefix)
 	if !ok {
-		return nil, fmt.Errorf("operation ID does not use cluster_cache fetch format")
+		return operationIDPayload{}, fmt.Errorf("operation ID does not use cluster_cache fetch format")
 	}
 
 	data, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil, err
+		return operationIDPayload{}, err
+	}
+
+	var payload operationIDPayload
+	if err := json.Unmarshal(data, &payload); err == nil {
+		if strings.TrimSpace(payload.SourceURI) != "" || len(payload.Paths) > 0 {
+			return payload, nil
+		}
 	}
 
 	var paths []string
 	if err := json.Unmarshal(data, &paths); err != nil {
-		return nil, err
+		return operationIDPayload{}, err
 	}
 	if len(paths) == 0 {
-		return nil, fmt.Errorf("operation ID does not contain paths")
+		return operationIDPayload{}, fmt.Errorf("operation ID does not contain source URI or paths")
+	}
+	return operationIDPayload{Paths: paths}, nil
+}
+
+func (c *Client) reconstructPrewarmPaths(ctx context.Context, payload operationIDPayload) ([]string, error) {
+	if len(payload.Paths) > 0 {
+		return payload.Paths, nil
+	}
+	if strings.TrimSpace(payload.SourceURI) == "" {
+		return nil, fmt.Errorf("operation ID does not contain source URI or paths")
+	}
+	metadata, err := c.fileMetadata(ctx, payload.SourceURI)
+	if err != nil {
+		return nil, fmt.Errorf("reconstruct cluster_cache prewarm operation from file_metadata: %w", err)
+	}
+	inspection := metadata.toModelCacheSourceInspection(modelcache.Source{URI: payload.SourceURI})
+	paths := make([]string, 0, len(inspection.Objects))
+	for _, object := range inspection.Objects {
+		if strings.TrimSpace(object.Path) != "" {
+			paths = append(paths, object.Path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("reconstructed cluster_cache prewarm operation has no paths")
 	}
 	return paths, nil
+}
+
+func pathsHash(paths []string) string {
+	copyPaths := append([]string(nil), paths...)
+	sort.Strings(copyPaths)
+	data, _ := json.Marshal(copyPaths)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:16])
 }
 
 func clonePrewarmStatus(status modelcache.PrewarmStatus) modelcache.PrewarmStatus {
@@ -554,6 +725,77 @@ func addInt(total int, value int) int {
 		return int(^uint(0) >> 1)
 	}
 	return total + value
+}
+
+func uint64ToInt64(value uint64) int64 {
+	if value > uint64(maxInt64) {
+		return maxInt64
+	}
+	return int64(value)
+}
+
+func inspectVersion(version, etag string, mtime *uint64) string {
+	if version != "" {
+		return version
+	}
+	if etag != "" {
+		return etag
+	}
+	if mtime != nil {
+		return strconv.FormatUint(*mtime, 10)
+	}
+	return ""
+}
+
+func stringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
+func inspectPath(sourceURI, uri, path, relativePath string) string {
+	if value := firstNonEmpty(uri, path); value != "" {
+		return value
+	}
+	relativePath = strings.TrimLeft(strings.TrimSpace(relativePath), "/")
+	if relativePath == "" {
+		return ""
+	}
+	sourceURI = strings.TrimSpace(sourceURI)
+	if sourceURI == "" {
+		return relativePath
+	}
+	if strings.HasSuffix(sourceURI, "/") {
+		return sourceURI + relativePath
+	}
+	return sourceURI + "/" + relativePath
+}
+
+func endpointStatusError(endpoint string, response *http.Response) error {
+	return &endpointError{
+		endpoint:   endpoint,
+		status:     response.Status,
+		statusCode: response.StatusCode,
+		body:       readErrorBody(response.Body),
+	}
+}
+
+func isEndpointStatus(err error, statusCode int) bool {
+	var endpointErr *endpointError
+	if !errors.As(err, &endpointErr) {
+		return false
+	}
+	return endpointErr.statusCode == statusCode
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func readErrorBody(reader io.Reader) string {

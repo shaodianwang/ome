@@ -112,10 +112,6 @@ func (c *MiniCPMConfig) IsEmbedding() bool {
 
 // Register the MiniCPM model handler
 func init() {
-	RegisterModelLoader("minicpm", func(configPath string) (HuggingFaceModel, error) {
-		return LoadMiniCPMConfig(configPath)
-	})
-	RegisterModelLoader("minicpm3", func(configPath string) (HuggingFaceModel, error) {
-		return LoadMiniCPMConfig(configPath)
-	})
+	RegisterJSONModelLoader[MiniCPMConfig, *MiniCPMConfig]("minicpm")
+	RegisterJSONModelLoader[MiniCPMConfig, *MiniCPMConfig]("minicpm3")
 }

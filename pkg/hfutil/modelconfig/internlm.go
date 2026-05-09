@@ -106,10 +106,6 @@ func (c *InternLMConfig) IsEmbedding() bool {
 
 // Register the InternLM model handler
 func init() {
-	RegisterModelLoader("internlm", func(configPath string) (HuggingFaceModel, error) {
-		return LoadInternLMConfig(configPath)
-	})
-	RegisterModelLoader("internlm2", func(configPath string) (HuggingFaceModel, error) {
-		return LoadInternLMConfig(configPath)
-	})
+	RegisterJSONModelLoader[InternLMConfig, *InternLMConfig]("internlm")
+	RegisterJSONModelLoader[InternLMConfig, *InternLMConfig]("internlm2")
 }

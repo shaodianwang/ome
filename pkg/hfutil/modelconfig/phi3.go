@@ -120,7 +120,5 @@ func (c *Phi3Config) IsEmbedding() bool {
 
 // Register the Phi3 model handler
 func init() {
-	RegisterModelLoader("phi3", func(configPath string) (HuggingFaceModel, error) {
-		return LoadPhi3Config(configPath)
-	})
+	RegisterJSONModelLoader[Phi3Config, *Phi3Config]("phi3")
 }

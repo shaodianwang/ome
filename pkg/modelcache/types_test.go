@@ -15,15 +15,7 @@ func (noopClient) CheckSource(context.Context, Source) (*SourceStatus, error) {
 	return nil, nil
 }
 
-func (noopClient) ListSource(context.Context, Source) ([]Object, error) {
-	return nil, nil
-}
-
-func (noopClient) GetObject(context.Context, ObjectRef) (*Object, error) {
-	return nil, nil
-}
-
-func (noopClient) ReadMetadataRange(context.Context, MetadataRangeRequest) ([]byte, error) {
+func (noopClient) InspectSource(context.Context, Source) (*SourceInspection, error) {
 	return nil, nil
 }
 

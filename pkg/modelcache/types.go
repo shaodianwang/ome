@@ -19,9 +19,7 @@ const (
 // Client is the high-level OME control-plane contract for a model cache.
 type Client interface {
 	CheckSource(ctx context.Context, source Source) (*SourceStatus, error)
-	ListSource(ctx context.Context, source Source) ([]Object, error)
-	GetObject(ctx context.Context, ref ObjectRef) (*Object, error)
-	ReadMetadataRange(ctx context.Context, req MetadataRangeRequest) ([]byte, error)
+	InspectSource(ctx context.Context, source Source) (*SourceInspection, error)
 	StartPrewarm(ctx context.Context, req PrewarmRequest) (*PrewarmOperation, error)
 	GetPrewarmStatus(ctx context.Context, operation PrewarmOperation) (*PrewarmStatus, error)
 }
@@ -146,6 +144,31 @@ type SourceStatus struct {
 	Message   string
 }
 
+// SourceInspection is a provider-neutral description of a model source plus
+// the small metadata payloads OME needs for model parsing.
+type SourceInspection struct {
+	Objects  []Object
+	Metadata ModelMetadataInputs
+}
+
+// ModelMetadataInputs contains small model metadata blobs returned by source
+// inspection. Providers must not include tensor bodies here.
+type ModelMetadataInputs struct {
+	ConfigJSON           []byte
+	ModelIndexJSON       []byte
+	SafetensorsIndexJSON []byte
+	TokenizerConfigJSON  []byte
+	SafetensorHeaders    []SafetensorHeader
+}
+
+// SafetensorHeader describes one safetensors shard and its JSON header.
+type SafetensorHeader struct {
+	Path       string
+	SizeBytes  int64
+	Version    string
+	HeaderJSON []byte
+}
+
 // ObjectRef identifies one object within a model source.
 type ObjectRef struct {
 	Source Source
@@ -158,13 +181,6 @@ type Object struct {
 	Path      string
 	SizeBytes int64
 	Version   string
-}
-
-// MetadataRangeRequest asks for a small metadata byte range from an object.
-type MetadataRangeRequest struct {
-	Object Object
-	Offset int64
-	Length int64
 }
 
 // PrewarmRequest asks the model cache to prewarm a source or known objects.

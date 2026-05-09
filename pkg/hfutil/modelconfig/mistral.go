@@ -147,7 +147,5 @@ func (c *MistralConfig) IsEmbedding() bool {
 
 // Register the Mistral model handler
 func init() {
-	RegisterModelLoader("mistral", func(configPath string) (HuggingFaceModel, error) {
-		return LoadMistralConfig(configPath)
-	})
+	RegisterJSONModelLoader[MistralConfig, *MistralConfig]("mistral")
 }

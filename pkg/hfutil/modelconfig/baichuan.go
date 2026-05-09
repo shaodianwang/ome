@@ -105,7 +105,5 @@ func (c *BaichuanConfig) IsEmbedding() bool {
 
 // Register the Baichuan model handler
 func init() {
-	RegisterModelLoader("baichuan", func(configPath string) (HuggingFaceModel, error) {
-		return LoadBaichuanConfig(configPath)
-	})
+	RegisterJSONModelLoader[BaichuanConfig, *BaichuanConfig]("baichuan")
 }

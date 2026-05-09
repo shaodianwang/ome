@@ -2,6 +2,7 @@ package clustercache
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -121,9 +122,18 @@ func TestCheckSource(t *testing.T) {
 	var gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodGet, r.Method)
-		require.Equal(t, "/head", r.URL.Path)
+		require.Equal(t, "/file_metadata", r.URL.Path)
 		gotPath = r.URL.Query().Get("path")
-		writeJSON(t, w, headResponse{Size: 100, MTime: 123})
+		writeJSON(t, w, fileMetadataResponse{
+			Root: "s3://bucket/model",
+			Files: []fileMetadataEntry{
+				{
+					Path:         "s3://bucket/model/config.json",
+					RelativePath: "config.json",
+					Size:         100,
+				},
+			},
+		})
 	}))
 	defer server.Close()
 
@@ -134,6 +144,47 @@ func TestCheckSource(t *testing.T) {
 	require.NotNil(t, status)
 	assert.True(t, status.Reachable)
 	assert.Equal(t, "s3://bucket/model", gotPath)
+}
+
+func TestCheckSourceFallsBackToHeadWhenFileMetadataUnsupported(t *testing.T) {
+	var gotHeadPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file_metadata":
+			http.NotFound(w, r)
+		case "/head":
+			gotHeadPath = r.URL.Query().Get("path")
+			writeJSON(t, w, headResponse{Size: 100, MTime: 123})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	status, err := client.CheckSource(context.Background(), modelcache.Source{URI: "s3://bucket/model"})
+
+	require.NoError(t, err)
+	require.NotNil(t, status)
+	assert.True(t, status.Reachable)
+	assert.Equal(t, "s3://bucket/model", gotHeadPath)
+}
+
+func TestCheckSourceRejectsEmptyFileMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/file_metadata", r.URL.Path)
+		writeJSON(t, w, fileMetadataResponse{Root: "s3://bucket/model"})
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	status, err := client.CheckSource(context.Background(), modelcache.Source{URI: "s3://bucket/model"})
+
+	require.NoError(t, err)
+	require.NotNil(t, status)
+	assert.False(t, status.Reachable)
+	assert.Equal(t, reasonSourceNotReachable, status.Reason)
+	assert.Contains(t, status.Message, "no files")
 }
 
 func TestCheckSourceNotReachable(t *testing.T) {
@@ -150,6 +201,137 @@ func TestCheckSourceNotReachable(t *testing.T) {
 	assert.False(t, status.Reachable)
 	assert.Equal(t, reasonSourceNotReachable, status.Reason)
 	assert.Contains(t, status.Message, "404")
+}
+
+func TestInspectSourceUsesFileMetadataRingAndPackedRanges(t *testing.T) {
+	const sourceURI = "s3://bucket/model"
+	configPath := sourceURI + "/config.json"
+	indexPath := sourceURI + "/model.safetensors.index.json"
+	weightPath := sourceURI + "/model-00001-of-00001.safetensors"
+
+	configJSON := []byte(`{"model_type": "phi"}`)
+	indexJSON := []byte(`{"weight_map":{"weight":"model-00001-of-00001.safetensors"}}`)
+	headerJSON := []byte(`{"weight": {"dtype": "F32", "shape": [2, 3], "data_offsets": [0, 24]}}`)
+	safetensorsData := safetensorsFileForTest(headerJSON, 128)
+	mtimeConfig := uint64(1710000000)
+	mtimeIndex := uint64(1710000001)
+	mtimeWeight := uint64(1710000002)
+	chunkSize := uint64(16)
+
+	var serverAddr string
+	var gotFetch fetchRequest
+	var packedRangeRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file_metadata":
+			require.Equal(t, http.MethodGet, r.Method)
+			assert.Equal(t, sourceURI, r.URL.Query().Get("path"))
+			writeJSON(t, w, fileMetadataResponse{
+				Root: sourceURI,
+				Files: []fileMetadataEntry{
+					{Path: configPath, RelativePath: "config.json", Size: uint64(len(configJSON)), MTime: &mtimeConfig, ETag: stringPtr("config-etag")},
+					{Path: indexPath, RelativePath: "model.safetensors.index.json", Size: uint64(len(indexJSON)), MTime: &mtimeIndex, ETag: stringPtr("index-etag")},
+					{Path: weightPath, RelativePath: "model-00001-of-00001.safetensors", Size: uint64(len(safetensorsData)), MTime: &mtimeWeight, ETag: stringPtr("weight-etag")},
+				},
+			})
+		case "/fetch":
+			require.Equal(t, http.MethodPost, r.Method)
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotFetch))
+			writeJSON(t, w, fetchResponse{
+				Results: []fetchPathResult{
+					{
+						Path:      configPath,
+						Status:    "cached",
+						TotalSize: uint64Ptr(uint64(len(configJSON))),
+						MTime:     uint64Ptr(mtimeConfig),
+						ChunkSize: uint64Ptr(chunkSize),
+					},
+				},
+			})
+		case "/ring_info":
+			require.Equal(t, http.MethodGet, r.Method)
+			writeJSON(t, w, ringInfoResponse{Nodes: []string{serverAddr}})
+		case "/packed_byte_ranges_by_key":
+			require.Equal(t, http.MethodPost, r.Method)
+			packedRangeRequests++
+			var req packedByteRangeBatchRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			for _, rangeSpec := range req.Ranges {
+				data := map[string][]byte{
+					configPath: configJSON,
+					indexPath:  indexJSON,
+					weightPath: safetensorsData,
+				}[rangeSpec.Path]
+				start := rangeSpec.ChunkOffset + rangeSpec.RangeOffset
+				end := start + rangeSpec.Length
+				require.LessOrEqual(t, end, uint64(len(data)))
+				_, _ = w.Write(data[start:end])
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	serverAddr = server.Listener.Addr().String()
+
+	client := newTestClient(t, server.URL)
+	inspection, err := client.InspectSource(context.Background(), modelcache.Source{URI: sourceURI})
+
+	require.NoError(t, err)
+	require.NotNil(t, inspection)
+	assert.Equal(t, fetchRequest{Paths: []string{configPath}}, gotFetch)
+	assert.GreaterOrEqual(t, packedRangeRequests, 3)
+	require.Len(t, inspection.Objects, 3)
+	assert.JSONEq(t, string(configJSON), string(inspection.Metadata.ConfigJSON))
+	assert.JSONEq(t, string(indexJSON), string(inspection.Metadata.SafetensorsIndexJSON))
+	require.Len(t, inspection.Metadata.SafetensorHeaders, 1)
+	assert.Equal(t, weightPath, inspection.Metadata.SafetensorHeaders[0].Path)
+	assert.Equal(t, int64(len(safetensorsData)), inspection.Metadata.SafetensorHeaders[0].SizeBytes)
+	assert.Equal(t, "weight-etag", inspection.Metadata.SafetensorHeaders[0].Version)
+	assert.JSONEq(t, string(headerJSON), string(inspection.Metadata.SafetensorHeaders[0].HeaderJSON))
+}
+
+func TestInspectSourceRequiresConfigOrModelIndex(t *testing.T) {
+	mtime := uint64(1710000000)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file_metadata":
+			writeJSON(t, w, fileMetadataResponse{
+				Root: "s3://bucket/model",
+				Files: []fileMetadataEntry{
+					{
+						Path:         "s3://bucket/model/model-00001-of-00001.safetensors",
+						RelativePath: "model-00001-of-00001.safetensors",
+						Size:         1024,
+						MTime:        &mtime,
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.InspectSource(context.Background(), modelcache.Source{URI: "s3://bucket/model"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "config.json")
+}
+
+func TestInspectSourceReportsEndpointError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.InspectSource(context.Background(), modelcache.Source{URI: "s3://bucket/model"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "file_metadata returned 503")
+	assert.Contains(t, err.Error(), "unavailable")
 }
 
 func TestStartPrewarmPostsFetchAndReportsSuccess(t *testing.T) {
@@ -189,6 +371,11 @@ func TestStartPrewarmPostsFetchAndReportsSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, operation)
 	assert.NotEmpty(t, operation.ID)
+	payload, err := decodeOperationID(operation.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "s3://bucket/model", payload.SourceURI)
+	assert.Empty(t, payload.Paths)
+	assert.NotEmpty(t, payload.PathsHash)
 
 	require.Eventually(t, func() bool {
 		status, err := client.GetPrewarmStatus(context.Background(), *operation)
@@ -269,20 +456,32 @@ func TestStartPrewarmReportsEmptyFetchFailure(t *testing.T) {
 func TestGetPrewarmStatusRestartsDecodedOperation(t *testing.T) {
 	fetchCalls := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCalls <- struct{}{}
-		writeJSON(t, w, fetchResponse{
-			Results: []fetchPathResult{
-				{
-					Path:   "s3://bucket/model",
-					Status: "cached",
+		switch r.URL.Path {
+		case "/file_metadata":
+			writeJSON(t, w, fileMetadataResponse{
+				Root: "s3://bucket/model",
+				Files: []fileMetadataEntry{
+					{Path: "s3://bucket/model/config.json", RelativePath: "config.json", Size: 100},
 				},
-			},
-		})
+			})
+		case "/fetch":
+			fetchCalls <- struct{}{}
+			writeJSON(t, w, fetchResponse{
+				Results: []fetchPathResult{
+					{
+						Path:   "s3://bucket/model/config.json",
+						Status: "cached",
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	operationID, err := encodeOperationID([]string{"s3://bucket/model"})
+	operationID, err := encodeOperationID(modelcache.Source{URI: "s3://bucket/model"}, []string{"s3://bucket/model/config.json"})
 	require.NoError(t, err)
 
 	status, err := client.GetPrewarmStatus(context.Background(), modelcache.PrewarmOperation{ID: operationID})
@@ -299,7 +498,7 @@ func TestGetPrewarmStatusRestartsDecodedOperation(t *testing.T) {
 
 func TestTerminalOperationsAreCleanedUpAfterRetention(t *testing.T) {
 	client := newTestClient(t, "http://cluster-cache.example")
-	operationID, err := encodeOperationID([]string{"s3://bucket/model"})
+	operationID, err := encodeOperationID(modelcache.Source{}, []string{"s3://bucket/model"})
 	require.NoError(t, err)
 
 	client.mu.Lock()
@@ -356,12 +555,9 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestUnsupportedOperations(t *testing.T) {
 	client := newTestClient(t, "http://cluster-cache.example")
 
-	_, err := client.ListSource(context.Background(), modelcache.Source{})
+	_, err := client.InspectSource(context.Background(), modelcache.Source{})
 	assert.Error(t, err)
-	_, err = client.GetObject(context.Background(), modelcache.ObjectRef{})
-	assert.Error(t, err)
-	_, err = client.ReadMetadataRange(context.Background(), modelcache.MetadataRangeRequest{})
-	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "source URI is required")
 }
 
 func newTestClient(t *testing.T, endpoint string) *Client {
@@ -381,4 +577,15 @@ func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 
 func stringPtr(value string) *string {
 	return &value
+}
+
+func uint64Ptr(value uint64) *uint64 {
+	return &value
+}
+
+func safetensorsFileForTest(headerJSON []byte, payloadBytes int) []byte {
+	data := make([]byte, 8+len(headerJSON)+payloadBytes)
+	binary.LittleEndian.PutUint64(data[:8], uint64(len(headerJSON)))
+	copy(data[8:], headerJSON)
+	return data
 }

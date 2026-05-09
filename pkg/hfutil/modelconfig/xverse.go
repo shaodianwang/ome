@@ -103,7 +103,5 @@ func (c *XverseConfig) IsEmbedding() bool {
 
 // Register the XVERSE model handler
 func init() {
-	RegisterModelLoader("xverse", func(configPath string) (HuggingFaceModel, error) {
-		return LoadXverseConfig(configPath)
-	})
+	RegisterJSONModelLoader[XverseConfig, *XverseConfig]("xverse")
 }

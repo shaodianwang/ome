@@ -194,7 +194,5 @@ func (c *DeepseekV3Config) IsEmbedding() bool {
 
 // Register the DeepSeek V3 model handler
 func init() {
-	RegisterModelLoader("deepseek_v3", func(configPath string) (HuggingFaceModel, error) {
-		return LoadDeepseekV3Config(configPath)
-	})
+	RegisterJSONModelLoader[DeepseekV3Config, *DeepseekV3Config]("deepseek_v3")
 }

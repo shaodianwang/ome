@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/modelcache"
+	"github.com/sgl-project/ome/pkg/modelparser"
 )
 
 const shardedModelCachePollInterval = 5 * time.Second
@@ -60,7 +62,11 @@ func reconcileShardedModelCacheStatus(ctx context.Context, kubeClient client.Cli
 
 	cachedCondition := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionCached)
 	if cachedCondition != nil && cachedCondition.Status == metav1.ConditionTrue {
-		return ctrl.Result{}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, nil)
+		readyCondition := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionReady)
+		if readyCondition != nil && readyCondition.Status == metav1.ConditionTrue {
+			return ctrl.Result{}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, nil)
+		}
+		return reconcileShardedModelMetadata(ctx, kubeClient, log, cacheClient, source, obj, modelType, provider.Name)
 	}
 
 	prewarmID := ""
@@ -68,8 +74,22 @@ func reconcileShardedModelCacheStatus(ctx context.Context, kubeClient client.Cli
 		prewarmID = status.Cache.PrewarmID
 	}
 	if prewarmID == "" {
+		inspection, result, err := reconcileShardedModelMetadataSpec(ctx, kubeClient, log, cacheClient, source, obj, modelType, provider.Name)
+		if err != nil {
+			return result, err
+		}
+		if result.Requeue || result.RequeueAfter > 0 {
+			return result, nil
+		}
+
+		objects := shardedPrewarmObjectRefs(source, inspection)
+		if len(objects) == 0 {
+			return markShardedModelMetadataPending(ctx, kubeClient, log, obj, modelType, provider.Name, "model cache source inspection returned no objects to prewarm")
+		}
+
 		operation, err := cacheClient.StartPrewarm(ctx, modelcache.PrewarmRequest{
 			Source:         source,
+			Objects:        objects,
 			IdempotencyKey: modelPrewarmIdempotencyKey(obj, source),
 		})
 		if err != nil {
@@ -97,7 +117,125 @@ func reconcileShardedModelCacheStatus(ctx context.Context, kubeClient client.Cli
 	transition := func(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool {
 		return applyPrewarmStatus(generation, status, prewarmStatus)
 	}
-	return result, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, transition)
+	if err := updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, transition); err != nil {
+		return result, err
+	}
+	if prewarmStatus != nil && prewarmStatus.Phase == modelcache.PrewarmPhaseSucceeded {
+		return reconcileShardedModelMetadata(ctx, kubeClient, log, cacheClient, source, obj, modelType, provider.Name)
+	}
+	return result, nil
+}
+
+func reconcileShardedModelMetadata(ctx context.Context, kubeClient client.Client, log logr.Logger, cacheClient modelcache.Client, source modelcache.Source, obj client.Object, modelType, backend string) (ctrl.Result, error) {
+	parser, metadata, _, result, err := parseShardedModelMetadata(ctx, kubeClient, log, cacheClient, source, obj, modelType, backend)
+	if err != nil {
+		return result, err
+	}
+	if result.Requeue || result.RequeueAfter > 0 {
+		return result, nil
+	}
+
+	return ctrl.Result{}, updateShardedModelMetadataWithRetry(ctx, kubeClient, log, obj, modelType, backend, parser, *metadata)
+}
+
+func reconcileShardedModelMetadataSpec(ctx context.Context, kubeClient client.Client, log logr.Logger, cacheClient modelcache.Client, source modelcache.Source, obj client.Object, modelType, backend string) (*modelcache.SourceInspection, ctrl.Result, error) {
+	parser, metadata, inspection, result, err := parseShardedModelMetadata(ctx, kubeClient, log, cacheClient, source, obj, modelType, backend)
+	if err != nil {
+		return nil, result, err
+	}
+	if result.Requeue || result.RequeueAfter > 0 {
+		return nil, result, nil
+	}
+
+	return inspection, ctrl.Result{}, updateShardedModelMetadataSpecWithRetry(ctx, kubeClient, log, obj, modelType, parser, *metadata)
+}
+
+func parseShardedModelMetadata(ctx context.Context, kubeClient client.Client, log logr.Logger, cacheClient modelcache.Client, source modelcache.Source, obj client.Object, modelType, backend string) (*modelparser.ModelConfigParser, *modelparser.ModelMetadata, *modelcache.SourceInspection, ctrl.Result, error) {
+	parser := newShardedModelConfigParser()
+	inspection, inputs, err := shardedModelMetadataInputs(ctx, cacheClient, source)
+	if err != nil {
+		result, updateErr := markShardedModelMetadataPending(ctx, kubeClient, log, obj, modelType, backend, fmt.Sprintf("model metadata is pending: %v", err))
+		return nil, nil, nil, result, updateErr
+	}
+
+	metadata, err := parser.ParseModelConfigFromFiles(ctx, inputs, nil, nil)
+	if err != nil {
+		result, updateErr := markShardedModelMetadataPending(ctx, kubeClient, log, obj, modelType, backend, fmt.Sprintf("model metadata parsing is pending: %v", err))
+		return nil, nil, nil, result, updateErr
+	}
+	if metadata == nil {
+		result, updateErr := markShardedModelMetadataPending(ctx, kubeClient, log, obj, modelType, backend, "model metadata parsing produced no metadata")
+		return nil, nil, nil, result, updateErr
+	}
+
+	return parser, metadata, inspection, ctrl.Result{}, nil
+}
+
+func newShardedModelConfigParser() *modelparser.ModelConfigParser {
+	return modelparser.NewModelConfigParser(nil, zap.NewNop().Sugar())
+}
+
+func markShardedModelMetadataPending(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, modelType, backend, message string) (ctrl.Result, error) {
+	transition := func(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool {
+		return applyMetadataPending(generation, status, message)
+	}
+	return ctrl.Result{RequeueAfter: shardedModelCachePollInterval}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, backend, transition)
+}
+
+func updateShardedModelMetadataSpecWithRetry(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, modelType string, parser *modelparser.ModelConfigParser, metadata modelparser.ModelMetadata) error {
+	updateFunc := func(ctx context.Context, client client.Client, obj client.Object) error {
+		spec, _, err := modelSpecAndStatus(obj)
+		if err != nil {
+			return err
+		}
+
+		if !parser.ApplyModelMetadata(spec, metadata) {
+			return nil
+		}
+		if err := client.Update(ctx, obj); err != nil {
+			return err
+		}
+		log.Info(fmt.Sprintf("Updated Sharded %s spec with cache metadata", modelType),
+			"name", obj.GetName(), "namespace", obj.GetNamespace())
+
+		return nil
+	}
+
+	return retryUpdate(ctx, kubeClient, log, obj, "sharded metadata spec", updateFunc)
+}
+
+func updateShardedModelMetadataWithRetry(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, modelType, backend string, parser *modelparser.ModelConfigParser, metadata modelparser.ModelMetadata) error {
+	updateFunc := func(ctx context.Context, client client.Client, obj client.Object) error {
+		spec, status, err := modelSpecAndStatus(obj)
+		if err != nil {
+			return err
+		}
+
+		specUpdated := parser.ApplyModelMetadata(spec, metadata)
+		if specUpdated {
+			if err := client.Update(ctx, obj); err != nil {
+				return err
+			}
+			log.Info(fmt.Sprintf("Updated Sharded %s spec with cache metadata", modelType),
+				"name", obj.GetName(), "namespace", obj.GetNamespace())
+		}
+
+		statusUpdated := applyInitialShardedModelStatus(obj.GetGeneration(), spec, status, backend)
+		statusUpdated = applyMetadataReady(obj.GetGeneration(), status) || statusUpdated
+		if statusUpdated {
+			if err := client.Status().Update(ctx, obj); err != nil {
+				return err
+			}
+			log.Info(fmt.Sprintf("Updated Sharded %s status with cache metadata", modelType),
+				"state", status.State,
+				"cacheBackend", status.Cache.Backend,
+				"sourceUri", status.Cache.SourceUri)
+		}
+
+		return nil
+	}
+
+	return retryUpdate(ctx, kubeClient, log, obj, "sharded metadata", updateFunc)
 }
 
 func updateShardedModelStatusWithRetry(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, modelType string, backend string, transition shardedStatusTransition) error {
@@ -406,6 +544,38 @@ func applyTerminalPrewarmFailure(generation int64, status *v1beta1.ModelStatusSp
 		ObservedGeneration: generation,
 	}) || updated
 
+	return updated
+}
+
+func applyMetadataPending(generation int64, status *v1beta1.ModelStatusSpec, message string) bool {
+	updated := false
+	if status.State != v1beta1.LifeCycleStateImporting {
+		status.State = v1beta1.LifeCycleStateImporting
+		updated = true
+	}
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonMetadataPending,
+		Message:            messageOrDefault(message, "model metadata parsing has not completed"),
+		ObservedGeneration: generation,
+	}) || updated
+	return updated
+}
+
+func applyMetadataReady(generation int64, status *v1beta1.ModelStatusSpec) bool {
+	updated := false
+	if status.State != v1beta1.LifeCycleStateReady {
+		status.State = v1beta1.LifeCycleStateReady
+		updated = true
+	}
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             v1beta1.ModelConditionReasonMetadataParsed,
+		Message:            "model cache prewarm and metadata parsing completed",
+		ObservedGeneration: generation,
+	}) || updated
 	return updated
 }
 

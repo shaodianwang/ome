@@ -133,7 +133,5 @@ func (c *PhiMoEConfig) IsEmbedding() bool {
 
 // Register the PhiMoE model handler
 func init() {
-	RegisterModelLoader("phimoe", func(configPath string) (HuggingFaceModel, error) {
-		return LoadPhiMoEConfig(configPath)
-	})
+	RegisterJSONModelLoader[PhiMoEConfig, *PhiMoEConfig]("phimoe")
 }

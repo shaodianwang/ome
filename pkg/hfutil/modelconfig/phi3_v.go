@@ -125,7 +125,5 @@ func estimateModelParams(hiddenSize, numLayers, intermediateSize, vocabSize int)
 
 // Register the Phi3V model handler
 func init() {
-	RegisterModelLoader("phi3_v", func(configPath string) (HuggingFaceModel, error) {
-		return LoadPhi3VConfig(configPath)
-	})
+	RegisterJSONModelLoader[Phi3VConfig, *Phi3VConfig]("phi3_v")
 }

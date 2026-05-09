@@ -89,7 +89,7 @@ func UpdateVolumeMounts(b *BaseComponentFields, isvc *v1beta1.InferenceService, 
 	}
 
 	// Add model volume mount if base model is specified and it's necessary
-	if b.BaseModel != nil && b.BaseModel.Storage != nil && b.BaseModelMeta != nil {
+	if b.BaseModel != nil && !isShardedModel(b.BaseModel) && b.BaseModel.Storage != nil && b.BaseModelMeta != nil {
 		if isvcutils.IsOriginalModelVolumeMountNecessary(objectMeta.Annotations) {
 			if pvc := parsePVCComponents(b); pvc != nil {
 				vm := corev1.VolumeMount{
@@ -147,18 +147,11 @@ func UpdateEnvVariables(b *BaseComponentFields, isvc *v1beta1.InferenceService, 
 
 	if !b.FineTunedServing {
 		// Base model serving - add MODEL_PATH env variable if necessary
-		if isvcutils.IsOriginalModelVolumeMountNecessary(objectMeta.Annotations) {
-			if isPVCBaseModel(b) {
-				b.Log.Info("Base model serving (PVC) - adding MODEL_PATH env variable if not provided", "inference service", isvc.Name, "namespace", isvc.Namespace)
-				isvcutils.AppendEnvVarsIfNotExist(container, &[]corev1.EnvVar{
-					{Name: constants.ModelPathEnvVarKey, Value: constants.ModelDefaultMountPath},
-				})
-			} else if b.BaseModel != nil && b.BaseModel.Storage != nil && b.BaseModel.Storage.Path != nil {
-				b.Log.Info("Base model serving - adding MODEL_PATH env variable if not provided", "inference service", isvc.Name, "namespace", isvc.Namespace)
-				isvcutils.AppendEnvVarsIfNotExist(container, &[]corev1.EnvVar{
-					{Name: constants.ModelPathEnvVarKey, Value: *b.BaseModel.Storage.Path},
-				})
-			}
+		if modelPath, ok := modelPathEnvValue(b, objectMeta); ok {
+			b.Log.Info("Base model serving - adding MODEL_PATH env variable if not provided", "inference service", isvc.Name, "namespace", isvc.Namespace)
+			isvcutils.AppendEnvVarsIfNotExist(container, &[]corev1.EnvVar{
+				{Name: constants.ModelPathEnvVarKey, Value: modelPath},
+			})
 		}
 	} else {
 		// Fine-tuned serving - add vendor-specific environment variables
@@ -238,7 +231,14 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 	}
 
 	// Add preferred node affinity for model readiness using the shared utility function
-	isvcutils.AddNodeSelectorForModelReadyNode(podSpec, b.BaseModelMeta)
+	if isShardedModel(b.BaseModel) {
+		b.Log.Info("Skipping per-node model readiness selector for sharded model",
+			"modelName", b.BaseModelMeta.Name,
+			"namespace", b.BaseModelMeta.Namespace,
+			"inferenceService", isvc.Name)
+	} else {
+		isvcutils.AddNodeSelectorForModelReadyNode(podSpec, b.BaseModelMeta)
+	}
 
 	// Add node selector merged from AcceleratorClass if applicable
 	// Only add mergedNodeSelector to engine and decoder component.
@@ -252,16 +252,18 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 		}
 	}
 
-	b.Log.Info("Added preferred node affinity for model scheduling",
-		"modelName", b.BaseModelMeta.Name,
-		"namespace", b.BaseModelMeta.Namespace,
-		"inferenceService", isvc.Name)
+	if !isShardedModel(b.BaseModel) {
+		b.Log.Info("Added preferred node affinity for model scheduling",
+			"modelName", b.BaseModelMeta.Name,
+			"namespace", b.BaseModelMeta.Namespace,
+			"inferenceService", isvc.Name)
+	}
 }
 
 // UpdatePodSpecVolumes updates pod spec with common volumes
 func UpdatePodSpecVolumes(b *BaseComponentFields, isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, objectMeta *metav1.ObjectMeta) {
 	// Add model volume if base model is specified.
-	if b.BaseModel != nil && b.BaseModel.Storage != nil && b.BaseModelMeta != nil {
+	if b.BaseModel != nil && !isShardedModel(b.BaseModel) && b.BaseModel.Storage != nil && b.BaseModelMeta != nil {
 		if pvc := parsePVCComponents(b); pvc != nil {
 			modelVolume := corev1.Volume{
 				Name: b.BaseModelMeta.Name,
@@ -298,6 +300,32 @@ func UpdatePodSpecVolumes(b *BaseComponentFields, isvc *v1beta1.InferenceService
 		}
 		podSpec.Volumes = utils.AppendVolumeIfNotExists(podSpec.Volumes, emptyModelDirVolume)
 	}
+}
+
+func isShardedModel(model *v1beta1.BaseModelSpec) bool {
+	return model != nil && model.Distribution != nil && *model.Distribution == v1beta1.DistributionSharded
+}
+
+func modelPathEnvValue(b *BaseComponentFields, objectMeta *metav1.ObjectMeta) (string, bool) {
+	if b == nil || b.BaseModel == nil || b.BaseModel.Storage == nil {
+		return "", false
+	}
+	if isShardedModel(b.BaseModel) {
+		if b.BaseModel.Storage.StorageUri == nil || *b.BaseModel.Storage.StorageUri == "" {
+			return "", false
+		}
+		return *b.BaseModel.Storage.StorageUri, true
+	}
+	if objectMeta == nil || !isvcutils.IsOriginalModelVolumeMountNecessary(objectMeta.Annotations) {
+		return "", false
+	}
+	if isPVCBaseModel(b) {
+		return constants.ModelDefaultMountPath, true
+	}
+	if b.BaseModel.Storage.Path == nil || *b.BaseModel.Storage.Path == "" {
+		return "", false
+	}
+	return *b.BaseModel.Storage.Path, true
 }
 
 // MergeRuntimeArgumentsOverride merges runtime argument overrides according AcceleratorClass into the container args

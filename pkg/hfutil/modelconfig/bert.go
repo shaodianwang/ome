@@ -126,7 +126,5 @@ func (c *BertConfig) IsEmbedding() bool {
 
 // Register the BERT model handler
 func init() {
-	RegisterModelLoader("bert", func(configPath string) (HuggingFaceModel, error) {
-		return LoadBertConfig(configPath)
-	})
+	RegisterJSONModelLoader[BertConfig, *BertConfig]("bert")
 }

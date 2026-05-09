@@ -131,7 +131,5 @@ func (c *Phi3SmallConfig) IsEmbedding() bool {
 
 // Register the Phi3Small model handler
 func init() {
-	RegisterModelLoader("phi3small", func(configPath string) (HuggingFaceModel, error) {
-		return LoadPhi3SmallConfig(configPath)
-	})
+	RegisterJSONModelLoader[Phi3SmallConfig, *Phi3SmallConfig]("phi3small")
 }

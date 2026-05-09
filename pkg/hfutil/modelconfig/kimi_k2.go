@@ -189,7 +189,5 @@ func (c *KimiK2Config) IsEmbedding() bool {
 
 // Register the Kimi-K2 model handler
 func init() {
-	RegisterModelLoader("kimi_k2", func(configPath string) (HuggingFaceModel, error) {
-		return LoadKimiK2Config(configPath)
-	})
+	RegisterJSONModelLoader[KimiK2Config, *KimiK2Config]("kimi_k2")
 }

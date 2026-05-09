@@ -23,14 +23,13 @@ func TestClientRecordsCalls(t *testing.T) {
 		CheckSourceFunc: func(ctx context.Context, got modelcache.Source) (*modelcache.SourceStatus, error) {
 			return &modelcache.SourceStatus{Reachable: true}, nil
 		},
-		ListSourceFunc: func(ctx context.Context, got modelcache.Source) ([]modelcache.Object, error) {
-			return []modelcache.Object{object}, nil
-		},
-		GetObjectFunc: func(ctx context.Context, got modelcache.ObjectRef) (*modelcache.Object, error) {
-			return &object, nil
-		},
-		ReadMetadataRangeFunc: func(ctx context.Context, got modelcache.MetadataRangeRequest) ([]byte, error) {
-			return []byte("metadata"), nil
+		InspectSourceFunc: func(ctx context.Context, got modelcache.Source) (*modelcache.SourceInspection, error) {
+			return &modelcache.SourceInspection{
+				Objects: []modelcache.Object{object},
+				Metadata: modelcache.ModelMetadataInputs{
+					ConfigJSON: []byte("metadata"),
+				},
+			}, nil
 		},
 		StartPrewarmFunc: func(ctx context.Context, got modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
 			return &modelcache.PrewarmOperation{ID: "op-1"}, nil
@@ -44,17 +43,11 @@ func TestClientRecordsCalls(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, sourceStatus.Reachable)
 
-	objects, err := client.ListSource(context.Background(), source)
+	inspection, err := client.InspectSource(context.Background(), source)
 	require.NoError(t, err)
-	assert.Equal(t, []modelcache.Object{object}, objects)
-
-	gotObject, err := client.GetObject(context.Background(), modelcache.ObjectRef{Source: source, Path: object.Path})
-	require.NoError(t, err)
-	assert.Equal(t, &object, gotObject)
-
-	data, err := client.ReadMetadataRange(context.Background(), modelcache.MetadataRangeRequest{Object: object, Offset: 0, Length: 128})
-	require.NoError(t, err)
-	assert.Equal(t, []byte("metadata"), data)
+	require.NotNil(t, inspection)
+	assert.Equal(t, []modelcache.Object{object}, inspection.Objects)
+	assert.Equal(t, []byte("metadata"), inspection.Metadata.ConfigJSON)
 
 	operation, err := client.StartPrewarm(context.Background(), modelcache.PrewarmRequest{Source: source})
 	require.NoError(t, err)
@@ -65,9 +58,7 @@ func TestClientRecordsCalls(t *testing.T) {
 	assert.Equal(t, modelcache.PrewarmPhaseRunning, prewarmStatus.Phase)
 
 	assert.Equal(t, []modelcache.Source{source}, client.CheckSourceCalls())
-	assert.Equal(t, []modelcache.Source{source}, client.ListSourceCalls())
-	assert.Equal(t, []modelcache.ObjectRef{{Source: source, Path: object.Path}}, client.GetObjectCalls())
-	assert.Equal(t, []modelcache.MetadataRangeRequest{{Object: object, Offset: 0, Length: 128}}, client.ReadMetadataRangeCalls())
+	assert.Equal(t, []modelcache.Source{source}, client.InspectSourceCalls())
 	assert.Equal(t, []modelcache.PrewarmRequest{{Source: source}}, client.StartPrewarmCalls())
 	assert.Equal(t, []modelcache.PrewarmOperation{{ID: "op-1"}}, client.GetPrewarmStatusCalls())
 }
