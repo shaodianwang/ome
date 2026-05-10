@@ -23,10 +23,9 @@ import (
 // fires. Restoring the suite-level provider in AfterAll keeps the
 // rest of the suite running normally.
 //
-// The Ordered + BeforeAll/AfterAll restart dance is acceptable here
-// because the no-provider config is fundamentally different from
-// every other Sharded spec; there's no way to express both in one
-// manager.
+// The Ordered + BeforeAll/AfterAll restart dance is needed because
+// the no-provider config is fundamentally different from every other
+// Sharded spec; there's no way to express both in one manager.
 var _ = ginkgo.Describe("Sharded BaseModel without a configured model-cache provider", ginkgo.Ordered, func() {
 
 	ginkgo.BeforeAll(func() {

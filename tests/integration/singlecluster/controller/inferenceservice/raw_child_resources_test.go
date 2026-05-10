@@ -16,8 +16,7 @@ import (
 
 // RawDeployment-mode child resources beyond the Deployment itself:
 // the controller produces a Service for traffic routing and (when
-// MinReplicas != MaxReplicas) an HPA for autoscaling. PDB is gated
-// on a separate config we'll cover in a follow-up.
+// MinReplicas != MaxReplicas) an HPA for autoscaling.
 //
 // Service is unconditional. HPA only fires when the autoscaler
 // classification resolves to HPA AND the spec asks for variable

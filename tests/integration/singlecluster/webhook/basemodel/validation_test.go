@@ -12,6 +12,18 @@ import (
 	"github.com/sgl-project/ome/tests/integration/util"
 )
 
+// ensureModelsNamespace creates the "models" namespace used by every
+// webhook spec's BaseModel (BMs are namespaced; the apiserver returns
+// "namespace not found" on Create if the NS isn't there). Shared by
+// every Describe in this package via BeforeEach so each Describe's
+// specs work in isolation when run with -ginkgo.focus.
+func ensureModelsNamespace() {
+	ginkgo.GinkgoHelper()
+	_ = k8sClient.Create(suiteCtx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "models"},
+	})
+}
+
 // Webhook envtest specs for BaseModel + ClusterBaseModel validators.
 // Each spec sends a Create through the apiserver and asserts the
 // admission rejection (or acceptance) — same logic the unit tests in
@@ -20,12 +32,7 @@ import (
 // webhook over TLS.
 var _ = ginkgo.Describe("BaseModel webhook validation", func() {
 
-	ginkgo.BeforeEach(func() {
-		// Ensure the test namespace exists for the BaseModel creates.
-		_ = k8sClient.Create(suiteCtx, &corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{Name: "models"},
-		})
-	})
+	ginkgo.BeforeEach(ensureModelsNamespace)
 
 	ginkgo.It("namespaced BaseModel rejects pvc URI with namespace prefix", func() {
 		bm := v1beta1testing.MakeBaseModel("bad-bm-1", "models").
@@ -100,5 +107,5 @@ var _ = ginkgo.Describe("BaseModel webhook validation", func() {
 			"webhook must reject PVC URI without subpath")
 	})
 
-	_ = util.MediumTimeout // keep util imported; future specs poll for status conditions
+	_ = util.MediumTimeout // keep util imported for status-condition polling specs
 })

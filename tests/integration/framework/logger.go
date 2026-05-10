@@ -12,9 +12,9 @@ import (
 
 // SetupTestLogger wires the controller-runtime logger for an
 // integration suite. Defaults to ErrorLevel (suite output stays
-// readable). Match Kueue's convention via the TEST_LOG_LEVEL env var:
-// integer zapcore levels — negative for verbose (debug = -1), 0 for
-// info, 1 for warn, 2 for error.
+// readable). Override via the TEST_LOG_LEVEL env var using integer
+// zapcore levels — negative for verbose (debug = -1), 0 for info,
+// 1 for warn, 2 for error.
 //
 //	TEST_LOG_LEVEL=-1 go test ./tests/integration/...   # full debug trace
 //	TEST_LOG_LEVEL=0  go test ./tests/integration/...   # info+

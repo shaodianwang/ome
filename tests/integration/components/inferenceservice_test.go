@@ -14,7 +14,7 @@ import (
 // SetupInferenceService smoke test: registering the reconciler must
 // not error and the manager must start cleanly. End-to-end reconcile
 // behavior is covered in tests/integration/singlecluster/controller/
-// inferenceservice/ (lands in P2.4+).
+// inferenceservice/.
 var _ = ginkgo.Describe("components.SetupInferenceService", func() {
 	ginkgo.It("registers the InferenceServiceReconciler and manager starts cleanly", func() {
 		s, err := framework.NewSuite(&framework.Framework{})

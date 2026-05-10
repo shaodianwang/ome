@@ -1,7 +1,6 @@
-// Package metadata hosts Tier-1 integration tests for the metadata-
-// extraction agent (internal/ome-agent/model-metadata) driven against
-// envtest via the shared framework. Suite uses Ginkgo per
-// .claude/integration-test-framework-design.md §7.
+// Package metadata hosts integration tests for the metadata-extraction
+// agent (internal/ome-agent/model-metadata) driven against envtest via
+// the shared framework.
 package metadata
 
 import (
@@ -20,7 +19,6 @@ import (
 	"github.com/sgl-project/ome/tests/integration/util"
 )
 
-// TestMetadataAgent is the Go entrypoint Ginkgo hooks into.
 func TestMetadataAgent(t *testing.T) {
 	util.RunSuite(t, "Metadata Agent Integration Suite")
 }

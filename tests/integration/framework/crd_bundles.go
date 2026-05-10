@@ -39,20 +39,3 @@ var LWS = OptionalCRDBundle{
 		lwsv1.AddToScheme,
 	},
 }
-
-// KEDA bundle: keda.sh/v1alpha1.ScaledObject. Required for the KEDA
-// autoscaler reconciler when ISVC.Spec.KedaConfig is set.
-// TODO P3.x: vendor + add scheme contributor.
-
-// Ray bundle: ray.io/v1.RayCluster. Required for InferenceService
-// MultiNodeRayVLLM mode.
-// TODO P3.x: vendor + add scheme contributor.
-
-// Istio bundle: networking.istio.io/v1beta1.VirtualService + Sidecar.
-// Required for Serverless ingress when IngressConfig.DisableIstioVirtualHost
-// is false.
-// TODO P3.x: vendor + add scheme contributor.
-
-// Volcano bundle: scheduling.volcano.sh/v1beta1.Queue +
-// batch.volcano.sh/v1alpha1.Job. Currently registered in cmd/manager
-// scheme but not consumed by any reconciler — defer until needed.

@@ -6,7 +6,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -145,7 +144,7 @@ var _ = ginkgo.Describe("InferenceService RawDeployment", ginkgo.Ordered, func()
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("ISVC deletion clears the finalizer (envtest has no GC; child cleanup is Tier-3)", func() {
+	ginkgo.It("ISVC deletion clears the finalizer (envtest has no GC, so child cleanup is not asserted here)", func() {
 		ginkgo.By("creating BaseModel + Runtime + ISVC and waiting for the finalizer to land")
 		cbm := v1beta1testing.MakeClusterBaseModel("del-llama-7b").
 			StorageURI("oci://n/test/b/models/o/llama-7b").
@@ -230,11 +229,3 @@ var _ = ginkgo.Describe("InferenceService RawDeployment", ginkgo.Ordered, func()
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 })
-
-// _ keeps apierrors imported; reserved for negative-path specs that
-// will land alongside this happy-path test.
-var _ = apierrors.IsNotFound
-
-// _ keeps metav1 imported; reserved for selectors / status assertions
-// in subsequent specs.
-var _ = metav1.GetOptions{}

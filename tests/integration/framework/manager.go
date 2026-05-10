@@ -20,8 +20,8 @@ import (
 // ManagerSetup is the seam between the generic framework and OME's
 // controllers. Each suite passes a function that registers exactly the
 // reconcilers, indexers, and webhooks it needs onto the supplied
-// manager. Mirrors Kueue's framework.ManagerSetup design — the
-// framework intentionally knows nothing about specific OME controllers.
+// manager. The framework intentionally knows nothing about specific
+// OME controllers.
 //
 // Returning an error fails the test; the framework calls
 // gomega/testing.Fatalf with the wrapped message.

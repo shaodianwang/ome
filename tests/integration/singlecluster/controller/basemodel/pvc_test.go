@@ -24,10 +24,8 @@ import (
 )
 
 // BaseModel + ClusterBaseModel PVC reconcile flow against envtest.
-// Direct port of the original Tier-2 subtests onto Ginkgo. Each `It`
-// is the same scenario the migrated subtest covered; the `By(...)`
-// markers expose multi-step assertions in long flows so a failing
-// CI log says exactly which step regressed.
+// `By(...)` markers expose multi-step assertions in long flows so a
+// failing CI log says exactly which step regressed.
 var _ = ginkgo.Describe("BaseModel PVC reconcile", ginkgo.Ordered, func() {
 
 	ginkgo.It("happy path: pending PVC → bound → Job → ConfigMap → Ready", func() {

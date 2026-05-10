@@ -37,8 +37,7 @@ func CreateNamespaceFromPrefix(ctx context.Context, c client.Client, prefix stri
 // This is the central place where per-CRD cleanup logic plugs in via
 // RegisterCleanup. The pattern means adding a new CRD with a
 // finalizer is a one-line init() in its builder package, not an edit
-// to a central walker (Kueue's anti-pattern; see
-// .claude/integration-test-framework-design.md §2 "Reject" #4).
+// to a central walker.
 //
 // Idempotent: passing a namespace that doesn't exist is success.
 func DeleteNamespace(ctx context.Context, c client.Client, namespace string) error {

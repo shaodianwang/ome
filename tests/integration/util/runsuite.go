@@ -16,9 +16,6 @@ import (
 //	func TestBaseModelController(t *testing.T) {
 //	    util.RunSuite(t, "BaseModel Controller Integration Suite")
 //	}
-//
-// Mirrors Kueue's test/util/util.go RunSuite (the same shape every
-// suite_test.go opens with).
 func RunSuite(t *testing.T, suiteName string) {
 	t.Helper()
 	gomega.RegisterFailHandler(ginkgo.Fail)

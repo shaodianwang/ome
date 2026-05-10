@@ -20,9 +20,8 @@ import (
 	"github.com/sgl-project/ome/tests/integration/util"
 )
 
-// Edge-case PVC reconcile specs that go beyond the original migrated
-// happy/sad paths. Grouped here so the Tier-2 baseline in pvc_test.go
-// stays focused on the v1 PR-scope coverage.
+// Edge-case PVC reconcile specs that go beyond the happy/sad paths in
+// pvc_test.go.
 var _ = ginkgo.Describe("BaseModel PVC edge cases", ginkgo.Ordered, func() {
 
 	ginkgo.It("two BaseModels sharing one PVC get separate Jobs and per-PVC ConfigMaps", func() {
@@ -90,10 +89,6 @@ var _ = ginkgo.Describe("BaseModel PVC edge cases", ginkgo.Ordered, func() {
 		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "multi-llama-13b", Namespace: ns}, got13)).To(Succeed())
 		Expect(got13.Status.State).To(Equal(v1beta1.LifeCycleStateReady), "the surviving BM must remain Ready")
 
-		// AfterEach for this Describe is implicit via the per-spec
-		// DeferCleanup we don't have — the suite's namespace stays
-		// across specs (Ordered) but cleanup hooks strip finalizers
-		// on Teardown.
 		_ = k8sClient.Delete(suiteCtx, got13)
 	})
 

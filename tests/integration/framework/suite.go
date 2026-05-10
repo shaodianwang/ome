@@ -9,9 +9,8 @@ import (
 
 // Suite bundles the values every integration suite needs in nearly
 // every test: the framework itself, the rest.Config, a client, and a
-// context. The struct is the antidote to the package-level
-// `var (cfg, k8sClient, ctx, fwk)` boilerplate Kueue has in 30+
-// suite_test.go files.
+// context. The struct removes the package-level
+// `var (cfg, k8sClient, ctx, fwk)` boilerplate from each suite_test.go.
 //
 // Construct via NewSuite from BeforeSuite (Ginkgo) or TestMain
 // (plain go test).

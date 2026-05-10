@@ -6,14 +6,14 @@
 //	    if err := components.SetupBaseModel(ctx, mgr, components.WithOmeAgentConfig(cfg)); err != nil {
 //	        return err
 //	    }
-//	    return components.SetupInferenceService(ctx, mgr)  // arrives in P2
+//	    return components.SetupInferenceService(ctx, mgr)
 //	}
 //	fwk.StartManager(s.Ctx, s.Cfg, mgrSetup)
 //
-// This is the seam Kueue's framework documents: each suite picks
-// exactly the controllers it needs, the framework knows nothing about
-// specific OME controllers. Adding a new controller = one Setup* func
-// in this package, no edit to framework code.
+// Each suite picks exactly the controllers it needs; the framework
+// knows nothing about specific OME controllers. Adding a new
+// controller = one Setup* func in this package, no edit to framework
+// code.
 package components
 
 import (

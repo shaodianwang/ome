@@ -19,9 +19,8 @@ import (
 	"github.com/sgl-project/ome/pkg/modelagent"
 )
 
-// Tier-1 metadata-agent specs. Each It uses a distinct model name so
-// the deterministic per-PVC ConfigMap names don't collide on the
-// shared envtest.
+// Each It uses a distinct model name so the deterministic per-PVC
+// ConfigMap names don't collide on the shared envtest.
 var _ = ginkgo.Describe("Metadata Agent PVC writes", ginkgo.Ordered, func() {
 
 	ginkgo.It("writes a Ready ConfigMap with parsed metadata for a namespaced BaseModel", func() {

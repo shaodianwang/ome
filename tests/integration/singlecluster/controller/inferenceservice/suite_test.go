@@ -1,8 +1,6 @@
 // Package inferenceservice hosts integration tests for the
 // InferenceService reconciler driven against envtest via the shared
-// framework. Phase 2 covers RawDeployment + VirtualDeployment paths
-// with no optional CRDs installed (Knative / LWS / KEDA / Ray / Istio
-// arrive in Phase 3 alongside their respective mode tests).
+// framework.
 package inferenceservice
 
 import (
@@ -19,9 +17,7 @@ import (
 	"github.com/sgl-project/ome/tests/integration/util"
 )
 
-// TestInferenceServiceController is the Go entrypoint Ginkgo hooks
-// into. Other files in this package contribute Describes registered
-// at package init via `var _ = ginkgo.Describe(...)`.
+// TestInferenceServiceController is the Go entrypoint Ginkgo hooks into.
 func TestInferenceServiceController(t *testing.T) {
 	util.RunSuite(t, "InferenceService Controller Integration Suite")
 }
@@ -37,11 +33,10 @@ var (
 var _ = ginkgo.BeforeSuite(func() {
 	framework.SetupTestLogger()
 
-	// Phase 3 lights up optional bundles so each deployment mode's
-	// spec runs in the same suite. Bundles are mode-orthogonal:
-	// installing Knative + LWS does not change RawDeployment behavior
-	// (annotation + MinReplicas + Leader/Worker presence are the
-	// controller-side mode triggers).
+	// Optional bundles allow each deployment mode's spec to run in the
+	// same suite. Bundles are mode-orthogonal: installing Knative + LWS
+	// does not change RawDeployment behavior (annotation + MinReplicas +
+	// Leader/Worker presence are the controller-side mode triggers).
 	s, err := framework.NewSuite(&framework.Framework{
 		OptionalCRDs: []framework.OptionalCRDBundle{
 			framework.Knative,
@@ -57,7 +52,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	ginkgo.By("seeding inferenceservice-config + benchmarkjob-config so the reconciler can read them at reconcile time")
 	gomega.Expect(util.SeedDefaultConfigMaps(suiteCtx, k8sClient)).To(gomega.Succeed())
 
-	ginkgo.By("registering BaseModel + InferenceService reconcilers (no optional CRDs in P2)")
+	ginkgo.By("registering BaseModel + InferenceService reconcilers")
 	mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
 		// SetupBaseModel without WithOmeAgentConfig is fine here —
 		// the ISVC tests don't use PVC-backed models.

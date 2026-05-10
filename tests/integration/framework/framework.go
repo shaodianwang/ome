@@ -1,6 +1,5 @@
 // Package framework provides a shared envtest + controller-runtime
-// manager harness for OME's integration test suites. Modeled on Kueue's
-// test/integration/framework package.
+// manager harness for OME's integration test suites.
 //
 // A typical suite builds a Framework, calls Init() to start envtest in
 // BeforeSuite, SetupClient() to obtain a client, optionally
@@ -56,8 +55,7 @@ type Framework struct {
 	ProjectRoot string
 
 	// OptionalCRDs declares which optional-dep CRD bundles to install.
-	// Filled in by future commits (Knative, LWS, KEDA, Ray, Istio,
-	// Volcano). Each bundle resolves to a directory under
+	// Each bundle resolves to a directory under
 	// ProjectRoot/tests/integration/dep-crds/<dir>.
 	OptionalCRDs []OptionalCRDBundle
 
@@ -96,11 +94,9 @@ type Framework struct {
 // (manager.go has the import). Kept private.
 type ctrlManager = ctrl.Manager
 
-// OptionalCRDBundle is a placeholder for the optional-CRD registry that
-// arrives in Phase 3. Defined here so the Framework signature is stable
-// from Phase 1. Schemes is the set of AddToScheme functions registered
-// on the client-side scheme by SetupClient — bundles without schemes
-// are install-only (rare).
+// OptionalCRDBundle declares an optional-dep CRD set installed by
+// envtest plus the schemes registered on the client-side scheme by
+// SetupClient. Bundles without schemes are install-only (rare).
 type OptionalCRDBundle struct {
 	Name    string
 	CRDDir  string                           // relative to ProjectRoot/tests/integration/dep-crds/
@@ -210,7 +206,7 @@ func (f *Framework) SetupClient(cfg *rest.Config) (context.Context, client.Clien
 
 // Scheme returns the client-side scheme assembled by SetupClient. Nil
 // before SetupClient is called. Suites pass it into the Manager
-// constructor in StartManager (added in P1.1c).
+// constructor in StartManager.
 func (f *Framework) Scheme() *apiruntime.Scheme {
 	return f.scheme
 }
@@ -248,7 +244,7 @@ func findProjectRoot() (string, error) {
 }
 
 // envtestScheme returns the scheme installed on the apiserver. Suites
-// build their own client-side scheme via SetupClient (added in P1.1b).
+// build their own client-side scheme via SetupClient.
 func envtestScheme() *apiruntime.Scheme {
 	// envtest's apiserver uses the global client-go scheme by default;
 	// using the same one keeps codecs consistent.

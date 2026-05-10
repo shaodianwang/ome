@@ -72,8 +72,6 @@ var _ = Describe("OME Agent Framework", Ordered, func() {
 			Expect(stdout).To(ContainSubstring("replica"))
 			Expect(stdout).To(ContainSubstring("serving-agent"))
 		})
-
-		// Version flag test removed as it might not be implemented
 	})
 
 	Context("when running specific agent help", func() {
@@ -333,13 +331,10 @@ output: ` + mockDataDir + `/output
 			}
 		})
 
-		// Note: These tests will likely fail without proper mocking of dependencies
-		// They are included as examples of how to structure the tests
+		// Pending: dependency injection / mocking required before these can run.
 		XIt("should start the enigma agent", func() {
 			stdout, _, err := RunAgent(binaryPath, "enigma", "--config", configPaths["enigma"])
 
-			// In a real test, you would need to mock the dependencies
-			// This is just an example of how to structure the test
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stdout).To(ContainSubstring("Enigma agent started"))
 		})
@@ -347,8 +342,6 @@ output: ` + mockDataDir + `/output
 		XIt("should start the hf-download agent", func() {
 			stdout, _, err := RunAgent(binaryPath, "hf-download", "--config", configPaths["hf-download"])
 
-			// In a real test, you would need to mock the dependencies
-			// This is just an example of how to structure the test
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stdout).To(ContainSubstring("HF Download agent started"))
 		})
@@ -356,8 +349,6 @@ output: ` + mockDataDir + `/output
 		XIt("should start the replica agent", func() {
 			stdout, _, err := RunAgent(binaryPath, "replica", "--config", configPaths["replica"])
 
-			// In a real test, you would need to mock the dependencies
-			// This is just an example of how to structure the test
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stdout).To(ContainSubstring("Replica agent started"))
 		})
@@ -365,8 +356,6 @@ output: ` + mockDataDir + `/output
 		XIt("should start the serving-agent", func() {
 			stdout, _, err := RunAgent(binaryPath, "serving-agent", "--config", configPaths["serving-agent"])
 
-			// In a real test, you would need to mock the dependencies
-			// This is just an example of how to structure the test
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stdout).To(ContainSubstring("Serving sidecar started"))
 		})
@@ -374,24 +363,15 @@ output: ` + mockDataDir + `/output
 		XIt("should start the fine-tuned-adapter", func() {
 			stdout, _, err := RunAgent(binaryPath, "fine-tuned-adapter", "--config", configPaths["fine-tuned-adapter"])
 
-			// In a real test, you would need to mock the dependencies
-			// This is just an example of how to structure the test
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stdout).To(ContainSubstring("Fine-tuned adapter started"))
 		})
 	})
 
 	Context("when running with timeout", func() {
-		// Fix the timeout test structure
 		XIt("should timeout after specified duration", func() {
-			// This test demonstrates how to test timeouts
-			// In a real test, you would configure the agent to run a long operation
-			// and verify it times out correctly
-
-			// Example of running with a timeout
 			_, _, err := RunAgentWithTimeout(1*time.Second, binaryPath, "enigma", "--config", "/path/to/config")
 
-			// Expect a timeout error
 			Expect(err).To(HaveOccurred())
 		})
 	})

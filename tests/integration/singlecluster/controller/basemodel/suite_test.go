@@ -1,7 +1,6 @@
 // Package basemodel hosts integration tests for the BaseModel /
 // ClusterBaseModel reconcilers driven against envtest via the shared
-// framework. Suite uses Ginkgo per
-// .claude/integration-test-framework-design.md §7.
+// framework.
 package basemodel
 
 import (
@@ -26,19 +25,11 @@ import (
 	"github.com/sgl-project/ome/tests/integration/util"
 )
 
-// TestBaseModelController is the Go entrypoint Ginkgo hooks into.
-// Every other file in this package contributes Describes registered
-// at package init via `var _ = ginkgo.Describe(...)`.
 func TestBaseModelController(t *testing.T) {
 	util.RunSuite(t, "BaseModel Controller Integration Suite")
 }
 
 // Suite-wide state. Populated by BeforeSuite, used by each Describe.
-// Package-level vars are the Kueue convention for Ginkgo suites
-// (.claude/integration-test-framework-design.md §2 calls out the
-// alternative — framework.Suite{} value type — but most Ginkgo
-// suites end up wanting cancel scope hooked into AfterSuite, so the
-// convention wins).
 var (
 	suiteCtx    context.Context
 	suiteCancel context.CancelFunc

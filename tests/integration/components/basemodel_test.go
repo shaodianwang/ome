@@ -25,7 +25,7 @@ import (
 // TestComponents is the Ginkgo entrypoint for components self-tests.
 // Each It builds its own framework so wiring failures isolate
 // cleanly — the cost (~5s envtest boot per spec) is acceptable for
-// 2 tests.
+// the small number of tests in this package.
 func TestComponents(t *testing.T) {
 	util.RunSuite(t, "Integration Components Self-Test Suite")
 }

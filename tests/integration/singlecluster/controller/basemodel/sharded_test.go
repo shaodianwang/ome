@@ -16,6 +16,45 @@ import (
 	"github.com/sgl-project/ome/tests/integration/util"
 )
 
+// setSuiteFakeMCDefaults restores the suite's fake modelcache.Client
+// to the happy-path defaults: source reachable, inspectable with a
+// minimal valid config.json + one object, prewarm starts successfully
+// with op ID "fake-op-1", GetPrewarmStatus returns Succeeded.
+//
+// Both this Describe and Sharded edge-case Describes share these
+// defaults. Each spec overrides the specific Func it cares about
+// after BeforeEach runs.
+//
+// InspectSource is required by the new sharded flow (PR #56):
+// reconcileShardedModelMetadataSpec calls InspectSource BEFORE
+// StartPrewarm so the controller can parse model metadata from the
+// source's config.json. Without this, the controller short-circuits
+// at markShardedModelMetadataPending and StartPrewarm never fires —
+// Cached condition never flips.
+func setSuiteFakeMCDefaults() {
+	suiteFakeMC.CheckSourceFunc = func(_ context.Context, _ modelcache.Source) (*modelcache.SourceStatus, error) {
+		return &modelcache.SourceStatus{Reachable: true, Reason: "SourceReachable"}, nil
+	}
+	suiteFakeMC.InspectSourceFunc = func(_ context.Context, src modelcache.Source) (*modelcache.SourceInspection, error) {
+		return &modelcache.SourceInspection{
+			Objects: []modelcache.Object{
+				{Source: src, Path: src.URI + "/config.json"},
+			},
+			Metadata: modelcache.ModelMetadataInputs{
+				// Minimal config.json the modelparser accepts.
+				// Mirrors pkg/.../sharded_cache_metadata_test.go.
+				ConfigJSON: []byte(`{"model_type":"phi","architectures":["PhiForCausalLM"]}`),
+			},
+		}, nil
+	}
+	suiteFakeMC.StartPrewarmFunc = func(_ context.Context, _ modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
+		return &modelcache.PrewarmOperation{ID: "fake-op-1"}, nil
+	}
+	suiteFakeMC.GetPrewarmStatusFunc = func(_ context.Context, op modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
+		return &modelcache.PrewarmStatus{Operation: op, Phase: modelcache.PrewarmPhaseSucceeded}, nil
+	}
+}
+
 // Sharded distribution flow (sharded_cache_status.go):
 //
 //  1. controller calls provider.Client.CheckSource → SourceReachable
@@ -32,20 +71,7 @@ import (
 // restarting the manager.
 var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func() {
 
-	ginkgo.BeforeEach(func() {
-		// Default happy path: source reachable, every prewarm succeeds.
-		// Specs override these in their own ginkgo.By blocks before
-		// creating their CR.
-		suiteFakeMC.CheckSourceFunc = func(_ context.Context, _ modelcache.Source) (*modelcache.SourceStatus, error) {
-			return &modelcache.SourceStatus{Reachable: true, Reason: "SourceReachable"}, nil
-		}
-		suiteFakeMC.StartPrewarmFunc = func(_ context.Context, _ modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
-			return &modelcache.PrewarmOperation{ID: "fake-op-1"}, nil
-		}
-		suiteFakeMC.GetPrewarmStatusFunc = func(_ context.Context, op modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-			return &modelcache.PrewarmStatus{Operation: op, Phase: modelcache.PrewarmPhaseSucceeded}, nil
-		}
-	})
+	ginkgo.BeforeEach(setSuiteFakeMCDefaults)
 
 	ginkgo.It("CheckSource→StartPrewarm→GetPrewarmStatus(Succeeded) drives Cached=True", func() {
 		ginkgo.By("creating a Sharded ClusterBaseModel")
@@ -66,13 +92,29 @@ var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func(
 			g.Expect(cached.Reason).To(Equal(v1beta1.ModelConditionReasonPrewarmSucceeded))
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
-		ginkgo.By("Ready stays False with reason=MetadataPending — metadata parsing is a separate flow")
-		got := &v1beta1.ClusterBaseModel{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-llama-7b"}, got)).To(Succeed())
-		ready := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionReady)
-		Expect(ready).NotTo(BeNil())
-		Expect(string(ready.Status)).To(Equal("False"))
-		Expect(ready.Reason).To(Equal(v1beta1.ModelConditionReasonMetadataPending))
+		ginkgo.By("Ready flips True with reason=MetadataParsed once prewarm completes (inline metadata parse via InspectSource)")
+		// reconcileShardedModelMetadata is called inline after Cached
+		// flips True (sharded_cache_status.go:65-69), parses the
+		// fake's ConfigJSON, and flips Ready=True.
+		//
+		// NOTE: we deliberately do NOT also assert state=Ready here.
+		// applyInitialShardedModelStatus (sharded_cache_status.go:281)
+		// unconditionally resets state=Importing on every reconcile,
+		// and the post-Ready reconcile path (Cached=True+Ready=True
+		// branch at line 65-67) doesn't pass a transition that would
+		// re-flip state to Ready. So state oscillates: Importing →
+		// Ready (one reconcile) → Importing (next reconcile, sticks).
+		// The Ready *condition* stays True throughout, which is the
+		// truth source consumers should rely on. Status.State revert
+		// looks like a controller bug — tracking separately.
+		Eventually(func(g Gomega) {
+			got := &v1beta1.ClusterBaseModel{}
+			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-llama-7b"}, got)).To(Succeed())
+			ready := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(string(ready.Status)).To(Equal("True"))
+			g.Expect(ready.Reason).To(Equal(v1beta1.ModelConditionReasonMetadataParsed))
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
 	ginkgo.It("CheckSource returning Reachable=false drives SourceReachable=False", func() {
@@ -186,5 +228,5 @@ var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func(
 
 // Note: provider-not-configured spec lives in
 // sharded_no_provider_test.go because it requires a different
-// manager wiring (no provider injected) — Ginkgo's Ordered + manager
-// restart dance is cleaner as a separate Describe.
+// manager wiring (no provider injected) — separate Describe with its
+// own BeforeAll/AfterAll restart is cleaner.
