@@ -66,6 +66,33 @@ func (w *InferenceServiceWrapper) NamespacedModel(name string) *InferenceService
 	return w
 }
 
+// FineTunedWeightModel sets spec.Model with Kind=FineTunedWeight, the
+// shape used when an ISVC directly references a FineTunedWeight
+// instead of a BaseModel/ClusterBaseModel. The modelconfig reconciler
+// resolves the FTW's BaseModelRef to find the underlying base model.
+func (w *InferenceServiceWrapper) FineTunedWeightModel(name string) *InferenceServiceWrapper {
+	kind := "FineTunedWeight"
+	apiGroup := "ome.io"
+	w.Spec.Model = &v1beta1.ModelRef{
+		Name:     name,
+		Kind:     &kind,
+		APIGroup: &apiGroup,
+	}
+	return w
+}
+
+// WithFineTunedWeights sets spec.Model.FineTunedWeights. Used when the
+// primary ModelRef is a BaseModel/ClusterBaseModel that should ALSO
+// load one or more fine-tuned weights on top. Per the controller, only
+// the FIRST entry is consumed today (modelconfig_reconciler.go:316).
+func (w *InferenceServiceWrapper) WithFineTunedWeights(names ...string) *InferenceServiceWrapper {
+	if w.Spec.Model == nil {
+		w.Spec.Model = &v1beta1.ModelRef{}
+	}
+	w.Spec.Model.FineTunedWeights = append([]string{}, names...)
+	return w
+}
+
 // Runtime sets spec.Runtime.Name. Defaults Kind to ClusterServingRuntime.
 func (w *InferenceServiceWrapper) Runtime(name string) *InferenceServiceWrapper {
 	kind := "ClusterServingRuntime"

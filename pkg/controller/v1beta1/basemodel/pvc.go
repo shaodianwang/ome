@@ -32,7 +32,14 @@ import (
 // primary triggers are the PVC, Job, and ConfigMap watches in
 // SetupWithManager; this requeue exists to re-check progress in case a
 // watch event was missed.
-const pvcRequeueAfter = 30 * time.Second
+//
+// Kept short (5s) so an operator looking at "why is my model still
+// Importing?" sees a Failed terminal state within a few seconds when
+// the underlying Job hits BackoffLimit, not after a 30s pause. Cost:
+// idle PVC-backed BaseModels reconcile a few times more frequently;
+// each reconcile is one apiserver Get for the Job and one for the
+// per-PVC ConfigMap, both cache-backed.
+const pvcRequeueAfter = 5 * time.Second
 
 // isPVCStorage reports whether the given BaseModel/ClusterBaseModel spec
 // references a PVC-backed storage URI.

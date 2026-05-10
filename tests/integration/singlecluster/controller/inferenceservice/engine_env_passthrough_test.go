@@ -9,7 +9,7 @@ import (
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/constants"
-	v1beta1testing "github.com/sgl-project/ome/pkg/util/testing/v1beta1"
+	v1beta1testing "github.com/sgl-project/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/sgl-project/ome/tests/integration/util"
 )
