@@ -79,6 +79,10 @@ type MatchDetails struct {
 	// QuantizationMatch indicates if the model quantization is compatible
 	QuantizationMatch bool
 
+	// ModelCacheProviderMatch indicates if the runtime can load from the
+	// configured model cache provider for sharded-distribution models.
+	ModelCacheProviderMatch bool
+
 	// Priority is the runtime's priority for this model format
 	Priority int32
 
@@ -169,6 +173,10 @@ type Config struct {
 
 	// ModelFrameworkWeight is the default weight for model framework matching
 	ModelFrameworkWeight int64
+
+	// ModelCacheProvider is the configured cache provider name used when
+	// selecting runtimes for sharded-distribution models.
+	ModelCacheProvider string
 }
 
 // NewConfig creates a new Config with default values.

@@ -407,17 +407,19 @@ func (v *InferenceServiceValidator) validateRuntimeAndModelResolution(ctx contex
 		return warnings, nil
 	}
 
-	// Rule 2: If inference service does not have runtime defined in isvc.runtime
-	if isvc.Spec.Runtime == nil {
-		// Check if engine has full runner config
-		if !hasFullRunnerConfig(isvc.Spec.Engine) {
-			// Model reference is required when runtime is not specified and engine doesn't have full config
-			if isvc.Spec.Model == nil {
-				return warnings, fmt.Errorf("model reference is required when runtime is not specified and engine does not have complete runner configuration")
-			}
-
-			return v.resolveModelAndRuntime(ctx, isvc, warnings)
+	if isvc.Spec.Model == nil {
+		if isvc.Spec.Runtime == nil && !hasFullRunnerConfig(isvc.Spec.Engine) {
+			return warnings, fmt.Errorf("model reference is required when runtime is not specified and engine does not have complete runner configuration")
 		}
+		return warnings, nil
+	}
+
+	if isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != "" {
+		return v.resolveModelAndRuntime(ctx, isvc, warnings)
+	}
+
+	if !hasFullRunnerConfig(isvc.Spec.Engine) {
+		return v.resolveModelAndRuntime(ctx, isvc, warnings)
 	}
 
 	return warnings, nil

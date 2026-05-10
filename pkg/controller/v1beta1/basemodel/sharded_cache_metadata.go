@@ -44,19 +44,19 @@ func shardedMetadataInputsFromInspection(sourceURI string, inspection *modelcach
 	inputs := make([]modelparser.ModelConfigFileInput, 0, 2+len(metadata.SafetensorHeaders))
 	if len(metadata.ModelIndexJSON) > 0 {
 		inputs = append(inputs, modelparser.ModelConfigFileInput{
-			Path: modelparser.DefaultModelIndexFileName,
+			Path: pathOrDefault(metadata.ModelIndexPath, modelparser.DefaultModelIndexFileName),
 			Data: metadata.ModelIndexJSON,
 		})
 	}
 	if len(metadata.ConfigJSON) > 0 {
 		inputs = append(inputs, modelparser.ModelConfigFileInput{
-			Path: modelparser.DefaultConfigFileName,
+			Path: pathOrDefault(metadata.ConfigPath, modelparser.DefaultConfigFileName),
 			Data: metadata.ConfigJSON,
 		})
 	}
 	if len(metadata.SafetensorsIndexJSON) > 0 {
 		inputs = append(inputs, modelparser.ModelConfigFileInput{
-			Path: defaultSafetensorsIndexFileName,
+			Path: pathOrDefault(metadata.SafetensorsIndexPath, defaultSafetensorsIndexFileName),
 			Data: metadata.SafetensorsIndexJSON,
 		})
 	}
@@ -65,7 +65,7 @@ func shardedMetadataInputsFromInspection(sourceURI string, inspection *modelcach
 	}
 
 	for _, header := range metadata.SafetensorHeaders {
-		inputPath, ok, err := shardedMetadataInputPath(sourceURI, header.Path)
+		inputPath, ok, err := shardedMetadataHeaderInputPath(sourceURI, header)
 		if err != nil {
 			return nil, err
 		}
@@ -82,6 +82,13 @@ func shardedMetadataInputsFromInspection(sourceURI string, inspection *modelcach
 		})
 	}
 	return inputs, nil
+}
+
+func pathOrDefault(value, defaultValue string) string {
+	if strings.TrimSpace(value) != "" {
+		return value
+	}
+	return defaultValue
 }
 
 func safetensorsHeaderInputData(headerJSON []byte) ([]byte, error) {
@@ -149,4 +156,11 @@ func shardedMetadataInputPath(sourceURI, objectPath string) (string, bool, error
 		return "", false, fmt.Errorf("model cache object path must stay under model root: %q", objectPath)
 	}
 	return objectPath, true, nil
+}
+
+func shardedMetadataHeaderInputPath(sourceURI string, header modelcache.SafetensorHeader) (string, bool, error) {
+	if strings.TrimSpace(header.RelativePath) != "" {
+		return shardedMetadataInputPath("", header.RelativePath)
+	}
+	return shardedMetadataInputPath(sourceURI, header.Path)
 }

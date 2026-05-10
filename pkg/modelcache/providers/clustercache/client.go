@@ -191,6 +191,9 @@ func (c *Client) CheckSource(ctx context.Context, source modelcache.Source) (*mo
 			Message:   "model source is reachable through cluster_cache",
 		}, nil
 	}
+	if isTransientEndpointError(err) {
+		return nil, err
+	}
 	if !isEndpointStatus(err, http.StatusNotFound) {
 		return &modelcache.SourceStatus{
 			Reachable: false,
@@ -217,10 +220,14 @@ func (c *Client) checkSourceWithHead(ctx context.Context, source modelcache.Sour
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		err := endpointStatusError("head", response)
+		if isTransientStatusCode(response.StatusCode) {
+			return nil, err
+		}
 		return &modelcache.SourceStatus{
 			Reachable: false,
 			Reason:    reasonSourceNotReachable,
-			Message:   fmt.Sprintf("cluster_cache head returned %s: %s", response.Status, readErrorBody(response.Body)),
+			Message:   err.Error(),
 		}, nil
 	}
 
@@ -281,19 +288,29 @@ func (r *fileMetadataResponse) toModelCacheSourceInspection(source modelcache.So
 		return &modelcache.SourceInspection{}
 	}
 
+	root := firstNonEmpty(r.Root, source.URI)
 	inspection := &modelcache.SourceInspection{
+		RootURI: root,
 		Objects: make([]modelcache.Object, 0, len(r.Files)),
 	}
 	for _, file := range r.Files {
-		path := inspectPath(firstNonEmpty(r.Root, source.URI), file.Path, "", file.RelativePath)
-		if path == "" {
+		objectPath := inspectPath(root, file.Path, "", file.RelativePath)
+		if objectPath == "" {
+			continue
+		}
+		relativePath := cleanMetadataRelativePath(file.RelativePath)
+		if relativePath == "" {
+			relativePath = relativePathFromRoot(root, objectPath)
+		}
+		if relativePath == "" {
 			continue
 		}
 		inspection.Objects = append(inspection.Objects, modelcache.Object{
-			Source:    source,
-			Path:      path,
-			SizeBytes: uint64ToInt64(file.Size),
-			Version:   inspectVersion("", stringPtrValue(file.ETag), file.MTime),
+			Source:       source,
+			Path:         objectPath,
+			RelativePath: relativePath,
+			SizeBytes:    uint64ToInt64(file.Size),
+			Version:      inspectVersion("", stringPtrValue(file.ETag), file.MTime),
 		})
 	}
 	return inspection
@@ -787,6 +804,18 @@ func isEndpointStatus(err error, statusCode int) bool {
 		return false
 	}
 	return endpointErr.statusCode == statusCode
+}
+
+func isTransientEndpointError(err error) bool {
+	var endpointErr *endpointError
+	if !errors.As(err, &endpointErr) {
+		return true
+	}
+	return isTransientStatusCode(endpointErr.statusCode)
+}
+
+func isTransientStatusCode(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
 }
 
 func firstNonEmpty(values ...string) string {

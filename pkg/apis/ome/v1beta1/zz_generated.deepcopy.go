@@ -2610,6 +2610,11 @@ func (in *SupportedModelFormat) DeepCopyInto(out *SupportedModelFormat) {
 		*out = new(DiffusionPipelineSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.ModelCacheProviders != nil {
+		in, out := &in.ModelCacheProviders, &out.ModelCacheProviders
+		*out = make([]ModelCacheProvider, len(*in))
+		copy(*out, *in)
+	}
 	if in.AutoSelect != nil {
 		in, out := &in.AutoSelect, &out.AutoSelect
 		*out = new(bool)

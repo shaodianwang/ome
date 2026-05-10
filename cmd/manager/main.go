@@ -270,11 +270,12 @@ func main() {
 	setupLog.Info("Setting up InferenceService controller")
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
 	if err = (&v1beta1isvccontroller.InferenceServiceReconciler{
-		Client:    mgr.GetClient(),
-		Clientset: clientSet,
-		Log:       ctrl.Log.WithName("InferenceService"),
-		Scheme:    mgr.GetScheme(),
-		Recorder:  eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+		Client:     mgr.GetClient(),
+		Clientset:  clientSet,
+		Log:        ctrl.Log.WithName("InferenceService"),
+		Scheme:     mgr.GetScheme(),
+		Recorder:   eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+		ModelCache: modelCacheProvider,
 	}).SetupWithManager(mgr, deployConfig, ingressConfig); err != nil {
 		setupLog.Error(err, "Failed to create InferenceService controller")
 		os.Exit(1)
@@ -367,6 +368,10 @@ func main() {
 			Handler: &basemodelwebhook.ClusterBaseModelValidator{Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
+		runtimeSelectorConfig := runtimeselector.NewConfig(mgr.GetClient())
+		runtimeSelectorConfig.ModelCacheProvider = modelCacheProvider.Name
+		runtimeSelector := runtimeselector.NewWithConfig(runtimeSelectorConfig)
+
 		if err = ctrl.NewWebhookManagedBy(mgr).
 			For(&v1beta1.InferenceService{}).
 			WithDefaulter(&isvc.InferenceServiceDefaulter{
@@ -375,7 +380,7 @@ func main() {
 			}).
 			WithValidator(&isvc.InferenceServiceValidator{
 				Client:          mgr.GetClient(),
-				RuntimeSelector: runtimeselector.New(mgr.GetClient()),
+				RuntimeSelector: runtimeSelector,
 			}).
 			Complete(); err != nil {
 			setupLog.Error(err, "Failed to create InferenceService webhook", "webhook", "v1beta1")

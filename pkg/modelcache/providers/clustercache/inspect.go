@@ -240,6 +240,7 @@ func (c *Client) readMetadataInputs(ctx context.Context, files []clusterCacheMet
 			return inputs, fmt.Errorf("read %s through cluster_cache: %w", defaultModelIndexFileName, err)
 		}
 		inputs.ModelIndexJSON = data
+		inputs.ModelIndexPath = file.relativePath
 	}
 	if file := selectMetadataFileByBase(files, defaultConfigFileName); file != nil {
 		data, err := c.readWholeMetadataFile(ctx, file, chunkSize, ring)
@@ -247,6 +248,7 @@ func (c *Client) readMetadataInputs(ctx context.Context, files []clusterCacheMet
 			return inputs, fmt.Errorf("read %s through cluster_cache: %w", defaultConfigFileName, err)
 		}
 		inputs.ConfigJSON = data
+		inputs.ConfigPath = file.relativePath
 	}
 	if file := selectMetadataFileByBase(files, defaultSafetensorsIndexFileName); file != nil {
 		data, err := c.readWholeMetadataFile(ctx, file, chunkSize, ring)
@@ -254,6 +256,7 @@ func (c *Client) readMetadataInputs(ctx context.Context, files []clusterCacheMet
 			return inputs, fmt.Errorf("read %s through cluster_cache: %w", defaultSafetensorsIndexFileName, err)
 		}
 		inputs.SafetensorsIndexJSON = data
+		inputs.SafetensorsIndexPath = file.relativePath
 	}
 
 	safetensorFiles, err := safetensorMetadataFiles(files, selectMetadataFileByBase(files, defaultSafetensorsIndexFileName), inputs.SafetensorsIndexJSON)
@@ -361,10 +364,11 @@ func (c *Client) readSafetensorHeader(ctx context.Context, file *clusterCacheMet
 		return nil, fmt.Errorf("read safetensors header %s through cluster_cache: %w", file.path, err)
 	}
 	return &modelcache.SafetensorHeader{
-		Path:       file.path,
-		SizeBytes:  uint64ToInt64(file.size),
-		Version:    file.version,
-		HeaderJSON: headerJSON,
+		Path:         file.path,
+		RelativePath: file.relativePath,
+		SizeBytes:    uint64ToInt64(file.size),
+		Version:      file.version,
+		HeaderJSON:   headerJSON,
 	}, nil
 }
 

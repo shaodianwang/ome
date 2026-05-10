@@ -751,6 +751,75 @@ func TestGetCompatibilityDetails(t *testing.T) {
 	})
 }
 
+func TestGetCompatibilityDetailsRequiresModelCacheProviderForShardedModels(t *testing.T) {
+	config := NewConfig(nil)
+	config.ModelCacheProvider = "cluster_cache"
+	matcher := NewDefaultRuntimeMatcher(config)
+	distribution := v1beta1.DistributionSharded
+
+	baseModel := &v1beta1.BaseModelSpec{
+		Distribution: &distribution,
+		ModelFormat:  v1beta1.ModelFormat{Name: "safetensors"},
+	}
+	isvc := &v1beta1.InferenceService{}
+
+	t.Run("rejects runtime format without cache provider", func(t *testing.T) {
+		runtime := &v1beta1.ServingRuntimeSpec{
+			SupportedModelFormats: []v1beta1.SupportedModelFormat{
+				{
+					ModelFormat: &v1beta1.ModelFormat{Name: "safetensors"},
+					AutoSelect:  ptr(true),
+				},
+			},
+		}
+
+		report, err := matcher.GetCompatibilityDetails(runtime, baseModel, isvc, "runtime")
+
+		assert.NoError(t, err)
+		assert.False(t, report.IsCompatible)
+		assert.NotEmpty(t, report.IncompatibilityReasons)
+		assert.Contains(t, report.IncompatibilityReasons[0], "cluster_cache")
+	})
+
+	t.Run("accepts runtime format with configured cache provider", func(t *testing.T) {
+		runtime := &v1beta1.ServingRuntimeSpec{
+			SupportedModelFormats: []v1beta1.SupportedModelFormat{
+				{
+					ModelFormat:         &v1beta1.ModelFormat{Name: "safetensors"},
+					ModelCacheProviders: []v1beta1.ModelCacheProvider{v1beta1.ModelCacheProviderClusterCache},
+					AutoSelect:          ptr(true),
+				},
+			},
+		}
+
+		report, err := matcher.GetCompatibilityDetails(runtime, baseModel, isvc, "runtime")
+
+		assert.NoError(t, err)
+		assert.True(t, report.IsCompatible)
+		assert.True(t, report.MatchDetails.ModelCacheProviderMatch)
+	})
+
+	t.Run("rejects cache-capable runtime when no provider is configured", func(t *testing.T) {
+		matcher := NewDefaultRuntimeMatcher(NewConfig(nil))
+		runtime := &v1beta1.ServingRuntimeSpec{
+			SupportedModelFormats: []v1beta1.SupportedModelFormat{
+				{
+					ModelFormat:         &v1beta1.ModelFormat{Name: "safetensors"},
+					ModelCacheProviders: []v1beta1.ModelCacheProvider{v1beta1.ModelCacheProviderClusterCache},
+					AutoSelect:          ptr(true),
+				},
+			},
+		}
+
+		report, err := matcher.GetCompatibilityDetails(runtime, baseModel, isvc, "runtime")
+
+		assert.NoError(t, err)
+		assert.False(t, report.IsCompatible)
+		assert.NotEmpty(t, report.IncompatibilityReasons)
+		assert.Contains(t, report.IncompatibilityReasons[0], "no model cache provider is configured")
+	})
+}
+
 func TestMatcherPicksRuntimeByModelSize(t *testing.T) {
 	matcher := NewDefaultRuntimeMatcher(NewConfig(nil))
 	isvc := &v1beta1.InferenceService{}

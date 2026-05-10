@@ -45,6 +45,31 @@ func TestFindAndParseSafetensorsFilesParsesHeaderInputs(t *testing.T) {
 	}
 }
 
+func TestFindAndParseSafetensorsFilesResolvesIndexSubdirectory(t *testing.T) {
+	modelDir := filepath.Join("testdata", "tiny-random-PhiModel")
+
+	count, err := FindAndParseSafetensorsFiles([]SafetensorsFileInput{
+		{
+			Path: "weights/model.safetensors.index.json",
+			Data: []byte(`{"weight_map":{"a":"model-1-of-2.safetensors","b":"model-2-of-2.safetensors"}}`),
+		},
+		{
+			Path: "weights/model-1-of-2.safetensors",
+			Data: readSafetensorsHeaderForTest(t, filepath.Join(modelDir, "model-1-of-2.safetensors")),
+		},
+		{
+			Path: "weights/model-2-of-2.safetensors",
+			Data: readSafetensorsHeaderForTest(t, filepath.Join(modelDir, "model-2-of-2.safetensors")),
+		},
+	})
+	if err != nil {
+		t.Fatalf("FindAndParseSafetensorsFiles returned error: %v", err)
+	}
+	if count != 92564 {
+		t.Fatalf("expected parameter count 92564, got %d", count)
+	}
+}
+
 func readSafetensorsHeaderForTest(t *testing.T, filePath string) []byte {
 	t.Helper()
 

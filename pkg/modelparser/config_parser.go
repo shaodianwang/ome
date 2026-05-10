@@ -566,6 +566,13 @@ func (p *ModelConfigParser) updateModelSpec(spec *v1beta1.BaseModelSpec, metadat
 				*c = new.(*v1beta1.ModelFrameworkSpec)
 				isUpdated = true
 			}
+		case **int32:
+			if *c == nil {
+				if val, ok := new.(int32); ok && val > 0 {
+					*c = &val
+					isUpdated = true
+				}
+			}
 		case **v1beta1.DiffusionPipelineSpec:
 			if *c == nil && new != nil {
 				*c = new.(*v1beta1.DiffusionPipelineSpec)

@@ -160,15 +160,16 @@ func (m *DefaultRuntimeMatcher) GetCompatibilityDetails(runtime *v1beta1.Serving
 // evaluateFormatMatch evaluates how well a supported format matches a model.
 func (m *DefaultRuntimeMatcher) evaluateFormatMatch(model *v1beta1.BaseModelSpec, format v1beta1.SupportedModelFormat) MatchDetails {
 	match := MatchDetails{
-		FormatMatch:            false,
-		FrameworkMatch:         false,
-		ArchitectureMatch:      true, // Default to true if not specified
-		DiffusionPipelineMatch: true, // Default to true if not specified
-		QuantizationMatch:      true, // Default to true if not specified
-		SizeMatch:              true, // Will be checked separately
-		Priority:               m.config.DefaultPriority,
-		Weight:                 0,
-		Reasons:                []string{},
+		FormatMatch:             false,
+		FrameworkMatch:          false,
+		ArchitectureMatch:       true, // Default to true if not specified
+		DiffusionPipelineMatch:  true, // Default to true if not specified
+		QuantizationMatch:       true, // Default to true if not specified
+		ModelCacheProviderMatch: true, // Default to true unless the model uses sharded distribution
+		SizeMatch:               true, // Will be checked separately
+		Priority:                m.config.DefaultPriority,
+		Weight:                  0,
+		Reasons:                 []string{},
 	}
 
 	// Set priority
@@ -179,6 +180,13 @@ func (m *DefaultRuntimeMatcher) evaluateFormatMatch(model *v1beta1.BaseModelSpec
 	// Set auto-select
 	if format.AutoSelect != nil {
 		match.AutoSelectEnabled = *format.AutoSelect
+	}
+
+	if modelRequiresCacheProvider(model) {
+		match.ModelCacheProviderMatch = supportedFormatSupportsModelCacheProvider(format, m.config.ModelCacheProvider)
+		if !match.ModelCacheProviderMatch {
+			match.Reasons = append(match.Reasons, modelCacheProviderMismatchReason(m.config.ModelCacheProvider, format))
+		}
 	}
 
 	pipelineMatch, pipelineReason := m.compareDiffusionPipeline(model.DiffusionPipeline, format.DiffusionPipeline)
@@ -300,6 +308,10 @@ func (m *DefaultRuntimeMatcher) compareAcceleratorClass(runtime *v1beta1.Serving
 
 // compareSupportedModelFormats checks if a model matches a supported format.
 func (m *DefaultRuntimeMatcher) compareSupportedModelFormats(model *v1beta1.BaseModelSpec, format v1beta1.SupportedModelFormat) bool {
+	if modelRequiresCacheProvider(model) && !supportedFormatSupportsModelCacheProvider(format, m.config.ModelCacheProvider) {
+		return false
+	}
+
 	if ok, _ := m.compareDiffusionPipeline(model.DiffusionPipeline, format.DiffusionPipeline); !ok {
 		return false
 	}
@@ -364,6 +376,10 @@ func (m *DefaultRuntimeMatcher) compareSupportedModelFormats(model *v1beta1.Base
 //   - "format name mismatch (model=pytorch, runtime=safetensors), quantization mismatch (model=fp8, runtime=int4)"
 func (m *DefaultRuntimeMatcher) getFormatMismatchReason(model *v1beta1.BaseModelSpec, format v1beta1.SupportedModelFormat) string {
 	var reasons []string
+
+	if modelRequiresCacheProvider(model) && !supportedFormatSupportsModelCacheProvider(format, m.config.ModelCacheProvider) {
+		reasons = append(reasons, modelCacheProviderMismatchReason(m.config.ModelCacheProvider, format))
+	}
 
 	if ok, reason := m.compareDiffusionPipeline(model.DiffusionPipeline, format.DiffusionPipeline); !ok {
 		if reason != "" {

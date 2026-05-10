@@ -203,6 +203,74 @@ func TestCheckSourceNotReachable(t *testing.T) {
 	assert.Contains(t, status.Message, "404")
 }
 
+func TestCheckSourceReturnsErrorForTransientFileMetadataFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/file_metadata", r.URL.Path)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	status, err := client.CheckSource(context.Background(), modelcache.Source{URI: "s3://bucket/model"})
+
+	require.Error(t, err)
+	assert.Nil(t, status)
+	assert.Contains(t, err.Error(), "file_metadata returned 503")
+}
+
+func TestCheckSourceReturnsErrorForTransientHeadFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file_metadata":
+			http.NotFound(w, r)
+		case "/head":
+			http.Error(w, "busy", http.StatusTooManyRequests)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	status, err := client.CheckSource(context.Background(), modelcache.Source{URI: "s3://bucket/model"})
+
+	require.Error(t, err)
+	assert.Nil(t, status)
+	assert.Contains(t, err.Error(), "head returned 429")
+}
+
+func TestFileMetadataInspectionUsesCanonicalRootAndRelativePaths(t *testing.T) {
+	mtime := uint64(1710000000)
+	source := modelcache.Source{URI: "manifold://bucket/model"}
+	response := &fileMetadataResponse{
+		Root: "s3://bucket/model",
+		Files: []fileMetadataEntry{
+			{
+				Path:  "s3://bucket/model/config.json",
+				Size:  100,
+				MTime: &mtime,
+			},
+			{
+				Path:         "s3://bucket/model/weights/model-00001-of-00001.safetensors",
+				RelativePath: "weights/model-00001-of-00001.safetensors",
+				Size:         200,
+			},
+		},
+	}
+
+	files := metadataFilesFromResponse(source, response)
+	require.Len(t, files, 2)
+	assert.Equal(t, "config.json", files[0].relativePath)
+	assert.Equal(t, "weights/model-00001-of-00001.safetensors", files[1].relativePath)
+
+	inspection := response.toModelCacheSourceInspection(source)
+	require.NotNil(t, inspection)
+	assert.Equal(t, "s3://bucket/model", inspection.RootURI)
+	require.Len(t, inspection.Objects, 2)
+	assert.Equal(t, "config.json", inspection.Objects[0].RelativePath)
+	assert.Equal(t, "weights/model-00001-of-00001.safetensors", inspection.Objects[1].RelativePath)
+}
+
 func TestInspectSourceUsesFileMetadataRingAndPackedRanges(t *testing.T) {
 	const sourceURI = "s3://bucket/model"
 	configPath := sourceURI + "/config.json"
@@ -281,11 +349,15 @@ func TestInspectSourceUsesFileMetadataRingAndPackedRanges(t *testing.T) {
 	require.NotNil(t, inspection)
 	assert.Equal(t, fetchRequest{Paths: []string{configPath}}, gotFetch)
 	assert.GreaterOrEqual(t, packedRangeRequests, 3)
+	assert.Equal(t, sourceURI, inspection.RootURI)
 	require.Len(t, inspection.Objects, 3)
 	assert.JSONEq(t, string(configJSON), string(inspection.Metadata.ConfigJSON))
+	assert.Equal(t, "config.json", inspection.Metadata.ConfigPath)
 	assert.JSONEq(t, string(indexJSON), string(inspection.Metadata.SafetensorsIndexJSON))
+	assert.Equal(t, "model.safetensors.index.json", inspection.Metadata.SafetensorsIndexPath)
 	require.Len(t, inspection.Metadata.SafetensorHeaders, 1)
 	assert.Equal(t, weightPath, inspection.Metadata.SafetensorHeaders[0].Path)
+	assert.Equal(t, "model-00001-of-00001.safetensors", inspection.Metadata.SafetensorHeaders[0].RelativePath)
 	assert.Equal(t, int64(len(safetensorsData)), inspection.Metadata.SafetensorHeaders[0].SizeBytes)
 	assert.Equal(t, "weight-etag", inspection.Metadata.SafetensorHeaders[0].Version)
 	assert.JSONEq(t, string(headerJSON), string(inspection.Metadata.SafetensorHeaders[0].HeaderJSON))

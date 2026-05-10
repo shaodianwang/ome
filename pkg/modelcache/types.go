@@ -35,13 +35,22 @@ type ProviderConfig struct {
 type Provider struct {
 	Name   string
 	Client Client
+	Config ProviderConfig
 }
 
 // NewProvider returns a configured model cache provider.
-func NewProvider(name string, client Client) Provider {
+func NewProvider(name string, client Client, configs ...ProviderConfig) Provider {
+	config := ProviderConfig{Provider: name}
+	if len(configs) > 0 {
+		config = configs[0]
+		if strings.TrimSpace(config.Provider) == "" {
+			config.Provider = name
+		}
+	}
 	return Provider{
 		Name:   name,
 		Client: client,
+		Config: config,
 	}
 }
 
@@ -108,7 +117,7 @@ func (r *Registry) Build(config ProviderConfig) (Provider, error) {
 		return Provider{}, fmt.Errorf("model cache provider %q returned nil client", provider)
 	}
 
-	return NewProvider(provider, client), nil
+	return NewProvider(provider, client, config), nil
 }
 
 var defaultRegistry = NewRegistry()
@@ -147,6 +156,7 @@ type SourceStatus struct {
 // SourceInspection is a provider-neutral description of a model source plus
 // the small metadata payloads OME needs for model parsing.
 type SourceInspection struct {
+	RootURI  string
 	Objects  []Object
 	Metadata ModelMetadataInputs
 }
@@ -155,18 +165,22 @@ type SourceInspection struct {
 // inspection. Providers must not include tensor bodies here.
 type ModelMetadataInputs struct {
 	ConfigJSON           []byte
+	ConfigPath           string
 	ModelIndexJSON       []byte
+	ModelIndexPath       string
 	SafetensorsIndexJSON []byte
+	SafetensorsIndexPath string
 	TokenizerConfigJSON  []byte
 	SafetensorHeaders    []SafetensorHeader
 }
 
 // SafetensorHeader describes one safetensors shard and its JSON header.
 type SafetensorHeader struct {
-	Path       string
-	SizeBytes  int64
-	Version    string
-	HeaderJSON []byte
+	Path         string
+	RelativePath string
+	SizeBytes    int64
+	Version      string
+	HeaderJSON   []byte
 }
 
 // ObjectRef identifies one object within a model source.
@@ -177,10 +191,11 @@ type ObjectRef struct {
 
 // Object describes one source object using backend-neutral metadata.
 type Object struct {
-	Source    Source
-	Path      string
-	SizeBytes int64
-	Version   string
+	Source       Source
+	Path         string
+	RelativePath string
+	SizeBytes    int64
+	Version      string
 }
 
 // PrewarmRequest asks the model cache to prewarm a source or known objects.

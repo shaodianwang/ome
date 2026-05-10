@@ -4797,6 +4797,15 @@
           "description": "ModelArchitecture of the model, e.g., \"LlamaForCausalLM\", \"GemmaForCausalLM\", \"MixtralForCausalLM\"",
           "type": "string"
         },
+        "modelCacheProviders": {
+          "description": "ModelCacheProviders lists model cache providers this runtime can load from when a BaseModel uses sharded distribution. Empty means this format supports only the default local/per-node model loading path.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
         "modelFormat": {
           "description": "ModelFormat of the model, e.g., \"PyTorch\", \"TensorFlow\", \"ONNX\", \"SafeTensors\"",
           "$ref": "#/definitions/v1beta1.ModelFormat"

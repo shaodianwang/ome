@@ -66,6 +66,38 @@ func TestShardedModelMetadataInputsFetchesHeaders(t *testing.T) {
 	g.Expect(cacheClient.InspectSourceCalls()).To(gomega.Equal([]modelcache.Source{source}))
 }
 
+func TestShardedMetadataInputsPreserveSubdirectorySafetensorsIndex(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	sourceURI := "s3://bucket/models/tiny"
+	configData := []byte(`{"model_type":"phi","architectures":["PhiForCausalLM"]}`)
+	indexData := []byte(`{"weight_map":{"weight":"model-00001-of-00001.safetensors"}}`)
+	safetensorsData := safetensorsHeaderForTest(`{"weight":{"dtype":"F32","shape":[2,3],"data_offsets":[0,24]}}`)
+
+	inputs, err := shardedMetadataInputsFromInspection(sourceURI, &modelcache.SourceInspection{
+		RootURI: sourceURI,
+		Metadata: modelcache.ModelMetadataInputs{
+			ConfigJSON:           configData,
+			ConfigPath:           "config.json",
+			SafetensorsIndexJSON: indexData,
+			SafetensorsIndexPath: "weights/model.safetensors.index.json",
+			SafetensorHeaders: []modelcache.SafetensorHeader{
+				{
+					Path:         sourceURI + "/weights/model-00001-of-00001.safetensors",
+					RelativePath: "weights/model-00001-of-00001.safetensors",
+					HeaderJSON:   safetensorsHeaderJSONForTest(safetensorsData),
+				},
+			},
+		},
+	})
+
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(inputs).To(gomega.HaveLen(3))
+	g.Expect(inputs[0].Path).To(gomega.Equal("config.json"))
+	g.Expect(inputs[1].Path).To(gomega.Equal("weights/model.safetensors.index.json"))
+	g.Expect(inputs[2].Path).To(gomega.Equal("weights/model-00001-of-00001.safetensors"))
+}
+
 func TestShardedPrewarmObjectRefsDefaultsSource(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 

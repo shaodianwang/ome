@@ -11,6 +11,8 @@ import (
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/sgl-project/ome/pkg/modelcache"
 )
 
 func TestUpdatePodSpecNodeSelector(t *testing.T) {
@@ -196,6 +198,15 @@ func TestUpdateEnvVariablesForShardedModel(t *testing.T) {
 			},
 			Distribution: distributionPtr(v1beta1.DistributionSharded),
 		},
+		InferenceServiceConfig: &controllerconfig.InferenceServicesConfig{
+			ModelCache: modelcache.ProviderConfig{
+				Provider: modelcache.ProviderClusterCache,
+				Endpoint: "http://cluster-cache.ome.svc.cluster.local:10090",
+				Options: map[string]string{
+					"timeout": "5m",
+				},
+			},
+		},
 		Log: ctrl.Log.WithName("test"),
 	}
 	container := &v1.Container{}
@@ -211,6 +222,22 @@ func TestUpdateEnvVariablesForShardedModel(t *testing.T) {
 	g.Expect(container.Env).To(gomega.ContainElement(v1.EnvVar{
 		Name:  constants.ModelPathEnvVarKey,
 		Value: storageURI,
+	}))
+	g.Expect(container.Env).To(gomega.ContainElement(v1.EnvVar{
+		Name:  constants.ModelCacheProviderEnvVarKey,
+		Value: modelcache.ProviderClusterCache,
+	}))
+	g.Expect(container.Env).To(gomega.ContainElement(v1.EnvVar{
+		Name:  constants.ModelCacheEndpointEnvVarKey,
+		Value: "http://cluster-cache.ome.svc.cluster.local:10090",
+	}))
+	g.Expect(container.Env).To(gomega.ContainElement(v1.EnvVar{
+		Name:  constants.ClusterCacheHeadlessServiceEnvVarKey,
+		Value: "cluster-cache.ome.svc.cluster.local:10090",
+	}))
+	g.Expect(container.Env).To(gomega.ContainElement(v1.EnvVar{
+		Name:  constants.ModelCacheOptionsEnvVarKey,
+		Value: `{"timeout":"5m"}`,
 	}))
 }
 

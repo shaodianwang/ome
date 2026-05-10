@@ -72,6 +72,64 @@ func TestNewClusterCacheRingLookupCandidates(t *testing.T) {
 	assert.ElementsMatch(t, []string{"[::1]:10090", "[::1]:10091", "[::1]:10092"}, candidates)
 }
 
+func TestClusterCacheRingLookupCandidatesMatchRustGoldenVectors(t *testing.T) {
+	ring, err := newClusterCacheRing([]string{
+		"[::1]:10092",
+		"[::1]:10090",
+		"[::1]:10091",
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		key  clusterCacheChunkKey
+		want []string
+	}{
+		{
+			name: "first safetensors chunk",
+			key: clusterCacheChunkKey{
+				path:   "s3://bucket/model/model-00001-of-00002.safetensors",
+				offset: 0,
+				mtime:  1710000000,
+			},
+			want: []string{"[::1]:10091", "[::1]:10090", "[::1]:10092"},
+		},
+		{
+			name: "later safetensors chunk",
+			key: clusterCacheChunkKey{
+				path:   "s3://bucket/model/model-00001-of-00002.safetensors",
+				offset: 96 * 1024 * 1024,
+				mtime:  1710000000,
+			},
+			want: []string{"[::1]:10092", "[::1]:10090", "[::1]:10091"},
+		},
+		{
+			name: "second safetensors shard",
+			key: clusterCacheChunkKey{
+				path:   "s3://bucket/model/model-00002-of-00002.safetensors",
+				offset: 0,
+				mtime:  1710000001,
+			},
+			want: []string{"[::1]:10092", "[::1]:10090", "[::1]:10091"},
+		},
+		{
+			name: "non-uri path",
+			key: clusterCacheChunkKey{
+				path:   "bucket/path/file_0.bin",
+				offset: 0,
+				mtime:  1700000000,
+			},
+			want: []string{"[::1]:10092", "[::1]:10091", "[::1]:10090"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ring.lookupCandidates(tt.key))
+		})
+	}
+}
+
 func TestNewClusterCacheRingRejectsEmptyNodes(t *testing.T) {
 	_, err := newClusterCacheRing([]string{"", " "})
 	require.Error(t, err)

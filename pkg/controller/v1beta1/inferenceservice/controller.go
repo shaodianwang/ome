@@ -3,6 +3,7 @@ package inferenceservice
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/sgl-project/ome/pkg/acceleratorclassselector"
 
@@ -44,6 +45,7 @@ import (
 	multimodelconfig "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/modelconfig"
 	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/sgl-project/ome/pkg/modelcache"
 	"github.com/sgl-project/ome/pkg/runtimeselector"
 	"github.com/sgl-project/ome/pkg/utils"
 )
@@ -112,6 +114,7 @@ type InferenceServiceReconciler struct {
 	StatusManager            *status.StatusReconciler
 	RuntimeSelector          runtimeselector.Selector
 	AcceleratorClassSelector acceleratorclassselector.Selector
+	ModelCache               modelcache.Provider
 }
 
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -190,6 +193,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to create InferenceServicesConfig")
 	}
+	isvcConfig.ModelCache = r.ModelCache.Config
 
 	modelConfigReconciler := multimodelconfig.NewModelConfigReconciler(r.Client, r.Clientset, r.Scheme)
 	result, err := modelConfigReconciler.Reconcile(ctx, isvc) // Added ctx
@@ -215,11 +219,25 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	var ingressDeploymentMode constants.DeploymentModeType
 
 	// Step 1: Reconcile model first
-	baseModel, baseModelMeta, err := isvcutils.ReconcileBaseModel(r.Client, isvc)
+	baseModel, baseModelMeta, baseModelStatus, err := isvcutils.ReconcileBaseModelWithStatus(r.Client, isvc)
 	if err != nil {
 		r.Log.Error(err, "Failed to reconcile base model", "Name", isvc.Name)
 		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "ModelReconcileError", err.Error())
 		return reconcile.Result{}, err
+	}
+	if isvcutils.IsShardedBaseModel(baseModel) {
+		ready, message := isvcutils.ShardedBaseModelReady(baseModelStatus, baseModelMeta.Generation)
+		if !ready {
+			if message == "" {
+				message = "sharded BaseModel is not ready"
+			}
+			r.Log.Info("Waiting for sharded BaseModel to become ready",
+				"model", isvc.Spec.Model.Name,
+				"namespace", isvc.Namespace,
+				"message", message)
+			r.Recorder.Eventf(isvc, v1.EventTypeNormal, "ModelNotReady", message)
+			return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 	}
 
 	// Step 2: Get runtime spec (either specified or auto-selected based on model)
@@ -622,7 +640,9 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 	r.StatusManager = status.NewStatusReconciler()
 
 	// Initialize RuntimeSelector
-	r.RuntimeSelector = runtimeselector.New(mgr.GetClient())
+	runtimeSelectorConfig := runtimeselector.NewConfig(mgr.GetClient())
+	runtimeSelectorConfig.ModelCacheProvider = r.ModelCache.Name
+	r.RuntimeSelector = runtimeselector.NewWithConfig(runtimeSelectorConfig)
 
 	// Initialize AcceleratorClassSelector
 	r.AcceleratorClassSelector = acceleratorclassselector.New(mgr.GetClient())

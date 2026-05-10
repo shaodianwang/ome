@@ -51,6 +51,9 @@ type PodConfig struct {
 type InferenceServicesConfig struct {
 	// MultiNodeProber contains all MultiNodeProber Configuration
 	MultiNodeProber MultiNodeProberConfig `json:"multinodeProber"`
+	// ModelCache contains the configured model cache provider used by
+	// sharded model-serving runtimes.
+	ModelCache modelcache.ProviderConfig `json:"modelCache,omitempty"`
 }
 
 // +kubebuilder:object:generate=false

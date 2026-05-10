@@ -52,6 +52,9 @@ func TestRegistryBuild(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "test_cache", provider.Name)
+	assert.Equal(t, "test_cache", provider.Config.Provider)
+	assert.Equal(t, "http://cache.example", provider.Config.Endpoint)
+	assert.Equal(t, map[string]string{"timeout": "5s"}, provider.Config.Options)
 	assert.True(t, provider.Configured())
 }
 

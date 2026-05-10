@@ -8626,6 +8626,26 @@ func schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref common.ReferenceCallba
 							Ref:         ref("github.com/sgl-project/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec"),
 						},
 					},
+					"modelCacheProviders": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "ModelCacheProviders lists model cache providers this runtime can load from when a BaseModel uses sharded distribution. Empty means this format supports only the default local/per-node model loading path.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 					"autoSelect": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Set to true to allow the ServingRuntime to be used for automatic model placement if this model format is specified with no explicit runtime.",

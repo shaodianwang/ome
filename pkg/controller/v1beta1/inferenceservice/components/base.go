@@ -1,9 +1,12 @@
 package components
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
@@ -18,6 +21,7 @@ import (
 	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/sgl-project/ome/pkg/modelcache"
 	"github.com/sgl-project/ome/pkg/utils"
 )
 
@@ -152,6 +156,11 @@ func UpdateEnvVariables(b *BaseComponentFields, isvc *v1beta1.InferenceService, 
 			isvcutils.AppendEnvVarsIfNotExist(container, &[]corev1.EnvVar{
 				{Name: constants.ModelPathEnvVarKey, Value: modelPath},
 			})
+		}
+		if envVars, err := modelCacheEnvVars(b); err != nil {
+			b.Log.Error(err, "Failed to build model cache environment variables", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
+		} else if len(envVars) > 0 {
+			isvcutils.AppendEnvVarsIfNotExist(container, &envVars)
 		}
 	} else {
 		// Fine-tuned serving - add vendor-specific environment variables
@@ -326,6 +335,54 @@ func modelPathEnvValue(b *BaseComponentFields, objectMeta *metav1.ObjectMeta) (s
 		return "", false
 	}
 	return *b.BaseModel.Storage.Path, true
+}
+
+func modelCacheEnvVars(b *BaseComponentFields) ([]corev1.EnvVar, error) {
+	if b == nil || !isShardedModel(b.BaseModel) || b.InferenceServiceConfig == nil {
+		return nil, nil
+	}
+
+	config := b.InferenceServiceConfig.ModelCache
+	provider := strings.TrimSpace(config.Provider)
+	if provider == "" {
+		return nil, nil
+	}
+
+	envVars := []corev1.EnvVar{
+		{Name: constants.ModelCacheProviderEnvVarKey, Value: provider},
+	}
+	if endpoint := strings.TrimSpace(config.Endpoint); endpoint != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: constants.ModelCacheEndpointEnvVarKey, Value: endpoint})
+		if provider == modelcache.ProviderClusterCache {
+			envVars = append(envVars, corev1.EnvVar{
+				Name:  constants.ClusterCacheHeadlessServiceEnvVarKey,
+				Value: modelCacheEndpointHostPort(endpoint),
+			})
+		}
+	}
+
+	options := config.Options
+	if options == nil {
+		options = map[string]string{}
+	}
+	optionsJSON, err := json.Marshal(options)
+	if err != nil {
+		return nil, err
+	}
+	envVars = append(envVars, corev1.EnvVar{Name: constants.ModelCacheOptionsEnvVarKey, Value: string(optionsJSON)})
+
+	return envVars, nil
+}
+
+func modelCacheEndpointHostPort(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if parsed, err := url.Parse(endpoint); err == nil && parsed.Host != "" {
+		return parsed.Host
+	}
+	if parsed, err := url.Parse("//" + endpoint); err == nil && parsed.Host != "" {
+		return parsed.Host
+	}
+	return endpoint
 }
 
 // MergeRuntimeArgumentsOverride merges runtime argument overrides according AcceleratorClass into the container args

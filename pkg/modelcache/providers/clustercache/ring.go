@@ -57,6 +57,7 @@ func newClusterCacheRing(nodes []string) (*clusterCacheRing, error) {
 	if len(normalized) == 0 {
 		return nil, fmt.Errorf("cluster_cache ring has no nodes")
 	}
+	sort.Strings(normalized)
 
 	vnodes := make([]clusterCacheVNode, 0, len(normalized)*clusterCacheDefaultVNodes)
 	var scratch [4]byte

@@ -266,8 +266,12 @@ const (
 
 	TFewWeightPathEnvVarKey = "TFEW_PATH"
 
-	ModelPathEnvVarKey       = "MODEL_PATH"
-	ServedModelNameEnvVarKey = "SERVED_MODEL_NAME"
+	ModelPathEnvVarKey                   = "MODEL_PATH"
+	ServedModelNameEnvVarKey             = "SERVED_MODEL_NAME"
+	ModelCacheProviderEnvVarKey          = "MODEL_CACHE_PROVIDER"
+	ModelCacheEndpointEnvVarKey          = "MODEL_CACHE_ENDPOINT"
+	ModelCacheOptionsEnvVarKey           = "MODEL_CACHE_OPTIONS"
+	ClusterCacheHeadlessServiceEnvVarKey = "CLUSTER_CACHE_HEADLESS_SERVICE"
 
 	ParallelismSizeEnvVarKey = "PARALLELISM_SIZE"
 )

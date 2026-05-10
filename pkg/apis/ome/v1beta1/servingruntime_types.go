@@ -40,6 +40,13 @@ type SupportedModelFormat struct {
 	// +optional
 	DiffusionPipeline *DiffusionPipelineSpec `json:"diffusionPipeline,omitempty"`
 
+	// ModelCacheProviders lists model cache providers this runtime can load
+	// from when a BaseModel uses sharded distribution. Empty means this format
+	// supports only the default local/per-node model loading path.
+	// +optional
+	// +listType=atomic
+	ModelCacheProviders []ModelCacheProvider `json:"modelCacheProviders,omitempty"`
+
 	// Set to true to allow the ServingRuntime to be used for automatic model placement if
 	// this model format is specified with no explicit runtime.
 	// +optional
@@ -59,6 +66,16 @@ type SupportedModelFormat struct {
 	// +optional
 	AcceleratorConfig map[string]*AcceleratorModelConfig `json:"acceleratorConfig,omitempty"`
 }
+
+// ModelCacheProvider identifies a model cache provider implementation that a
+// runtime knows how to consume.
+type ModelCacheProvider string
+
+const (
+	// ModelCacheProviderClusterCache is the cluster_cache provider name used by
+	// the internal sharded cache integration.
+	ModelCacheProviderClusterCache ModelCacheProvider = "cluster_cache"
+)
 
 // AcceleratorModelConfig provides accelerator-specific overrides for this model format
 // +k8s:openapi-gen=true

@@ -576,6 +576,7 @@ func TestUpdateModelSpec(t *testing.T) {
 		ModelType:          "llama",
 		ModelArchitecture:  "LlamaForCausalLM",
 		ModelParameterSize: "7B",
+		MaxTokens:          4096,
 		ModelCapabilities:  []string{string(v1beta1.ModelCapabilityTextToText)},
 	}
 
@@ -593,15 +594,20 @@ func TestUpdateModelSpec(t *testing.T) {
 	assert.NotNil(t, emptySpec.ModelParameterSize)
 	assert.Equal(t, "7B", *emptySpec.ModelParameterSize)
 
+	assert.NotNil(t, emptySpec.MaxTokens)
+	assert.Equal(t, int32(4096), *emptySpec.MaxTokens)
+
 	// Verify slice
 	assert.Equal(t, []string{string(v1beta1.ModelCapabilityTextToText)}, emptySpec.ModelCapabilities)
 
 	// Test that existing values aren't overwritten
 	existingType := "something-else"
 	existingArch := "different-arch"
+	existingMaxTokens := int32(2048)
 	existingSpec := &v1beta1.BaseModelSpec{
 		ModelType:         &existingType,
 		ModelArchitecture: &existingArch,
+		MaxTokens:         &existingMaxTokens,
 		ModelCapabilities: []string{"EXISTING_CAP"},
 	}
 
@@ -610,6 +616,7 @@ func TestUpdateModelSpec(t *testing.T) {
 	// Existing values shouldn't be overwritten
 	assert.Equal(t, "something-else", *existingSpec.ModelType)
 	assert.Equal(t, "different-arch", *existingSpec.ModelArchitecture)
+	assert.Equal(t, int32(2048), *existingSpec.MaxTokens)
 	assert.Equal(t, []string{"EXISTING_CAP"}, existingSpec.ModelCapabilities)
 
 	// But nil values should be populated

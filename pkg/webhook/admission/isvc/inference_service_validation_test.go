@@ -1349,6 +1349,155 @@ func TestResolveModelAndRuntime_Comprehensive(t *testing.T) {
 	}
 }
 
+func TestResolveModelAndRuntime_ExplicitShardedRuntimeRequiresConfiguredCacheProvider(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1beta1.AddToScheme(scheme)
+
+	distribution := v1beta1.DistributionSharded
+	model := &v1beta1.BaseModel{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sharded-model",
+			Namespace: "default",
+		},
+		Spec: v1beta1.BaseModelSpec{
+			Distribution: &distribution,
+			ModelFormat:  v1beta1.ModelFormat{Name: "safetensors"},
+		},
+	}
+	cacheRuntime := &v1beta1.ClusterServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cache-runtime",
+		},
+		Spec: v1beta1.ServingRuntimeSpec{
+			SupportedModelFormats: []v1beta1.SupportedModelFormat{
+				{
+					ModelFormat:         &v1beta1.ModelFormat{Name: "safetensors"},
+					ModelCacheProviders: []v1beta1.ModelCacheProvider{v1beta1.ModelCacheProviderClusterCache},
+				},
+			},
+		},
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-isvc",
+			Namespace: "default",
+		},
+		Spec: v1beta1.InferenceServiceSpec{
+			Model: &v1beta1.ModelRef{Name: "sharded-model"},
+			Runtime: &v1beta1.ServingRuntimeRef{
+				Name: "cache-runtime",
+			},
+		},
+	}
+
+	tests := []struct {
+		name          string
+		cacheProvider string
+		wantErr       bool
+		errMsg        string
+	}{
+		{
+			name:          "configured provider accepts explicit runtime",
+			cacheProvider: string(v1beta1.ModelCacheProviderClusterCache),
+		},
+		{
+			name:    "missing provider rejects explicit runtime",
+			wantErr: true,
+			errMsg:  "no model cache provider is configured",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(model.DeepCopy(), cacheRuntime.DeepCopy()).
+				Build()
+			selectorConfig := runtimeselector.NewConfig(fakeClient)
+			selectorConfig.ModelCacheProvider = tt.cacheProvider
+			validator := &InferenceServiceValidator{
+				Client:          fakeClient,
+				RuntimeSelector: runtimeselector.NewWithConfig(selectorConfig),
+			}
+
+			warnings, err := validator.resolveModelAndRuntime(context.Background(), isvc.DeepCopy(), admission.Warnings{})
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Len(t, warnings, 1)
+			assert.Contains(t, warnings[0], "Runtime cache-runtime is valid for model sharded-model")
+		})
+	}
+}
+
+func TestValidateCreate_ExplicitShardedRuntimeRequiresConfiguredCacheProvider(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1beta1.AddToScheme(scheme)
+
+	distribution := v1beta1.DistributionSharded
+	model := &v1beta1.BaseModel{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sharded-model",
+			Namespace: "default",
+		},
+		Spec: v1beta1.BaseModelSpec{
+			Distribution: &distribution,
+			ModelFormat:  v1beta1.ModelFormat{Name: "safetensors"},
+		},
+	}
+	cacheRuntime := &v1beta1.ClusterServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cache-runtime",
+		},
+		Spec: v1beta1.ServingRuntimeSpec{
+			SupportedModelFormats: []v1beta1.SupportedModelFormat{
+				{
+					ModelFormat:         &v1beta1.ModelFormat{Name: "safetensors"},
+					ModelCacheProviders: []v1beta1.ModelCacheProvider{v1beta1.ModelCacheProviderClusterCache},
+				},
+			},
+		},
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-isvc",
+			Namespace: "default",
+		},
+		Spec: v1beta1.InferenceServiceSpec{
+			Model: &v1beta1.ModelRef{Name: "sharded-model"},
+			Runtime: &v1beta1.ServingRuntimeRef{
+				Name: "cache-runtime",
+			},
+			Engine: &v1beta1.EngineSpec{
+				Runner: &v1beta1.RunnerSpec{
+					Container: v1.Container{
+						Image: "example.com/runtime:latest",
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(model, cacheRuntime).
+		Build()
+	selectorConfig := runtimeselector.NewConfig(fakeClient)
+	validator := &InferenceServiceValidator{
+		Client:          fakeClient,
+		RuntimeSelector: runtimeselector.NewWithConfig(selectorConfig),
+	}
+
+	_, err := validator.ValidateCreate(context.Background(), isvc)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no model cache provider is configured")
+}
+
 // Test edge cases and warning scenarios
 func TestResolveModelAndRuntime_EdgeCases(t *testing.T) {
 	scheme := runtime.NewScheme()

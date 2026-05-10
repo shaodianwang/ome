@@ -31621,6 +31621,11 @@ spec:
                         type: object
                       modelArchitecture:
                         type: string
+                      modelCacheProviders:
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: atomic
                       modelFormat:
                         properties:
                           name:
