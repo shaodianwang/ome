@@ -3,7 +3,9 @@ package modelconfig
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -140,4 +142,134 @@ func parseJSONStringField(values map[string]json.RawMessage, keys ...string) str
 		}
 	}
 	return ""
+}
+
+// GenericDiffusionModelConfig is the HuggingFaceDiffusionModel
+// implementation for diffusers model_index.json files. It walks the
+// pipeline's component sub-directories (text_encoder, transformer or
+// unet, vae, plus any AdditionalComponents) and sums their parameter
+// counts via safetensors. Context length comes from the text_encoder's
+// own config.json.
+type GenericDiffusionModelConfig struct {
+	BaseModelConfig
+
+	DiffusersVersion  string
+	DiffusionPipeline *DiffusionPipelineSpec
+}
+
+func (c *GenericDiffusionModelConfig) GetDiffusionModel() *DiffusionPipelineSpec {
+	return c.DiffusionPipeline
+}
+
+func (c *GenericDiffusionModelConfig) GetParameterCount() int64 {
+	if c.ConfigPath == "" {
+		return 0
+	}
+
+	baseDir := filepath.Dir(c.ConfigPath)
+	textEncoderConfig := filepath.Join(baseDir, "text_encoder", "config.json")
+	transformerConfig := filepath.Join(baseDir, "transformer", "config.json")
+	if _, err := os.Stat(transformerConfig); err != nil {
+		unetConfig := filepath.Join(baseDir, "unet", "config.json")
+		if _, unetErr := os.Stat(unetConfig); unetErr == nil {
+			transformerConfig = unetConfig
+		}
+	}
+	vaeConfig := filepath.Join(baseDir, "vae", "config.json")
+
+	total := int64(0)
+
+	add := func(label, configPath string, required bool) bool {
+		if configPath == "" {
+			if required {
+				fmt.Printf("Warning: %s config path is empty\n", label)
+				return false
+			}
+			return true
+		}
+		if _, err := os.Stat(configPath); err != nil {
+			if required {
+				fmt.Printf("Warning: %s config not found at '%s': %v\n", label, configPath, err)
+				return false
+			}
+			return true
+		}
+
+		count, err := FindAndParseSafetensors(configPath)
+		if err != nil {
+			if required {
+				fmt.Printf("Warning: failed to parse %s safetensors: %v\n", label, err)
+				return false
+			}
+			return true
+		}
+		if total > math.MaxInt64-count {
+			fmt.Printf("Warning: parameter count overflow when adding %s\n", label)
+			return false
+		}
+		total += count
+		return true
+	}
+
+	if !add("text_encoder", textEncoderConfig, true) {
+		return 0
+	}
+	if !add("transformer", transformerConfig, true) {
+		return 0
+	}
+	if !add("vae", vaeConfig, true) {
+		return 0
+	}
+
+	for name := range c.DiffusionPipeline.AdditionalComponents {
+		configPath := filepath.Join(baseDir, name, "config.json")
+		if !add(name, configPath, false) {
+			return 0
+		}
+	}
+
+	return total
+}
+
+func (c *GenericDiffusionModelConfig) GetQuantizationType() string {
+	// Quantization metadata for diffusers isn't standardized in HF.
+	return ""
+}
+
+func (c *GenericDiffusionModelConfig) GetContextLength() int {
+	if c.ConfigPath == "" {
+		return 0
+	}
+
+	textEncoderConfig := filepath.Join(filepath.Dir(c.ConfigPath), "text_encoder", "config.json")
+	data, err := os.ReadFile(textEncoderConfig)
+	if err != nil {
+		return 0
+	}
+
+	data = SanitizeJSONBytes(data)
+
+	var meta struct {
+		MaxPositionEmbeds int `json:"max_position_embeddings"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return 0
+	}
+	return meta.MaxPositionEmbeds
+}
+
+func (c *GenericDiffusionModelConfig) GetModelSizeBytes() int64 {
+	paramCount := c.GetParameterCount()
+	if paramCount == 0 {
+		return 0
+	}
+	return EstimateModelSizeBytes(paramCount, c.TorchDtype)
+}
+
+func (c *GenericDiffusionModelConfig) HasVision() bool {
+	return true
+}
+
+func (c *GenericDiffusionModelConfig) IsEmbedding() bool {
+	return false
 }

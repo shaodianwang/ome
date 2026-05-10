@@ -440,7 +440,7 @@ func (p *ModelConfigParser) extractModelMetadataFromHFWithParameterCount(hfModel
 		ModelArchitecture:  hfModel.GetArchitecture(),
 		ModelParameterSize: modelconfig.FormatParamCount(parameterCount),
 		MaxTokens:          int32(hfModel.GetContextLength()),
-		ModelCapabilities:  p.determineModelCapabilitiesFromHF(hfModel),
+		ModelCapabilities:  capabilitiesAsStrings(determineCapabilities(hfModel)),
 	}
 
 	if isDiffusion {
@@ -660,7 +660,6 @@ func convertDiffusionComponent(component *modelconfig.DiffusionComponentSpec) *v
 	return &v1beta1.DiffusionComponentSpec{Library: component.Library, Type: component.Type}
 }
 
-// determineModelCapabilitiesFromHF determines the model capabilities based on the HuggingFaceModel
 // shouldSkipConfigParsing checks if config parsing should be skipped for this model
 func (p *ModelConfigParser) shouldSkipConfigParsing(baseModel *v1beta1.BaseModel, clusterBaseModel *v1beta1.ClusterBaseModel) bool {
 	// Check base model annotations
@@ -686,81 +685,14 @@ func (p *ModelConfigParser) shouldSkipConfigParsing(baseModel *v1beta1.BaseModel
 	return false
 }
 
-func (p *ModelConfigParser) determineModelCapabilitiesFromHF(hfModel modelconfig.HuggingFaceModel) []string {
-	var capabilities []string
-	architecture := hfModel.GetArchitecture()
-	modelType := hfModel.GetModelType()
-
-	normalizedArchitecture := strings.ToLower(architecture)
-	normalizedModelType := strings.ToLower(modelType)
-
-	// Tested against 90+ models.
-	if dm, ok := hfModel.(modelconfig.HuggingFaceDiffusionModel); ok {
-		pipeline := dm.GetDiffusionModel()
-		if pipeline == nil {
-			return capabilities
-		}
-		if strings.Contains(normalizedArchitecture, "imageedit") ||
-			strings.Contains(normalizedArchitecture, "pix2pix") ||
-			strings.Contains(normalizedArchitecture, "img2img") ||
-			strings.Contains(normalizedArchitecture, "inpaint") {
-			return append(capabilities, string(v1beta1.ModelCapabilityImageTextToImage))
-		}
-		if strings.Contains(normalizedArchitecture, "image") ||
-			strings.Contains(normalizedArchitecture, "pix") ||
-			strings.Contains(normalizedArchitecture, "stablediffusion") {
-			return append(capabilities, string(v1beta1.ModelCapabilityTextToImage))
-		}
-		if strings.Contains(normalizedArchitecture, "texttovideo") ||
-			strings.Contains(normalizedArchitecture, "t2v") {
-			return append(capabilities, string(v1beta1.ModelCapabilityTextToVideo))
-		}
-		if strings.Contains(normalizedArchitecture, "video") {
-			return append(capabilities, string(v1beta1.ModelCapabilityImageTextToVideo))
-		}
+// capabilitiesAsStrings converts a typed []v1beta1.ModelCapability into
+// the []string representation that ModelMetadata.ModelCapabilities holds.
+func capabilitiesAsStrings(caps []v1beta1.ModelCapability) []string {
+	out := make([]string, len(caps))
+	for i, c := range caps {
+		out[i] = string(c)
 	}
-
-	// For NemotronH_Nano capability
-	if strings.Contains(normalizedModelType, "nemotronh_nano") {
-		return append(capabilities, string(v1beta1.ModelCapabilityImageTextToText), string(v1beta1.ModelCapabilityTextToText),
-			string(v1beta1.ModelCapabilityAudioToText))
-	}
-
-	// For vision, only support image text capability right now
-	if hfModel.HasVision() {
-		return append(capabilities, string(v1beta1.ModelCapabilityImageTextToText))
-	}
-
-	// Check for omni-model capability
-	if strings.Contains(normalizedArchitecture, "omni") {
-		return append(capabilities,
-			string(v1beta1.ModelCapabilityTextToAudio), string(v1beta1.ModelCapabilityImageTextToAudio),
-			string(v1beta1.ModelCapabilityVideoTextToAudio), string(v1beta1.ModelCapabilityAudioToText),
-			string(v1beta1.ModelCapabilityAudioToAudio))
-	}
-
-	// Check for audio-to-text capability (ASR/transcription models e.g. Whisper, Wav2Vec2, HuBERT)
-	if strings.Contains(normalizedArchitecture, "whisper") ||
-		strings.Contains(normalizedArchitecture, "wav2vec2") ||
-		strings.Contains(normalizedArchitecture, "hubert") ||
-		strings.Contains(normalizedArchitecture, "fortc") ||
-		strings.Contains(normalizedArchitecture, "forspeechtotext") {
-		return append(capabilities, string(v1beta1.ModelCapabilityAudioToText))
-	}
-
-	// Check for text embedding capability
-	if hfModel.IsEmbedding() ||
-		strings.Contains(normalizedArchitecture, "embedding") ||
-		strings.Contains(normalizedArchitecture, "sentence") ||
-		strings.Contains(normalizedModelType, "bert") ||
-		// Special case for known embedding models
-		(strings.Contains(normalizedModelType, "mistral") &&
-			strings.Contains(normalizedArchitecture, "mistralmodel")) {
-		return append(capabilities, string(v1beta1.ModelCapabilityEmbedding))
-	}
-
-	// Default to text-to-text capability
-	return append(capabilities, string(v1beta1.ModelCapabilityTextToText))
+	return out
 }
 
 // PopulateArtifactAttribute returns a pointer to an updated copy of currentModelMetadata

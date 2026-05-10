@@ -1,116 +1,134 @@
 # Hugging Face Model Configuration Parser
 
-This package provides Go utilities for loading, parsing, and analyzing Hugging Face model configurations. It allows you to extract important information from model configuration files without needing to know the specific model type in advance.
+This package parses Hugging Face model configurations (`config.json` and
+`model_index.json`) into a uniform Go interface so callers can extract
+metadata — parameter count, context length, architecture, vision
+capability, quantization — without knowing the model type in advance.
 
-## Features
+## How it works
 
-- **Automatic model detection:**
-  Detects and loads configuration for any supported model type.
-- **Model metadata extraction:**
-  Extracts key information, including:
-  - Parameter count
-  - Context window size
-  - Model architecture
-  - Vision capabilities (for multimodal models)
-- **Extensible architecture:**
-  Easy to add support for new model families.
-- **Accurate parameter counting:**
-  Handles complex cases such as Mixture of Experts (MoE) and multi-file safetensors models.
-- **Comprehensive test coverage:**
-  Unit tests and real-world test data for all supported models.
+A single `GenericModelConfig` parses every transformer `config.json`,
+and a single `GenericDiffusionModelConfig` parses every diffusers
+`model_index.json`. There is no per-`model_type` registry, no
+per-family struct.
 
-## Supported Model Families
+What the resolver derives:
 
-### Language Models
-- **LLaMA Family**: Llama-3, Llama-3.1, Llama-4, Maverick, Scout, SmolLM
-- **Mistral Family**: Mistral, Mixtral (MoE)
-- **DeepSeek**: DeepSeek V3
-- **Phi Family**: Phi-3, Phi-3 Vision
-- **Qwen Family**: Qwen2, Qwen2.5
-- **Gemma Family**: Gemma, Gemma2
-- **ChatGLM Family**: ChatGLM3, GLM-4
-- **Other Models**:
-  - StableLM (StabilityAI)
-  - MiniCPM, MiniCPM3
-  - InternLM, InternLM2
-  - Baichuan, Baichuan2
-  - XVERSE
-  - ExaONE 3
-  - Command-R (Cohere)
-  - DBRX (Databricks)
+- **Architecture / model_type / dtype / transformers version**: read
+  from top-level JSON, with a fallback to nested `text_config`,
+  `llm_config`, or `language_config` for multimodal configs that
+  push these fields down.
+- **Context length**: cascade through `max_position_embeddings`,
+  `max_sequence_length`, `max_seq_len` (DBRX), `seq_length`
+  (ChatGLM), `model_max_length` (Baichuan). First non-zero wins.
+  Nested LLM-config values are folded into the top-level fields by
+  the same probe.
+- **Parameter count**: try sibling safetensors via
+  `FindAndParseSafetensors` first; fall back to architecture-based
+  estimation (MoE-aware when `n_routed_experts` /
+  `num_local_experts` / `num_experts` is present).
+- **Vision capability**: detected from JSON shape — any of
+  `vision_config`, `mm_vision_tower`, `image_token_id`,
+  `image_token_index`, or `img_processor` flips it on. No
+  per-`model_type` allowlist.
+- **Quantization**: read from `quantization_config.quant_method`.
 
-### Multimodal Models
-- **Qwen2-VL**: Vision-language models
-- **Phi-3 Vision**: Multimodal Phi models
-- **MLlama**: Multimodal Llama models (Llama 3.2 Vision)
-- **DeepSeek-VL**: DeepSeek VL2 and Janus multimodal models
-- **LLaVA**: Large Language and Vision Assistant models
-
-### Embedding Models
-- **BERT-based**: BGE, E5, and other BERT architectures
-- **Mistral-based**: E5-Mistral embedding models
-- **Qwen-based**: GTE-Qwen2 embedding models
-
-### Reward Models
-- Models using Llama, Gemma, Qwen, and InternLM architectures for reward modeling
+`pkg/modelparser` consumes this interface and maps the result onto
+OME's `ModelCapability` enum.
 
 ## Usage
 
 ```go
-import "path/to/hf_model_config"
+import "github.com/sgl-project/ome/pkg/hfutil/modelconfig"
 
-config, err := hf_model_config.LoadConfig("path/to/config.json")
+// From a file path:
+model, err := modelconfig.LoadModelConfig("/path/to/config.json")
 if err != nil {
-    // handle error
+    return err
 }
-fmt.Println("Parameters:", config.GetParameterCount())
-fmt.Println("Context window:", config.GetContextLength())
-fmt.Println("Architecture:", config.GetArchitecture())
+fmt.Println("Parameters:", model.GetParameterCount())
+fmt.Println("Context:   ", model.GetContextLength())
+fmt.Println("Vision:    ", model.HasVision())
+
+// From in-memory bytes (e.g., when serving from object storage):
+model, err = modelconfig.ParseModelConfig(modelconfig.ModelConfigInput{
+    Path: "config.json",
+    Data: bytes,
+})
 ```
 
-See the `examples/` directory for more detailed usage patterns.
+`LoadModelConfig` and `ParseModelConfig` both return
+`HuggingFaceModel`. Diffusion pipelines additionally satisfy
+`HuggingFaceDiffusionModel` — type-assert to it when you need
+pipeline metadata:
 
-## Directory Structure
+```go
+if dm, ok := model.(modelconfig.HuggingFaceDiffusionModel); ok {
+    pipeline := dm.GetDiffusionModel()
+    // ... access pipeline.Scheduler, .TextEncoder, etc.
+}
+```
 
-- `interface.go` – Central interface and loader logic
-- `llama.go`, `llama4.go`, `mllama.go` – LLaMA family implementations
-- `mistral.go`, `mixtral.go` – Mistral and Mixtral implementations
-- `deepseek_v3.go` – DeepSeek V3 implementation
-- `phi.go`, `phi3_v.go` – Phi family implementations
-- `qwen2.go`, `qwen2_vl.go` – Qwen family implementations
-- `gemma.go` – Gemma family implementation
-- `chatglm.go` – ChatGLM/GLM-4 implementation
-- `stablelm.go` – StableLM implementation
-- `minicpm.go` – MiniCPM implementation
-- `internlm.go` – InternLM implementation
-- `baichuan.go` – Baichuan implementation
-- `xverse.go` – XVERSE implementation
-- `exaone.go` – ExaONE implementation
-- `bert.go` – BERT-based models (embeddings)
-- `deepseek_vl.go` – DeepSeek VL multimodal models
-- `llava.go` – LLaVA multimodal models
-- `command_r.go` – Command-R implementation
-- `dbrx.go` – DBRX implementation
-- `safetensors.go` – Utilities for parameter counting from safetensors files
-- `*_test.go` – Unit tests
-- `examples/` – Example code
-- `testdata/` – Real model configuration files for testing
+See `examples/` for end-to-end runnable code.
 
-## Future Work
+## Files
 
-- **Additional model families to support:**
-  - OLMoE (Allen AI)
-  - LLaVA-NeXT, LLaVA-OneVision (extended LLaVA variants)
-  - CLIP (standalone vision encoders)
-  - Additional embedding models (Voyage, Cohere embeddings)
-  - More reward models
+| File | Responsibility |
+|---|---|
+| `interface.go` | Public contract: `HuggingFaceModel`, `HuggingFaceDiffusionModel`, `ModelConfigInput`. |
+| `base.go` | Shared data types (`BaseModelConfig`, `AutoMap`, `QuantizationConfig`, `RopeScalingConfig`) and pure utilities (`FormatSize`, `FormatParamCount`, `EstimateModelSizeBytes`, `SanitizeJSONBytes`). |
+| `config.go` | `GenericModelConfig`, the JSON-shape vision detector, nested-config probing, MoE-aware parameter estimation. |
+| `diffusion.go` | Diffusion pipeline parsing (`DiffusionPipelineSpec`) and `GenericDiffusionModelConfig` — sums component params via safetensors. |
+| `loader.go` | Entry points: `LoadModelConfig` (path), `ParseModelConfig` (bytes). |
+| `safetensors.go` | Safetensors header parsing for accurate parameter counts. |
+| `testdata/` | 70+ real model configs used by the test suite. |
+| `examples/` | Runnable examples. |
 
-- **Enhanced features:**
-  - Automatic model file downloading
-  - Model quantization detection and analysis
-  - Memory usage estimation
-  - Performance benchmarking utilities
+## Adding a new model
 
-- Continue expanding support for new and emerging Hugging Face model architectures.
-- Add more robust error handling and config validation for edge cases.
-- Improve documentation and provide more real-world examples.
+Most of the time, no code change is needed. Drop the model's
+`config.json` into `testdata/` and run the test suite:
+
+```bash
+go test ./pkg/hfutil/modelconfig/ -run TestAllFixturesParse -v
+```
+
+The fixture walker (`fixtures_test.go`) loads every config under
+`testdata/` and asserts a Loose contract: parses without error,
+non-empty `model_type` and architecture, positive context length,
+diffusion fixtures satisfy `HuggingFaceDiffusionModel`. If your
+fixture passes, the parser already handles it.
+
+If a fixture fails:
+
+- **Vision not detected**: add the relevant JSON-shape key to the
+  `visionShapeKeys` list in `config.go` (only if the existing
+  signals genuinely don't appear).
+- **Context length zero**: check whether the JSON exposes an
+  unrecognized field name, then add it to the cascade in
+  `GetContextLength` and to the `GenericModelConfig` struct.
+- **Truly sparse config** (no architecture anywhere, or an
+  exotic derived-context formula): add the fixture to
+  `fixturesSkipped` in `fixtures_test.go` with a one-line reason.
+  The walker is intentionally strict; skips are documented.
+
+Parameter counts derived from `config.json` alone are estimates —
+they're inherently unreliable across architectures. The walker does
+not assert on them; if you need accurate counts, place the model's
+`.safetensors` files (or a `model.safetensors.index.json`) next to
+the config so `FindAndParseSafetensors` can read the real counts.
+
+## Known fixture skips
+
+Two fixtures are excluded from the walker, with documented reasons in
+`fixtures_test.go`:
+
+- `clip_vision_model.json` — a CLIP vision-encoder sub-component, not
+  a complete model. No text context length by design.
+- `janus_1.3b.json` — `multi_modality` config with no `architectures`
+  field at top level or in any nested config. The previous per-model
+  parser hardcoded `JanusMultiModalityCausalLM`; we don't synthesize
+  data the JSON doesn't have.
+- `gemma3.json` — context length only derivable as
+  `text_config.sliding_window * rope_scaling.factor`, an exotic formula
+  we deliberately don't carry in the generic resolver.
