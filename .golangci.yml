@@ -26,12 +26,6 @@ issues:
       linters:
         - errcheck
 
-    # WIP scaffolding inherited from upstream that's not wired up yet.
-    # Track in a follow-up.
-    - path: pkg/storage/providers/(s3|gcs)/
-      linters:
-        - unused
-
     # Ineffectual assignment — fires from both staticcheck (SA4006) and
     # the ineffassign linter on the same line. Two upstream-inherited sites.
     - path: pkg/hfutil/modelconfig/interface\.go
@@ -52,10 +46,6 @@ issues:
     # SA6002 (passing []byte to sync.Pool.Put causes header allocation).
     # Real but small perf issue we can fix later.
     - path: pkg/ociobjectstore/(os_parallel_download|utils)\.go
-      linters:
-        - staticcheck
-      text: "SA6002"
-    - path: pkg/storage/providers/oci/(parallel|provider)\.go
       linters:
         - staticcheck
       text: "SA6002"

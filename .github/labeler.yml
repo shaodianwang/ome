@@ -45,15 +45,12 @@ webhook:
 # Storage
 storage:
   - changed-files:
-    - any-glob-to-any-file:
-      - 'pkg/storage/**/*'
-      - 'pkg/ociobjectstore/**/*'
+    - any-glob-to-any-file: 'pkg/ociobjectstore/**/*'
 
 # Authentication
 auth:
   - changed-files:
     - any-glob-to-any-file:
-      - 'pkg/auth/**/*'
       - 'pkg/principals/**/*'
       - 'pkg/vault/**/*'
 
