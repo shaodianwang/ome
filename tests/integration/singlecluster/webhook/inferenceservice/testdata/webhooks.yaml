@@ -1,0 +1,30 @@
+# Stripped-down webhook fixture for the ISVC validating webhook only.
+# config/webhook/manifests.yaml installs three webhooks for ISVC: a
+# MutatingWebhookConfiguration with a defaulter handler + pod mutator,
+# AND a ValidatingWebhookConfiguration. We only want the validator
+# here — installing the others (with failurePolicy=Fail) without
+# registering matching handlers in the suite manager would 404 every
+# Create/Update and defeat the test.
+#
+# envtest patches the placeholder caBundle / clientConfig.service →
+# clientConfig.url at install time; values here are scaffolding.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: inferenceservice.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-inferenceservice
+    failurePolicy: Fail
+    name: inferenceservice.ome-webhook-server.validator
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["inferenceservices"]
