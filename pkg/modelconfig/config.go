@@ -262,6 +262,13 @@ func (c *GenericModelConfig) HasVision() bool {
 	return c.hasVisionConfig
 }
 
+// GetCapabilities returns the model's classified capabilities by
+// running the modelconfig rule dispatcher against this config.
+// Overrides BaseModelConfig's [CapabilityUnknown] default.
+func (c *GenericModelConfig) GetCapabilities() []Capability {
+	return classifyCapabilities(c)
+}
+
 func (c *GenericModelConfig) GetModelSizeBytes() int64 {
 	paramCount := c.GetParameterCount()
 	if paramCount == 0 {

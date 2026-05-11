@@ -440,7 +440,7 @@ func (p *ModelConfigParser) extractModelMetadataFromHFWithParameterCount(hfModel
 		ModelArchitecture:  hfModel.GetArchitecture(),
 		ModelParameterSize: modelconfig.FormatParamCount(parameterCount),
 		MaxTokens:          int32(hfModel.GetContextLength()),
-		ModelCapabilities:  capabilitiesAsStrings(determineCapabilities(hfModel)),
+		ModelCapabilities:  capabilitiesAsStrings(hfModel, p.logger),
 	}
 
 	if isDiffusion {
@@ -683,16 +683,6 @@ func (p *ModelConfigParser) shouldSkipConfigParsing(baseModel *v1beta1.BaseModel
 	}
 
 	return false
-}
-
-// capabilitiesAsStrings converts a typed []v1beta1.ModelCapability into
-// the []string representation that ModelMetadata.ModelCapabilities holds.
-func capabilitiesAsStrings(caps []v1beta1.ModelCapability) []string {
-	out := make([]string, len(caps))
-	for i, c := range caps {
-		out[i] = string(c)
-	}
-	return out
 }
 
 // PopulateArtifactAttribute returns a pointer to an updated copy of currentModelMetadata

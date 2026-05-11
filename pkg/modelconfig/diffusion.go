@@ -270,6 +270,16 @@ func (c *GenericDiffusionModelConfig) HasVision() bool {
 	return true
 }
 
+// GetCapabilities returns the model's classified capabilities by
+// running the modelconfig rule dispatcher against this config.
+// Overrides BaseModelConfig's [CapabilityUnknown] default. The
+// diffusionRule will fire (since this type satisfies
+// HuggingFaceDiffusionModel) and use the pipeline class name to
+// classify.
+func (c *GenericDiffusionModelConfig) GetCapabilities() []Capability {
+	return classifyCapabilities(c)
+}
+
 func (c *GenericDiffusionModelConfig) IsEmbedding() bool {
 	return false
 }

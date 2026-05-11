@@ -30,6 +30,10 @@ type HuggingFaceModel interface {
 	HasVision() bool
 	// IsEmbedding returns true if this model is intended for generating embeddings.
 	IsEmbedding() bool
+	// GetCapabilities returns the capabilities (inference tasks) the
+	// model serves. Always returns at least one element; an opaque
+	// model returns []Capability{CapabilityUnknown}.
+	GetCapabilities() []Capability
 }
 
 // HuggingFaceDiffusionModel is the additional contract for diffusion

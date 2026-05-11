@@ -61,6 +61,14 @@ func (c *BaseModelConfig) IsEmbedding() bool {
 	return false
 }
 
+// GetCapabilities defaults to CapabilityUnknown. GenericModelConfig
+// and GenericDiffusionModelConfig override this with the real
+// classifier; types that embed BaseModelConfig without overriding
+// will surface as Unknown so the gap is visible in logs.
+func (c *BaseModelConfig) GetCapabilities() []Capability {
+	return []Capability{CapabilityUnknown}
+}
+
 // QuantizationConfig captures the quantization settings most HF
 // configs expose.
 type QuantizationConfig struct {

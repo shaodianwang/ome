@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -52,6 +53,24 @@ func (m *mockHuggingFaceModel) GetTorchDtype() string         { return m.torchDt
 func (m *mockHuggingFaceModel) GetModelSizeBytes() int64      { return m.modelSizeBytes }
 func (m *mockHuggingFaceModel) HasVision() bool               { return m.hasVision }
 func (m *mockHuggingFaceModel) IsEmbedding() bool             { return m.isEmbedding }
+func (m *mockHuggingFaceModel) GetCapabilities() []modelconfig.Capability {
+	// Synthesize capabilities approximating what modelconfig's
+	// classifier would return for this mock's flags. Covers the
+	// simple cases the existing mock-driven tests exercise; richer
+	// scenarios should route through the real classifier via
+	// modelconfig.LoadModelConfig + a fixture.
+	if m.isEmbedding {
+		return []modelconfig.Capability{modelconfig.CapabilityEmbedding}
+	}
+	if strings.Contains(strings.ToLower(m.modelType), "bert") ||
+		strings.Contains(m.architecture, "Bert") {
+		return []modelconfig.Capability{modelconfig.CapabilityEmbedding}
+	}
+	if m.hasVision {
+		return []modelconfig.Capability{modelconfig.CapabilityImageTextToText}
+	}
+	return []modelconfig.Capability{modelconfig.CapabilityTextToText}
+}
 
 // Define a helper function to create a mock model with default values
 func createDefaultMockModel() *mockHuggingFaceModel {
