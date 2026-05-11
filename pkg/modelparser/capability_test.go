@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/hfutil/modelconfig"
+	"github.com/sgl-project/ome/pkg/modelconfig"
 )
 
 // TestDetermineCapabilities pins down the table-driven capability

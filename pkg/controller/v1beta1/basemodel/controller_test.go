@@ -1984,7 +1984,7 @@ func distributionPtr(distribution v1beta1.Distribution) *v1beta1.Distribution {
 func tinyPhiConfigForTest(t *testing.T) []byte {
 	t.Helper()
 
-	data, err := os.ReadFile("../../../hfutil/modelconfig/testdata/tiny-random-PhiModel/config.json")
+	data, err := os.ReadFile("../../../modelconfig/testdata/tiny-random-PhiModel/config.json")
 	if err != nil {
 		t.Fatalf("failed to read tiny phi config fixture: %v", err)
 	}

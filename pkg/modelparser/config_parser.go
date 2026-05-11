@@ -18,7 +18,7 @@ import (
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
 	"github.com/sgl-project/ome/pkg/client/clientset/versioned"
-	"github.com/sgl-project/ome/pkg/hfutil/modelconfig"
+	"github.com/sgl-project/ome/pkg/modelconfig"
 )
 
 const (
@@ -64,7 +64,7 @@ func (p *ModelConfigParser) ParseModelConfig(modelDir string, baseModel *v1beta1
 
 // ParseModelConfigFromFiles reads model metadata from an explicit set of files.
 // Config JSON and safetensors headers are parsed directly from bytes by
-// hfutil/modelconfig.
+// pkg/modelconfig.
 func (p *ModelConfigParser) ParseModelConfigFromFiles(ctx context.Context, files []ModelConfigFileInput, baseModel *v1beta1.BaseModel, clusterBaseModel *v1beta1.ClusterBaseModel) (*ModelMetadata, error) {
 	if shouldSkip := p.shouldSkipConfigParsing(baseModel, clusterBaseModel); shouldSkip {
 		p.logger.Infof("Skipping config parsing due to annotation")

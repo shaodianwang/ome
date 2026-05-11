@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/sgl-project/ome/pkg/hfutil/modelconfig"
+	"github.com/sgl-project/ome/pkg/modelconfig"
 )
 
 // Create a temporary example configuration

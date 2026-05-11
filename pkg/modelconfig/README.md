@@ -39,7 +39,7 @@ OME's `ModelCapability` enum.
 ## Usage
 
 ```go
-import "github.com/sgl-project/ome/pkg/hfutil/modelconfig"
+import "github.com/sgl-project/ome/pkg/modelconfig"
 
 // From a file path:
 model, err := modelconfig.LoadModelConfig("/path/to/config.json")
@@ -90,7 +90,7 @@ Most of the time, no code change is needed. Drop the model's
 `config.json` into `testdata/` and run the test suite:
 
 ```bash
-go test ./pkg/hfutil/modelconfig/ -run TestAllFixturesParse -v
+go test ./pkg/modelconfig/ -run TestAllFixturesParse -v
 ```
 
 The fixture walker (`fixtures_test.go`) loads every config under

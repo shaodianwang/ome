@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/hfutil/modelconfig"
+	"github.com/sgl-project/ome/pkg/modelconfig"
 )
 
 // capabilityRule classifies a model into a list of v1beta1.ModelCapability

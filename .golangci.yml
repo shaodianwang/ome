@@ -27,14 +27,8 @@ issues:
         - errcheck
 
     # Ineffectual assignment — fires from both staticcheck (SA4006) and
-    # the ineffassign linter on the same line. Two upstream-inherited sites.
-    - path: pkg/hfutil/modelconfig/interface\.go
-      linters:
-        - staticcheck
-      text: "SA4006"
-    - path: pkg/hfutil/modelconfig/interface\.go
-      linters:
-        - ineffassign
+    # the ineffassign linter on the same line. Upstream-inherited site
+    # in modelagent/gopher.go.
     - path: pkg/modelagent/gopher\.go
       linters:
         - staticcheck
