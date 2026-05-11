@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	testutils "github.com/sgl-project/ome/pkg/testing"
+	testutils "github.com/ome-projects/ome/pkg/testing"
 )
 
 const leafConfig = `imports:

@@ -9,10 +9,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/modelcache"
 
-	"github.com/sgl-project/ome/tests/integration/util"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // Sharded cache-identity sensitivity: shardedCacheIdentityChanged

@@ -23,12 +23,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/benchmark/reconcilers/job"
-	benchmarkutils "github.com/sgl-project/ome/pkg/controller/v1beta1/benchmark/utils"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
-	isvcutils "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/utils"
-	"github.com/sgl-project/ome/pkg/utils/storage"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/benchmark/reconcilers/job"
+	benchmarkutils "github.com/ome-projects/ome/pkg/controller/v1beta1/benchmark/utils"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/utils/storage"
 )
 
 const (

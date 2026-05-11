@@ -7,8 +7,8 @@ import (
 	. "github.com/onsi/gomega"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/sgl-project/ome/tests/integration/components"
-	"github.com/sgl-project/ome/tests/integration/framework"
+	"github.com/ome-projects/ome/tests/integration/components"
+	"github.com/ome-projects/ome/tests/integration/framework"
 )
 
 // SetupInferenceService smoke test: registering the reconciler must

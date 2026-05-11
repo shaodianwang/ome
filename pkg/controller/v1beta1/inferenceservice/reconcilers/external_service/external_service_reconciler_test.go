@@ -15,9 +15,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 )
 
 func TestExternalServiceReconciler_shouldCreateExternalService(t *testing.T) {

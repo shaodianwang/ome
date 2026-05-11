@@ -15,7 +15,7 @@ import (
 	kclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // mockClient implements kclient.Client interface for testing error conditions

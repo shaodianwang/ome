@@ -6,7 +6,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1beta1acreconciler "github.com/sgl-project/ome/pkg/controller/v1beta1/acceleratorclass"
+	v1beta1acreconciler "github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorclass"
 )
 
 // SetupAcceleratorClass registers the AcceleratorClassReconciler.

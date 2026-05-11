@@ -7,10 +7,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	v1beta1 "github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/runtimeselector"
-	basemodelwebhook "github.com/sgl-project/ome/pkg/webhook/admission/basemodel"
-	isvcwebhook "github.com/sgl-project/ome/pkg/webhook/admission/isvc"
+	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/runtimeselector"
+	basemodelwebhook "github.com/ome-projects/ome/pkg/webhook/admission/basemodel"
+	isvcwebhook "github.com/ome-projects/ome/pkg/webhook/admission/isvc"
 )
 
 // SetupBaseModelWebhooks registers BOTH the BaseModel and

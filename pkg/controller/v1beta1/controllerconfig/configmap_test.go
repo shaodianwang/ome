@@ -11,8 +11,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/modelcache"
 )
 
 const (

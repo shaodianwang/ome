@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // RayServiceReconciler reconciles Ray head Service objects

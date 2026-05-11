@@ -4,7 +4,7 @@ package modelagent
 import (
 	"encoding/json"
 
-	"github.com/sgl-project/ome/pkg/modelparser"
+	"github.com/ome-projects/ome/pkg/modelparser"
 )
 
 // ModelStatus represents the status of a model on a node

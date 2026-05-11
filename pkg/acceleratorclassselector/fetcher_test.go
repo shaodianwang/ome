@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 // Helper function to create resource.Quantity

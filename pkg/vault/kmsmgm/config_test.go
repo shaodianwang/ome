@@ -7,9 +7,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sgl-project/ome/pkg/principals"
-	testingPkg "github.com/sgl-project/ome/pkg/testing"
-	"github.com/sgl-project/ome/pkg/vault/kmsvault"
+	"github.com/ome-projects/ome/pkg/principals"
+	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	"github.com/ome-projects/ome/pkg/vault/kmsvault"
 )
 
 func TestNewConfig(t *testing.T) {

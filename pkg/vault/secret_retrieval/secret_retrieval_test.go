@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sgl-project/ome/pkg/principals"
-	testingPkg "github.com/sgl-project/ome/pkg/testing"
-	omesecrets "github.com/sgl-project/ome/pkg/vault"
+	"github.com/ome-projects/ome/pkg/principals"
+	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	omesecrets "github.com/ome-projects/ome/pkg/vault"
 )
 
 // MockSecretsClientInterface defines the interface for mocking secrets client

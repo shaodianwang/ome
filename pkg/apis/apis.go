@@ -7,7 +7,7 @@ package apis
 import (
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 // AddToSchemes may be used to add all resources defined in the project to a Scheme

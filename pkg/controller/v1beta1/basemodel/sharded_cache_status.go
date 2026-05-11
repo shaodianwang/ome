@@ -15,9 +15,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/modelcache"
-	"github.com/sgl-project/ome/pkg/modelparser"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/modelparser"
 )
 
 const shardedModelCachePollInterval = 5 * time.Second

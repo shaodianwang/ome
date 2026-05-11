@@ -5,8 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 )
 
 func TestResolveIngressConfig(t *testing.T) {

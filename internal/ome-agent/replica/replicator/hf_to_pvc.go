@@ -3,10 +3,10 @@ package replicator
 import (
 	"path/filepath"
 
-	"github.com/sgl-project/ome/pkg/xet"
+	"github.com/ome-projects/ome/pkg/xet"
 
-	"github.com/sgl-project/ome/internal/ome-agent/replica/common"
-	"github.com/sgl-project/ome/pkg/logging"
+	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
+	"github.com/ome-projects/ome/pkg/logging"
 )
 
 type HFToPVCReplicator struct {

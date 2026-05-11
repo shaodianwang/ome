@@ -8,8 +8,8 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 
-	"github.com/sgl-project/ome/pkg/principals"
-	"github.com/sgl-project/ome/pkg/utils"
+	"github.com/ome-projects/ome/pkg/principals"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 func NewObjectStorageClient(configurationProvider common.ConfigurationProvider, config *Config) (*objectstorage.ObjectStorageClient, error) {

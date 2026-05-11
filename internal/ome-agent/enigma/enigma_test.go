@@ -10,11 +10,11 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sgl-project/ome/pkg/constants"
-	testingPkg "github.com/sgl-project/ome/pkg/testing"
-	"github.com/sgl-project/ome/pkg/vault/kmscrypto"
-	"github.com/sgl-project/ome/pkg/vault/kmsmgm"
-	ocisecret "github.com/sgl-project/ome/pkg/vault/secret"
+	"github.com/ome-projects/ome/pkg/constants"
+	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	"github.com/ome-projects/ome/pkg/vault/kmscrypto"
+	"github.com/ome-projects/ome/pkg/vault/kmsmgm"
+	ocisecret "github.com/ome-projects/ome/pkg/vault/secret"
 )
 
 func TestNewApplication(t *testing.T) {

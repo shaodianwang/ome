@@ -8,7 +8,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/sgl-project/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/logging"
 )
 
 const (

@@ -9,8 +9,8 @@ import (
 	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	lwsspec "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // Helper functions for StatusReconciler

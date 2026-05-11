@@ -19,8 +19,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1beta1 "github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
+	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 func TestModelConfigReconciler_Reconcile(t *testing.T) {

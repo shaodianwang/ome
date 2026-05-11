@@ -7,8 +7,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
-	v1beta1isvccontroller "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
 )
 
 // InferenceServiceOption mutates the ISVC reconciler before it is

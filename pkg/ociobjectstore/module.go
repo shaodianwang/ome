@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/viper"
 	"go.uber.org/fx"
 
-	"github.com/sgl-project/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/logging"
 )
 
 // ProvideOCIOSDataStore initializes a single OCIOSDataStore using viper configuration,

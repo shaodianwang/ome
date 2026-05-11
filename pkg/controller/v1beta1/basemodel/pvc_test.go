@@ -18,10 +18,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/modelagent"
-	"github.com/sgl-project/ome/pkg/utils/storage"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/utils/storage"
 )
 
 func testMetadataJobConfig() MetadataJobConfig {

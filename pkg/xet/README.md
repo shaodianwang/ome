@@ -244,7 +244,7 @@ import (
     "fmt"
     "os"
 
-    xet "github.com/sgl-project/ome/pkg/xet"
+    xet "github.com/ome-projects/ome/pkg/xet"
 )
 
 func main() {

@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sgl-project/ome/internal/ome-agent/replica/common"
-	"github.com/sgl-project/ome/pkg/afero"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
-	testingPkg "github.com/sgl-project/ome/pkg/testing"
+	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
+	"github.com/ome-projects/ome/pkg/afero"
+	"github.com/ome-projects/ome/pkg/ociobjectstore"
+	testingPkg "github.com/ome-projects/ome/pkg/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

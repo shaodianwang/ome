@@ -11,10 +11,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 
-	"github.com/sgl-project/ome/tests/integration/framework"
-	"github.com/sgl-project/ome/tests/integration/util"
+	"github.com/ome-projects/ome/tests/integration/framework"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // TestFramework is the Ginkgo entrypoint for self-tests of the

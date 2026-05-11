@@ -9,8 +9,8 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	modelVer "github.com/sgl-project/ome/pkg/modelver"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	modelVer "github.com/ome-projects/ome/pkg/modelver"
 )
 
 // DefaultRuntimeMatcher implements RuntimeMatcher with comprehensive compatibility checking.

@@ -24,12 +24,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/modelagent"
-	"github.com/sgl-project/ome/pkg/modelcache"
-	modelcachefake "github.com/sgl-project/ome/pkg/modelcache/fake"
-	"github.com/sgl-project/ome/pkg/modelcache/providers/clustercache"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/modelcache"
+	modelcachefake "github.com/ome-projects/ome/pkg/modelcache/fake"
+	"github.com/ome-projects/ome/pkg/modelcache/providers/clustercache"
 )
 
 func TestBaseModelReconcile(t *testing.T) {

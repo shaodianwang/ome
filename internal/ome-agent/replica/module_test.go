@@ -4,16 +4,16 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/sgl-project/ome/pkg/xet"
+	"github.com/ome-projects/ome/pkg/xet"
 
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
-	"github.com/sgl-project/ome/pkg/principals"
-	testingPkg "github.com/sgl-project/ome/pkg/testing"
+	"github.com/ome-projects/ome/pkg/ociobjectstore"
+	"github.com/ome-projects/ome/pkg/principals"
+	testingPkg "github.com/ome-projects/ome/pkg/testing"
 )
 
 func TestModule(t *testing.T) {

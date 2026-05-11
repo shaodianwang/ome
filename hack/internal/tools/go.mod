@@ -1,4 +1,4 @@
-module github.com/sgl-project/ome/hack/internal/tools
+module github.com/ome-projects/ome/hack/internal/tools
 
 go 1.25.0
 

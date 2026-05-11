@@ -6,9 +6,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	v1beta1testing "github.com/sgl-project/ome/pkg/utils/testing/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 )
 
 // ensureNamespace creates the "isvc-webhook" namespace used by every

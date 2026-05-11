@@ -13,7 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 // MergeRuntimeContainers Merge the predictor Container struct with the runtime Container struct, allowing users

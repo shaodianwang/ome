@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"text/template"
 
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/interfaces"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/interfaces"
 )
 
 // DefaultPathService implements PathService interface

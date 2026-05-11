@@ -14,9 +14,9 @@ import (
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/client/clientset/versioned"
-	"github.com/sgl-project/ome/pkg/modelconfig"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/client/clientset/versioned"
+	"github.com/ome-projects/ome/pkg/modelconfig"
 )
 
 // mockHuggingFaceModel implements the modelconfig.HuggingFaceModel interface for testing

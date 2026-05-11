@@ -13,13 +13,13 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/status"
-	isvcutils "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/utils"
-	"github.com/sgl-project/ome/pkg/utils"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 var _ Component = &Decoder{}

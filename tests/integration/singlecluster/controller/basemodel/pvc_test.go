@@ -15,12 +15,12 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/modelagent"
-	v1beta1testing "github.com/sgl-project/ome/pkg/utils/testing/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/modelagent"
+	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
-	"github.com/sgl-project/ome/tests/integration/util"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // BaseModel + ClusterBaseModel PVC reconcile flow against envtest.

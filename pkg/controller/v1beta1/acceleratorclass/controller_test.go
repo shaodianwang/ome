@@ -15,8 +15,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 func TestAcceleratorClass_Reconcile_AddsFinalizerAndUpdatesStatus(t *testing.T) {

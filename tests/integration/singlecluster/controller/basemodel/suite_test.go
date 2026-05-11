@@ -15,14 +15,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/sgl-project/ome/pkg/modelcache"
-	mcfake "github.com/sgl-project/ome/pkg/modelcache/fake"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/modelcache"
+	mcfake "github.com/ome-projects/ome/pkg/modelcache/fake"
 
-	"github.com/sgl-project/ome/tests/integration/components"
-	"github.com/sgl-project/ome/tests/integration/framework"
-	"github.com/sgl-project/ome/tests/integration/util"
+	"github.com/ome-projects/ome/tests/integration/components"
+	"github.com/ome-projects/ome/tests/integration/framework"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 func TestBaseModelController(t *testing.T) {

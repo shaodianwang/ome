@@ -1,7 +1,7 @@
 package components
 
 import (
-	"github.com/sgl-project/ome/pkg/utils/storage"
+	"github.com/ome-projects/ome/pkg/utils/storage"
 )
 
 // isPVCBaseModel reports whether b's referenced BaseModel is PVC-backed.

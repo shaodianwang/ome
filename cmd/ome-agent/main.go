@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/sgl-project/ome/pkg/version"
+	"github.com/ome-projects/ome/pkg/version"
 )
 
 var rootCmd = &cobra.Command{

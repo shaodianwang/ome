@@ -14,11 +14,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	hpa "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/hpa"
-	keda "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/keda"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	hpa "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/hpa"
+	keda "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/keda"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
 
 // Autoscaler Interface implemented by all autoscalers

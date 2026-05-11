@@ -11,7 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/sgl-project/ome/pkg/version"
+	"github.com/ome-projects/ome/pkg/version"
 )
 
 // ChatCompletionRequest represents the request payload for the OpenAI-compatible API

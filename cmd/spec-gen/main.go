@@ -10,7 +10,7 @@ import (
 	"k8s.io/kube-openapi/pkg/common"
 	spec "k8s.io/kube-openapi/pkg/validation/spec"
 
-	omev1beta1 "github.com/sgl-project/ome/pkg/openapi"
+	omev1beta1 "github.com/ome-projects/ome/pkg/openapi"
 )
 
 // Generate OpenAPI spec definitions for InferenceService Resource
@@ -51,7 +51,7 @@ func main() {
 }
 
 func swaggify(name string) string {
-	name = strings.ReplaceAll(name, "github.com/sgl-project/ome/pkg/apis/ome/", "")
+	name = strings.ReplaceAll(name, "github.com/ome-projects/ome/pkg/apis/ome/", "")
 	name = strings.ReplaceAll(name, "./pkg/apis/ome/", "")
 	name = strings.ReplaceAll(name, "knative.dev/pkg/apis/duck/v1.", "knative/")
 	name = strings.ReplaceAll(name, "knative.dev/pkg/apis.", "knative/")

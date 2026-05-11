@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sgl-project/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/logging"
 )
 
 const (

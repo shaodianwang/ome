@@ -3,16 +3,16 @@ package main
 import (
 	"fmt"
 
-	"github.com/sgl-project/ome/pkg/xet"
+	"github.com/ome-projects/ome/pkg/xet"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.uber.org/fx"
 
-	"github.com/sgl-project/ome/internal/ome-agent/replica"
-	"github.com/sgl-project/ome/pkg/afero"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"github.com/ome-projects/ome/internal/ome-agent/replica"
+	"github.com/ome-projects/ome/pkg/afero"
+	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/ociobjectstore"
 )
 
 // ReplicaAgent implements the AgentModule interface for object storage replica agent

@@ -8,8 +8,8 @@ import (
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
-	testingPkg "github.com/sgl-project/ome/pkg/testing"
+	"github.com/ome-projects/ome/pkg/ociobjectstore"
+	testingPkg "github.com/ome-projects/ome/pkg/testing"
 )
 
 func TestNewServingSidecarConfig(t *testing.T) {

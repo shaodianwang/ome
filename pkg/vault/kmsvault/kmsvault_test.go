@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
-	"github.com/sgl-project/ome/pkg/principals"
-	testingPkg "github.com/sgl-project/ome/pkg/testing"
+	"github.com/ome-projects/ome/pkg/principals"
+	testingPkg "github.com/ome-projects/ome/pkg/testing"
 )
 
 // MockKmsVaultClientInterface defines the interface for mocking KMS vault client

@@ -37,10 +37,10 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/modelagent"
-	"github.com/sgl-project/ome/pkg/modelparser"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/modelparser"
 )
 
 // MetadataExtractor parses a PVC-mounted model and writes the result to a

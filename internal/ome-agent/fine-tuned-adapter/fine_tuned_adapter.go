@@ -4,9 +4,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
-	"github.com/sgl-project/ome/pkg/zipper"
+	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/ociobjectstore"
+	"github.com/ome-projects/ome/pkg/zipper"
 )
 
 const (

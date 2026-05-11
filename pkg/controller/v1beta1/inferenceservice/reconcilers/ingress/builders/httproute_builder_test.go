@@ -12,9 +12,9 @@ import (
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
 )
 
 func TestHTTPRouteBuilder_GetResourceType(t *testing.T) {

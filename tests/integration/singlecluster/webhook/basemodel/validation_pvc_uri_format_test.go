@@ -4,8 +4,8 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	v1beta1testing "github.com/sgl-project/ome/pkg/utils/testing/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 )
 
 // Additional webhook specs covering the corners of ParsePVCStorageURI

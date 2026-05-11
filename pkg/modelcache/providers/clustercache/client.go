@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sgl-project/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/modelcache"
 )
 
 const (

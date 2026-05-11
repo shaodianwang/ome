@@ -3,9 +3,9 @@
 package fake
 
 import (
-	clientset "github.com/sgl-project/ome/pkg/client/clientset/versioned"
-	omev1beta1 "github.com/sgl-project/ome/pkg/client/clientset/versioned/typed/ome/v1beta1"
-	fakeomev1beta1 "github.com/sgl-project/ome/pkg/client/clientset/versioned/typed/ome/v1beta1/fake"
+	clientset "github.com/ome-projects/ome/pkg/client/clientset/versioned"
+	omev1beta1 "github.com/ome-projects/ome/pkg/client/clientset/versioned/typed/ome/v1beta1"
+	fakeomev1beta1 "github.com/ome-projects/ome/pkg/client/clientset/versioned/typed/ome/v1beta1/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"

@@ -3,8 +3,8 @@ package utils
 import (
 	"fmt"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // DetermineEngineDeploymentMode determines the deployment mode for the engine based on its configuration

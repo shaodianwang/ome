@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sgl-project/ome/web-console/backend/internal/api"
-	"github.com/sgl-project/ome/web-console/backend/internal/k8s"
+	"github.com/ome-projects/ome/web-console/backend/internal/api"
+	"github.com/ome-projects/ome/web-console/backend/internal/k8s"
 	"go.uber.org/zap"
 )
 

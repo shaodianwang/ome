@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sgl-project/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/modelcache"
 )
 
 func TestClientRecordsCalls(t *testing.T) {

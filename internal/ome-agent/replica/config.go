@@ -3,18 +3,18 @@ package replica
 import (
 	"fmt"
 
-	"github.com/sgl-project/ome/pkg/xet"
+	"github.com/ome-projects/ome/pkg/xet"
 
-	"github.com/sgl-project/ome/internal/ome-agent/replica/common"
+	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/spf13/viper"
 
-	"github.com/sgl-project/ome/pkg/afero"
-	"github.com/sgl-project/ome/pkg/configutils"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
-	"github.com/sgl-project/ome/pkg/utils/storage"
+	"github.com/ome-projects/ome/pkg/afero"
+	"github.com/ome-projects/ome/pkg/configutils"
+	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/ociobjectstore"
+	"github.com/ome-projects/ome/pkg/utils/storage"
 )
 
 type Config struct {

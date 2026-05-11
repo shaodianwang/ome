@@ -3,12 +3,12 @@ package common
 import (
 	"testing"
 
-	"github.com/sgl-project/ome/pkg/xet"
+	"github.com/ome-projects/ome/pkg/xet"
 
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/sgl-project/ome/pkg/afero"
+	"github.com/ome-projects/ome/pkg/afero"
 )
 
 func TestObjectSummaryReplicationObject(t *testing.T) {

@@ -3,8 +3,8 @@
 package fake
 
 import (
-	v1beta1 "github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	omev1beta1 "github.com/sgl-project/ome/pkg/client/clientset/versioned/typed/ome/v1beta1"
+	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	omev1beta1 "github.com/ome-projects/ome/pkg/client/clientset/versioned/typed/ome/v1beta1"
 	gentype "k8s.io/client-go/gentype"
 )
 

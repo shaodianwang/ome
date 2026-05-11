@@ -12,9 +12,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sgl-project/ome/tests/integration/components"
-	"github.com/sgl-project/ome/tests/integration/framework"
-	"github.com/sgl-project/ome/tests/integration/util"
+	"github.com/ome-projects/ome/tests/integration/components"
+	"github.com/ome-projects/ome/tests/integration/framework"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // TestInferenceServiceController is the Go entrypoint Ginkgo hooks into.

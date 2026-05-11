@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/sgl-project/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/modelcache"
 )
 
 var ErrNotImplemented = errors.New("fake model cache client method not implemented")

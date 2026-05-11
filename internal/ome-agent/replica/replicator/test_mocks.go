@@ -1,7 +1,7 @@
 package replicator
 
 import (
-	"github.com/sgl-project/ome/internal/ome-agent/replica/common"
+	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 )
 
 // MockReplicationObject is a common mock implementation of common.ReplicationObject

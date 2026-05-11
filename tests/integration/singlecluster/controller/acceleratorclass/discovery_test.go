@@ -7,10 +7,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	v1beta1testing "github.com/sgl-project/ome/pkg/utils/testing/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
-	"github.com/sgl-project/ome/tests/integration/util"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // AcceleratorClass discovery: nodes whose labels match the AC's

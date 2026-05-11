@@ -8,9 +8,9 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/vault"
 
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/principals"
-	vaultUtils "github.com/sgl-project/ome/pkg/vault"
+	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/principals"
+	vaultUtils "github.com/ome-projects/ome/pkg/vault"
 )
 
 type VaultClient struct {

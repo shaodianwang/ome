@@ -23,9 +23,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	volcano "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/sgl-project/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/modelcache"
 )
 
 func TestGetOptions(t *testing.T) {

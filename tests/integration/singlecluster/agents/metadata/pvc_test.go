@@ -13,10 +13,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	modelmetadata "github.com/sgl-project/ome/internal/ome-agent/model-metadata"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/modelagent"
+	modelmetadata "github.com/ome-projects/ome/internal/ome-agent/model-metadata"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/modelagent"
 )
 
 // Each It uses a distinct model name so the deterministic per-PVC

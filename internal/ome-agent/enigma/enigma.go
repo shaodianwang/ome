@@ -11,9 +11,9 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/keymanagement"
 	"github.com/otiai10/copy"
 
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/vault"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/vault"
 )
 
 type Enigma struct {

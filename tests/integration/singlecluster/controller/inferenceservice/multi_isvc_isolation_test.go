@@ -8,11 +8,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	v1beta1testing "github.com/sgl-project/ome/pkg/utils/testing/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
-	"github.com/sgl-project/ome/tests/integration/util"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // Multi-ISVC isolation: two independent ISVCs in the same namespace

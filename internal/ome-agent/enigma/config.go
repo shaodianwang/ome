@@ -7,13 +7,13 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/spf13/viper"
 
-	"github.com/sgl-project/ome/pkg/configutils"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/logging"
-	utils "github.com/sgl-project/ome/pkg/utils"
-	"github.com/sgl-project/ome/pkg/vault/kmscrypto"
-	"github.com/sgl-project/ome/pkg/vault/kmsmgm"
-	ocisecret "github.com/sgl-project/ome/pkg/vault/secret"
+	"github.com/ome-projects/ome/pkg/configutils"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/logging"
+	utils "github.com/ome-projects/ome/pkg/utils"
+	"github.com/ome-projects/ome/pkg/vault/kmscrypto"
+	"github.com/ome-projects/ome/pkg/vault/kmsmgm"
+	ocisecret "github.com/ome-projects/ome/pkg/vault/secret"
 )
 
 type ModelFramework string

@@ -12,8 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sgl-project/ome/tests/integration/framework"
-	"github.com/sgl-project/ome/tests/integration/util"
+	"github.com/ome-projects/ome/tests/integration/framework"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // TestUtil is the Ginkgo entrypoint for self-tests of the integration

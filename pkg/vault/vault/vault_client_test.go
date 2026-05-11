@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sgl-project/ome/pkg/principals"
-	testingPkg "github.com/sgl-project/ome/pkg/testing"
-	vaultUtils "github.com/sgl-project/ome/pkg/vault"
+	"github.com/ome-projects/ome/pkg/principals"
+	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	vaultUtils "github.com/ome-projects/ome/pkg/vault"
 )
 
 // MockVaultsClientInterface defines the interface for mocking vault client

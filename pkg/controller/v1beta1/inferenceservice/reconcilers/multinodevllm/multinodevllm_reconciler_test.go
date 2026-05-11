@@ -20,8 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	kfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 func TestMultiNodeVLLMReconciler_Reconcile(t *testing.T) {

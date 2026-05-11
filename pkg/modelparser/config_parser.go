@@ -16,9 +16,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/retry"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/client/clientset/versioned"
-	"github.com/sgl-project/ome/pkg/modelconfig"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/client/clientset/versioned"
+	"github.com/ome-projects/ome/pkg/modelconfig"
 )
 
 const (

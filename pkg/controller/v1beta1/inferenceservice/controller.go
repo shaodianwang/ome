@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sgl-project/ome/pkg/acceleratorclassselector"
+	"github.com/ome-projects/ome/pkg/acceleratorclassselector"
 
 	policyv1 "k8s.io/api/policy/v1"
 
@@ -36,18 +36,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
-	v1beta1 "github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/components"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/external_service"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress"
-	multimodelconfig "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/modelconfig"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/status"
-	isvcutils "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/utils"
-	"github.com/sgl-project/ome/pkg/modelcache"
-	"github.com/sgl-project/ome/pkg/runtimeselector"
-	"github.com/sgl-project/ome/pkg/utils"
+	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/components"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/external_service"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress"
+	multimodelconfig "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/modelconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/runtimeselector"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices;inferenceservices/finalizers,verbs=get;list;watch;create;update;patch;delete

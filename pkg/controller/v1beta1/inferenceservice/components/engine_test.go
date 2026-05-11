@@ -24,9 +24,9 @@ import (
 	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 )
 
 // Helper functions for creating pointers

@@ -7,12 +7,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sgl-project/ome/pkg/xet"
+	"github.com/ome-projects/ome/pkg/xet"
 
-	"github.com/sgl-project/ome/internal/ome-agent/replica/common"
+	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/ociobjectstore"
 )
 
 type HFToOCIReplicator struct {

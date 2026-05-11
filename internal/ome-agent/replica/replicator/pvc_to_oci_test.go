@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/sgl-project/ome/internal/ome-agent/replica/common"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
-	testingPkg "github.com/sgl-project/ome/pkg/testing"
-	"github.com/sgl-project/ome/pkg/utils/storage"
+	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
+	"github.com/ome-projects/ome/pkg/ociobjectstore"
+	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	"github.com/ome-projects/ome/pkg/utils/storage"
 	"github.com/stretchr/testify/assert"
 )
 

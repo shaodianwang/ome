@@ -3,8 +3,8 @@ package modelparser
 import (
 	"go.uber.org/zap"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/modelconfig"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/modelconfig"
 )
 
 // capabilityToOME maps modelconfig's package-internal Capability

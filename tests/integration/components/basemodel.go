@@ -22,9 +22,9 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1beta1basemodelcontroller "github.com/sgl-project/ome/pkg/controller/v1beta1/basemodel"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/sgl-project/ome/pkg/modelcache"
+	v1beta1basemodelcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/modelcache"
 )
 
 // BaseModelOption mutates the BaseModel reconciler before it is

@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sgl-project/ome/web-console/backend/pkg/huggingface"
+	"github.com/ome-projects/ome/web-console/backend/pkg/huggingface"
 	"go.uber.org/zap"
 )
 

@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sgl-project/ome/internal/ome-agent/replica/common"
+	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/utils/storage"
+	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/utils/storage"
 )
 
 const (

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/sgl-project/ome/pkg/xet"
+	"github.com/ome-projects/ome/pkg/xet"
 
-	"github.com/sgl-project/ome/pkg/afero"
+	"github.com/ome-projects/ome/pkg/afero"
 
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 )

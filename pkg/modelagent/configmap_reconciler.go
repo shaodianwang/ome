@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sgl-project/ome/pkg/utils"
+	"github.com/ome-projects/ome/pkg/utils"
 
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -17,9 +17,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/modelparser"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/modelparser"
 )
 
 // constants related to attribute name in the configmap data

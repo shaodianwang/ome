@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/afero"
 
-	"github.com/sgl-project/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/logging"
 )
 
 type File interface {

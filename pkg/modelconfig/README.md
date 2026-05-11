@@ -39,7 +39,7 @@ OME's `ModelCapability` enum.
 ## Usage
 
 ```go
-import "github.com/sgl-project/ome/pkg/modelconfig"
+import "github.com/ome-projects/ome/pkg/modelconfig"
 
 // From a file path:
 model, err := modelconfig.LoadModelConfig("/path/to/config.json")

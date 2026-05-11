@@ -11,9 +11,9 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	v1beta1 "github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	storageutil "github.com/sgl-project/ome/pkg/utils/storage"
+	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	storageutil "github.com/ome-projects/ome/pkg/utils/storage"
 )
 
 var log = logf.Log.WithName(constants.BenchmarkJobValidatorWebhookName)

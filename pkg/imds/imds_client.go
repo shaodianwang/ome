@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sgl-project/ome/pkg/logging"
+	"github.com/ome-projects/ome/pkg/logging"
 )
 
 const (

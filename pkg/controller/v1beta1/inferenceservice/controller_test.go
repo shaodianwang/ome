@@ -23,12 +23,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
-	"github.com/sgl-project/ome/pkg/acceleratorclassselector"
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/status"
-	"github.com/sgl-project/ome/pkg/runtimeselector"
-	omeTesting "github.com/sgl-project/ome/pkg/testing"
+	"github.com/ome-projects/ome/pkg/acceleratorclassselector"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
+	"github.com/ome-projects/ome/pkg/runtimeselector"
+	omeTesting "github.com/ome-projects/ome/pkg/testing"
 )
 
 func TestInferenceServiceReconcile(t *testing.T) {

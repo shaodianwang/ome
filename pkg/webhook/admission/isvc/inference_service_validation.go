@@ -15,11 +15,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/constants"
-	isvcutils "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/utils"
-	"github.com/sgl-project/ome/pkg/runtimeselector"
-	"github.com/sgl-project/ome/pkg/utils/storage"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/runtimeselector"
+	"github.com/ome-projects/ome/pkg/utils/storage"
 )
 
 // regular expressions for validation of isvc name

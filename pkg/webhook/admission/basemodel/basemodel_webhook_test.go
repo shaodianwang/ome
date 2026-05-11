@@ -5,7 +5,7 @@ import (
 
 	"k8s.io/utils/ptr"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 func TestValidatePVCStorage(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sgl-project/ome/web-console/backend/internal/k8s"
+	"github.com/ome-projects/ome/web-console/backend/internal/k8s"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"

@@ -6,7 +6,7 @@
 package modelparser
 
 import (
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 // ConfigParsingAnnotation is the annotation key to skip config parsing

@@ -8,8 +8,8 @@ import (
 
 	"github.com/onsi/gomega"
 
-	"github.com/sgl-project/ome/pkg/modelcache"
-	modelcachefake "github.com/sgl-project/ome/pkg/modelcache/fake"
+	"github.com/ome-projects/ome/pkg/modelcache"
+	modelcachefake "github.com/ome-projects/ome/pkg/modelcache/fake"
 )
 
 func TestShardedModelMetadataInputsFetchesHeaders(t *testing.T) {

@@ -5,8 +5,8 @@ import (
 	"github.com/spf13/viper"
 	"go.uber.org/fx"
 
-	modelmetadata "github.com/sgl-project/ome/internal/ome-agent/model-metadata"
-	"github.com/sgl-project/ome/pkg/logging"
+	modelmetadata "github.com/ome-projects/ome/internal/ome-agent/model-metadata"
+	"github.com/ome-projects/ome/pkg/logging"
 )
 
 // ModelMetadataAgent implements the AgentModule interface for model metadata extraction

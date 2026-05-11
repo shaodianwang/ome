@@ -7,8 +7,8 @@ import (
 
 	"github.com/oracle/oci-go-sdk/v65/secrets"
 
-	"github.com/sgl-project/ome/pkg/logging"
-	omesecrets "github.com/sgl-project/ome/pkg/vault"
+	"github.com/ome-projects/ome/pkg/logging"
+	omesecrets "github.com/ome-projects/ome/pkg/vault"
 )
 
 type SecretRetriever struct {

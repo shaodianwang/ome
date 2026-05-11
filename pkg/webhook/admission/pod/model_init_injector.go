@@ -9,8 +9,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/sgl-project/ome/pkg/constants"
-	isvcutils "github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/constants"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
 
 const (

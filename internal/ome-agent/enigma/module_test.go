@@ -7,10 +7,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	testingPkg "github.com/sgl-project/ome/pkg/testing"
-	"github.com/sgl-project/ome/pkg/vault/kmscrypto"
-	"github.com/sgl-project/ome/pkg/vault/kmsmgm"
-	ocisecret "github.com/sgl-project/ome/pkg/vault/secret"
+	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	"github.com/ome-projects/ome/pkg/vault/kmscrypto"
+	"github.com/ome-projects/ome/pkg/vault/kmsmgm"
+	ocisecret "github.com/ome-projects/ome/pkg/vault/secret"
 )
 
 func TestModule(t *testing.T) {

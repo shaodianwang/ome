@@ -9,13 +9,13 @@ import (
 	knapis "knative.dev/pkg/apis"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sgl-project/ome/pkg/apis/ome/v1beta1"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/deployment"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
-	"github.com/sgl-project/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/deployment"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 )
 
 // RawKubeReconciler reconciles the Native K8S Resources

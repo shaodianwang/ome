@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sgl-project/ome/pkg/modelcache"
-	"github.com/sgl-project/ome/pkg/modelparser"
+	"github.com/ome-projects/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/modelparser"
 )
 
 const (
