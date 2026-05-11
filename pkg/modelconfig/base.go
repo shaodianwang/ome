@@ -53,10 +53,9 @@ func (c *BaseModelConfig) HasVision() bool {
 	return false
 }
 
-// IsEmbedding defaults to false. Capability-side classification in
-// pkg/modelparser does its own architecture-string sniffing for
-// embedding models, so leaving this as false for transformer configs
-// is fine.
+// IsEmbedding defaults to false. The capability classifier in this
+// package detects embedding models from architecture name (BertModel,
+// SentenceTransformerModel, etc.), so few configs need to override.
 func (c *BaseModelConfig) IsEmbedding() bool {
 	return false
 }

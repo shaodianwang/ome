@@ -6,9 +6,8 @@ import (
 )
 
 // Capability identifies the kind of inference task a model serves.
-// Values mirror v1beta1.ModelCapability so the modelparser mapping
-// is a 1:1 string-keyed lookup; modelconfig itself stays free of
-// any OME-API dependency.
+// Values mirror v1beta1.ModelCapability so consumers can map 1:1
+// without modelconfig taking a dependency on the OME API.
 type Capability string
 
 const (
@@ -27,19 +26,9 @@ const (
 	CapabilityEmbedding        Capability = "EMBEDDING"
 )
 
-// hasArchToken reports whether arch contains the given token as a
-// distinct CamelCase or underscore-separated segment. Splits on
-// underscore boundaries and on the boundary BEFORE each uppercase
-// letter (when the previous rune is not also uppercase), so
-// "Qwen3OmniMoeForConditionalGeneration" yields tokens including
-// "Omni" and hasArchToken(..., "Omni") reports true. "Demonic"
-// does not match "Omni" because "Demonic" splits to ["Demonic"]
-// (single token), and the comparison is exact-token-match, not
-// substring.
-//
-// Numbers stay attached to adjacent letters: "Qwen3" is a single
-// token. Comparison is case-sensitive — HF architecture names are
-// stable in their original casing.
+// hasArchToken reports whether arch contains token as a distinct
+// CamelCase or underscore-separated segment. Unlike strings.Contains,
+// "Demonic" does not match "Omni". Case-sensitive.
 func hasArchToken(arch, token string) bool {
 	if arch == "" || token == "" {
 		return false
@@ -52,12 +41,10 @@ func hasArchToken(arch, token string) bool {
 	return false
 }
 
-// splitArchTokens splits an architecture string on underscores and
-// on the boundary BEFORE each uppercase letter, except when the
-// previous rune is also uppercase (so "BERT" / "MLP" stay as one
-// token). Digits and lowercase letters both trigger a split before
-// the next uppercase: "Qwen3Omni" → ["Qwen3", "Omni"], "fooBar" →
-// ["foo", "Bar"].
+// splitArchTokens splits arch on underscores and before each
+// uppercase letter — except when the previous rune is also uppercase,
+// so consecutive caps like "BERT" stay one token. "Qwen3Omni" yields
+// ["Qwen3", "Omni"].
 func splitArchTokens(arch string) []string {
 	var out []string
 	var current []rune
@@ -82,10 +69,8 @@ func splitArchTokens(arch string) []string {
 	return out
 }
 
-// hasAnySuffix reports whether arch ends with any of the suffixes
-// (case-sensitive). HF architecture names are stable in their
-// original casing, so HasSuffix is the right primitive for
-// identity-style matches like "ForCausalLM", "ForCTC".
+// hasAnySuffix reports whether arch ends with any suffix.
+// Case-sensitive; HF architecture names are stable in their casing.
 func hasAnySuffix(arch string, suffixes ...string) bool {
 	for _, suffix := range suffixes {
 		if strings.HasSuffix(arch, suffix) {
@@ -96,9 +81,8 @@ func hasAnySuffix(arch string, suffixes ...string) bool {
 }
 
 // containsAny reports whether s contains any of the substrings.
-// Used only for diffusion pipeline class names, where substring
-// is genuinely the right primitive because pipeline names are
-// composite ("StableDiffusionImg2ImgPipeline").
+// Reserved for diffusion pipeline class names, which are composite
+// ("StableDiffusionImg2ImgPipeline") and need substring matching.
 func containsAny(s string, substrings ...string) bool {
 	for _, sub := range substrings {
 		if strings.Contains(s, sub) {
@@ -108,61 +92,40 @@ func containsAny(s string, substrings ...string) bool {
 	return false
 }
 
-// capabilityRule examines a model and returns the capabilities it
-// classifies it as. Returning nil means "this rule does not apply
-// to this model — try the next one." The dispatcher walks rules
-// in order and returns the first non-nil result.
+// capabilityRule classifies a model. Returning nil means "skip me";
+// the dispatcher moves on to the next rule.
 type capabilityRule func(hf HuggingFaceModel) []Capability
 
-// capabilityRules is the ordered list of classifiers. First non-nil
-// result wins. Order is load-bearing — comments below call out the
-// constraints that drove it.
+// capabilityRules. First non-nil result wins. Order is load-bearing.
 var capabilityRules = []capabilityRule{
-	// Diffusion first: the diffusion sub-interface is a strong,
-	// structural signal that beats any architecture-suffix
-	// coincidence.
+	// Diffusion first: the pipeline-class signal beats any
+	// architecture-suffix coincidence.
 	diffusionRule,
-
-	// NemotronH-Nano next: this is genuinely multi-capability
-	// (image+text, text, audio outputs). MUST beat the vision
-	// short-circuit, or it'd collapse to ImageTextToText only.
+	// NemotronH-Nano before vision: it is genuinely multi-cap, and
+	// the vision short-circuit would otherwise drop the text and
+	// audio outputs.
 	nemotronHNanoRule,
-
-	// Omni next: same reasoning — omni implies audio-output
-	// capabilities, not just whatever the vision detection would
-	// say. Deliberate behavior change vs today's modelparser
-	// (which had vision before omni).
+	// Omni before vision: omni implies audio-output capabilities
+	// that the vision short-circuit alone would miss.
 	omniRule,
-
-	// Vision short-circuit: a vision-capable LLM with no omni /
-	// nemotron signal classifies as ImageTextToText. Beats ASR
-	// matching: a vision model with "ForConditionalGeneration"
-	// suffix should not become AudioToText just because of
-	// suffix coincidence.
+	// Vision before ASR: a vision LLM with "ForConditionalGeneration"
+	// shouldn't classify as AudioToText via suffix coincidence.
 	visionRule,
-
-	// ASR family: stable suffix patterns (ForCTC, ForSpeechToText,
-	// the exact Whisper class).
 	asrRule,
-
-	// Embedding: combination of the explicit IsEmbedding flag,
-	// embedding-y architecture tokens, and the e5-mistral special
-	// case (MistralModel without a CausalLM head).
 	embeddingRule,
 }
 
 // generativeTextSuffixes is the catch-all for unrecognized models
-// whose architecture name signals a generative-text head. Used only
-// after every rule returned nil.
+// whose architecture name signals a generative-text head.
 var generativeTextSuffixes = []string{
 	"ForCausalLM",
 	"ForConditionalGeneration",
 	"LMHeadModel",
 }
 
-// classifyCapabilities is the dispatcher. First matching rule wins;
-// if no rule matches, fall back to TextToText for recognized text
-// LLMs, otherwise Unknown.
+// classifyCapabilities runs the rule dispatcher. First match wins.
+// No match + recognized generative-text suffix => TextToText.
+// Otherwise => Unknown (callers should log).
 func classifyCapabilities(hf HuggingFaceModel) []Capability {
 	for _, rule := range capabilityRules {
 		if caps := rule(hf); caps != nil {
@@ -187,13 +150,13 @@ func diffusionRule(hf HuggingFaceModel) []Capability {
 	case containsAny(cls, "TextToVideo", "T2V"):
 		return []Capability{CapabilityTextToVideo}
 	case strings.Contains(cls, "Video"):
-		// Catch-all after the T2V check above.
+		// Image-to-video catch-all after the T2V check above.
 		return []Capability{CapabilityImageTextToVideo}
 	case containsAny(cls, "Image", "Pix", "StableDiffusion", "Flux"):
 		return []Capability{CapabilityTextToImage}
 	}
-	// Diffusion sub-interface but no recognized pipeline class.
-	// Return Unknown so the warning fires and we add a rule.
+	// Diffusion sub-interface but no recognized pipeline class —
+	// return Unknown so the warning fires and we can add a rule.
 	return []Capability{CapabilityUnknown}
 }
 
@@ -242,11 +205,9 @@ func embeddingRule(hf HuggingFaceModel) []Capability {
 		return []Capability{CapabilityEmbedding}
 	}
 	arch := hf.GetArchitecture()
-	// BERT-architecture-named models (BertModel, BertForMaskedLM,
-	// BertForSequenceClassification, ...). Today's modelconfig
-	// IsEmbedding() always returns false in real configs, so this
-	// architecture token check is the practical embedding detector
-	// for the BERT family.
+	// BertModel, BertForMaskedLM, BertForSequenceClassification, ...
+	// IsEmbedding is rarely set on real configs, so the architecture
+	// token is the practical detector for BERT-family encoders.
 	if hasArchToken(arch, "Bert") {
 		return []Capability{CapabilityEmbedding}
 	}
@@ -254,8 +215,7 @@ func embeddingRule(hf HuggingFaceModel) []Capability {
 		return []Capability{CapabilityEmbedding}
 	}
 	// e5-mistral and similar use MistralModel (no CausalLM head)
-	// for embedding output. The model_type is "mistral" but the
-	// architecture is the bare encoder.
+	// for embedding output.
 	if strings.ToLower(hf.GetModelType()) == "mistral" && arch == "MistralModel" {
 		return []Capability{CapabilityEmbedding}
 	}
