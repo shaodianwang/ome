@@ -67,6 +67,21 @@ CHARTS = ["ome-crd", "ome-resources"]
 
 
 # ---------------------------------------------------------------------------
+# Step helpers
+# ---------------------------------------------------------------------------
+
+
+def _gh_status(key: str, indent: int = 12) -> str:
+    """Per-step GitHub commit status block; without it BuildKite publishes only the pipeline rollup."""
+    pad = " " * indent
+    return (
+        f"{pad}notify:\n"
+        f"{pad}  - github_commit_status:\n"
+        f'{pad}      context: "{key}"'
+    )
+
+
+# ---------------------------------------------------------------------------
 # CI pipeline (runs on every commit / PR)
 # ---------------------------------------------------------------------------
 
@@ -77,6 +92,7 @@ def ci_steps() -> str:
         steps:
           - label: ":golangci-lint: Lint"
             key: "lint"
+{_gh_status("lint")}
             command: |
               make ci-lint
             agents:
@@ -90,6 +106,7 @@ def ci_steps() -> str:
 
           - label: ":golang: Vet"
             key: "vet"
+{_gh_status("vet")}
             command: |
               make vet
             agents:
@@ -103,6 +120,7 @@ def ci_steps() -> str:
 
           - label: ":test_tube: Unit Tests"
             key: "test"
+{_gh_status("test")}
             command: |
               sh .buildkite/run_tests.sh
             agents:
@@ -116,6 +134,7 @@ def ci_steps() -> str:
 
           - label: ":test_tube: Integration Tests"
             key: "integration-test"
+{_gh_status("integration-test")}
             # No depends_on: integration tests share no state with unit
             # tests (each step bootstraps its own envtest + xet under a
             # fresh container) so they run in parallel with everything
@@ -133,6 +152,7 @@ def ci_steps() -> str:
 
           - label: ":helm: Helm Lint"
             key: "helm-lint"
+{_gh_status("helm-lint")}
             command: |
               make helm-lint
             agents:
@@ -162,6 +182,7 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
         f"""\
           - label: ":docker: Build {label}"
             key: "build-{label}"
+{_gh_status(f"build-{label}")}
             depends_on: "test"
             agents:
               queue: "{BUILD_QUEUE}"
@@ -200,6 +221,7 @@ def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
         f"""\
           - label: ":helm: Package {chart}"
             key: "chart-{chart}"
+{_gh_status(f"chart-{chart}")}
             {depends_block}
             command: |
               sh .buildkite/push_chart.sh {chart}
