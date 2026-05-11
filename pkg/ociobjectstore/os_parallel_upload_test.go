@@ -8,9 +8,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/oracle/oci-go-sdk/v65/objectstorage/transfer"
 	"github.com/ome-projects/ome/pkg/logging"
 	"github.com/ome-projects/ome/pkg/principals"
+	"github.com/oracle/oci-go-sdk/v65/objectstorage/transfer"
 )
 
 // TestLogger for testing

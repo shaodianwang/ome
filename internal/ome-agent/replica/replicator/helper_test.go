@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
