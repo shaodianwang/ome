@@ -9,8 +9,8 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/sgl-project/ome/pkg/afero"
-	"github.com/sgl-project/ome/pkg/hfutil/hub"
 	"github.com/sgl-project/ome/pkg/logging"
+	"github.com/sgl-project/ome/pkg/xet"
 )
 
 // hfDownloadAgentParams represents the parameters for dependency injection
@@ -21,9 +21,9 @@ type hfDownloadAgentParams struct {
 
 // HFDownloadAgent implements the AgentModule interface for HuggingFace download agent
 type HFDownloadAgent struct {
-	hubClient *hub.HubClient
-	viper     *viper.Viper
-	logger    logging.Interface
+	client *xet.Client
+	viper  *viper.Viper
+	logger logging.Interface
 }
 
 // Name returns the name of the agent
@@ -38,7 +38,7 @@ func (h *HFDownloadAgent) ShortDescription() string {
 
 // LongDescription returns a detailed description of the agent
 func (h *HFDownloadAgent) LongDescription() string {
-	return "OME Agent HuggingFace Download Agent downloads models from HuggingFace Hub using the comprehensive hub client with enterprise features like progress tracking, resume capability, and concurrent downloads."
+	return "OME Agent HuggingFace Download Agent downloads models from HuggingFace Hub using the xet client (Rust-backed libxet) with chunk-level deduplication, resume capability, and concurrent downloads."
 }
 
 // ConfigureCommand configures the agent command
@@ -55,10 +55,9 @@ func (h *HFDownloadAgent) FxModules() []fx.Option {
 		afero.Module,
 		logging.Module,
 		logging.ModuleNamed("another_log"),
-		logging.ModuleNamed("hub_logger"),
-		hub.Module, // Hub module handles all configuration via viper
-		fx.Invoke(func(params hfDownloadAgentParams, hubClient *hub.HubClient, v *viper.Viper) {
-			h.hubClient = hubClient
+		xet.Module, // xet module wires its own logger and reads viper config
+		fx.Invoke(func(params hfDownloadAgentParams, client *xet.Client, v *viper.Viper) {
+			h.client = client
 			h.viper = v
 			h.logger = params.Logger
 		}),
@@ -67,16 +66,11 @@ func (h *HFDownloadAgent) FxModules() []fx.Option {
 
 // Start starts the agent
 func (h *HFDownloadAgent) Start() error {
-
-	// Get configuration values directly from viper (no validation here - let hub handle it)
 	modelName := h.viper.GetString("model_name")
 	localPath := h.viper.GetString("local_path")
 	revision := h.viper.GetString("revision")
 	repoType := h.viper.GetString("repo_type")
 
-	ctx := context.Background()
-
-	// Log the download operation
 	if h.logger != nil {
 		h.logger.Infof("🤗 Starting HuggingFace model download")
 		h.logger.Infof("   Model: %s", modelName)
@@ -85,23 +79,21 @@ func (h *HFDownloadAgent) Start() error {
 		h.logger.Infof("   Repository Type: %s (defaults to 'model' if empty)", repoType)
 	}
 
-	// Build download options - let hub module handle defaults and validation
-	var opts []hub.DownloadOption
-	if revision != "" {
-		opts = append(opts, hub.WithRevision(revision))
+	if repoType == "" {
+		repoType = xet.RepoTypeModel
 	}
-	if repoType != "" {
-		opts = append(opts, hub.WithRepoType(repoType))
+	if revision == "" {
+		revision = "main"
 	}
 
-	// Perform snapshot download using the hub client
-	downloadPath, err := h.hubClient.SnapshotDownload(
-		ctx,
-		modelName,
-		localPath,
-		opts...,
-	)
+	req := &xet.SnapshotRequest{
+		RepoID:   modelName,
+		RepoType: repoType,
+		Revision: revision,
+		LocalDir: localPath,
+	}
 
+	downloadPath, err := h.client.DownloadSnapshotWithContext(context.Background(), req)
 	if err != nil {
 		if h.logger != nil {
 			h.logger.Errorf("Failed to download model %s: %v", modelName, err)

@@ -11,7 +11,6 @@ import (
 
 	"github.com/sgl-project/ome/internal/ome-agent/replica/common"
 
-	"github.com/sgl-project/ome/pkg/hfutil/hub"
 	"github.com/sgl-project/ome/pkg/logging"
 	"github.com/sgl-project/ome/pkg/ociobjectstore"
 )
@@ -66,7 +65,7 @@ func (r *HFToOCIReplicator) Replicate(objects []common.ReplicationObject) error 
 func downloadFromHF(input common.ReplicationInput, hubClient *xet.Client, downloadDir string, logger logging.Interface) (string, error) {
 	req := &xet.SnapshotRequest{
 		RepoID:   input.Source.BucketName,
-		RepoType: hub.RepoTypeModel,
+		RepoType: xet.RepoTypeModel,
 		Revision: input.Source.Prefix,
 		LocalDir: downloadDir,
 	}

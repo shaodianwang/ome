@@ -8,9 +8,12 @@ import (
 	"time"
 )
 
-// HF Hub compatibility types to match pkg/hfutil/hub
+// HF Hub-style download API. DownloadConfig is a flat input shape
+// for the package-level helpers below; the methods on *Client take
+// typed request structs (DownloadRequest, SnapshotRequest) directly.
 
-// DownloadConfig matches the structure from pkg/hfutil/hub
+// DownloadConfig is the flat input type for HfHubDownload,
+// SnapshotDownload, SnapshotDownloadWithProgress, and ListRepoFiles.
 type DownloadConfig struct {
 	RepoID         string
 	RepoType       string
