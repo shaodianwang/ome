@@ -212,12 +212,36 @@ var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func(
 		got.Spec.Storage.StorageUri = &newURI
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 
+		// Two-stage convergence so a CI failure narrows precisely to
+		// the broken phase. Stage 1 = controller observed the URI
+		// change (Status.Cache.SourceUri swap) — fast, fires on the
+		// first reconcile after the watch event. Stage 2 = controller
+		// fired a fresh StartPrewarm AFTER the reset (PrewarmID
+		// non-empty AGAIN, lastPrewarmedURI matches v2) — slower,
+		// needs ~3 reconcile cycles. Splitting them avoids the
+		// combined-90s-timeout hiding which phase actually stalled
+		// under CI load.
 		Eventually(func(g Gomega) {
 			latest := &v1beta1.ClusterBaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-uri-change"}, latest)).To(Succeed())
 			g.Expect(latest.Status.Cache).NotTo(BeNil())
 			g.Expect(latest.Status.Cache.SourceUri).To(Equal(newURI),
 				"Status.Cache.SourceUri must reflect the new storage URI after identity reset")
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			latest := &v1beta1.ClusterBaseModel{}
+			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-uri-change"}, latest)).To(Succeed())
+			// Status.Cache.PrewarmID was reset to "" by
+			// resetShardedCacheProgress; a non-empty value here proves
+			// applyPrewarmStarted ran AFTER the reset. Combined with
+			// the lastPrewarmedURI assertion (controller-side mutator
+			// from the fake), this catches a regression where the
+			// controller observes the URI change but never fires a
+			// fresh prewarm.
+			g.Expect(latest.Status.Cache).NotTo(BeNil())
+			g.Expect(latest.Status.Cache.PrewarmID).NotTo(BeEmpty(),
+				"controller must call StartPrewarm AFTER the URI-change reset (PrewarmID was cleared and must be re-populated)")
 			seen := lastPrewarmedURI.Load()
 			g.Expect(seen).NotTo(BeNil())
 			g.Expect(*seen).To(Equal(newURI),

@@ -8,6 +8,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -146,6 +147,13 @@ func newPVCTestScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := batchv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("batchv1 AddToScheme: %v", err)
+	}
+	// rbacv1: ensureMetadataJobRBAC creates a RoleBinding in the OME
+	// namespace before the Job is submitted (covers PVC-backed BMs in
+	// non-OME namespaces). The reconcile path's fake client needs the
+	// kind registered or the create errors out.
+	if err := rbacv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("rbacv1 AddToScheme: %v", err)
 	}
 	return scheme
 }

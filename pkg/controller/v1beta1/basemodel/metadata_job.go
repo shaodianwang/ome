@@ -37,6 +37,16 @@ const (
 	// metadataJobNameSuffix is appended to the model name to produce the
 	// Job name. The total length is bounded by combining with a short hash.
 	metadataJobNameSuffix = "-metadata-"
+
+	// metadataJobAgentConfigPath is the path to the bundled ome-agent
+	// config file inside the standard ome-agent image
+	// (dockerfiles/ome-agent.Dockerfile:85). The agent's configProvider
+	// (cmd/ome-agent/config.go:28) errors with "no config file provided"
+	// if --config is empty, even though `model-metadata` reads all its
+	// runtime params from --model-path / --basemodel-name / etc. flags.
+	// Passing the bundled path satisfies the gratuitous existence check
+	// without requiring a per-Job ConfigMap mount.
+	metadataJobAgentConfigPath = "/ome-agent.yaml"
 )
 
 // MetadataJobConfig is the runtime configuration the BaseModel reconciler
@@ -141,6 +151,7 @@ func buildMetadataJob(obj client.Object, isClusterScoped bool, components *stora
 
 	args := []string{
 		"model-metadata",
+		"--config", metadataJobAgentConfigPath,
 		"--model-path", metadataJobModelMountPath,
 		"--basemodel-name", obj.GetName(),
 	}

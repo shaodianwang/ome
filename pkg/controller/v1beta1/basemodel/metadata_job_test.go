@@ -158,6 +158,11 @@ func TestBuildMetadataJob_BaseModel(t *testing.T) {
 	args := strings.Join(c.Args, " ")
 	for _, want := range []string{
 		"model-metadata",
+		// --config satisfies the agent's gratuitous configFilePath != ""
+		// check (cmd/ome-agent/config.go:28). Without it the Job pod
+		// crash-loops with "no config file provided" before reaching
+		// model-metadata logic.
+		"--config " + metadataJobAgentConfigPath,
 		"--model-path " + metadataJobModelMountPath,
 		"--basemodel-name llama-7b",
 		"--basemodel-namespace models",

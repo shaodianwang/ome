@@ -191,6 +191,15 @@ func ensureMetadataJob(ctx context.Context, kubeClient client.Client, scheme *ru
 	jobKey := types.NamespacedName{Namespace: want.Namespace, Name: want.Name}
 	switch err := kubeClient.Get(ctx, jobKey, got); {
 	case errors.IsNotFound(err):
+		// Make sure the SA + cross-ns RoleBinding exist BEFORE we
+		// submit the Job. Without this, Jobs in non-OME namespaces
+		// sit at 0/1 ready forever ("serviceaccount not found") and
+		// the BaseModel never leaves InTransit. Idempotent for the
+		// in-OME-namespace case.
+		if err := ensureMetadataJobRBAC(ctx, kubeClient, log, want.Namespace, cfg.ServiceAccount, cfg.ServiceAccount); err != nil {
+			log.Error(err, "Failed to ensure metadata Job RBAC", "namespace", want.Namespace)
+			return nil, ctrl.Result{}, err
+		}
 		if err := kubeClient.Create(ctx, want); err != nil && !errors.IsAlreadyExists(err) {
 			log.Error(err, "Failed to create metadata extraction Job", "job", jobKey)
 			return nil, ctrl.Result{}, err
