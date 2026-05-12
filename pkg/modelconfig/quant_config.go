@@ -5,65 +5,36 @@ import (
 	"fmt"
 )
 
-// HFQuantConfig is the schema for hf_quant_config.json, a sibling file
-// to config.json shipped by NVIDIA ModelOpt and the TensorRT-LLM
-// quantization workflow. It carries quantization metadata that the HF
-// native pipelines surface inside config.json under the
-// "quantization_config" key — but ModelOpt-style models don't always
-// modify config.json itself, so the data lives in this separate file
-// instead. Both conventions exist in the wild; OME readers should
-// honor either.
-//
-// Real-world example (Llama4x NVFP4 PTQ):
-//
-//	{
-//	  "quant_method": "modelopt",
-//	  "quantization": {
-//	    "quant_algo": "NVFP4",
-//	    "group_size": 16,
-//	    "kv_cache_quant_algo": "FP8",
-//	    "exclude_modules": ["layers.0.", "layers.61.", "self_attn", "lm_head"]
-//	  }
-//	}
+// HFQuantConfig is the schema for hf_quant_config.json, a sibling
+// file to config.json shipped by NVIDIA ModelOpt / TensorRT-LLM. The
+// HF-native pipelines surface the same data inside config.json under
+// "quantization_config", but ModelOpt-style models often don't modify
+// config.json — OME readers honor either source.
 type HFQuantConfig struct {
-	// QuantMethod is the producing tool ("modelopt" for the NVIDIA
-	// flow). Other tools that emit this file may use other values.
-	QuantMethod string `json:"quant_method"`
-	// Quantization carries the actual scheme parameters.
+	QuantMethod  string               `json:"quant_method"`
 	Quantization HFQuantConfigDetails `json:"quantization"`
 }
 
-// HFQuantConfigDetails carries the per-model quantization parameters
-// inside hf_quant_config.json. Field names mirror ModelOpt's wire
-// format. Many fields are optional and provider-dependent; OME only
-// reads QuantAlgo today.
+// HFQuantConfigDetails mirrors ModelOpt's "quantization" sub-object.
+// OME currently reads QuantAlgo + ExcludeModules; the rest are
+// informational.
 type HFQuantConfigDetails struct {
-	// QuantAlgo is the weight quantization algorithm — typical values
-	// include "FP8", "NVFP4", "MXFP4", "INT4_AWQ", "INT8_SQ", "W4A8_AWQ".
-	// Drives BaseModel.spec.quantization via quantAlgoToOMEEnum.
+	// QuantAlgo: "FP8", "NVFP4", "MXFP4", "INT4_AWQ", "INT8_SQ", "W4A8_AWQ", etc.
+	// Drives spec.quantization via QuantAlgoToOMEEnum.
 	QuantAlgo string `json:"quant_algo"`
-	// GroupSize is the per-group scale group size for grouped quant
-	// formats (NVFP4 = 16 typical). Informational only today.
+	// GroupSize: per-group scale size for grouped formats (NVFP4 = 16).
 	GroupSize int `json:"group_size,omitempty"`
-	// KVCacheQuantAlgo is the KV-cache quantization scheme (often "FP8"
-	// when weights are NVFP4). Informational only today; future param-
-	// count work may want it.
+	// KVCacheQuantAlgo: KV-cache scheme (often "FP8" when weights are NVFP4).
 	KVCacheQuantAlgo string `json:"kv_cache_quant_algo,omitempty"`
-	// ExcludeModules names tensor-name patterns kept at higher
-	// precision (e.g., "self_attn", "lm_head", "layers.0.", etc.).
-	// Required for accurate parameter counting on packed-quant models;
-	// see Gap 2 in the metadata-parser TODO list.
+	// ExcludeModules: tensor-name patterns kept at higher precision —
+	// required for accurate counting on packed-quant models.
 	ExcludeModules []string `json:"exclude_modules,omitempty"`
 }
 
-// HFQuantConfigFileName is the canonical filename ModelOpt and similar
-// tools use. Looked up by basename so subdirectory placement is
-// immaterial.
 const HFQuantConfigFileName = "hf_quant_config.json"
 
-// ParseHFQuantConfig deserializes the JSON bytes of an
-// hf_quant_config.json file. Returns nil + nil on empty input so
-// callers can use it for the "file is optional" pattern.
+// ParseHFQuantConfig returns nil + nil on empty input so callers can
+// use it for the "file is optional" pattern.
 func ParseHFQuantConfig(data []byte) (*HFQuantConfig, error) {
 	if len(data) == 0 {
 		return nil, nil

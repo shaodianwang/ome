@@ -34,13 +34,10 @@ type HuggingFaceModel interface {
 	// model serves. Always returns at least one element; an opaque
 	// model returns []Capability{CapabilityUnknown}.
 	GetCapabilities() []Capability
-	// GetHFQuantConfig returns the model's quantization metadata in
-	// the unified HFQuantConfig shape — bridging the two real-world
-	// schemas (NVIDIA ModelOpt's separate hf_quant_config.json file
-	// and the HF-native quantization_config block embedded in
-	// config.json) so downstream callers like the safetensors
-	// param-count pipeline see one type. Returns nil for
-	// unquantized models.
+	// GetHFQuantConfig returns quantization metadata in the unified
+	// HFQuantConfig shape, bridging the two real-world schemas
+	// (separate hf_quant_config.json vs embedded quantization_config).
+	// Returns nil for unquantized models.
 	GetHFQuantConfig() *HFQuantConfig
 }
 

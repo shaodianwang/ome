@@ -68,67 +68,38 @@ func (c *BaseModelConfig) GetCapabilities() []Capability {
 	return []Capability{CapabilityUnknown}
 }
 
-// QuantizationConfig captures the embedded "quantization_config" block
-// inside config.json — the HF-native convention used by mxfp4
-// (gpt-oss), fbgemm_fp8 (Llama-3.1-405B), gptq, awq, and plain fp8
-// (kimi-k2). Distinct from HFQuantConfig (NVIDIA ModelOpt's separate
-// hf_quant_config.json file in quant_config.go).
+// QuantizationConfig is the embedded "quantization_config" block from
+// config.json — the HF-native convention used by mxfp4, fbgemm_fp8,
+// gptq, awq, fp8, compressed-tensors. Distinct from HFQuantConfig
+// (ModelOpt's separate hf_quant_config.json in quant_config.go).
 //
-// Producers can't agree on a single key name for the excluded-modules
-// list: HF-native uses modules_to_not_convert, compressed-tensors uses
-// "ignore", and some neuralmagic builds use "ignored_layers". We accept
-// all three and surface them via ExcludePatterns(). Field names mirror
-// the JSON exactly; the union covers every variant observed in
-// pkg/modelconfig/testdata/quant/.
+// The excluded-modules list has three field names in the wild —
+// modules_to_not_convert (HF-native), ignore (compressed-tensors),
+// ignored_layers (neuralmagic) — surfaced uniformly via ExcludePatterns.
 type QuantizationConfig struct {
-	// QuantMethod is the algorithm OR producer name ("fp8", "mxfp4",
-	// "fbgemm_fp8", "gptq", "awq", "compressed-tensors", "modelopt").
-	// For most producers this IS the algorithm; ModelOpt distinguishes
-	// producer ("modelopt") from algorithm ("NVFP4") and stores the
-	// latter under QuantAlgo below.
+	// QuantMethod is the algorithm OR producer name. For most
+	// producers it IS the algorithm; ModelOpt distinguishes producer
+	// ("modelopt") from algorithm (under QuantAlgo).
 	QuantMethod string `json:"quant_method"`
-	// QuantAlgo is the actual algorithm name when QuantMethod identifies
-	// only the producer. NVIDIA ModelOpt's embedded config sets
-	// quant_method:"modelopt" + quant_algo:"NVFP4". When non-empty,
-	// QuantAlgo wins over QuantMethod for downstream OME mapping.
+	// QuantAlgo is the algorithm name when QuantMethod is just the
+	// producer. ModelOpt: quant_method="modelopt" + quant_algo="NVFP4".
+	// Wins over QuantMethod for downstream mapping when set.
 	QuantAlgo string `json:"quant_algo,omitempty"`
-	// Bits is the weight bit width carried by GPTQ/AWQ embedded
-	// configs ({"quant_method":"gptq", "bits":4} etc.). Without this
-	// field the downstream matchers see "gptq" alone, which doesn't
-	// contain "int4" — so packed INT4 GPTQ tensors silently
-	// undercount by 8x. resolveAlgo() folds Bits into the synthesized
-	// name when QuantAlgo is absent.
-	Bits int `json:"bits,omitempty"`
-	// ModulesToNotConvert is the HF-native excluded-modules key. Used
-	// by mxfp4 (gpt-oss), fbgemm_fp8, awq. Patterns may be substrings
-	// OR globs (mxfp4 uses "model.layers.*.self_attn"); IsExcludedTensor
-	// handles both.
+	// Bits is the weight bit width on GPTQ/AWQ ({"quant_method":"gptq",
+	// "bits":4}). Without folding this in, "gptq" alone misses every
+	// "int4"/"w4a" matcher and packed INT4 GPTQ undercounts 8x.
+	Bits                int      `json:"bits,omitempty"`
 	ModulesToNotConvert []string `json:"modules_to_not_convert,omitempty"`
-	// Ignore is the compressed-tensors excluded-modules key. Same
-	// semantics as ModulesToNotConvert but a different field name.
-	Ignore []string `json:"ignore,omitempty"`
-	// IgnoredLayers is the neuralmagic excluded-modules key. Same
-	// semantics, third name.
-	IgnoredLayers []string `json:"ignored_layers,omitempty"`
-	// ActivationScheme — fp8 / kimi-k2 use "dynamic" / "static".
-	// Informational only today.
-	ActivationScheme string `json:"activation_scheme,omitempty"`
-	// Format — fp8 / kimi-k2 use "e4m3" / "e5m2"; compressed-tensors
-	// uses "naive-quantized" / "int-quantized". Informational.
-	Format string `json:"fmt,omitempty"`
-	// WeightBlockSize — fp8 group size, e.g. [128, 128] for
-	// kimi-k2's per-block FP8. Informational.
-	WeightBlockSize []int `json:"weight_block_size,omitempty"`
+	Ignore              []string `json:"ignore,omitempty"`
+	IgnoredLayers       []string `json:"ignored_layers,omitempty"`
+	ActivationScheme    string   `json:"activation_scheme,omitempty"`
+	Format              string   `json:"fmt,omitempty"`
+	WeightBlockSize     []int    `json:"weight_block_size,omitempty"`
 }
 
 // ExcludePatterns returns the first non-empty excluded-modules list
-// across the three known field-name conventions. Returns nil when no
-// list is set OR when the receiver is nil.
-//
-// Resolution order is the documented frequency in production
-// fixtures: HF-native is most common, then compressed-tensors, then
-// neuralmagic. If a producer ships multiple lists in the same config
-// (no real example yet), the most-common name wins.
+// across the three known field-name conventions, in order of
+// production frequency: HF-native → compressed-tensors → neuralmagic.
 func (c *QuantizationConfig) ExcludePatterns() []string {
 	if c == nil {
 		return nil
@@ -145,18 +116,10 @@ func (c *QuantizationConfig) ExcludePatterns() []string {
 	return nil
 }
 
-// ToHFQuantConfig converts an embedded HF-native QuantizationConfig
-// into the standalone HFQuantConfig shape so the safetensors counting
-// pipeline can use a single code path regardless of the producer
-// convention. Returns nil if the embedded block has neither
-// quant_method nor quant_algo (i.e., the model isn't quantized).
-//
-// Algorithm resolution: QuantAlgo wins when present (NVIDIA ModelOpt
-// puts the algorithm there with quant_method="modelopt"). Otherwise
-// QuantMethod is the algorithm (HF-native producers like mxfp4,
-// fbgemm_fp8, gptq, awq, fp8 don't distinguish — quant_method IS the
-// algo). This must match the priority the downstream
-// QuantAlgoToOMEEnum + QuantPackingFactor lookups expect.
+// ToHFQuantConfig synthesizes a standalone HFQuantConfig from the
+// embedded block so the safetensors counting pipeline sees one type
+// regardless of producer convention. Returns nil for unquantized
+// models (no quant_method AND no quant_algo).
 func (c *QuantizationConfig) ToHFQuantConfig() *HFQuantConfig {
 	if c == nil {
 		return nil
@@ -174,19 +137,10 @@ func (c *QuantizationConfig) ToHFQuantConfig() *HFQuantConfig {
 	}
 }
 
-// resolveAlgo returns the algorithm name to surface — QuantAlgo if
-// set (ModelOpt convention), else QuantMethod, optionally normalized
-// when Bits is set on a producer that needs both fields to
-// disambiguate the scheme.
-//
-// Normalizations:
-//
-//	GPTQ/AWQ + bits=N → "INT<N>_<METHOD>" (e.g. "INT4_GPTQ").
-//	  Without this, "gptq" alone slips past every QuantPackingFactor
-//	  branch (which substring-matches "int4"/"w4a"), so an I32-packed
-//	  INT4 tensor would undercount 8x.
-//
-// Returns empty string when the model isn't quantized.
+// resolveAlgo returns the algorithm name to surface: QuantAlgo if
+// set (ModelOpt), else QuantMethod normalized to "INT<N>_<METHOD>"
+// when GPTQ/AWQ + Bits is set (so "gptq"+bits:4 doesn't slip past
+// the "int4"/"w4a" matchers and undercount 8x).
 func (c *QuantizationConfig) resolveAlgo() string {
 	if c == nil {
 		return ""
