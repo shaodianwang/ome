@@ -627,6 +627,73 @@ func TestParseModelConfigFromFiles(t *testing.T) {
 	}
 }
 
+// safetensorsHeaderBytesForTest builds an in-memory safetensors file
+// (8-byte length prefix + JSON header). Used by parser-level tests
+// that need to exercise the safetensors counting path with synthesized
+// tensor metadata rather than shipping multi-GB binary fixtures.
+func safetensorsHeaderBytesForTest(t *testing.T, tensors map[string]map[string]any) []byte {
+	t.Helper()
+	jsonBytes, err := json.Marshal(tensors)
+	require.NoError(t, err)
+	out := make([]byte, 8+len(jsonBytes))
+	binary.LittleEndian.PutUint64(out[:8], uint64(len(jsonBytes)))
+	copy(out[8:], jsonBytes)
+	return out
+}
+
+func TestParseModelConfigFromFiles_QuantAwareSafetensorsCount(t *testing.T) {
+	// End-to-end through ParseModelConfigFromFiles: config.json (no
+	// quantization_config) + hf_quant_config.json (NVFP4) + a synthetic
+	// safetensors file with one packed U8 tensor + one excluded F16
+	// tensor + one scale. Verify the resulting metadata.ModelParameterSize
+	// reflects the quant-aware count, not the legacy naive sum.
+	logger := zap.NewNop().Sugar()
+	parser := &ModelConfigParser{
+		logger:          logger,
+		loadModelConfig: modelconfig.LoadModelConfig,
+	}
+
+	// Tensors:
+	//   layers.0.self_attn.k_proj.weight: F16 [4, 8] = 32 params, EXCLUDED → naive
+	//   layers.30.mlp.gate_proj.weight:   U8  [8, 8] = 64 storage, NVFP4 → ×2 = 128 logical
+	//   layers.30.mlp.gate_proj.weight_scale: F32 [8] = scale, SKIPPED
+	// Quant-aware total: 32 + 128 = 160. Legacy naive: 32 + 64 + 8 = 104.
+	safetensorsBytes := safetensorsHeaderBytesForTest(t, map[string]map[string]any{
+		"model.layers.0.self_attn.k_proj.weight": {
+			"shape": []int64{4, 8}, "dtype": "F16", "data_offsets": []int64{0, 64},
+		},
+		"model.layers.30.mlp.gate_proj.weight": {
+			"shape": []int64{8, 8}, "dtype": "U8", "data_offsets": []int64{0, 64},
+		},
+		"model.layers.30.mlp.gate_proj.weight_scale": {
+			"shape": []int64{8}, "dtype": "F32", "data_offsets": []int64{0, 32},
+		},
+	})
+
+	files := []ModelConfigFileInput{
+		{Path: DefaultConfigFileName, Data: []byte(`{"model_type":"llama4x_text","architectures":["Llama4xForCausalLM"]}`)},
+		{Path: "model.safetensors", Data: safetensorsBytes},
+		{Path: modelconfig.HFQuantConfigFileName, Data: []byte(`{
+			"quant_method": "modelopt",
+			"quantization": {
+				"quant_algo": "NVFP4",
+				"exclude_modules": ["self_attn"]
+			}
+		}`)},
+	}
+
+	metadata, err := parser.ParseModelConfigFromFiles(context.Background(), files, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, metadata)
+
+	// Quant-aware: 32 (excluded F16) + 128 (NVFP4 ×2) = 160.
+	// FormatParamCount renders 160 as "160" — no SI suffix because <1000.
+	assert.Equal(t, modelconfig.FormatParamCount(160), metadata.ModelParameterSize,
+		"hf_quant_config.json + NVFP4 + excluded module + scale tensor must yield quant-aware count, not naive sum")
+	assert.Equal(t, v1beta1.ModelQuantizationNVFP4, metadata.Quantization,
+		"sanity: spec.Quantization should also be set from the same hf_quant_config.json")
+}
+
 func TestParseModelConfigDir_HFQuantConfigFallbackFromDisk(t *testing.T) {
 	// PVC agent path: model dir on disk has config.json (no
 	// quantization_config) + hf_quant_config.json (NVFP4).

@@ -25,8 +25,18 @@ type SafetensorsFileInput struct {
 }
 
 // FindAndParseSafetensors looks for a safetensors file in the same directory as the config file
-// and parses it to count the total number of parameters
+// and parses it to count the total number of parameters. Naive count — see
+// FindAndParseSafetensorsWithQuantConfig for the packed-quant-aware variant.
 func FindAndParseSafetensors(configPath string) (int64, error) {
+	return FindAndParseSafetensorsWithQuantConfig(configPath, nil)
+}
+
+// FindAndParseSafetensorsWithQuantConfig is the quant-aware variant of
+// FindAndParseSafetensors. When quantConfig is non-nil the per-tensor
+// counting respects packed-quantization storage (NVFP4 stored as
+// U8[out, in/2] etc.) and skips scale/zero-point tensors. Pass nil to
+// preserve the legacy naive-count behavior.
+func FindAndParseSafetensorsWithQuantConfig(configPath string, quantConfig *HFQuantConfig) (int64, error) {
 	if configPath == "" {
 		return 0, fmt.Errorf("config path cannot be empty")
 	}
@@ -40,7 +50,7 @@ func FindAndParseSafetensors(configPath string) (int64, error) {
 	// Look for index.json file first, which might point to sharded safetensors
 	indexPath := filepath.Join(dir, "model.safetensors.index.json")
 	if _, err := os.Stat(indexPath); err == nil {
-		count, err := ParseSafetensorsIndex(indexPath)
+		count, err := parseSafetensorsIndexFile(indexPath, quantConfig)
 		if err != nil {
 			return 0, fmt.Errorf("failed to parse safetensors index '%s': %w", indexPath, err)
 		}
@@ -54,7 +64,7 @@ func FindAndParseSafetensors(configPath string) (int64, error) {
 	for _, f := range files {
 		if strings.HasSuffix(f.Name(), ".safetensors") {
 			fullPath := filepath.Join(dir, f.Name())
-			params, err := ParseSafetensors(fullPath)
+			params, err := parseSafetensorsFile(fullPath, quantConfig)
 			if err != nil {
 				return 0, fmt.Errorf("failed to parse safetensors file '%s': %w", fullPath, err)
 			}
@@ -78,8 +88,17 @@ func FindAndParseSafetensors(configPath string) (int64, error) {
 
 // FindAndParseSafetensorsFiles parses safetensors metadata from an explicit set of files.
 // It supports either model.safetensors.index.json plus referenced shard headers, or
-// all .safetensors files in the set when no index is present.
+// all .safetensors files in the set when no index is present. Naive count — see
+// FindAndParseSafetensorsFilesWithQuantConfig for the packed-quant-aware variant.
 func FindAndParseSafetensorsFiles(files []SafetensorsFileInput) (int64, error) {
+	return FindAndParseSafetensorsFilesWithQuantConfig(files, nil)
+}
+
+// FindAndParseSafetensorsFilesWithQuantConfig is the quant-aware variant of
+// FindAndParseSafetensorsFiles. When quantConfig is non-nil the per-tensor
+// counting respects packed-quantization storage and skips scale tensors.
+// Pass nil to preserve the legacy naive-count behavior.
+func FindAndParseSafetensorsFilesWithQuantConfig(files []SafetensorsFileInput, quantConfig *HFQuantConfig) (int64, error) {
 	if len(files) == 0 {
 		return 0, fmt.Errorf("safetensors file input set is empty")
 	}
@@ -119,7 +138,7 @@ func FindAndParseSafetensorsFiles(files []SafetensorsFileInput) (int64, error) {
 			if !ok {
 				return 0, fmt.Errorf("shard '%s' referenced in index '%s' was not provided", shardPath, indexPath)
 			}
-			return ParseSafetensorsBytes(data, shardPath)
+			return ParseSafetensorsBytesWithQuantConfig(data, shardPath, quantConfig)
 		})
 	}
 
@@ -130,7 +149,7 @@ func FindAndParseSafetensorsFiles(files []SafetensorsFileInput) (int64, error) {
 
 	var totalParams int64
 	for _, safetensorsPath := range safetensorsPaths {
-		params, err := ParseSafetensorsBytes(byPath[safetensorsPath], safetensorsPath)
+		params, err := ParseSafetensorsBytesWithQuantConfig(byPath[safetensorsPath], safetensorsPath, quantConfig)
 		if err != nil {
 			return 0, fmt.Errorf("failed to parse safetensors file '%s': %w", safetensorsPath, err)
 		}
@@ -143,7 +162,14 @@ func FindAndParseSafetensorsFiles(files []SafetensorsFileInput) (int64, error) {
 }
 
 // ParseSafetensors parses a single safetensors file and counts parameters
+// (naive count). Use parseSafetensorsFile internally to thread quantConfig.
 func ParseSafetensors(path string) (int64, error) {
+	return parseSafetensorsFile(path, nil)
+}
+
+// parseSafetensorsFile is the internal worker that opens a file and
+// counts parameters with optional quant-aware classification.
+func parseSafetensorsFile(path string, quantConfig *HFQuantConfig) (int64, error) {
 	if path == "" {
 		return 0, fmt.Errorf("safetensors file path cannot be empty")
 	}
@@ -154,17 +180,27 @@ func ParseSafetensors(path string) (int64, error) {
 	}
 	defer file.Close()
 
-	return ParseSafetensorsReader(file, path)
+	return parseSafetensorsReader(file, path, quantConfig)
 }
 
 // ParseSafetensorsBytes parses safetensors metadata from bytes containing the
 // 8-byte header length followed by the safetensors JSON header.
 func ParseSafetensorsBytes(data []byte, label string) (int64, error) {
-	return ParseSafetensorsReader(bytes.NewReader(data), label)
+	return ParseSafetensorsBytesWithQuantConfig(data, label, nil)
 }
 
-// ParseSafetensorsReader parses safetensors metadata from a reader.
+// ParseSafetensorsBytesWithQuantConfig is the quant-aware variant of
+// ParseSafetensorsBytes.
+func ParseSafetensorsBytesWithQuantConfig(data []byte, label string, quantConfig *HFQuantConfig) (int64, error) {
+	return parseSafetensorsReader(bytes.NewReader(data), label, quantConfig)
+}
+
+// ParseSafetensorsReader parses safetensors metadata from a reader (naive count).
 func ParseSafetensorsReader(reader io.Reader, label string) (int64, error) {
+	return parseSafetensorsReader(reader, label, nil)
+}
+
+func parseSafetensorsReader(reader io.Reader, label string, quantConfig *HFQuantConfig) (int64, error) {
 	if label == "" {
 		label = "safetensors input"
 	}
@@ -186,11 +222,29 @@ func ParseSafetensorsReader(reader io.Reader, label string) (int64, error) {
 		return 0, fmt.Errorf("failed to read JSON header from '%s': %w", label, err)
 	}
 
-	return ParseSafetensorsHeader(headerBytes, label)
+	return ParseSafetensorsHeaderQuantAware(headerBytes, label, quantConfig)
 }
 
-// ParseSafetensorsHeader parses a safetensors JSON header and counts parameters.
+// ParseSafetensorsHeader parses a safetensors JSON header and counts
+// parameters naively (sum of shape products across all tensors).
+// Backward-compat shim — new callers that have an hf_quant_config.json
+// should use ParseSafetensorsHeaderQuantAware to get the logical count
+// for packed-quant formats (NVFP4 stored as U8[out, in/2] etc.).
 func ParseSafetensorsHeader(headerBytes []byte, label string) (int64, error) {
+	return ParseSafetensorsHeaderQuantAware(headerBytes, label, nil)
+}
+
+// ParseSafetensorsHeaderQuantAware parses a safetensors JSON header
+// and counts the logical parameters per tensor with awareness of
+// packed-quantization formats. When quantConfig is nil the behavior
+// matches the legacy ParseSafetensorsHeader (sum of shape products).
+//
+// When quantConfig is non-nil the per-tensor classification skips
+// scale tensors entirely, treats tensors in exclude_modules as
+// full-precision (naive count), and multiplies the shape product by
+// QuantPackingFactor(quant_algo, dtype) for the rest. See
+// CountTensorParams for the exact rules.
+func ParseSafetensorsHeaderQuantAware(headerBytes []byte, label string, quantConfig *HFQuantConfig) (int64, error) {
 	if label == "" {
 		label = "safetensors input"
 	}
@@ -207,32 +261,33 @@ func ParseSafetensorsHeader(headerBytes []byte, label string) (int64, error) {
 
 	var total int64 = 0
 	for tensorName, tensor := range raw {
-		// Skip metadata tensors which may have empty shapes
 		if tensorName == "__metadata__" {
 			continue
 		}
-
+		// Up-front overflow guard on shape product. Done in the loop
+		// rather than in CountTensorParams so the error message can
+		// blame the specific tensor + label, which is the most
+		// useful diagnostic when a corrupted header surfaces.
 		if len(tensor.Shape) == 0 {
-			// Skip tensors with empty shapes (like scalars or metadata)
 			continue
 		}
-
-		count := int64(1)
+		var dimProduct int64 = 1
 		for i, dim := range tensor.Shape {
 			if dim <= 0 {
 				return 0, fmt.Errorf("tensor '%s' in '%s' has invalid dimension %d at index %d",
 					tensorName, label, dim, i)
 			}
-
-			// Check for overflow before multiplication
-			if count > 0 && dim > math.MaxInt64/count {
+			if dimProduct > 0 && dim > math.MaxInt64/dimProduct {
 				return 0, fmt.Errorf("dimension overflow for tensor '%s' in '%s': multiplication would exceed maximum value",
 					tensorName, label)
 			}
-			count *= dim
+			dimProduct *= dim
 		}
 
-		// Check for overflow when adding to total
+		count := CountTensorParams(tensorName, tensor.Shape, tensor.Dtype, quantConfig)
+		if count == 0 {
+			continue
+		}
 		if total > math.MaxInt64-count {
 			return 0, fmt.Errorf("parameter count overflow in '%s': total would exceed maximum value", label)
 		}
@@ -242,8 +297,13 @@ func ParseSafetensorsHeader(headerBytes []byte, label string) (int64, error) {
 	return total, nil
 }
 
-// ParseSafetensorsIndex parses a model.safetensors.index.json file for sharded models
+// ParseSafetensorsIndex parses a model.safetensors.index.json file for
+// sharded models (naive count).
 func ParseSafetensorsIndex(indexPath string) (int64, error) {
+	return parseSafetensorsIndexFile(indexPath, nil)
+}
+
+func parseSafetensorsIndexFile(indexPath string, quantConfig *HFQuantConfig) (int64, error) {
 	if indexPath == "" {
 		return 0, fmt.Errorf("index path cannot be empty")
 	}
@@ -256,7 +316,7 @@ func ParseSafetensorsIndex(indexPath string) (int64, error) {
 	dir := filepath.Dir(indexPath)
 	return parseSafetensorsIndexData(data, indexPath, func(shard string) (int64, error) {
 		shardPath := filepath.Join(dir, shard)
-		return ParseSafetensors(shardPath)
+		return parseSafetensorsFile(shardPath, quantConfig)
 	})
 }
 

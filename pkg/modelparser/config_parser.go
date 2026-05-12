@@ -82,9 +82,24 @@ func (p *ModelConfigParser) ParseModelConfigFromFiles(ctx context.Context, files
 		return nil, fmt.Errorf("no model_index.json or config.json found in file input set")
 	}
 
+	// Parse hf_quant_config.json early so the safetensors counting
+	// downstream can be quant-aware (NVFP4 stored as U8[out, in/2]
+	// requires a 2x multiplier; INT4 packed in I32 requires 8x; etc.).
+	// Pre-parsing also lets the spec.Quantization fallback below use
+	// the already-parsed value.
+	var hfQuantConfig *modelconfig.HFQuantConfig
+	if len(hfQuantConfigBytes) > 0 {
+		parsed, perr := modelconfig.ParseHFQuantConfig(hfQuantConfigBytes)
+		if perr != nil {
+			p.logger.Warnf("Failed to parse %s: %v", modelconfig.HFQuantConfigFileName, perr)
+		} else {
+			hfQuantConfig = parsed
+		}
+	}
+
 	var parameterCountOverride *int64
 	if len(safetensorsFiles) > 0 {
-		parameterCount, err := modelconfig.FindAndParseSafetensorsFiles(safetensorsFiles)
+		parameterCount, err := modelconfig.FindAndParseSafetensorsFilesWithQuantConfig(safetensorsFiles, hfQuantConfig)
 		if err != nil {
 			return nil, fmt.Errorf("parse safetensors metadata from file inputs: %w", err)
 		}
@@ -98,23 +113,17 @@ func (p *ModelConfigParser) ParseModelConfigFromFiles(ctx context.Context, files
 
 	metadata := p.extractModelMetadataFromHFWithParameterCount(hfModel, parameterCountOverride)
 
-	// hf_quant_config.json is the NVIDIA ModelOpt / TensorRT-LLM
-	// fallback for models whose quantization scheme isn't declared in
-	// config.json. Override only when config.json was silent —
-	// config.json wins when both are present.
-	if metadata.Quantization == "" && len(hfQuantConfigBytes) > 0 {
-		hfQuantConfig, err := modelconfig.ParseHFQuantConfig(hfQuantConfigBytes)
-		if err != nil {
-			p.logger.Warnf("Failed to parse %s: %v", modelconfig.HFQuantConfigFileName, err)
-		} else if hfQuantConfig != nil {
-			if mapped := QuantAlgoToOMEEnum(hfQuantConfig.Quantization.QuantAlgo); mapped != "" {
-				metadata.Quantization = mapped
-				p.logger.Infof("Setting quantization to %s from %s (quant_algo=%s)",
-					mapped, modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
-			} else if hfQuantConfig.Quantization.QuantAlgo != "" {
-				p.logger.Warnf("%s declared quant_algo=%q which OME does not yet recognize; spec.Quantization will be left unset",
-					modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
-			}
+	// hf_quant_config.json fallback for spec.Quantization. Override
+	// only when config.json was silent — config.json wins when both
+	// are present.
+	if metadata.Quantization == "" && hfQuantConfig != nil {
+		if mapped := QuantAlgoToOMEEnum(hfQuantConfig.Quantization.QuantAlgo); mapped != "" {
+			metadata.Quantization = mapped
+			p.logger.Infof("Setting quantization to %s from %s (quant_algo=%s)",
+				mapped, modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
+		} else if hfQuantConfig.Quantization.QuantAlgo != "" {
+			p.logger.Warnf("%s declared quant_algo=%q which OME does not yet recognize; spec.Quantization will be left unset",
+				modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
 		}
 	}
 
@@ -135,6 +144,31 @@ func (p *ModelConfigParser) parseModelConfigDir(modelDir string, parameterCountO
 	if shouldSkip := p.shouldSkipConfigParsing(baseModel, clusterBaseModel); shouldSkip {
 		p.logger.Infof("Skipping config parsing due to annotation")
 		return nil, nil
+	}
+
+	// Read hf_quant_config.json early so it can drive both the
+	// parameter-count override AND the spec.Quantization fallback.
+	// loadHFQuantConfig returns nil for both "missing" and "parse
+	// failed" — either way the rest of the function falls back to the
+	// legacy naive count, which preserves behavior on non-quant models.
+	hfQuantConfig := p.loadHFQuantConfig(modelDir)
+
+	// Quant-aware parameter counting: when there's a quant config and
+	// the caller didn't provide an override, recompute the count from
+	// the safetensors directory using QuantPackingFactor + scale-tensor
+	// skip + exclude_modules. The legacy hfModel.GetParameterCount()
+	// does a naive sum of shape products which under-counts NVFP4 by
+	// ~2x and over-counts FP16 excluded modules; correcting up-front
+	// lets every downstream consumer see the right number.
+	if parameterCountOverride == nil && hfQuantConfig != nil {
+		if configPath, ferr := p.findConfigFile(modelDir); ferr == nil {
+			if count, cerr := modelconfig.FindAndParseSafetensorsWithQuantConfig(configPath, hfQuantConfig); cerr == nil && count > 0 {
+				countCopy := count
+				parameterCountOverride = &countCopy
+				p.logger.Infof("Using quant-aware safetensors count: %d (algo=%s)",
+					count, hfQuantConfig.Quantization.QuantAlgo)
+			}
+		}
 	}
 
 	var metadata ModelMetadata
@@ -178,20 +212,18 @@ func (p *ModelConfigParser) parseModelConfigDir(modelDir string, parameterCountO
 		return nil, fmt.Errorf("no model_index.json or config.json found in %s", modelDir)
 	}
 
-	// hf_quant_config.json is the NVIDIA ModelOpt / TensorRT-LLM
-	// fallback for models whose config.json doesn't carry a
-	// quantization_config block. Override only when config.json was
-	// silent — config.json wins when both are present.
-	if metadata.Quantization == "" {
-		if hfQuantConfig := p.loadHFQuantConfig(modelDir); hfQuantConfig != nil {
-			if mapped := QuantAlgoToOMEEnum(hfQuantConfig.Quantization.QuantAlgo); mapped != "" {
-				metadata.Quantization = mapped
-				p.logger.Infof("Setting quantization to %s from %s (quant_algo=%s)",
-					mapped, modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
-			} else if hfQuantConfig.Quantization.QuantAlgo != "" {
-				p.logger.Warnf("%s declared quant_algo=%q which OME does not yet recognize; spec.Quantization will be left unset",
-					modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
-			}
+	// hf_quant_config.json fallback for spec.Quantization. Uses the
+	// already-parsed value from the early load above. Override only
+	// when config.json was silent — config.json wins when both are
+	// present.
+	if metadata.Quantization == "" && hfQuantConfig != nil {
+		if mapped := QuantAlgoToOMEEnum(hfQuantConfig.Quantization.QuantAlgo); mapped != "" {
+			metadata.Quantization = mapped
+			p.logger.Infof("Setting quantization to %s from %s (quant_algo=%s)",
+				mapped, modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
+		} else if hfQuantConfig.Quantization.QuantAlgo != "" {
+			p.logger.Warnf("%s declared quant_algo=%q which OME does not yet recognize; spec.Quantization will be left unset",
+				modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
 		}
 	}
 
