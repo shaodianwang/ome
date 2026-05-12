@@ -520,9 +520,12 @@ func TestQuantizationConfig_ToHFQuantConfig_RealFixtures(t *testing.T) {
 			wantExcludeNonZero: false,
 		},
 		{
-			name:               "gptq with no exclude",
-			path:               filepath.Join("testdata", "quant", "gptq-llama-2-7b", "config.json"),
-			wantQuantAlgo:      "gptq",
+			name: "gptq + bits:4 normalized to INT4_GPTQ",
+			path: filepath.Join("testdata", "quant", "gptq-llama-2-7b", "config.json"),
+			// Real fixture has quant_method:"gptq" + bits:4. resolveAlgo
+			// folds those together into INT4_GPTQ so QuantPackingFactor's
+			// "int4" substring branch fires (factor 8 for I32 packing).
+			wantQuantAlgo:      "INT4_GPTQ",
 			wantExcludeNonZero: false,
 		},
 		{
@@ -555,6 +558,25 @@ func TestQuantizationConfig_ToHFQuantConfig_RealFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestQuantizationConfig_ToHFQuantConfig_PrefersQuantAlgoOverQuantMethod(t *testing.T) {
+	// NVIDIA's embedded quantization_config (and its hf_quant_config.json)
+	// puts quant_method:"modelopt" with the actual algorithm under
+	// quant_algo:"NVFP4". If we only read quant_method we'd surface
+	// "modelopt" — unrecognized by QuantPackingFactor (factor 1, no
+	// 2x multiplier) and QuantAlgoToOMEEnum (empty enum, no
+	// spec.Quantization). Both gaps would manifest as silent
+	// undercounting on real production models.
+	data, err := os.ReadFile(filepath.Join("testdata", "quant", "nvidia-llama-3-1-8b-nvfp4", "config.json"))
+	require.NoError(t, err)
+	model, err := ParseModelConfig(ModelConfigInput{Path: "config.json", Data: data})
+	require.NoError(t, err)
+
+	hfQuant := model.GetHFQuantConfig()
+	require.NotNil(t, hfQuant)
+	assert.Equal(t, "NVFP4", hfQuant.Quantization.QuantAlgo,
+		"quant_algo:NVFP4 must win over quant_method:modelopt — otherwise downstream gets the producer name and silently undercounts")
 }
 
 func TestGenericModelConfig_GetHFQuantConfig_NilForUnquantized(t *testing.T) {

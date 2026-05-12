@@ -219,6 +219,12 @@ func TestExtractModelMetadataFromHF(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Call the function under test
 			metadata := parser.extractModelMetadataFromHF(tc.mockModel)
+			// extractModelMetadataFromHF no longer writes Quantization
+			// (see config_parser.go's "intentionally NOT set here"
+			// comment) — the parser entry points apply it via
+			// applyQuantizationFromConfig as a single source of truth.
+			// Mimic that here so the existing assertion is meaningful.
+			applyQuantizationFromConfig(&metadata, syntheticQuantConfig(tc.mockModel.quantizationType), parser.logger)
 
 			// Verify the metadata using the custom validation function
 			if !tc.expectedMetadata(metadata) {
@@ -756,11 +762,15 @@ func TestParseModelConfigFromFiles_HFQuantConfigFallback(t *testing.T) {
 	}
 }
 
-func TestParseModelConfigFromFiles_ConfigJSONWinsOverHFQuantConfig(t *testing.T) {
-	// config.json with quantization_config + hf_quant_config.json with
-	// a different value → config.json wins. Catches a regression
-	// where the fallback ordering reverses and silently overwrites
-	// the HF-native value.
+func TestParseModelConfigFromFiles_StandaloneHFQuantConfigWinsOverEmbedded(t *testing.T) {
+	// Standalone hf_quant_config.json + embedded quantization_config:
+	// standalone is the higher-priority signal (richer schema —
+	// group_size, kv_cache_quant_algo, etc.) and unifying spec.Quantization
+	// with the safetensors counting source prevents the NVFP4-count +
+	// FP8-spec asymmetry the unification fix closes.
+	//
+	// Earlier this test asserted the OPPOSITE invariant (embedded wins)
+	// — that was a documented bug, not a feature. Renamed for clarity.
 	logger := zap.NewNop().Sugar()
 	parser := &ModelConfigParser{
 		logger:          logger,
@@ -783,8 +793,8 @@ func TestParseModelConfigFromFiles_ConfigJSONWinsOverHFQuantConfig(t *testing.T)
 	metadata, err := parser.ParseModelConfigFromFiles(context.Background(), files, nil, nil)
 	assert.NoError(t, err)
 	if assert.NotNil(t, metadata) {
-		assert.Equal(t, v1beta1.ModelQuantizationFP8, metadata.Quantization,
-			"config.json's quantization_config must win over hf_quant_config.json when both are present")
+		assert.Equal(t, v1beta1.ModelQuantizationNVFP4, metadata.Quantization,
+			"standalone hf_quant_config.json must win — same source as parameter counting, no spec/count divergence")
 	}
 }
 
@@ -834,52 +844,6 @@ func TestParseModelConfigFromFiles_EmbeddedQuantConfigDrivesParameterCount(t *te
 		"embedded quantization_config (mxfp4) must trigger quant-aware counting just like standalone hf_quant_config.json")
 	assert.Equal(t, v1beta1.ModelQuantizationMXFP4, metadata.Quantization,
 		"sanity: spec.Quantization should also be set from the embedded block")
-}
-
-func TestParseModelConfigFromFiles_StandaloneHFQuantConfigBeatsEmbedded(t *testing.T) {
-	// Standalone hf_quant_config.json AND embedded quantization_config
-	// both present. Standalone is documented as the winner because it's
-	// the higher-resolution signal (carries group_size, kv_cache_quant_algo).
-	// This pins the resolution order so future refactors don't silently
-	// flip the precedence.
-	logger := zap.NewNop().Sugar()
-	parser := &ModelConfigParser{
-		logger:          logger,
-		loadModelConfig: modelconfig.LoadModelConfig,
-	}
-
-	files := []ModelConfigFileInput{
-		{Path: DefaultConfigFileName, Data: []byte(`{
-			"model_type": "llama",
-			"architectures": ["LlamaForCausalLM"],
-			"quantization_config": {"quant_method": "fp8"}
-		}`)},
-		{Path: modelconfig.HFQuantConfigFileName, Data: []byte(`{
-			"quant_method": "modelopt",
-			"quantization": {"quant_algo": "NVFP4"}
-		}`)},
-	}
-
-	metadata, err := parser.ParseModelConfigFromFiles(context.Background(), files, nil, nil)
-	require.NoError(t, err)
-	require.NotNil(t, metadata)
-
-	// Embedded says fp8 (would map to ModelQuantizationFP8). Standalone
-	// says NVFP4. The standalone winner means metadata.Quantization
-	// is NVFP4 — but wait: extractModelMetadataFromHFWithParameterCount
-	// reads hfModel.GetQuantizationType() which returns "fp8" from the
-	// embedded block, sets metadata.Quantization = FP8, and the
-	// applyQuantizationFallback no-ops because Quantization is already
-	// set. So in practice EMBEDDED wins for spec.Quantization, but
-	// STANDALONE wins for the safetensors counting (because the
-	// counting reads hfQuantConfig directly, which we set to standalone
-	// first). This is a known asymmetry — document it explicitly.
-	//
-	// For this test, verify the asymmetry: spec.Quantization is FP8
-	// (embedded), but the safetensors counting (no safetensors here
-	// to verify directly) would use NVFP4 if there were any.
-	assert.Equal(t, v1beta1.ModelQuantizationFP8, metadata.Quantization,
-		"embedded quantization_config wins for spec.Quantization (config.json's value is the operator's intent)")
 }
 
 func TestParseModelConfigFromFiles_HFQuantConfigUnknownAlgoLeavesEmpty(t *testing.T) {
@@ -1015,6 +979,20 @@ func TestPopulateArtifactAttribute_NilInput(t *testing.T) {
 	assert.Nil(t, out.Artifact.ParentPath)
 	assert.Nil(t, out.Artifact.ChildrenPaths)
 	assert.Equal(t, original, out, "no update should happen to original model moetadata")
+}
+
+// syntheticQuantConfig wraps a bare quant_method string in the unified
+// HFQuantConfig shape so TestExtractModelMetadataFromHF (which mocks
+// only the legacy GetQuantizationType()) can still drive the new
+// applyQuantizationFromConfig path. Returns nil for the unquantized
+// case so the helper is a no-op.
+func syntheticQuantConfig(quantMethod string) *modelconfig.HFQuantConfig {
+	if quantMethod == "" {
+		return nil
+	}
+	return &modelconfig.HFQuantConfig{
+		Quantization: modelconfig.HFQuantConfigDetails{QuantAlgo: quantMethod},
+	}
 }
 
 func TestBuildArtifactAttribute_Basic(t *testing.T) {

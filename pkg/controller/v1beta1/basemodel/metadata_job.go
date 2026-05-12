@@ -199,6 +199,19 @@ func buildMetadataJob(obj client.Object, isClusterScoped bool, components *stora
 							Image:           cfg.Image,
 							Args:            args,
 							SecurityContext: metadataJobContainerSecurityContext(),
+							// constants.OMENamespace reads the controller
+							// pod's POD_NAMESPACE at process start (default
+							// "ome"). The agent uses the same constant
+							// to compute the per-PVC status ConfigMap's
+							// namespace, so without this env on the Job
+							// pod an OME install in (e.g.) "ome-prod"
+							// would have the controller writing RBAC in
+							// "ome-prod" while the agent tried to write
+							// the ConfigMap in "ome" — perpetual
+							// "configmap not found" on reconcile.
+							Env: []corev1.EnvVar{
+								{Name: "POD_NAMESPACE", Value: constants.OMENamespace},
+							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      metadataJobModelVolumeName,

@@ -195,6 +195,24 @@ func TestBuildMetadataJob_BaseModel(t *testing.T) {
 	if c.Resources.Requests.Memory().String() != "128Mi" {
 		t.Errorf("memory request = %q, want 128Mi", c.Resources.Requests.Memory().String())
 	}
+
+	// POD_NAMESPACE must propagate the controller's resolved OME ns
+	// to the Job pod so the agent's writeStatus targets the SAME
+	// namespace the controller reads ConfigMaps from. Otherwise an
+	// install in any namespace except the literal "ome" produces a
+	// permanent ConfigMap-not-found loop.
+	var foundPodNamespace bool
+	for _, env := range c.Env {
+		if env.Name == "POD_NAMESPACE" {
+			foundPodNamespace = true
+			if env.Value != constants.OMENamespace {
+				t.Errorf("POD_NAMESPACE = %q, want %q (controller's resolved OME ns)", env.Value, constants.OMENamespace)
+			}
+		}
+	}
+	if !foundPodNamespace {
+		t.Error("Job container must set POD_NAMESPACE env so the agent writes status ConfigMaps in the controller's OME namespace")
+	}
 }
 
 func TestBuildMetadataJob_ClusterBaseModel(t *testing.T) {

@@ -121,22 +121,22 @@ func (p *ModelConfigParser) ParseModelConfigFromFiles(ctx context.Context, files
 
 	metadata := p.extractModelMetadataFromHFWithParameterCount(hfModel, parameterCountOverride)
 
-	applyQuantizationFallback(&metadata, hfQuantConfig, p.logger)
+	applyQuantizationFromConfig(&metadata, hfQuantConfig, p.logger)
 
 	p.updateParsedModelMetadata(baseModel, clusterBaseModel, metadata)
 	return &metadata, nil
 }
 
-// applyQuantizationFallback writes metadata.Quantization from the
-// resolved hfQuantConfig when the config.json's own quantization_config
-// block was silent. config.json wins on conflict (this fallback only
-// fires when metadata.Quantization is empty after the embedded check).
+// applyQuantizationFromConfig is the SOLE writer of metadata.Quantization.
+// Called after extractModelMetadataFromHFWithParameterCount so the OME
+// enum and the safetensors parameter count both come from the same
+// resolved hfQuantConfig — no path can produce e.g. NVFP4-derived
+// counts paired with FP8-derived spec.quantization.
 //
-// No-op when hfQuantConfig is nil (unquantized model) or when
-// metadata.Quantization is already set (config.json had its own quant
-// info that the existing extractor pipeline already picked up).
-func applyQuantizationFallback(metadata *ModelMetadata, hfQuantConfig *modelconfig.HFQuantConfig, logger *zap.SugaredLogger) {
-	if metadata.Quantization != "" || hfQuantConfig == nil {
+// No-op for unquantized models (hfQuantConfig nil) or for models
+// declaring an algorithm OME doesn't yet recognize.
+func applyQuantizationFromConfig(metadata *ModelMetadata, hfQuantConfig *modelconfig.HFQuantConfig, logger *zap.SugaredLogger) {
+	if hfQuantConfig == nil {
 		return
 	}
 	algo := hfQuantConfig.Quantization.QuantAlgo
@@ -207,7 +207,7 @@ func (p *ModelConfigParser) parseModelConfigDir(modelDir string, parameterCountO
 	metadata := p.extractModelMetadataFromHFWithParameterCount(hfModel, parameterCountOverride)
 	p.logger.Infof("Extracted metadata: %+v", metadata)
 
-	applyQuantizationFallback(&metadata, hfQuantConfig, p.logger)
+	applyQuantizationFromConfig(&metadata, hfQuantConfig, p.logger)
 
 	p.updateParsedModelMetadata(baseModel, clusterBaseModel, metadata)
 	return &metadata, nil
@@ -599,17 +599,14 @@ func (p *ModelConfigParser) extractModelMetadataFromHFWithParameterCount(hfModel
 		}
 	}
 
-	// Extract quantization information from config.json's
-	// quantization_config block (the HF-native convention). If config.json
-	// doesn't carry one, callers that have it can override metadata.Quantization
-	// from a sibling hf_quant_config.json file (NVIDIA ModelOpt convention).
-	if quantType := hfModel.GetQuantizationType(); quantType != "" {
-		p.logger.Infof("Detected quantization type from config.json: %s", quantType)
-		if mapped := QuantAlgoToOMEEnum(quantType); mapped != "" {
-			metadata.Quantization = mapped
-			p.logger.Infof("Setting quantization to %s", mapped)
-		}
-	}
+	// metadata.Quantization is intentionally NOT set here. The parser
+	// callers (ParseModelConfigFromFiles + parseModelConfigDir) resolve
+	// the authoritative HFQuantConfig (standalone hf_quant_config.json
+	// → embedded quantization_config block → nil) and write the OME
+	// enum via applyQuantizationFromConfig. Centralizing the write
+	// guarantees the spec.quantization field comes from the SAME quant
+	// config that drove the safetensors parameter counting — otherwise
+	// you can get NVFP4 count + FP8 spec on a model that ships both.
 
 	// Get the model size in bytes
 	var modelSizeBytes int64

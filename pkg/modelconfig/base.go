@@ -81,11 +81,24 @@ func (c *BaseModelConfig) GetCapabilities() []Capability {
 // the JSON exactly; the union covers every variant observed in
 // pkg/modelconfig/testdata/quant/.
 type QuantizationConfig struct {
-	// QuantMethod is the algorithm name ("fp8", "mxfp4", "fbgemm_fp8",
-	// "gptq", "awq", "compressed-tensors", etc.). Maps to a packing
-	// factor via QuantPackingFactor and to OME's enum via the parser's
-	// QuantAlgoToOMEEnum.
+	// QuantMethod is the algorithm OR producer name ("fp8", "mxfp4",
+	// "fbgemm_fp8", "gptq", "awq", "compressed-tensors", "modelopt").
+	// For most producers this IS the algorithm; ModelOpt distinguishes
+	// producer ("modelopt") from algorithm ("NVFP4") and stores the
+	// latter under QuantAlgo below.
 	QuantMethod string `json:"quant_method"`
+	// QuantAlgo is the actual algorithm name when QuantMethod identifies
+	// only the producer. NVIDIA ModelOpt's embedded config sets
+	// quant_method:"modelopt" + quant_algo:"NVFP4". When non-empty,
+	// QuantAlgo wins over QuantMethod for downstream OME mapping.
+	QuantAlgo string `json:"quant_algo,omitempty"`
+	// Bits is the weight bit width carried by GPTQ/AWQ embedded
+	// configs ({"quant_method":"gptq", "bits":4} etc.). Without this
+	// field the downstream matchers see "gptq" alone, which doesn't
+	// contain "int4" — so packed INT4 GPTQ tensors silently
+	// undercount by 8x. resolveAlgo() folds Bits into the synthesized
+	// name when QuantAlgo is absent.
+	Bits int `json:"bits,omitempty"`
 	// ModulesToNotConvert is the HF-native excluded-modules key. Used
 	// by mxfp4 (gpt-oss), fbgemm_fp8, awq. Patterns may be substrings
 	// OR globs (mxfp4 uses "model.layers.*.self_attn"); IsExcludedTensor
@@ -135,25 +148,57 @@ func (c *QuantizationConfig) ExcludePatterns() []string {
 // ToHFQuantConfig converts an embedded HF-native QuantizationConfig
 // into the standalone HFQuantConfig shape so the safetensors counting
 // pipeline can use a single code path regardless of the producer
-// convention. Returns nil if the embedded block has no quant_method
-// (i.e., the model isn't quantized).
+// convention. Returns nil if the embedded block has neither
+// quant_method nor quant_algo (i.e., the model isn't quantized).
 //
-// The conversion is lossy in the OTHER direction (HFQuantConfig has
-// fields like KVCacheQuantAlgo and group_size that the embedded
-// block doesn't carry), but that's fine — the param-count pipeline
-// only reads QuantAlgo + ExcludeModules, which are the two fields
-// covered by both shapes.
+// Algorithm resolution: QuantAlgo wins when present (NVIDIA ModelOpt
+// puts the algorithm there with quant_method="modelopt"). Otherwise
+// QuantMethod is the algorithm (HF-native producers like mxfp4,
+// fbgemm_fp8, gptq, awq, fp8 don't distinguish — quant_method IS the
+// algo). This must match the priority the downstream
+// QuantAlgoToOMEEnum + QuantPackingFactor lookups expect.
 func (c *QuantizationConfig) ToHFQuantConfig() *HFQuantConfig {
-	if c == nil || strings.TrimSpace(c.QuantMethod) == "" {
+	if c == nil {
+		return nil
+	}
+	algo := c.resolveAlgo()
+	if algo == "" {
 		return nil
 	}
 	return &HFQuantConfig{
 		QuantMethod: c.QuantMethod,
 		Quantization: HFQuantConfigDetails{
-			QuantAlgo:      c.QuantMethod,
+			QuantAlgo:      algo,
 			ExcludeModules: c.ExcludePatterns(),
 		},
 	}
+}
+
+// resolveAlgo returns the algorithm name to surface — QuantAlgo if
+// set (ModelOpt convention), else QuantMethod, optionally normalized
+// when Bits is set on a producer that needs both fields to
+// disambiguate the scheme.
+//
+// Normalizations:
+//
+//	GPTQ/AWQ + bits=N → "INT<N>_<METHOD>" (e.g. "INT4_GPTQ").
+//	  Without this, "gptq" alone slips past every QuantPackingFactor
+//	  branch (which substring-matches "int4"/"w4a"), so an I32-packed
+//	  INT4 tensor would undercount 8x.
+//
+// Returns empty string when the model isn't quantized.
+func (c *QuantizationConfig) resolveAlgo() string {
+	if c == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(c.QuantAlgo); v != "" {
+		return v
+	}
+	method := strings.TrimSpace(c.QuantMethod)
+	if c.Bits > 0 && (method == "gptq" || method == "awq") {
+		return fmt.Sprintf("INT%d_%s", c.Bits, strings.ToUpper(method))
+	}
+	return method
 }
 
 // RopeScalingConfig captures RoPE (Rotary Position Embedding) scaling

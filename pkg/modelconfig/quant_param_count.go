@@ -1,6 +1,7 @@
 package modelconfig
 
 import (
+	"math"
 	"regexp"
 	"strings"
 	"sync"
@@ -245,6 +246,13 @@ func CountTensorParams(name string, shape []int64, dtype string, quantConfig *HF
 		if dim <= 0 {
 			return 0
 		}
+		// Same overflow guard as ParseSafetensorsHeaderQuantAware's
+		// inner loop. Defensive against corrupted shapes that would
+		// wrap to negative — int64(N * M) wrap == truncated count
+		// shows up downstream as a wildly wrong total.
+		if count > math.MaxInt64/dim {
+			return 0
+		}
 		count *= dim
 	}
 
@@ -258,5 +266,12 @@ func CountTensorParams(name string, shape []int64, dtype string, quantConfig *HF
 		return count
 	}
 	factor := QuantPackingFactor(quantConfig.Quantization.QuantAlgo, dtype)
+	if factor > 1 && count > math.MaxInt64/factor {
+		// Packed-quant multiplier could overflow on a pathological
+		// tensor (e.g., a corrupted header reporting a multi-exabyte
+		// shape). Returning 0 makes the bad tensor invisible to the
+		// total instead of poisoning it with a negative value.
+		return 0
+	}
 	return count * factor
 }
