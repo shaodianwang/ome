@@ -98,17 +98,18 @@ type stubModel struct {
 	isEmbedding  bool
 }
 
-func (m *stubModel) GetParameterCount() int64      { return 0 }
-func (m *stubModel) GetTransformerVersion() string { return "" }
-func (m *stubModel) GetQuantizationType() string   { return "" }
-func (m *stubModel) GetArchitecture() string       { return m.architecture }
-func (m *stubModel) GetModelType() string          { return m.modelType }
-func (m *stubModel) GetContextLength() int         { return 0 }
-func (m *stubModel) GetModelSizeBytes() int64      { return 0 }
-func (m *stubModel) GetTorchDtype() string         { return "" }
-func (m *stubModel) HasVision() bool               { return m.hasVision }
-func (m *stubModel) IsEmbedding() bool             { return m.isEmbedding }
-func (m *stubModel) GetCapabilities() []Capability { return classifyCapabilities(m) }
+func (m *stubModel) GetParameterCount() int64         { return 0 }
+func (m *stubModel) GetTransformerVersion() string    { return "" }
+func (m *stubModel) GetQuantizationType() string      { return "" }
+func (m *stubModel) GetArchitecture() string          { return m.architecture }
+func (m *stubModel) GetModelType() string             { return m.modelType }
+func (m *stubModel) GetContextLength() int            { return 0 }
+func (m *stubModel) GetModelSizeBytes() int64         { return 0 }
+func (m *stubModel) GetTorchDtype() string            { return "" }
+func (m *stubModel) HasVision() bool                  { return m.hasVision }
+func (m *stubModel) IsEmbedding() bool                { return m.isEmbedding }
+func (m *stubModel) GetCapabilities() []Capability    { return classifyCapabilities(m) }
+func (m *stubModel) GetHFQuantConfig() *HFQuantConfig { return nil }
 
 // stubDiffusionModel adds the diffusion sub-interface.
 type stubDiffusionModel struct {

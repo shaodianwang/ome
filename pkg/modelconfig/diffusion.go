@@ -236,6 +236,11 @@ func (c *GenericDiffusionModelConfig) GetQuantizationType() string {
 	return ""
 }
 
+func (c *GenericDiffusionModelConfig) GetHFQuantConfig() *HFQuantConfig {
+	// Diffusion pipelines don't carry HF-style quantization_config.
+	return nil
+}
+
 func (c *GenericDiffusionModelConfig) GetContextLength() int {
 	if c.ConfigPath == "" {
 		return 0

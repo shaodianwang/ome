@@ -68,13 +68,92 @@ func (c *BaseModelConfig) GetCapabilities() []Capability {
 	return []Capability{CapabilityUnknown}
 }
 
-// QuantizationConfig captures the quantization settings most HF
-// configs expose.
+// QuantizationConfig captures the embedded "quantization_config" block
+// inside config.json — the HF-native convention used by mxfp4
+// (gpt-oss), fbgemm_fp8 (Llama-3.1-405B), gptq, awq, and plain fp8
+// (kimi-k2). Distinct from HFQuantConfig (NVIDIA ModelOpt's separate
+// hf_quant_config.json file in quant_config.go).
+//
+// Producers can't agree on a single key name for the excluded-modules
+// list: HF-native uses modules_to_not_convert, compressed-tensors uses
+// "ignore", and some neuralmagic builds use "ignored_layers". We accept
+// all three and surface them via ExcludePatterns(). Field names mirror
+// the JSON exactly; the union covers every variant observed in
+// pkg/modelconfig/testdata/quant/.
 type QuantizationConfig struct {
-	ActivationScheme string `json:"activation_scheme"`
-	Format           string `json:"fmt"`
-	QuantMethod      string `json:"quant_method"`
-	WeightBlockSize  []int  `json:"weight_block_size"`
+	// QuantMethod is the algorithm name ("fp8", "mxfp4", "fbgemm_fp8",
+	// "gptq", "awq", "compressed-tensors", etc.). Maps to a packing
+	// factor via QuantPackingFactor and to OME's enum via the parser's
+	// QuantAlgoToOMEEnum.
+	QuantMethod string `json:"quant_method"`
+	// ModulesToNotConvert is the HF-native excluded-modules key. Used
+	// by mxfp4 (gpt-oss), fbgemm_fp8, awq. Patterns may be substrings
+	// OR globs (mxfp4 uses "model.layers.*.self_attn"); IsExcludedTensor
+	// handles both.
+	ModulesToNotConvert []string `json:"modules_to_not_convert,omitempty"`
+	// Ignore is the compressed-tensors excluded-modules key. Same
+	// semantics as ModulesToNotConvert but a different field name.
+	Ignore []string `json:"ignore,omitempty"`
+	// IgnoredLayers is the neuralmagic excluded-modules key. Same
+	// semantics, third name.
+	IgnoredLayers []string `json:"ignored_layers,omitempty"`
+	// ActivationScheme — fp8 / kimi-k2 use "dynamic" / "static".
+	// Informational only today.
+	ActivationScheme string `json:"activation_scheme,omitempty"`
+	// Format — fp8 / kimi-k2 use "e4m3" / "e5m2"; compressed-tensors
+	// uses "naive-quantized" / "int-quantized". Informational.
+	Format string `json:"fmt,omitempty"`
+	// WeightBlockSize — fp8 group size, e.g. [128, 128] for
+	// kimi-k2's per-block FP8. Informational.
+	WeightBlockSize []int `json:"weight_block_size,omitempty"`
+}
+
+// ExcludePatterns returns the first non-empty excluded-modules list
+// across the three known field-name conventions. Returns nil when no
+// list is set OR when the receiver is nil.
+//
+// Resolution order is the documented frequency in production
+// fixtures: HF-native is most common, then compressed-tensors, then
+// neuralmagic. If a producer ships multiple lists in the same config
+// (no real example yet), the most-common name wins.
+func (c *QuantizationConfig) ExcludePatterns() []string {
+	if c == nil {
+		return nil
+	}
+	if len(c.ModulesToNotConvert) > 0 {
+		return c.ModulesToNotConvert
+	}
+	if len(c.Ignore) > 0 {
+		return c.Ignore
+	}
+	if len(c.IgnoredLayers) > 0 {
+		return c.IgnoredLayers
+	}
+	return nil
+}
+
+// ToHFQuantConfig converts an embedded HF-native QuantizationConfig
+// into the standalone HFQuantConfig shape so the safetensors counting
+// pipeline can use a single code path regardless of the producer
+// convention. Returns nil if the embedded block has no quant_method
+// (i.e., the model isn't quantized).
+//
+// The conversion is lossy in the OTHER direction (HFQuantConfig has
+// fields like KVCacheQuantAlgo and group_size that the embedded
+// block doesn't carry), but that's fine — the param-count pipeline
+// only reads QuantAlgo + ExcludeModules, which are the two fields
+// covered by both shapes.
+func (c *QuantizationConfig) ToHFQuantConfig() *HFQuantConfig {
+	if c == nil || strings.TrimSpace(c.QuantMethod) == "" {
+		return nil
+	}
+	return &HFQuantConfig{
+		QuantMethod: c.QuantMethod,
+		Quantization: HFQuantConfigDetails{
+			QuantAlgo:      c.QuantMethod,
+			ExcludeModules: c.ExcludePatterns(),
+		},
+	}
 }
 
 // RopeScalingConfig captures RoPE (Rotary Position Embedding) scaling

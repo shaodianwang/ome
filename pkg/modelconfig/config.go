@@ -238,6 +238,10 @@ func (c *GenericModelConfig) GetQuantizationType() string {
 	return ""
 }
 
+func (c *GenericModelConfig) GetHFQuantConfig() *HFQuantConfig {
+	return c.QuantizationConfig.ToHFQuantConfig()
+}
+
 // GetContextLength returns the first non-zero candidate from the
 // cascade: max_position_embeddings, max_sequence_length, max_seq_len
 // (DBRX), seq_length (ChatGLM), model_max_length (Baichuan).
