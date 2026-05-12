@@ -17,6 +17,7 @@ const (
 	maxShardedSafetensorsHeaderBytes  = 10 * 1024 * 1024
 	safetensorsHeaderLengthFieldBytes = 8
 	defaultSafetensorsIndexFileName   = "model.safetensors.index.json"
+	defaultHFQuantConfigFileName      = "hf_quant_config.json"
 )
 
 func shardedModelMetadataInputs(ctx context.Context, cacheClient modelcache.Client, source modelcache.Source) (*modelcache.SourceInspection, []modelparser.ModelConfigFileInput, error) {
@@ -58,6 +59,16 @@ func shardedMetadataInputsFromInspection(sourceURI string, inspection *modelcach
 		inputs = append(inputs, modelparser.ModelConfigFileInput{
 			Path: pathOrDefault(metadata.SafetensorsIndexPath, defaultSafetensorsIndexFileName),
 			Data: metadata.SafetensorsIndexJSON,
+		})
+	}
+	// hf_quant_config.json is the ModelOpt/TRT-LLM fallback for the
+	// quantization scheme. Optional — included only when the provider
+	// fetched it; the parser handles absence via QuantAlgoToOMEEnum's
+	// empty-string return.
+	if len(metadata.HFQuantConfigJSON) > 0 {
+		inputs = append(inputs, modelparser.ModelConfigFileInput{
+			Path: pathOrDefault(metadata.HFQuantConfigPath, defaultHFQuantConfigFileName),
+			Data: metadata.HFQuantConfigJSON,
 		})
 	}
 	if len(inputs) == 0 {

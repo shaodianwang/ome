@@ -363,6 +363,75 @@ func TestInspectSourceUsesFileMetadataRingAndPackedRanges(t *testing.T) {
 	assert.JSONEq(t, string(headerJSON), string(inspection.Metadata.SafetensorHeaders[0].HeaderJSON))
 }
 
+func TestInspectSourceFetchesHFQuantConfigWhenPresent(t *testing.T) {
+	// hf_quant_config.json is the NVIDIA ModelOpt / TensorRT-LLM
+	// fallback for quantization metadata. Verify the provider fetches
+	// it through the same packed-byte-ranges path as config.json and
+	// surfaces it in inspection.Metadata.HFQuantConfigJSON. Absence
+	// is handled by the existing TestInspectSourceUsesFileMetadataRingAndPackedRanges
+	// test (which does NOT include the file).
+	const sourceURI = "s3://bucket/quant-model"
+	configPath := sourceURI + "/config.json"
+	hfQuantPath := sourceURI + "/hf_quant_config.json"
+
+	configJSON := []byte(`{"model_type":"llama4x_text"}`)
+	hfQuantJSON := []byte(`{"quant_method":"modelopt","quantization":{"quant_algo":"NVFP4","group_size":16}}`)
+	mtimeConfig := uint64(1710000000)
+	mtimeQuant := uint64(1710000001)
+	chunkSize := uint64(64)
+
+	var serverAddr string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file_metadata":
+			writeJSON(t, w, fileMetadataResponse{
+				Root: sourceURI,
+				Files: []fileMetadataEntry{
+					{Path: configPath, RelativePath: "config.json", Size: uint64(len(configJSON)), MTime: &mtimeConfig, ETag: stringPtr("config-etag")},
+					{Path: hfQuantPath, RelativePath: "hf_quant_config.json", Size: uint64(len(hfQuantJSON)), MTime: &mtimeQuant, ETag: stringPtr("quant-etag")},
+				},
+			})
+		case "/fetch":
+			writeJSON(t, w, fetchResponse{
+				Results: []fetchPathResult{{
+					Path:      configPath,
+					Status:    "cached",
+					TotalSize: uint64Ptr(uint64(len(configJSON))),
+					MTime:     uint64Ptr(mtimeConfig),
+					ChunkSize: uint64Ptr(chunkSize),
+				}},
+			})
+		case "/ring_info":
+			writeJSON(t, w, ringInfoResponse{Nodes: []string{serverAddr}})
+		case "/packed_byte_ranges_by_key":
+			var req packedByteRangeBatchRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			for _, rangeSpec := range req.Ranges {
+				data := map[string][]byte{
+					configPath:  configJSON,
+					hfQuantPath: hfQuantJSON,
+				}[rangeSpec.Path]
+				start := rangeSpec.ChunkOffset + rangeSpec.RangeOffset
+				end := start + rangeSpec.Length
+				_, _ = w.Write(data[start:end])
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	serverAddr = server.Listener.Addr().String()
+
+	client := newTestClient(t, server.URL)
+	inspection, err := client.InspectSource(context.Background(), modelcache.Source{URI: sourceURI})
+	require.NoError(t, err)
+	require.NotNil(t, inspection)
+
+	assert.JSONEq(t, string(hfQuantJSON), string(inspection.Metadata.HFQuantConfigJSON),
+		"provider must surface hf_quant_config.json bytes in inspection.Metadata.HFQuantConfigJSON")
+	assert.Equal(t, "hf_quant_config.json", inspection.Metadata.HFQuantConfigPath)
+}
+
 func TestInspectSourceRequiresConfigOrModelIndex(t *testing.T) {
 	mtime := uint64(1710000000)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

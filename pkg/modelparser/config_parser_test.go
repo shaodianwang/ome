@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -623,6 +624,128 @@ func TestParseModelConfigFromFiles(t *testing.T) {
 		assert.NotNil(t, metadata.ModelFramework.Version)
 		assert.Equal(t, "4.40.0.dev0", *metadata.ModelFramework.Version)
 		assert.Equal(t, "safetensors", metadata.ModelFormat.Name)
+	}
+}
+
+func TestParseModelConfigDir_HFQuantConfigFallbackFromDisk(t *testing.T) {
+	// PVC agent path: model dir on disk has config.json (no
+	// quantization_config) + hf_quant_config.json (NVFP4).
+	// parseModelConfigDir is the function the agent's
+	// MetadataExtractor calls; this proves the fallback wiring works
+	// when the file lives on a real filesystem (not just in-memory
+	// inputs through ParseModelConfigFromFiles).
+	tempDir, err := os.MkdirTemp("", "hf-quant-fallback")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tempDir, DefaultConfigFileName),
+		[]byte(`{"model_type":"llama4x_text","architectures":["Llama4xForCausalLM"],"max_position_embeddings":32768}`),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tempDir, modelconfig.HFQuantConfigFileName),
+		[]byte(`{"quant_method":"modelopt","quantization":{"quant_algo":"NVFP4","group_size":16}}`),
+		0o644,
+	))
+
+	logger, _ := zap.NewDevelopment()
+	parser := &ModelConfigParser{
+		logger:          logger.Sugar(),
+		loadModelConfig: modelconfig.LoadModelConfig,
+	}
+
+	metadata, err := parser.ParseModelConfig(tempDir, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, metadata)
+	assert.Equal(t, v1beta1.ModelQuantizationNVFP4, metadata.Quantization,
+		"hf_quant_config.json on disk should populate metadata.Quantization via parseModelConfigDir")
+}
+
+func TestParseModelConfigFromFiles_HFQuantConfigFallback(t *testing.T) {
+	// config.json without a quantization_config block + a sibling
+	// hf_quant_config.json with NVFP4 → metadata.Quantization should
+	// pick up NVFP4 from the hf_quant_config fallback path.
+	logger := zap.NewNop().Sugar()
+	parser := &ModelConfigParser{
+		logger:          logger,
+		loadModelConfig: modelconfig.LoadModelConfig,
+	}
+
+	configJSON := []byte(`{"model_type":"llama4x_text","architectures":["Llama4xForCausalLM"],"max_position_embeddings":32768}`)
+	hfQuantJSON := []byte(`{"quant_method":"modelopt","quantization":{"quant_algo":"NVFP4","group_size":16,"kv_cache_quant_algo":"FP8"}}`)
+
+	files := []ModelConfigFileInput{
+		{Path: DefaultConfigFileName, Data: configJSON},
+		{Path: modelconfig.HFQuantConfigFileName, Data: hfQuantJSON},
+	}
+
+	metadata, err := parser.ParseModelConfigFromFiles(context.Background(), files, nil, nil)
+	assert.NoError(t, err)
+	if assert.NotNil(t, metadata) {
+		assert.Equal(t, v1beta1.ModelQuantizationNVFP4, metadata.Quantization,
+			"hf_quant_config.json's NVFP4 should populate metadata.Quantization when config.json has no quantization_config")
+	}
+}
+
+func TestParseModelConfigFromFiles_ConfigJSONWinsOverHFQuantConfig(t *testing.T) {
+	// config.json with quantization_config + hf_quant_config.json with
+	// a different value → config.json wins. Catches a regression
+	// where the fallback ordering reverses and silently overwrites
+	// the HF-native value.
+	logger := zap.NewNop().Sugar()
+	parser := &ModelConfigParser{
+		logger:          logger,
+		loadModelConfig: modelconfig.LoadModelConfig,
+	}
+
+	configJSON := []byte(`{
+		"model_type":"llama",
+		"architectures":["LlamaForCausalLM"],
+		"max_position_embeddings":4096,
+		"quantization_config":{"quant_method":"fp8"}
+	}`)
+	hfQuantJSON := []byte(`{"quant_method":"modelopt","quantization":{"quant_algo":"NVFP4"}}`)
+
+	files := []ModelConfigFileInput{
+		{Path: DefaultConfigFileName, Data: configJSON},
+		{Path: modelconfig.HFQuantConfigFileName, Data: hfQuantJSON},
+	}
+
+	metadata, err := parser.ParseModelConfigFromFiles(context.Background(), files, nil, nil)
+	assert.NoError(t, err)
+	if assert.NotNil(t, metadata) {
+		assert.Equal(t, v1beta1.ModelQuantizationFP8, metadata.Quantization,
+			"config.json's quantization_config must win over hf_quant_config.json when both are present")
+	}
+}
+
+func TestParseModelConfigFromFiles_HFQuantConfigUnknownAlgoLeavesEmpty(t *testing.T) {
+	// hf_quant_config.json with a quant_algo OME doesn't recognize
+	// (e.g., a future format) → metadata.Quantization stays empty.
+	// The parser should NOT write a placeholder enum value for an
+	// unknown algorithm — operators should see "unset" and fix the
+	// CR by hand, not see a misleading value that suggests OME knows
+	// what's going on.
+	logger := zap.NewNop().Sugar()
+	parser := &ModelConfigParser{
+		logger:          logger,
+		loadModelConfig: modelconfig.LoadModelConfig,
+	}
+
+	configJSON := []byte(`{"model_type":"llama","architectures":["LlamaForCausalLM"]}`)
+	hfQuantJSON := []byte(`{"quant_method":"modelopt","quantization":{"quant_algo":"some-future-format-ome-doesnt-know"}}`)
+
+	files := []ModelConfigFileInput{
+		{Path: DefaultConfigFileName, Data: configJSON},
+		{Path: modelconfig.HFQuantConfigFileName, Data: hfQuantJSON},
+	}
+
+	metadata, err := parser.ParseModelConfigFromFiles(context.Background(), files, nil, nil)
+	assert.NoError(t, err)
+	if assert.NotNil(t, metadata) {
+		assert.Equal(t, v1beta1.ModelQuantization(""), metadata.Quantization,
+			"unknown quant_algo must NOT map to a placeholder enum value")
 	}
 }
 

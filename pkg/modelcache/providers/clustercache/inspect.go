@@ -21,6 +21,7 @@ const (
 	defaultConfigFileName            = "config.json"
 	defaultModelIndexFileName        = "model_index.json"
 	defaultSafetensorsIndexFileName  = "model.safetensors.index.json"
+	defaultHFQuantConfigFileName     = "hf_quant_config.json"
 	maxClusterCacheMetadataFileBytes = 64 * 1024 * 1024
 	maxClusterCacheSafetensorHeader  = 10 * 1024 * 1024
 )
@@ -257,6 +258,17 @@ func (c *Client) readMetadataInputs(ctx context.Context, files []clusterCacheMet
 		}
 		inputs.SafetensorsIndexJSON = data
 		inputs.SafetensorsIndexPath = file.relativePath
+	}
+	// hf_quant_config.json is the NVIDIA ModelOpt / TensorRT-LLM
+	// fallback for quantization metadata that doesn't live in
+	// config.json. Optional; absence is normal and not an error.
+	if file := selectMetadataFileByBase(files, defaultHFQuantConfigFileName); file != nil {
+		data, err := c.readWholeMetadataFile(ctx, file, chunkSize, ring)
+		if err != nil {
+			return inputs, fmt.Errorf("read %s through cluster_cache: %w", defaultHFQuantConfigFileName, err)
+		}
+		inputs.HFQuantConfigJSON = data
+		inputs.HFQuantConfigPath = file.relativePath
 	}
 
 	safetensorFiles, err := safetensorMetadataFiles(files, selectMetadataFileByBase(files, defaultSafetensorsIndexFileName), inputs.SafetensorsIndexJSON)

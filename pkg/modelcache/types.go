@@ -172,6 +172,14 @@ type ModelMetadataInputs struct {
 	SafetensorsIndexPath string
 	TokenizerConfigJSON  []byte
 	SafetensorHeaders    []SafetensorHeader
+	// HFQuantConfigJSON carries the contents of hf_quant_config.json
+	// when the source has it. NVIDIA ModelOpt and TensorRT-LLM emit
+	// this sibling file for models whose quantization scheme isn't
+	// declared in config.json's quantization_config block (e.g.,
+	// NVFP4 PTQ models). Providers should fetch it best-effort —
+	// absence is normal and not an error.
+	HFQuantConfigJSON []byte
+	HFQuantConfigPath string
 }
 
 // SafetensorHeader describes one safetensors shard and its JSON header.

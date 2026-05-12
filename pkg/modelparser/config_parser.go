@@ -74,7 +74,7 @@ func (p *ModelConfigParser) ParseModelConfigFromFiles(ctx context.Context, files
 		return nil, fmt.Errorf("model config file input set is empty")
 	}
 
-	configInput, safetensorsFiles, err := splitModelConfigFileInputs(ctx, files)
+	configInput, safetensorsFiles, hfQuantConfigBytes, err := splitModelConfigFileInputs(ctx, files)
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +97,27 @@ func (p *ModelConfigParser) ParseModelConfigFromFiles(ctx context.Context, files
 	}
 
 	metadata := p.extractModelMetadataFromHFWithParameterCount(hfModel, parameterCountOverride)
+
+	// hf_quant_config.json is the NVIDIA ModelOpt / TensorRT-LLM
+	// fallback for models whose quantization scheme isn't declared in
+	// config.json. Override only when config.json was silent —
+	// config.json wins when both are present.
+	if metadata.Quantization == "" && len(hfQuantConfigBytes) > 0 {
+		hfQuantConfig, err := modelconfig.ParseHFQuantConfig(hfQuantConfigBytes)
+		if err != nil {
+			p.logger.Warnf("Failed to parse %s: %v", modelconfig.HFQuantConfigFileName, err)
+		} else if hfQuantConfig != nil {
+			if mapped := QuantAlgoToOMEEnum(hfQuantConfig.Quantization.QuantAlgo); mapped != "" {
+				metadata.Quantization = mapped
+				p.logger.Infof("Setting quantization to %s from %s (quant_algo=%s)",
+					mapped, modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
+			} else if hfQuantConfig.Quantization.QuantAlgo != "" {
+				p.logger.Warnf("%s declared quant_algo=%q which OME does not yet recognize; spec.Quantization will be left unset",
+					modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
+			}
+		}
+	}
+
 	p.updateParsedModelMetadata(baseModel, clusterBaseModel, metadata)
 	return &metadata, nil
 }
@@ -157,6 +178,23 @@ func (p *ModelConfigParser) parseModelConfigDir(modelDir string, parameterCountO
 		return nil, fmt.Errorf("no model_index.json or config.json found in %s", modelDir)
 	}
 
+	// hf_quant_config.json is the NVIDIA ModelOpt / TensorRT-LLM
+	// fallback for models whose config.json doesn't carry a
+	// quantization_config block. Override only when config.json was
+	// silent — config.json wins when both are present.
+	if metadata.Quantization == "" {
+		if hfQuantConfig := p.loadHFQuantConfig(modelDir); hfQuantConfig != nil {
+			if mapped := QuantAlgoToOMEEnum(hfQuantConfig.Quantization.QuantAlgo); mapped != "" {
+				metadata.Quantization = mapped
+				p.logger.Infof("Setting quantization to %s from %s (quant_algo=%s)",
+					mapped, modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
+			} else if hfQuantConfig.Quantization.QuantAlgo != "" {
+				p.logger.Warnf("%s declared quant_algo=%q which OME does not yet recognize; spec.Quantization will be left unset",
+					modelconfig.HFQuantConfigFileName, hfQuantConfig.Quantization.QuantAlgo)
+			}
+		}
+	}
+
 	p.updateParsedModelMetadata(baseModel, clusterBaseModel, metadata)
 	return &metadata, nil
 }
@@ -178,7 +216,7 @@ type normalizedModelConfigFileInput struct {
 	Data []byte
 }
 
-func splitModelConfigFileInputs(ctx context.Context, files []ModelConfigFileInput) (*modelconfig.ModelConfigInput, []modelconfig.SafetensorsFileInput, error) {
+func splitModelConfigFileInputs(ctx context.Context, files []ModelConfigFileInput) (*modelconfig.ModelConfigInput, []modelconfig.SafetensorsFileInput, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -186,12 +224,12 @@ func splitModelConfigFileInputs(ctx context.Context, files []ModelConfigFileInpu
 	normalized := make([]normalizedModelConfigFileInput, 0, len(files))
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		relativePath, err := cleanInputFilePath(file.Path)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		normalized = append(normalized, normalizedModelConfigFileInput{
 			Path: relativePath,
@@ -204,10 +242,11 @@ func splitModelConfigFileInputs(ctx context.Context, files []ModelConfigFileInpu
 
 	var modelIndexInput *modelconfig.ModelConfigInput
 	var configInput *modelconfig.ModelConfigInput
+	var hfQuantConfigBytes []byte
 	safetensorsFiles := make([]modelconfig.SafetensorsFileInput, 0)
 	for _, file := range normalized {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if isSafetensorsFileInput(file.Path) {
 			safetensorsFiles = append(safetensorsFiles, modelconfig.SafetensorsFileInput{
@@ -233,13 +272,17 @@ func splitModelConfigFileInputs(ctx context.Context, files []ModelConfigFileInpu
 				}
 				configInput = &input
 			}
+		case modelconfig.HFQuantConfigFileName:
+			if hfQuantConfigBytes == nil {
+				hfQuantConfigBytes = file.Data
+			}
 		}
 	}
 
 	if modelIndexInput != nil {
-		return modelIndexInput, safetensorsFiles, nil
+		return modelIndexInput, safetensorsFiles, hfQuantConfigBytes, nil
 	}
-	return configInput, safetensorsFiles, nil
+	return configInput, safetensorsFiles, hfQuantConfigBytes, nil
 }
 
 func cleanInputFilePath(filePath string) (string, error) {
@@ -306,6 +349,46 @@ func (p *ModelConfigParser) findConfigFile(modelDir string) (string, error) {
 		return "", fmt.Errorf("config.json not found in %s", modelDir)
 	}
 	return configPath, nil
+}
+
+// findHFQuantConfigFile looks for hf_quant_config.json in the same
+// places as config.json. NVIDIA ModelOpt and TensorRT-LLM emit it as a
+// sibling file when they don't modify config.json's quantization_config
+// block. Returns "" + nil if absent — the file is optional.
+func (p *ModelConfigParser) findHFQuantConfigFile(modelDir string) string {
+	rootPath := filepath.Join(modelDir, modelconfig.HFQuantConfigFileName)
+	if _, err := os.Stat(rootPath); err == nil {
+		return rootPath
+	}
+	for _, sub := range []string{"safetensors", "pytorch_model", "model"} {
+		p := filepath.Join(modelDir, sub, modelconfig.HFQuantConfigFileName)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// loadHFQuantConfig reads + parses an hf_quant_config.json file from
+// disk. Returns nil + nil if absent so callers can use the
+// "optional file" pattern without distinguishing between "not present"
+// and "present but empty".
+func (p *ModelConfigParser) loadHFQuantConfig(modelDir string) *modelconfig.HFQuantConfig {
+	path := p.findHFQuantConfigFile(modelDir)
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		p.logger.Warnf("Found %s at %s but failed to read it: %v", modelconfig.HFQuantConfigFileName, path, err)
+		return nil
+	}
+	cfg, err := modelconfig.ParseHFQuantConfig(data)
+	if err != nil {
+		p.logger.Warnf("Failed to parse %s at %s: %v", modelconfig.HFQuantConfigFileName, path, err)
+		return nil
+	}
+	return cfg
 }
 
 // findModelIndexFile searches for the model_index.json file in the model directory
@@ -475,17 +558,15 @@ func (p *ModelConfigParser) extractModelMetadataFromHFWithParameterCount(hfModel
 		}
 	}
 
-	// Extract quantization information if available
-	quantType := hfModel.GetQuantizationType()
-	if quantType != "" {
-		p.logger.Infof("Detected quantization type: %s", quantType)
-		switch {
-		case strings.Contains(strings.ToLower(quantType), "int4"):
-			metadata.Quantization = v1beta1.ModelQuantizationINT4
-			p.logger.Infof("Setting quantization to INT4")
-		case strings.Contains(strings.ToLower(quantType), "fp8"):
-			metadata.Quantization = v1beta1.ModelQuantizationFP8
-			p.logger.Infof("Setting quantization to FP8")
+	// Extract quantization information from config.json's
+	// quantization_config block (the HF-native convention). If config.json
+	// doesn't carry one, callers that have it can override metadata.Quantization
+	// from a sibling hf_quant_config.json file (NVIDIA ModelOpt convention).
+	if quantType := hfModel.GetQuantizationType(); quantType != "" {
+		p.logger.Infof("Detected quantization type from config.json: %s", quantType)
+		if mapped := QuantAlgoToOMEEnum(quantType); mapped != "" {
+			metadata.Quantization = mapped
+			p.logger.Infof("Setting quantization to %s", mapped)
 		}
 	}
 
