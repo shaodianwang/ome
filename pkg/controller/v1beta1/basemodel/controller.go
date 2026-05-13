@@ -915,6 +915,13 @@ func updateSpecWithConfig(spec *v1beta1.BaseModelSpec, config *modelagent.ModelC
 		updated = true
 	}
 
+	// Update Quantization if not set
+	if spec.Quantization == nil && config.Quantization != "" {
+		quant := v1beta1.ModelQuantization(config.Quantization)
+		spec.Quantization = &quant
+		updated = true
+	}
+
 	// Update ModelParameterSize if not set
 	if spec.ModelParameterSize == nil && config.ModelParameterSize != "" {
 		paramSize := config.ModelParameterSize

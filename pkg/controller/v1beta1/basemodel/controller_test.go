@@ -1555,6 +1555,7 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 			config: &modelagent.ModelConfig{
 				ModelType:          "llama",
 				ModelArchitecture:  "LlamaForCausalLM",
+				Quantization:       "nvfp4",
 				ModelParameterSize: "7B",
 				ModelCapabilities:  []string{"TEXT_GENERATION", "CHAT"},
 				ModelFramework: map[string]string{
@@ -1573,6 +1574,8 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 				g.Expect(*spec.ModelType).To(gomega.Equal("llama"))
 				g.Expect(spec.ModelArchitecture).ToNot(gomega.BeNil())
 				g.Expect(*spec.ModelArchitecture).To(gomega.Equal("LlamaForCausalLM"))
+				g.Expect(spec.Quantization).ToNot(gomega.BeNil())
+				g.Expect(*spec.Quantization).To(gomega.Equal(v1beta1.ModelQuantization("nvfp4")))
 				g.Expect(spec.ModelParameterSize).ToNot(gomega.BeNil())
 				g.Expect(*spec.ModelParameterSize).To(gomega.Equal("7B"))
 				g.Expect(spec.ModelCapabilities).To(gomega.Equal([]string{"TEXT_GENERATION", "CHAT"}))
@@ -1590,6 +1593,7 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 			initialSpec: &v1beta1.BaseModelSpec{
 				ModelType:         stringPtr("existing-type"),
 				ModelArchitecture: stringPtr("existing-arch"),
+				Quantization:      quantPtr("existing-quant"),
 				ModelFormat: v1beta1.ModelFormat{
 					Name:    "existing-format",
 					Version: stringPtr("1.0.0"),
@@ -1599,6 +1603,7 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 			config: &modelagent.ModelConfig{
 				ModelType:         "new-type",
 				ModelArchitecture: "new-arch",
+				Quantization:      "new-quant",
 				ModelFormat: map[string]string{
 					"name":    "new-format",
 					"version": "2.0.0",
@@ -1610,6 +1615,7 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 				// Values should remain unchanged
 				g.Expect(*spec.ModelType).To(gomega.Equal("existing-type"))
 				g.Expect(*spec.ModelArchitecture).To(gomega.Equal("existing-arch"))
+				g.Expect(*spec.Quantization).To(gomega.Equal(v1beta1.ModelQuantization("existing-quant")))
 				g.Expect(spec.ModelFormat.Name).To(gomega.Equal("existing-format"))
 				g.Expect(*spec.ModelFormat.Version).To(gomega.Equal("1.0.0"))
 				g.Expect(*spec.MaxTokens).To(gomega.Equal(int32(2048)))
@@ -1971,6 +1977,10 @@ func TestHandleNodeDeletion(t *testing.T) {
 // Helper functions
 func stringPtr(s string) *string {
 	return &s
+}
+
+func quantPtr(q v1beta1.ModelQuantization) *v1beta1.ModelQuantization {
+	return &q
 }
 
 func int32Ptr(i int32) *int32 {
