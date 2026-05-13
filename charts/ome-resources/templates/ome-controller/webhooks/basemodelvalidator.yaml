@@ -16,6 +16,11 @@ webhooks:
     name: basemodel.ome-webhook-server.validator
     sideEffects: None
     admissionReviewVersions: ["v1"]
+    # Skip on objects already being deleted: finalizer-only patches
+    # shouldn't trigger spec-invariant checks (would deadlock GC).
+    matchConditions:
+      - name: skip-deletion
+        expression: "!has(object.metadata.deletionTimestamp)"
     rules:
       - apiGroups:
           - ome.io
@@ -45,6 +50,11 @@ webhooks:
     name: clusterbasemodel.ome-webhook-server.validator
     sideEffects: None
     admissionReviewVersions: ["v1"]
+    # Skip on objects already being deleted: finalizer-only patches
+    # shouldn't trigger spec-invariant checks (would deadlock GC).
+    matchConditions:
+      - name: skip-deletion
+        expression: "!has(object.metadata.deletionTimestamp)"
     rules:
       - apiGroups:
           - ome.io
