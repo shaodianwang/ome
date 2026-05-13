@@ -99,17 +99,10 @@ var _ = ginkgo.Describe("BaseModel PVC spec auto-fill edges", ginkgo.Ordered, fu
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("agent supplies Quantization → controller does NOT propagate it to Spec.Quantization (current gap, documented)", func() {
-		// modelagent.ModelConfig has a Quantization field
-		// (model_data.go:44) and ConvertMetadataToModelConfig
-		// (model_data.go:101-105) populates it from parsed
-		// metadata. But updateSpecWithConfig (controller.go:897)
-		// has NO branch for Quantization — the field is silently
-		// dropped on its way from agent → CR.
-		//
-		// This is a real gap; the spec pins current behavior so
-		// a future fix that adds the missing branch surfaces here
-		// (the spec would start asserting positive propagation).
+	ginkgo.It("agent supplies Quantization → controller propagates it to Spec.Quantization", func() {
+		// updateSpecWithConfig now has a Quantization branch (added in #82),
+		// so a Quantization value supplied by the agent flows through to
+		// the BaseModel spec the same way ModelType and ModelArchitecture do.
 		ns := "pvc-autofill-quant"
 		makeNamespace(suiteCtx, k8sClient, ns)
 		makePVC(suiteCtx, k8sClient, "p", ns)
@@ -127,16 +120,15 @@ var _ = ginkgo.Describe("BaseModel PVC spec auto-fill edges", ginkgo.Ordered, fu
 				Quantization: "fp8", // valid ModelQuantization value
 			})).To(Succeed())
 
-		// Wait for the OTHER fields to populate so we know the agent
-		// CM was consumed. Then assert Quantization is STILL nil.
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "quant-llama", Namespace: ns}, got)).To(Succeed())
 			g.Expect(got.Spec.ModelType).NotTo(BeNil(),
 				"sanity: ModelType must populate so we know the spec-update reconcile actually ran")
 			g.Expect(*got.Spec.ModelType).To(Equal("llama"))
-			g.Expect(got.Spec.Quantization).To(BeNil(),
-				"current behavior: controller does NOT propagate ModelConfig.Quantization to Spec.Quantization (updateSpecWithConfig has no branch for it). When fixed, flip this to NotTo(BeNil()) + assert value")
+			g.Expect(got.Spec.Quantization).NotTo(BeNil(),
+				"controller should propagate ModelConfig.Quantization to Spec.Quantization")
+			g.Expect(*got.Spec.Quantization).To(Equal(v1beta1.ModelQuantization("fp8")))
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 })
