@@ -217,9 +217,12 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
 
 
 def _mirror_image_step(label: str, ecr_name: str) -> str:
-    """Copy the dev-ECR manifest to prod ECR via `docker buildx imagetools
-    create` — registry-side manifest copy (no rebuild, no layer re-upload).
-    Skipped on non-main branches (build step doesn't push there either).
+    """Copy the dev-ECR image to prod ECR via `crane copy` — pure-registry
+    manifest+blob copy, no rebuild and no docker daemon required (the
+    ci-base image doesn't ship one). The script downloads crane on first
+    run and uses cloud_oss for cross-account ECR auth via the shared
+    _ecr_login.sh helper. --only-main skips on PR branches (build step
+    only pushes on main, so there's nothing on dev to mirror otherwise).
     """
     short_sha = "${BUILDKITE_COMMIT:0:8}"
     return textwrap.dedent(
@@ -231,21 +234,7 @@ def _mirror_image_step(label: str, ecr_name: str) -> str:
             agents:
               queue: "{BUILD_QUEUE}"
             command: |
-              if [ "$$BUILDKITE_BRANCH" != "main" ]; then
-                echo "branch=$$BUILDKITE_BRANCH is not main; skipping mirror"
-                exit 0
-              fi
-              set -eu
-              aws ecr get-login-password --region {AWS_REGION} \\
-                | docker login --username AWS --password-stdin {ECR_REGISTRY}
-              aws ecr get-login-password --region {AWS_REGION} \\
-                | docker login --username AWS --password-stdin {PROD_ECR_REGISTRY}
-              for tag in latest "{short_sha}"; do
-                echo "--- :docker: Mirror msl_infra/{ecr_name}:$$tag → {PROD_AWS_ACCOUNT_ID}"
-                docker buildx imagetools create \\
-                  -t "{PROD_ECR_REGISTRY}/msl_infra/{ecr_name}:$$tag" \\
-                  "{ECR_REGISTRY}/msl_infra/{ecr_name}:$$tag"
-              done
+              sh .buildkite/mirror_image.sh --only-main msl_infra/{ecr_name} latest "{short_sha}"
             plugins:
               - kubernetes:
                   metadata:

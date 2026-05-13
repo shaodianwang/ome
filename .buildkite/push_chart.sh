@@ -56,34 +56,14 @@ fi
 
 helm package "charts/${CHART}"
 
-# helm_registry_login <env> <ecr_url>
-# Mirrors the cf-docker-image plugin's three-tier ECR auth so chart
-# pushes use the same credential path as image pushes:
-#   1. Meta cloud_oss + x509 identity (the path that runs in prod)
-#   2. Pre-baked ECR_AUTH_TOKEN env var (dev only)
-#   3. aws CLI fallback (resolved via MKS pod-identity annotations)
-helm_registry_login() {
-  env="$1"
-  ecr_url="$2"
-  if [ -x /shared/cloud_oss ] && [ -f /var/facebook/x509_identities/combined.pem ]; then
-    /shared/cloud_oss ecr get-credentials "--${env}" \
-        --role SSOContainerRegistryReadWrite --region "$AWS_REGION" --outform text \
-      | helm registry login --username AWS --password-stdin "$ecr_url"
-  elif [ "$env" = "dev" ] && [ -n "${ECR_AUTH_TOKEN:-}" ]; then
-    echo "$ECR_AUTH_TOKEN" \
-      | helm registry login --username AWS --password-stdin "$ecr_url"
-  else
-    aws ecr get-login-password --region "$AWS_REGION" \
-      | helm registry login --username AWS --password-stdin "$ecr_url"
-  fi
-}
+. "$(dirname "$0")/_ecr_login.sh"
 
 if [ "${BUILDKITE_BRANCH:-}" = "main" ]; then
-  helm_registry_login dev "$ECR_REGISTRY"
+  ecr_login_for dev helm registry login --username AWS --password-stdin "$ECR_REGISTRY"
   helm push "${CHART}-${CHART_VERSION}.tgz" "$DEV_CHART_REPO"
   echo "pushed ${CHART}-${CHART_VERSION}.tgz to ${DEV_CHART_REPO}"
 
-  helm_registry_login prod "$PROD_ECR_REGISTRY"
+  ecr_login_for prod helm registry login --username AWS --password-stdin "$PROD_ECR_REGISTRY"
   helm push "${CHART}-${CHART_VERSION}.tgz" "$PROD_CHART_REPO"
   echo "pushed ${CHART}-${CHART_VERSION}.tgz to ${PROD_CHART_REPO}"
 else

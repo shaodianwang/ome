@@ -80,11 +80,16 @@ var _ = ginkgo.Describe("InferenceService update flow", ginkgo.Ordered, func() {
 
 		ginkgo.By("mutating ISVC to MinReplicas=3 + MaxReplicas=8")
 		minR2, maxR2 := 3, 8
-		gotISVC := &v1beta1.InferenceService{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "update-isvc", Namespace: ns.Name}, gotISVC)).To(Succeed())
-		gotISVC.Spec.Engine.MinReplicas = &minR2
-		gotISVC.Spec.Engine.MaxReplicas = maxR2
-		Expect(k8sClient.Update(suiteCtx, gotISVC)).To(Succeed())
+		// Retry the Get→Update on conflict: between the read and the
+		// write the controller may have touched the ISVC (status/finalizer)
+		// and bumped ResourceVersion, which 409s a single-shot Update.
+		Eventually(func(g Gomega) {
+			gotISVC := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "update-isvc", Namespace: ns.Name}, gotISVC)).To(Succeed())
+			gotISVC.Spec.Engine.MinReplicas = &minR2
+			gotISVC.Spec.Engine.MaxReplicas = maxR2
+			g.Expect(k8sClient.Update(suiteCtx, gotISVC)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("expecting the EXISTING HPA's bounds to update in place (no new HPA)")
 		Eventually(func(g Gomega) {
