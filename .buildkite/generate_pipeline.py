@@ -11,9 +11,10 @@ Usage:
 Environment variables read at runtime:
     BUILDKITE_BRANCH          – current branch name
     BUILDKITE_COMMIT          – full commit SHA
-    AWS_ACCOUNT_ID            – AWS account for ECR (default: 588845226011)
+    AWS_ACCOUNT_ID            – dev AWS account for ECR (default: 588845226011)
+    PROD_AWS_ACCOUNT_ID       – prod AWS account for ECR (default: 168653207203)
     AWS_REGION                – AWS region for ECR (default: us-east-2)
-    ECR_REGISTRY              – full ECR registry override (takes precedence)
+    ECR_REGISTRY              – full dev ECR registry override (takes precedence)
 """
 
 from __future__ import annotations
@@ -27,10 +28,15 @@ import textwrap
 # ---------------------------------------------------------------------------
 
 AWS_ACCOUNT_ID = os.environ.get("AWS_ACCOUNT_ID", "588845226011")
+# Prod ECR is the cluster-foundation managed registry; cf-replace-image-registry
+# admission policy fast-paths images already on this registry, so consumers in
+# policy-restricted clusters need the prod-tagged copy.
+PROD_AWS_ACCOUNT_ID = os.environ.get("PROD_AWS_ACCOUNT_ID", "168653207203")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
 ECR_REGISTRY = os.environ.get(
     "ECR_REGISTRY", f"{AWS_ACCOUNT_ID}.dkr.ecr.{AWS_REGION}.amazonaws.com"
 )
+PROD_ECR_REGISTRY = f"{PROD_AWS_ACCOUNT_ID}.dkr.ecr.{AWS_REGION}.amazonaws.com"
 
 CI_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/library/golang:1.25-bookworm"
 
@@ -173,10 +179,12 @@ def ci_steps() -> str:
 
 
 def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
-    """Emit a cf-docker-image plugin step.
+    """Emit a cf-docker-image plugin step that builds + pushes to dev ECR.
 
     Builds on every branch (validates the Dockerfile); pushes only on
-    main via push-branches. The plugin handles ECR auth + tagging.
+    main via push-branches. Mirror to prod ECR is handled by
+    _mirror_image_step which copies the manifest at the registry layer
+    — no rebuild, no layer re-upload.
     """
     return textwrap.dedent(
         f"""\
@@ -204,6 +212,50 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
                   push-branches: "main"
                   tags: ["latest", "{COMMIT[:8]}"]
                   login: true
+        """
+    )
+
+
+def _mirror_image_step(label: str, ecr_name: str) -> str:
+    """Copy the dev-ECR manifest to prod ECR via `docker buildx imagetools
+    create` — registry-side manifest copy (no rebuild, no layer re-upload).
+    Skipped on non-main branches (build step doesn't push there either).
+    """
+    short_sha = "${BUILDKITE_COMMIT:0:8}"
+    return textwrap.dedent(
+        f"""\
+          - label: ":docker: Mirror {label} → prod ECR"
+            key: "mirror-{label}"
+{_gh_status(f"mirror-{label}")}
+            depends_on: "build-{label}"
+            agents:
+              queue: "{BUILD_QUEUE}"
+            command: |
+              if [ "$$BUILDKITE_BRANCH" != "main" ]; then
+                echo "branch=$$BUILDKITE_BRANCH is not main; skipping mirror"
+                exit 0
+              fi
+              set -eu
+              aws ecr get-login-password --region {AWS_REGION} \\
+                | docker login --username AWS --password-stdin {ECR_REGISTRY}
+              aws ecr get-login-password --region {AWS_REGION} \\
+                | docker login --username AWS --password-stdin {PROD_ECR_REGISTRY}
+              for tag in latest "{short_sha}"; do
+                echo "--- :docker: Mirror msl_infra/{ecr_name}:$$tag → {PROD_AWS_ACCOUNT_ID}"
+                docker buildx imagetools create \\
+                  -t "{PROD_ECR_REGISTRY}/msl_infra/{ecr_name}:$$tag" \\
+                  "{ECR_REGISTRY}/msl_infra/{ecr_name}:$$tag"
+              done
+            plugins:
+              - kubernetes:
+                  metadata:
+                    annotations:
+                      identity.mks.meta.com/default: "true"
+                      identity.mks.meta.com/inject-auth-tools: "true"
+                  podSpec:
+                    containers:
+                      - name: container-0
+                        image: "{CF_DOCKER_PLUGIN_RUNTIME_IMAGE}"
         """
     )
 
@@ -243,10 +295,16 @@ def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
 
 def cd_steps() -> str:
     parts: list[str] = []
+    # ome-resources chart's default `hub` points at the prod ECR, so it must
+    # wait for both the build (dev push) AND the mirror (prod push) to finish
+    # — otherwise a consumer installing the freshly published chart could
+    # hit ImagePullBackOff until the mirror catches up.
     image_keys = []
     for label, ecr_name, dockerfile in IMAGES:
         parts.append(_build_image_step(label, ecr_name, dockerfile))
+        parts.append(_mirror_image_step(label, ecr_name))
         image_keys.append(f"build-{label}")
+        image_keys.append(f"mirror-{label}")
     for chart in CHARTS:
         if chart == "ome-resources":
             parts.append(_push_chart_step(chart, depends_on=image_keys))
