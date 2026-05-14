@@ -122,6 +122,17 @@ var (
 	RDMAAutoInjectAnnotationKey              = "rdma.ome.io/auto-inject"
 	RDMAProfileAnnotationKey                 = "rdma.ome.io/profile"
 	RDMAContainerNameAnnotationKey           = "rdma.ome.io/container-name"
+
+	// Runtime profile injection — opt-in profiles that factor out
+	// repetitive ServingRuntime YAML (probes, /dev/shm, prometheus
+	// scrape annotations). Each is gated on its own profile annotation;
+	// the container-name annotation is shared across all of them.
+	RuntimeContainerNameAnnotationKey        = "runtime.ome.io/container-name"
+	RuntimeShmProfileAnnotationKey           = "runtime.ome.io/shm-profile"
+	RuntimeProbeProfileAnnotationKey         = "runtime.ome.io/probe-profile"
+	RuntimeProbePortAnnotationKey            = "runtime.ome.io/probe-port"
+	RuntimeObservabilityProfileAnnotationKey = "runtime.ome.io/observability-profile"
+	RuntimeObservabilityPortAnnotationKey    = "runtime.ome.io/observability-port"
 	DefaultPrometheusPath                    = "/metrics"
 	QueueProxyAggregatePrometheusMetricsPort = 9088
 	DefaultPodPrometheusPort                 = "9091"
@@ -421,6 +432,7 @@ var (
 		"prometheus.io/",             // Prometheus scraping annotations (prometheus.io/scrape, prometheus.io/port, prometheus.io/path)
 		"networking.gke.io/",         // GKE multi-NIC and RDMA network annotations (networking.gke.io/interfaces, etc.)
 		"rdma.ome.io/",               // OME RDMA injection annotations (RDMAAutoInjectAnnotationKey, RDMAProfileAnnotationKey, etc.)
+		"runtime.ome.io/",            // OME runtime profile annotations (shm/probe/observability profiles + container-name override)
 		ModelInitInjectionKey,        // ome.io/inject-model-init - triggers model init container injection via webhook
 		FineTunedAdapterInjectionKey, // ome.io/inject-fine-tuned-adapter - triggers fine-tuned adapter injection via webhook
 		ServingSidecarInjectionKey,   // ome.io/inject-serving-sidecar - triggers serving sidecar injection via webhook

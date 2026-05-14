@@ -85,6 +85,44 @@ var RDMAProfiles = map[string]RDMAProfile{
 			Privileged: &[]bool{true}[0],
 		},
 	},
+	// cks-gb-sglang: SGLang env mirrored from
+	// sglang_meta/srt/serve_dis/cluster_env.py:_pd_env_base.
+	// Volumes/mounts and securityContext match oci-roce so runtimes can
+	// swap profiles without touching the rest of the pod.
+	"cks-gb-sglang": {
+		EnvVars: map[string]string{
+			"MC_TE_METRIC":        "true",
+			"NCCL_MNNVL_ENABLE":   "1",
+			"NCCL_CUMEM_ENABLE":   "1",
+			"NCCL_IB_ADDR_FAMILY": "AF_INET6",
+			"NCCL_SOCKET_IFNAME":  "eth0",
+			"NCCL_SOCKET_FAMILY":  "AF_INET6",
+		},
+		VolumeMounts: []v1.VolumeMount{
+			{Name: DshmVolumeName, MountPath: "/dev/shm"},
+			{Name: DevInfVolumeName, MountPath: "/dev/infiniband"},
+		},
+		Volumes: []v1.Volume{
+			{
+				Name: DshmVolumeName,
+				VolumeSource: v1.VolumeSource{
+					EmptyDir: &v1.EmptyDirVolumeSource{Medium: v1.StorageMediumMemory},
+				},
+			},
+			{
+				Name: DevInfVolumeName,
+				VolumeSource: v1.VolumeSource{
+					HostPath: &v1.HostPathVolumeSource{Path: "/dev/infiniband"},
+				},
+			},
+		},
+		SecurityContext: &v1.SecurityContext{
+			Capabilities: &v1.Capabilities{
+				Add: []v1.Capability{"IPC_LOCK", "CAP_SYS_ADMIN"},
+			},
+			Privileged: &[]bool{true}[0],
+		},
+	},
 	// Add other profiles here as needed
 }
 

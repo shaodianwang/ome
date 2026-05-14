@@ -86,6 +86,9 @@ func (mutator *Mutator) mutate(pod *v1.Pod, configMap *v1.ConfigMap) error {
 	servingSidecarInjector := newServingSidecarInjector(configMap)
 
 	rdmaInjector := NewRDMAInjector()
+	shmInjector := NewShmInjector()
+	probeInjector := NewProbeInjector()
+	observabilityInjector := NewObservabilityInjector()
 
 	mutators := []func(pod *v1.Pod) error{
 		metricsAggregator.InjectMetricsAggregator,
@@ -93,6 +96,9 @@ func (mutator *Mutator) mutate(pod *v1.Pod, configMap *v1.ConfigMap) error {
 		fineTunedAdapterInjector.InjectFineTunedAdapter,
 		servingSidecarInjector.InjectServingSidecar,
 		rdmaInjector.InjectRDMA,
+		shmInjector.InjectShm,
+		probeInjector.InjectProbes,
+		observabilityInjector.InjectObservability,
 	}
 
 	for _, mutator := range mutators {
