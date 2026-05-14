@@ -6,6 +6,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 func TestValidatePVCStorage(t *testing.T) {
@@ -65,7 +66,7 @@ func TestValidatePVCStorage(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validatePVCStorage(tc.spec, tc.isClusterScoped)
+			err := validation.ValidatePVCStorage(tc.spec, tc.isClusterScoped)
 			if tc.wantErr && err == nil {
 				t.Fatalf("expected error, got nil")
 			}

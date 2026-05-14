@@ -2,7 +2,6 @@ package servingruntime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 var log = logf.Log.WithName(constants.ServingRuntimeValidatorWebhookName)
@@ -21,13 +21,10 @@ const (
 	InvalidPriorityError                        = "same priority assigned for the model format %s"
 	InvalidPriorityServingRuntimeError          = "%s in the servingruntimes %s and %s in namespace %s"
 	InvalidPriorityClusterServingRuntimeError   = "%s in the clusterservingruntimes %s and %s"
-	PriorityIsNotSameError                      = "different priorities assigned for the model format %s"
 	PriorityIsNotSameServingRuntimeError        = "%s under the servingruntime %s"
 	PriorityIsNotSameClusterServingRuntimeError = "%s under the clusterservingruntime %s"
 	ChainsawInjectAnnotationNotAllowError       = "chainsaw inject annotation is not allowed"
 	InvalidConfigurationError                   = "invalid configuration: %s"
-	MultiNodeConfigurationError                 = "for MultiNode deployment, both leader and worker must be defined and worker.size must be greater than 0"
-	RawDeploymentConfigurationError             = "for RawDeployment, leader and worker must not be defined"
 	UnknownAcceleratorClassError                = "unknown accelerator classes referenced in AcceleratorRequirements: %v"
 )
 
@@ -64,7 +61,7 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 	}
 
 	// Validate the configuration based on engineConfig and decoderConfig
-	if err := validateServingRuntimeConfiguration(&servingRuntime.Spec); err != nil {
+	if err := validation.ValidateServingRuntimeConfiguration(&servingRuntime.Spec); err != nil {
 		return admission.Denied(fmt.Sprintf(InvalidConfigurationError, err.Error()))
 	}
 
@@ -75,7 +72,7 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 	}
 
 	for i := range ExistingRuntimes.Items {
-		if err := validateModelFormatPrioritySame(&servingRuntime.Spec); err != nil {
+		if err := validation.ValidateModelFormatPrioritySame(&servingRuntime.Spec); err != nil {
 			return admission.Denied(fmt.Sprintf(PriorityIsNotSameServingRuntimeError, err.Error(), servingRuntime.Name))
 		}
 
@@ -110,7 +107,7 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 	}
 
 	// Validate the configuration based on engineConfig and decoderConfig
-	if err := validateServingRuntimeConfiguration(&clusterServingRuntime.Spec); err != nil {
+	if err := validation.ValidateServingRuntimeConfiguration(&clusterServingRuntime.Spec); err != nil {
 		return admission.Denied(fmt.Sprintf(InvalidConfigurationError, err.Error()))
 	}
 
@@ -121,7 +118,7 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 	}
 
 	for i := range ExistingRuntimes.Items {
-		if err := validateModelFormatPrioritySame(&clusterServingRuntime.Spec); err != nil {
+		if err := validation.ValidateModelFormatPrioritySame(&clusterServingRuntime.Spec); err != nil {
 			return admission.Denied(fmt.Sprintf(PriorityIsNotSameClusterServingRuntimeError, err.Error(), clusterServingRuntime.Name))
 		}
 
@@ -179,26 +176,6 @@ func validateServingRuntimeAnnotations(servingRuntime *v1beta1.ServingRuntimeSpe
 	return nil
 }
 
-func validateModelFormatPrioritySame(newSpec *v1beta1.ServingRuntimeSpec) error {
-	nameToPriority := make(map[string]*int32)
-
-	// Validate when same model format has same priority under same runtime.
-	// If the same model format has different priority value then throws the error
-	for _, newModelFormat := range newSpec.SupportedModelFormats {
-		// Only validate priority if autoselect is true
-		if newModelFormat.IsAutoSelectEnabled() {
-			if existingPriority, ok := nameToPriority[newModelFormat.Name]; ok {
-				if existingPriority != nil && newModelFormat.Priority != nil && (*existingPriority != *newModelFormat.Priority) {
-					return fmt.Errorf(PriorityIsNotSameError, newModelFormat.Name)
-				}
-			} else {
-				nameToPriority[newModelFormat.Name] = newModelFormat.Priority
-			}
-		}
-	}
-	return nil
-}
-
 func validateServingRuntimePriority(newSpec *v1beta1.ServingRuntimeSpec, existingSpec *v1beta1.ServingRuntimeSpec, existingRuntimeName string, newRuntimeName string) error {
 	// Skip the runtime if it is disabled or both are not multi model runtime and in update scenario skip the existing runtime if it is same as the new runtime
 	if (existingSpec.IsDisabled()) || (existingRuntimeName == newRuntimeName) {
@@ -226,82 +203,6 @@ func validateServingRuntimePriority(newSpec *v1beta1.ServingRuntimeSpec, existin
 			}
 		}
 	}
-	return nil
-}
-
-func validateServingRuntimeConfiguration(spec *v1beta1.ServingRuntimeSpec) error {
-	// Check if both engineConfig and decoderConfig are specified
-	hasEngineConfig := spec.EngineConfig != nil
-	hasDecoderConfig := spec.DecoderConfig != nil
-
-	// If both engineConfig and decoderConfig are specified, this is a PDDisaggregated deployment
-	// No additional validation needed for this case
-	if hasEngineConfig && hasDecoderConfig {
-		// This is PDDisaggregated mode
-		return nil
-	}
-
-	// First, validate any worker configuration regardless of deployment mode
-	// If worker size is specified as 0 or negative, that's always invalid
-	if spec.WorkerPodSpec != nil && spec.WorkerPodSpec.Size != nil && *spec.WorkerPodSpec.Size <= 0 {
-		return errors.New(MultiNodeConfigurationError)
-	}
-
-	// Check for explicit deployment mode in environment variables
-	isExplicitMultiNode := false
-	isExplicitRawDeployment := false
-	for _, container := range spec.Containers {
-		for _, env := range container.Env {
-			if env.Name == "DEPLOYMENT_MODE" {
-				if env.Value == string(constants.MultiNode) {
-					isExplicitMultiNode = true
-				} else if env.Value == string(constants.RawDeployment) {
-					isExplicitRawDeployment = true
-				}
-			}
-		}
-	}
-
-	// If only engineConfig is specified, check for the deployment mode configuration
-	if hasEngineConfig && !hasDecoderConfig {
-		// Check if this is a MultiNode configuration
-		isMultiNode := isExplicitMultiNode
-
-		// If no explicit mode is set, check worker configuration to determine mode
-		if !isExplicitMultiNode && !isExplicitRawDeployment {
-			// Check if there are worker pods defined with size > 0
-			if spec.WorkerPodSpec != nil && spec.WorkerPodSpec.Size != nil && *spec.WorkerPodSpec.Size > 0 {
-				isMultiNode = true
-			}
-		}
-
-		// For MultiNode configuration, validate according to requirements:
-		// - Must have both leader and worker defined
-		// - Worker size must be greater than 0
-		if isMultiNode {
-			// Check if worker is properly defined
-			if spec.WorkerPodSpec == nil || spec.WorkerPodSpec.Size == nil || *spec.WorkerPodSpec.Size <= 0 {
-				return errors.New(MultiNodeConfigurationError)
-			}
-
-			// In the future, we can add leader node validation here when the API supports it
-		}
-
-		// For RawDeployment, validate that workers are not defined
-		if isExplicitRawDeployment {
-			// If explicit RawDeployment mode is set and there are workers, that's invalid
-			if spec.WorkerPodSpec != nil && spec.WorkerPodSpec.Size != nil && *spec.WorkerPodSpec.Size > 0 {
-				return errors.New(RawDeploymentConfigurationError)
-			}
-		} else if !isMultiNode {
-			// Default case is RawDeployment without explicit mode set
-			// Check that no worker configuration is present for default RawDeployment
-			if spec.WorkerPodSpec != nil && spec.WorkerPodSpec.Size != nil && *spec.WorkerPodSpec.Size > 0 {
-				return errors.New(RawDeploymentConfigurationError)
-			}
-		}
-	}
-
 	return nil
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 // Helper function to create integer pointers
@@ -1603,7 +1604,7 @@ func TestValidateServingRuntimeConfiguration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateServingRuntimeConfiguration(tt.spec)
+			err := validation.ValidateServingRuntimeConfiguration(tt.spec)
 			if tt.expectSuccess {
 				if err != nil {
 					t.Errorf("expected no error, got: %v", err)
@@ -1662,7 +1663,7 @@ func TestValidateModelFormatPrioritySame(t *testing.T) {
 					},
 				},
 			},
-			expected: gomega.Equal(fmt.Errorf(PriorityIsNotSameError, "vllm")),
+			expected: gomega.Equal(fmt.Errorf("different priorities assigned for the model format %s", "vllm")),
 		},
 		"When same priority assigned for the same model format in the runtime then it should return nil": {
 			newServingRuntime: &v1beta1.ServingRuntime{
@@ -1710,7 +1711,7 @@ func TestValidateModelFormatPrioritySame(t *testing.T) {
 	for name, scenario := range scenarios {
 		t.Run(name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			err := validateModelFormatPrioritySame(&scenario.newServingRuntime.Spec)
+			err := validation.ValidateModelFormatPrioritySame(&scenario.newServingRuntime.Spec)
 			g.Expect(err).To(scenario.expected)
 		})
 	}
@@ -1980,7 +1981,7 @@ func TestValidateServingRuntimeConfigurationComplete(t *testing.T) {
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			err := validateServingRuntimeConfiguration(tc.spec)
+			err := validation.ValidateServingRuntimeConfiguration(tc.spec)
 
 			if tc.expectSuccess {
 				g.Expect(err).To(gomega.BeNil())

@@ -50,11 +50,11 @@ func ValidateAutoscalerConfig(isvc *v1beta1.InferenceService) ([]string, error) 
 				switch class {
 				case constants.AutoscalerClassHPA:
 					if metric, ok := annotations[constants.AutoscalerMetrics]; ok {
-						return nil, validateHPAMetrics(v1beta1.ScaleMetric(metric))
+						return nil, ValidateHPAMetrics(v1beta1.ScaleMetric(metric))
 					}
 					return nil, nil
 				case constants.AutoscalerClassKEDA:
-					return validateKEDAConfig(isvc)
+					return ValidateKEDAConfig(isvc)
 				case constants.AutoscalerClassExternal:
 					return nil, nil
 				default:
@@ -81,7 +81,7 @@ func ValidateAutoscalerTargetUtilizationPercentage(isvc *v1beta1.InferenceServic
 	return nil
 }
 
-func validateHPAMetrics(metric v1beta1.ScaleMetric) error {
+func ValidateHPAMetrics(metric v1beta1.ScaleMetric) error {
 	for _, item := range constants.AutoscalerAllowedMetricsList {
 		if item == constants.AutoscalerMetricsType(metric) {
 			return nil
@@ -104,49 +104,49 @@ var kedaValidAuthModes = []string{
 	"custom",
 }
 
-func validateKEDAConfig(isvc *v1beta1.InferenceService) ([]string, error) {
+func ValidateKEDAConfig(isvc *v1beta1.InferenceService) ([]string, error) {
 	var warnings []string
 	kedaConfig := isvc.Spec.KedaConfig
 	annotations := isvc.ObjectMeta.Annotations
 
 	if kedaConfig != nil && kedaConfig.ScalingOperator != "" {
-		if err := validateKEDAScalingOperator(kedaConfig.ScalingOperator); err != nil {
+		if err := ValidateKEDAScalingOperator(kedaConfig.ScalingOperator); err != nil {
 			return warnings, err
 		}
 	}
 
 	if operatorAnnotation, ok := annotations[constants.KedaScalingOperator]; ok {
-		if err := validateKEDAScalingOperator(operatorAnnotation); err != nil {
+		if err := ValidateKEDAScalingOperator(operatorAnnotation); err != nil {
 			return warnings, err
 		}
 	}
 
 	if kedaConfig != nil && kedaConfig.ScalingThreshold != "" {
-		if err := validateKEDAScalingThreshold(kedaConfig.ScalingThreshold); err != nil {
+		if err := ValidateKEDAScalingThreshold(kedaConfig.ScalingThreshold); err != nil {
 			return warnings, err
 		}
 	}
 
 	if thresholdAnnotation, ok := annotations[constants.KedaScalingThreshold]; ok {
-		if err := validateKEDAScalingThreshold(thresholdAnnotation); err != nil {
+		if err := ValidateKEDAScalingThreshold(thresholdAnnotation); err != nil {
 			return warnings, err
 		}
 	}
 
 	if kedaConfig != nil && kedaConfig.PromServerAddress != "" {
-		if err := validateKEDAPrometheusServerAddress(kedaConfig.PromServerAddress); err != nil {
+		if err := ValidateKEDAPrometheusServerAddress(kedaConfig.PromServerAddress); err != nil {
 			return warnings, err
 		}
 	}
 
 	if promAddrAnnotation, ok := annotations[constants.KedaPrometheusServerAddress]; ok {
-		if err := validateKEDAPrometheusServerAddress(promAddrAnnotation); err != nil {
+		if err := ValidateKEDAPrometheusServerAddress(promAddrAnnotation); err != nil {
 			return warnings, err
 		}
 	}
 
 	if kedaConfig != nil && kedaConfig.AuthModes != "" {
-		if err := validateKEDAAuthModes(kedaConfig.AuthModes); err != nil {
+		if err := ValidateKEDAAuthModes(kedaConfig.AuthModes); err != nil {
 			return warnings, err
 		}
 		if kedaConfig.AuthenticationRef == nil {
@@ -157,7 +157,7 @@ func validateKEDAConfig(isvc *v1beta1.InferenceService) ([]string, error) {
 	return warnings, nil
 }
 
-func validateKEDAScalingOperator(operator string) error {
+func ValidateKEDAScalingOperator(operator string) error {
 	for _, valid := range kedaValidScalingOperators {
 		if operator == valid {
 			return nil
@@ -166,7 +166,7 @@ func validateKEDAScalingOperator(operator string) error {
 	return fmt.Errorf("invalid KEDA scaling operator %q, must be one of: %s", operator, strings.Join(kedaValidScalingOperators, ", "))
 }
 
-func validateKEDAScalingThreshold(threshold string) error {
+func ValidateKEDAScalingThreshold(threshold string) error {
 	_, err := strconv.ParseFloat(threshold, 64)
 	if err != nil {
 		return fmt.Errorf("invalid KEDA scaling threshold %q: must be a valid number", threshold)
@@ -174,7 +174,7 @@ func validateKEDAScalingThreshold(threshold string) error {
 	return nil
 }
 
-func validateKEDAPrometheusServerAddress(address string) error {
+func ValidateKEDAPrometheusServerAddress(address string) error {
 	parsedURL, err := url.Parse(address)
 	if err != nil {
 		return fmt.Errorf("invalid KEDA Prometheus server address %q: %v", address, err)
@@ -188,7 +188,7 @@ func validateKEDAPrometheusServerAddress(address string) error {
 	return nil
 }
 
-func validateKEDAAuthModes(authModes string) error {
+func ValidateKEDAAuthModes(authModes string) error {
 	modes := strings.Split(authModes, ",")
 	for _, mode := range modes {
 		mode = strings.TrimSpace(mode)

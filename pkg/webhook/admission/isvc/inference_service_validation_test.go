@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 // =============================================================================
@@ -288,7 +289,7 @@ func TestInferenceService_NameValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateInferenceServiceName(tt.isvc)
+			err := validation.ValidateInferenceServiceName(tt.isvc.Name)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -386,7 +387,7 @@ func TestInferenceService_AutoscalerValidation(t *testing.T) {
 				},
 			}
 
-			err := validateInferenceServiceAutoscaler(isvc)
+			err := func() error { _, err := validation.ValidateAutoscalerConfig(isvc); return err }()
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -451,7 +452,7 @@ func TestInferenceService_TargetUtilizationValidation(t *testing.T) {
 				},
 			}
 
-			err := validateAutoscalerTargetUtilizationPercentage(isvc)
+			err := validation.ValidateAutoscalerTargetUtilizationPercentage(isvc)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -471,13 +472,13 @@ func TestValidateHPAMetrics_AllMetrics(t *testing.T) {
 
 	for _, metric := range validMetrics {
 		t.Run(string(metric), func(t *testing.T) {
-			err := validateHPAMetrics(metric)
+			err := validation.ValidateHPAMetrics(metric)
 			assert.NoError(t, err)
 		})
 	}
 
 	t.Run("invalid metric", func(t *testing.T) {
-		err := validateHPAMetrics("invalid-metric")
+		err := validation.ValidateHPAMetrics("invalid-metric")
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "is not a supported metric")
 	})
@@ -536,7 +537,7 @@ func TestInferenceService_EngineDecoderValidation(t *testing.T) {
 				isvc.Spec.Decoder = &v1beta1.DecoderSpec{}
 			}
 
-			err := validateEngineDecoderConfiguration(isvc)
+			err := validation.ValidateEngineDecoderConfig(&isvc.Spec)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -2443,7 +2444,7 @@ func TestValidateKEDAConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			warnings, err := validateKEDAConfig(tt.isvc)
+			warnings, err := validation.ValidateKEDAConfig(tt.isvc)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -2470,7 +2471,7 @@ func TestValidateKEDAScalingOperator(t *testing.T) {
 
 	for _, op := range validOperators {
 		t.Run("valid_"+op, func(t *testing.T) {
-			err := validateKEDAScalingOperator(op)
+			err := validation.ValidateKEDAScalingOperator(op)
 			assert.NoError(t, err)
 		})
 	}
@@ -2488,7 +2489,7 @@ func TestValidateKEDAScalingOperator(t *testing.T) {
 
 	for _, op := range invalidOperators {
 		t.Run("invalid_"+op, func(t *testing.T) {
-			err := validateKEDAScalingOperator(op)
+			err := validation.ValidateKEDAScalingOperator(op)
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "invalid KEDA scaling operator")
 		})
@@ -2508,7 +2509,7 @@ func TestValidateKEDAScalingThreshold(t *testing.T) {
 
 	for _, threshold := range validThresholds {
 		t.Run("valid_"+threshold, func(t *testing.T) {
-			err := validateKEDAScalingThreshold(threshold)
+			err := validation.ValidateKEDAScalingThreshold(threshold)
 			assert.NoError(t, err)
 		})
 	}
@@ -2523,7 +2524,7 @@ func TestValidateKEDAScalingThreshold(t *testing.T) {
 
 	for _, threshold := range invalidThresholds {
 		t.Run("invalid_"+threshold, func(t *testing.T) {
-			err := validateKEDAScalingThreshold(threshold)
+			err := validation.ValidateKEDAScalingThreshold(threshold)
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "invalid KEDA scaling threshold")
 		})
@@ -2541,7 +2542,7 @@ func TestValidateKEDAPrometheusServerAddress(t *testing.T) {
 
 	for _, addr := range validAddresses {
 		t.Run("valid_"+addr, func(t *testing.T) {
-			err := validateKEDAPrometheusServerAddress(addr)
+			err := validation.ValidateKEDAPrometheusServerAddress(addr)
 			assert.NoError(t, err)
 		})
 	}
@@ -2558,7 +2559,7 @@ func TestValidateKEDAPrometheusServerAddress(t *testing.T) {
 
 	for _, tc := range invalidAddresses {
 		t.Run("invalid_"+tc.addr, func(t *testing.T) {
-			err := validateKEDAPrometheusServerAddress(tc.addr)
+			err := validation.ValidateKEDAPrometheusServerAddress(tc.addr)
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), tc.errMsg)
 		})
@@ -2578,7 +2579,7 @@ func TestValidateKEDAAuthModes(t *testing.T) {
 
 	for _, mode := range validAuthModes {
 		t.Run("valid_"+mode, func(t *testing.T) {
-			err := validateKEDAAuthModes(mode)
+			err := validation.ValidateKEDAAuthModes(mode)
 			assert.NoError(t, err)
 		})
 	}
@@ -2594,7 +2595,7 @@ func TestValidateKEDAAuthModes(t *testing.T) {
 
 	for _, mode := range invalidAuthModes {
 		t.Run("invalid_"+mode, func(t *testing.T) {
-			err := validateKEDAAuthModes(mode)
+			err := validation.ValidateKEDAAuthModes(mode)
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "invalid KEDA auth mode")
 		})
@@ -2602,7 +2603,7 @@ func TestValidateKEDAAuthModes(t *testing.T) {
 
 	// Empty auth modes should pass (empty string, only whitespace)
 	t.Run("empty auth modes", func(t *testing.T) {
-		err := validateKEDAAuthModes("")
+		err := validation.ValidateKEDAAuthModes("")
 		assert.NoError(t, err)
 	})
 }
@@ -2673,7 +2674,7 @@ func TestInferenceService_KEDAAutoscalerIntegration(t *testing.T) {
 				},
 			}
 
-			err := validateInferenceServiceAutoscaler(isvc)
+			err := func() error { _, err := validation.ValidateAutoscalerConfig(isvc); return err }()
 
 			if tt.wantErr {
 				assert.Error(t, err)

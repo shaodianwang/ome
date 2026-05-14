@@ -3,10 +3,6 @@ package isvc
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"regexp"
-	"strconv"
-	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,23 +12,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/constants"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils/storage"
-)
-
-// regular expressions for validation of isvc name
-const (
-	IsvcNameFmt                string = "[a-z]([-a-z0-9]*[a-z0-9])?"
-	InvalidISVCNameFormatError string = "invalid InferenceService name %q, must match %q"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 var (
-	// logger for the validation webhook.
 	validatorLogger = logf.Log.WithName("inferenceservice-v1beta1-validation-webhook")
-	// IsvcRegexp regular expressions for validation of isvc name
-	IsvcRegexp = regexp.MustCompile("^" + IsvcNameFmt + "$")
 )
 
 // InferenceServiceValidator is responsible for validating the InferenceService resource
@@ -92,20 +79,21 @@ func GetIntReference(number int) *int {
 func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context, isvc *v1beta1.InferenceService) (admission.Warnings, error) {
 	var allWarnings admission.Warnings
 
-	if err := validateInferenceServiceName(isvc); err != nil {
+	if err := validation.ValidateInferenceServiceName(isvc.Name); err != nil {
 		return allWarnings, err
 	}
 
-	if err := validateInferenceServiceAutoscaler(isvc); err != nil {
+	warnings, err := validation.ValidateAutoscalerConfig(isvc)
+	if err != nil {
+		return allWarnings, err
+	}
+	allWarnings = append(allWarnings, warnings...)
+
+	if err := validation.ValidateAutoscalerTargetUtilizationPercentage(isvc); err != nil {
 		return allWarnings, err
 	}
 
-	if err := validateAutoscalerTargetUtilizationPercentage(isvc); err != nil {
-		return allWarnings, err
-	}
-
-	// New validation logic for Engine/Decoder architecture
-	if err := validateEngineDecoderConfiguration(isvc); err != nil {
+	if err := validation.ValidateEngineDecoderConfig(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
 
@@ -125,210 +113,6 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	return allWarnings, nil
 }
 
-// Validation of isvc name
-func validateInferenceServiceName(isvc *v1beta1.InferenceService) error {
-	if !IsvcRegexp.MatchString(isvc.Name) {
-		return fmt.Errorf(InvalidISVCNameFormatError, isvc.Name, IsvcNameFmt)
-	}
-	return nil
-}
-
-// Validation of isvc autoscaler class
-func validateInferenceServiceAutoscaler(isvc *v1beta1.InferenceService) error {
-	annotations := isvc.ObjectMeta.Annotations
-	value, ok := annotations[constants.AutoscalerClass]
-	class := constants.AutoscalerClassType(value)
-	if ok {
-		for _, item := range constants.AutoscalerAllowedClassList {
-			if class == item {
-				switch class {
-				case constants.AutoscalerClassHPA:
-					if metric, ok := annotations[constants.AutoscalerMetrics]; ok {
-						return validateHPAMetrics(v1beta1.ScaleMetric(metric))
-					} else {
-						return nil
-					}
-				case constants.AutoscalerClassKEDA:
-					_, err := validateKEDAConfig(isvc)
-					return err
-				case constants.AutoscalerClassExternal:
-					return nil
-				default:
-					return fmt.Errorf("unknown autoscaler class [%s]", class)
-				}
-			}
-		}
-		return fmt.Errorf("[%s] is not a supported autoscaler class type", value)
-	}
-
-	return nil
-}
-
-// Validate of autoscaler HPA metrics
-func validateHPAMetrics(metric v1beta1.ScaleMetric) error {
-	for _, item := range constants.AutoscalerAllowedMetricsList {
-		if item == constants.AutoscalerMetricsType(metric) {
-			return nil
-		}
-	}
-	return fmt.Errorf("[%s] is not a supported metric", metric)
-}
-
-// kedaValidScalingOperators defines the valid KEDA scaling operators
-var kedaValidScalingOperators = []string{
-	"GreaterThan",
-	"GreaterThanOrEqual",
-	"LessThan",
-	"LessThanOrEqual",
-}
-
-// kedaValidAuthModes defines the valid KEDA authentication modes
-var kedaValidAuthModes = []string{
-	"basic",
-	"tls",
-	"bearer",
-	"custom",
-}
-
-// validateKEDAConfig validates KEDA-specific configuration in KedaConfig and annotations
-func validateKEDAConfig(isvc *v1beta1.InferenceService) (admission.Warnings, error) {
-	var warnings admission.Warnings
-	kedaConfig := isvc.Spec.KedaConfig
-	annotations := isvc.ObjectMeta.Annotations
-
-	// Validate scaling operator from KedaConfig
-	if kedaConfig != nil && kedaConfig.ScalingOperator != "" {
-		if err := validateKEDAScalingOperator(kedaConfig.ScalingOperator); err != nil {
-			return warnings, err
-		}
-	}
-
-	// Validate scaling operator from annotations (takes precedence)
-	if operatorAnnotation, ok := annotations[constants.KedaScalingOperator]; ok {
-		if err := validateKEDAScalingOperator(operatorAnnotation); err != nil {
-			return warnings, err
-		}
-	}
-
-	// Validate scaling threshold from KedaConfig
-	if kedaConfig != nil && kedaConfig.ScalingThreshold != "" {
-		if err := validateKEDAScalingThreshold(kedaConfig.ScalingThreshold); err != nil {
-			return warnings, err
-		}
-	}
-
-	// Validate scaling threshold from annotations
-	if thresholdAnnotation, ok := annotations[constants.KedaScalingThreshold]; ok {
-		if err := validateKEDAScalingThreshold(thresholdAnnotation); err != nil {
-			return warnings, err
-		}
-	}
-
-	// Validate Prometheus server address from KedaConfig
-	if kedaConfig != nil && kedaConfig.PromServerAddress != "" {
-		if err := validateKEDAPrometheusServerAddress(kedaConfig.PromServerAddress); err != nil {
-			return warnings, err
-		}
-	}
-
-	// Validate Prometheus server address from annotations
-	if promAddrAnnotation, ok := annotations[constants.KedaPrometheusServerAddress]; ok {
-		if err := validateKEDAPrometheusServerAddress(promAddrAnnotation); err != nil {
-			return warnings, err
-		}
-	}
-
-	// Validate authModes if provided
-	if kedaConfig != nil && kedaConfig.AuthModes != "" {
-		if err := validateKEDAAuthModes(kedaConfig.AuthModes); err != nil {
-			return warnings, err
-		}
-
-		// Warn if authModes is set without authenticationRef
-		if kedaConfig.AuthenticationRef == nil {
-			warnings = append(warnings, "KEDA authModes is specified but authenticationRef is not set; authModes will be ignored by KEDA")
-		}
-	}
-
-	return warnings, nil
-}
-
-// validateKEDAScalingOperator validates that the scaling operator is one of the valid KEDA operators
-func validateKEDAScalingOperator(operator string) error {
-	for _, valid := range kedaValidScalingOperators {
-		if operator == valid {
-			return nil
-		}
-	}
-	return fmt.Errorf("invalid KEDA scaling operator %q, must be one of: %s", operator, strings.Join(kedaValidScalingOperators, ", "))
-}
-
-// validateKEDAScalingThreshold validates that the scaling threshold is a valid number
-func validateKEDAScalingThreshold(threshold string) error {
-	_, err := strconv.ParseFloat(threshold, 64)
-	if err != nil {
-		return fmt.Errorf("invalid KEDA scaling threshold %q: must be a valid number", threshold)
-	}
-	return nil
-}
-
-// validateKEDAPrometheusServerAddress validates that the Prometheus server address is a valid URL
-func validateKEDAPrometheusServerAddress(address string) error {
-	parsedURL, err := url.Parse(address)
-	if err != nil {
-		return fmt.Errorf("invalid KEDA Prometheus server address %q: %v", address, err)
-	}
-
-	// Check that scheme is http or https
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return fmt.Errorf("invalid KEDA Prometheus server address %q: scheme must be http or https", address)
-	}
-
-	// Check that host is not empty
-	if parsedURL.Host == "" {
-		return fmt.Errorf("invalid KEDA Prometheus server address %q: host is required", address)
-	}
-
-	return nil
-}
-
-// validateKEDAAuthModes validates that all auth modes are valid
-func validateKEDAAuthModes(authModes string) error {
-	modes := strings.Split(authModes, ",")
-	for _, mode := range modes {
-		mode = strings.TrimSpace(mode)
-		if mode == "" {
-			continue
-		}
-		valid := false
-		for _, validMode := range kedaValidAuthModes {
-			if mode == validMode {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			return fmt.Errorf("invalid KEDA auth mode %q, must be one of: %s", mode, strings.Join(kedaValidAuthModes, ", "))
-		}
-	}
-	return nil
-}
-
-// Validate of autoscaler targetUtilizationPercentage
-func validateAutoscalerTargetUtilizationPercentage(isvc *v1beta1.InferenceService) error {
-	annotations := isvc.ObjectMeta.Annotations
-	if value, ok := annotations[constants.TargetUtilizationPercentage]; ok {
-		t, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("the target utilization percentage should be a [1-100] integer")
-		} else if t < 1 || t > 100 {
-			return fmt.Errorf("the target utilization percentage should be a [1-100] integer")
-		}
-	}
-
-	return nil
-}
-
 // Convert runtime.Object into InferenceService
 func convertToInferenceService(obj runtime.Object) (*v1beta1.InferenceService, error) {
 	isvc, ok := obj.(*v1beta1.InferenceService)
@@ -336,16 +120,6 @@ func convertToInferenceService(obj runtime.Object) (*v1beta1.InferenceService, e
 		return nil, fmt.Errorf("expected an InferenceService object but got %T", obj)
 	}
 	return isvc, nil
-}
-
-// validateEngineDecoderConfiguration validates Engine/Decoder configuration rules
-func validateEngineDecoderConfiguration(isvc *v1beta1.InferenceService) error {
-	// Rule 1: If inference service has decoder defined, but not engine, fail
-	if isvc.Spec.Decoder != nil && isvc.Spec.Engine == nil {
-		return fmt.Errorf("decoder cannot be specified without engine")
-	}
-
-	return nil
 }
 
 // validateModelExists validates that the referenced model (BaseModel or ClusterBaseModel) exists
