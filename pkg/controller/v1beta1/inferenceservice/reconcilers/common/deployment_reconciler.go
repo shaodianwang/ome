@@ -36,9 +36,11 @@ func (r *DeploymentReconciler) ReconcileRawDeployment(
 	componentSpec *v1beta1.ComponentExtensionSpec,
 	componentType v1beta1.ComponentType,
 ) (ctrl.Result, error) {
-	// Create an InferenceServiceSpec with component spec and KedaConfig
+	// Synthetic InferenceServiceSpec carrying the component-level extension
+	// spec to the downstream raw reconciler. Engine is the carrier;
+	// raw/autoscaler/keda all read from Spec.Engine.ComponentExtensionSpec.
 	inferenceServiceSpec := &v1beta1.InferenceServiceSpec{
-		Predictor: v1beta1.PredictorSpec{
+		Engine: &v1beta1.EngineSpec{
 			ComponentExtensionSpec: *componentSpec,
 		},
 		KedaConfig: isvc.Spec.KedaConfig,

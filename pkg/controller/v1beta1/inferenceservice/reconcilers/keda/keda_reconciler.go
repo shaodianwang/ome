@@ -43,7 +43,7 @@ func NewKEDAReconciler(
 		client:       client,
 		scheme:       scheme,
 		ScaledObject: scaledObject,
-		componentExt: &inferenceServiceSpec.Predictor.ComponentExtensionSpec,
+		componentExt: &inferenceServiceSpec.Engine.ComponentExtensionSpec,
 	}, nil
 }
 
@@ -59,7 +59,7 @@ func createScaledObject(
 			filteredLabels[key] = value
 		}
 	}
-	componentExt := &inferenceServiceSpec.Predictor.ComponentExtensionSpec
+	componentExt := &inferenceServiceSpec.Engine.ComponentExtensionSpec
 	minReplicas := calculateMinReplicas(componentExt)
 	maxReplicas := calculateMaxReplicas(componentExt, minReplicas)
 	triggers := getScaledObjectTriggers(componentMeta, inferenceServiceSpec)
@@ -156,8 +156,10 @@ func getScalingThreshold(metadata metav1.ObjectMeta, kedaConfig *v1beta1.KedaCon
 // getScaleMetric retrieves the scaling metric name
 func getScaleMetric(inferenceServiceSpec v1beta1.InferenceServiceSpec) string {
 	// Use ScaleMetric from inferenceServiceSpec if available
-	if inferenceServiceSpec.Predictor.ScaleMetric != nil && *inferenceServiceSpec.Predictor.ScaleMetric != "" {
-		return string(*inferenceServiceSpec.Predictor.ScaleMetric)
+	if inferenceServiceSpec.Engine != nil &&
+		inferenceServiceSpec.Engine.ScaleMetric != nil &&
+		*inferenceServiceSpec.Engine.ScaleMetric != "" {
+		return string(*inferenceServiceSpec.Engine.ScaleMetric)
 	}
 	// Default metric
 	return string(v1beta1.MetricTPS)

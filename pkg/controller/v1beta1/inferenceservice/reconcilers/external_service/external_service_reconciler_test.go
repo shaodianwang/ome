@@ -58,11 +58,6 @@ func TestExternalServiceReconciler_shouldCreateExternalService(t *testing.T) {
 				},
 				Spec: v1beta1.InferenceServiceSpec{
 					Router: &v1beta1.RouterSpec{},
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
 				},
 			},
 			ingressConfig: &controllerconfig.IngressConfig{
@@ -70,27 +65,6 @@ func TestExternalServiceReconciler_shouldCreateExternalService(t *testing.T) {
 			},
 			expected:    true,
 			description: "should create external service when ingress is disabled and router component exists",
-		},
-		{
-			name: "should create when ingress disabled and has predictor",
-			isvc: &v1beta1.InferenceService{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-service",
-					Namespace: "default",
-				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
-				},
-			},
-			ingressConfig: &controllerconfig.IngressConfig{
-				DisableIngressCreation: true,
-			},
-			expected:    true,
-			description: "should create external service when ingress is disabled and predictor component exists",
 		},
 		{
 			name: "should not create when ingress enabled",
@@ -156,9 +130,7 @@ func TestExternalServiceReconciler_shouldCreateExternalService(t *testing.T) {
 					Name:      "test-service",
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{},
-				},
+				Spec: v1beta1.InferenceServiceSpec{},
 			},
 			ingressConfig: &controllerconfig.IngressConfig{
 				DisableIngressCreation: true,
@@ -200,9 +172,8 @@ func TestExternalServiceReconciler_determineTargetSelector(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: v1beta1.InferenceServiceSpec{
-					Router:    &v1beta1.RouterSpec{},
-					Engine:    &v1beta1.EngineSpec{},
-					Predictor: v1beta1.PredictorSpec{},
+					Router: &v1beta1.RouterSpec{},
+					Engine: &v1beta1.EngineSpec{},
 				},
 			},
 			expectedSelector: map[string]string{
@@ -219,8 +190,7 @@ func TestExternalServiceReconciler_determineTargetSelector(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: v1beta1.InferenceServiceSpec{
-					Engine:    &v1beta1.EngineSpec{},
-					Predictor: v1beta1.PredictorSpec{},
+					Engine: &v1beta1.EngineSpec{},
 				},
 			},
 			expectedSelector: map[string]string{
@@ -228,27 +198,6 @@ func TestExternalServiceReconciler_determineTargetSelector(t *testing.T) {
 				constants.OMEComponentLabel:           string(v1beta1.EngineComponent),
 			},
 			description: "engine component should be selected when router doesn't exist",
-		},
-		{
-			name: "predictor exists, no component label added",
-			isvc: &v1beta1.InferenceService{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-service",
-					Namespace: "default",
-				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Engine: &v1beta1.EngineSpec{},
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
-				},
-			},
-			expectedSelector: map[string]string{
-				constants.InferenceServicePodLabelKey: "test-service",
-			},
-			description: "predictor component should be selected as fallback",
 		},
 	}
 
@@ -343,11 +292,7 @@ func TestExternalServiceReconciler_buildExternalService(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
+					Engine: &v1beta1.EngineSpec{},
 				},
 			},
 			internalService:    nil, // No internal service
@@ -619,11 +564,6 @@ func TestExternalServiceReconciler_getDeploymentMode(t *testing.T) {
 						Leader: &v1beta1.LeaderSpec{},
 						Worker: &v1beta1.WorkerSpec{},
 					},
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
 				},
 			},
 			expectedMode: constants.MultiNode,
@@ -640,11 +580,6 @@ func TestExternalServiceReconciler_getDeploymentMode(t *testing.T) {
 					Engine: &v1beta1.EngineSpec{
 						Leader: &v1beta1.LeaderSpec{},
 					},
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
 				},
 			},
 			expectedMode: constants.MultiNode,
@@ -659,33 +594,10 @@ func TestExternalServiceReconciler_getDeploymentMode(t *testing.T) {
 				},
 				Spec: v1beta1.InferenceServiceSpec{
 					Engine: &v1beta1.EngineSpec{},
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
 				},
 			},
 			expectedMode: constants.RawDeployment,
 			description:  "should detect raw deployment for regular engine without leader/worker",
-		},
-		{
-			name: "raw deployment for predictor",
-			isvc: &v1beta1.InferenceService{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-service",
-					Namespace: "default",
-				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
-				},
-			},
-			expectedMode: constants.RawDeployment,
-			description:  "should detect raw deployment for predictor-only spec",
 		},
 	}
 
@@ -701,9 +613,4 @@ func TestExternalServiceReconciler_getDeploymentMode(t *testing.T) {
 			assert.Equal(t, tt.expectedMode, result, tt.description)
 		})
 	}
-}
-
-// Helper function to create string pointer
-func stringPtr(s string) *string {
-	return &s
 }

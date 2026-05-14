@@ -153,8 +153,8 @@ func (b *HTTPRouteBuilder) buildEngineHTTPRoute(isvc *v1beta1.InferenceService) 
 	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(constants.FallbackPrefix())}
 
 	timeout := DefaultTimeout
-	if isvc.Spec.Predictor.TimeoutSeconds != nil {
-		timeout = toGatewayAPIDuration(*isvc.Spec.Predictor.TimeoutSeconds)
+	if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
+		timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
 	}
 
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
@@ -231,7 +231,7 @@ func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(isvc *v1beta1.InferenceService)
 }
 
 func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
-	if !isvc.Status.IsConditionReady(v1beta1.PredictorReady) {
+	if !isvc.Status.IsConditionReady(v1beta1.EngineReady) {
 		isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
 			Type:   v1beta1.IngressReady,
 			Status: corev1.ConditionFalse,
@@ -305,8 +305,8 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 		httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(routeMatch, filters, routerName, isvc.Namespace, constants.CommonISVCPort, timeout))
 	} else {
 		timeout := DefaultTimeout
-		if isvc.Spec.Predictor.TimeoutSeconds != nil {
-			timeout = toGatewayAPIDuration(*isvc.Spec.Predictor.TimeoutSeconds)
+		if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
+			timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
 		}
 		routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(constants.FallbackPrefix())}
 		httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(routeMatch, filters, engineName, isvc.Namespace, constants.CommonISVCPort, timeout))
@@ -339,8 +339,8 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 			httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(pathRouteMatch, filters, routerName, isvc.Namespace, constants.CommonISVCPort, timeout))
 		} else {
 			timeout := DefaultTimeout
-			if isvc.Spec.Predictor.TimeoutSeconds != nil {
-				timeout = toGatewayAPIDuration(*isvc.Spec.Predictor.TimeoutSeconds)
+			if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
+				timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
 			}
 			pathRouteMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(path + "/")}
 			httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(pathRouteMatch, filters, engineName, isvc.Namespace, constants.CommonISVCPort, timeout))

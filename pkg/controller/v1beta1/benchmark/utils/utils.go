@@ -33,9 +33,6 @@ func GetInferenceService(ctx context.Context, c client.Client, ref *v1beta1.Infe
 
 // GetBaseModelName extracts the base model name from an InferenceService
 func GetBaseModelName(isvc *v1beta1.InferenceService) string {
-	if isvc.Spec.Predictor.Model != nil && isvc.Spec.Predictor.Model.BaseModel != nil {
-		return *isvc.Spec.Predictor.Model.BaseModel
-	}
 	if isvc.Spec.Model != nil {
 		return isvc.Spec.Model.Name
 	}
@@ -75,13 +72,11 @@ func BuildInferenceServiceArgs(ctx context.Context, c client.Client, endpointSpe
 			"--model-tokenizer": *baseModel.Storage.Path,
 		}
 
-		// Use protocol version if available
+		// Protocol version is sourced from the engine runner's env vars
+		// in the new architecture (the legacy spec.predictor.model.protocolVersion
+		// has been removed).
 		var protocolVersion string
-		if inferenceService.Spec.Predictor.Model != nil &&
-			inferenceService.Spec.Predictor.Model.ProtocolVersion != nil &&
-			*inferenceService.Spec.Predictor.Model.ProtocolVersion != "" {
-			protocolVersion = string(*inferenceService.Spec.Predictor.Model.ProtocolVersion)
-		} else if inferenceService.Spec.Engine != nil && inferenceService.Spec.Engine.Runner != nil {
+		if inferenceService.Spec.Engine != nil && inferenceService.Spec.Engine.Runner != nil {
 			for _, env := range inferenceService.Spec.Engine.Runner.Env {
 				if env.Name == "PROTOCOL_VERSION" {
 					protocolVersion = env.Value

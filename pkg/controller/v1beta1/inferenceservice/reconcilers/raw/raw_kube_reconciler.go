@@ -42,15 +42,16 @@ func NewRawKubeReconciler(client client.Client,
 		return nil, err
 	}
 
-	pdb := pdb.NewPDBReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Predictor.ComponentExtensionSpec)
+	pdb := pdb.NewPDBReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Engine.ComponentExtensionSpec)
 	url, err := createRawURL(clientset, componentMeta)
 	if err != nil {
 		return nil, err
 	}
 
-	// TODO: Remove this once we have a better way to handle the component extension spec
-	// Ensure we are using the predictor's extension spec for the component reconcilers
-	componentExt := &inferenceServiceSpec.Predictor.ComponentExtensionSpec
+	// Component-level extension spec is carried on Spec.Engine by the
+	// caller (deployment_reconciler.go) regardless of which actual
+	// component is being reconciled.
+	componentExt := &inferenceServiceSpec.Engine.ComponentExtensionSpec
 
 	return &RawKubeReconciler{
 		client:              client,

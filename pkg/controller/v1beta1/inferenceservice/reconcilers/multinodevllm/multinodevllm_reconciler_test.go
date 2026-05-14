@@ -48,21 +48,16 @@ func TestMultiNodeVLLMReconciler_Reconcile(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
+					Engine: &v1beta1.EngineSpec{
 						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
 							MinReplicas: ptr.To(1),
 							MaxReplicas: 3,
 						},
-						Model: &v1beta1.ModelSpec{
-							PredictorExtensionSpec: v1beta1.PredictorExtensionSpec{
-								RuntimeVersion: ptr.To("2.6.0"),
-								Container: corev1.Container{
-									Image: "vllm/vllm-openai:latest",
-									Name:  "kserve-container",
-								},
+						Runner: &v1beta1.RunnerSpec{
+							Container: corev1.Container{
+								Image: "vllm/vllm-openai:latest",
+								Name:  "kserve-container",
 							},
-							Runtime:   ptr.To("vllm"),
-							BaseModel: ptr.To("llama-7b"),
 						},
 					},
 				},
@@ -119,21 +114,16 @@ func TestMultiNodeVLLMReconciler_Reconcile(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
+					Engine: &v1beta1.EngineSpec{
 						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
 							MinReplicas: ptr.To(2),
 							MaxReplicas: 4,
 						},
-						Model: &v1beta1.ModelSpec{
-							PredictorExtensionSpec: v1beta1.PredictorExtensionSpec{
-								RuntimeVersion: ptr.To("2.6.0"),
-								Container: corev1.Container{
-									Image: "vllm/vllm-openai:v0.2.7",
-									Name:  "kserve-container",
-								},
+						Runner: &v1beta1.RunnerSpec{
+							Container: corev1.Container{
+								Image: "vllm/vllm-openai:v0.2.7",
+								Name:  "kserve-container",
 							},
-							Runtime:   ptr.To("vllm"),
-							BaseModel: ptr.To("llama-13b"),
 						},
 					},
 				},
@@ -163,21 +153,16 @@ func TestMultiNodeVLLMReconciler_Reconcile(t *testing.T) {
 					},
 				},
 				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
+					Engine: &v1beta1.EngineSpec{
 						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
 							MinReplicas: ptr.To(2),
 							MaxReplicas: 4,
 						},
-						Model: &v1beta1.ModelSpec{
-							PredictorExtensionSpec: v1beta1.PredictorExtensionSpec{
-								RuntimeVersion: ptr.To("0.5.3"),
-								Container: corev1.Container{
-									Image: "vllm/vllm-openai:latest",
-									Name:  "kserve-container",
-								},
+						Runner: &v1beta1.RunnerSpec{
+							Container: corev1.Container{
+								Image: "vllm/vllm-openai:latest",
+								Name:  "kserve-container",
 							},
-							Runtime:   ptr.To("vllm"),
-							BaseModel: ptr.To("falcon-40b"),
 						},
 					},
 				},
@@ -216,7 +201,7 @@ func TestMultiNodeVLLMReconciler_Reconcile(t *testing.T) {
 
 			podSpec := &corev1.PodSpec{
 				Containers: []corev1.Container{
-					tt.isvc.Spec.Predictor.Model.Container,
+					tt.isvc.Spec.Engine.Runner.Container,
 				},
 			}
 
@@ -225,7 +210,7 @@ func TestMultiNodeVLLMReconciler_Reconcile(t *testing.T) {
 				clientset,
 				s,
 				tt.isvc.ObjectMeta,
-				&tt.isvc.Spec.Predictor.ComponentExtensionSpec,
+				&tt.isvc.Spec.Engine.ComponentExtensionSpec,
 				podSpec,
 			)
 			require.NoError(t, err)

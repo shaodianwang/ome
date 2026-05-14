@@ -63,7 +63,7 @@ func NewAutoscalerReconciler(
 		client:       client,
 		scheme:       scheme,
 		Autoscaler:   as,
-		componentExt: &inferenceServiceSpec.Predictor.ComponentExtensionSpec,
+		componentExt: &inferenceServiceSpec.Engine.ComponentExtensionSpec,
 	}, err
 }
 
@@ -92,7 +92,7 @@ func createAutoscaler(client client.Client,
 				return nil, fmt.Errorf("failed to delete existing ScaledObject: %w", err)
 			}
 		}
-		return hpa.NewHPAReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Predictor.ComponentExtensionSpec), nil
+		return hpa.NewHPAReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Engine.ComponentExtensionSpec), nil
 	case constants.AutoscalerClassKEDA:
 		// Before creating ScaledObject, ensure any existing HPA is deleted
 		err := deleteExistingHPA(client, componentMeta)

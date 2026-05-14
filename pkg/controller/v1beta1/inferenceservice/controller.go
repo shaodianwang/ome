@@ -209,13 +209,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Determine which components to reconcile based on the spec
 	var reconcilers []components.Component
 
-	// Migrate predictor spec to new architecture if needed
-	if err := r.migratePredictorToNewArchitecture(isvc); err != nil {
-		r.Log.Error(err, "Failed to migrate predictor spec", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
-		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "PredictorMigrationError", err.Error())
-		return reconcile.Result{}, err
-	}
-
 	var ingressDeploymentMode constants.DeploymentModeType
 
 	// Step 1: Reconcile model first
@@ -464,23 +457,10 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	// Clean up old predictor deployment after new components are ready (migration-specific)
-	// This is a temporary migration-specific cleanup function.
-	deploymentReady, err := r.cleanupOldPredictorDeployment(ctx, isvc)
-	if err != nil {
-		r.Log.Error(err, "Failed to cleanup old predictor deployment", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
-		return ctrl.Result{Requeue: true}, nil
-	} else if !deploymentReady {
-		// Requeue until old predictor deployment is fully cleaned up
-		return ctrl.Result{Requeue: true}, nil
-	} else {
-		// Clean up resources for components that no longer exist
-		// Move it under else condition to avoid old predictor deployment exist but hpa is cleaned up
-		// After migration, it will refactor.
-		if err := r.cleanupRemovedComponents(ctx, isvc, mergedEngine, mergedDecoder, mergedRouter); err != nil {
-			r.Log.Error(err, "Failed to cleanup removed components", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
-			// Don't fail reconciliation on cleanup errors
-		}
+	// Clean up resources for components that no longer exist.
+	if err := r.cleanupRemovedComponents(ctx, isvc, mergedEngine, mergedDecoder, mergedRouter); err != nil {
+		r.Log.Error(err, "Failed to cleanup removed components", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
+		// Don't fail reconciliation on cleanup errors
 	}
 
 	// Clean up status for components that no longer exist
@@ -755,9 +735,4 @@ func (r *InferenceServiceReconciler) setExternalServiceURL(ctx context.Context, 
 	}
 
 	return nil
-}
-
-// migratePredictorToNewArchitecture delegates to the migration utility
-func (r *InferenceServiceReconciler) migratePredictorToNewArchitecture(isvc *v1beta1.InferenceService) error {
-	return isvcutils.MigratePredictorToNewArchitecture(context.Background(), r.Client, r.Log, isvc)
 }

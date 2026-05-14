@@ -531,11 +531,7 @@ func createTestInferenceServiceVirtualService(name, namespace string) *v1beta1.I
 			Namespace: namespace,
 		},
 		Spec: v1beta1.InferenceServiceSpec{
-			Predictor: v1beta1.PredictorSpec{
-				Model: &v1beta1.ModelSpec{
-					Runtime: stringPtrVirtualService("sklearn"),
-				},
-			},
+			Engine: &v1beta1.EngineSpec{},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			Status: duckv1.Status{
@@ -605,10 +601,6 @@ func mockComponentStatus(isvc *v1beta1.InferenceService) {
 }
 
 func setEngineReadyVirtualService(isvc *v1beta1.InferenceService) {
-	isvc.Status.SetCondition(v1beta1.PredictorReady, &apis.Condition{
-		Type:   v1beta1.PredictorReady,
-		Status: corev1.ConditionTrue,
-	})
 	isvc.Status.SetCondition(v1beta1.EngineReady, &apis.Condition{
 		Type:   v1beta1.EngineReady,
 		Status: corev1.ConditionTrue,
@@ -628,8 +620,4 @@ func setDecoderReadyVirtualService(isvc *v1beta1.InferenceService) {
 		Type:   v1beta1.DecoderReady,
 		Status: corev1.ConditionTrue,
 	})
-}
-
-func stringPtrVirtualService(s string) *string {
-	return &s
 }
