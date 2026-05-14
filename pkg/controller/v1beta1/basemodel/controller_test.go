@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1198,6 +1199,127 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 			tt.validate(t, c, tt.modelCache, result)
 		})
 	}
+}
+
+// TestSharded_URIChange_ResetsCacheAndFiresFreshPrewarm exercises the
+// URI-change → reset → fresh-StartPrewarm flow directly via the
+// ClusterBaseModel reconciler with an in-memory fake k8s client and the
+// modelcache fake. It replaces an integration spec
+// (tests/integration/.../sharded_test.go) that depended on the
+// controller-runtime work queue + watch + informer cache to converge
+// within a fixed wall-clock budget — under heavy CI suite contention
+// that budget kept being insufficient. This unit test asserts the same
+// invariant deterministically by driving Reconcile in a tight loop.
+func TestSharded_URIChange_ResetsCacheAndFiresFreshPrewarm(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	// Per-call unique PrewarmID so a fresh StartPrewarm is observable as
+	// a different PrewarmID on the CBM status — a counter alone races
+	// with conflict-retries, but PrewarmID changes only on a successful
+	// applyPrewarmStarted that wrote to status.
+	var prewarmSeq int32
+	cacheClient := &modelcachefake.Client{
+		CheckSourceFunc: func(_ context.Context, _ modelcache.Source) (*modelcache.SourceStatus, error) {
+			return &modelcache.SourceStatus{Reachable: true, Reason: "SourceReachable"}, nil
+		},
+		InspectSourceFunc: func(_ context.Context, src modelcache.Source) (*modelcache.SourceInspection, error) {
+			return &modelcache.SourceInspection{
+				Objects: []modelcache.Object{{Source: src, Path: src.URI + "/config.json"}},
+				Metadata: modelcache.ModelMetadataInputs{
+					ConfigJSON: []byte(`{"model_type":"phi","architectures":["PhiForCausalLM"]}`),
+				},
+			}, nil
+		},
+		StartPrewarmFunc: func(_ context.Context, _ modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
+			n := atomic.AddInt32(&prewarmSeq, 1)
+			return &modelcache.PrewarmOperation{ID: fmt.Sprintf("op-%d", n)}, nil
+		},
+		// Stay in Running; we don't want PrewarmPhaseSucceeded to push the
+		// status into Cached=True before the URI-change reset path runs,
+		// because Cached=True short-circuits the StartPrewarm branch.
+		GetPrewarmStatusFunc: func(_ context.Context, op modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
+			return &modelcache.PrewarmStatus{Operation: op, Phase: modelcache.PrewarmPhaseRunning}, nil
+		},
+	}
+
+	const v1URI = "oci://n/test/b/models/o/llama-v1"
+	const v2URI = "oci://n/test/b/models/o/llama-v2"
+
+	cbm := &v1beta1.ClusterBaseModel{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "uri-change-cbm",
+			Finalizers: []string{constants.ClusterBaseModelFinalizer},
+		},
+		Spec: v1beta1.BaseModelSpec{
+			ModelFormat:  v1beta1.ModelFormat{Name: "safetensors"},
+			Storage:      &v1beta1.StorageSpec{StorageUri: stringPtr(v1URI)},
+			Distribution: distributionPtr(v1beta1.DistributionSharded),
+		},
+	}
+	kubeClient := ctrlclientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cbm).
+		WithStatusSubresource(cbm).
+		Build()
+
+	reconciler := &ClusterBaseModelReconciler{
+		Client:     kubeClient,
+		Scheme:     kubeClient.Scheme(),
+		ModelCache: modelcache.NewProvider("test_cache", cacheClient),
+	}
+
+	reconcile := func() {
+		_, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: cbm.Name},
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+	}
+	get := func() *v1beta1.ClusterBaseModel {
+		got := &v1beta1.ClusterBaseModel{}
+		g.Expect(kubeClient.Get(context.TODO(), types.NamespacedName{Name: cbm.Name}, got)).To(gomega.Succeed())
+		return got
+	}
+
+	// Phase 1: drive reconciles until the initial StartPrewarm fires
+	// (URI=v1) and PrewarmID is recorded on status. The chain is reset
+	// → CheckSource → StartPrewarm; an upper bound of 10 iterations is
+	// generous (each iteration is a single in-process Reconcile call).
+	for i := 0; i < 10 && atomic.LoadInt32(&prewarmSeq) < 1; i++ {
+		reconcile()
+	}
+	g.Expect(int(atomic.LoadInt32(&prewarmSeq))).To(gomega.Equal(1), "initial StartPrewarm should have fired")
+	g.Expect(cacheClient.StartPrewarmCalls()[0].Source.URI).To(gomega.Equal(v1URI))
+	firstPrewarmID := get().Status.Cache.PrewarmID
+	g.Expect(firstPrewarmID).NotTo(gomega.BeEmpty())
+
+	// Mutate spec to v2 — the user-visible event that should reset cache identity.
+	{
+		got := get()
+		got.Spec.Storage.StorageUri = stringPtr(v2URI)
+		g.Expect(kubeClient.Update(context.TODO(), got)).To(gomega.Succeed())
+	}
+
+	// Phase 2: drive reconciles until the fresh StartPrewarm fires for
+	// v2. If the controller's URI-change → reset → re-prewarm chain
+	// regresses (e.g. cacheIdentityChanged stops firing on URI swap, or
+	// resetShardedCacheProgress stops clearing PrewarmID), prewarmSeq
+	// stays at 1 and the assertion below fails with a clear signal.
+	for i := 0; i < 10 && atomic.LoadInt32(&prewarmSeq) < 2; i++ {
+		reconcile()
+	}
+	g.Expect(int(atomic.LoadInt32(&prewarmSeq))).To(gomega.Equal(2), "URI change must trigger a fresh StartPrewarm")
+	g.Expect(cacheClient.StartPrewarmCalls()[1].Source.URI).To(gomega.Equal(v2URI),
+		"fresh StartPrewarm must use the new URI")
+
+	final := get()
+	g.Expect(final.Status.Cache.SourceUri).To(gomega.Equal(v2URI))
+	g.Expect(final.Status.Cache.PrewarmID).NotTo(gomega.Equal(firstPrewarmID),
+		"PrewarmID should have been reset and re-populated, not unchanged from the v1 prewarm")
 }
 
 func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {

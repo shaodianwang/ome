@@ -2,7 +2,6 @@ package basemodel
 
 import (
 	"context"
-	"sync/atomic"
 
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -170,84 +169,14 @@ var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func(
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("storage URI change resets cache identity (PrewarmID cleared, fresh CheckSource fires)", func() {
-		ginkgo.By("recording the latest URI the controller invokes StartPrewarm with")
-		// Atomic pointer instead of an int counter: avoids a data race
-		// between the controller goroutine (writes) and the test
-		// goroutine (reads), and asserts the *semantic* we care about
-		// — that StartPrewarm fired with the NEW URI — rather than the
-		// less precise "the call count went up" (which can be off by
-		// retries when etcd is slow on CI).
-		var lastPrewarmedURI atomic.Pointer[string]
-		suiteFakeMC.StartPrewarmFunc = func(_ context.Context, req modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
-			uri := req.Source.URI
-			lastPrewarmedURI.Store(&uri)
-			return &modelcache.PrewarmOperation{ID: "fake-op-uri-change"}, nil
-		}
-
-		const firstURI = "oci://n/test/b/models/o/llama-v1"
-		cbm := v1beta1testing.MakeClusterBaseModel("sharded-uri-change").
-			StorageURI(firstURI).
-			Distribution(v1beta1.DistributionSharded).
-			ModelFormat("safetensors").Obj()
-		Expect(k8sClient.Create(suiteCtx, cbm)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, cbm) })
-
-		ginkgo.By("waiting for the first prewarm to record a PrewarmID in Status.Cache (with the original URI)")
-		Eventually(func(g Gomega) {
-			got := &v1beta1.ClusterBaseModel{}
-			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-uri-change"}, got)).To(Succeed())
-			g.Expect(got.Status.Cache).NotTo(BeNil())
-			g.Expect(got.Status.Cache.PrewarmID).NotTo(BeEmpty())
-			g.Expect(got.Status.Cache.SourceUri).To(Equal(firstURI))
-			seen := lastPrewarmedURI.Load()
-			g.Expect(seen).NotTo(BeNil())
-			g.Expect(*seen).To(Equal(firstURI))
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
-
-		ginkgo.By("changing storage URI — cache identity must reset and a fresh StartPrewarm fires for the new URI")
-		newURI := "oci://n/test/b/models/o/llama-v2"
-		got := &v1beta1.ClusterBaseModel{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-uri-change"}, got)).To(Succeed())
-		got.Spec.Storage.StorageUri = &newURI
-		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
-
-		// Two-stage convergence so a CI failure narrows precisely to
-		// the broken phase. Stage 1 = controller observed the URI
-		// change (Status.Cache.SourceUri swap) — fast, fires on the
-		// first reconcile after the watch event. Stage 2 = controller
-		// fired a fresh StartPrewarm AFTER the reset (PrewarmID
-		// non-empty AGAIN, lastPrewarmedURI matches v2) — slower,
-		// needs ~3 reconcile cycles. Splitting them avoids the
-		// combined-90s-timeout hiding which phase actually stalled
-		// under CI load.
-		Eventually(func(g Gomega) {
-			latest := &v1beta1.ClusterBaseModel{}
-			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-uri-change"}, latest)).To(Succeed())
-			g.Expect(latest.Status.Cache).NotTo(BeNil())
-			g.Expect(latest.Status.Cache.SourceUri).To(Equal(newURI),
-				"Status.Cache.SourceUri must reflect the new storage URI after identity reset")
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
-
-		Eventually(func(g Gomega) {
-			latest := &v1beta1.ClusterBaseModel{}
-			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-uri-change"}, latest)).To(Succeed())
-			// Status.Cache.PrewarmID was reset to "" by
-			// resetShardedCacheProgress; a non-empty value here proves
-			// applyPrewarmStarted ran AFTER the reset. Combined with
-			// the lastPrewarmedURI assertion (controller-side mutator
-			// from the fake), this catches a regression where the
-			// controller observes the URI change but never fires a
-			// fresh prewarm.
-			g.Expect(latest.Status.Cache).NotTo(BeNil())
-			g.Expect(latest.Status.Cache.PrewarmID).NotTo(BeEmpty(),
-				"controller must call StartPrewarm AFTER the URI-change reset (PrewarmID was cleared and must be re-populated)")
-			seen := lastPrewarmedURI.Load()
-			g.Expect(seen).NotTo(BeNil())
-			g.Expect(*seen).To(Equal(newURI),
-				"the most recent StartPrewarm call must have been for the new URI")
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
-	})
+	// The URI-change → reset → fresh-StartPrewarm spec moved to a unit
+	// test in pkg/controller/v1beta1/basemodel/controller_test.go
+	// (TestSharded_URIChange_ResetsCacheAndFiresFreshPrewarm). The
+	// integration spec was racy under suite contention because it
+	// depended on the controller-runtime work queue + watch + informer
+	// cache to converge within a fixed wall-clock budget. The unit test
+	// drives Reconcile directly with an in-memory fake k8s client and
+	// the modelcache fake, asserting the same invariant deterministically.
 })
 
 // Note: provider-not-configured spec lives in
