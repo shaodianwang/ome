@@ -24,6 +24,33 @@ func ValidateEngineDecoderConfig(spec *v1beta1.InferenceServiceSpec) error {
 	return nil
 }
 
+// ValidatePredictorNotUsed rejects InferenceServices that still set the
+// deprecated spec.predictor field. The migration path is spec.engine +
+// top-level spec.model + spec.runtime; setting predictor is a hard error
+// — the previous opt-in auto-migration has been removed.
+func ValidatePredictorNotUsed(spec *v1beta1.InferenceServiceSpec) error {
+	p := spec.Predictor
+	if p.Model != nil && p.Model.BaseModel != nil {
+		return predictorRemovedErr("spec.predictor.model")
+	}
+	if p.MinReplicas != nil {
+		return predictorRemovedErr("spec.predictor.minReplicas")
+	}
+	if p.ServiceAccountName != "" ||
+		len(p.Containers) > 0 ||
+		len(p.Volumes) > 0 ||
+		len(p.NodeSelector) > 0 ||
+		len(p.Tolerations) > 0 ||
+		p.Affinity != nil {
+		return predictorRemovedErr("spec.predictor pod-spec field")
+	}
+	return nil
+}
+
+func predictorRemovedErr(field string) error {
+	return fmt.Errorf("%s is set, but the Predictor API has been removed; migrate to spec.engine + spec.model + spec.runtime", field)
+}
+
 func ValidateReplicaBounds(min, max *int) error {
 	if min != nil && *min < 0 {
 		return fmt.Errorf("minReplicas must be >= 0")

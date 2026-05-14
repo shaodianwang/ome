@@ -3,6 +3,7 @@ package validation
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -218,6 +219,70 @@ func TestValidateAutoscalerTargetUtilizationPercentage(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Annotations: tc.annotations},
 			}
 			err := ValidateAutoscalerTargetUtilizationPercentage(isvc)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidatePredictorNotUsed(t *testing.T) {
+	stringPtr := func(s string) *string { return &s }
+	intPtr := func(i int) *int { return &i }
+	tests := []struct {
+		name    string
+		spec    v1beta1.InferenceServiceSpec
+		wantErr bool
+	}{
+		{
+			name:    "empty spec passes",
+			spec:    v1beta1.InferenceServiceSpec{},
+			wantErr: false,
+		},
+		{
+			name: "engine + top-level model passes",
+			spec: v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{},
+				Model:  &v1beta1.ModelRef{Name: "m"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "predictor.model is rejected",
+			spec: v1beta1.InferenceServiceSpec{
+				Predictor: v1beta1.PredictorSpec{
+					Model: &v1beta1.ModelSpec{BaseModel: stringPtr("m")},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "predictor.minReplicas is rejected",
+			spec: v1beta1.InferenceServiceSpec{
+				Predictor: v1beta1.PredictorSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(1)},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "predictor pod-spec field (containers) is rejected",
+			spec: v1beta1.InferenceServiceSpec{
+				Predictor: v1beta1.PredictorSpec{
+					PodSpec: v1beta1.PodSpec{
+						Containers: []corev1.Container{{Name: "c"}},
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidatePredictorNotUsed(&tc.spec)
 			if tc.wantErr && err == nil {
 				t.Fatalf("expected error, got nil")
 			}

@@ -78,13 +78,7 @@ func TestInferenceServiceValidator_ValidateCreate(t *testing.T) {
 					Name:      "test-isvc",
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
-				},
+				Spec: v1beta1.InferenceServiceSpec{				},
 			},
 			wantErr: false,
 		},
@@ -95,13 +89,7 @@ func TestInferenceServiceValidator_ValidateCreate(t *testing.T) {
 					Name:      "Test-ISVC", // Invalid name format
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
-				},
+				Spec: v1beta1.InferenceServiceSpec{				},
 			},
 			wantErr: true,
 		},
@@ -136,26 +124,14 @@ func TestInferenceServiceValidator_ValidateUpdate(t *testing.T) {
 					Name:      "test-isvc",
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
-				},
+				Spec: v1beta1.InferenceServiceSpec{				},
 			},
 			newIsvc: &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-isvc",
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("updated-model"),
-						},
-					},
-				},
+				Spec: v1beta1.InferenceServiceSpec{				},
 			},
 			wantErr: false,
 		},
@@ -189,13 +165,7 @@ func TestInferenceServiceValidator_ValidateDelete(t *testing.T) {
 					Name:      "test-isvc",
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("test-model"),
-						},
-					},
-				},
+				Spec: v1beta1.InferenceServiceSpec{				},
 			},
 			wantErr: false,
 		},
@@ -794,13 +764,7 @@ func TestInferenceService_RuntimeResolution(t *testing.T) {
 					Name:      "test-isvc",
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Predictor: v1beta1.PredictorSpec{
-						Model: &v1beta1.ModelSpec{
-							BaseModel: stringPtr("enabled-model"),
-						},
-					},
-				},
+				Spec: v1beta1.InferenceServiceSpec{				},
 			},
 			wantErr: false,
 		},

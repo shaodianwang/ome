@@ -93,6 +93,10 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
+	if err := validation.ValidatePredictorNotUsed(&isvc.Spec); err != nil {
+		return allWarnings, err
+	}
+
 	if err := validation.ValidateEngineDecoderConfig(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
