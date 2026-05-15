@@ -26,12 +26,18 @@ milestone:
   beta: "TBD"
   stable: "TBD"
 
-feature-gates:
-  - name: OMENativeWorkloadStrategy
-    description: |
-      Enables the OMENative workload strategy. When disabled, OME falls
-      back to the SingleComponentStrategy with the LWS-backed paths.
+feature-gates: []
 disable-supported: true
+
+# Opt-in mechanism. OMENative does not ship behind a Kubernetes feature
+# gate in alpha. Operators select the new strategy per-Component via the
+# existing `ome.io/deploymentMode` annotation on the Component spec
+# (router/engine/decoder). When the annotation is absent or set to any
+# other supported value, OMENative is not invoked. This keeps the alpha
+# rollout minimally invasive: no controller-wide flag, no admission
+# gating beyond enum validation. Promotion to a typed `deploymentMode`
+# field and/or a feature gate may happen at beta, see graduation
+# criteria in README.md.
 
 metrics:
   - omenative_reconcile_duration_seconds

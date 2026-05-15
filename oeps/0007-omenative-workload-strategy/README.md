@@ -98,8 +98,8 @@ independently.
 
 OME defines eight CRDs in the `ome.io/v1beta1` API group and runs
 four controllers. The workload-facing CRD is `InferenceService`, which
-today supports six deployment modes defined in
-`pkg/constants/constants.go:440-446`:
+today supports five deployment modes defined in
+`pkg/constants/constants.go:445-453`:
 
 | Mode | Primary resource | Multi-pod Instance | Multi-Component | Uses LWS? |
 |------|------------------|--------------------|-----------------|-----------|
@@ -299,20 +299,40 @@ controllers don't prioritize:
 
 ### What OMENative Is, Conceptually
 
-OMENative is a `WorkloadStrategy` registered in OME's strategy
-manager (from OEP-0006) under the strategy name `OMENative`. The
-strategy is selected per-Component on an InferenceService via the
-existing `deploymentMode` field:
+OMENative is a new `WorkloadStrategy` for OME's InferenceService
+controller. Operators select the strategy per-Component via the
+existing `ome.io/deploymentMode` annotation on each Component's
+metadata — the same annotation OME already uses today
+(`pkg/constants/constants.go:90`,
+`pkg/controller/v1beta1/inferenceservice/utils/deployment.go:18`):
 
 ```yaml
 spec:
   router:
-    deploymentMode: Serverless      # router is free to pick any mode
+    metadata:
+      annotations:
+        ome.io/deploymentMode: Serverless    # router is free to pick any mode
   engine:
-    deploymentMode: OMENative        # NEW mode introduced by this OEP
+    metadata:
+      annotations:
+        ome.io/deploymentMode: OMENative     # NEW mode introduced by this OEP
   decoder:
-    deploymentMode: OMENative        # must match engine in PD mode
+    metadata:
+      annotations:
+        ome.io/deploymentMode: OMENative     # must match engine in PD mode
 ```
+
+OMENative deliberately reuses the existing per-Component annotation
+rather than introducing a typed `deploymentMode` field on
+`EngineSpec`/`DecoderSpec`/`RouterSpec`. The reasoning is two-sided:
+
+- The annotation contract already works today: `DetermineEngineDeploymentMode`
+  reads `engine.Annotations` first and falls back to inference. Adding
+  `OMENative` to that resolution table is a one-line change.
+- Promoting the annotation to a typed field is an additive CRD change
+  that can land at beta or GA once the surface has stabilized. Going
+  the other way (typed field first, then realising you wanted to
+  describe it differently) is a breaking change.
 
 Engine and decoder deployment modes **must match** when both are
 present — they are coupled through coordinated rollout and shared
@@ -407,8 +427,9 @@ Operator has a 7B model on `RawDeployment`. Upgrade to a 70B model
 requiring tensor parallelism across 2 nodes (1 leader + 1 worker).
 
 Operator changes `InferenceService.spec.engine` to add `leader` and
-`worker` sections with `worker.size: 1`, and sets
-`engine.deploymentMode: OMENative`. OMENative's controller creates a
+`worker` sections with `worker.size: 1`, and sets the
+`ome.io/deploymentMode: OMENative` annotation on `spec.engine.metadata.annotations`.
+OMENative's controller creates a
 headless Service, two pods (`-engine-0-leader-0`,
 `-engine-0-worker-0`), and one PodGroup. Pods come up; runtime
 readiness and `ome.io/serving` gate them; Instance 0 is Ready only
@@ -469,11 +490,12 @@ once no protected pods remain.
 #### Story 5: Single-pod engine stays on RawDeployment unless migration semantics are needed
 
 Operator runs an engine-only `InferenceService` where one pod is the
-entire serving unit. The default remains `deploymentMode:
-RawDeployment`, because Alfred can safely evict and reschedule that pod
-without group semantics. If the operator later needs OMENative's
-controller-owned drain or surge migration semantics, they opt the
-Component into `deploymentMode: OMENative` explicitly.
+entire serving unit. The default remains `RawDeployment`, because
+Alfred can safely evict and reschedule that pod without group
+semantics. If the operator later needs OMENative's controller-owned
+drain or surge migration semantics, they opt the Component into
+OMENative explicitly by setting the `ome.io/deploymentMode: OMENative`
+annotation on `spec.engine.metadata.annotations`.
 
 ### Risks and Mitigations
 
@@ -529,9 +551,10 @@ Errors clearly distinguish OMENative-issued vs. K8s-native.
 **Risk: Engine/decoder coupling rule surprises users.**
 
 *Mitigation:* Admission webhook rejects mismatched
-`engine.deploymentMode` vs. `decoder.deploymentMode` with
-`InvalidDeploymentModeCombination` and a clear error message. Users
-see the rejection at `kubectl apply` time, not in production.
+`ome.io/deploymentMode` annotation values between `spec.engine` and
+`spec.decoder` with `InvalidDeploymentModeCombination` and a clear
+error message. Users see the rejection at `kubectl apply` time, not
+in production.
 
 ## Design Details
 
@@ -1095,9 +1118,10 @@ Users with running InferenceServices on the LWS-backed `MultiNode` /
 cutover is not universal**. Procedure:
 
 1. User annotates InferenceService with
-   `ome.io/migrate-strategy-to: OMENative` (or changes
-   `deploymentMode` values — annotation is a declarative hint to the
-   controller for intermediate phased migration).
+   `ome.io/migrate-strategy-to: OMENative` (or changes the per-Component
+   `ome.io/deploymentMode` annotation values — the migrate-strategy
+   annotation is a declarative hint to the controller for intermediate
+   phased migration).
 2. OMENative's controller detects the annotation and classifies the
    target Component's cutover as either overlap-safe or not.
 3. **Safety boundary**:
@@ -1119,8 +1143,8 @@ cutover is not universal**. Procedure:
 5. After the old LWS path is drained and removed, or after an
    overlap-safe cutover completes, the controller removes the old
    LWS-managed resources and Services/PDB no longer needed.
-6. Annotation is cleared. InferenceService's
-   `spec.*.deploymentMode` is updated to `OMENative`.
+6. Annotation is cleared. InferenceService's per-Component
+   `ome.io/deploymentMode` annotation is settled at `OMENative`.
 7. Migration history entry is recorded.
 
 **Requirements**:
@@ -1238,10 +1262,10 @@ containers, model-init container, annotation translation) works
   Discovery](#service-discovery)) avoids collision with
   webhook-injected env.
 
-Integration tests cover: for a `deploymentMode: OMENative`
-InferenceService, emitted pods have correct RDMA injection, sidecar
-containers, model-init container, OMENative's env vars, and
-controller-assigned hostname/subdomain.
+Integration tests cover: for a Component annotated with
+`ome.io/deploymentMode: OMENative`, emitted pods have correct RDMA
+injection, sidecar containers, model-init container, OMENative's env
+vars, and controller-assigned hostname/subdomain.
 
 ### Status Propagation
 
@@ -1289,12 +1313,14 @@ status:
 ```
 
 The nested `components[*].omenative` field is additive and optional in
-CRD terms. Older clients ignore it, and Components not using
-`deploymentMode: OMENative` leave it `nil`.
+CRD terms. Older clients ignore it, and Components not annotated with
+`ome.io/deploymentMode: OMENative` leave it `nil`.
 
 After upgrade, OMENative reconstructs this status from live Pods,
 Services, `ControllerRevision`, PodGroups, and EndpointSlices, so no
-storage migration or feature gate is required just to add the field.
+storage migration is required just to add the field. OMENative does
+not ship behind a Kubernetes feature gate; opt-in is per-Component via
+the `ome.io/deploymentMode` annotation.
 
 Per-runner counters are intentionally **not** persisted in
 `InstanceStatus` in v1. Runner-level debugging comes from live pod
@@ -1376,19 +1402,23 @@ updates).
 
 ### Component Strategy Selection Rules
 
-OMENative is selected per-Component via `deploymentMode: OMENative`.
-Other Components can use any other strategy.
+OMENative is selected per-Component by setting the
+`ome.io/deploymentMode: OMENative` annotation on the Component's
+metadata. Other Components can use any other strategy by setting (or
+not setting) the same annotation.
 
 **Router**: free. Typically `Serverless` (Knative), `RawDeployment`,
 or `OMENative`. Decoupled from engine/decoder via Service discovery.
 
 **Engine and Decoder**: when both are present (PD mode), they **must
-share the same deploymentMode**. Enforced at admission:
+share the same `ome.io/deploymentMode` annotation value**. Enforced at
+admission:
 
 ```
 Admission webhook:
-    if spec.engine.deploymentMode != spec.decoder.deploymentMode:
-        reject: "InvalidDeploymentModeCombination: engine and decoder must use the same deploymentMode"
+    if engine.metadata.annotations["ome.io/deploymentMode"] !=
+       decoder.metadata.annotations["ome.io/deploymentMode"]:
+        reject: "InvalidDeploymentModeCombination: engine and decoder must use the same deployment mode"
 ```
 
 Rationale: coordinated rollout, shared migration semantics, and
@@ -1409,7 +1439,7 @@ Six-release deprecation window for LWS-backed paths.
 | Phase | OME version | LWS-backed modes | OMENative | Communication |
 |-------|-------------|------------------|-----------|---------------|
 | 0 | current | Supported (default) | Does not exist | none |
-| 1 | +1 minor | Supported | Alpha, feature-gated opt-in | none |
+| 1 | +1 minor | Supported | Alpha, annotation-driven opt-in | none |
 | 2 | +2 minor | Supported | Beta | Controller logs + K8s Events on ISVC |
 | 3 | +3 minor | Supported | Beta (default for new multi-node ISVCs) | + Admission warnings (`kubectl apply` stderr) |
 | 4 | +4 minor | Frozen (bug fixes only) | GA, recommended | + Admission warnings escalated (multi-line, removal date) |
@@ -1420,9 +1450,10 @@ Warning text at phase 3+ (exact `<URL>` and `vX.Y` values are
 populated when OMENative reaches GA and the migration guide is
 published):
 ```
-InferenceService field .spec.<component>.deploymentMode=MultiNode uses the
-deprecated LWS-backed strategy. Migrate to deploymentMode=OMENative.
-See migration guide: <URL>. This path will be removed in OME vX.Y.
+InferenceService Component <name> has annotation ome.io/deploymentMode=MultiNode,
+which uses the deprecated LWS-backed strategy. Migrate to
+ome.io/deploymentMode=OMENative. See migration guide: <URL>.
+This path will be removed in OME vX.Y.
 ```
 
 Supplementary signals:
@@ -1431,19 +1462,33 @@ Supplementary signals:
   deprecated-mode state, not on every reconcile.
 - Controller logs WARN.
 
-## Feature Gating and Rollout
+## Opt-In and Rollout
 
-A feature gate `OMENativeWorkloadStrategy` controls strategy
-registration:
+OMENative does **not** ship behind a Kubernetes feature gate. Selection
+is per-Component via the existing `ome.io/deploymentMode` annotation
+(`pkg/constants/constants.go:90`). Operators opt in by adding
+`ome.io/deploymentMode: OMENative` to a Component's metadata
+annotations; absence (or any other supported value) means the existing
+mode for that Component continues to apply.
 
-- Alpha (disabled by default; opt-in via
-  `--feature-gates=OMENativeWorkloadStrategy=true`).
-- Beta (enabled by default; can be disabled).
-- GA (always enabled; feature gate removed).
+This deliberately keeps the alpha rollout minimally invasive — no
+controller-wide flag, no global toggle, no admission gating beyond the
+enum validation OME already performs on `DeploymentModeType`. The
+trade-off is that there is no single "kill switch" to stop all
+OMENative behavior cluster-wide; if a fleet-wide rollback is needed
+during alpha, operators remove the annotation from each Component
+(or revert OME to the previous version).
 
-When disabled, OMENative is not registered. An InferenceService with
-`deploymentMode: OMENative` should be rejected at admission with
-reason `StrategyNotAvailable`.
+A typed `deploymentMode` field on `EngineSpec`/`DecoderSpec`/`RouterSpec`
+and/or a real Kubernetes feature gate may be introduced at beta or GA
+based on operational experience. Both are additive changes that do not
+break the alpha annotation contract.
+
+When OMENative is not yet implemented for a given build (e.g., on a
+controller version predating PR-N), an InferenceService Component
+annotated with `ome.io/deploymentMode: OMENative` falls through the
+existing `IsValid()` enum check and is rejected at admission with the
+standard "unsupported deployment mode" error.
 
 ## Test Plan
 
@@ -1469,9 +1514,9 @@ gang scheduling. Fake GPU device plugin for resource accounting.
 **Core scenarios:**
 
 1. Single-pod RawDeployment-equivalent: InferenceService with
-   `engine.minReplicas=1` and `engine.deploymentMode=OMENative`, no
-   leader/worker. Verify one direct Pod with stable name, headless
-   Service, and env vars.
+   `engine.minReplicas=1` and the `ome.io/deploymentMode: OMENative`
+   annotation on `spec.engine`, no leader/worker. Verify one direct
+   Pod with stable name, headless Service, and env vars.
 2. Single-Component multi-node: leader + 3 workers. Verify 2
    Runner pod sets (leader=1, worker=3), DNS resolution correct, one
    PodGroup created, pods gang-scheduled.
@@ -1507,15 +1552,18 @@ gang scheduling. Fake GPU device plugin for resource accounting.
 16. User readiness gates preserved. Verify OMENative appends
     `ome.io/serving` without clobbering existing readiness gates.
 17. Deprecation warnings at phase 3. Verify webhook emits warning
-    on LWS-mode ISVC apply.
-18. Strategy rejection with feature gate off. Verify OMENative ISVC is
-    rejected at admission.
+    on `ome.io/deploymentMode: MultiNode` Component apply.
+18. Unknown deployment-mode rejection. Verify a Component annotated
+    with `ome.io/deploymentMode: OMENative` on a controller build that
+    does not yet support OMENative is rejected at admission with the
+    standard "unsupported deployment mode" error.
 19. Coexistence: OMENative ISVC and LWS-mode ISVC in same namespace.
     No interference.
 20. LWS → OMENative strategy migration procedure. Verify dual-write,
     drain, completion.
-21. Engine/decoder deploymentMode mismatch. Verify admission
-    rejection.
+21. Engine/decoder deployment-mode mismatch. Verify admission rejects
+    the case where `engine.metadata.annotations["ome.io/deploymentMode"]`
+    differs from the same annotation on `decoder`.
 22. Port allocation: PodScoped, InstanceScoped, ComponentScoped.
     Verify correct env var values.
 23. Unsupported schema version. Write a migration request with
@@ -1542,10 +1590,12 @@ gang scheduling. Fake GPU device plugin for resource accounting.
 
 - All unit tests passing.
 - Integration tests 1–9 passing.
-- Feature gate disabled by default.
-- Documentation: opt-in mechanism, known limitations, feature-gate
-  flag.
-- No backward-compatibility promises.
+- Opt-in is per-Component via the `ome.io/deploymentMode: OMENative`
+  annotation; OMENative is invoked only on Components carrying it.
+- Documentation covers: annotation-based opt-in, known limitations,
+  the alpha contract that no feature gate is shipped (the only
+  rollback is annotation removal or controller revert).
+- No backward-compatibility promises on internal status fields.
 
 ### Beta
 
@@ -1554,14 +1604,20 @@ gang scheduling. Fake GPU device plugin for resource accounting.
   without Sev1/Sev2 incidents attributed to OMENative.
 - Dashboard published.
 - Migration guide published.
-- Feature gate enabled by default.
-- API surface frozen except for bug fixes.
+- Decision recorded on whether to promote the annotation contract to
+  a typed `deploymentMode` field on EngineSpec/DecoderSpec/RouterSpec
+  and/or to introduce a Kubernetes feature gate. Either, both, or
+  neither is acceptable; the OEP is intentionally agnostic.
+- API surface (status fields, annotation contract) frozen except for
+  bug fixes.
 
 ### GA
 
 - 3 months of Beta with no regressions.
 - Deprecation plan reaches phase 3 (admission warnings).
-- Feature gate removed.
+- If a feature gate was introduced at beta, it is removed (or
+  promoted to permanently-on); if no feature gate was introduced,
+  the annotation contract is the GA surface.
 - Test coverage ≥ 85% across all OMENative packages.
 - Post-mortem process for any OMENative-attributed production
   incidents.
@@ -1621,50 +1677,49 @@ Four alternatives were considered. Brief summary:
 
 ## Open Questions
 
-Remaining genuinely-open questions (P3 in `design-questions.md`).
-These are research-level, not blocking design completeness:
+Remaining genuinely-open questions. These are research-level, not
+blocking design completeness:
 
-1. **KV cache handoff protocol during migration** (Q-038). Future
-   primitive for transferring in-flight KV cache between old and new
-   Instance during migration. Requires runtime cooperation. Research.
+1. **KV cache handoff protocol during migration.** Future primitive
+   for transferring in-flight KV cache between old and new Instance
+   during migration. Requires runtime cooperation. Research.
 
-2. **RDMA fabric topology data source** (Q-039). How does OMENative
-   / alfred know which nodes have full RDMA mesh connectivity?
-   Sources: gpu-feature-discovery labels, operator config, runtime
-   discovery. No clear standard yet.
+2. **RDMA fabric topology data source.** How does OMENative / alfred
+   know which nodes have full RDMA mesh connectivity? Sources:
+   gpu-feature-discovery labels, operator config, runtime discovery.
+   No clear standard yet.
 
-3. **GPU topology within a node (NVLink, PCIe)** (Q-040). Selecting
-   the right GPUs for an 8-GPU workload inside a node. Deferred; v1
+3. **GPU topology within a node (NVLink, PCIe).** Selecting the
+   right GPUs for an 8-GPU workload inside a node. Deferred; v1
    treats intra-node GPUs as fungible.
 
-4. **DRA (Dynamic Resource Allocation) integration** (Q-041).
-   Migrate from `Resources.Limits["nvidia.com/gpu"]` to
-   `ResourceClaims`. Revisit when DRA matures.
+4. **DRA (Dynamic Resource Allocation) integration.** Migrate from
+   `Resources.Limits["nvidia.com/gpu"]` to `ResourceClaims`.
+   Revisit when DRA matures.
 
-5. **User-facing rollback mechanism** (Q-009). Internal
-   `ControllerRevision` is emitted; a rollback verb
-   (`ome.io/rollback-to-revision: <N>` or subresource) is future
-   work.
+5. **User-facing rollback mechanism.** Internal `ControllerRevision`
+   is emitted; a rollback verb (`ome.io/rollback-to-revision: <N>`
+   or subresource) is future work.
 
-6. **Component dependencies** (Q-007). Explicit `dependencies`
-   field on Component spec for cases requiring orderly restart
-   cascades (e.g., Mooncake-style KV master). Not required in v1
-   because router uses Service discovery; add when a concrete need
-   surfaces.
+6. **Component dependencies.** Explicit `dependencies` field on
+   Component spec for cases requiring orderly restart cascades
+   (e.g., Mooncake-style KV master). Not required in v1 because
+   router uses Service discovery; add when a concrete need surfaces.
 
-7. **Gang scheduling fallback** (Q-005). OMENative-managed pod
-   scheduling gates for clusters without a gang-aware scheduler.
-   Substantial work; deferred; separate OEP if demand emerges.
+7. **Gang scheduling fallback.** OMENative-managed pod scheduling
+   gates for clusters without a gang-aware scheduler. Substantial
+   work; deferred; separate OEP if demand emerges.
 
-8. **Final names** (Q-047 OMENative; Q-048 Alfred). Candidates for
-   consideration before GA: `Native`, `NativeGroup`, `OMECore`,
-   `Bundle`.
+8. **Final name.** Candidates for consideration before GA:
+   `OMENative` (default), `Native`, `NativeGroup`, `OMECore`,
+   `Bundle`. Pin before any code lands — every label, env var,
+   metric, and package path embeds the name.
 
-9. **Resource resize in place (K8s 1.33+)** (part of Q-002). When
+9. **Resource resize in place (K8s 1.33+).** When
    `resizePolicy: RestartNotRequired` is set and the cluster is ≥
    1.33, resource requests/limits could be classified as in-place
    capable. Follow-up addendum.
 
-10. **Historical migration learning** (Q-042 — alfred-side, but
-    OMENative could consume feedback). Adjust migration timeouts and
-    retry policy based on past outcomes. v2+ feature.
+10. **Historical migration learning** (alfred-side, but OMENative
+    could consume feedback). Adjust migration timeouts and retry
+    policy based on past outcomes. v2+ feature.

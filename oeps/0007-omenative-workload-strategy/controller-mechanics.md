@@ -3,10 +3,9 @@
 > This document defines the v1 controller-level mechanics for
 > OMENative.
 >
-> `README.md` is the product-level OEP, and
-> `design-questions.md` is the decision ledger. The three documents
-> must stay consistent, but low-level reconcile behavior, watches,
-> and file layout are specified here.
+> `README.md` is the product-level OEP. The two documents must stay
+> consistent, but low-level reconcile behavior, watches, and file
+> layout are specified here.
 
 ## 0. Decisions Locked By This Document
 
@@ -1560,9 +1559,38 @@ but **engine and decoder are coupled**.
 
 Coupling rule:
 
-- `engine.deploymentMode` **must match** `decoder.deploymentMode` when
-  both are present
-- `router.deploymentMode` is independent
+- The `ome.io/deploymentMode` annotation on `spec.engine` **must match**
+  the same annotation on `spec.decoder` when both are present. This is
+  enforced by the existing `validateDeploymentModeCompatibility` path
+  in `pkg/controller/v1beta1/inferenceservice/utils/deployment.go`,
+  which OMENative extends with one new rule (`OMENative` may not pair
+  with any other mode in the engine/decoder slot).
+- The router's `ome.io/deploymentMode` annotation is independent.
+
+Operators set the annotation directly on each Component's metadata,
+matching the existing OME pattern (`pkg/constants/constants.go:90`):
+
+```yaml
+spec:
+  router:
+    metadata:
+      annotations:
+        ome.io/deploymentMode: Serverless
+  engine:
+    metadata:
+      annotations:
+        ome.io/deploymentMode: OMENative
+  decoder:
+    metadata:
+      annotations:
+        ome.io/deploymentMode: OMENative
+```
+
+A typed `deploymentMode` field on `EngineSpec` / `DecoderSpec` /
+`RouterSpec` is **deferred** until OMENative reaches beta and the
+annotation contract has been validated by real users — the cost of
+introducing a typed field later is one additive CRD change, while the
+cost of getting it wrong now and migrating away is much higher.
 
 Rationale for the coupling:
 
@@ -1739,7 +1767,9 @@ Components leave it `nil`.
 
 After upgrade, OMENative reconstructs this nested status from live Pods,
 Services, ControllerRevisions, PodGroups, and EndpointSlices, so no
-storage migration or feature gate is required just to add the field.
+storage migration is required just to add the field. OMENative does not
+ship behind a Kubernetes feature gate; opt-in is per-Component via the
+`ome.io/deploymentMode` annotation.
 
 with:
 
