@@ -13,6 +13,7 @@ import (
 	istionetworking "istio.io/api/networking/v1beta1"
 	istioclientv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	v1 "k8s.io/api/core/v1"
+	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -260,6 +261,11 @@ func main() {
 			setupLog.Error(err, "Failed to register Istio scheme")
 			os.Exit(1)
 		}
+	}
+
+	if ingressConfig.EnableGatewayAPI {
+		setupLog.Info("Registering Gateway API scheme")
+		utilruntime.Must(gatewayapiv1.Install(mgr.GetScheme()))
 	}
 
 	// Setup Event Broadcaster
