@@ -73,7 +73,7 @@ func TestShmInjector_ExistingVolumeNotDuplicated(t *testing.T) {
 
 func TestShmInjector_TargetContainerMissing_NoOp(t *testing.T) {
 	pod := makePod(map[string]string{
-		constants.RuntimeShmProfileAnnotationKey:   "default",
+		constants.RuntimeShmProfileAnnotationKey:    "default",
 		constants.RuntimeContainerNameAnnotationKey: "missing",
 	}, defaultContainer())
 	assert.NoError(t, NewShmInjector().InjectShm(pod))

@@ -485,10 +485,6 @@ func createTestInferenceServiceWithRouterAndDecoderHTTPRoute(name, namespace str
 }
 
 func setEngineReady(isvc *v1beta1.InferenceService) {
-	isvc.Status.SetCondition(v1beta1.PredictorReady, &apis.Condition{
-		Type:   v1beta1.PredictorReady,
-		Status: corev1.ConditionTrue,
-	})
 	isvc.Status.SetCondition(v1beta1.EngineReady, &apis.Condition{
 		Type:   v1beta1.EngineReady,
 		Status: corev1.ConditionTrue,

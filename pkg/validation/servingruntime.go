@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	multiNodeConfigurationError   = "for MultiNode deployment, both leader and worker must be defined and worker.size must be greater than 0"
+	multiNodeConfigurationError     = "for MultiNode deployment, both leader and worker must be defined and worker.size must be greater than 0"
 	rawDeploymentConfigurationError = "for RawDeployment, leader and worker must not be defined"
-	priorityIsNotSameError        = "different priorities assigned for the model format %s"
+	priorityIsNotSameError          = "different priorities assigned for the model format %s"
 )
 
 func ValidateSupportedModelFormats(formats []v1beta1.SupportedModelFormat) error {

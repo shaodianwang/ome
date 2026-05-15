@@ -515,7 +515,7 @@ func (r *InferenceServiceReconciler) handleVirtualDeployment(isvc *v1beta1.Infer
 	isvc.Status.URL = openAIURL
 	isvc.Status.Address = addressURL
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.PredictorComponent: {
+		v1beta1.EngineComponent: {
 			URL: openAIURL,
 		},
 	}

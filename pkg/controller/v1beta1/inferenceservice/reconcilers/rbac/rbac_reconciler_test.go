@@ -71,7 +71,7 @@ func TestNewRBACReconciler(t *testing.T) {
 			client:           fakeClient,
 			scheme:           scheme,
 			objectMeta:       objectMeta,
-			componentType:    v1beta1.PredictorComponent,
+			componentType:    v1beta1.EngineComponent,
 			inferenceService: inferenceService,
 			expectError:      false,
 		},
@@ -112,14 +112,6 @@ func TestRBACReconciler_GetServiceAccountName(t *testing.T) {
 			},
 			componentType: v1beta1.RouterComponent,
 			expected:      "my-service-router",
-		},
-		{
-			name: "predictor component",
-			inferenceService: &v1beta1.InferenceService{
-				ObjectMeta: metav1.ObjectMeta{Name: "inference-svc"},
-			},
-			componentType: v1beta1.PredictorComponent,
-			expected:      "inference-svc-predictor",
 		},
 		{
 			name: "decoder component",
@@ -324,7 +316,7 @@ func TestRBACReconciler_Reconcile_NonRouterComponent(t *testing.T) {
 		fakeClient,
 		scheme,
 		objectMeta,
-		v1beta1.PredictorComponent, // Non-router component
+		v1beta1.EngineComponent, // Non-router component
 		inferenceService,
 	)
 
@@ -332,7 +324,7 @@ func TestRBACReconciler_Reconcile_NonRouterComponent(t *testing.T) {
 	err := reconciler.Reconcile()
 	require.NoError(t, err)
 
-	expectedServiceAccountName := "test-inference-service-predictor"
+	expectedServiceAccountName := "test-inference-service-engine"
 
 	// Verify ServiceAccount was created
 	sa := &corev1.ServiceAccount{}
