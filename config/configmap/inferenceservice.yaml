@@ -34,6 +34,21 @@ data:
       "enablePrometheusScraping" : "false"
     }
 
+  # modelCache configures the optional cluster-wide model cache provider used
+  # by BaseModel/ClusterBaseModel resources with spec.distribution: Sharded.
+  # Omit this key (or leave provider empty) to keep the default PerNode /
+  # model-agent behavior. The built-in provider is "cluster_cache".
+  #
+  # modelCache: |-
+  #   {
+  #     "provider": "cluster_cache",
+  #     "endpoint": "http://cluster-cache.ome.svc.cluster.local:10090",
+  #     "options": {
+  #       "timeout": "5m",
+  #       "operation_retention": "10m"
+  #     }
+  #   }
+
   modelInit: |-
     {
         "image" : "ghcr.io/moirai-internal/ome-agent:v0.1.5",
