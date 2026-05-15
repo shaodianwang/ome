@@ -59,7 +59,7 @@ type indexedPackedRange struct {
 func (c *Client) inspectSourceFromFileMetadata(ctx context.Context, source modelcache.Source, metadata *fileMetadataResponse) (*modelcache.SourceInspection, error) {
 	files := metadataFilesFromResponse(source, metadata)
 	if len(files) == 0 {
-		return nil, fmt.Errorf("cluster_cache file_metadata returned no files for model source")
+		return nil, fmt.Errorf("cluster_cache file_metadata returned no files for model source: %w", modelcache.ErrSourceUnparseable)
 	}
 
 	chunkSize, err := c.metadataChunkSize(ctx, files)
@@ -149,7 +149,7 @@ func (c *Client) metadataChunkSize(ctx context.Context, files []clusterCacheMeta
 		}
 	}
 	if len(candidates) == 0 {
-		return 0, fmt.Errorf("cluster_cache source inspection requires %s or %s", defaultConfigFileName, defaultModelIndexFileName)
+		return 0, fmt.Errorf("cluster_cache source inspection requires %s or %s: %w", defaultConfigFileName, defaultModelIndexFileName, modelcache.ErrSourceUnparseable)
 	}
 
 	response, err := c.fetch(ctx, []string{candidates[0].path})
@@ -299,7 +299,7 @@ func safetensorMetadataFiles(files []clusterCacheMetadataFile, indexFile *cluste
 		for _, ref := range refs {
 			file := selectMetadataFileByRelativePath(files, ref)
 			if file == nil {
-				return nil, fmt.Errorf("safetensors shard %q referenced by %s was not listed by cluster_cache", ref, defaultSafetensorsIndexFileName)
+				return nil, fmt.Errorf("safetensors shard %q referenced by %s was not listed by cluster_cache: %w", ref, defaultSafetensorsIndexFileName, modelcache.ErrSourceUnparseable)
 			}
 			selected = append(selected, *file)
 		}
@@ -323,7 +323,7 @@ func safetensorsIndexShardPaths(data []byte, indexPath string) ([]string, error)
 		return nil, err
 	}
 	if len(index.WeightMap) == 0 {
-		return nil, fmt.Errorf("weight_map is empty")
+		return nil, fmt.Errorf("weight_map is empty: %w", modelcache.ErrSourceUnparseable)
 	}
 
 	seen := map[string]struct{}{}
@@ -332,7 +332,7 @@ func safetensorsIndexShardPaths(data []byte, indexPath string) ([]string, error)
 	for _, shard := range index.WeightMap {
 		shard = cleanMetadataRelativePath(shard)
 		if shard == "" {
-			return nil, fmt.Errorf("weight_map includes an empty or invalid shard path")
+			return nil, fmt.Errorf("weight_map includes an empty or invalid shard path: %w", modelcache.ErrSourceUnparseable)
 		}
 		if indexDir != "." && indexDir != "" {
 			shard = path.Join(indexDir, shard)
@@ -349,14 +349,14 @@ func safetensorsIndexShardPaths(data []byte, indexPath string) ([]string, error)
 
 func (c *Client) readWholeMetadataFile(ctx context.Context, file *clusterCacheMetadataFile, chunkSize uint64, ring *clusterCacheRing) ([]byte, error) {
 	if file.size > maxClusterCacheMetadataFileBytes {
-		return nil, fmt.Errorf("metadata file %s is %d bytes, above limit %d", file.path, file.size, maxClusterCacheMetadataFileBytes)
+		return nil, fmt.Errorf("metadata file %s is %d bytes, above limit %d: %w", file.path, file.size, maxClusterCacheMetadataFileBytes, modelcache.ErrSourceUnparseable)
 	}
 	return c.readRemoteRange(ctx, file, 0, file.size, chunkSize, ring)
 }
 
 func (c *Client) readSafetensorHeader(ctx context.Context, file *clusterCacheMetadataFile, chunkSize uint64, ring *clusterCacheRing) (*modelcache.SafetensorHeader, error) {
 	if file.size < 8 {
-		return nil, fmt.Errorf("safetensors file %s is too small to contain a header length", file.path)
+		return nil, fmt.Errorf("safetensors file %s is too small to contain a header length: %w", file.path, modelcache.ErrSourceUnparseable)
 	}
 
 	lengthBytes, err := c.readRemoteRange(ctx, file, 0, 8, chunkSize, ring)
@@ -365,10 +365,10 @@ func (c *Client) readSafetensorHeader(ctx context.Context, file *clusterCacheMet
 	}
 	headerLength := binary.LittleEndian.Uint64(lengthBytes)
 	if headerLength > maxClusterCacheSafetensorHeader {
-		return nil, fmt.Errorf("safetensors header length %d in %s exceeds limit %d", headerLength, file.path, maxClusterCacheSafetensorHeader)
+		return nil, fmt.Errorf("safetensors header length %d in %s exceeds limit %d: %w", headerLength, file.path, maxClusterCacheSafetensorHeader, modelcache.ErrSourceUnparseable)
 	}
 	if headerLength > file.size-8 {
-		return nil, fmt.Errorf("safetensors header length %d in %s exceeds file size %d", headerLength, file.path, file.size)
+		return nil, fmt.Errorf("safetensors header length %d in %s exceeds file size %d: %w", headerLength, file.path, file.size, modelcache.ErrSourceUnparseable)
 	}
 
 	headerJSON, err := c.readRemoteRange(ctx, file, 8, headerLength, chunkSize, ring)

@@ -2,10 +2,27 @@ package modelcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 )
+
+// ErrSourceUnparseable means the model source layout is structurally
+// incompatible with the provider's parsing requirements and retrying will
+// not help. The controller surfaces this as a terminal MetadataUnparseable
+// condition + state=Failed; the operator must change the spec or the
+// source bytes before the model can become Ready.
+//
+// Providers signal this by wrapping their structural errors:
+//
+//	fmt.Errorf("source missing config.json: %w", modelcache.ErrSourceUnparseable)
+//
+// Only use this for errors that are guaranteed not to be transient — i.e.
+// the bytes are visible and well-formed, but the layout doesn't match what
+// the parser needs. Network errors, auth failures, and truncated reads
+// must NOT be wrapped with this sentinel.
+var ErrSourceUnparseable = errors.New("model cache source has unparseable layout")
 
 const (
 	// ProviderClusterCache is the provider label for Meta's cluster_cache implementation.

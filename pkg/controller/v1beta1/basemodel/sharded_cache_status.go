@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -131,7 +132,7 @@ func reconcileShardedModelMetadata(ctx context.Context, kubeClient client.Client
 	if err != nil {
 		return result, err
 	}
-	if result.Requeue || result.RequeueAfter > 0 {
+	if result.Requeue || result.RequeueAfter > 0 || metadata == nil {
 		return result, nil
 	}
 
@@ -143,7 +144,7 @@ func reconcileShardedModelMetadataSpec(ctx context.Context, kubeClient client.Cl
 	if err != nil {
 		return nil, result, err
 	}
-	if result.Requeue || result.RequeueAfter > 0 {
+	if result.Requeue || result.RequeueAfter > 0 || metadata == nil {
 		return nil, result, nil
 	}
 
@@ -154,6 +155,10 @@ func parseShardedModelMetadata(ctx context.Context, kubeClient client.Client, lo
 	parser := newShardedModelConfigParser()
 	inspection, inputs, err := shardedModelMetadataInputs(ctx, cacheClient, source)
 	if err != nil {
+		if errors.Is(err, modelcache.ErrSourceUnparseable) {
+			updateErr := markShardedModelMetadataUnparseable(ctx, kubeClient, log, obj, modelType, backend, fmt.Sprintf("model metadata cannot be parsed: %v", err))
+			return nil, nil, nil, ctrl.Result{}, updateErr
+		}
 		result, updateErr := markShardedModelMetadataPending(ctx, kubeClient, log, obj, modelType, backend, fmt.Sprintf("model metadata is pending: %v", err))
 		return nil, nil, nil, result, updateErr
 	}
@@ -180,6 +185,18 @@ func markShardedModelMetadataPending(ctx context.Context, kubeClient client.Clie
 		return applyMetadataPending(generation, status, message)
 	}
 	return ctrl.Result{RequeueAfter: shardedModelCachePollInterval}, updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, backend, transition)
+}
+
+// markShardedModelMetadataUnparseable transitions the model to a terminal
+// Failed state when the provider reports modelcache.ErrSourceUnparseable.
+// No requeue — operator action (spec edit or source change) is required;
+// a generation bump on the spec will re-trigger reconciliation through the
+// normal informer path.
+func markShardedModelMetadataUnparseable(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, modelType, backend, message string) error {
+	transition := func(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool {
+		return applyMetadataUnparseable(generation, status, message)
+	}
+	return updateShardedModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, backend, transition)
 }
 
 func updateShardedModelMetadataSpecWithRetry(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, modelType string, parser *modelparser.ModelConfigParser, metadata modelparser.ModelMetadata) error {
@@ -558,6 +575,22 @@ func applyMetadataPending(generation int64, status *v1beta1.ModelStatusSpec, mes
 		Status:             metav1.ConditionFalse,
 		Reason:             v1beta1.ModelConditionReasonMetadataPending,
 		Message:            messageOrDefault(message, "model metadata parsing has not completed"),
+		ObservedGeneration: generation,
+	}) || updated
+	return updated
+}
+
+func applyMetadataUnparseable(generation int64, status *v1beta1.ModelStatusSpec, message string) bool {
+	updated := false
+	if status.State != v1beta1.LifeCycleStateFailed {
+		status.State = v1beta1.LifeCycleStateFailed
+		updated = true
+	}
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonMetadataUnparseable,
+		Message:            messageOrDefault(message, "model metadata cannot be parsed by the configured cache provider"),
 		ObservedGeneration: generation,
 	}) || updated
 	return updated

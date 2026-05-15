@@ -455,6 +455,11 @@ const (
 	ModelConditionReasonMetadataPending = "MetadataPending"
 	// ModelConditionReasonMetadataParsed means model metadata has been parsed.
 	ModelConditionReasonMetadataParsed = "MetadataParsed"
+	// ModelConditionReasonMetadataUnparseable means the model source layout is
+	// structurally incompatible with the cache provider's parsing requirements
+	// (e.g. missing config.json/model_index.json or unresolvable safetensors
+	// shards). The state is terminal until the spec or the source changes.
+	ModelConditionReasonMetadataUnparseable = "MetadataUnparseable"
 	// ModelConditionReasonProviderNotConfigured means no model cache provider is configured for the controller.
 	ModelConditionReasonProviderNotConfigured = "ProviderNotConfigured"
 

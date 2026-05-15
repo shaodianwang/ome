@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -459,6 +460,36 @@ func TestInspectSourceRequiresConfigOrModelIndex(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "config.json")
+	assert.True(t, errors.Is(err, modelcache.ErrSourceUnparseable),
+		"missing config.json/model_index.json is a structural source fault and must wrap ErrSourceUnparseable so the controller transitions to state=Failed instead of looping in MetadataPending forever")
+}
+
+// TestInspectSourceReportsEmptyFileMetadataAsUnparseable pins the wire
+// contract: when /file_metadata returns 200 with zero files, the InspectSource
+// path must surface that as ErrSourceUnparseable (same as the CheckSource
+// SourceNotReachable path). Without this, an empty-prefix source would be
+// retried indefinitely as a transient error.
+func TestInspectSourceReportsEmptyFileMetadataAsUnparseable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file_metadata":
+			writeJSON(t, w, fileMetadataResponse{
+				Root:  "s3://bucket/empty-model",
+				Files: nil,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.InspectSource(context.Background(), modelcache.Source{URI: "s3://bucket/empty-model"})
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, modelcache.ErrSourceUnparseable),
+		"empty file_metadata listing is a structural fault, not a transient error")
+	assert.Contains(t, err.Error(), "no files")
 }
 
 func TestInspectSourceReportsEndpointError(t *testing.T) {
