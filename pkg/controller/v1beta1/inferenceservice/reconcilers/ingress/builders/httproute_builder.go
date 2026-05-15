@@ -247,7 +247,6 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 	var httpRouteRules []gatewayapiv1.HTTPRouteRule
 	engineName := constants.PredictorServiceName(isvc.Name)
 	routerName := constants.RouterServiceName(isvc.Name)
-	decoderName := constants.DecoderServiceName(isvc.Name)
 
 	topLevelHost, err := b.domainService.GenerateDomainName(isvc.Name, isvc.ObjectMeta, b.ingressConfig)
 	if err != nil {
@@ -274,30 +273,12 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 
 	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace)}
 
-	// Build component-specific routes
-	if isvc.Spec.Decoder != nil {
-		if !isvc.Status.IsConditionReady(v1beta1.DecoderReady) {
-			isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
-				Type:   v1beta1.IngressReady,
-				Status: corev1.ConditionFalse,
-				Reason: "Decoder ingress not created",
-			})
-			return nil, nil
-		}
-		timeout := DefaultTimeout
-		if isvc.Spec.Decoder.TimeoutSeconds != nil {
-			timeout = toGatewayAPIDuration(*isvc.Spec.Decoder.TimeoutSeconds)
-		}
-		explainRouteMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(constants.DecoderPrefix())}
-		httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(explainRouteMatch, filters, decoderName, isvc.Namespace, DecoderDefaultPort, timeout))
-	}
-
 	if isvc.Spec.Router != nil {
 		if !isvc.Status.IsConditionReady(v1beta1.RouterReady) {
 			isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
 				Type:   v1beta1.IngressReady,
 				Status: corev1.ConditionFalse,
-				Reason: "Router ingress not created",
+				Reason: "Router not ready",
 			})
 			return nil, nil
 		}
@@ -316,7 +297,6 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 		httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(routeMatch, filters, engineName, isvc.Namespace, EngineDefaultPort, timeout))
 	}
 
-	// Add path-based routing if configured
 	if b.ingressConfig.PathTemplate != "" {
 		path, err := b.pathService.GenerateUrlPath(isvc.Name, isvc.Namespace, b.ingressConfig)
 		if err != nil {
@@ -324,15 +304,6 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 		}
 		path = strings.TrimSuffix(path, "/")
 		allowedHosts = append(allowedHosts, gatewayapiv1.Hostname(b.ingressConfig.IngressDomain))
-
-		if isvc.Spec.Decoder != nil {
-			timeout := DefaultTimeout
-			if isvc.Spec.Decoder.TimeoutSeconds != nil {
-				timeout = toGatewayAPIDuration(*isvc.Spec.Decoder.TimeoutSeconds)
-			}
-			decoderPathRouteMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(path + constants.PathBasedExplainPrefix())}
-			httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(decoderPathRouteMatch, filters, decoderName, isvc.Namespace, DecoderDefaultPort, timeout))
-		}
 
 		if isvc.Spec.Router != nil {
 			timeout := DefaultTimeout

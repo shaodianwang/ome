@@ -264,18 +264,11 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_TopLevelComponent(t *testing.T) {
 			expectedRules: 1,
 		},
 		{
-			name:          "top level with decoder",
-			isvc:          createTestInferenceServiceWithDecoderHTTPRoute("test-isvc", "default"),
-			expectedName:  "test-isvc",
-			expectedError: false,
-			expectedRules: 2, // decoder + engine
-		},
-		{
 			name:          "top level with router and decoder",
 			isvc:          createTestInferenceServiceWithRouterAndDecoderHTTPRoute("test-isvc", "default"),
 			expectedName:  "test-isvc",
 			expectedError: false,
-			expectedRules: 2, // decoder + router
+			expectedRules: 1, // router only, decoder goes through router
 		},
 		{
 			name:          "top level predictor not ready",
