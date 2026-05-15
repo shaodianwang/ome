@@ -55,7 +55,7 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_EngineComponent(t *testing.T) {
 			expectedError:   false,
 			expectedRules:   1,
 			expectedHosts:   1,
-			expectedTimeout: toGatewayAPIDuration(60), // default
+			expectedTimeout: DefaultTimeout, // default
 		},
 		{
 			name:          "engine component not ready",
@@ -124,7 +124,7 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_RouterComponent(t *testing.T) {
 			isvc:            createTestInferenceServiceWithRouterHTTPRoute("test-isvc", "default"),
 			expectedName:    "test-isvc-router",
 			expectedError:   false,
-			expectedTimeout: toGatewayAPIDuration(60),
+			expectedTimeout: DefaultTimeout,
 		},
 		{
 			name:          "router component not ready",
@@ -189,7 +189,7 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_DecoderComponent(t *testing.T) {
 			isvc:            createTestInferenceServiceWithDecoderHTTPRoute("test-isvc", "default"),
 			expectedName:    "test-isvc-decoder",
 			expectedError:   false,
-			expectedTimeout: toGatewayAPIDuration(60),
+			expectedTimeout: DefaultTimeout,
 		},
 		{
 			name:          "decoder component not ready",
@@ -325,14 +325,14 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_UnsupportedComponent(t *testing.T) {
 	assert.Nil(t, result)
 }
 
-func TestHTTPRouteBuilder_CreateHTTPRouteMatch(t *testing.T) {
+func TestHTTPRouteBuilder_CreatePathPrefixMatch(t *testing.T) {
 	builder := createHTTPRouteBuilder()
 
-	match := builder.createHTTPRouteMatch("^/test/.*$")
+	match := builder.createPathPrefixMatch("/playground/test-isvc/")
 
 	assert.NotNil(t, match.Path)
-	assert.Equal(t, gatewayapiv1.PathMatchRegularExpression, *match.Path.Type)
-	assert.Equal(t, "^/test/.*$", *match.Path.Value)
+	assert.Equal(t, gatewayapiv1.PathMatchPathPrefix, *match.Path.Type)
+	assert.Equal(t, "/playground/test-isvc/", *match.Path.Value)
 }
 
 func TestHTTPRouteBuilder_AddIsvcHeaders(t *testing.T) {
@@ -357,7 +357,7 @@ func TestHTTPRouteBuilder_CreateHTTPRouteRule(t *testing.T) {
 	builder := createHTTPRouteBuilder()
 
 	matches := []gatewayapiv1.HTTPRouteMatch{
-		builder.createHTTPRouteMatch("^/.*$"),
+		builder.createPathPrefixMatch("/playground/test-service/"),
 	}
 	filters := []gatewayapiv1.HTTPRouteFilter{
 		builder.addIsvcHeaders("test-service", "test-namespace"),

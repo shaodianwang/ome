@@ -30,7 +30,7 @@ const (
 	RouterDefaultPort  int32 = 30080
 )
 
-var DefaultTimeout = toGatewayAPIDuration(60)
+var DefaultTimeout = toGatewayAPIDuration(600)
 
 // HTTPRouteBuilder builds Gateway API HTTPRoute resources
 type HTTPRouteBuilder struct {
@@ -80,11 +80,31 @@ func toGatewayAPIDuration(seconds int64) *gatewayapiv1.Duration {
 	return &duration
 }
 
-func (b *HTTPRouteBuilder) createHTTPRouteMatch(prefix string) gatewayapiv1.HTTPRouteMatch {
+func (b *HTTPRouteBuilder) gatewayHostname() gatewayapiv1.Hostname {
+	return gatewayapiv1.Hostname("llm." + b.ingressConfig.IngressDomain)
+}
+
+func (b *HTTPRouteBuilder) pathPrefix(isvc *v1beta1.InferenceService, serviceName string) string {
+	return "/" + isvc.Namespace + "/" + serviceName + "/"
+}
+
+func (b *HTTPRouteBuilder) createPathPrefixMatch(prefix string) gatewayapiv1.HTTPRouteMatch {
 	return gatewayapiv1.HTTPRouteMatch{
 		Path: &gatewayapiv1.HTTPPathMatch{
-			Type:  ptr.To(gatewayapiv1.PathMatchRegularExpression),
+			Type:  ptr.To(gatewayapiv1.PathMatchPathPrefix),
 			Value: ptr.To(prefix),
+		},
+	}
+}
+
+func (b *HTTPRouteBuilder) urlRewriteFilter() gatewayapiv1.HTTPRouteFilter {
+	return gatewayapiv1.HTTPRouteFilter{
+		Type: gatewayapiv1.HTTPRouteFilterURLRewrite,
+		URLRewrite: &gatewayapiv1.HTTPURLRewriteFilter{
+			Path: &gatewayapiv1.HTTPPathModifier{
+				Type:               gatewayapiv1.PrefixMatchHTTPPathModifier,
+				ReplacePrefixMatch: ptr.To("/"),
+			},
 		},
 	}
 }
@@ -146,26 +166,21 @@ func (b *HTTPRouteBuilder) buildEngineHTTPRoute(isvc *v1beta1.InferenceService) 
 	}
 
 	engineName := constants.PredictorServiceName(isvc.Name)
-	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace)}
-
-	engineHost, err := b.domainService.GenerateDomainName(engineName, isvc.ObjectMeta, b.ingressConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate engine ingress host: %w", err)
-	}
-
-	allowedHosts := []gatewayapiv1.Hostname{gatewayapiv1.Hostname(engineHost)}
-	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(constants.FallbackPrefix())}
+	prefix := b.pathPrefix(isvc, engineName)
+	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace), b.urlRewriteFilter()}
 
 	timeout := DefaultTimeout
 	if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
 		timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
 	}
 
+	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
 		b.createHTTPRouteRule(routeMatch, filters, engineName, isvc.Namespace, EngineDefaultPort, timeout),
 	}
 
-	return b.buildHTTPRouteResource(isvc, constants.PredictorServiceName(isvc.Name), allowedHosts, httpRouteRules), nil
+	return b.buildHTTPRouteResource(isvc, constants.PredictorServiceName(isvc.Name),
+		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
 }
 
 func (b *HTTPRouteBuilder) buildRouterHTTPRoute(isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
@@ -179,26 +194,21 @@ func (b *HTTPRouteBuilder) buildRouterHTTPRoute(isvc *v1beta1.InferenceService) 
 	}
 
 	routerName := constants.RouterServiceName(isvc.Name)
-	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace)}
-
-	routerHost, err := b.domainService.GenerateDomainName(routerName, isvc.ObjectMeta, b.ingressConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate router ingress host: %w", err)
-	}
-
-	allowedHosts := []gatewayapiv1.Hostname{gatewayapiv1.Hostname(routerHost)}
-	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(constants.FallbackPrefix())}
+	prefix := b.pathPrefix(isvc, routerName)
+	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace), b.urlRewriteFilter()}
 
 	timeout := DefaultTimeout
 	if isvc.Spec.Router.TimeoutSeconds != nil {
 		timeout = toGatewayAPIDuration(*isvc.Spec.Router.TimeoutSeconds)
 	}
 
+	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
 		b.createHTTPRouteRule(routeMatch, filters, routerName, isvc.Namespace, RouterDefaultPort, timeout),
 	}
 
-	return b.buildHTTPRouteResource(isvc, constants.RouterServiceName(isvc.Name), allowedHosts, httpRouteRules), nil
+	return b.buildHTTPRouteResource(isvc, constants.RouterServiceName(isvc.Name),
+		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
 }
 
 func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
@@ -212,66 +222,29 @@ func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(isvc *v1beta1.InferenceService)
 	}
 
 	decoderName := constants.DecoderServiceName(isvc.Name)
-	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace)}
-
-	decoderHost, err := b.domainService.GenerateDomainName(decoderName, isvc.ObjectMeta, b.ingressConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate decoder ingress host: %w", err)
-	}
-
-	allowedHosts := []gatewayapiv1.Hostname{gatewayapiv1.Hostname(decoderHost)}
-	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(constants.FallbackPrefix())}
+	prefix := b.pathPrefix(isvc, decoderName)
+	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace), b.urlRewriteFilter()}
 
 	timeout := DefaultTimeout
 	if isvc.Spec.Decoder.TimeoutSeconds != nil {
 		timeout = toGatewayAPIDuration(*isvc.Spec.Decoder.TimeoutSeconds)
 	}
 
+	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
 		b.createHTTPRouteRule(routeMatch, filters, decoderName, isvc.Namespace, DecoderDefaultPort, timeout),
 	}
 
-	return b.buildHTTPRouteResource(isvc, constants.DecoderServiceName(isvc.Name), allowedHosts, httpRouteRules), nil
+	return b.buildHTTPRouteResource(isvc, constants.DecoderServiceName(isvc.Name),
+		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
 }
 
 func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
-	if !isvc.Status.IsConditionReady(v1beta1.EngineReady) {
-		isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
-			Type:   v1beta1.IngressReady,
-			Status: corev1.ConditionFalse,
-			Reason: "Engine ingress not created",
-		})
-		return nil, nil
-	}
+	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace), b.urlRewriteFilter()}
 
-	var httpRouteRules []gatewayapiv1.HTTPRouteRule
-	engineName := constants.PredictorServiceName(isvc.Name)
-	routerName := constants.RouterServiceName(isvc.Name)
-
-	topLevelHost, err := b.domainService.GenerateDomainName(isvc.Name, isvc.ObjectMeta, b.ingressConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate top level ingress host: %w", err)
-	}
-
-	allowedHosts := []gatewayapiv1.Hostname{gatewayapiv1.Hostname(topLevelHost)}
-
-	// Add additional hosts
-	domainList := []string{b.ingressConfig.IngressDomain}
-	additionalHosts := b.domainService.GetAdditionalHostsWithAnnotations(&domainList, topLevelHost, b.ingressConfig, isvc.Annotations)
-	if additionalHosts != nil {
-		hostMap := make(map[gatewayapiv1.Hostname]bool, len(allowedHosts))
-		for _, host := range allowedHosts {
-			hostMap[host] = true
-		}
-		for _, additionalHost := range *additionalHosts {
-			gwHost := gatewayapiv1.Hostname(additionalHost)
-			if _, found := hostMap[gwHost]; !found {
-				allowedHosts = append(allowedHosts, gwHost)
-			}
-		}
-	}
-
-	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace)}
+	var serviceName string
+	var port int32
+	var timeout *gatewayapiv1.Duration
 
 	if isvc.Spec.Router != nil {
 		if !isvc.Status.IsConditionReady(v1beta1.RouterReady) {
@@ -282,47 +255,37 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 			})
 			return nil, nil
 		}
-		timeout := DefaultTimeout
+		serviceName = constants.RouterServiceName(isvc.Name)
+		port = RouterDefaultPort
+		timeout = DefaultTimeout
 		if isvc.Spec.Router.TimeoutSeconds != nil {
 			timeout = toGatewayAPIDuration(*isvc.Spec.Router.TimeoutSeconds)
 		}
-		routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(constants.FallbackPrefix())}
-		httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(routeMatch, filters, routerName, isvc.Namespace, RouterDefaultPort, timeout))
 	} else {
-		timeout := DefaultTimeout
+		if !isvc.Status.IsConditionReady(v1beta1.EngineReady) {
+			isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
+				Type:   v1beta1.IngressReady,
+				Status: corev1.ConditionFalse,
+				Reason: "Engine not ready",
+			})
+			return nil, nil
+		}
+		serviceName = constants.PredictorServiceName(isvc.Name)
+		port = EngineDefaultPort
+		timeout = DefaultTimeout
 		if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
 			timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
 		}
-		routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(constants.FallbackPrefix())}
-		httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(routeMatch, filters, engineName, isvc.Namespace, EngineDefaultPort, timeout))
 	}
 
-	if b.ingressConfig.PathTemplate != "" {
-		path, err := b.pathService.GenerateUrlPath(isvc.Name, isvc.Namespace, b.ingressConfig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate URL from pathTemplate: %w", err)
-		}
-		path = strings.TrimSuffix(path, "/")
-		allowedHosts = append(allowedHosts, gatewayapiv1.Hostname(b.ingressConfig.IngressDomain))
-
-		if isvc.Spec.Router != nil {
-			timeout := DefaultTimeout
-			if isvc.Spec.Router.TimeoutSeconds != nil {
-				timeout = toGatewayAPIDuration(*isvc.Spec.Router.TimeoutSeconds)
-			}
-			pathRouteMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(path + "/")}
-			httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(pathRouteMatch, filters, routerName, isvc.Namespace, RouterDefaultPort, timeout))
-		} else {
-			timeout := DefaultTimeout
-			if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
-				timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
-			}
-			pathRouteMatch := []gatewayapiv1.HTTPRouteMatch{b.createHTTPRouteMatch(path + "/")}
-			httpRouteRules = append(httpRouteRules, b.createHTTPRouteRule(pathRouteMatch, filters, engineName, isvc.Namespace, EngineDefaultPort, timeout))
-		}
+	prefix := b.pathPrefix(isvc, isvc.Name)
+	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
+	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
+		b.createHTTPRouteRule(routeMatch, filters, serviceName, isvc.Namespace, port, timeout),
 	}
 
-	return b.buildHTTPRouteResource(isvc, isvc.Name, allowedHosts, httpRouteRules), nil
+	return b.buildHTTPRouteResource(isvc, isvc.Name,
+		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
 }
 
 func (b *HTTPRouteBuilder) buildHTTPRouteResource(isvc *v1beta1.InferenceService, name string, allowedHosts []gatewayapiv1.Hostname, httpRouteRules []gatewayapiv1.HTTPRouteRule) *gatewayapiv1.HTTPRoute {
