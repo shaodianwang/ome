@@ -1,6 +1,7 @@
 package pod
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -19,6 +20,10 @@ const (
 	DshmVolumeName = "dshm"
 	// DefaultContainerName is the default container name to inject into if not specified
 	DefaultContainerName = "ome-container"
+	// MultusNetworksAnnotation is the pod annotation Multus reads to attach
+	// extra NetworkAttachmentDefinitions. Value is a JSON array of
+	// {name, namespace} objects.
+	MultusNetworksAnnotation = "k8s.v1.cni.cncf.io/networks"
 )
 
 // RDMAProfiles is a map of profile names to RDMA configurations
@@ -123,7 +128,40 @@ var RDMAProfiles = map[string]RDMAProfile{
 			Privileged: &[]bool{true}[0],
 		},
 	},
+	// cks-gb-rdma: Multus network attachments only (no env/volumes/security)
+	// for the GB-class CKS topology (GB200 + GB300 share 4 HCAs × 4 ports =
+	// 16 ibs*-macvlan attachments in cw-multus). CoreWeave provisions the
+	// NADs but does NOT auto-attach them, so each pod needing NIXL/UCX over
+	// RoCEv2 must request them explicitly. Workload-specific knobs
+	// (NCCL/UCX env, /dev/shm sizing, securityContext) stay in the runtime
+	// YAML — they vary per model. Add a new profile if a future GB-class
+	// node ships with a different HCA layout.
+	"cks-gb-rdma": {
+		Networks: cksGbRdmaNetworks,
+	},
 	// Add other profiles here as needed
+}
+
+// cksGbRdmaNetworks is the canonical 16-attachment list for CKS GB200/GB300
+// (4 HCAs × 4 ports). Mirrors devops/pd cluster_env.py:_cks_net_devices().
+var cksGbRdmaNetworks = func() []NetworkAttachment {
+	out := make([]NetworkAttachment, 0, 16)
+	for hca := 0; hca < 4; hca++ {
+		for port := 0; port < 4; port++ {
+			out = append(out, NetworkAttachment{
+				Name:      fmt.Sprintf("ibs%dp%d-macvlan", hca, port),
+				Namespace: "cw-multus",
+			})
+		}
+	}
+	return out
+}()
+
+// NetworkAttachment is a Multus network reference. Serialized into
+// k8s.v1.cni.cncf.io/networks per the multus-cni JSON schema.
+type NetworkAttachment struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // RDMAProfile represents configuration parameters for RDMA and NCCL
@@ -132,6 +170,9 @@ type RDMAProfile struct {
 	VolumeMounts    []v1.VolumeMount
 	Volumes         []v1.Volume
 	SecurityContext *v1.SecurityContext
+	// Networks are merged into the pod's k8s.v1.cni.cncf.io/networks
+	// annotation; dedup is by (name, namespace).
+	Networks []NetworkAttachment
 }
 
 // RDMAInjector is responsible for injecting RDMA and NCCL configurations
@@ -190,6 +231,11 @@ func (ri *RDMAInjector) injectRDMAConfig(pod *v1.Pod, profile RDMAProfile) error
 	// Add volumes to pod if they don't already exist
 	ri.injectVolumes(pod, profile.Volumes)
 
+	// Merge profile networks into the Multus annotation.
+	if err := ri.injectNetworks(pod, profile.Networks); err != nil {
+		return err
+	}
+
 	// Now inject into the target container
 	for i := range pod.Spec.Containers {
 		if pod.Spec.Containers[i].Name == targetContainerName {
@@ -198,6 +244,46 @@ func (ri *RDMAInjector) injectRDMAConfig(pod *v1.Pod, profile RDMAProfile) error
 		}
 	}
 
+	return nil
+}
+
+// injectNetworks merges `networks` into the pod's
+// k8s.v1.cni.cncf.io/networks annotation. Existing entries are preserved;
+// dedup is by (name, namespace). Returns an error if the existing
+// annotation is malformed (rather than silently clobbering it).
+func (ri *RDMAInjector) injectNetworks(pod *v1.Pod, networks []NetworkAttachment) error {
+	if len(networks) == 0 {
+		return nil
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+
+	merged := []NetworkAttachment{}
+	if raw, ok := pod.Annotations[MultusNetworksAnnotation]; ok && raw != "" {
+		if err := json.Unmarshal([]byte(raw), &merged); err != nil {
+			return fmt.Errorf("rdma-injector: %s annotation is not a valid JSON array: %w",
+				MultusNetworksAnnotation, err)
+		}
+	}
+	seen := map[string]struct{}{}
+	for _, n := range merged {
+		seen[n.Name+"/"+n.Namespace] = struct{}{}
+	}
+	for _, n := range networks {
+		key := n.Name + "/" + n.Namespace
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		merged = append(merged, n)
+		seen[key] = struct{}{}
+	}
+
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return fmt.Errorf("rdma-injector: marshal %s: %w", MultusNetworksAnnotation, err)
+	}
+	pod.Annotations[MultusNetworksAnnotation] = string(out)
 	return nil
 }
 
