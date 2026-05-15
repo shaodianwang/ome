@@ -28373,6 +28373,48 @@ spec:
                           availableReplicas:
                             format: int32
                             type: integer
+                          collisionCount:
+                            format: int32
+                            type: integer
+                          conditions:
+                            items:
+                              properties:
+                                lastTransitionTime:
+                                  format: date-time
+                                  type: string
+                                message:
+                                  maxLength: 32768
+                                  type: string
+                                observedGeneration:
+                                  format: int64
+                                  minimum: 0
+                                  type: integer
+                                reason:
+                                  maxLength: 1024
+                                  minLength: 1
+                                  pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                                  type: string
+                                status:
+                                  enum:
+                                    - "True"
+                                    - "False"
+                                    - Unknown
+                                  type: string
+                                type:
+                                  maxLength: 316
+                                  pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                                  type: string
+                              required:
+                                - lastTransitionTime
+                                - message
+                                - reason
+                                - status
+                                - type
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                              - type
+                            x-kubernetes-list-type: map
                           currentRevision:
                             type: string
                           instanceStatuses:
@@ -28381,8 +28423,47 @@ spec:
                                 availablePodCount:
                                   format: int32
                                   type: integer
+                                conditions:
+                                  items:
+                                    properties:
+                                      lastTransitionTime:
+                                        format: date-time
+                                        type: string
+                                      message:
+                                        maxLength: 32768
+                                        type: string
+                                      observedGeneration:
+                                        format: int64
+                                        minimum: 0
+                                        type: integer
+                                      reason:
+                                        maxLength: 1024
+                                        minLength: 1
+                                        pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                                        type: string
+                                      status:
+                                        enum:
+                                          - "True"
+                                          - "False"
+                                          - Unknown
+                                        type: string
+                                      type:
+                                        maxLength: 316
+                                        pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                                        type: string
+                                    required:
+                                      - lastTransitionTime
+                                      - message
+                                      - reason
+                                      - status
+                                      - type
+                                    type: object
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                    - type
+                                  x-kubernetes-list-type: map
                                 incarnation:
-                                  format: int32
+                                  format: int64
                                   type: integer
                                 index:
                                   format: int32
@@ -28392,6 +28473,56 @@ spec:
                                     type: string
                                   type: array
                                   x-kubernetes-list-type: set
+                                operation:
+                                  properties:
+                                    deadline:
+                                      format: date-time
+                                      type: string
+                                    fromNode:
+                                      type: string
+                                    hintTargetNodes:
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                    id:
+                                      type: string
+                                    lastProgressAt:
+                                      format: date-time
+                                      type: string
+                                    reason:
+                                      type: string
+                                    requestUUID:
+                                      type: string
+                                    retryCount:
+                                      format: int32
+                                      type: integer
+                                    startedAt:
+                                      format: date-time
+                                      type: string
+                                    step:
+                                      type: string
+                                    surgeIndex:
+                                      format: int32
+                                      type: integer
+                                    targetRevision:
+                                      type: string
+                                    type:
+                                      enum:
+                                        - Create
+                                        - Update
+                                        - Restart
+                                        - Migrate
+                                        - Delete
+                                      type: string
+                                  required:
+                                    - deadline
+                                    - id
+                                    - lastProgressAt
+                                    - startedAt
+                                    - step
+                                    - type
+                                  type: object
                                 phase:
                                   enum:
                                     - Pending
@@ -28437,6 +28568,12 @@ spec:
                             type: integer
                           updateRevision:
                             type: string
+                          updatedReadyReplicas:
+                            format: int32
+                            type: integer
+                          updatedReplicas:
+                            format: int32
+                            type: integer
                         type: object
                       previousRolledoutRevision:
                         type: string

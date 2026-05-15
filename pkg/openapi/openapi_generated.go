@@ -57,6 +57,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceReference":  schema_pkg_apis_ome_v1beta1_InferenceServiceReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceSpec":       schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":     schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation":          schema_pkg_apis_ome_v1beta1_InstanceOperation(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig":                 schema_pkg_apis_ome_v1beta1_KedaConfig(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                 schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":             schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
@@ -3962,6 +3963,126 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_InstanceOperation(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InstanceOperation is the recovery anchor written before any destructive action against an Instance and cleared on completion.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"id": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ID is the idempotency key for this operation. Retries with the same ID are a no-op.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Type identifies the operation kind: Create, Update, Restart, Migrate, Delete.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"step": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Step is the fine-grained resume point within the operation (e.g., Drain, DeletePods, WaitZero, Recreate, WaitReady).",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"startedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "StartedAt is when this operation began.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"lastProgressAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastProgressAt is when the operation last advanced. Used for stall detection.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"deadline": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Deadline is the hard timeout for the current Step.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"retryCount": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RetryCount is the per-step escalation counter.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"targetRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TargetRevision is the ControllerRevision the operation is converging toward.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reason is a short cause string for the operation.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"surgeIndex": {
+						SchemaProps: spec.SchemaProps{
+							Description: "SurgeIndex is the Instance index allocated for a surge replacement. Set only when Type=Migrate.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"fromNode": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FromNode is the node the migrating Instance is being moved off. Set only when Type=Migrate.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"hintTargetNodes": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "HintTargetNodes is the caller-supplied preferred-node list for a migration. Set only when Type=Migrate.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"requestUUID": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RequestUUID is the migration request UUID. Set only when Type=Migrate.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"id", "type", "step", "startedAt", "lastProgressAt", "deadline"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_KedaConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -5157,6 +5278,13 @@ func schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref common.ReferenceCa
 							Format:      "",
 						},
 					},
+					"collisionCount": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CollisionCount is the salt folded into ControllerRevision hash input after a name collision is observed, so retries produce a different revision name. Same pattern as StatefulSet.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 					"labelSelector": {
 						SchemaProps: spec.SchemaProps{
 							Description: "LabelSelector identifies pods of this Component for HPA-style consumers.",
@@ -5166,23 +5294,59 @@ func schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref common.ReferenceCa
 					},
 					"replicas": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Replicas is the total Instance count.",
+							Description: "Replicas is the total Instance count (any phase).",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
 					},
 					"readyReplicas": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ReadyReplicas is the number of Instances reporting Phase=Ready.",
+							Description: "ReadyReplicas is the number of Instances whose every pod is Ready.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
 					},
 					"availableReplicas": {
 						SchemaProps: spec.SchemaProps{
-							Description: "AvailableReplicas is the number of Instances ready for at least MinReadySeconds.",
+							Description: "AvailableReplicas is the number of Instances that have been Ready continuously for at least MinReadySeconds.",
 							Type:        []string{"integer"},
 							Format:      "int32",
+						},
+					},
+					"updatedReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdatedReplicas is the number of Instances on UpdateRevision.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"updatedReadyReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdatedReadyReplicas is the number of Instances on UpdateRevision and fully Ready. UpdatedReadyReplicas / Replicas drives maxUnavailable rollout pacing.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions reports Component-level conditions. Defined types include Available, Progressing, FailedScale, FailedUpdate, GangSchedulingUnavailable, OperationStuck.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
 						},
 					},
 					"instanceStatuses": {
@@ -5211,7 +5375,7 @@ func schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref common.ReferenceCa
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 
@@ -5232,9 +5396,9 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 					},
 					"incarnation": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Incarnation increments each time the Instance is recreated by the restart machinery.",
+							Description: "Incarnation increments each time the Instance is recreated (full recreate update, restart-on-loss). In-place updates do not increment. Stamped on pods via the `ome.io/instance-incarnation` label.",
 							Type:        []string{"integer"},
-							Format:      "int32",
+							Format:      "int64",
 						},
 					},
 					"phase": {
@@ -5307,10 +5471,40 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 							},
 						},
 					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions reports Instance-level conditions. Defined types include AllPodsScheduled, AllPodsReady, AllPodsAvailable, Drained, Failed.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+					"operation": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Operation is the durable record of an in-flight destructive action against this Instance. Set before the action starts, cleared after it completes. Lets a crashed controller resume work without diffing pod state.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation"),
+						},
+					},
 				},
 				Required: []string{"index", "phase"},
 			},
 		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 

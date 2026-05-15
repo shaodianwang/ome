@@ -19,21 +19,46 @@ type OMENativeComponentStatus struct {
 	// +optional
 	UpdateRevision string `json:"updateRevision,omitempty"`
 
+	// CollisionCount is the salt folded into ControllerRevision hash input
+	// after a name collision is observed, so retries produce a different
+	// revision name. Same pattern as StatefulSet.
+	// +optional
+	CollisionCount *int32 `json:"collisionCount,omitempty"`
+
 	// LabelSelector identifies pods of this Component for HPA-style consumers.
 	// +optional
 	LabelSelector string `json:"labelSelector,omitempty"`
 
-	// Replicas is the total Instance count.
+	// Replicas is the total Instance count (any phase).
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
 
-	// ReadyReplicas is the number of Instances reporting Phase=Ready.
+	// ReadyReplicas is the number of Instances whose every pod is Ready.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
-	// AvailableReplicas is the number of Instances ready for at least MinReadySeconds.
+	// AvailableReplicas is the number of Instances that have been Ready
+	// continuously for at least MinReadySeconds.
 	// +optional
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
+
+	// UpdatedReplicas is the number of Instances on UpdateRevision.
+	// +optional
+	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`
+
+	// UpdatedReadyReplicas is the number of Instances on UpdateRevision and
+	// fully Ready. UpdatedReadyReplicas / Replicas drives maxUnavailable
+	// rollout pacing.
+	// +optional
+	UpdatedReadyReplicas int32 `json:"updatedReadyReplicas,omitempty"`
+
+	// Conditions reports Component-level conditions. Defined types include
+	// Available, Progressing, FailedScale, FailedUpdate,
+	// GangSchedulingUnavailable, OperationStuck.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// InstanceStatuses reports per-Instance state.
 	// +optional
@@ -62,9 +87,11 @@ type OMENativeInstanceStatus struct {
 	// Index is the stable Instance ordinal. Values may be sparse after surge migration.
 	Index int32 `json:"index"`
 
-	// Incarnation increments each time the Instance is recreated by the restart machinery.
+	// Incarnation increments each time the Instance is recreated (full
+	// recreate update, restart-on-loss). In-place updates do not increment.
+	// Stamped on pods via the `ome.io/instance-incarnation` label.
 	// +optional
-	Incarnation int32 `json:"incarnation,omitempty"`
+	Incarnation int64 `json:"incarnation,omitempty"`
 
 	// Phase is the lifecycle phase of the Instance.
 	Phase OMENativeInstancePhase `json:"phase"`
@@ -97,7 +124,90 @@ type OMENativeInstanceStatus struct {
 	// +optional
 	// +listType=set
 	NodesOccupied []string `json:"nodesOccupied,omitempty"`
+
+	// Conditions reports Instance-level conditions. Defined types include
+	// AllPodsScheduled, AllPodsReady, AllPodsAvailable, Drained, Failed.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Operation is the durable record of an in-flight destructive action
+	// against this Instance. Set before the action starts, cleared after
+	// it completes. Lets a crashed controller resume work without diffing
+	// pod state.
+	// +optional
+	Operation *InstanceOperation `json:"operation,omitempty"`
 }
+
+// InstanceOperation is the recovery anchor written before any destructive
+// action against an Instance and cleared on completion.
+type InstanceOperation struct {
+	// ID is the idempotency key for this operation. Retries with the same
+	// ID are a no-op.
+	ID string `json:"id"`
+
+	// Type identifies the operation kind: Create, Update, Restart, Migrate, Delete.
+	// +kubebuilder:validation:Enum=Create;Update;Restart;Migrate;Delete
+	Type InstanceOperationType `json:"type"`
+
+	// Step is the fine-grained resume point within the operation
+	// (e.g., Drain, DeletePods, WaitZero, Recreate, WaitReady).
+	Step string `json:"step"`
+
+	// StartedAt is when this operation began.
+	StartedAt metav1.Time `json:"startedAt"`
+
+	// LastProgressAt is when the operation last advanced. Used for stall detection.
+	LastProgressAt metav1.Time `json:"lastProgressAt"`
+
+	// Deadline is the hard timeout for the current Step.
+	Deadline metav1.Time `json:"deadline"`
+
+	// RetryCount is the per-step escalation counter.
+	// +optional
+	RetryCount int32 `json:"retryCount,omitempty"`
+
+	// TargetRevision is the ControllerRevision the operation is converging toward.
+	// +optional
+	TargetRevision string `json:"targetRevision,omitempty"`
+
+	// Reason is a short cause string for the operation.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// SurgeIndex is the Instance index allocated for a surge replacement.
+	// Set only when Type=Migrate.
+	// +optional
+	SurgeIndex *int32 `json:"surgeIndex,omitempty"`
+
+	// FromNode is the node the migrating Instance is being moved off.
+	// Set only when Type=Migrate.
+	// +optional
+	FromNode string `json:"fromNode,omitempty"`
+
+	// HintTargetNodes is the caller-supplied preferred-node list for a migration.
+	// Set only when Type=Migrate.
+	// +optional
+	// +listType=atomic
+	HintTargetNodes []string `json:"hintTargetNodes,omitempty"`
+
+	// RequestUUID is the migration request UUID. Set only when Type=Migrate.
+	// +optional
+	RequestUUID string `json:"requestUUID,omitempty"`
+}
+
+// InstanceOperationType is the kind of destructive action recorded in
+// InstanceOperation.
+type InstanceOperationType string
+
+const (
+	InstanceOperationCreate  InstanceOperationType = "Create"
+	InstanceOperationUpdate  InstanceOperationType = "Update"
+	InstanceOperationRestart InstanceOperationType = "Restart"
+	InstanceOperationMigrate InstanceOperationType = "Migrate"
+	InstanceOperationDelete  InstanceOperationType = "Delete"
+)
 
 // MigrationMode is the migration mechanism selected.
 // +kubebuilder:validation:Enum=surge
@@ -140,9 +250,10 @@ type MigrationHistoryEntry struct {
 	Instance int32 `json:"instance"`
 
 	// ReplacementInstance is the Instance index allocated for the surge replacement.
-	// Zero when the migration was rejected before allocation.
+	// Nil when the migration was rejected before allocation. Distinct from
+	// index 0, which is a valid replacement index after sparse migration.
 	// +optional
-	ReplacementInstance int32 `json:"replacementInstance,omitempty"`
+	ReplacementInstance *int32 `json:"replacementInstance,omitempty"`
 
 	// Mode is the migration mechanism. Always `surge` in v1.
 	Mode MigrationMode `json:"mode"`
