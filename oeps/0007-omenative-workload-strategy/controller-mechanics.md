@@ -1510,8 +1510,6 @@ Mode impact in v1:
     for OMENative
 - `Serverless`
   - unchanged
-- `MultiNodeRayVLLM`
-  - unchanged
 - `VirtualDeployment`
   - unchanged
 
@@ -1597,8 +1595,7 @@ Concrete mapping from today's modes:
 - Current `PDDisaggregated` (router + engine + decoder, engine and
   decoder LWS-backed) → migrate engine and decoder to `OMENative`
   together; router stays on whatever mode already served it
-- Current `Serverless`, `MultiNodeRayVLLM`, `VirtualDeployment` →
-  unchanged
+- Current `Serverless`, `VirtualDeployment` → unchanged
 
 "Is this ISVC a PD serving workload?" is not the selection question.
 "Is engine or decoder multi-pod per replica?" is.

@@ -17,7 +17,6 @@ import (
 const (
 	IngressConfigKeyName   = "ingress"
 	DeployConfigName       = "deploy"
-	MultiNodeProberName    = "multinodeProber"
 	OmeAgentConfigName     = "omeAgent"
 	BenchmarkJobConfigName = "benchmarkjob"
 	ModelCacheConfigName   = "modelCache"
@@ -49,8 +48,6 @@ type PodConfig struct {
 
 // +kubebuilder:object:generate=false
 type InferenceServicesConfig struct {
-	// MultiNodeProber contains all MultiNodeProber Configuration
-	MultiNodeProber MultiNodeProberConfig `json:"multinodeProber"`
 	// ModelCache contains the configured model cache provider used by
 	// sharded model-serving runtimes.
 	ModelCache modelcache.ProviderConfig `json:"modelCache,omitempty"`
@@ -76,20 +73,6 @@ type IngressConfig struct {
 }
 
 // +kubebuilder:object:generate=false
-type MultiNodeProberConfig struct {
-	Image                       string `json:"image"`
-	CPURequest                  string `json:"cpuRequest"`
-	MemoryRequest               string `json:"memoryRequest"`
-	CPULimit                    string `json:"cpuLimit"`
-	MemoryLimit                 string `json:"memoryLimit"`
-	StartupFailureThreshold     int32  `json:"startupFailureThreshold"`
-	StartupPeriodSeconds        int32  `json:"startupPeriodSeconds"`
-	StartupInitialDelaySeconds  int32  `json:"startupInitialDelaySeconds"`
-	StartupTimeoutSeconds       int32  `json:"startupTimeoutSeconds"`
-	UnavailableThresholdSeconds int32  `json:"unavailableThresholdSeconds"`
-}
-
-// +kubebuilder:object:generate=false
 type DeployConfig struct {
 	DefaultDeploymentMode string `json:"defaultDeploymentMode,omitempty"`
 }
@@ -106,8 +89,8 @@ type OmeAgentConfig struct {
 	// the agent surfaces extracted metadata via a per-model status
 	// ConfigMap, not via direct CR updates.
 	ServiceAccount string `json:"serviceAccount,omitempty"`
-	// CPURequest/MemoryRequest/CPULimit/MemoryLimit follow the same shape
-	// as MultiNodeProberConfig; empty strings fall back to the K8s default.
+	// CPURequest/MemoryRequest/CPULimit/MemoryLimit follow the standard
+	// resource shape; empty strings fall back to the K8s default.
 	CPURequest    string `json:"cpuRequest,omitempty"`
 	MemoryRequest string `json:"memoryRequest,omitempty"`
 	CPULimit      string `json:"cpuLimit,omitempty"`
@@ -128,20 +111,14 @@ type OmeAgentConfig struct {
 	PriorityClassName string            `json:"priorityClassName,omitempty"`
 }
 
+// NewInferenceServicesConfig verifies that the inferenceservice ConfigMap
+// exists (callers fail fast otherwise) and returns an empty config struct.
+// ModelCache is loaded separately via NewModelCacheConfig.
 func NewInferenceServicesConfig(clientset kubernetes.Interface) (*InferenceServicesConfig, error) {
-	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
-	if err != nil {
+	if _, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{}); err != nil {
 		return nil, err
 	}
-	icfg := &InferenceServicesConfig{}
-	for _, err := range []error{
-		getComponentConfig(MultiNodeProberName, configMap, &icfg.MultiNodeProber),
-	} {
-		if err != nil {
-			return nil, err
-		}
-	}
-	return icfg, nil
+	return &InferenceServicesConfig{}, nil
 }
 
 // NewOmeAgentConfig loads the ome-agent block from the inferenceservice
@@ -254,22 +231,6 @@ func NewModelCacheConfig(clientset kubernetes.Interface) (*modelcache.ProviderCo
 		}
 	}
 	return modelCacheConfig, nil
-}
-
-func NewMultiNodeProberConfig(clientset kubernetes.Interface) (*MultiNodeProberConfig, error) {
-	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	multiNodeProberConfig := &MultiNodeProberConfig{}
-	for _, err := range []error{
-		getComponentConfig(MultiNodeProberName, configMap, &multiNodeProberConfig),
-	} {
-		if err != nil {
-			return nil, err
-		}
-	}
-	return multiNodeProberConfig, nil
 }
 
 func NewBenchmarkJobConfig(clientset kubernetes.Interface) (*BenchmarkJobConfig, error) {

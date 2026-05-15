@@ -13,7 +13,6 @@ OME (Open Model Engine) is a Kubernetes operator for managing and serving Large 
 make ome-manager          # Build controller manager binary
 make model-agent          # Build model-agent binary (requires xet-build)
 make ome-agent            # Build ome-agent binary (requires xet-build)
-make multinode-prober     # Build multinode-prober binary
 make xet-build            # Build the Rust xet native library (required before model-agent/ome-agent)
 ```
 
@@ -107,13 +106,12 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 ### Binaries (`cmd/`)
 | Binary | Role |
 |---|---|
-| `cmd/manager` | Main Kubernetes operator. Runs all controllers and webhooks. Dynamically registers schemes for Ray, Knative, LWS, Volcano, KEDA, Istio based on cluster CRD availability. |
+| `cmd/manager` | Main Kubernetes operator. Runs all controllers and webhooks. Dynamically registers schemes for Knative, LWS, Volcano, KEDA, Istio based on cluster CRD availability. |
 | `cmd/model-agent` | DaemonSet on GPU nodes. Scout watches models, Gopher downloads from storage backends. Labels nodes with model readiness. Uses xet (CGo/Rust) for HuggingFace downloads. |
 | `cmd/ome-agent` | Multi-command CLI (Cobra + uber/fx): enigma (encryption), hf-download, replica (cross-region replication), serving-agent (sidecar), fine-tuned-adapter, model-metadata. |
-| `cmd/multinode-prober` | Health probe for multi-node (LeaderWorkerSet) inference deployments. |
 
 ### Controllers (`pkg/controller/v1beta1/`)
-- **InferenceServiceReconciler** — The largest controller. Auto-selects runtimes via `runtimeselector`, selects accelerators via `acceleratorclassselector`, generates Deployments/Knative Services/LeaderWorkerSets/RayClusters/HPAs/KEDA ScaledObjects. Supports RawDeployment, Serverless, and VirtualDeployment modes.
+- **InferenceServiceReconciler** — The largest controller. Auto-selects runtimes via `runtimeselector`, selects accelerators via `acceleratorclassselector`, generates Deployments/Knative Services/LeaderWorkerSets/HPAs/KEDA ScaledObjects. Supports RawDeployment, Serverless, MultiNode, PDDisaggregated, and VirtualDeployment modes.
 - **BaseModelReconciler / ClusterBaseModelReconciler** — Manages model lifecycle. Monitors download status via ConfigMaps. Requeues every 5s during importing/transit states.
 - **AcceleratorClassReconciler** — Discovers matching GPU nodes, maintains `status.nodes` and `status.availableNodes`.
 - **BenchmarkJobReconciler** — Creates Kubernetes batch Jobs for benchmarking.

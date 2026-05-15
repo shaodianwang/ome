@@ -50,7 +50,6 @@ if [ "${CHART}" = "ome-resources" ]; then
   sed -i "s|hub: \"ghcr.io/moirai-internal\"|hub: \"${PROD_ECR_REGISTRY}/msl_infra\"|" "charts/${CHART}/values.yaml"
   sed -i "s|version: \&defaultVersion .*|version: \&defaultVersion \"${IMAGE_TAG}\"|" "charts/${CHART}/values.yaml"
   # Fix repository names to match ECR repo names
-  sed -i "s|image: multinode-prober|image: ome-multinode-prober|" "charts/${CHART}/values.yaml"
   sed -i "s|repository: model-agent|repository: ome-model-agent|" "charts/${CHART}/values.yaml"
 fi
 

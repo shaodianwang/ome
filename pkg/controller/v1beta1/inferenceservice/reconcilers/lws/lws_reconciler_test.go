@@ -541,8 +541,7 @@ func TestCreateLWS(t *testing.T) {
 							Name:      testInput["defaultLWS"].componentMeta.Name,
 							Namespace: testInput["defaultLWS"].componentMeta.Namespace,
 							Labels: map[string]string{
-								"app":              "test-isvc",
-								"ray.io/node-type": "head",
+								"app": "test-isvc",
 							},
 							Annotations: map[string]string{
 								"annotation": "value",
@@ -624,8 +623,7 @@ func TestCreateLWS(t *testing.T) {
 							Name:      testInput["customMinReplicasLWS"].componentMeta.Name,
 							Namespace: testInput["customMinReplicasLWS"].componentMeta.Namespace,
 							Labels: map[string]string{
-								"app":              "test-isvc-custom",
-								"ray.io/node-type": "head",
+								"app": "test-isvc-custom",
 							},
 							// Not initializing Annotations since createLWS will set nil for empty annotations
 						},
@@ -707,8 +705,7 @@ func TestCreateLWS(t *testing.T) {
 							Name:      testInput["withPrometheusAnnotations"].componentMeta.Name,
 							Namespace: testInput["withPrometheusAnnotations"].componentMeta.Namespace,
 							Labels: map[string]string{
-								"app":              "test-isvc-prometheus",
-								"ray.io/node-type": "head",
+								"app": "test-isvc-prometheus",
 							},
 							Annotations: map[string]string{
 								constants.PrometheusPathAnnotationKey:   "/metrics",

@@ -66,7 +66,6 @@ IMAGES = [
     ("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile"),
     ("model-agent", "ome-model-agent", "dockerfiles/model-agent.Dockerfile"),
     ("ome-agent", "ome-agent", "dockerfiles/ome-agent.Dockerfile"),
-    ("multinode-prober", "ome-multinode-prober", "dockerfiles/multinode-prober.Dockerfile"),
 ]
 
 CHARTS = ["ome-crd", "ome-resources"]

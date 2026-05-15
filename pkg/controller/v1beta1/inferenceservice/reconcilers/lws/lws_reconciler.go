@@ -54,7 +54,6 @@ func createLWS(headPod *corev1.PodSpec,
 	lwsObjectMeta := componentMeta.DeepCopy()
 	lwsObjectMeta.Name = constants.LWSName(componentMeta.Name)
 	headPodMeta.Labels["app"] = constants.GetRawServiceLabel(componentMeta.Name)
-	headPodMeta.Labels["ray.io/node-type"] = "head"
 	utils.SetPodLabelsFromAnnotations(headPodMeta)
 	utils.SetPodLabelsFromAnnotations(workerPodMeta)
 

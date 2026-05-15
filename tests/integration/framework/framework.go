@@ -77,8 +77,8 @@ type Framework struct {
 
 	// scheme is the *client-side* runtime.Scheme assembled in
 	// SetupClient. Distinct from f.testEnv.Scheme (apiserver-side); the
-	// split lets us register controller-only types (e.g. KSvc, LWS,
-	// RayCluster) without polluting the apiserver scheme.
+	// split lets us register controller-only types (e.g. KSvc, LWS)
+	// without polluting the apiserver scheme.
 	scheme *apiruntime.Scheme
 
 	// unexported state — set by Init/StartManager, consumed by Teardown.

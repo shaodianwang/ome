@@ -77,7 +77,6 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 			cm)).To(Succeed())
 		Expect(cm.Data).To(HaveKey("ingress"))
 		Expect(cm.Data).To(HaveKey("deploy"))
-		Expect(cm.Data).To(HaveKey("multinodeProber"))
 		Expect(cm.Data).To(HaveKey("omeAgent"))
 
 		Expect(suiteClient.Get(suiteCtx,

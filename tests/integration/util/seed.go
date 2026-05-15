@@ -16,10 +16,9 @@ import (
 // SeedDefaultConfigMaps creates the two ConfigMaps the controllers
 // read at reconcile time:
 //
-//   - inferenceservice-config — keys: ingress, deploy, multinodeProber,
-//     omeAgent. The ISVC reconciler reads ingress + deploy; the
-//     BaseModel PVC path reads omeAgent; the multinode prober injector
-//     reads multinodeProber.
+//   - inferenceservice-config — keys: ingress, deploy, omeAgent. The
+//     ISVC reconciler reads ingress + deploy; the BaseModel PVC path
+//     reads omeAgent.
 //   - benchmarkjob-config — key: benchmarkjob. Read by the BenchmarkJob
 //     reconciler.
 //
@@ -30,8 +29,8 @@ import (
 //     to keep the controller from materializing routes
 //   - deploy.defaultDeploymentMode = RawDeployment (the safe default;
 //     NewDeployConfig errors on empty)
-//   - multinodeProber + omeAgent get a minimal image so the helpers
-//     don't panic on nil dereferences when a test doesn't override
+//   - omeAgent gets a minimal image so the helpers don't panic on nil
+//     dereferences when a test doesn't override
 //
 // Idempotent: subsequent calls with the same desired state are no-ops.
 // If a ConfigMap already exists with different data, this function
@@ -54,18 +53,6 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
 }`,
 		"deploy": `{
   "defaultDeploymentMode": "RawDeployment"
-}`,
-		"multinodeProber": `{
-  "image": "ghcr.io/test/multinode-prober:test",
-  "memoryRequest": "100Mi",
-  "memoryLimit": "100Mi",
-  "cpuRequest": "100m",
-  "cpuLimit": "100m",
-  "startupFailureThreshold": 150,
-  "startupPeriodSeconds": 30,
-  "startupTimeoutSeconds": 60,
-  "startupInitialDelaySeconds": 120,
-  "unavailableThresholdSeconds": 600
 }`,
 		"omeAgent": `{
   "image": "ghcr.io/test/ome-agent:test",

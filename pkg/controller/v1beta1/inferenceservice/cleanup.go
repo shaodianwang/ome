@@ -138,7 +138,6 @@ func (r *InferenceServiceReconciler) getAvailableResourceTypes() ([]schema.Group
 	optionals := []struct {
 		gvk schema.GroupVersionKind
 	}{
-		{gvk: schema.GroupVersionKind{Group: "ray.io", Version: "v1", Kind: "RayCluster"}},
 		{gvk: schema.GroupVersionKind{Group: "serving.knative.dev", Version: "v1", Kind: "Service"}},
 		{gvk: schema.GroupVersionKind{Group: "leaderworkerset.x-k8s.io", Version: "v1", Kind: "LeaderWorkerSet"}},
 		{gvk: schema.GroupVersionKind{Group: "keda.sh", Version: "v1alpha1", Kind: "ScaledObject"}},

@@ -14,7 +14,6 @@ func DetermineEngineDeploymentMode(engine *v1beta1.EngineSpec) constants.Deploym
 		return constants.RawDeployment
 	}
 
-	// Check for deployment mode annotation (e.g., MultiNodeRayVLLM)
 	if mode, found := GetDeploymentModeFromAnnotations(engine.Annotations); found {
 		return mode
 	}

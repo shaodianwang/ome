@@ -47,20 +47,6 @@ data:
         "region": "eu-frankfurt-1"
     }
 
-  multinodeProber: |-
-    {
-      "image" : "ghcr.io/moirai-internal/multinode-prober:v0.1.5",
-      "memoryRequest": "100Mi",
-      "memoryLimit": "100Mi",
-      "cpuRequest": "100m",
-      "cpuLimit": "100m",
-      "startupFailureThreshold": 150,
-      "startupPeriodSeconds": 30,
-      "startupTimeoutSeconds": 60,
-      "startupInitialDelaySeconds": 200,
-      "unavailableThresholdSeconds": 1800
-    }
-
   omeAgent: |-
     {
       "image": "ghcr.io/moirai-internal/ome-agent:v0.1.5",

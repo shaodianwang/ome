@@ -7,7 +7,7 @@ themselves are **not committed** — they're regenerated from go.mod by
 
 The single source of truth for CRD versions is `go.mod`. Checking the
 YAMLs in would create a drift surface and bloat the repo (Knative +
-LWS + KEDA + Ray + Istio together is ~30 files) without buying anything
+LWS + KEDA + Istio together is ~25 files) without buying anything
 that the go.mod pin doesn't already give us.
 
 ## Layout (after `make dep-crds`)
@@ -17,7 +17,6 @@ dep-crds/
 ├── knative-serving/    # knative.dev/serving CRDs (Service, Route, …)
 ├── lws/                # leaderworkerset.x-k8s.io CRDs (TODO)
 ├── keda/               # keda.sh CRDs (TODO)
-├── kuberay/            # ray.io CRDs (TODO)
 ├── istio/              # networking.istio.io CRDs (TODO)
 └── README.md
 ```

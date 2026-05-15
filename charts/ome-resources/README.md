@@ -67,17 +67,6 @@ OME Resources and Controller
 | ome.modelCache.endpoint | string | `""` | HTTP endpoint for the optional model cache provider control-plane API. |
 | ome.modelCache.options | object | `{}` | Provider-specific options. For `cluster_cache`, supported keys include `timeout` and `operation_retention`. |
 | ome.modelCache.provider | string | `""` | Optional model cache provider name. Use `cluster_cache` for sharded model distribution through cluster_cache. |
-| ome.multinodeProber.cpuLimit | string | `"100m"` |  |
-| ome.multinodeProber.cpuRequest | string | `"100m"` |  |
-| ome.multinodeProber.image | string | `"multinode-prober"` |  |
-| ome.multinodeProber.memoryLimit | string | `"100Mi"` |  |
-| ome.multinodeProber.memoryRequest | string | `"100Mi"` |  |
-| ome.multinodeProber.startupFailureThreshold | int | `150` |  |
-| ome.multinodeProber.startupInitialDelaySeconds | int | `120` |  |
-| ome.multinodeProber.startupPeriodSeconds | int | `30` |  |
-| ome.multinodeProber.startupTimeoutSeconds | int | `60` |  |
-| ome.multinodeProber.tag | string | `"v0.1"` |  |
-| ome.multinodeProber.unavailableThresholdSeconds | int | `600` |  |
 | ome.omeAgent.authType | string | `"InstancePrincipal"` |  |
 | ome.omeAgent.compartmentId | string | `"ocid1.compartment.oc1..dummy-compartment"` |  |
 | ome.omeAgent.fineTunedAdapter.cpuLimit | int | `15` |  |

@@ -669,7 +669,7 @@ On each decision loop with fragmentation above threshold:
    - LWS-backed multi-pod: candidate NOT eligible for execution, but
      STILL included for recommendation emission (with
      `executable: false` flag).
-   - Ray and Knative workloads: not managed by Alfred.
+   - Knative workloads: not managed by Alfred.
 3. **Simulate each candidate.** Predict post-migration cluster state
    (virtual: free source node's GPUs; virtual: best-available target
    node receives the Instance). Compute predicted fragmentation
@@ -915,7 +915,7 @@ eligible unless:
 - In cooldown.
 - In active migration.
 - Strategy is unsupported (LWS → recommendation-only;
-  MultiNodeRayVLLM / Serverless → not managed).
+  Serverless → not managed).
 
 Operators preferring opt-in-only set
 `policy.defaultMovable: false`; then workloads need

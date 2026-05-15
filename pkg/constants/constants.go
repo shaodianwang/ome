@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strings"
 
-	rayutils "github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/network"
 	"knative.dev/serving/pkg/apis/autoscaling"
@@ -157,11 +156,7 @@ var (
 
 // Label Constants
 var (
-	RayScheduler                          = "ray.io/scheduler-name"
-	RayPrioriyClass                       = "ray.io/priority-class-name"
-	RayClusterUnavailableSince            = "raycluster/unavailable-since"
 	VolcanoQueueName                      = "volcano.sh/queue-name"
-	VolcanoScheduler                      = "volcano"
 	InferenceServiceBaseModelNameLabelKey = "base-model-name"
 	InferenceServiceBaseModelSizeLabelKey = "base-model-size"
 	BaseModelTypeLabelKey                 = "base-model-type"
@@ -174,8 +169,6 @@ var (
 
 // PrioriryClass
 var (
-	DedicatedAiClusterPreemptionPriorityClass = "volcano-scheduling-high-priority"
-
 	DedicatedAiClusterPreemptionWorkloadPriorityClass = "kueue-scheduling-high-priority"
 )
 
@@ -359,12 +352,10 @@ const (
 const (
 	MainContainerName               = "ome-container"
 	TrainingMainContainerName       = "trainer"
-	MultiNodeProberContainerName    = "multinode-prober"
 	StorageInitializerContainerName = "storage-initializer"
 	ModelInitContainerName          = "model-init"
 	FineTunedAdapterContainerName   = "fine-tuned-adapter"
 	ServingSidecarContainerName     = "serving-sidecar"
-	MultiNodeProberContainerPort    = 8080
 )
 
 // Model Agents Constants
@@ -456,7 +447,6 @@ type DeploymentModeType string
 const (
 	Serverless        DeploymentModeType = "Serverless"
 	RawDeployment     DeploymentModeType = "RawDeployment"
-	MultiNodeRayVLLM  DeploymentModeType = "MultiNodeRayVLLM"
 	PDDisaggregated   DeploymentModeType = "PDDisaggregated"
 	MultiNode         DeploymentModeType = "MultiNode"
 	VirtualDeployment DeploymentModeType = "VirtualDeployment"
@@ -465,7 +455,7 @@ const (
 // IsValid checks if the deployment mode is valid
 func (d DeploymentModeType) IsValid() bool {
 	switch d {
-	case Serverless, RawDeployment, MultiNodeRayVLLM, MultiNode, VirtualDeployment:
+	case Serverless, RawDeployment, MultiNode, VirtualDeployment:
 		return true
 	default:
 		return false
@@ -494,7 +484,6 @@ const (
 const (
 	IstioVirtualServiceKind = "VirtualService"
 	KnativeServiceKind      = "Service"
-	RayClusterKind          = "RayCluster"
 	VolcanoQueueKind        = "Queue"
 	KEDAScaledObjectKind    = "ScaledObject"
 	VolcanoJobKind          = "Job"
@@ -741,10 +730,6 @@ func exact(regexp string) string {
 
 func optional(regexp string) string {
 	return "(" + regexp + ")?"
-}
-
-func DefaultRayHeadServiceName(name string, index int) string {
-	return rayutils.CheckName(fmt.Sprintf("%s-%d", name, index))
 }
 
 // Kubernetes naming constraints

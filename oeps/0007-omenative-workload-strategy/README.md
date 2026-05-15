@@ -105,7 +105,6 @@ today supports six deployment modes defined in
 |------|------------------|--------------------|-----------------|-----------|
 | `RawDeployment` | `Deployment` | No | Router+Engine via separate Deployments | No |
 | `MultiNode` | `LeaderWorkerSet` | Yes (leader + workers) | No | **Yes** |
-| `MultiNodeRayVLLM` | `RayCluster` | Yes (head + workers) | No | No |
 | `Serverless` | `Knative Service` | No | Per-component | No |
 | `PDDisaggregated` | `LeaderWorkerSet` × 2 + Deployment | Yes per component | Yes (router + engine + decoder) | **Yes** |
 | `VirtualDeployment` | (none) | N/A | N/A | No |
@@ -273,8 +272,7 @@ controllers don't prioritize:
 
 ### Non-Goals
 
-1. **Not replacing Knative or RayCluster paths.** `Serverless` and
-   `MultiNodeRayVLLM` modes remain unchanged.
+1. **Not replacing the Knative path.** `Serverless` mode remains unchanged.
 2. **Not becoming a general-purpose workload controller.** OMENative
    is specialized for LLM inference.
 3. **Not implementing a scheduler.** OMENative relies on the K8s

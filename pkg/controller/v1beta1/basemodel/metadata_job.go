@@ -62,8 +62,8 @@ type MetadataJobConfig struct {
 	// run in any namespace), so a cluster-scoped binding is required.
 	ServiceAccount string
 	// CPURequest / MemoryRequest / CPULimit / MemoryLimit follow the same
-	// shape as MultiNodeProberConfig and BenchmarkJobConfig; empty strings
-	// fall back to Kubernetes defaults.
+	// shape as BenchmarkJobConfig; empty strings fall back to Kubernetes
+	// defaults.
 	CPURequest    string
 	MemoryRequest string
 	CPULimit      string

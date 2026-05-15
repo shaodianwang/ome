@@ -129,8 +129,7 @@ func (w *InferenceServiceWrapper) Router(spec *v1beta1.RouterSpec) *InferenceSer
 // DeploymentMode sets the ome.io/deploymentMode annotation, which the
 // controller reads to override the cluster default. Pass
 // constants.RawDeployment / constants.Serverless / constants.MultiNode /
-// constants.PDDisaggregated / constants.MultiNodeRayVLLM /
-// constants.VirtualDeployment.
+// constants.PDDisaggregated / constants.VirtualDeployment.
 func (w *InferenceServiceWrapper) DeploymentMode(mode constants.DeploymentModeType) *InferenceServiceWrapper {
 	if w.Annotations == nil {
 		w.Annotations = map[string]string{}

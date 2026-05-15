@@ -7,7 +7,6 @@ import (
 	"os"
 	"testing"
 
-	ray "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	istionetworking "istio.io/api/networking/v1beta1"
@@ -397,20 +396,6 @@ func TestCRDSetup(t *testing.T) {
 		shouldError bool
 	}{
 		{
-			name:        "Ray CRD available",
-			crdType:     "Ray",
-			available:   true,
-			setupError:  nil,
-			shouldError: false,
-		},
-		{
-			name:        "Ray CRD not available",
-			crdType:     "Ray",
-			available:   false,
-			setupError:  nil,
-			shouldError: false,
-		},
-		{
 			name:        "Volcano CRD available",
 			crdType:     "Volcano",
 			available:   true,
@@ -419,7 +404,7 @@ func TestCRDSetup(t *testing.T) {
 		},
 		{
 			name:        "Error checking CRD",
-			crdType:     "Ray",
+			crdType:     "Volcano",
 			available:   false,
 			setupError:  errors.New("failed to check CRD"),
 			shouldError: true,
@@ -437,8 +422,6 @@ func TestCRDSetup(t *testing.T) {
 			var err error
 
 			switch tt.crdType {
-			case "Ray":
-				_, err = mockChecker.IsCrdAvailable(cfg, ray.SchemeGroupVersion.String(), constants.RayClusterKind)
 			case "Volcano":
 				_, err = mockChecker.IsCrdAvailable(cfg, volcano.SchemeGroupVersion.String(), constants.VolcanoQueueKind)
 			}
