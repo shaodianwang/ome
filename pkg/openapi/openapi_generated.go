@@ -59,6 +59,8 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":     schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig":                 schema_pkg_apis_ome_v1beta1_KedaConfig(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                 schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":             schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry":      schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus":           schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCopies":                schema_pkg_apis_ome_v1beta1_ModelCopies(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelExtensionSpec":         schema_pkg_apis_ome_v1beta1_ModelExtensionSpec(ref),
@@ -69,6 +71,8 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec":         schema_pkg_apis_ome_v1beta1_ModelSizeRangeSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus":                schema_pkg_apis_ome_v1beta1_ModelStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatusSpec":            schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus":   schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":    schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":            schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodOverride":                schema_pkg_apis_ome_v1beta1_PodOverride(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                    schema_pkg_apis_ome_v1beta1_PodSpec(ref),
@@ -2004,11 +2008,17 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelection"),
 						},
 					},
+					"omenative": {
+						SchemaProps: spec.SchemaProps{
+							Description: "OMENative reports OMENative-managed state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelection", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable", "knative.dev/serving/pkg/apis/serving/v1.TrafficTarget"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelection", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable", "knative.dev/serving/pkg/apis/serving/v1.TrafficTarget"},
 	}
 }
 
@@ -3925,11 +3935,30 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus"),
 						},
 					},
+					"migrationHistory": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "MigrationHistory is a rolling window of OMENative migration requests processed against this InferenceService. Bounded to the most recent entries; older entries are dropped (and optionally archived to a controller-owned ConfigMap).",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry"),
+									},
+								},
+							},
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus", "knative.dev/pkg/apis.Condition", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus", "knative.dev/pkg/apis.Condition", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
 	}
 }
 
@@ -4485,6 +4514,157 @@ func schema_pkg_apis_ome_v1beta1_LeaderSpec(ref common.ReferenceCallback) common
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_MigrationEvent(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "MigrationEvent is one observation logged during a migration.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"at": {
+						SchemaProps: spec.SchemaProps{
+							Description: "At is the time the event was recorded.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"message": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Message describes the observation.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"at", "message"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "MigrationHistoryEntry is one entry of the rolling MigrationHistory window recorded on InferenceServiceStatus.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"id": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ID is the request UUID supplied by the caller.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"component": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Component identifies which Component was migrated.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"instance": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Instance is the original Instance index that was migrated away from.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"replacementInstance": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReplacementInstance is the Instance index allocated for the surge replacement. Zero when the migration was rejected before allocation.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"mode": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Mode is the migration mechanism. Always `surge` in v1.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"phase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Phase is the current lifecycle phase.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"requestedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RequestedAt is the time the request annotation was first observed.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"startedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "StartedAt is the time the controller began executing the migration.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"completedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CompletedAt is the time the migration reached a terminal phase.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"reason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reason is the caller-supplied reason (e.g., \"fragmentation\").",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"requestedBy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RequestedBy identifies the caller that wrote the request annotation.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"events": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Events records observations made during the migration.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent"),
+									},
+								},
+							},
+						},
+					},
+					"outcomeReason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "OutcomeReason is a short machine-readable reason describing why the migration ended in its terminal phase (e.g., \"InstanceReadyTimeout\").",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"id", "component", "instance", "mode", "phase", "requestedAt"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -4946,6 +5126,191 @@ func schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref common.ReferenceCallback) c
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "OMENativeComponentStatus reports OMENative-managed state for one Component. Nil when the Component does not use OMENative.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"observedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedGeneration is the InferenceService.metadata.generation reflected by this block.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"currentRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CurrentRevision names the ControllerRevision currently serving traffic.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"updateRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdateRevision names the ControllerRevision being rolled out.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"labelSelector": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LabelSelector identifies pods of this Component for HPA-style consumers.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"replicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Replicas is the total Instance count.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"readyReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReadyReplicas is the number of Instances reporting Phase=Ready.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"availableReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AvailableReplicas is the number of Instances ready for at least MinReadySeconds.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"instanceStatuses": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"index",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "InstanceStatuses reports per-Instance state.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "OMENativeInstanceStatus reports state for one OMENative Instance.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"index": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Index is the stable Instance ordinal. Values may be sparse after surge migration.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"incarnation": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Incarnation increments each time the Instance is recreated by the restart machinery.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"phase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Phase is the lifecycle phase of the Instance.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"runningRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RunningRevision is the ControllerRevision the live pods are running.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"targetRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TargetRevision is the ControllerRevision the live pods are converging toward.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"podCount": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PodCount is the total number of pods owned by this Instance.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"readyPodCount": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReadyPodCount is the number of pods reporting Ready=True.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"availablePodCount": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AvailablePodCount is the number of pods ready for at least MinReadySeconds.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"scheduledPodCount": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ScheduledPodCount is the number of pods with Spec.NodeName set.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"nodesOccupied": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "NodesOccupied is the set of node names hosting pods of this Instance.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"index", "phase"},
+			},
+		},
 	}
 }
 

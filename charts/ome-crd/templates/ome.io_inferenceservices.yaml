@@ -28368,6 +28368,76 @@ spec:
                         type: string
                       latestRolledoutRevision:
                         type: string
+                      omenative:
+                        properties:
+                          availableReplicas:
+                            format: int32
+                            type: integer
+                          currentRevision:
+                            type: string
+                          instanceStatuses:
+                            items:
+                              properties:
+                                availablePodCount:
+                                  format: int32
+                                  type: integer
+                                incarnation:
+                                  format: int32
+                                  type: integer
+                                index:
+                                  format: int32
+                                  type: integer
+                                nodesOccupied:
+                                  items:
+                                    type: string
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                phase:
+                                  enum:
+                                    - Pending
+                                    - Creating
+                                    - Ready
+                                    - Updating
+                                    - Restarting
+                                    - Migrating
+                                    - Failed
+                                    - Deleting
+                                  type: string
+                                podCount:
+                                  format: int32
+                                  type: integer
+                                readyPodCount:
+                                  format: int32
+                                  type: integer
+                                runningRevision:
+                                  type: string
+                                scheduledPodCount:
+                                  format: int32
+                                  type: integer
+                                targetRevision:
+                                  type: string
+                              required:
+                                - index
+                                - phase
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                              - index
+                            x-kubernetes-list-type: map
+                          labelSelector:
+                            type: string
+                          observedGeneration:
+                            format: int64
+                            type: integer
+                          readyReplicas:
+                            format: int32
+                            type: integer
+                          replicas:
+                            format: int32
+                            type: integer
+                          updateRevision:
+                            type: string
+                        type: object
                       previousRolledoutRevision:
                         type: string
                       restURL:
@@ -28432,6 +28502,69 @@ spec:
                       - type
                     type: object
                   type: array
+                migrationHistory:
+                  items:
+                    properties:
+                      completedAt:
+                        format: date-time
+                        type: string
+                      component:
+                        type: string
+                      events:
+                        items:
+                          properties:
+                            at:
+                              format: date-time
+                              type: string
+                            message:
+                              type: string
+                          required:
+                            - at
+                            - message
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      id:
+                        type: string
+                      instance:
+                        format: int32
+                        type: integer
+                      mode:
+                        enum:
+                          - surge
+                        type: string
+                      outcomeReason:
+                        type: string
+                      phase:
+                        enum:
+                          - Pending
+                          - InProgress
+                          - Completed
+                          - Failed
+                        type: string
+                      reason:
+                        type: string
+                      replacementInstance:
+                        format: int32
+                        type: integer
+                      requestedAt:
+                        format: date-time
+                        type: string
+                      requestedBy:
+                        type: string
+                      startedAt:
+                        format: date-time
+                        type: string
+                    required:
+                      - component
+                      - id
+                      - instance
+                      - mode
+                      - phase
+                      - requestedAt
+                    type: object
+                  type: array
+                  x-kubernetes-list-type: atomic
                 modelStatus:
                   properties:
                     lastFailureInfo:

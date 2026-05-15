@@ -29,6 +29,13 @@ type InferenceServiceStatus struct {
 	Components map[ComponentType]ComponentStatusSpec `json:"components,omitempty"`
 	// Model related statuses
 	ModelStatus ModelStatus `json:"modelStatus,omitempty"`
+	// MigrationHistory is a rolling window of OMENative migration requests
+	// processed against this InferenceService. Bounded to the most recent
+	// entries; older entries are dropped (and optionally archived to a
+	// controller-owned ConfigMap).
+	// +optional
+	// +listType=atomic
+	MigrationHistory []MigrationHistoryEntry `json:"migrationHistory,omitempty"`
 }
 
 // ComponentStatusSpec describes the state of the component
@@ -63,6 +70,11 @@ type ComponentStatusSpec struct {
 	// SelectedAccelerator shows which AcceleratorClass was selected
 	// +optional
 	SelectedAccelerator *AcceleratorSelection `json:"selectedAccelerator,omitempty"`
+
+	// OMENative reports OMENative-managed state for this Component when the
+	// Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.
+	// +optional
+	OMENative *OMENativeComponentStatus `json:"omenative,omitempty"`
 }
 
 // AcceleratorSelection shows what accelerator was selected and why

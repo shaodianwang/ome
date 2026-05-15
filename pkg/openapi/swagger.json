@@ -1039,6 +1039,10 @@
           "description": "Latest revision name that is rolled out with 100 percent traffic",
           "type": "string"
         },
+        "omenative": {
+          "description": "OMENative reports OMENative-managed state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.",
+          "$ref": "#/definitions/v1beta1.OMENativeComponentStatus"
+        },
         "previousRolledoutRevision": {
           "description": "Previous revision name that is rolled out with 100 percent traffic",
           "type": "string"
@@ -2161,6 +2165,15 @@
           "x-kubernetes-patch-merge-key": "type",
           "x-kubernetes-patch-strategy": "merge"
         },
+        "migrationHistory": {
+          "description": "MigrationHistory is a rolling window of OMENative migration requests processed against this InferenceService. Bounded to the most recent entries; older entries are dropped (and optionally archived to a controller-owned ConfigMap).",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.MigrationHistoryEntry"
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
         "modelStatus": {
           "description": "Model related statuses",
           "default": {},
@@ -2489,6 +2502,103 @@
         }
       }
     },
+    "v1beta1.MigrationEvent": {
+      "description": "MigrationEvent is one observation logged during a migration.",
+      "type": "object",
+      "required": [
+        "at",
+        "message"
+      ],
+      "properties": {
+        "at": {
+          "description": "At is the time the event was recorded.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "message": {
+          "description": "Message describes the observation.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "v1beta1.MigrationHistoryEntry": {
+      "description": "MigrationHistoryEntry is one entry of the rolling MigrationHistory window recorded on InferenceServiceStatus.",
+      "type": "object",
+      "required": [
+        "id",
+        "component",
+        "instance",
+        "mode",
+        "phase",
+        "requestedAt"
+      ],
+      "properties": {
+        "completedAt": {
+          "description": "CompletedAt is the time the migration reached a terminal phase.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "component": {
+          "description": "Component identifies which Component was migrated.",
+          "type": "string",
+          "default": ""
+        },
+        "events": {
+          "description": "Events records observations made during the migration.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.MigrationEvent"
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "id": {
+          "description": "ID is the request UUID supplied by the caller.",
+          "type": "string",
+          "default": ""
+        },
+        "instance": {
+          "description": "Instance is the original Instance index that was migrated away from.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "mode": {
+          "description": "Mode is the migration mechanism. Always `surge` in v1.",
+          "type": "string",
+          "default": ""
+        },
+        "outcomeReason": {
+          "description": "OutcomeReason is a short machine-readable reason describing why the migration ended in its terminal phase (e.g., \"InstanceReadyTimeout\").",
+          "type": "string"
+        },
+        "phase": {
+          "description": "Phase is the current lifecycle phase.",
+          "type": "string",
+          "default": ""
+        },
+        "reason": {
+          "description": "Reason is the caller-supplied reason (e.g., \"fragmentation\").",
+          "type": "string"
+        },
+        "replacementInstance": {
+          "description": "ReplacementInstance is the Instance index allocated for the surge replacement. Zero when the migration was rejected before allocation.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "requestedAt": {
+          "description": "RequestedAt is the time the request annotation was first observed.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "requestedBy": {
+          "description": "RequestedBy identifies the caller that wrote the request annotation.",
+          "type": "string"
+        },
+        "startedAt": {
+          "description": "StartedAt is the time the controller began executing the migration.",
+          "$ref": "#/definitions/v1.Time"
+        }
+      }
+    },
     "v1beta1.ModelCacheStatus": {
       "description": "ModelCacheStatus reports cluster-wide cache progress for models that use a sharded distribution backend.",
       "type": "object",
@@ -2745,6 +2855,119 @@
           "description": "Status of the model weight",
           "type": "string",
           "default": ""
+        }
+      }
+    },
+    "v1beta1.OMENativeComponentStatus": {
+      "description": "OMENativeComponentStatus reports OMENative-managed state for one Component. Nil when the Component does not use OMENative.",
+      "type": "object",
+      "properties": {
+        "availableReplicas": {
+          "description": "AvailableReplicas is the number of Instances ready for at least MinReadySeconds.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "currentRevision": {
+          "description": "CurrentRevision names the ControllerRevision currently serving traffic.",
+          "type": "string"
+        },
+        "instanceStatuses": {
+          "description": "InstanceStatuses reports per-Instance state.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.OMENativeInstanceStatus"
+          },
+          "x-kubernetes-list-map-keys": [
+            "index"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "labelSelector": {
+          "description": "LabelSelector identifies pods of this Component for HPA-style consumers.",
+          "type": "string"
+        },
+        "observedGeneration": {
+          "description": "ObservedGeneration is the InferenceService.metadata.generation reflected by this block.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "readyReplicas": {
+          "description": "ReadyReplicas is the number of Instances reporting Phase=Ready.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "replicas": {
+          "description": "Replicas is the total Instance count.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "updateRevision": {
+          "description": "UpdateRevision names the ControllerRevision being rolled out.",
+          "type": "string"
+        }
+      }
+    },
+    "v1beta1.OMENativeInstanceStatus": {
+      "description": "OMENativeInstanceStatus reports state for one OMENative Instance.",
+      "type": "object",
+      "required": [
+        "index",
+        "phase"
+      ],
+      "properties": {
+        "availablePodCount": {
+          "description": "AvailablePodCount is the number of pods ready for at least MinReadySeconds.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "incarnation": {
+          "description": "Incarnation increments each time the Instance is recreated by the restart machinery.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "index": {
+          "description": "Index is the stable Instance ordinal. Values may be sparse after surge migration.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "nodesOccupied": {
+          "description": "NodesOccupied is the set of node names hosting pods of this Instance.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "set"
+        },
+        "phase": {
+          "description": "Phase is the lifecycle phase of the Instance.",
+          "type": "string",
+          "default": ""
+        },
+        "podCount": {
+          "description": "PodCount is the total number of pods owned by this Instance.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "readyPodCount": {
+          "description": "ReadyPodCount is the number of pods reporting Ready=True.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "runningRevision": {
+          "description": "RunningRevision is the ControllerRevision the live pods are running.",
+          "type": "string"
+        },
+        "scheduledPodCount": {
+          "description": "ScheduledPodCount is the number of pods with Spec.NodeName set.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "targetRevision": {
+          "description": "TargetRevision is the ControllerRevision the live pods are converging toward.",
+          "type": "string"
         }
       }
     },
