@@ -139,8 +139,7 @@ var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func(
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("GetPrewarmStatus(Failed) drives state=Failed with reason=PrewarmFailed", func() {
-		ginkgo.By("scripting the fake to return PrewarmPhaseFailed")
+	ginkgo.It("GetPrewarmStatus(Failed) drives transient PrewarmFailed retry, NOT terminal state=Failed", func() {
 		suiteFakeMC.GetPrewarmStatusFunc = func(_ context.Context, op modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
 			return &modelcache.PrewarmStatus{
 				Operation: op,
@@ -160,12 +159,13 @@ var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func(
 		Eventually(func(g Gomega) {
 			got := &v1beta1.ClusterBaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-prewarm-fail"}, got)).To(Succeed())
-			g.Expect(got.Status.State).To(Equal(v1beta1.LifeCycleStateFailed))
-			ready := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionReady)
-			g.Expect(ready).NotTo(BeNil())
-			g.Expect(string(ready.Status)).To(Equal("False"))
-			g.Expect(ready.Reason).To(Equal(v1beta1.ModelConditionReasonPrewarmFailed))
-			g.Expect(ready.Message).To(ContainSubstring("fake provider injected failure"))
+			g.Expect(got.Status.State).NotTo(Equal(v1beta1.LifeCycleStateFailed))
+			cached := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionCached)
+			g.Expect(cached).NotTo(BeNil())
+			g.Expect(string(cached.Status)).To(Equal("False"))
+			g.Expect(cached.Reason).To(Equal(v1beta1.ModelConditionReasonPrewarmFailed))
+			g.Expect(cached.Message).To(ContainSubstring("fake provider injected failure"))
+			g.Expect(cached.Message).To(ContainSubstring("will retry"))
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 

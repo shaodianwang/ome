@@ -380,9 +380,14 @@ func (c *Client) GetPrewarmStatus(ctx context.Context, operation modelcache.Prew
 func (c *Client) startOperation(operationID string, paths []string) {
 	c.mu.Lock()
 	c.cleanupOperationsLocked(time.Now())
-	if _, ok := c.operations[operationID]; ok {
-		c.mu.Unlock()
-		return
+	// In-flight (Pending/Running): honor idempotency — no second goroutine.
+	// Terminal (Failed/Canceled): caller is retrying — wipe and re-fire.
+	if existing, ok := c.operations[operationID]; ok {
+		if existing == nil || !prewarmPhaseTerminal(existing.status.Phase) {
+			c.mu.Unlock()
+			return
+		}
+		delete(c.operations, operationID)
 	}
 	c.operations[operationID] = &operationState{
 		status: modelcache.PrewarmStatus{

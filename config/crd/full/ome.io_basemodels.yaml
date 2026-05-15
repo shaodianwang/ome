@@ -339,6 +339,12 @@ spec:
                   cachedChunks:
                     format: int32
                     type: integer
+                  lastPrewarmFailureAt:
+                    format: date-time
+                    type: string
+                  prewarmAttempts:
+                    format: int32
+                    type: integer
                   prewarmID:
                     type: string
                   sourceUri:

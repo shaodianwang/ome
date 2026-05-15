@@ -1122,15 +1122,48 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 			},
 		},
 		{
-			name:   "prewarm failure marks model failed",
-			status: shardedStatusWithPrewarmID("op-1"),
+			name:        "prewarm failure within retry budget retries with backoff",
+			status:      shardedStatusWithPrewarmAttempts("op-1", 1),
+			wantRequeue: 30 * time.Second,
 			modelCache: &modelcachefake.Client{
 				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
 					return &modelcache.PrewarmStatus{
 						Operation: operation,
 						Phase:     modelcache.PrewarmPhaseFailed,
-						Reason:    "AuthFailed",
-						Message:   "source credentials were rejected",
+						Reason:    "ClusterCacheFetchFailed",
+						Message:   "cgroup pressure 2GB/2GB",
+					}, nil
+				},
+			},
+			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
+				updated := getBaseModelForTest(t, c, "default", "cached-model")
+
+				g.Expect(updated.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateImporting))
+				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.BeEmpty())
+				cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
+				g.Expect(cached).ToNot(gomega.BeNil())
+				g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
+				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmFailed))
+				g.Expect(cached.Message).To(gomega.ContainSubstring("attempt 1/10, will retry"))
+				g.Expect(cached.Message).To(gomega.ContainSubstring("ClusterCacheFetchFailed"))
+				g.Expect(cached.Message).To(gomega.ContainSubstring("cgroup pressure"))
+				ready := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionReady)
+				g.Expect(ready).ToNot(gomega.BeNil())
+				g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonCacheNotReady))
+				g.Expect(result.RequeueAfter).To(gomega.Equal(30 * time.Second))
+			},
+		},
+		{
+			name:        "prewarm failure at retry budget cap becomes exhausted with long-tail retry",
+			status:      shardedStatusWithPrewarmAttempts("op-final", 10),
+			wantRequeue: time.Hour,
+			modelCache: &modelcachefake.Client{
+				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
+					return &modelcache.PrewarmStatus{
+						Operation: operation,
+						Phase:     modelcache.PrewarmPhaseFailed,
+						Reason:    "ClusterCacheFetchFailed",
+						Message:   "cgroup pressure 2GB/2GB",
 					}, nil
 				},
 			},
@@ -1138,14 +1171,35 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 				updated := getBaseModelForTest(t, c, "default", "cached-model")
 
 				g.Expect(updated.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateFailed))
+				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.BeEmpty())
 				cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
 				g.Expect(cached).ToNot(gomega.BeNil())
-				g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
-				g.Expect(cached.Reason).To(gomega.Equal("AuthFailed"))
+				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmExhausted))
+				g.Expect(cached.Message).To(gomega.ContainSubstring("slow-retrying every 1h0m0s"))
+				g.Expect(cached.Message).To(gomega.ContainSubstring("cgroup pressure"))
 				ready := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionReady)
 				g.Expect(ready).ToNot(gomega.BeNil())
-				g.Expect(ready.Status).To(gomega.Equal(metav1.ConditionFalse))
-				g.Expect(ready.Reason).To(gomega.Equal("AuthFailed"))
+				g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmExhausted))
+				g.Expect(result.RequeueAfter).To(gomega.Equal(time.Hour))
+			},
+		},
+		{
+			name:   "prewarm canceled is terminal regardless of attempts",
+			status: shardedStatusWithPrewarmAttempts("op-canceled", 1),
+			modelCache: &modelcachefake.Client{
+				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
+					return &modelcache.PrewarmStatus{
+						Operation: operation,
+						Phase:     modelcache.PrewarmPhaseCanceled,
+						Reason:    "OperatorCanceled",
+						Message:   "operator canceled the prewarm",
+					}, nil
+				},
+			},
+			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
+				updated := getBaseModelForTest(t, c, "default", "cached-model")
+
+				g.Expect(updated.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateFailed))
 				g.Expect(result).To(gomega.Equal(ctrl.Result{}))
 			},
 		},
@@ -2124,11 +2178,16 @@ func tinyPhiConfigForTest(t *testing.T) []byte {
 }
 
 func shardedStatusWithPrewarmID(prewarmID string) v1beta1.ModelStatusSpec {
+	return shardedStatusWithPrewarmAttempts(prewarmID, 1)
+}
+
+func shardedStatusWithPrewarmAttempts(prewarmID string, attempts int32) v1beta1.ModelStatusSpec {
 	return v1beta1.ModelStatusSpec{
 		Cache: &v1beta1.ModelCacheStatus{
-			Backend:   modelcache.ProviderClusterCache,
-			SourceUri: "s3://bucket/cached-model",
-			PrewarmID: prewarmID,
+			Backend:         modelcache.ProviderClusterCache,
+			SourceUri:       "s3://bucket/cached-model",
+			PrewarmID:       prewarmID,
+			PrewarmAttempts: &attempts,
 		},
 		Conditions: []metav1.Condition{
 			{

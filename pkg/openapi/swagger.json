@@ -2693,6 +2693,15 @@
           "type": "integer",
           "format": "int32"
         },
+        "lastPrewarmFailureAt": {
+          "description": "LastPrewarmFailureAt records when the controller first observed the current failure cycle. The controller compares it against the exponential backoff (or long-tail interval) to decide whether the next reconcile is allowed to re-submit StartPrewarm. Required because k8s metav1.Condition.LastTransitionTime only updates on Status change, not Reason change — so a same-Status reason transition (PrewarmPending → PrewarmFailed → PrewarmFailed) does not refresh the condition timestamp and cannot be used to enforce retry cadence.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "prewarmAttempts": {
+          "description": "PrewarmAttempts counts how many times the controller has submitted a prewarm operation for this source. Incremented after a transient PrewarmFailed phase before the controller re-submits. The terminal PrewarmExhausted reason fires when this hits the controller's retry budget.",
+          "type": "integer",
+          "format": "int32"
+        },
         "prewarmID": {
           "description": "PrewarmID is the operation ID returned by the cache prewarm API.",
           "type": "string"

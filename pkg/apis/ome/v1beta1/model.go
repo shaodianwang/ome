@@ -445,8 +445,13 @@ const (
 	ModelConditionReasonPrewarmRunning = "PrewarmRunning"
 	// ModelConditionReasonPrewarmSucceeded means cache prewarm completed successfully.
 	ModelConditionReasonPrewarmSucceeded = "PrewarmSucceeded"
-	// ModelConditionReasonPrewarmFailed means cache prewarm failed.
+	// ModelConditionReasonPrewarmFailed means the most recent cache prewarm
+	// attempt failed. Transient — the controller retries with backoff.
 	ModelConditionReasonPrewarmFailed = "PrewarmFailed"
+	// ModelConditionReasonPrewarmExhausted means the burst retry budget is
+	// spent. State=Failed; controller keeps slow-retrying so transient
+	// infra recovery still heals the model without operator intervention.
+	ModelConditionReasonPrewarmExhausted = "PrewarmExhausted"
 	// ModelConditionReasonPrewarmCanceled means cache prewarm was canceled.
 	ModelConditionReasonPrewarmCanceled = "PrewarmCanceled"
 	// ModelConditionReasonCacheNotReady means cache state still blocks model readiness.
@@ -520,6 +525,18 @@ type ModelCacheStatus struct {
 	// CachedChunks is the number of cache chunks cached so far, if known.
 	// +optional
 	CachedChunks *int32 `json:"cachedChunks,omitempty"`
+
+	// PrewarmAttempts counts StartPrewarm submissions for this source.
+	// PrewarmExhausted fires when this reaches the controller's burst budget.
+	// +optional
+	PrewarmAttempts *int32 `json:"prewarmAttempts,omitempty"`
+
+	// LastPrewarmFailureAt anchors the retry-backoff computation.
+	// Needed instead of the Cached condition's LastTransitionTime because
+	// the latter only updates on Status change, and same-Status reason
+	// transitions (PrewarmPending → PrewarmFailed) leave it stuck.
+	// +optional
+	LastPrewarmFailureAt *metav1.Time `json:"lastPrewarmFailureAt,omitempty"`
 }
 
 // ModelStatusSpec defines the observed state of Model weight

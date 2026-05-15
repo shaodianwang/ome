@@ -4842,9 +4842,24 @@ func schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref common.ReferenceCallback) 
 							Format:      "int32",
 						},
 					},
+					"prewarmAttempts": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PrewarmAttempts counts how many times the controller has submitted a prewarm operation for this source. Incremented after a transient PrewarmFailed phase before the controller re-submits. The terminal PrewarmExhausted reason fires when this hits the controller's retry budget.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"lastPrewarmFailureAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastPrewarmFailureAt records when the controller first observed the current failure cycle. The controller compares it against the exponential backoff (or long-tail interval) to decide whether the next reconcile is allowed to re-submit StartPrewarm. Required because k8s metav1.Condition.LastTransitionTime only updates on Status change, not Reason change — so a same-Status reason transition (PrewarmPending → PrewarmFailed → PrewarmFailed) does not refresh the condition timestamp and cannot be used to enforce retry cadence.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -623,6 +624,79 @@ func TestStartPrewarmReportsEmptyFetchFailure(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, reasonClusterCacheFetchFailed, status.Reason)
 	assert.Contains(t, status.Message, "no path results")
+}
+
+// After a terminal Failed phase, a re-submit with the same deterministic
+// operationID must wipe the dead state and fire a fresh /fetch. Without
+// this, the controller's retry loop is silently swallowed by the
+// existing-operation early-return until the 10min retention TTL elapses.
+func TestStartPrewarmReFiresAfterTerminalFailure(t *testing.T) {
+	var fetchCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount.Add(1)
+		writeJSON(t, w, fetchResponse{
+			Results: []fetchPathResult{{
+				Path:   "s3://bucket/model",
+				Status: "error",
+				Error:  stringPtr("transient overload"),
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	req := modelcache.PrewarmRequest{Source: modelcache.Source{URI: "s3://bucket/model"}}
+
+	op1, err := client.StartPrewarm(context.Background(), req)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		s, _ := client.GetPrewarmStatus(context.Background(), *op1)
+		return s.Phase == modelcache.PrewarmPhaseFailed
+	}, time.Second, 10*time.Millisecond)
+
+	op2, err := client.StartPrewarm(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, op1.ID, op2.ID)
+
+	require.Eventually(t, func() bool { return fetchCount.Load() == 2 }, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		s, _ := client.GetPrewarmStatus(context.Background(), *op2)
+		return s.Phase == modelcache.PrewarmPhaseFailed
+	}, time.Second, 10*time.Millisecond)
+}
+
+// Inverse: an in-flight operation (Pending/Running) must NOT fan out a
+// duplicate /fetch on resubmit.
+func TestStartPrewarmIdempotentForInflightOperation(t *testing.T) {
+	var fetchCount atomic.Int32
+	releaseFetch := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount.Add(1)
+		<-releaseFetch
+		writeJSON(t, w, fetchResponse{
+			Results: []fetchPathResult{{
+				Path:   "s3://bucket/model",
+				Status: "warmed",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	req := modelcache.PrewarmRequest{Source: modelcache.Source{URI: "s3://bucket/model"}}
+
+	op1, err := client.StartPrewarm(context.Background(), req)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return fetchCount.Load() == 1 }, time.Second, 10*time.Millisecond)
+
+	op2, err := client.StartPrewarm(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, op1.ID, op2.ID)
+
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, int32(1), fetchCount.Load())
+
+	close(releaseFetch)
 }
 
 func TestGetPrewarmStatusRestartsDecodedOperation(t *testing.T) {

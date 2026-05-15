@@ -21,7 +21,70 @@ import (
 	"github.com/ome-projects/ome/pkg/modelparser"
 )
 
-const shardedModelCachePollInterval = 5 * time.Second
+// TODO: surface these as PrewarmRetry knobs in modelcache.ProviderConfig
+// so operators can tune via inferenceservice-config ConfigMap.
+const (
+	shardedModelCachePollInterval  = 5 * time.Second
+	shardedPrewarmMaxAttempts      = 10
+	shardedPrewarmBaseBackoff      = 30 * time.Second
+	shardedPrewarmMaxBackoff       = 5 * time.Minute
+	shardedPrewarmLongTailInterval = time.Hour
+)
+
+// shardedPrewarmBackoff returns base * 2^(attempts-1), capped at maxBackoff.
+func shardedPrewarmBackoff(attempts int32) time.Duration {
+	if attempts <= 0 {
+		return 0
+	}
+	backoff := shardedPrewarmBaseBackoff
+	exp := attempts - 1
+	if exp > 8 { // 2^8 already past the maxBackoff cap; prevents overflow
+		exp = 8
+	}
+	for i := int32(0); i < exp; i++ {
+		backoff *= 2
+		if backoff >= shardedPrewarmMaxBackoff {
+			return shardedPrewarmMaxBackoff
+		}
+	}
+	if backoff > shardedPrewarmMaxBackoff {
+		return shardedPrewarmMaxBackoff
+	}
+	return backoff
+}
+
+func prewarmAttempts(status *v1beta1.ModelStatusSpec) int32 {
+	if status == nil || status.Cache == nil || status.Cache.PrewarmAttempts == nil {
+		return 0
+	}
+	return *status.Cache.PrewarmAttempts
+}
+
+// shardedPrewarmRetryWait gates the empty-PrewarmID branch from re-submitting
+// before the backoff (or long-tail interval) elapses. Without it, the
+// informer event from a status write that cleared PrewarmID would re-fire
+// StartPrewarm in milliseconds, hammering the provider through a transient
+// outage — controller-runtime's RequeueAfter is ignored when an informer
+// event fires the reconcile first.
+func shardedPrewarmRetryWait(status *v1beta1.ModelStatusSpec, now time.Time) time.Duration {
+	if status == nil || status.Cache == nil || status.Cache.LastPrewarmFailureAt == nil {
+		return 0
+	}
+	// State, not Cached.Reason, because the provider's raw reason
+	// (e.g. ClusterCacheFetchFailed) propagates into the condition and
+	// would fail-open a switch on OME's constants.
+	var backoff time.Duration
+	if status.State == v1beta1.LifeCycleStateFailed {
+		backoff = shardedPrewarmLongTailInterval
+	} else {
+		backoff = shardedPrewarmBackoff(prewarmAttempts(status))
+	}
+	deadline := status.Cache.LastPrewarmFailureAt.Time.Add(backoff)
+	if remaining := deadline.Sub(now); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
 
 type shardedStatusTransition func(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool
 
@@ -75,6 +138,9 @@ func reconcileShardedModelCacheStatus(ctx context.Context, kubeClient client.Cli
 		prewarmID = status.Cache.PrewarmID
 	}
 	if prewarmID == "" {
+		if wait := shardedPrewarmRetryWait(status, time.Now()); wait > 0 {
+			return ctrl.Result{RequeueAfter: wait}, nil
+		}
 		inspection, result, err := reconcileShardedModelMetadataSpec(ctx, kubeClient, log, cacheClient, source, obj, modelType, provider.Name)
 		if err != nil {
 			return result, err
@@ -112,8 +178,13 @@ func reconcileShardedModelCacheStatus(ctx context.Context, kubeClient client.Cli
 	}
 
 	result := ctrl.Result{}
-	if prewarmStatus == nil || prewarmStatus.Phase == modelcache.PrewarmPhasePending || prewarmStatus.Phase == modelcache.PrewarmPhaseRunning {
+	switch {
+	case prewarmStatus == nil || prewarmStatus.Phase == modelcache.PrewarmPhasePending || prewarmStatus.Phase == modelcache.PrewarmPhaseRunning:
 		result.RequeueAfter = shardedModelCachePollInterval
+	case prewarmStatus.Phase == modelcache.PrewarmPhaseFailed && prewarmAttempts(status) < shardedPrewarmMaxAttempts:
+		result.RequeueAfter = shardedPrewarmBackoff(prewarmAttempts(status))
+	case prewarmStatus.Phase == modelcache.PrewarmPhaseFailed:
+		result.RequeueAfter = shardedPrewarmLongTailInterval
 	}
 	transition := func(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec) bool {
 		return applyPrewarmStatus(generation, status, prewarmStatus)
@@ -424,6 +495,14 @@ func applyPrewarmStarted(generation int64, status *v1beta1.ModelStatusSpec, oper
 		status.Cache.PrewarmID = operationID
 		updated = true
 	}
+	attempts := prewarmAttempts(status) + 1
+	if setInt32Ptr(&status.Cache.PrewarmAttempts, attempts) {
+		updated = true
+	}
+	if status.Cache.LastPrewarmFailureAt != nil {
+		status.Cache.LastPrewarmFailureAt = nil
+		updated = true
+	}
 	if status.State != v1beta1.LifeCycleStateImporting {
 		status.State = v1beta1.LifeCycleStateImporting
 		updated = true
@@ -478,7 +557,13 @@ func applyPrewarmStatus(generation int64, status *v1beta1.ModelStatusSpec, prewa
 			ObservedGeneration: generation,
 		}) || updated
 	case modelcache.PrewarmPhaseFailed:
-		updated = applyTerminalPrewarmFailure(generation, status, v1beta1.ModelConditionReasonPrewarmFailed, prewarmStatus) || updated
+		// Transient (OOM, throttling, pod restart) until the burst budget
+		// is spent. Cancellation below stays terminal — operator intent.
+		if prewarmAttempts(status) >= shardedPrewarmMaxAttempts {
+			updated = applyTerminalPrewarmExhausted(generation, status, prewarmStatus) || updated
+		} else {
+			updated = applyTransientPrewarmFailure(generation, status, prewarmStatus) || updated
+		}
 	case modelcache.PrewarmPhaseCanceled:
 		updated = applyTerminalPrewarmFailure(generation, status, v1beta1.ModelConditionReasonPrewarmCanceled, prewarmStatus) || updated
 	case modelcache.PrewarmPhasePending:
@@ -534,6 +619,94 @@ func applyActivePrewarmCondition(generation int64, status *v1beta1.ModelStatusSp
 		ObservedGeneration: generation,
 	}) || updated
 
+	return updated
+}
+
+// applyTransientPrewarmFailure clears PrewarmID so the next reconcile
+// re-submits StartPrewarm and stamps LastPrewarmFailureAt for the backoff
+// gate. Reason is forced to OME's PrewarmFailed constant so operators
+// recognize the retry state regardless of provider; the provider's raw
+// reason/message moves into the human-readable Message.
+func applyTransientPrewarmFailure(generation int64, status *v1beta1.ModelStatusSpec, prewarmStatus *modelcache.PrewarmStatus) bool {
+	updated := false
+	if status.State != v1beta1.LifeCycleStateImporting {
+		status.State = v1beta1.LifeCycleStateImporting
+		updated = true
+	}
+	if status.Cache != nil && status.Cache.PrewarmID != "" {
+		status.Cache.PrewarmID = ""
+		updated = true
+	}
+	if status.Cache != nil && status.Cache.LastPrewarmFailureAt == nil {
+		now := metav1.NewTime(time.Now())
+		status.Cache.LastPrewarmFailureAt = &now
+		updated = true
+	}
+
+	attempts := prewarmAttempts(status)
+	underlying := messageOrDefault(prewarmStatus.Message, "model cache prewarm failed")
+	if prewarmStatus.Reason != "" {
+		underlying = prewarmStatus.Reason + ": " + underlying
+	}
+	message := fmt.Sprintf("%s (attempt %d/%d, will retry)", underlying, attempts, shardedPrewarmMaxAttempts)
+
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionCached,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonPrewarmFailed,
+		Message:            message,
+		ObservedGeneration: generation,
+	}) || updated
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonCacheNotReady,
+		Message:            "model is not ready until model cache prewarm and metadata parsing complete",
+		ObservedGeneration: generation,
+	}) || updated
+
+	return updated
+}
+
+// applyTerminalPrewarmExhausted sets state=Failed as an alarm signal but
+// clears PrewarmID so each long-tail reconcile re-submits StartPrewarm —
+// transient infra recovery heals the model without operator intervention.
+func applyTerminalPrewarmExhausted(generation int64, status *v1beta1.ModelStatusSpec, prewarmStatus *modelcache.PrewarmStatus) bool {
+	updated := false
+	if status.State != v1beta1.LifeCycleStateFailed {
+		status.State = v1beta1.LifeCycleStateFailed
+		updated = true
+	}
+	if status.Cache != nil && status.Cache.PrewarmID != "" {
+		status.Cache.PrewarmID = ""
+		updated = true
+	}
+	if status.Cache != nil && status.Cache.LastPrewarmFailureAt == nil {
+		now := metav1.NewTime(time.Now())
+		status.Cache.LastPrewarmFailureAt = &now
+		updated = true
+	}
+
+	underlying := messageOrDefault(prewarmStatus.Message, "model cache prewarm did not complete")
+	if prewarmStatus.Reason != "" {
+		underlying = prewarmStatus.Reason + ": " + underlying
+	}
+	message := fmt.Sprintf("model cache prewarm exhausted burst retry budget (%d attempts); slow-retrying every %s: %s", shardedPrewarmMaxAttempts, shardedPrewarmLongTailInterval, underlying)
+
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionCached,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonPrewarmExhausted,
+		Message:            message,
+		ObservedGeneration: generation,
+	}) || updated
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonPrewarmExhausted,
+		Message:            message,
+		ObservedGeneration: generation,
+	}) || updated
 	return updated
 }
 
@@ -697,7 +870,8 @@ func shardedCacheProgressStarted(cache *v1beta1.ModelCacheStatus) bool {
 		cache.TotalBytes != nil ||
 		cache.CachedBytes != nil ||
 		cache.TotalChunks != nil ||
-		cache.CachedChunks != nil
+		cache.CachedChunks != nil ||
+		cache.PrewarmAttempts != nil
 }
 
 func resetShardedCacheProgress(status *v1beta1.ModelCacheStatus) bool {
@@ -720,6 +894,14 @@ func resetShardedCacheProgress(status *v1beta1.ModelCacheStatus) bool {
 	}
 	if status.CachedChunks != nil {
 		status.CachedChunks = nil
+		updated = true
+	}
+	if status.PrewarmAttempts != nil {
+		status.PrewarmAttempts = nil
+		updated = true
+	}
+	if status.LastPrewarmFailureAt != nil {
+		status.LastPrewarmFailureAt = nil
 		updated = true
 	}
 	return updated
