@@ -313,8 +313,27 @@ def generate_pipeline() -> str:
     return pipeline
 
 
+def _priority_prefix() -> str:
+    """Return ``"priority: N\\n"`` if ``MSL_BK_PIPELINE_PRIORITY`` is set.
+
+    The value is set by mslsrc/dev's static pipeline (see
+    ``pulumi/deployments/buildkite/prod/pipelines.py``) and propagated to
+    every step in the build via Buildkite's top-level ``env:`` mechanism.
+    Re-emitting it as top-level YAML here makes the dynamically uploaded
+    steps inherit the same priority instead of running at the implicit
+    Buildkite default 0. Per-step priorities, if any, still win.
+    """
+    raw = os.environ.get("MSL_BK_PIPELINE_PRIORITY")
+    if not raw:
+        return ""
+    try:
+        return f"priority: {int(raw)}\n"
+    except ValueError:
+        return ""
+
+
 def main() -> None:
-    sys.stdout.write(generate_pipeline())
+    sys.stdout.write(_priority_prefix() + generate_pipeline())
 
 
 if __name__ == "__main__":
