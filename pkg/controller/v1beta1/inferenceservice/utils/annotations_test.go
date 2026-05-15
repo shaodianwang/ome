@@ -200,6 +200,14 @@ func TestGetDeploymentModeFromAnnotations(t *testing.T) {
 			expectedFound: true,
 		},
 		{
+			name: "valid OMENative mode",
+			annotations: map[string]string{
+				constants.DeploymentMode: string(constants.OMENative),
+			},
+			expectedMode:  constants.OMENative,
+			expectedFound: true,
+		},
+		{
 			name: "invalid deployment mode - returns empty and false",
 			annotations: map[string]string{
 				constants.DeploymentMode: "InvalidMode",

@@ -79,6 +79,102 @@ func TestValidateEngineDecoderConfig(t *testing.T) {
 	}
 }
 
+func TestValidateEngineDecoderDeploymentMode(t *testing.T) {
+	withMode := func(mode string) *v1beta1.ComponentExtensionSpec {
+		return &v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{constants.DeploymentMode: mode},
+		}
+	}
+	engineWith := func(ext *v1beta1.ComponentExtensionSpec) *v1beta1.EngineSpec {
+		if ext == nil {
+			return &v1beta1.EngineSpec{}
+		}
+		return &v1beta1.EngineSpec{ComponentExtensionSpec: *ext}
+	}
+	decoderWith := func(ext *v1beta1.ComponentExtensionSpec) *v1beta1.DecoderSpec {
+		if ext == nil {
+			return &v1beta1.DecoderSpec{}
+		}
+		return &v1beta1.DecoderSpec{ComponentExtensionSpec: *ext}
+	}
+
+	tests := []struct {
+		name    string
+		spec    *v1beta1.InferenceServiceSpec
+		wantErr bool
+	}{
+		{
+			name: "no engine, no decoder",
+			spec: &v1beta1.InferenceServiceSpec{},
+		},
+		{
+			name: "engine only (no decoder) — rule does not apply",
+			spec: &v1beta1.InferenceServiceSpec{Engine: engineWith(withMode(string(constants.OMENative)))},
+		},
+		{
+			name: "both present, no annotations — rule does not apply",
+			spec: &v1beta1.InferenceServiceSpec{Engine: engineWith(nil), Decoder: decoderWith(nil)},
+		},
+		{
+			name: "both OMENative — match",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  engineWith(withMode(string(constants.OMENative))),
+				Decoder: decoderWith(withMode(string(constants.OMENative))),
+			},
+		},
+		{
+			name: "engine OMENative, decoder unset — mismatch",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  engineWith(withMode(string(constants.OMENative))),
+				Decoder: decoderWith(nil),
+			},
+			wantErr: true,
+		},
+		{
+			name: "engine unset, decoder OMENative — mismatch",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  engineWith(nil),
+				Decoder: decoderWith(withMode(string(constants.OMENative))),
+			},
+			wantErr: true,
+		},
+		{
+			name: "engine OMENative, decoder MultiNode — mismatch",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  engineWith(withMode(string(constants.OMENative))),
+				Decoder: decoderWith(withMode(string(constants.MultiNode))),
+			},
+			wantErr: true,
+		},
+		{
+			name: "both MultiNode (no OMENative) — rule does not apply",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  engineWith(withMode(string(constants.MultiNode))),
+				Decoder: decoderWith(withMode(string(constants.MultiNode))),
+			},
+		},
+		{
+			name: "engine MultiNode, decoder RawDeployment (no OMENative) — rule does not apply",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  engineWith(withMode(string(constants.MultiNode))),
+				Decoder: decoderWith(withMode(string(constants.RawDeployment))),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateEngineDecoderDeploymentMode(tc.spec)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateReplicaBounds(t *testing.T) {
 	intPtr := func(v int) *int { return &v }
 

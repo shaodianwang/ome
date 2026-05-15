@@ -2,6 +2,7 @@ package components
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	policyv1 "k8s.io/api/policy/v1"
@@ -1383,5 +1384,18 @@ func TestDecoderAffinityMerging(t *testing.T) {
 				tt.validateAffinity(podSpec.Affinity)
 			}
 		})
+	}
+}
+
+func TestDecoderReconcileDeployment_OMENativeReturnsNotImplemented(t *testing.T) {
+	d := &Decoder{
+		BaseComponentFields: BaseComponentFields{DeploymentMode: constants.OMENative},
+	}
+	_, err := d.reconcileDeployment(nil, metav1.ObjectMeta{}, nil, 0, nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "OMENative") || !strings.Contains(err.Error(), "not implemented") || !strings.Contains(err.Error(), "decoder") {
+		t.Fatalf("unexpected error message: %v", err)
 	}
 }

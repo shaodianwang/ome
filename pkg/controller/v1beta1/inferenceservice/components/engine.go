@@ -157,6 +157,8 @@ func (e *Engine) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 		return e.deploymentReconciler.ReconcileMultiNodeDeployment(isvc, objectMeta, podSpec, workerSize, workerPodSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
 	case constants.Serverless:
 		return e.deploymentReconciler.ReconcileKnativeDeployment(isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
+	case constants.OMENative:
+		return ctrl.Result{}, errors.New("OMENative deployment mode is not implemented in this build (engine)")
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for engine")
 	}

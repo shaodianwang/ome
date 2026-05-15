@@ -156,6 +156,8 @@ func (d *Decoder) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta
 		return d.deploymentReconciler.ReconcileMultiNodeDeployment(isvc, objectMeta, podSpec, workerSize, workerPodSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent)
 	case constants.Serverless:
 		return d.deploymentReconciler.ReconcileKnativeDeployment(isvc, objectMeta, podSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent)
+	case constants.OMENative:
+		return ctrl.Result{}, errors.New("OMENative deployment mode is not implemented in this build (decoder)")
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for decoder")
 	}

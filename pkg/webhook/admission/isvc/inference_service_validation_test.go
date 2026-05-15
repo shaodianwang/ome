@@ -521,6 +521,85 @@ func TestInferenceService_EngineDecoderValidation(t *testing.T) {
 	}
 }
 
+func TestInferenceService_OMENativeEngineDecoderCoupling(t *testing.T) {
+	annot := func(mode string) v1beta1.ComponentExtensionSpec {
+		return v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{constants.DeploymentMode: mode},
+		}
+	}
+	withRunner := &v1beta1.RunnerSpec{Container: v1.Container{Image: "test-image:latest"}}
+
+	tests := []struct {
+		name    string
+		isvc    *v1beta1.InferenceService
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "engine and decoder both OMENative - passes",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: annot(string(constants.OMENative)),
+						Runner:                 withRunner,
+					},
+					Decoder: &v1beta1.DecoderSpec{
+						ComponentExtensionSpec: annot(string(constants.OMENative)),
+					},
+				},
+			},
+		},
+		{
+			name: "engine OMENative, decoder unset - rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: annot(string(constants.OMENative)),
+						Runner:                 withRunner,
+					},
+					Decoder: &v1beta1.DecoderSpec{},
+				},
+			},
+			wantErr: true,
+			errMsg:  "InvalidDeploymentModeCombination",
+		},
+		{
+			name: "engine OMENative, decoder MultiNode - rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: annot(string(constants.OMENative)),
+						Runner:                 withRunner,
+					},
+					Decoder: &v1beta1.DecoderSpec{
+						ComponentExtensionSpec: annot(string(constants.MultiNode)),
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "InvalidDeploymentModeCombination",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := &InferenceServiceValidator{}
+			_, err := v.ValidateCreate(context.Background(), tt.isvc)
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestHasFullRunnerConfig(t *testing.T) {
 	tests := []struct {
 		name     string

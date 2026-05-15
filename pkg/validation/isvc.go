@@ -24,6 +24,28 @@ func ValidateEngineDecoderConfig(spec *v1beta1.InferenceServiceSpec) error {
 	return nil
 }
 
+// ValidateEngineDecoderDeploymentMode enforces that when both Engine and
+// Decoder are present and either carries ome.io/deploymentMode=OMENative,
+// both components carry the same value for that annotation.
+func ValidateEngineDecoderDeploymentMode(spec *v1beta1.InferenceServiceSpec) error {
+	if spec.Engine == nil || spec.Decoder == nil {
+		return nil
+	}
+	engineMode := spec.Engine.Annotations[constants.DeploymentMode]
+	decoderMode := spec.Decoder.Annotations[constants.DeploymentMode]
+	if engineMode != string(constants.OMENative) && decoderMode != string(constants.OMENative) {
+		return nil
+	}
+	if engineMode != decoderMode {
+		return fmt.Errorf(
+			"InvalidDeploymentModeCombination: engine %s=%q does not match decoder %s=%q; when either is OMENative, both must use the same value",
+			constants.DeploymentMode, engineMode,
+			constants.DeploymentMode, decoderMode,
+		)
+	}
+	return nil
+}
+
 func ValidateReplicaBounds(min, max *int) error {
 	if min != nil && *min < 0 {
 		return fmt.Errorf("minReplicas must be >= 0")

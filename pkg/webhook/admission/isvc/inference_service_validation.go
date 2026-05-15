@@ -97,6 +97,10 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
+	if err := validation.ValidateEngineDecoderDeploymentMode(&isvc.Spec); err != nil {
+		return allWarnings, err
+	}
+
 	// Validate that referenced model exists (for new Engine architecture using isvc.Spec.Model)
 	if err := v.validateModelExists(ctx, isvc); err != nil {
 		return allWarnings, err

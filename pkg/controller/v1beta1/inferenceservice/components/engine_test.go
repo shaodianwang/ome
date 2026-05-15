@@ -1304,3 +1304,16 @@ func TestEngineAffinityMerging(t *testing.T) {
 // UpdateEngineAffinity check isvc.Spec.Engine.Runner and isvc.Spec.Engine.PodSpec.Affinity,
 // not the worker-specific fields. This means the merging decision is based on the engine/leader
 // spec, not the worker spec. This is the current implementation behavior.
+
+func TestEngineReconcileDeployment_OMENativeReturnsNotImplemented(t *testing.T) {
+	e := &Engine{
+		BaseComponentFields: BaseComponentFields{DeploymentMode: constants.OMENative},
+	}
+	_, err := e.reconcileDeployment(nil, metav1.ObjectMeta{}, nil, 0, nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "OMENative") || !strings.Contains(err.Error(), "not implemented") || !strings.Contains(err.Error(), "engine") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}

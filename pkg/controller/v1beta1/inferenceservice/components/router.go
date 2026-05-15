@@ -133,6 +133,8 @@ func (r *Router) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 		return r.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
 	case constants.Serverless:
 		return r.deploymentReconciler.ReconcileKnativeDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
+	case constants.OMENative:
+		return ctrl.Result{}, errors.New("OMENative deployment mode is not implemented in this build (router)")
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for router")
 	}
