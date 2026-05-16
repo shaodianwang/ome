@@ -47,6 +47,13 @@ func init() {
 type Client struct {
 	endpoint   *url.URL
 	httpClient *http.Client
+	// prewarmHTTPClient is a separate client used for /prefetch_owned_chunks.
+	// http.Client.Timeout is an absolute deadline on the whole request; the
+	// inspect/CheckSource workloads want a short bound (default 5min) while
+	// large owner prewarm requests legitimately take longer. Without a
+	// separate client, the shorter Timeout wins over any per-request
+	// context.WithTimeout and owner POSTs die at the wrong cap.
+	prewarmHTTPClient *http.Client
 
 	ctx                context.Context
 	cancel             context.CancelFunc
@@ -138,6 +145,15 @@ func NewClient(config modelcache.ProviderConfig) (modelcache.Client, error) {
 		}
 		httpClient.Timeout = duration
 	}
+	// Larger client-level timeout for prewarm: defaultPrefetchOwnerTimeout
+	// (currently 10m) is the per-request context cap; the client timeout
+	// must be >= that or it'd silently win. Use max(prewarm_default,
+	// configured_short_timeout) so an operator who bumped the short timeout
+	// past 10m still gets at least that much for prewarm.
+	prewarmHTTPClient := &http.Client{Timeout: defaultPrefetchOwnerTimeout}
+	if httpClient.Timeout > prewarmHTTPClient.Timeout {
+		prewarmHTTPClient.Timeout = httpClient.Timeout
+	}
 
 	operationRetention := defaultOperationRetention
 	if retention := strings.TrimSpace(config.Options[optionOperationRetention]); retention != "" {
@@ -155,6 +171,7 @@ func NewClient(config modelcache.ProviderConfig) (modelcache.Client, error) {
 	return &Client{
 		endpoint:           endpoint,
 		httpClient:         httpClient,
+		prewarmHTTPClient:  prewarmHTTPClient,
 		ctx:                ctx,
 		cancel:             cancel,
 		operationRetention: operationRetention,
@@ -322,6 +339,16 @@ func (c *Client) StartPrewarm(ctx context.Context, req modelcache.PrewarmRequest
 	}
 	if err := c.ctx.Err(); err != nil {
 		return nil, err
+	}
+
+	// Source.URI is load-bearing: runPrewarm calls /file_metadata against it
+	// for per-file size+mtime. Reject empty URI synchronously rather than
+	// silently failing in the background goroutine. The modelcache.Client
+	// interface comment says "source or known objects", but the cluster_cache
+	// provider's owner-routed implementation needs the URI for /file_metadata
+	// regardless of how object paths were sourced.
+	if strings.TrimSpace(req.Source.URI) == "" {
+		return nil, fmt.Errorf("cluster_cache prewarm requires non-empty source.URI")
 	}
 
 	paths := prewarmPaths(req)

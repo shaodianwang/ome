@@ -200,6 +200,29 @@ func TestAggregateOwnerOutcomesLookupErrorsAlone(t *testing.T) {
 	assert.Contains(t, message, "missing")
 }
 
+func TestTotalBytesForPathsSumsOnlyRequestedFiles(t *testing.T) {
+	files := []clusterCacheMetadataFile{
+		{path: "s3://b/a", size: 10},
+		{path: "s3://b/b", size: 20},
+		{path: "s3://b/c", size: 40},
+	}
+
+	// Two of three files requested → only their sizes contribute.
+	assert.Equal(t, int64(50), totalBytesForPaths(files, []string{"s3://b/a", "s3://b/c"}))
+
+	// All three requested → full total.
+	assert.Equal(t, int64(70), totalBytesForPaths(files, []string{"s3://b/a", "s3://b/b", "s3://b/c"}))
+
+	// A requested path absent from /file_metadata contributes zero —
+	// it'll surface as a lookupError elsewhere; total reflects what we
+	// can actually route.
+	assert.Equal(t, int64(10), totalBytesForPaths(files, []string{"s3://b/a", "s3://b/missing"}))
+
+	// Empty inputs.
+	assert.Equal(t, int64(0), totalBytesForPaths(files, nil))
+	assert.Equal(t, int64(0), totalBytesForPaths(nil, []string{"s3://b/a"}))
+}
+
 func TestAggregateOwnerOutcomesEmptyResponseFails(t *testing.T) {
 	// Defensive: an owner outcome with no error AND no response shouldn't
 	// silently succeed. Pin that it surfaces as a failure.

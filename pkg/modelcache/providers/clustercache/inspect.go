@@ -160,20 +160,25 @@ func (c *Client) metadataChunkSize(ctx context.Context, files []clusterCacheMeta
 		if result.Path != candidates[0].path {
 			continue
 		}
+		// chunk_size is daemon-wide configuration, not per-file. Accept
+		// it even when status=error (e.g. the file's S3 HEAD returned
+		// 404 because it was deleted upstream). The size/mtime updates
+		// only apply when the result actually has them; without them
+		// the chunk-routing path will HEAD-fallback per file later.
+		if result.ChunkSize != nil && *result.ChunkSize > 0 {
+			if result.TotalSize != nil {
+				candidates[0].size = *result.TotalSize
+			}
+			if result.MTime != nil {
+				mtime := *result.MTime
+				candidates[0].mtime = &mtime
+			}
+			return *result.ChunkSize, nil
+		}
 		if result.Status == "error" {
 			return 0, fmt.Errorf("fetch cluster_cache metadata file for chunk sizing failed: %s", fetchResultError(result, "cluster_cache fetch failed"))
 		}
-		if result.TotalSize != nil {
-			candidates[0].size = *result.TotalSize
-		}
-		if result.MTime != nil {
-			mtime := *result.MTime
-			candidates[0].mtime = &mtime
-		}
-		if result.ChunkSize == nil || *result.ChunkSize == 0 {
-			return 0, fmt.Errorf("cluster_cache fetch did not return chunk_size for %s", candidates[0].path)
-		}
-		return *result.ChunkSize, nil
+		return 0, fmt.Errorf("cluster_cache fetch did not return chunk_size for %s", candidates[0].path)
 	}
 
 	return 0, fmt.Errorf("cluster_cache fetch did not return metadata for %s", candidates[0].path)

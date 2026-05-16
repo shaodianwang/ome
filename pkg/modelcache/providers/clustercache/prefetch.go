@@ -83,8 +83,44 @@ func (c *Client) runOwnerRoutedPrewarm(ctx context.Context, sourceURI string, pa
 		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, "no chunks routed to any owner"
 	}
 
+	// Compute total bytes from the file_metadata response. /file_metadata
+	// has exact sizes; we don't get per-chunk byte progress from the
+	// owner responses, but we can at least report total + cached-on-success.
+	totalBytes := totalBytesForPaths(files, paths)
+
 	outcomes := c.postPerOwnerConcurrent(ctx, byOwner)
-	return aggregateOwnerOutcomes(outcomes, lookupErrors)
+	phase, progress, message := aggregateOwnerOutcomes(outcomes, lookupErrors)
+	if totalBytes > 0 {
+		tb := totalBytes
+		progress.TotalBytes = &tb
+		if phase == modelcache.PrewarmPhaseSucceeded {
+			cb := totalBytes
+			progress.CachedBytes = &cb
+		}
+	}
+	return phase, progress, message
+}
+
+// totalBytesForPaths sums sizes of the files in the prewarm path set.
+// Paths absent from /file_metadata contribute zero — they'll surface as
+// lookupErrors in groupChunksByOwner so the prewarm reports Failed anyway;
+// the byte total reflects only what we could actually route.
+func totalBytesForPaths(files []clusterCacheMetadataFile, paths []string) int64 {
+	if len(paths) == 0 {
+		return 0
+	}
+	wanted := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		wanted[strings.TrimSpace(p)] = struct{}{}
+	}
+	var total int64
+	for _, f := range files {
+		if _, ok := wanted[f.path]; !ok {
+			continue
+		}
+		total += int64(f.size)
+	}
+	return total
 }
 
 // groupChunksByOwner builds the per-owner chunk lists. HEAD-fallback for
@@ -200,7 +236,10 @@ func (c *Client) postPrefetchOwnedChunks(ctx context.Context, owner string, chun
 	}
 	request.Header.Set("Content-Type", "application/json")
 
-	response, err := c.httpClient.Do(request)
+	// Use the prewarm-dedicated client so the long per-request context
+	// isn't capped by the shorter http.Client.Timeout used for the
+	// inspect/check workloads.
+	response, err := c.prewarmHTTPClient.Do(request)
 	if err != nil {
 		return nil, err
 	}

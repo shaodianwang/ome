@@ -466,6 +466,88 @@ func TestInspectSourceRequiresConfigOrModelIndex(t *testing.T) {
 		"missing config.json/model_index.json is a structural source fault and must wrap ErrSourceUnparseable so the controller transitions to state=Failed instead of looping in MetadataPending forever")
 }
 
+// chunk_size is daemon-wide configuration, not per-file. When /fetch
+// returns chunk_size on a result whose status=error (e.g. the file's
+// S3 HEAD returned 404 because it was deleted upstream), we should
+// still use the chunk_size — otherwise InspectSource is wedged for the
+// entire model just because one seed file went missing at the source.
+func TestMetadataChunkSizeAcceptsChunkSizeEvenWhenStatusError(t *testing.T) {
+	const sourceURI = "s3://bucket/model"
+	configPath := sourceURI + "/config.json"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file_metadata":
+			writeJSON(t, w, fileMetadataResponse{
+				Root:  sourceURI,
+				Files: []fileMetadataEntry{{Path: configPath, RelativePath: "config.json", Size: 100}},
+			})
+		case "/fetch":
+			// Mirror cluster_cache's real behavior: when S3 HEAD fails,
+			// status="error" + total_size/mtime nil + chunk_size still set.
+			writeJSON(t, w, fetchResponse{Results: []fetchPathResult{{
+				Path:      configPath,
+				Status:    "error",
+				ChunkSize: uint64Ptr(96 * 1024 * 1024),
+				Error:     stringPtr("HEAD s3://...: service error; status=404"),
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	// Call InspectSource — chunk_size discovery should NOT fail just because
+	// /fetch returned status=error for the seed file. Subsequent metadata-
+	// byte reads will fail (the file is gone) but that's a separate path.
+	_, err := client.InspectSource(context.Background(), modelcache.Source{URI: sourceURI})
+
+	// Expect either success-ish or a downstream error from reading bytes —
+	// crucially NOT the "chunk sizing failed" error.
+	if err != nil {
+		assert.NotContains(t, err.Error(), "chunk sizing", "chunk_size discovery must accept the chunk_size value when the daemon returns it, regardless of per-file status")
+	}
+}
+
+func TestStartPrewarmRejectsEmptySourceURI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("server should not be hit when source.URI is empty; got %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	op, err := client.StartPrewarm(context.Background(), modelcache.PrewarmRequest{
+		// Source.URI deliberately empty; Objects supplied.
+		Objects: []modelcache.ObjectRef{{Path: "s3://bucket/model/config.json"}},
+	})
+
+	require.Error(t, err, "owner-routed prewarm calls /file_metadata on Source.URI; rejecting empty up-front is better than silently failing in the goroutine")
+	assert.Nil(t, op)
+	assert.Contains(t, err.Error(), "source.URI")
+}
+
+func TestNewClientHasSeparatePrewarmHTTPClientWithLongerTimeout(t *testing.T) {
+	// Default config: short-call client at 5min, prewarm at >= 10min.
+	c, err := NewClient(modelcache.ProviderConfig{Endpoint: "http://cluster-cache.example"})
+	require.NoError(t, err)
+	cc := c.(*Client)
+	assert.Equal(t, defaultHTTPTimeout, cc.httpClient.Timeout)
+	assert.GreaterOrEqual(t, cc.prewarmHTTPClient.Timeout, defaultPrefetchOwnerTimeout,
+		"prewarm client must allow per-request context.WithTimeout(defaultPrefetchOwnerTimeout) to actually elapse — http.Client.Timeout caps the whole request and would silently win if shorter")
+
+	// Operator-tuned short timeout above the prewarm default: prewarm
+	// client should be at least the configured value (don't shrink prewarm
+	// just because the operator opted into a longer short-call cap).
+	c, err = NewClient(modelcache.ProviderConfig{
+		Endpoint: "http://cluster-cache.example",
+		Options:  map[string]string{"timeout": "20m"},
+	})
+	require.NoError(t, err)
+	cc = c.(*Client)
+	assert.Equal(t, 20*time.Minute, cc.httpClient.Timeout)
+	assert.GreaterOrEqual(t, cc.prewarmHTTPClient.Timeout, 20*time.Minute)
+}
+
 // TestInspectSourceReportsEmptyFileMetadataAsUnparseable pins the wire
 // contract: when /file_metadata returns 200 with zero files, the InspectSource
 // path must surface that as ErrSourceUnparseable (same as the CheckSource

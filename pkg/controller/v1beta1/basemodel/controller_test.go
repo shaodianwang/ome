@@ -1617,11 +1617,12 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 	g.Expect(*updated.Spec.ModelArchitecture).To(gomega.Equal("PhiModel"))
 	g.Expect(updated.Status.Cache.Backend).To(gomega.Equal(modelcache.ProviderClusterCache))
 	g.Expect(updated.Status.Cache.SourceUri).To(gomega.Equal(sourceURI))
-	// The /prefetch_owned_chunks response doesn't include byte counts —
-	// only chunk counts (api.rs:58-62: OwnedChunkPrefetchResponse).
-	// TotalBytes/CachedBytes stay nil; TotalChunks/CachedChunks sum across owners.
-	g.Expect(updated.Status.Cache.TotalBytes).To(gomega.BeNil(), "owner-routed prewarm doesn't surface byte progress")
-	g.Expect(updated.Status.Cache.CachedBytes).To(gomega.BeNil(), "owner-routed prewarm doesn't surface byte progress")
+	// /prefetch_owned_chunks doesn't surface per-chunk byte progress, but
+	// /file_metadata gives exact per-file sizes — TotalBytes is summed
+	// from there. On success, CachedBytes == TotalBytes.
+	expectedTotalBytes := int64(len(configData) + len(safetensorsData))
+	g.Expect(*updated.Status.Cache.TotalBytes).To(gomega.Equal(expectedTotalBytes))
+	g.Expect(*updated.Status.Cache.CachedBytes).To(gomega.Equal(expectedTotalBytes))
 	expectedChunks := int32(chunksForSize(uint64(len(configData)), chunkSize) +
 		chunksForSize(uint64(len(safetensorsData)), chunkSize))
 	g.Expect(*updated.Status.Cache.TotalChunks).To(gomega.Equal(expectedChunks))
