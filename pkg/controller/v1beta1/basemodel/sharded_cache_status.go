@@ -311,6 +311,7 @@ func updateShardedModelMetadataWithRetry(ctx context.Context, kubeClient client.
 		statusUpdated := applyInitialShardedModelStatus(obj.GetGeneration(), spec, status, backend)
 		statusUpdated = applyMetadataReady(obj.GetGeneration(), status) || statusUpdated
 		if statusUpdated {
+			stampObservedReconcile(obj, status)
 			if err := client.Status().Update(ctx, obj); err != nil {
 				return err
 			}
@@ -340,6 +341,7 @@ func updateShardedModelStatusWithRetry(ctx context.Context, kubeClient client.Cl
 		if !updated {
 			return nil
 		}
+		stampObservedReconcile(obj, status)
 
 		if err := client.Status().Update(ctx, obj); err != nil {
 			return err
@@ -353,6 +355,20 @@ func updateShardedModelStatusWithRetry(ctx context.Context, kubeClient client.Cl
 	}
 
 	return retryUpdate(ctx, kubeClient, log, obj, "sharded status", updateFunc)
+}
+
+// stampObservedReconcile updates top-level ObservedGeneration and
+// LastReconcileTime. Called by all three update paths (sharded, PVC,
+// per-node) before client.Status().Update.
+func stampObservedReconcile(obj client.Object, status *v1beta1.ModelStatusSpec) {
+	if status == nil {
+		return
+	}
+	if status.ObservedGeneration != obj.GetGeneration() {
+		status.ObservedGeneration = obj.GetGeneration()
+	}
+	now := metav1.NewTime(time.Now())
+	status.LastReconcileTime = &now
 }
 
 func applyInitialShardedModelStatus(generation int64, spec *v1beta1.BaseModelSpec, status *v1beta1.ModelStatusSpec, backend string) bool {
@@ -394,6 +410,13 @@ func applyInitialShardedModelStatus(generation int64, spec *v1beta1.BaseModelSpe
 		Status:             metav1.ConditionUnknown,
 		Reason:             v1beta1.ModelConditionReasonNotChecked,
 		Message:            "model cache source reachability has not been checked yet",
+		ObservedGeneration: generation,
+	}) || updated
+	updated = setInitialModelCondition(status, cacheIdentityChanged, metav1.Condition{
+		Type:               v1beta1.ModelConditionMetadataExtracted,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonMetadataPending,
+		Message:            "model metadata has not been extracted yet",
 		ObservedGeneration: generation,
 	}) || updated
 	updated = setInitialModelCondition(status, cacheIdentityChanged, metav1.Condition{
@@ -542,6 +565,18 @@ func applyPrewarmStatus(generation int64, status *v1beta1.ModelStatusSpec, prewa
 			status.State = v1beta1.LifeCycleStateImporting
 			updated = true
 		}
+		// Success proves the source is reachable for every object —
+		// drop any lingering FailedObjects and re-affirm SourceReachable.
+		if status.Cache != nil {
+			updated = clearFailedObjectsOnCache(status.Cache) || updated
+		}
+		updated = setModelCondition(status, metav1.Condition{
+			Type:               v1beta1.ModelConditionSourceReachable,
+			Status:             metav1.ConditionTrue,
+			Reason:             v1beta1.ModelConditionReasonSourceReachable,
+			Message:            "model source is reachable through cluster_cache",
+			ObservedGeneration: generation,
+		}) || updated
 		updated = setModelCondition(status, metav1.Condition{
 			Type:               v1beta1.ModelConditionCached,
 			Status:             metav1.ConditionTrue,
@@ -622,11 +657,11 @@ func applyActivePrewarmCondition(generation int64, status *v1beta1.ModelStatusSp
 	return updated
 }
 
-// applyTransientPrewarmFailure clears PrewarmID so the next reconcile
-// re-submits StartPrewarm and stamps LastPrewarmFailureAt for the backoff
-// gate. Reason is forced to OME's PrewarmFailed constant so operators
-// recognize the retry state regardless of provider; the provider's raw
-// reason/message moves into the human-readable Message.
+// applyTransientPrewarmFailure clears PrewarmID for the next reconcile and
+// stamps LastPrewarmFailureAt for the backoff gate. Reason is forced to
+// OME's PrewarmFailed constant so operators recognize the retry state
+// regardless of provider; the provider's per-object failures populate
+// cache.FailedObjects and trigger SourceReachable re-verification.
 func applyTransientPrewarmFailure(generation int64, status *v1beta1.ModelStatusSpec, prewarmStatus *modelcache.PrewarmStatus) bool {
 	updated := false
 	if status.State != v1beta1.LifeCycleStateImporting {
@@ -643,6 +678,14 @@ func applyTransientPrewarmFailure(generation int64, status *v1beta1.ModelStatusS
 		updated = true
 	}
 
+	var merged []v1beta1.FailedObject
+	if status.Cache != nil {
+		var total int32
+		var truncated bool
+		merged, total, truncated = mergeFailedObjects(status.Cache.FailedObjects, prewarmStatus.FailedObjects, time.Now())
+		updated = applyFailedObjectsToCache(status.Cache, merged, total, truncated) || updated
+	}
+
 	attempts := prewarmAttempts(status)
 	underlying := messageOrDefault(prewarmStatus.Message, "model cache prewarm failed")
 	if prewarmStatus.Reason != "" {
@@ -657,6 +700,8 @@ func applyTransientPrewarmFailure(generation int64, status *v1beta1.ModelStatusS
 		Message:            message,
 		ObservedGeneration: generation,
 	}) || updated
+	updated = applyPostPrewarmSourceReverify(generation, status, merged) || updated
+	updated = applyMetadataExtractedCaveat(generation, status, merged) || updated
 	updated = setModelCondition(status, metav1.Condition{
 		Type:               v1beta1.ModelConditionReady,
 		Status:             metav1.ConditionFalse,
@@ -668,9 +713,57 @@ func applyTransientPrewarmFailure(generation int64, status *v1beta1.ModelStatusS
 	return updated
 }
 
-// applyTerminalPrewarmExhausted sets state=Failed as an alarm signal but
-// clears PrewarmID so each long-tail reconcile re-submits StartPrewarm —
-// transient infra recovery heals the model without operator intervention.
+// applyPostPrewarmSourceReverify flips SourceReachable=False when prewarm
+// reveals SourceObjectMissing failures. applySourceStatus can leave
+// SourceReachable=True after a check served from cached metadata bytes;
+// prewarm is the authoritative re-check because it hits the backend.
+func applyPostPrewarmSourceReverify(generation int64, status *v1beta1.ModelStatusSpec, failed []v1beta1.FailedObject) bool {
+	if !hasSourceObjectMissing(failed) {
+		return false
+	}
+	count := 0
+	for _, f := range failed {
+		if f.ErrorClass == v1beta1.ErrorClassSourceObjectMissing {
+			count++
+		}
+	}
+	msg := fmt.Sprintf("source backend reports %d object(s) missing (see status.cache.failedObjects)", count)
+	return setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionSourceReachable,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonSourceObjectMissing,
+		Message:            msg,
+		ObservedGeneration: generation,
+	})
+}
+
+// applyMetadataExtractedCaveat flips MetadataExtracted's reason to
+// ExtractedFromCache when metadata extraction succeeded earlier but prewarm
+// now shows a metadata file (config.json, model_index.json, etc.) missing
+// on the source.
+func applyMetadataExtractedCaveat(generation int64, status *v1beta1.ModelStatusSpec, failed []v1beta1.FailedObject) bool {
+	existing := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionMetadataExtracted)
+	if existing == nil || existing.Status != metav1.ConditionTrue {
+		return false
+	}
+	if !hasMetadataObjectMissing(failed) {
+		return false
+	}
+	if existing.Reason == v1beta1.ModelConditionReasonExtractedFromCache && existing.ObservedGeneration == generation {
+		return false
+	}
+	return setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionMetadataExtracted,
+		Status:             metav1.ConditionTrue,
+		Reason:             v1beta1.ModelConditionReasonExtractedFromCache,
+		Message:            "metadata was served from cached bytes; source backend no longer has all metadata files",
+		ObservedGeneration: generation,
+	})
+}
+
+// applyTerminalPrewarmExhausted sets state=Failed but still clears
+// PrewarmID so each long-tail reconcile re-submits StartPrewarm —
+// transient infra recovery heals the model without operator action.
 func applyTerminalPrewarmExhausted(generation int64, status *v1beta1.ModelStatusSpec, prewarmStatus *modelcache.PrewarmStatus) bool {
 	updated := false
 	if status.State != v1beta1.LifeCycleStateFailed {
@@ -687,6 +780,14 @@ func applyTerminalPrewarmExhausted(generation int64, status *v1beta1.ModelStatus
 		updated = true
 	}
 
+	var merged []v1beta1.FailedObject
+	if status.Cache != nil {
+		var total int32
+		var truncated bool
+		merged, total, truncated = mergeFailedObjects(status.Cache.FailedObjects, prewarmStatus.FailedObjects, time.Now())
+		updated = applyFailedObjectsToCache(status.Cache, merged, total, truncated) || updated
+	}
+
 	underlying := messageOrDefault(prewarmStatus.Message, "model cache prewarm did not complete")
 	if prewarmStatus.Reason != "" {
 		underlying = prewarmStatus.Reason + ": " + underlying
@@ -700,6 +801,8 @@ func applyTerminalPrewarmExhausted(generation int64, status *v1beta1.ModelStatus
 		Message:            message,
 		ObservedGeneration: generation,
 	}) || updated
+	updated = applyPostPrewarmSourceReverify(generation, status, merged) || updated
+	updated = applyMetadataExtractedCaveat(generation, status, merged) || updated
 	updated = setModelCondition(status, metav1.Condition{
 		Type:               v1beta1.ModelConditionReady,
 		Status:             metav1.ConditionFalse,
@@ -717,6 +820,14 @@ func applyTerminalPrewarmFailure(generation int64, status *v1beta1.ModelStatusSp
 		updated = true
 	}
 
+	var merged []v1beta1.FailedObject
+	if status.Cache != nil {
+		var total int32
+		var truncated bool
+		merged, total, truncated = mergeFailedObjects(status.Cache.FailedObjects, prewarmStatus.FailedObjects, time.Now())
+		updated = applyFailedObjectsToCache(status.Cache, merged, total, truncated) || updated
+	}
+
 	reason := reasonOrDefault(prewarmStatus.Reason, defaultReason)
 	message := messageOrDefault(prewarmStatus.Message, "model cache prewarm did not complete")
 	updated = setModelCondition(status, metav1.Condition{
@@ -726,6 +837,8 @@ func applyTerminalPrewarmFailure(generation int64, status *v1beta1.ModelStatusSp
 		Message:            message,
 		ObservedGeneration: generation,
 	}) || updated
+	updated = applyPostPrewarmSourceReverify(generation, status, merged) || updated
+	updated = applyMetadataExtractedCaveat(generation, status, merged) || updated
 	updated = setModelCondition(status, metav1.Condition{
 		Type:               v1beta1.ModelConditionReady,
 		Status:             metav1.ConditionFalse,
@@ -743,11 +856,19 @@ func applyMetadataPending(generation int64, status *v1beta1.ModelStatusSpec, mes
 		status.State = v1beta1.LifeCycleStateImporting
 		updated = true
 	}
+	pendingMsg := messageOrDefault(message, "model metadata parsing has not completed")
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionMetadataExtracted,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonMetadataPending,
+		Message:            pendingMsg,
+		ObservedGeneration: generation,
+	}) || updated
 	updated = setModelCondition(status, metav1.Condition{
 		Type:               v1beta1.ModelConditionReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             v1beta1.ModelConditionReasonMetadataPending,
-		Message:            messageOrDefault(message, "model metadata parsing has not completed"),
+		Message:            pendingMsg,
 		ObservedGeneration: generation,
 	}) || updated
 	return updated
@@ -759,11 +880,19 @@ func applyMetadataUnparseable(generation int64, status *v1beta1.ModelStatusSpec,
 		status.State = v1beta1.LifeCycleStateFailed
 		updated = true
 	}
+	unparseableMsg := messageOrDefault(message, "model metadata cannot be parsed by the configured cache provider")
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionMetadataExtracted,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.ModelConditionReasonMetadataUnparseable,
+		Message:            unparseableMsg,
+		ObservedGeneration: generation,
+	}) || updated
 	updated = setModelCondition(status, metav1.Condition{
 		Type:               v1beta1.ModelConditionReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             v1beta1.ModelConditionReasonMetadataUnparseable,
-		Message:            messageOrDefault(message, "model metadata cannot be parsed by the configured cache provider"),
+		Message:            unparseableMsg,
 		ObservedGeneration: generation,
 	}) || updated
 	return updated
@@ -775,6 +904,13 @@ func applyMetadataReady(generation int64, status *v1beta1.ModelStatusSpec) bool 
 		status.State = v1beta1.LifeCycleStateReady
 		updated = true
 	}
+	updated = setModelCondition(status, metav1.Condition{
+		Type:               v1beta1.ModelConditionMetadataExtracted,
+		Status:             metav1.ConditionTrue,
+		Reason:             v1beta1.ModelConditionReasonMetadataParsed,
+		Message:            "model metadata parsing completed",
+		ObservedGeneration: generation,
+	}) || updated
 	updated = setModelCondition(status, metav1.Condition{
 		Type:               v1beta1.ModelConditionReady,
 		Status:             metav1.ConditionTrue,
@@ -904,6 +1040,7 @@ func resetShardedCacheProgress(status *v1beta1.ModelCacheStatus) bool {
 		status.LastPrewarmFailureAt = nil
 		updated = true
 	}
+	updated = clearFailedObjectsOnCache(status) || updated
 	return updated
 }
 

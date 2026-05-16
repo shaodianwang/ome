@@ -35,7 +35,6 @@ const (
 	reasonSourceNotReachable      = "SourceNotReachable"
 
 	maxInt64 = int64(1<<63 - 1)
-	maxInt32 = int32(1<<31 - 1)
 )
 
 func init() {
@@ -145,12 +144,13 @@ func NewClient(config modelcache.ProviderConfig) (modelcache.Client, error) {
 		}
 		httpClient.Timeout = duration
 	}
-	// Larger client-level timeout for prewarm: defaultPrefetchOwnerTimeout
-	// (currently 10m) is the per-request context cap; the client timeout
-	// must be >= that or it'd silently win. Use max(prewarm_default,
-	// configured_short_timeout) so an operator who bumped the short timeout
-	// past 10m still gets at least that much for prewarm.
-	prewarmHTTPClient := &http.Client{Timeout: defaultPrefetchOwnerTimeout}
+	// Prewarm client timeout sits 30s above the per-request context cap
+	// (defaultPrefetchOwnerTimeout) so the context wins on expiry — the
+	// http.Client.Timeout is the safety net for misbehaving connections,
+	// not the primary deadline. Operators who bump the short timeout
+	// past prewarmTimeoutHeadroom still get at least that much.
+	const prewarmTimeoutHeadroom = 30 * time.Second
+	prewarmHTTPClient := &http.Client{Timeout: defaultPrefetchOwnerTimeout + prewarmTimeoutHeadroom}
 	if httpClient.Timeout > prewarmHTTPClient.Timeout {
 		prewarmHTTPClient.Timeout = httpClient.Timeout
 	}
@@ -225,7 +225,7 @@ func (c *Client) CheckSource(ctx context.Context, source modelcache.Source) (*mo
 func (c *Client) checkSourceWithHead(ctx context.Context, source modelcache.Source) (*modelcache.SourceStatus, error) {
 	query := url.Values{}
 	query.Set("path", source.URI)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL("/head", query), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL("", "/head", query), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +278,7 @@ func (c *Client) InspectSource(ctx context.Context, source modelcache.Source) (*
 func (c *Client) fileMetadata(ctx context.Context, sourceURI string) (*fileMetadataResponse, error) {
 	query := url.Values{}
 	query.Set("path", sourceURI)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL("/file_metadata", query), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL("", "/file_metadata", query), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +311,7 @@ func (r *fileMetadataResponse) toModelCacheSourceInspection(source modelcache.So
 		Objects: make([]modelcache.Object, 0, len(r.Files)),
 	}
 	for _, file := range r.Files {
-		objectPath := inspectPath(root, file.Path, "", file.RelativePath)
+		objectPath := inspectPath(root, file.Path, file.RelativePath)
 		if objectPath == "" {
 			continue
 		}
@@ -438,11 +438,12 @@ func (c *Client) runPrewarm(operationID, sourceURI string, paths []string) {
 		status.Message = "cluster_cache prewarm is running"
 	})
 
-	phase, progress, message := c.runOwnerRoutedPrewarm(c.ctx, sourceURI, paths)
+	phase, progress, failedObjects, message := c.runOwnerRoutedPrewarm(c.ctx, sourceURI, paths)
 	c.updateOperation(operationID, func(status *modelcache.PrewarmStatus) {
 		status.Phase = phase
 		status.Progress = progress
 		status.Message = message
+		status.FailedObjects = failedObjects
 		if phase == modelcache.PrewarmPhaseSucceeded {
 			status.Reason = ""
 		} else {
@@ -457,7 +458,7 @@ func (c *Client) fetch(ctx context.Context, paths []string) (*fetchResponse, err
 		return nil, err
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointURL("/fetch", nil), bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointURL("", "/fetch", nil), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -519,8 +520,14 @@ func prewarmPhaseTerminal(phase modelcache.PrewarmPhase) bool {
 		phase == modelcache.PrewarmPhaseCanceled
 }
 
-func (c *Client) endpointURL(endpointPath string, query url.Values) string {
+// endpointURL builds a URL against the configured cluster_cache endpoint.
+// Pass host="" to hit the gateway; pass host=<node-addr> for per-owner
+// endpoints (/packed_byte_ranges_by_key, /prefetch_owned_chunks).
+func (c *Client) endpointURL(host, endpointPath string, query url.Values) string {
 	endpoint := *c.endpoint
+	if host != "" {
+		endpoint.Host = host
+	}
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + endpointPath
 	endpoint.RawQuery = query.Encode()
 	return endpoint.String()
@@ -653,6 +660,9 @@ func clonePrewarmStatus(status modelcache.PrewarmStatus) modelcache.PrewarmStatu
 	status.Progress.CachedBytes = cloneInt64Ptr(status.Progress.CachedBytes)
 	status.Progress.TotalChunks = cloneInt32Ptr(status.Progress.TotalChunks)
 	status.Progress.CachedChunks = cloneInt32Ptr(status.Progress.CachedChunks)
+	if len(status.FailedObjects) > 0 {
+		status.FailedObjects = append([]modelcache.ChunkFailure(nil), status.FailedObjects...)
+	}
 	return status
 }
 
@@ -703,8 +713,8 @@ func stringPtrValue(value *string) string {
 	return strings.TrimSpace(*value)
 }
 
-func inspectPath(sourceURI, uri, path, relativePath string) string {
-	if value := firstNonEmpty(uri, path); value != "" {
+func inspectPath(sourceURI, uri, relativePath string) string {
+	if value := strings.TrimSpace(uri); value != "" {
 		return value
 	}
 	relativePath = strings.TrimLeft(strings.TrimSpace(relativePath), "/")

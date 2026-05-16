@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ome-projects/ome/pkg/modelcache"
@@ -89,7 +90,7 @@ func metadataFilesFromResponse(source modelcache.Source, response *fileMetadataR
 	root := firstNonEmpty(response.Root, source.URI)
 	files := make([]clusterCacheMetadataFile, 0, len(response.Files))
 	for _, entry := range response.Files {
-		objectPath := inspectPath(root, entry.Path, "", entry.RelativePath)
+		objectPath := inspectPath(root, entry.Path, entry.RelativePath)
 		if objectPath == "" {
 			continue
 		}
@@ -211,7 +212,7 @@ func selectMetadataFileByRelativePath(files []clusterCacheMetadataFile, relative
 }
 
 func (c *Client) ring(ctx context.Context) (*clusterCacheRing, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL("/ring_info", nil), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL("", "/ring_info", nil), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -409,8 +410,8 @@ func (c *Client) readRemoteRange(ctx context.Context, file *clusterCacheMetadata
 	for remaining > 0 {
 		chunkOffset := (readOffset / chunkSize) * chunkSize
 		rangeOffset := readOffset - chunkOffset
-		chunkLength := minUint64(chunkSize, file.size-chunkOffset)
-		rangeLength := minUint64(remaining, chunkLength-rangeOffset)
+		chunkLength := min(chunkSize, file.size-chunkOffset)
+		rangeLength := min(remaining, chunkLength-rangeOffset)
 		if rangeLength == 0 {
 			return nil, fmt.Errorf("range for %s produced an empty cluster_cache chunk read", file.path)
 		}
@@ -475,8 +476,11 @@ func (c *Client) readPackedRangesWithFallback(ctx context.Context, ring *cluster
 			offset: item.spec.ChunkOffset,
 			mtime:  item.spec.MTime,
 		})
+		// candidates[0] is the primary that already failed in the caller's
+		// grouped read. Skip it — mirrors Rust HashRing::lookup_secondary
+		// at cluster_cache/ring/src/lib.rs.
 		var errors []string
-		for _, candidate := range candidates {
+		for _, candidate := range candidates[min(1, len(candidates)):] {
 			body, err := c.packedByteRanges(ctx, candidate, []indexedPackedRange{item})
 			if err == nil {
 				pieces[item.index] = body
@@ -502,7 +506,7 @@ func (c *Client) ensureMetadataFileMTime(ctx context.Context, file *clusterCache
 	file.size = head.Size
 	file.mtime = &head.MTime
 	if file.version == "" {
-		file.version = strconvFormatUint(head.MTime)
+		file.version = strconv.FormatUint(head.MTime, 10)
 	}
 	return nil
 }
@@ -510,7 +514,7 @@ func (c *Client) ensureMetadataFileMTime(ctx context.Context, file *clusterCache
 func (c *Client) head(ctx context.Context, path string) (*headResponse, error) {
 	query := url.Values{}
 	query.Set("path", path)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL("/head", query), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointURL("", "/head", query), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -544,7 +548,7 @@ func (c *Client) packedByteRanges(ctx context.Context, owner string, ranges []in
 	if err != nil {
 		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.nodeEndpointURL(owner, "/packed_byte_ranges_by_key", nil), bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointURL(owner, "/packed_byte_ranges_by_key", nil), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -567,23 +571,4 @@ func (c *Client) packedByteRanges(ctx context.Context, owner string, ranges []in
 		return nil, fmt.Errorf("cluster_cache packed range response from %s returned %d bytes, expected %d", owner, len(data), expectedBytes)
 	}
 	return data, nil
-}
-
-func (c *Client) nodeEndpointURL(node, endpointPath string, query url.Values) string {
-	endpoint := *c.endpoint
-	endpoint.Host = node
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + endpointPath
-	endpoint.RawQuery = query.Encode()
-	return endpoint.String()
-}
-
-func minUint64(a, b uint64) uint64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func strconvFormatUint(value uint64) string {
-	return fmt.Sprintf("%d", value)
 }

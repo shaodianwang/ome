@@ -947,16 +947,20 @@ func updateModelStatusWithRetry(ctx context.Context, kubeClient client.Client, l
 		// Update status if changed
 		if updated {
 			// Apply the updates based on type
+			var status *v1beta1.ModelStatusSpec
 			switch model := obj.(type) {
 			case *v1beta1.BaseModel:
 				model.Status.NodesReady = nodesReady
 				model.Status.NodesFailed = nodesFailed
 				model.Status.State = newState
+				status = &model.Status
 			case *v1beta1.ClusterBaseModel:
 				model.Status.NodesReady = nodesReady
 				model.Status.NodesFailed = nodesFailed
 				model.Status.State = newState
+				status = &model.Status
 			}
+			stampObservedReconcile(obj, status)
 
 			if err := client.Status().Update(ctx, obj); err != nil {
 				return err

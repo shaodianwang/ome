@@ -54,33 +54,37 @@ type ownerPrewarmOutcome struct {
 // /file_metadata once, discover chunk_size, fetch the ring, compute
 // per-owner chunk specs, POST /prefetch_owned_chunks per owner
 // concurrently, aggregate.
-func (c *Client) runOwnerRoutedPrewarm(ctx context.Context, sourceURI string, paths []string) (modelcache.PrewarmPhase, modelcache.PrewarmProgress, string) {
+//
+// Returns the structured failedObjects list alongside the short message;
+// upstream surfaces it as PrewarmStatus.FailedObjects so the controller
+// can populate ModelCacheStatus.FailedObjects without re-parsing strings.
+func (c *Client) runOwnerRoutedPrewarm(ctx context.Context, sourceURI string, paths []string) (modelcache.PrewarmPhase, modelcache.PrewarmProgress, []modelcache.ChunkFailure, string) {
 	metadata, err := c.fileMetadata(ctx, sourceURI)
 	if err != nil {
-		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, fmt.Sprintf("list source files: %v", err)
+		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, nil, fmt.Sprintf("list source files: %v", err)
 	}
 
 	files := metadataFilesFromResponse(modelcache.Source{URI: sourceURI}, metadata)
 	if len(files) == 0 {
-		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, "cluster_cache file_metadata returned no files"
+		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, nil, "cluster_cache file_metadata returned no files"
 	}
 
 	chunkSize, err := c.metadataChunkSize(ctx, files)
 	if err != nil {
-		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, fmt.Sprintf("discover chunk_size: %v", err)
+		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, nil, fmt.Sprintf("discover chunk_size: %v", err)
 	}
 
 	ring, err := c.ring(ctx)
 	if err != nil {
-		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, fmt.Sprintf("fetch ring_info: %v", err)
+		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, nil, fmt.Sprintf("fetch ring_info: %v", err)
 	}
 
 	byOwner, lookupErrors, err := c.groupChunksByOwner(ctx, files, paths, chunkSize, ring)
 	if err != nil {
-		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, err.Error()
+		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, nil, err.Error()
 	}
 	if len(byOwner) == 0 {
-		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, "no chunks routed to any owner"
+		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, nil, "no chunks routed to any owner"
 	}
 
 	// Compute total bytes from the file_metadata response. /file_metadata
@@ -89,7 +93,7 @@ func (c *Client) runOwnerRoutedPrewarm(ctx context.Context, sourceURI string, pa
 	totalBytes := totalBytesForPaths(files, paths)
 
 	outcomes := c.postPerOwnerConcurrent(ctx, byOwner)
-	phase, progress, message := aggregateOwnerOutcomes(outcomes, lookupErrors)
+	phase, progress, failedObjects, message := aggregateOwnerOutcomes(outcomes, lookupErrors)
 	if totalBytes > 0 {
 		tb := totalBytes
 		progress.TotalBytes = &tb
@@ -98,7 +102,23 @@ func (c *Client) runOwnerRoutedPrewarm(ctx context.Context, sourceURI string, pa
 			progress.CachedBytes = &cb
 		}
 	}
-	return phase, progress, message
+	// Stitch SizeBytes onto failedObjects from /file_metadata. Keys are the
+	// bucket-root-relative paths (matches pathFromURL output) so multi-shard
+	// models with files in subdirectories resolve uniquely.
+	if len(failedObjects) > 0 {
+		sizeByPath := make(map[string]int64, len(files))
+		for _, f := range files {
+			if p := bucketRelativePath(f.path); p != "" {
+				sizeByPath[p] = int64(f.size)
+			}
+		}
+		for i := range failedObjects {
+			if size, ok := sizeByPath[failedObjects[i].Path]; ok {
+				failedObjects[i].SizeBytes = size
+			}
+		}
+	}
+	return phase, progress, failedObjects, message
 }
 
 // totalBytesForPaths sums sizes of the files in the prewarm path set.
@@ -210,6 +230,13 @@ func (c *Client) postPerOwnerConcurrent(ctx context.Context, byOwner map[string]
 		wg.Add(1)
 		go func(i int, owner string) {
 			defer wg.Done()
+			// Survive a panic inside postPrefetchOwnedChunks — a malformed
+			// daemon response shouldn't take the controller pod down with it.
+			defer func() {
+				if r := recover(); r != nil {
+					outcomes[i] = ownerPrewarmOutcome{owner: owner, err: fmt.Errorf("panic in prefetch fanout: %v", r)}
+				}
+			}()
 			resp, err := c.postPrefetchOwnedChunks(ctx, owner, byOwner[owner])
 			outcomes[i] = ownerPrewarmOutcome{owner: owner, response: resp, err: err}
 		}(i, owner)
@@ -230,7 +257,7 @@ func (c *Client) postPrefetchOwnedChunks(ctx context.Context, owner string, chun
 	reqCtx, cancel := context.WithTimeout(ctx, defaultPrefetchOwnerTimeout)
 	defer cancel()
 
-	request, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.nodeEndpointURL(owner, "/prefetch_owned_chunks", url.Values{}), bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.endpointURL(owner, "/prefetch_owned_chunks", url.Values{}), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -257,30 +284,31 @@ func (c *Client) postPrefetchOwnedChunks(ctx context.Context, owner string, chun
 }
 
 // aggregateOwnerOutcomes collapses per-owner results into one PrewarmStatus.
-// Policy: any per-owner network error OR any per-chunk error in any
-// owner's response OR any lookup error means the operation Failed. Progress
-// fields are the sum across all owners (counts the partial work that did
-// succeed so operators can see retries are making progress).
-func aggregateOwnerOutcomes(outcomes []ownerPrewarmOutcome, lookupErrors []string) (modelcache.PrewarmPhase, modelcache.PrewarmProgress, string) {
+// Any per-chunk error, per-owner error, or lookup error fails the operation.
+// Progress reflects the partial work that did succeed.
+//
+// Per-chunk errors flow into structured FailedObjects via the parser.
+// Per-owner errors (transport, empty response) don't map to source objects
+// and stay in the summary message.
+func aggregateOwnerOutcomes(outcomes []ownerPrewarmOutcome, lookupErrors []string) (modelcache.PrewarmPhase, modelcache.PrewarmProgress, []modelcache.ChunkFailure, string) {
 	var totalChunks, cachedChunks, warmedChunks int32
-	var errMessages []string
-	errMessages = append(errMessages, lookupErrors...)
+	chunkErrors := make([]string, 0, len(lookupErrors))
+	chunkErrors = append(chunkErrors, lookupErrors...)
+	ownerErrors := make([]string, 0, len(outcomes))
 
 	for _, outcome := range outcomes {
 		if outcome.err != nil {
-			errMessages = append(errMessages, fmt.Sprintf("%s: %v", outcome.owner, outcome.err))
+			ownerErrors = append(ownerErrors, fmt.Sprintf("%s: %v", outcome.owner, outcome.err))
 			continue
 		}
 		if outcome.response == nil {
-			errMessages = append(errMessages, fmt.Sprintf("%s: empty response", outcome.owner))
+			ownerErrors = append(ownerErrors, fmt.Sprintf("%s: empty response", outcome.owner))
 			continue
 		}
 		totalChunks += int32(outcome.response.TotalChunks)
 		cachedChunks += int32(outcome.response.CachedChunks)
 		warmedChunks += int32(outcome.response.WarmedChunks)
-		for _, e := range outcome.response.Errors {
-			errMessages = append(errMessages, fmt.Sprintf("%s: %s", outcome.owner, e))
-		}
+		chunkErrors = append(chunkErrors, outcome.response.Errors...)
 	}
 
 	progress := modelcache.PrewarmProgress{}
@@ -289,8 +317,72 @@ func aggregateOwnerOutcomes(outcomes []ownerPrewarmOutcome, lookupErrors []strin
 		progress.CachedChunks = int32Ptr(cachedChunks + warmedChunks)
 	}
 
-	if len(errMessages) == 0 {
-		return modelcache.PrewarmPhaseSucceeded, progress, "cluster_cache prewarm completed"
+	if len(chunkErrors) == 0 && len(ownerErrors) == 0 {
+		return modelcache.PrewarmPhaseSucceeded, progress, nil, "cluster_cache prewarm completed"
 	}
-	return modelcache.PrewarmPhaseFailed, progress, strings.Join(errMessages, "; ")
+
+	failedObjects := parseChunkErrorStrings(chunkErrors)
+	message := summarizePrewarmFailure(failedObjects, ownerErrors, totalChunks, cachedChunks+warmedChunks)
+	return modelcache.PrewarmPhaseFailed, progress, failedObjects, message
+}
+
+// summarizePrewarmFailure produces the one-line condition message.
+// Examples:
+//
+//	"1/5722 chunks unfetchable: config.json (NoSuchKey)"
+//	"24/5722 chunks unfetchable across 3 objects (NoSuchKey)"
+//	"10.0.0.1: connection refused"
+func summarizePrewarmFailure(failedObjects []modelcache.ChunkFailure, ownerErrors []string, totalChunks, cachedChunks int32) string {
+	missing := totalChunks - cachedChunks
+	if missing < 0 {
+		missing = 0
+	}
+
+	switch {
+	case len(failedObjects) == 1 && len(ownerErrors) == 0:
+		f := failedObjects[0]
+		hint := f.Code
+		if hint == "" && f.Class != modelcache.ChunkFailureClassUnknown {
+			hint = string(f.Class)
+		}
+		if hint != "" {
+			return fmt.Sprintf("%d/%d chunks unfetchable: %s (%s)", missing, totalChunks, f.Path, hint)
+		}
+		return fmt.Sprintf("%d/%d chunks unfetchable: %s", missing, totalChunks, f.Path)
+	case len(failedObjects) > 1 && len(ownerErrors) == 0:
+		base := fmt.Sprintf("%d/%d chunks unfetchable across %d objects", missing, totalChunks, len(failedObjects))
+		if hint := dominantErrorHint(failedObjects); hint != "" {
+			return fmt.Sprintf("%s (%s)", base, hint)
+		}
+		return base
+	case len(ownerErrors) > 0 && len(failedObjects) == 0:
+		return strings.Join(ownerErrors, "; ")
+	default:
+		return fmt.Sprintf(
+			"%d/%d chunks unfetchable across %d objects; %d owner(s) reported errors",
+			missing, totalChunks, len(failedObjects), len(ownerErrors),
+		)
+	}
+}
+
+func dominantErrorHint(failedObjects []modelcache.ChunkFailure) string {
+	codes := map[string]int{}
+	for _, f := range failedObjects {
+		key := f.Code
+		if key == "" {
+			if f.Class == modelcache.ChunkFailureClassUnknown {
+				continue
+			}
+			key = string(f.Class)
+		}
+		codes[key]++
+	}
+	var best string
+	bestN := 0
+	for k, n := range codes {
+		if n > bestN {
+			best, bestN = k, n
+		}
+	}
+	return best
 }

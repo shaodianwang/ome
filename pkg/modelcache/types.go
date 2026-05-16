@@ -255,6 +255,11 @@ type PrewarmStatus struct {
 	Progress  PrewarmProgress
 	Reason    string
 	Message   string
+	// FailedObjects is the structured per-object failure list observed in
+	// the most recent prewarm round. Provider-populated; the controller
+	// merges across rounds (preserving FirstSeenAt, accumulating Attempts).
+	// Empty when the phase is Succeeded.
+	FailedObjects []ChunkFailure
 }
 
 // PrewarmProgress reports byte and chunk progress when known.
@@ -263,4 +268,43 @@ type PrewarmProgress struct {
 	CachedBytes  *int64
 	TotalChunks  *int32
 	CachedChunks *int32
+}
+
+// ChunkFailureClass mirrors v1beta1.ErrorClass but lives in the
+// provider-neutral types so providers don't import the apis package. The
+// controller maps these 1:1 into the CRD status surface.
+type ChunkFailureClass string
+
+const (
+	ChunkFailureClassUnknown             ChunkFailureClass = "Unknown"
+	ChunkFailureClassSourceObjectMissing ChunkFailureClass = "SourceObjectMissing"
+	ChunkFailureClassAuthDenied          ChunkFailureClass = "AuthDenied"
+	ChunkFailureClassBackendUnreachable  ChunkFailureClass = "BackendUnreachable"
+	ChunkFailureClassChecksumMismatch    ChunkFailureClass = "ChecksumMismatch"
+	ChunkFailureClassThrottled           ChunkFailureClass = "Throttled"
+)
+
+// ChunkFailure is a single object's failure reported by a provider during
+// prewarm. Keyed by Path. If a provider sees multiple chunks of one file
+// fail, they MUST be coalesced into a single entry with Attempts summed.
+type ChunkFailure struct {
+	// Path is the object path relative to the model source root (e.g.
+	// "config.json", "model-00001-of-00002.safetensors"). Required.
+	Path string
+	// SizeBytes is the source object's size if the provider knows it.
+	// Optional — zero/unknown is fine.
+	SizeBytes int64
+	// Class is the coarse remediation taxonomy. Providers SHOULD classify;
+	// unclassified errors get ChunkFailureClassUnknown.
+	Class ChunkFailureClass
+	// Code is a short provider-specific identifier (e.g. "NoSuchKey",
+	// "AccessDenied", "ConnectionRefused"). Optional but encouraged.
+	Code string
+	// Message is a one-line human-readable summary. Must NOT contain XML
+	// bodies, request IDs, or stack traces — keep those out of CR status.
+	Message string
+	// Attempts is the number of chunk-fetch failures the provider observed
+	// for this object in the current round. Multiple chunks of the same
+	// file each count as one attempt.
+	Attempts int32
 }

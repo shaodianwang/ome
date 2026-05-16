@@ -748,6 +748,11 @@ func TestStartPrewarmReportsPerChunkErrorsAsFailed(t *testing.T) {
 	configPath := sourceURI + "/config.json"
 	mtime := uint64(1710000000)
 
+	// Use the canonical daemon error shape — it carries the URL of the
+	// failing chunk, which is how the controller-side parser extracts the
+	// source-object path for structured FailedObjects.
+	daemonErr := "GET range=bytes=0-100 expected_mtime=1710000000 " + configPath +
+		": service error; status=507; code=InsufficientStorage; message=cgroup pressure 2GB/2GB"
 	stubURL, _, _ := newPrewarmStubServer(t, prewarmStubConfig{
 		sourceURI: sourceURI,
 		files:     []fileMetadataEntry{{Path: configPath, RelativePath: "config.json", Size: 100, MTime: &mtime}},
@@ -757,7 +762,7 @@ func TestStartPrewarmReportsPerChunkErrorsAsFailed(t *testing.T) {
 				TotalChunks:  len(req.Chunks),
 				CachedChunks: 0,
 				WarmedChunks: 0,
-				Errors:       []string{"cgroup pressure 2GB/2GB"},
+				Errors:       []string{daemonErr},
 			}, http.StatusOK
 		},
 	})
@@ -771,7 +776,15 @@ func TestStartPrewarmReportsPerChunkErrorsAsFailed(t *testing.T) {
 
 	status := waitForPhase(t, client, *operation, modelcache.PrewarmPhaseFailed)
 	assert.Equal(t, reasonClusterCacheFetchFailed, status.Reason)
-	assert.Contains(t, status.Message, "cgroup pressure 2GB/2GB", "per-chunk errors from the daemon must propagate into the operation message")
+	// Per-chunk daemon errors are now surfaced as structured FailedObjects
+	// (one entry per source path); the short Message is a one-line summary
+	// pointing operators at FailedObjects for detail.
+	require.Len(t, status.FailedObjects, 1, "per-chunk errors must produce one FailedObject per source path")
+	// Full S3 key, not just basename — keeps two objects at different
+	// prefixes from collapsing into one FailedObject.
+	assert.Equal(t, "model/config.json", status.FailedObjects[0].Path)
+	assert.Equal(t, "InsufficientStorage", status.FailedObjects[0].Code)
+	assert.Contains(t, status.FailedObjects[0].Message, "cgroup pressure 2GB/2GB", "per-chunk error detail belongs in FailedObjects[].Message")
 }
 
 func TestStartPrewarmReportsOwnerHTTPErrorAsFailed(t *testing.T) {

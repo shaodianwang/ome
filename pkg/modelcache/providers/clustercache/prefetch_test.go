@@ -153,12 +153,13 @@ func TestAggregateOwnerOutcomesAllSucceed(t *testing.T) {
 		{owner: "10.0.0.2", response: &ownedChunkPrefetchResponse{TotalChunks: 7, CachedChunks: 7, WarmedChunks: 0}},
 	}
 
-	phase, progress, message := aggregateOwnerOutcomes(outcomes, nil)
+	phase, progress, failed, message := aggregateOwnerOutcomes(outcomes, nil)
 	assert.Equal(t, modelcache.PrewarmPhaseSucceeded, phase)
 	require.NotNil(t, progress.TotalChunks)
 	require.NotNil(t, progress.CachedChunks)
 	assert.Equal(t, int32(12), *progress.TotalChunks)
 	assert.Equal(t, int32(12), *progress.CachedChunks, "cached+warmed across all owners → total cached")
+	assert.Nil(t, failed, "no failures when all owners succeed")
 	assert.Equal(t, "cluster_cache prewarm completed", message)
 }
 
@@ -168,7 +169,7 @@ func TestAggregateOwnerOutcomesOwnerHTTPError(t *testing.T) {
 		{owner: "10.0.0.2", err: errors.New("POST returned 500: backend gone")},
 	}
 
-	phase, progress, message := aggregateOwnerOutcomes(outcomes, nil)
+	phase, progress, _, message := aggregateOwnerOutcomes(outcomes, nil)
 	assert.Equal(t, modelcache.PrewarmPhaseFailed, phase)
 	require.NotNil(t, progress.TotalChunks)
 	assert.Equal(t, int32(5), *progress.TotalChunks, "successful owner's progress still counted so operators see retries chip away")
@@ -180,23 +181,30 @@ func TestAggregateOwnerOutcomesPerChunkErrors(t *testing.T) {
 	outcomes := []ownerPrewarmOutcome{
 		{owner: "10.0.0.1", response: &ownedChunkPrefetchResponse{
 			TotalChunks: 5, CachedChunks: 3, WarmedChunks: 1,
-			Errors: []string{"chunk-3 fetch failed: s3 timeout"},
+			Errors: []string{"GET range=bytes=0-100 expected_mtime=1 s3://b/chunk-3: service error; status=500; code=InternalError; message=upstream timeout"},
 		}},
 	}
 
-	phase, progress, message := aggregateOwnerOutcomes(outcomes, nil)
+	phase, progress, failed, message := aggregateOwnerOutcomes(outcomes, nil)
 	assert.Equal(t, modelcache.PrewarmPhaseFailed, phase, "any per-chunk error fails the operation — we need ALL weights")
 	require.NotNil(t, progress.CachedChunks)
 	assert.Equal(t, int32(4), *progress.CachedChunks, "4 of 5 chunks DID cache; surface that progress")
-	assert.Contains(t, message, "10.0.0.1")
-	assert.Contains(t, message, "chunk-3 fetch failed")
-	assert.Contains(t, message, "s3 timeout")
+	// failedObjects carries the structured per-object detail; message
+	// is now a short summary.
+	require.Len(t, failed, 1)
+	assert.Equal(t, "chunk-3", failed[0].Path)
+	assert.Equal(t, "InternalError", failed[0].Code)
+	assert.Equal(t, modelcache.ChunkFailureClassBackendUnreachable, failed[0].Class)
+	assert.Contains(t, message, "chunk-3")
 }
 
 func TestAggregateOwnerOutcomesLookupErrorsAlone(t *testing.T) {
-	phase, progress, message := aggregateOwnerOutcomes(nil, []string{"s3://b/missing: not listed"})
+	phase, progress, failed, message := aggregateOwnerOutcomes(nil, []string{"s3://b/missing: not listed by cluster_cache file_metadata"})
 	assert.Equal(t, modelcache.PrewarmPhaseFailed, phase)
 	assert.Nil(t, progress.TotalChunks, "no owner outcomes → no chunk counts to report")
+	require.Len(t, failed, 1)
+	assert.Equal(t, "missing", failed[0].Path)
+	assert.Equal(t, modelcache.ChunkFailureClassSourceObjectMissing, failed[0].Class)
 	assert.Contains(t, message, "missing")
 }
 
@@ -230,7 +238,7 @@ func TestAggregateOwnerOutcomesEmptyResponseFails(t *testing.T) {
 		{owner: "10.0.0.1", response: nil, err: nil},
 	}
 
-	phase, _, message := aggregateOwnerOutcomes(outcomes, nil)
+	phase, _, _, message := aggregateOwnerOutcomes(outcomes, nil)
 	assert.Equal(t, modelcache.PrewarmPhaseFailed, phase)
 	assert.Contains(t, message, "10.0.0.1")
 	assert.Contains(t, message, "empty response")

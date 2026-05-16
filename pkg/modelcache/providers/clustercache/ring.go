@@ -11,10 +11,13 @@ import (
 
 const clusterCacheDefaultVNodes = 4000
 
+// clusterCacheChunkKey field order matches the byte layout written by
+// hash() — path, then offset, then mtime — so literal initializers in
+// callers/tests don't read confusingly relative to the hash.
 type clusterCacheChunkKey struct {
 	path   string
-	mtime  uint64
 	offset uint64
+	mtime  uint64
 }
 
 func (k clusterCacheChunkKey) hash() uint64 {

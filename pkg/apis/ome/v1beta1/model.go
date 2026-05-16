@@ -428,6 +428,12 @@ const (
 const (
 	// ModelConditionSourceReachable reports whether OME can access the model source.
 	ModelConditionSourceReachable = "SourceReachable"
+	// ModelConditionMetadataExtracted reports whether OME has extracted enough
+	// metadata from the source (config.json / model_index.json / safetensors
+	// headers) to populate the BaseModel spec. Separate from Cached because
+	// metadata can be served from already-cached chunks even when the source
+	// has since become incomplete — see reason ExtractedFromCache.
+	ModelConditionMetadataExtracted = "MetadataExtracted"
 	// ModelConditionCached reports whether model weights are available through the cache backend.
 	ModelConditionCached = "Cached"
 	// ModelConditionReady reports whether the model status is ready for serving consumers.
@@ -439,6 +445,16 @@ const (
 	ModelConditionReasonSourceReachable = "SourceReachable"
 	// ModelConditionReasonSourceNotReachable means the model source is not reachable.
 	ModelConditionReasonSourceNotReachable = "SourceNotReachable"
+	// ModelConditionReasonSourceObjectMissing means specific object(s) on the
+	// source backend returned 404 / NoSuchKey. See cache.failedObjects for the
+	// list. Distinct from SourceNotReachable (which means the whole backend
+	// can't be contacted).
+	ModelConditionReasonSourceObjectMissing = "SourceObjectMissing"
+	// ModelConditionReasonExtractedFromCache means metadata was extracted but
+	// from already-cached bytes — the source itself may have since become
+	// incomplete. Combine with the Cached / SourceReachable conditions to
+	// understand whether new consumers can still re-fetch.
+	ModelConditionReasonExtractedFromCache = "ExtractedFromCache"
 	// ModelConditionReasonPrewarmPending means cache prewarm has not started or is queued.
 	ModelConditionReasonPrewarmPending = "PrewarmPending"
 	// ModelConditionReasonPrewarmRunning means cache prewarm is in progress.
@@ -537,6 +553,116 @@ type ModelCacheStatus struct {
 	// transitions (PrewarmPending → PrewarmFailed) leave it stuck.
 	// +optional
 	LastPrewarmFailureAt *metav1.Time `json:"lastPrewarmFailureAt,omitempty"`
+
+	// FailedObjects lists per-object prewarm failures, capped at
+	// MaxFailedObjectsReported entries. The list is the operator's primary
+	// debug surface — read here before reading the Cached condition message.
+	// Use FailedObjectsTotal + FailedObjectsTruncated to detect truncation.
+	// +optional
+	// +listType=map
+	// +listMapKey=path
+	// +kubebuilder:validation:MaxItems=10
+	FailedObjects []FailedObject `json:"failedObjects,omitempty"`
+
+	// FailedObjectsTotal is the total number of distinct failing objects
+	// observed in the most recent prewarm round. If this is greater than
+	// len(FailedObjects), FailedObjectsTruncated is true.
+	// +optional
+	FailedObjectsTotal *int32 `json:"failedObjectsTotal,omitempty"`
+
+	// FailedObjectsTruncated is true when the controller observed more failing
+	// objects than fit in FailedObjects. The omitted entries share the same
+	// ErrorClass distribution as the ones reported.
+	// +optional
+	FailedObjectsTruncated *bool `json:"failedObjectsTruncated,omitempty"`
+}
+
+// MaxFailedObjectsReported caps ModelCacheStatus.FailedObjects to keep the
+// status payload bounded. Status writes hit etcd; an unbounded list grows the
+// per-object size and can collide with the per-object size limit on large
+// failure scenarios.
+const MaxFailedObjectsReported = 10
+
+// ErrorClass is a coarse taxonomy for prewarm-time per-object failures. Each
+// value maps to a distinct operator remediation: SourceObjectMissing usually
+// means the source needs to be re-uploaded; AuthDenied means cluster
+// credentials need attention; BackendUnreachable means a network/DNS problem.
+// +kubebuilder:validation:Enum=Unknown;SourceObjectMissing;AuthDenied;BackendUnreachable;ChecksumMismatch;Throttled
+type ErrorClass string
+
+const (
+	// ErrorClassUnknown means the controller could not classify the error.
+	// Default; check FailedObject.Message for the raw provider error.
+	ErrorClassUnknown ErrorClass = "Unknown"
+	// ErrorClassSourceObjectMissing means the backend reports the object does
+	// not exist (e.g. S3 NoSuchKey / 404). Operator action: re-upload the
+	// missing object, or update spec.storage.storageUri to a path where it
+	// exists.
+	ErrorClassSourceObjectMissing ErrorClass = "SourceObjectMissing"
+	// ErrorClassAuthDenied means the backend rejected the request for
+	// authentication or authorization reasons (e.g. 401 / 403 / AccessDenied).
+	// Operator action: verify cluster-cache credentials / IAM bindings.
+	ErrorClassAuthDenied ErrorClass = "AuthDenied"
+	// ErrorClassBackendUnreachable means the backend could not be contacted
+	// (DNS failure, connection refused, TLS handshake error). Distinct from
+	// SourceObjectMissing — the storage system itself is unreachable, not the
+	// specific object.
+	ErrorClassBackendUnreachable ErrorClass = "BackendUnreachable"
+	// ErrorClassChecksumMismatch means the fetched bytes failed integrity
+	// validation (mtime mismatch, size mismatch, hash mismatch).
+	ErrorClassChecksumMismatch ErrorClass = "ChecksumMismatch"
+	// ErrorClassThrottled means the backend returned a rate-limit signal
+	// (e.g. 429). Usually transient.
+	ErrorClassThrottled ErrorClass = "Throttled"
+)
+
+// FailedObject describes a single object that failed to fetch during the most
+// recent prewarm round. The list lives in ModelCacheStatus.FailedObjects and
+// is the primary structured debug surface for sharded prewarm failures —
+// operators read it before reading the Cached condition message.
+type FailedObject struct {
+	// Path is the object path relative to the model source root (e.g.
+	// "config.json", "model-00001-of-00002.safetensors"). Used as the listMapKey.
+	// +kubebuilder:validation:MaxLength=512
+	Path string `json:"path"`
+
+	// SizeBytes is the size of the object as reported by the source backend
+	// listing (not the bytes successfully fetched). Optional — provider may
+	// not know the size when listing failed.
+	// +optional
+	SizeBytes *int64 `json:"sizeBytes,omitempty"`
+
+	// ErrorClass is the coarse classification used to drive operator
+	// remediation. See the ErrorClass constants.
+	// +optional
+	ErrorClass ErrorClass `json:"errorClass,omitempty"`
+
+	// ErrorCode is the provider-specific short code (e.g. "NoSuchKey",
+	// "AccessDenied", "ConnectionRefused"). Optional and free-form per
+	// provider, kept short so it can be eyeballed without parsing.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	ErrorCode string `json:"errorCode,omitempty"`
+
+	// Message is a one-line human-readable summary. Must NOT contain XML
+	// bodies, request IDs, or stack traces — keep those in Events.
+	// +optional
+	// +kubebuilder:validation:MaxLength=512
+	Message string `json:"message,omitempty"`
+
+	// FirstSeenAt is the first time this object's failure was observed.
+	// Useful for distinguishing newly-flapping failures from chronic ones.
+	// +optional
+	FirstSeenAt *metav1.Time `json:"firstSeenAt,omitempty"`
+
+	// LastSeenAt is the most recent time this object's failure was observed.
+	// +optional
+	LastSeenAt *metav1.Time `json:"lastSeenAt,omitempty"`
+
+	// Attempts is the number of fetch attempts the provider has made for this
+	// object across the current prewarm round.
+	// +optional
+	Attempts *int32 `json:"attempts,omitempty"`
 }
 
 // ModelStatusSpec defines the observed state of Model weight
@@ -547,6 +673,20 @@ type ModelStatusSpec struct {
 	// Status of the model weight
 	State LifeCycleState `json:"state"`
 
+	// ObservedGeneration is the .metadata.generation the controller last
+	// reconciled against. If this lags behind .metadata.generation, the
+	// controller has not yet observed the latest spec edit.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// LastReconcileTime is the wall-clock timestamp of the controller's most
+	// recent reconcile pass for this object. Liveness signal — if it falls
+	// behind by more than the reconcile period, the controller is wedged or
+	// not scheduled. Distinct from Condition.lastTransitionTime, which only
+	// advances on actual status flips.
+	// +optional
+	LastReconcileTime *metav1.Time `json:"lastReconcileTime,omitempty"`
+
 	// +listType=atomic
 	NodesReady []string `json:"nodesReady,omitempty"`
 
@@ -554,9 +694,9 @@ type ModelStatusSpec struct {
 	NodesFailed []string `json:"nodesFailed,omitempty"`
 
 	// Conditions describe cluster-wide model readiness and cache state.
-	// Sharded models use conditions such as SourceReachable, Cached, and Ready.
-	// PerNode models continue to report node-level state through NodesReady and
-	// NodesFailed.
+	// Sharded models use conditions such as SourceReachable, MetadataExtracted,
+	// Cached, and Ready. PerNode models continue to report node-level state
+	// through NodesReady and NodesFailed.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

@@ -688,23 +688,27 @@ func pvcSpecMatches(spec *v1beta1.BaseModelSpec, pvcName, pvcNamespace string, i
 func updatePVCConditionedStatus(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, state *v1beta1.LifeCycleState, conditions []metav1.Condition) error {
 	return retryUpdate(ctx, kubeClient, log, obj, "pvc-status", func(ctx context.Context, c client.Client, latest client.Object) error {
 		var statusConditions *[]metav1.Condition
+		var status *v1beta1.ModelStatusSpec
 		switch m := latest.(type) {
 		case *v1beta1.BaseModel:
 			if state != nil {
 				m.Status.State = *state
 			}
 			statusConditions = &m.Status.Conditions
+			status = &m.Status
 		case *v1beta1.ClusterBaseModel:
 			if state != nil {
 				m.Status.State = *state
 			}
 			statusConditions = &m.Status.Conditions
+			status = &m.Status
 		default:
 			return fmt.Errorf("unsupported model type for PVC status update: %T", latest)
 		}
 		for _, cond := range conditions {
 			meta.SetStatusCondition(statusConditions, cond)
 		}
+		stampObservedReconcile(latest, status)
 		return c.Status().Update(ctx, latest)
 	})
 }
