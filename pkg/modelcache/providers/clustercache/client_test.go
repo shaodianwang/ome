@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -507,239 +508,473 @@ func TestInspectSourceReportsEndpointError(t *testing.T) {
 	assert.Contains(t, err.Error(), "unavailable")
 }
 
-func TestStartPrewarmPostsFetchAndReportsSuccess(t *testing.T) {
-	fetchCalled := make(chan fetchRequest, 1)
+// prewarmStubConfig scripts the four endpoints the new owner-routed prewarm
+// flow hits. Tests fill only the fields they care about; defaults handle
+// the rest. The single-server case puts the test server's own host:port in
+// the ring so all chunks route back to that server; multi-owner tests
+// allocate one httptest server per owner and use multiServerPrewarm.
+type prewarmStubConfig struct {
+	sourceURI  string
+	files      []fileMetadataEntry
+	chunkSize  uint64
+	headFunc   func(path string) headResponse                                        // optional; nil → 404
+	prefetchFn func(req ownedChunkPrefetchRequest) (ownedChunkPrefetchResponse, int) // returns response + HTTP status
+}
+
+// newPrewarmStubServer returns an httptest server scripted with the new
+// endpoints AND advertises itself in /ring_info, so all chunks route to
+// it. Returns (server URL, post counter, captured per-owner requests).
+// Use for single-owner tests.
+func newPrewarmStubServer(t *testing.T, cfg prewarmStubConfig) (string, *atomic.Int32, *prewarmStubCapture) {
+	t.Helper()
+	capture := &prewarmStubCapture{}
+	postCount := &atomic.Int32{}
+	var serverAddr string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/fetch", r.URL.Path)
-
-		var req fetchRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		fetchCalled <- req
-
-		totalSize := uint64(100)
-		totalChunks := 10
-		cachedChunks := 4
-		warmedChunks := 6
-		writeJSON(t, w, fetchResponse{
-			Results: []fetchPathResult{
-				{
-					Path:         "s3://bucket/model",
-					Status:       "warmed",
-					TotalSize:    &totalSize,
-					TotalChunks:  &totalChunks,
-					CachedChunks: &cachedChunks,
-					WarmedChunks: &warmedChunks,
-				},
-			},
-		})
+		switch r.URL.Path {
+		case "/file_metadata":
+			writeJSON(t, w, fileMetadataResponse{Root: cfg.sourceURI, Files: cfg.files})
+		case "/fetch":
+			// single-path /fetch is used only for chunk_size discovery.
+			// echo the requested path back so metadataChunkSize's
+			// result.Path match succeeds.
+			var req fetchRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			results := make([]fetchPathResult, 0, len(req.Paths))
+			for _, p := range req.Paths {
+				results = append(results, fetchPathResult{
+					Path:      p,
+					Status:    "cached",
+					ChunkSize: uint64Ptr(cfg.chunkSize),
+					TotalSize: uint64Ptr(1),
+				})
+			}
+			writeJSON(t, w, fetchResponse{Results: results})
+		case "/ring_info":
+			writeJSON(t, w, ringInfoResponse{Nodes: []string{serverAddr}})
+		case "/head":
+			if cfg.headFunc == nil {
+				http.NotFound(w, r)
+				return
+			}
+			writeJSON(t, w, cfg.headFunc(r.URL.Query().Get("path")))
+		case "/prefetch_owned_chunks":
+			postCount.Add(1)
+			var req ownedChunkPrefetchRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			capture.append(req)
+			if cfg.prefetchFn == nil {
+				writeJSON(t, w, ownedChunkPrefetchResponse{
+					TotalChunks:  len(req.Chunks),
+					CachedChunks: len(req.Chunks),
+				})
+				return
+			}
+			resp, status := cfg.prefetchFn(req)
+			if status != 0 && status != http.StatusOK {
+				http.Error(w, "owner error", status)
+				return
+			}
+			writeJSON(t, w, resp)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
-	defer server.Close()
+	serverAddr = server.Listener.Addr().String()
+	t.Cleanup(server.Close)
+	return server.URL, postCount, capture
+}
 
-	client := newTestClient(t, server.URL)
-	operation, err := client.StartPrewarm(context.Background(), modelcache.PrewarmRequest{
-		Source: modelcache.Source{URI: "s3://bucket/model"},
+// prewarmStubCapture records every /prefetch_owned_chunks POST body received,
+// so tests can assert the expected chunk routing happened.
+type prewarmStubCapture struct {
+	mu       sync.Mutex
+	requests []ownedChunkPrefetchRequest
+}
+
+func (c *prewarmStubCapture) append(req ownedChunkPrefetchRequest) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.requests = append(c.requests, req)
+}
+
+func (c *prewarmStubCapture) snapshot() []ownedChunkPrefetchRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]ownedChunkPrefetchRequest, len(c.requests))
+	copy(out, c.requests)
+	return out
+}
+
+// waitForPhase polls GetPrewarmStatus until status.Phase == want or the
+// 2-second budget elapses. Bigger than the older 1-second budget because
+// the new flow makes more HTTP round trips (file_metadata + fetch +
+// ring_info + per-owner POSTs).
+func waitForPhase(t *testing.T, client *Client, op modelcache.PrewarmOperation, want modelcache.PrewarmPhase) modelcache.PrewarmStatus {
+	t.Helper()
+	var got modelcache.PrewarmStatus
+	require.Eventually(t, func() bool {
+		s, err := client.GetPrewarmStatus(context.Background(), op)
+		require.NoError(t, err)
+		got = *s
+		return s.Phase == want
+	}, 2*time.Second, 10*time.Millisecond, "expected phase %q, never reached (last: %+v)", want, got)
+	return got
+}
+
+func TestStartPrewarmRoutesChunksAndReportsSuccess(t *testing.T) {
+	const sourceURI = "s3://bucket/model"
+	configPath := sourceURI + "/config.json"
+	weightPath := sourceURI + "/model-00001-of-00001.safetensors"
+	mtime := uint64(1710000000)
+	chunkSize := uint64(16)
+
+	stubURL, postCount, capture := newPrewarmStubServer(t, prewarmStubConfig{
+		sourceURI: sourceURI,
+		files: []fileMetadataEntry{
+			{Path: configPath, RelativePath: "config.json", Size: 8, MTime: &mtime},
+			{Path: weightPath, RelativePath: "model-00001-of-00001.safetensors", Size: 40, MTime: &mtime},
+		},
+		chunkSize: chunkSize,
 	})
 
+	client := newTestClient(t, stubURL)
+	operation, err := client.StartPrewarm(context.Background(), modelcache.PrewarmRequest{
+		Source:  modelcache.Source{URI: sourceURI},
+		Objects: []modelcache.ObjectRef{{Path: configPath}, {Path: weightPath}},
+	})
 	require.NoError(t, err)
-	require.NotNil(t, operation)
-	assert.NotEmpty(t, operation.ID)
-	payload, err := decodeOperationID(operation.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "s3://bucket/model", payload.SourceURI)
-	assert.Empty(t, payload.Paths)
-	assert.NotEmpty(t, payload.PathsHash)
 
-	require.Eventually(t, func() bool {
-		status, err := client.GetPrewarmStatus(context.Background(), *operation)
-		require.NoError(t, err)
-		return status.Phase == modelcache.PrewarmPhaseSucceeded
-	}, time.Second, 10*time.Millisecond)
+	status := waitForPhase(t, client, *operation, modelcache.PrewarmPhaseSucceeded)
+	assert.Equal(t, int32(1), postCount.Load(), "single-owner test should produce exactly one /prefetch_owned_chunks POST")
 
-	assert.Equal(t, []string{"s3://bucket/model"}, (<-fetchCalled).Paths)
-
-	status, err := client.GetPrewarmStatus(context.Background(), *operation)
-	require.NoError(t, err)
-	require.NotNil(t, status.Progress.TotalBytes)
-	require.NotNil(t, status.Progress.CachedBytes)
+	requests := capture.snapshot()
+	require.Len(t, requests, 1)
+	// config.json (8 bytes): 1 chunk. weight (40 bytes, chunk_size=16): 3 chunks. total 4.
+	assert.Len(t, requests[0].Chunks, 4)
 	require.NotNil(t, status.Progress.TotalChunks)
 	require.NotNil(t, status.Progress.CachedChunks)
-	assert.Equal(t, int64(100), *status.Progress.TotalBytes)
-	assert.Equal(t, int64(100), *status.Progress.CachedBytes)
-	assert.Equal(t, int32(10), *status.Progress.TotalChunks)
-	assert.Equal(t, int32(10), *status.Progress.CachedChunks)
+	assert.Equal(t, int32(4), *status.Progress.TotalChunks)
+	assert.Equal(t, int32(4), *status.Progress.CachedChunks)
 }
 
-func TestStartPrewarmReportsFetchFailure(t *testing.T) {
+func TestStartPrewarmReportsPerChunkErrorsAsFailed(t *testing.T) {
+	const sourceURI = "s3://bucket/model"
+	configPath := sourceURI + "/config.json"
+	mtime := uint64(1710000000)
+
+	stubURL, _, _ := newPrewarmStubServer(t, prewarmStubConfig{
+		sourceURI: sourceURI,
+		files:     []fileMetadataEntry{{Path: configPath, RelativePath: "config.json", Size: 100, MTime: &mtime}},
+		chunkSize: 96 * 1024 * 1024,
+		prefetchFn: func(req ownedChunkPrefetchRequest) (ownedChunkPrefetchResponse, int) {
+			return ownedChunkPrefetchResponse{
+				TotalChunks:  len(req.Chunks),
+				CachedChunks: 0,
+				WarmedChunks: 0,
+				Errors:       []string{"cgroup pressure 2GB/2GB"},
+			}, http.StatusOK
+		},
+	})
+
+	client := newTestClient(t, stubURL)
+	operation, err := client.StartPrewarm(context.Background(), modelcache.PrewarmRequest{
+		Source:  modelcache.Source{URI: sourceURI},
+		Objects: []modelcache.ObjectRef{{Path: configPath}},
+	})
+	require.NoError(t, err)
+
+	status := waitForPhase(t, client, *operation, modelcache.PrewarmPhaseFailed)
+	assert.Equal(t, reasonClusterCacheFetchFailed, status.Reason)
+	assert.Contains(t, status.Message, "cgroup pressure 2GB/2GB", "per-chunk errors from the daemon must propagate into the operation message")
+}
+
+func TestStartPrewarmReportsOwnerHTTPErrorAsFailed(t *testing.T) {
+	const sourceURI = "s3://bucket/model"
+	configPath := sourceURI + "/config.json"
+	mtime := uint64(1710000000)
+
+	stubURL, _, _ := newPrewarmStubServer(t, prewarmStubConfig{
+		sourceURI: sourceURI,
+		files:     []fileMetadataEntry{{Path: configPath, RelativePath: "config.json", Size: 100, MTime: &mtime}},
+		chunkSize: 96 * 1024 * 1024,
+		prefetchFn: func(req ownedChunkPrefetchRequest) (ownedChunkPrefetchResponse, int) {
+			return ownedChunkPrefetchResponse{}, http.StatusInternalServerError
+		},
+	})
+
+	client := newTestClient(t, stubURL)
+	operation, err := client.StartPrewarm(context.Background(), modelcache.PrewarmRequest{
+		Source:  modelcache.Source{URI: sourceURI},
+		Objects: []modelcache.ObjectRef{{Path: configPath}},
+	})
+	require.NoError(t, err)
+
+	status := waitForPhase(t, client, *operation, modelcache.PrewarmPhaseFailed)
+	assert.Equal(t, reasonClusterCacheFetchFailed, status.Reason)
+	assert.Contains(t, status.Message, "500")
+}
+
+// /file_metadata's `mtime` is Option<u64>. Without a HEAD fallback the
+// chunk-key would be (path, offset, 0), which won't match daemon-side
+// chunk storage. Pins the HEAD fallback via ensureMetadataFileMTime.
+func TestStartPrewarmHeadFallbackWhenMtimeMissing(t *testing.T) {
+	const sourceURI = "s3://bucket/model"
+	configPath := sourceURI + "/config.json"
+	const headMtime uint64 = 1710001234
+
+	var headCalled atomic.Int32
+	stubURL, _, capture := newPrewarmStubServer(t, prewarmStubConfig{
+		sourceURI: sourceURI,
+		// MTime intentionally nil — forces HEAD fallback.
+		files:     []fileMetadataEntry{{Path: configPath, RelativePath: "config.json", Size: 100}},
+		chunkSize: 96 * 1024 * 1024,
+		headFunc: func(path string) headResponse {
+			headCalled.Add(1)
+			return headResponse{Size: 100, MTime: headMtime}
+		},
+	})
+
+	client := newTestClient(t, stubURL)
+	operation, err := client.StartPrewarm(context.Background(), modelcache.PrewarmRequest{
+		Source:  modelcache.Source{URI: sourceURI},
+		Objects: []modelcache.ObjectRef{{Path: configPath}},
+	})
+	require.NoError(t, err)
+
+	waitForPhase(t, client, *operation, modelcache.PrewarmPhaseSucceeded)
+	assert.GreaterOrEqual(t, headCalled.Load(), int32(1), "HEAD must be called when /file_metadata omitted mtime")
+	requests := capture.snapshot()
+	require.Len(t, requests, 1)
+	require.NotEmpty(t, requests[0].Chunks)
+	assert.Equal(t, headMtime, requests[0].Chunks[0].MTime, "chunk-key mtime must come from HEAD fallback, not the zero default")
+}
+
+func TestStartPrewarmEmptyFileMetadataFails(t *testing.T) {
+	const sourceURI = "s3://bucket/empty"
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, fetchResponse{
-			Results: []fetchPathResult{
-				{
-					Path:   "s3://bucket/model",
-					Status: "error",
-					Error:  stringPtr("source credentials were rejected"),
+		if r.URL.Path == "/file_metadata" {
+			writeJSON(t, w, fileMetadataResponse{Root: sourceURI})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	operation, err := client.StartPrewarm(context.Background(), modelcache.PrewarmRequest{
+		Source:  modelcache.Source{URI: sourceURI},
+		Objects: []modelcache.ObjectRef{{Path: sourceURI + "/config.json"}},
+	})
+	require.NoError(t, err)
+
+	status := waitForPhase(t, client, *operation, modelcache.PrewarmPhaseFailed)
+	assert.Contains(t, status.Message, "no files")
+}
+
+// Routes chunks to two owners. Each owner gets only its ring-assigned
+// chunks; progress aggregates across both. Uses two raw httptest servers
+// for the owner endpoints, plus a single "control" server that serves
+// /file_metadata, /fetch (for chunk_size discovery), and /ring_info
+// (advertising both owners).
+func TestStartPrewarmRoutesChunksAcrossMultipleOwners(t *testing.T) {
+	const sourceURI = "s3://bucket/multimodel"
+	weightPath := sourceURI + "/weights.bin"
+	mtime := uint64(1710000000)
+	chunkSize := uint64(16)
+	fileSize := uint64(160) // 10 chunks
+
+	type ownerStub struct {
+		server  *httptest.Server
+		count   atomic.Int32
+		capture prewarmStubCapture
+	}
+
+	startOwner := func() *ownerStub {
+		s := &ownerStub{}
+		s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/prefetch_owned_chunks" {
+				http.NotFound(w, r)
+				return
+			}
+			s.count.Add(1)
+			var req ownedChunkPrefetchRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			s.capture.append(req)
+			writeJSON(t, w, ownedChunkPrefetchResponse{
+				TotalChunks:  len(req.Chunks),
+				CachedChunks: len(req.Chunks),
+			})
+		}))
+		t.Cleanup(s.server.Close)
+		return s
+	}
+	ownerA := startOwner()
+	ownerB := startOwner()
+
+	configPath := sourceURI + "/config.json"
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file_metadata":
+			// config.json is required so metadataChunkSize has a seed file.
+			writeJSON(t, w, fileMetadataResponse{
+				Root: sourceURI,
+				Files: []fileMetadataEntry{
+					{Path: configPath, RelativePath: "config.json", Size: 8, MTime: &mtime},
+					{Path: weightPath, RelativePath: "weights.bin", Size: fileSize, MTime: &mtime},
 				},
-			},
-		})
+			})
+		case "/fetch":
+			var req fetchRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			results := make([]fetchPathResult, 0, len(req.Paths))
+			for _, p := range req.Paths {
+				results = append(results, fetchPathResult{Path: p, Status: "cached", ChunkSize: uint64Ptr(chunkSize), TotalSize: uint64Ptr(1)})
+			}
+			writeJSON(t, w, fetchResponse{Results: results})
+		case "/ring_info":
+			writeJSON(t, w, ringInfoResponse{Nodes: []string{
+				ownerA.server.Listener.Addr().String(),
+				ownerB.server.Listener.Addr().String(),
+			}})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
-	defer server.Close()
+	t.Cleanup(control.Close)
 
-	client := newTestClient(t, server.URL)
+	client := newTestClient(t, control.URL)
 	operation, err := client.StartPrewarm(context.Background(), modelcache.PrewarmRequest{
-		Source: modelcache.Source{URI: "s3://bucket/model"},
+		Source:  modelcache.Source{URI: sourceURI},
+		Objects: []modelcache.ObjectRef{{Path: weightPath}},
 	})
 	require.NoError(t, err)
 
-	require.Eventually(t, func() bool {
-		status, err := client.GetPrewarmStatus(context.Background(), *operation)
-		require.NoError(t, err)
-		return status.Phase == modelcache.PrewarmPhaseFailed
-	}, time.Second, 10*time.Millisecond)
+	status := waitForPhase(t, client, *operation, modelcache.PrewarmPhaseSucceeded)
 
-	status, err := client.GetPrewarmStatus(context.Background(), *operation)
-	require.NoError(t, err)
-	assert.Equal(t, reasonClusterCacheFetchFailed, status.Reason)
-	assert.Contains(t, status.Message, "source credentials were rejected")
-}
+	// Both owners must have received exactly one POST — proves client-side
+	// routing (not server-side fan-out via /fetch).
+	assert.Equal(t, int32(1), ownerA.count.Load(), "owner A must receive exactly one POST")
+	assert.Equal(t, int32(1), ownerB.count.Load(), "owner B must receive exactly one POST")
 
-func TestStartPrewarmReportsEmptyFetchFailure(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, fetchResponse{})
-	}))
-	defer server.Close()
+	chunksA := ownerA.capture.snapshot()[0].Chunks
+	chunksB := ownerB.capture.snapshot()[0].Chunks
+	assert.Equal(t, 10, len(chunksA)+len(chunksB), "chunks must be partitioned (not duplicated) across owners")
+	assert.NotEmpty(t, chunksA, "owner A must receive at least one chunk")
+	assert.NotEmpty(t, chunksB, "owner B must receive at least one chunk")
 
-	client := newTestClient(t, server.URL)
-	operation, err := client.StartPrewarm(context.Background(), modelcache.PrewarmRequest{
-		Source: modelcache.Source{URI: "s3://bucket/model"},
-	})
-	require.NoError(t, err)
-
-	require.Eventually(t, func() bool {
-		status, err := client.GetPrewarmStatus(context.Background(), *operation)
-		require.NoError(t, err)
-		return status.Phase == modelcache.PrewarmPhaseFailed
-	}, time.Second, 10*time.Millisecond)
-
-	status, err := client.GetPrewarmStatus(context.Background(), *operation)
-	require.NoError(t, err)
-	assert.Equal(t, reasonClusterCacheFetchFailed, status.Reason)
-	assert.Contains(t, status.Message, "no path results")
+	require.NotNil(t, status.Progress.TotalChunks)
+	assert.Equal(t, int32(10), *status.Progress.TotalChunks)
 }
 
 // After a terminal Failed phase, a re-submit with the same deterministic
-// operationID must wipe the dead state and fire a fresh /fetch. Without
-// this, the controller's retry loop is silently swallowed by the
-// existing-operation early-return until the 10min retention TTL elapses.
+// operationID must wipe the dead state and fire fresh owner POSTs.
 func TestStartPrewarmReFiresAfterTerminalFailure(t *testing.T) {
-	var fetchCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount.Add(1)
-		writeJSON(t, w, fetchResponse{
-			Results: []fetchPathResult{{
-				Path:   "s3://bucket/model",
-				Status: "error",
-				Error:  stringPtr("transient overload"),
-			}},
-		})
-	}))
-	defer server.Close()
+	const sourceURI = "s3://bucket/model"
+	configPath := sourceURI + "/config.json"
+	mtime := uint64(1710000000)
 
-	client := newTestClient(t, server.URL)
-	req := modelcache.PrewarmRequest{Source: modelcache.Source{URI: "s3://bucket/model"}}
+	stubURL, postCount, _ := newPrewarmStubServer(t, prewarmStubConfig{
+		sourceURI: sourceURI,
+		files:     []fileMetadataEntry{{Path: configPath, RelativePath: "config.json", Size: 100, MTime: &mtime}},
+		chunkSize: 96 * 1024 * 1024,
+		prefetchFn: func(req ownedChunkPrefetchRequest) (ownedChunkPrefetchResponse, int) {
+			return ownedChunkPrefetchResponse{
+				TotalChunks: len(req.Chunks),
+				Errors:      []string{"transient overload"},
+			}, http.StatusOK
+		},
+	})
+
+	client := newTestClient(t, stubURL)
+	req := modelcache.PrewarmRequest{
+		Source:  modelcache.Source{URI: sourceURI},
+		Objects: []modelcache.ObjectRef{{Path: configPath}},
+	}
 
 	op1, err := client.StartPrewarm(context.Background(), req)
 	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		s, _ := client.GetPrewarmStatus(context.Background(), *op1)
-		return s.Phase == modelcache.PrewarmPhaseFailed
-	}, time.Second, 10*time.Millisecond)
+	waitForPhase(t, client, *op1, modelcache.PrewarmPhaseFailed)
+	postsAfterFirst := postCount.Load()
 
 	op2, err := client.StartPrewarm(context.Background(), req)
 	require.NoError(t, err)
 	assert.Equal(t, op1.ID, op2.ID)
 
-	require.Eventually(t, func() bool { return fetchCount.Load() == 2 }, time.Second, 10*time.Millisecond)
-	require.Eventually(t, func() bool {
-		s, _ := client.GetPrewarmStatus(context.Background(), *op2)
-		return s.Phase == modelcache.PrewarmPhaseFailed
-	}, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return postCount.Load() > postsAfterFirst }, 2*time.Second, 10*time.Millisecond,
+		"re-submit after terminal failure must trigger fresh owner POSTs; got %d (after first: %d)", postCount.Load(), postsAfterFirst)
+	waitForPhase(t, client, *op2, modelcache.PrewarmPhaseFailed)
 }
 
-// Inverse: an in-flight operation (Pending/Running) must NOT fan out a
-// duplicate /fetch on resubmit.
+// In-flight (Pending/Running) re-submits must NOT fan out a duplicate
+// owner POST — that would double the cluster_cache load for no benefit.
 func TestStartPrewarmIdempotentForInflightOperation(t *testing.T) {
-	var fetchCount atomic.Int32
-	releaseFetch := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchCount.Add(1)
-		<-releaseFetch
-		writeJSON(t, w, fetchResponse{
-			Results: []fetchPathResult{{
-				Path:   "s3://bucket/model",
-				Status: "warmed",
-			}},
-		})
-	}))
-	defer server.Close()
+	const sourceURI = "s3://bucket/model"
+	configPath := sourceURI + "/config.json"
+	mtime := uint64(1710000000)
 
-	client := newTestClient(t, server.URL)
-	req := modelcache.PrewarmRequest{Source: modelcache.Source{URI: "s3://bucket/model"}}
+	releaseOwner := make(chan struct{})
+	stubURL, postCount, _ := newPrewarmStubServer(t, prewarmStubConfig{
+		sourceURI: sourceURI,
+		files:     []fileMetadataEntry{{Path: configPath, RelativePath: "config.json", Size: 100, MTime: &mtime}},
+		chunkSize: 96 * 1024 * 1024,
+		prefetchFn: func(req ownedChunkPrefetchRequest) (ownedChunkPrefetchResponse, int) {
+			<-releaseOwner
+			return ownedChunkPrefetchResponse{TotalChunks: len(req.Chunks), CachedChunks: len(req.Chunks)}, http.StatusOK
+		},
+	})
+
+	client := newTestClient(t, stubURL)
+	req := modelcache.PrewarmRequest{
+		Source:  modelcache.Source{URI: sourceURI},
+		Objects: []modelcache.ObjectRef{{Path: configPath}},
+	}
 
 	op1, err := client.StartPrewarm(context.Background(), req)
 	require.NoError(t, err)
-	require.Eventually(t, func() bool { return fetchCount.Load() == 1 }, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return postCount.Load() == 1 }, 2*time.Second, 10*time.Millisecond,
+		"first submit must hit /prefetch_owned_chunks")
 
 	op2, err := client.StartPrewarm(context.Background(), req)
 	require.NoError(t, err)
 	assert.Equal(t, op1.ID, op2.ID)
 
 	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, int32(1), fetchCount.Load())
+	assert.Equal(t, int32(1), postCount.Load(), "in-flight re-submit must not produce a second /prefetch_owned_chunks POST")
 
-	close(releaseFetch)
+	close(releaseOwner)
+	waitForPhase(t, client, *op1, modelcache.PrewarmPhaseSucceeded)
 }
 
+// Restart-recovery: caller's in-memory operation map was lost (e.g. controller
+// restart), but operationID is durable. GetPrewarmStatus must decode the ID,
+// re-discover paths via /file_metadata, and re-fire the prewarm.
 func TestGetPrewarmStatusRestartsDecodedOperation(t *testing.T) {
-	fetchCalls := make(chan struct{}, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/file_metadata":
-			writeJSON(t, w, fileMetadataResponse{
-				Root: "s3://bucket/model",
-				Files: []fileMetadataEntry{
-					{Path: "s3://bucket/model/config.json", RelativePath: "config.json", Size: 100},
-				},
-			})
-		case "/fetch":
-			fetchCalls <- struct{}{}
-			writeJSON(t, w, fetchResponse{
-				Results: []fetchPathResult{
-					{
-						Path:   "s3://bucket/model/config.json",
-						Status: "cached",
-					},
-				},
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	const sourceURI = "s3://bucket/restart-model"
+	configPath := sourceURI + "/config.json"
+	mtime := uint64(1710000000)
 
-	client := newTestClient(t, server.URL)
-	operationID, err := encodeOperationID(modelcache.Source{URI: "s3://bucket/model"}, []string{"s3://bucket/model/config.json"})
+	stubURL, postCount, _ := newPrewarmStubServer(t, prewarmStubConfig{
+		sourceURI: sourceURI,
+		files:     []fileMetadataEntry{{Path: configPath, RelativePath: "config.json", Size: 100, MTime: &mtime}},
+		chunkSize: 96 * 1024 * 1024,
+	})
+
+	client := newTestClient(t, stubURL)
+	operationID, err := encodeOperationID(modelcache.Source{URI: sourceURI}, []string{configPath})
 	require.NoError(t, err)
 
+	// First GetPrewarmStatus on an unknown operation triggers recovery.
 	status, err := client.GetPrewarmStatus(context.Background(), modelcache.PrewarmOperation{ID: operationID})
 	require.NoError(t, err)
-	assert.Equal(t, modelcache.PrewarmPhaseRunning, status.Phase)
+	assert.Equal(t, modelcache.PrewarmPhaseRunning, status.Phase, "restart-recovery returns Running while the recovered goroutine starts")
 
-	require.Eventually(t, func() bool {
-		status, err := client.GetPrewarmStatus(context.Background(), modelcache.PrewarmOperation{ID: operationID})
-		require.NoError(t, err)
-		return status.Phase == modelcache.PrewarmPhaseSucceeded
-	}, time.Second, 10*time.Millisecond)
-	<-fetchCalls
+	waitForPhase(t, client, modelcache.PrewarmOperation{ID: operationID}, modelcache.PrewarmPhaseSucceeded)
+	assert.Equal(t, int32(1), postCount.Load(), "recovered operation must fire /prefetch_owned_chunks")
 }
 
 func TestTerminalOperationsAreCleanedUpAfterRetention(t *testing.T) {

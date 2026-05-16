@@ -1390,8 +1390,9 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 	const sourceURI = "s3://bucket/cached-model"
 	configPath := sourceURI + "/config.json"
 	weightPath := sourceURI + "/model-00001-of-00001.safetensors"
-	fetchPaths := make(chan []string, 2)
+	fetchPaths := make(chan []string, 4)
 	fileMetadataPaths := make(chan string, 4)
+	prefetchOwnedChunksPaths := make(chan []string, 4)
 	configData := tinyPhiConfigForTest(t)
 	safetensorsData := safetensorsHeaderForTest(`{"weight":{"dtype":"F32","shape":[2,3],"data_offsets":[0,24]}}`)
 	configMTime := uint64(123)
@@ -1482,6 +1483,39 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 				})
 			}
 			writeJSONForControllerTest(t, w, map[string]any{"results": results})
+		case "/prefetch_owned_chunks":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Chunks []struct {
+					Path   string `json:"path"`
+					Offset uint64 `json:"offset"`
+					MTime  uint64 `json:"mtime"`
+					Length uint64 `json:"length"`
+				} `json:"chunks"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			paths := make([]string, 0, len(req.Chunks))
+			seen := map[string]struct{}{}
+			for _, c := range req.Chunks {
+				if _, ok := seen[c.Path]; ok {
+					continue
+				}
+				seen[c.Path] = struct{}{}
+				paths = append(paths, c.Path)
+			}
+			prefetchOwnedChunksPaths <- paths
+			writeJSONForControllerTest(t, w, map[string]any{
+				"total_chunks":  len(req.Chunks),
+				"cached_chunks": 0,
+				"warmed_chunks": len(req.Chunks),
+				"errors":        []string{},
+			})
 		default:
 			http.NotFound(w, r)
 		}
@@ -1549,8 +1583,12 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 
 	result = reconcile()
 	g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
+	// /fetch is still used for chunk_size discovery, single-path.
 	g.Eventually(fetchPaths, time.Second).Should(gomega.Receive(gomega.Equal([]string{configPath})))
-	g.Eventually(fetchPaths, time.Second).Should(gomega.Receive(gomega.ConsistOf(configPath, weightPath)))
+	// The new owner-routed prewarm POSTs to /prefetch_owned_chunks (not /fetch).
+	// With a single-node ring (serverAddr is the only node), all chunks for
+	// both files route to that one owner in one POST.
+	g.Eventually(prefetchOwnedChunksPaths, time.Second).Should(gomega.Receive(gomega.ConsistOf(configPath, weightPath)))
 	updated = getBaseModelForTest(t, kubeClient, "default", "cached-model")
 	g.Expect(updated.Status.Cache).ToNot(gomega.BeNil())
 	g.Expect(updated.Status.Cache.PrewarmID).ToNot(gomega.BeEmpty())
@@ -1579,11 +1617,25 @@ func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
 	g.Expect(*updated.Spec.ModelArchitecture).To(gomega.Equal("PhiModel"))
 	g.Expect(updated.Status.Cache.Backend).To(gomega.Equal(modelcache.ProviderClusterCache))
 	g.Expect(updated.Status.Cache.SourceUri).To(gomega.Equal(sourceURI))
-	expectedTotalBytes := int64(len(configData) + len(safetensorsData))
-	g.Expect(*updated.Status.Cache.TotalBytes).To(gomega.Equal(expectedTotalBytes))
-	g.Expect(*updated.Status.Cache.CachedBytes).To(gomega.Equal(expectedTotalBytes))
-	g.Expect(*updated.Status.Cache.TotalChunks).To(gomega.Equal(int32(2)))
-	g.Expect(*updated.Status.Cache.CachedChunks).To(gomega.Equal(int32(2)))
+	// The /prefetch_owned_chunks response doesn't include byte counts —
+	// only chunk counts (api.rs:58-62: OwnedChunkPrefetchResponse).
+	// TotalBytes/CachedBytes stay nil; TotalChunks/CachedChunks sum across owners.
+	g.Expect(updated.Status.Cache.TotalBytes).To(gomega.BeNil(), "owner-routed prewarm doesn't surface byte progress")
+	g.Expect(updated.Status.Cache.CachedBytes).To(gomega.BeNil(), "owner-routed prewarm doesn't surface byte progress")
+	expectedChunks := int32(chunksForSize(uint64(len(configData)), chunkSize) +
+		chunksForSize(uint64(len(safetensorsData)), chunkSize))
+	g.Expect(*updated.Status.Cache.TotalChunks).To(gomega.Equal(expectedChunks))
+	g.Expect(*updated.Status.Cache.CachedChunks).To(gomega.Equal(expectedChunks))
+}
+
+// chunksForSize returns the number of chunks a file of size `size`
+// occupies given chunk_size (matches client-side computation in
+// pkg/modelcache/providers/clustercache/prefetch.go).
+func chunksForSize(size, chunkSize uint64) int {
+	if size == 0 || chunkSize == 0 {
+		return 0
+	}
+	return int((size + chunkSize - 1) / chunkSize)
 }
 
 func TestMapConfigMapToModelRequests(t *testing.T) {

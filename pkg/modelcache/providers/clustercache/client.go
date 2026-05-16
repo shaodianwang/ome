@@ -333,7 +333,7 @@ func (c *Client) StartPrewarm(ctx context.Context, req modelcache.PrewarmRequest
 	if err != nil {
 		return nil, err
 	}
-	c.startOperation(operationID, paths)
+	c.startOperation(operationID, req.Source.URI, paths)
 	return &modelcache.PrewarmOperation{ID: operationID}, nil
 }
 
@@ -369,7 +369,7 @@ func (c *Client) GetPrewarmStatus(ctx context.Context, operation modelcache.Prew
 		return nil, err
 	}
 
-	c.startOperation(operation.ID, paths)
+	c.startOperation(operation.ID, payload.SourceURI, paths)
 	return &modelcache.PrewarmStatus{
 		Operation: operation,
 		Phase:     modelcache.PrewarmPhaseRunning,
@@ -377,7 +377,7 @@ func (c *Client) GetPrewarmStatus(ctx context.Context, operation modelcache.Prew
 	}, nil
 }
 
-func (c *Client) startOperation(operationID string, paths []string) {
+func (c *Client) startOperation(operationID, sourceURI string, paths []string) {
 	c.mu.Lock()
 	c.cleanupOperationsLocked(time.Now())
 	// In-flight (Pending/Running): honor idempotency — no second goroutine.
@@ -398,26 +398,20 @@ func (c *Client) startOperation(operationID string, paths []string) {
 	}
 	c.mu.Unlock()
 
-	go c.runPrewarm(operationID, paths)
+	go c.runPrewarm(operationID, sourceURI, paths)
 }
 
-func (c *Client) runPrewarm(operationID string, paths []string) {
+// runPrewarm drives the owner-routed prewarm. Replaces the prior single
+// bulk /fetch (rate-limited at fetch_path_limit=32 on the daemon and
+// designed for ad-hoc warming, not bulk weights). See
+// .claude/specs/2026-05-15-clustercache-prefetch-owned-chunks-design.md.
+func (c *Client) runPrewarm(operationID, sourceURI string, paths []string) {
 	c.updateOperation(operationID, func(status *modelcache.PrewarmStatus) {
 		status.Phase = modelcache.PrewarmPhaseRunning
 		status.Message = "cluster_cache prewarm is running"
 	})
 
-	response, err := c.fetch(c.ctx, paths)
-	if err != nil {
-		c.updateOperation(operationID, func(status *modelcache.PrewarmStatus) {
-			status.Phase = modelcache.PrewarmPhaseFailed
-			status.Reason = reasonClusterCacheFetchFailed
-			status.Message = err.Error()
-		})
-		return
-	}
-
-	phase, progress, message := prewarmOutcome(response)
+	phase, progress, message := c.runOwnerRoutedPrewarm(c.ctx, sourceURI, paths)
 	c.updateOperation(operationID, func(status *modelcache.PrewarmStatus) {
 		status.Phase = phase
 		status.Progress = progress
@@ -544,69 +538,6 @@ func prewarmPaths(req modelcache.PrewarmRequest) []string {
 	return paths
 }
 
-func prewarmOutcome(response *fetchResponse) (modelcache.PrewarmPhase, modelcache.PrewarmProgress, string) {
-	if response == nil || len(response.Results) == 0 {
-		return modelcache.PrewarmPhaseFailed, modelcache.PrewarmProgress{}, "cluster_cache fetch returned no path results"
-	}
-
-	var totalBytes int64
-	var totalChunks int32
-	var cachedChunks int32
-	var hasTotalBytes bool
-	var hasTotalChunks bool
-	var hasCachedChunks bool
-	var errors []string
-
-	for _, result := range response.Results {
-		if result.TotalSize != nil {
-			totalBytes = addUint64ToInt64(totalBytes, *result.TotalSize)
-			hasTotalBytes = true
-		}
-		if result.TotalChunks != nil {
-			totalChunks = addIntToInt32(totalChunks, *result.TotalChunks)
-			hasTotalChunks = true
-		}
-
-		pathCachedChunks := 0
-		if result.CachedChunks != nil {
-			pathCachedChunks = addInt(pathCachedChunks, *result.CachedChunks)
-			hasCachedChunks = true
-		}
-		if result.WarmedChunks != nil {
-			pathCachedChunks = addInt(pathCachedChunks, *result.WarmedChunks)
-			hasCachedChunks = true
-		}
-		cachedChunks = addIntToInt32(cachedChunks, pathCachedChunks)
-
-		switch result.Status {
-		case "cached", "warmed":
-		case "partial":
-			errors = append(errors, fetchResultError(result, "cluster_cache prewarm partially completed"))
-		default:
-			errors = append(errors, fetchResultError(result, "cluster_cache prewarm failed"))
-		}
-	}
-
-	progress := modelcache.PrewarmProgress{}
-	if hasTotalBytes {
-		progress.TotalBytes = int64Ptr(totalBytes)
-	}
-	if hasTotalChunks {
-		progress.TotalChunks = int32Ptr(totalChunks)
-	}
-	if hasCachedChunks {
-		progress.CachedChunks = int32Ptr(cachedChunks)
-	}
-	if len(errors) == 0 {
-		if hasTotalBytes {
-			progress.CachedBytes = int64Ptr(totalBytes)
-		}
-		return modelcache.PrewarmPhaseSucceeded, progress, "cluster_cache prewarm completed"
-	}
-
-	return modelcache.PrewarmPhaseFailed, progress, strings.Join(errors, "; ")
-}
-
 func fetchResultError(result fetchPathResult, fallback string) string {
 	if result.Error != nil && *result.Error != "" {
 		return fmt.Sprintf("%s: %s", result.Path, *result.Error)
@@ -714,39 +645,8 @@ func cloneInt32Ptr(value *int32) *int32 {
 	return &copy
 }
 
-func int64Ptr(value int64) *int64 {
-	return &value
-}
-
 func int32Ptr(value int32) *int32 {
 	return &value
-}
-
-func addUint64ToInt64(total int64, value uint64) int64 {
-	if value > uint64(maxInt64-total) {
-		return maxInt64
-	}
-	return total + int64(value)
-}
-
-func addIntToInt32(total int32, value int) int32 {
-	if value <= 0 {
-		return total
-	}
-	if int64(value) > int64(maxInt32-total) {
-		return maxInt32
-	}
-	return total + int32(value)
-}
-
-func addInt(total int, value int) int {
-	if value <= 0 {
-		return total
-	}
-	if value > int(^uint(0)>>1)-total {
-		return int(^uint(0) >> 1)
-	}
-	return total + value
 }
 
 func uint64ToInt64(value uint64) int64 {
