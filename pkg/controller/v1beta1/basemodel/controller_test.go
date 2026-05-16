@@ -2060,6 +2060,240 @@ func TestCreateNodeDeletionPredicate(t *testing.T) {
 	g.Expect(deleteResult).To(gomega.BeTrue(), "DeleteFunc should return true")
 }
 
+// TestShardedBaseModelDeletionShortCircuitsConfigMapWait pins the fix for
+// the production wedge where deleting a Sharded BaseModel/ClusterBaseModel
+// blocked indefinitely on per-node ConfigMap status (nodesWithModel=303,
+// nodesNotDeleted=303 in the logs). Sharded distributions bypass model-agent,
+// so the per-node handshake never converges and the finalizer is never
+// removed. The short-circuit must remove the finalizer immediately AND
+// best-effort scrub any leftover per-node entries.
+func TestShardedBaseModelDeletionShortCircuitsConfigMapWait(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	t.Run("Sharded BaseModel with stale per-node entries: finalizer removed, entries scrubbed", func(t *testing.T) {
+		baseModel := &v1beta1.BaseModel{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "sharded-delete-me",
+				Namespace:         "default",
+				Finalizers:        []string{constants.BaseModelFinalizer},
+				DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			},
+			Spec: v1beta1.BaseModelSpec{
+				ModelFormat:  v1beta1.ModelFormat{Name: "safetensors"},
+				Storage:      &v1beta1.StorageSpec{StorageUri: stringPtr("s3://b/m")},
+				Distribution: distributionPtr(v1beta1.DistributionSharded),
+			},
+		}
+
+		c := ctrlclientfake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(baseModel).
+			Build()
+
+		// Simulate the production scenario: many nodes left a stale entry
+		// from a prior PerNode lifecycle (or the model was always Sharded
+		// and model-agent never marked them deleted — either way the wait
+		// never converged before this fix).
+		modelKey := constants.GetModelConfigMapKey("default", "sharded-delete-me", false)
+		entry, _ := json.Marshal(modelagent.ModelEntry{Status: modelagent.ModelStatusReady})
+		for i := 1; i <= 5; i++ {
+			node := fmt.Sprintf("node-%d", i)
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      node,
+					Namespace: constants.OMENamespace,
+					Labels:    map[string]string{constants.ModelStatusConfigMapLabel: "true"},
+				},
+				Data: map[string]string{modelKey: string(entry)},
+			}
+			g.Expect(c.Create(context.TODO(), cm)).NotTo(gomega.HaveOccurred())
+		}
+
+		reconciler := &BaseModelReconciler{Client: c, Scheme: scheme}
+		result, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: baseModel.Name, Namespace: baseModel.Namespace},
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(result.RequeueAfter).To(gomega.Equal(time.Duration(0)), "must NOT requeue waiting on per-node handshake")
+
+		// Finalizer must be gone (object may be GC'd by the fake client).
+		updated := &v1beta1.BaseModel{}
+		getErr := c.Get(context.TODO(), types.NamespacedName{Name: baseModel.Name, Namespace: baseModel.Namespace}, updated)
+		if getErr == nil {
+			g.Expect(updated.Finalizers).NotTo(gomega.ContainElement(constants.BaseModelFinalizer))
+		} else {
+			g.Expect(errors.IsNotFound(getErr)).To(gomega.BeTrue())
+		}
+
+		// Stale entries must be scrubbed so a re-creation with the same name
+		// doesn't inherit phantom "ready" status.
+		for i := 1; i <= 5; i++ {
+			cm := &corev1.ConfigMap{}
+			err := c.Get(context.TODO(), types.NamespacedName{Name: fmt.Sprintf("node-%d", i), Namespace: constants.OMENamespace}, cm)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			_, exists := cm.Data[modelKey]
+			g.Expect(exists).To(gomega.BeFalse(), "stale per-node entry for the deleted Sharded model must be scrubbed on node-%d", i)
+		}
+	})
+
+	t.Run("Sharded ClusterBaseModel with stale per-node entries: finalizer removed, entries scrubbed", func(t *testing.T) {
+		cbm := &v1beta1.ClusterBaseModel{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "sharded-cbm-delete-me",
+				Finalizers:        []string{constants.ClusterBaseModelFinalizer},
+				DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			},
+			Spec: v1beta1.BaseModelSpec{
+				ModelFormat:  v1beta1.ModelFormat{Name: "safetensors"},
+				Storage:      &v1beta1.StorageSpec{StorageUri: stringPtr("s3://b/m")},
+				Distribution: distributionPtr(v1beta1.DistributionSharded),
+			},
+		}
+
+		c := ctrlclientfake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(cbm).
+			Build()
+
+		modelKey := constants.GetModelConfigMapKey("", "sharded-cbm-delete-me", true)
+		entry, _ := json.Marshal(modelagent.ModelEntry{Status: modelagent.ModelStatusReady})
+		for i := 1; i <= 3; i++ {
+			node := fmt.Sprintf("cluster-node-%d", i)
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      node,
+					Namespace: constants.OMENamespace,
+					Labels:    map[string]string{constants.ModelStatusConfigMapLabel: "true"},
+				},
+				Data: map[string]string{modelKey: string(entry)},
+			}
+			g.Expect(c.Create(context.TODO(), cm)).NotTo(gomega.HaveOccurred())
+		}
+
+		reconciler := &ClusterBaseModelReconciler{Client: c, Scheme: scheme}
+		result, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: cbm.Name},
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(result.RequeueAfter).To(gomega.Equal(time.Duration(0)))
+
+		updated := &v1beta1.ClusterBaseModel{}
+		getErr := c.Get(context.TODO(), types.NamespacedName{Name: cbm.Name}, updated)
+		if getErr == nil {
+			g.Expect(updated.Finalizers).NotTo(gomega.ContainElement(constants.ClusterBaseModelFinalizer))
+		} else {
+			g.Expect(errors.IsNotFound(getErr)).To(gomega.BeTrue())
+		}
+
+		for i := 1; i <= 3; i++ {
+			cm := &corev1.ConfigMap{}
+			err := c.Get(context.TODO(), types.NamespacedName{Name: fmt.Sprintf("cluster-node-%d", i), Namespace: constants.OMENamespace}, cm)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			_, exists := cm.Data[modelKey]
+			g.Expect(exists).To(gomega.BeFalse(), "stale per-node entry must be scrubbed on cluster-node-%d", i)
+		}
+	})
+
+	t.Run("Sharded BaseModel with no leftover entries: finalizer removed immediately", func(t *testing.T) {
+		// The always-Sharded case (cluster_cache from day one) — there
+		// should never have been per-node entries, and the scrub must be a
+		// no-op rather than a failure.
+		baseModel := &v1beta1.BaseModel{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "pristine-sharded",
+				Namespace:         "default",
+				Finalizers:        []string{constants.BaseModelFinalizer},
+				DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			},
+			Spec: v1beta1.BaseModelSpec{
+				ModelFormat:  v1beta1.ModelFormat{Name: "safetensors"},
+				Storage:      &v1beta1.StorageSpec{StorageUri: stringPtr("s3://b/m")},
+				Distribution: distributionPtr(v1beta1.DistributionSharded),
+			},
+		}
+
+		c := ctrlclientfake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(baseModel).
+			Build()
+
+		reconciler := &BaseModelReconciler{Client: c, Scheme: scheme}
+		result, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: baseModel.Name, Namespace: baseModel.Namespace},
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(result.RequeueAfter).To(gomega.Equal(time.Duration(0)))
+
+		updated := &v1beta1.BaseModel{}
+		getErr := c.Get(context.TODO(), types.NamespacedName{Name: baseModel.Name, Namespace: baseModel.Namespace}, updated)
+		if getErr == nil {
+			g.Expect(updated.Finalizers).NotTo(gomega.ContainElement(constants.BaseModelFinalizer))
+		} else {
+			g.Expect(errors.IsNotFound(getErr)).To(gomega.BeTrue())
+		}
+	})
+
+	t.Run("Non-Sharded BaseModel deletion still goes through per-node handshake", func(t *testing.T) {
+		// Regression guard: the short-circuit must not bypass the normal
+		// flow for PerNode-distribution models.
+		baseModel := &v1beta1.BaseModel{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "pernode-delete-me",
+				Namespace:         "default",
+				Finalizers:        []string{constants.BaseModelFinalizer},
+				DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			},
+			Spec: v1beta1.BaseModelSpec{
+				ModelFormat: v1beta1.ModelFormat{Name: "safetensors"},
+				Storage:     &v1beta1.StorageSpec{StorageUri: stringPtr("s3://b/m")},
+				// No Distribution → defaults to PerNode (nil treated as
+				// non-Sharded by isShardedDistribution).
+			},
+		}
+
+		c := ctrlclientfake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(baseModel).
+			Build()
+
+		// Stale entry NOT marked deleted — should keep finalizer + requeue.
+		modelKey := constants.GetModelConfigMapKey("default", "pernode-delete-me", false)
+		entry, _ := json.Marshal(modelagent.ModelEntry{Status: modelagent.ModelStatusReady})
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "node-1",
+				Namespace: constants.OMENamespace,
+				Labels:    map[string]string{constants.ModelStatusConfigMapLabel: "true"},
+			},
+			Data: map[string]string{modelKey: string(entry)},
+		}
+		g.Expect(c.Create(context.TODO(), cm)).NotTo(gomega.HaveOccurred())
+
+		reconciler := &BaseModelReconciler{Client: c, Scheme: scheme}
+		result, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: baseModel.Name, Namespace: baseModel.Namespace},
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(result.RequeueAfter).To(gomega.Equal(30*time.Second), "PerNode deletion still waits for model-agent")
+
+		updated := &v1beta1.BaseModel{}
+		g.Expect(c.Get(context.TODO(), types.NamespacedName{Name: baseModel.Name, Namespace: baseModel.Namespace}, updated)).NotTo(gomega.HaveOccurred())
+		g.Expect(updated.Finalizers).To(gomega.ContainElement(constants.BaseModelFinalizer))
+
+		// Entry must NOT be scrubbed by the per-node path — model-agent owns
+		// the lifecycle for these.
+		afterCM := &corev1.ConfigMap{}
+		g.Expect(c.Get(context.TODO(), types.NamespacedName{Name: "node-1", Namespace: constants.OMENamespace}, afterCM)).NotTo(gomega.HaveOccurred())
+		_, exists := afterCM.Data[modelKey]
+		g.Expect(exists).To(gomega.BeTrue(), "PerNode path must not scrub — that's model-agent's job")
+	})
+}
+
 func TestHandleNodeDeletion(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 

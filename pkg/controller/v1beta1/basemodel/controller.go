@@ -77,12 +77,17 @@ func (r *BaseModelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	log.Info("Reconciling BaseModel")
 
 	// Handle deletion. PVC-backed models go through a dedicated cleanup
-	// (one ConfigMap, looked up by name) instead of the per-node deletion
-	// handshake handleModelDeletion expects.
+	// (one ConfigMap, looked up by name). Sharded-distribution models
+	// bypass the per-node model-agent protocol entirely and would wedge
+	// in handleModelDeletion's ConfigMap handshake forever. Default path
+	// is the per-node handshake.
 	if !baseModel.DeletionTimestamp.IsZero() {
 		log.Info("Handling BaseModel deletion")
 		if isPVCStorage(&baseModel.Spec) {
 			return handlePVCModelDeletion(ctx, r.Client, log, baseModel, false, constants.BaseModelFinalizer)
+		}
+		if isShardedDistribution(baseModel.Spec.Distribution) {
+			return handleShardedModelDeletion(ctx, r.Client, log, baseModel, false, constants.BaseModelFinalizer)
 		}
 		return r.handleDeletion(ctx, baseModel)
 	}
@@ -156,11 +161,16 @@ func (r *ClusterBaseModelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	log.Info("Reconciling ClusterBaseModel")
 
 	// Handle deletion. PVC-backed models go through the dedicated PVC
-	// cleanup path; per-node-style models go through the existing handshake.
+	// cleanup path; Sharded-distribution models short-circuit the per-node
+	// ConfigMap handshake (model-agent never wrote those entries).
+	// Per-node-style models go through the existing handshake.
 	if !clusterBaseModel.DeletionTimestamp.IsZero() {
 		log.Info("Handling ClusterBaseModel deletion")
 		if isPVCStorage(&clusterBaseModel.Spec) {
 			return handlePVCModelDeletion(ctx, r.Client, log, clusterBaseModel, true, constants.ClusterBaseModelFinalizer)
+		}
+		if isShardedDistribution(clusterBaseModel.Spec.Distribution) {
+			return handleShardedModelDeletion(ctx, r.Client, log, clusterBaseModel, true, constants.ClusterBaseModelFinalizer)
 		}
 		return r.handleDeletion(ctx, clusterBaseModel)
 	}
@@ -314,6 +324,84 @@ func handleModelDeletion(ctx context.Context, kubeClient client.Client, obj clie
 		log.Info("Finalizer removed, deletion complete", "model", modelInfo)
 	}
 	return ctrl.Result{}, nil
+}
+
+// handleShardedModelDeletion is the deletion path for Sharded-distribution
+// BaseModel/ClusterBaseModel. Sharded models do not participate in the
+// per-node model-agent download protocol (see OEP-0009): cluster_cache
+// manages chunks daemon-side, and model-agent's scout skips Sharded
+// distributions in both downloadBaseModel and updateBaseModel. The per-node
+// ConfigMap handshake handleModelDeletion waits on therefore never converges
+// — if any stale entries are left over from a prior PerNode lifecycle they
+// never get marked Deleted, and the finalizer is never removed.
+//
+// Short-circuit: best-effort scrub any leftover per-node entries so they
+// can't poison a later re-creation with the same name, then drop the
+// finalizer. Scrub failures are logged and swallowed; the deletion must
+// complete regardless or we'd reintroduce the wedge we're trying to fix.
+func handleShardedModelDeletion(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, isClusterScoped bool, finalizer string) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(obj, finalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	modelName := obj.GetName()
+	var modelNamespace string
+	if !isClusterScoped {
+		modelNamespace = obj.GetNamespace()
+	}
+	modelInfo := modelName
+	if !isClusterScoped {
+		modelInfo = modelNamespace + "/" + modelName
+	}
+	modelKey := constants.GetModelConfigMapKey(modelNamespace, modelName, isClusterScoped)
+
+	scrubbed, skipped := scrubStaleShardedConfigMapEntries(ctx, kubeClient, log, modelKey)
+	if scrubbed+skipped > 0 {
+		log.Info("Scrubbed stale per-node entries for Sharded model",
+			"model", modelInfo, "scrubbed", scrubbed, "skipped", skipped)
+	}
+
+	if err := retryUpdate(ctx, kubeClient, log, obj, "sharded-finalizer-remove", func(ctx context.Context, c client.Client, latest client.Object) error {
+		controllerutil.RemoveFinalizer(latest, finalizer)
+		return c.Update(ctx, latest)
+	}); err != nil {
+		log.Error(err, "Failed to remove finalizer for Sharded model", "model", modelInfo)
+		return ctrl.Result{}, err
+	}
+	log.Info("Sharded model deletion complete", "model", modelInfo)
+	return ctrl.Result{}, nil
+}
+
+// scrubStaleShardedConfigMapEntries removes modelKey from every per-node
+// model-status ConfigMap that still carries it. Returns counts of entries
+// successfully removed vs. update failures. Errors are logged and counted
+// toward `skipped`; the function never returns an error because the caller
+// must drop the finalizer regardless — a stuck deletion is worse than a
+// few leaked ConfigMap entries.
+func scrubStaleShardedConfigMapEntries(ctx context.Context, kubeClient client.Client, log logr.Logger, modelKey string) (scrubbed, skipped int) {
+	configMaps := &corev1.ConfigMapList{}
+	if err := kubeClient.List(ctx, configMaps,
+		client.InNamespace(constants.OMENamespace),
+		client.MatchingLabels{constants.ModelStatusConfigMapLabel: "true"},
+	); err != nil {
+		log.Error(err, "Failed to list per-node model-status ConfigMaps; Sharded deletion will proceed without scrub")
+		return 0, 0
+	}
+	for i := range configMaps.Items {
+		cm := &configMaps.Items[i]
+		if _, exists := cm.Data[modelKey]; !exists {
+			continue
+		}
+		delete(cm.Data, modelKey)
+		if err := kubeClient.Update(ctx, cm); err != nil {
+			log.Error(err, "Failed to scrub stale entry; deletion proceeds regardless",
+				"configMap", cm.Name, "modelKey", modelKey)
+			skipped++
+			continue
+		}
+		scrubbed++
+	}
+	return scrubbed, skipped
 }
 
 // updateModelStatus updates BaseModel status based on ConfigMap data
