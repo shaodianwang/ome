@@ -131,14 +131,6 @@ func CreateMockConfig(agentType string) string {
 	var content string
 
 	switch agentType {
-	case "enigma":
-		content = `
-debug: true
-# Mock enigma agent config
-encryption:
-  key_id: mock-key-id
-  region: us-west-2
-`
 	case "hf-download":
 		content = `
 debug: true
@@ -190,18 +182,6 @@ func CreateDetailedMockConfig(agentType string, mockDataDir string) string {
 	var content string
 
 	switch agentType {
-	case "enigma":
-		content = fmt.Sprintf(`
-debug: true
-# Detailed mock enigma agent config
-encryption:
-  key_id: mock-key-id
-  region: us-west-2
-  provider: mock
-input_file: %s/input.bin
-output_file: %s/output.bin
-`, mockDataDir, mockDataDir)
-
 	case "hf-download":
 		content = fmt.Sprintf(`
 debug: true
@@ -265,10 +245,6 @@ temp_dir: %s
 // SetupMockDataForAgent creates necessary mock data files for testing a specific agent
 func SetupMockDataForAgent(agentType string, mockDataDir string) {
 	switch agentType {
-	case "enigma":
-		// Create mock input file for encryption/decryption
-		CreateFileInDir(mockDataDir, "input.bin", "mock model data for encryption")
-
 	case "hf-download":
 		// Create mock model structure
 		modelDir := filepath.Join(mockDataDir, "models")

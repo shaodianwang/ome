@@ -64,7 +64,6 @@ var _ = Describe("OME Agent Framework", Ordered, func() {
 			// Check for all agent commands
 			TestLogger.Info("Verifying help output contains all agent commands")
 			Expect(stdout).To(ContainSubstring("completion"))
-			Expect(stdout).To(ContainSubstring("enigma"))
 			Expect(stdout).To(ContainSubstring("fine-tuned-adapter"))
 			Expect(stdout).To(ContainSubstring("help"))
 			Expect(stdout).To(ContainSubstring("hf-download"))
@@ -75,16 +74,6 @@ var _ = Describe("OME Agent Framework", Ordered, func() {
 	})
 
 	Context("when running specific agent help", func() {
-		It("should display the enigma agent help", func() {
-			stdout, stderr, err := RunAgent(binaryPath, "enigma", "--help")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(stderr).To(BeEmpty())
-
-			Expect(stdout).To(ContainSubstring("OME Agent Enigma is dedicated for model encryption and decryption"))
-			Expect(stdout).To(ContainSubstring("--config"))
-			Expect(stdout).To(ContainSubstring("--debug"))
-		})
-
 		It("should display the hf-download agent help", func() {
 			stdout, stderr, err := RunAgent(binaryPath, "hf-download", "--help")
 			Expect(err).NotTo(HaveOccurred())
@@ -127,13 +116,6 @@ var _ = Describe("OME Agent Framework", Ordered, func() {
 	})
 
 	Context("when running without required config", func() {
-		It("should report an error for enigma agent", func() {
-			_, stderr, err := RunAgent(binaryPath, "enigma")
-
-			Expect(err).To(HaveOccurred())
-			Expect(stderr).To(ContainSubstring("no config file provided"))
-		})
-
 		It("should report an error for hf-download agent", func() {
 			_, stderr, err := RunAgent(binaryPath, "hf-download")
 
@@ -180,13 +162,6 @@ this is not valid yaml
 			}
 		})
 
-		It("should report an error for enigma agent", func() {
-			_, stderr, err := RunAgent(binaryPath, "enigma", "--config", invalidConfigPath)
-
-			Expect(err).To(HaveOccurred())
-			Expect(stderr).To(ContainSubstring("cannot read config file"))
-		})
-
 		It("should report an error for hf-download agent", func() {
 			_, stderr, err := RunAgent(binaryPath, "hf-download", "--config", invalidConfigPath)
 
@@ -217,19 +192,6 @@ debug: true
 			if incompleteConfigPath != "" {
 				os.Remove(incompleteConfigPath)
 			}
-		})
-
-		It("should report missing fields for enigma agent", func() {
-			_, stderr, err := RunAgent(binaryPath, "enigma", "--config", incompleteConfigPath)
-
-			Expect(err).To(HaveOccurred())
-			// The exact error message might vary, but it should indicate a configuration issue
-			Expect(stderr).To(Or(
-				ContainSubstring("encryption"),
-				ContainSubstring("config"),
-				ContainSubstring("missing"),
-				ContainSubstring("required"),
-			))
 		})
 
 		It("should report missing fields for hf-download agent", func() {
@@ -266,7 +228,7 @@ debug: false
 		})
 
 		It("should include debug flag in the agent help output", func() {
-			stdout, stderr, err := RunAgent(binaryPath, "enigma", "--help")
+			stdout, stderr, err := RunAgent(binaryPath, "hf-download", "--help")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stderr).To(BeEmpty())
 			Expect(stdout).To(ContainSubstring("--debug"))
@@ -286,7 +248,6 @@ debug: false
 			// Create mock configs for each agent
 			configPaths = make(map[string]string)
 			agentTypes := []string{
-				"enigma",
 				"hf-download",
 				"replica",
 				"serving-agent",
@@ -332,13 +293,6 @@ output: ` + mockDataDir + `/output
 		})
 
 		// Pending: dependency injection / mocking required before these can run.
-		XIt("should start the enigma agent", func() {
-			stdout, _, err := RunAgent(binaryPath, "enigma", "--config", configPaths["enigma"])
-
-			Expect(err).NotTo(HaveOccurred())
-			Expect(stdout).To(ContainSubstring("Enigma agent started"))
-		})
-
 		XIt("should start the hf-download agent", func() {
 			stdout, _, err := RunAgent(binaryPath, "hf-download", "--config", configPaths["hf-download"])
 
@@ -370,7 +324,7 @@ output: ` + mockDataDir + `/output
 
 	Context("when running with timeout", func() {
 		XIt("should timeout after specified duration", func() {
-			_, _, err := RunAgentWithTimeout(1*time.Second, binaryPath, "enigma", "--config", "/path/to/config")
+			_, _, err := RunAgentWithTimeout(1*time.Second, binaryPath, "hf-download", "--config", "/path/to/config")
 
 			Expect(err).To(HaveOccurred())
 		})

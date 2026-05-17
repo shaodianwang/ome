@@ -569,7 +569,6 @@ func TestFilterPodOnlyAnnotations(t *testing.T) {
 		},
 		"FilterInjectionAnnotations": {
 			annotations: map[string]string{
-				constants.ModelInitInjectionKey:        "true",
 				constants.FineTunedAdapterInjectionKey: "weight-name",
 				constants.ServingSidecarInjectionKey:   "true",
 				"ome.io/base-model-name":               "test-model",
@@ -596,12 +595,12 @@ func TestFilterPodOnlyAnnotations(t *testing.T) {
 		},
 		"MixedAnnotations": {
 			annotations: map[string]string{
-				"k8s.grafana.com/scrape":        "true",
-				"networking.gke.io/interfaces":  "[...]",
-				constants.ModelInitInjectionKey: "true",
-				"ome.io/base-model-name":        "test-model",
-				"ome.io/service-type":           "ClusterIP",
-				"meta.helm.sh/release-name":     "test",
+				"k8s.grafana.com/scrape":               "true",
+				"networking.gke.io/interfaces":         "[...]",
+				constants.FineTunedAdapterInjectionKey: "weight-name",
+				"ome.io/base-model-name":               "test-model",
+				"ome.io/service-type":                  "ClusterIP",
+				"meta.helm.sh/release-name":            "test",
 			},
 			expected: map[string]string{
 				"ome.io/base-model-name":    "test-model",

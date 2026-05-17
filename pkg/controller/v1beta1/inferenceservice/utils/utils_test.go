@@ -123,28 +123,13 @@ func TestIsEmptyModelDirVolumeRequired(t *testing.T) {
 		expected    bool
 	}{
 		{
-			name:        "both annotations empty",
+			name:        "no annotations",
 			annotations: map[string]string{},
 			expected:    false,
 		},
 		{
-			name: "model init injection true",
-			annotations: map[string]string{
-				constants.ModelInitInjectionKey: "true",
-			},
-			expected: true,
-		},
-		{
 			name: "fine tuned adapter injection annotation present",
 			annotations: map[string]string{
-				constants.FineTunedAdapterInjectionKey: "amaaaaaask7dceya3ro4ls2wit3tu5dkk2u2ijvbbu4gmhbrsjeytwc2yagq",
-			},
-			expected: true,
-		},
-		{
-			name: "both annotations present - model init true",
-			annotations: map[string]string{
-				constants.ModelInitInjectionKey:        "true",
 				constants.FineTunedAdapterInjectionKey: "amaaaaaask7dceya3ro4ls2wit3tu5dkk2u2ijvbbu4gmhbrsjeytwc2yagq",
 			},
 			expected: true,
@@ -171,23 +156,8 @@ func TestIsOriginalModelVolumeMountNecessary(t *testing.T) {
 			expected:    true,
 		},
 		{
-			name: "model init injection true",
-			annotations: map[string]string{
-				constants.ModelInitInjectionKey: "true",
-			},
-			expected: false,
-		},
-		{
 			name: "ft serving with merged weights true",
 			annotations: map[string]string{
-				constants.FTServingWithMergedWeightsAnnotationKey: "true",
-			},
-			expected: false,
-		},
-		{
-			name: "both annotations true",
-			annotations: map[string]string{
-				constants.ModelInitInjectionKey:                   "true",
 				constants.FTServingWithMergedWeightsAnnotationKey: "true",
 			},
 			expected: false,

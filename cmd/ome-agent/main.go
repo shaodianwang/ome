@@ -25,7 +25,6 @@ func main() {
 
 func init() {
 	// Register all agent commands
-	rootCmd.AddCommand(CreateAgentCommand(NewEnigmaAgent()))
 	rootCmd.AddCommand(CreateAgentCommand(NewHFDownloadAgent()))
 	rootCmd.AddCommand(CreateAgentCommand(NewReplicaAgent()))
 	rootCmd.AddCommand(CreateAgentCommand(NewServingAgent()))

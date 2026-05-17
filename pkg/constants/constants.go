@@ -47,24 +47,19 @@ var (
 	AgentModelNameEnvVarKey           = AgentAppName + "_" + "MODEL_NAME"
 	AgentModelStoreDirectoryEnvVarKey = AgentAppName + "_" + "MODEL_STORE_DIRECTORY"
 	AgentModelFrameworkEnvVarKey      = AgentAppName + "_" + "MODEL_FRAMEWORK"
-	AgentTensorRTLLMVersionsEnvVarKey = AgentAppName + "_" + "TENSORRTLLM_VERSION"
 	AgentBaseModelTypeEnvVarKey       = AgentAppName + "_" + "MODEL_TYPE"
 
 	// General Configuration
-	AgentLocalPathEnvVarKey              = AgentAppName + "_" + "LOCAL_PATH"
-	AgentNumOfGPUEnvVarKey               = AgentAppName + "_" + "NUM_OF_GPU"
-	AgentDisableModelDecryptionEnvVarKey = AgentAppName + "_" + "DISABLE_MODEL_DECRYPTION"
-	AgentModelBucketNameEnvVarKey        = AgentAppName + "_" + "MODEL_BUCKET_NAME"
-	AgentModelNamespaceEnvVarKey         = AgentAppName + "_" + "MODEL_NAMESPACE"
-	AgentModelObjectName                 = AgentAppName + "_" + "MODEL_OBJECT_NAME"
+	AgentLocalPathEnvVarKey       = AgentAppName + "_" + "LOCAL_PATH"
+	AgentNumOfGPUEnvVarKey        = AgentAppName + "_" + "NUM_OF_GPU"
+	AgentModelBucketNameEnvVarKey = AgentAppName + "_" + "MODEL_BUCKET_NAME"
+	AgentModelNamespaceEnvVarKey  = AgentAppName + "_" + "MODEL_NAMESPACE"
+	AgentModelObjectName          = AgentAppName + "_" + "MODEL_OBJECT_NAME"
 
-	// OCI Vault and Security
+	// OCI Authentication
 	AgentCompartmentIDEnvVarKey = AgentAppName + "_" + "COMPARTMENT_ID"
 	AgentAuthTypeEnvVarKey      = AgentAppName + "_" + "AUTH_TYPE"
 	AgentRegionEnvVarKey        = AgentAppName + "_" + "REGION"
-	AgentVaultIDEnvVarKey       = AgentAppName + "_" + "VAULT_ID"
-	AgentKeyNameEnvVarKey       = AgentAppName + "_" + "KEY_NAME"
-	AgentSecretNameEnvVarKey    = AgentAppName + "_" + "SECRET_NAME"
 
 	// Serving Sidecar Configuration
 	AgentFineTunedWeightInfoFilePath      = AgentAppName + "_" + "FINE_TUNED_WEIGHT_INFO_FILE_PATH"
@@ -100,7 +95,6 @@ var (
 	SetPrometheusAnnotation                 = OMEAPIGroupName + "/enable-prometheus-scraping"
 	DedicatedAICluster                      = OMEAPIGroupName + "/dedicated-ai-cluster"
 	VolcanoQueue                            = OMEAPIGroupName + "/volcano-queue"
-	ModelInitInjectionKey                   = OMEAPIGroupName + "/inject-model-init"
 	FineTunedAdapterInjectionKey            = OMEAPIGroupName + "/inject-fine-tuned-adapter"
 	ServingSidecarInjectionKey              = OMEAPIGroupName + "/inject-serving-sidecar"
 	FineTunedWeightFTStrategyKey            = OMEAPIGroupName + "/fine-tuned-weight-ft-strategy"
@@ -145,13 +139,6 @@ var (
 	IngressPathTemplate            = OMEAPIGroupName + "/ingress-path-template"
 	IngressDisableIstioVirtualHost = OMEAPIGroupName + "/ingress-disable-istio-virtualhost"
 	IngressDisableCreation         = OMEAPIGroupName + "/ingress-disable-creation"
-)
-
-// InferenceService Annotations for model encryption and decryption
-var (
-	BaseModelDecryptionKeyName    = OMEAPIGroupName + "/base-model-decryption-key-name"
-	BaseModelDecryptionSecretName = OMEAPIGroupName + "/base-model-decryption-secret-name"
-	DisableModelDecryption        = OMEAPIGroupName + "/disable-model-decryption"
 )
 
 // Label Constants
@@ -353,7 +340,6 @@ const (
 	MainContainerName               = "ome-container"
 	TrainingMainContainerName       = "trainer"
 	StorageInitializerContainerName = "storage-initializer"
-	ModelInitContainerName          = "model-init"
 	FineTunedAdapterContainerName   = "fine-tuned-adapter"
 	ServingSidecarContainerName     = "serving-sidecar"
 )
@@ -414,7 +400,7 @@ var (
 	//
 	// Entries can be either:
 	// - Prefix patterns ending with "/" (e.g., "k8s.grafana.com/") - matches all annotations with this prefix
-	// - Exact annotation keys (e.g., ModelInitInjectionKey) - matches only that specific annotation
+	// - Exact annotation keys (e.g., FineTunedAdapterInjectionKey) - matches only that specific annotation
 	//
 	// Both styles work correctly because IsPrefixSupported uses strings.HasPrefix for matching.
 	PodOnlyAnnotationPrefixes = []string{
@@ -424,7 +410,6 @@ var (
 		"networking.gke.io/",         // GKE multi-NIC and RDMA network annotations (networking.gke.io/interfaces, etc.)
 		"rdma.ome.io/",               // OME RDMA injection annotations (RDMAAutoInjectAnnotationKey, RDMAProfileAnnotationKey, etc.)
 		"runtime.ome.io/",            // OME runtime profile annotations (shm/probe/observability profiles + container-name override)
-		ModelInitInjectionKey,        // ome.io/inject-model-init - triggers model init container injection via webhook
 		FineTunedAdapterInjectionKey, // ome.io/inject-fine-tuned-adapter - triggers fine-tuned adapter injection via webhook
 		ServingSidecarInjectionKey,   // ome.io/inject-serving-sidecar - triggers serving sidecar injection via webhook
 	}

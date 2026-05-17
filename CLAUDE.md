@@ -108,7 +108,7 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 |---|---|
 | `cmd/manager` | Main Kubernetes operator. Runs all controllers and webhooks. Dynamically registers schemes for Knative, LWS, Volcano, KEDA, Istio based on cluster CRD availability. |
 | `cmd/model-agent` | DaemonSet on GPU nodes. Scout watches models, Gopher downloads from storage backends. Labels nodes with model readiness. Uses xet (CGo/Rust) for HuggingFace downloads. |
-| `cmd/ome-agent` | Multi-command CLI (Cobra + uber/fx): enigma (encryption), hf-download, replica (cross-region replication), serving-agent (sidecar), fine-tuned-adapter, model-metadata. |
+| `cmd/ome-agent` | Multi-command CLI (Cobra + uber/fx): hf-download, replica (cross-region replication), serving-agent (sidecar), fine-tuned-adapter, model-metadata. |
 
 ### Controllers (`pkg/controller/v1beta1/`)
 - **InferenceServiceReconciler** — The largest controller. Auto-selects runtimes via `runtimeselector`, selects accelerators via `acceleratorclassselector`, generates Deployments/Knative Services/LeaderWorkerSets/HPAs/KEDA ScaledObjects. Supports RawDeployment, Serverless, MultiNode, PDDisaggregated, and VirtualDeployment modes.
@@ -125,9 +125,8 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 | `pkg/hfutil/hub` | HuggingFace Hub client: file download with resume, progress tracking, LFS support. |
 | `pkg/xet` | CGo bridge to Rust `libxet` library for high-performance HuggingFace downloads. Build with `cd pkg/xet && make build`. |
 | `pkg/webhook/admission` | Pod mutator (injects config into ISVC pods), ServingRuntime/InferenceService/BenchmarkJob validators and defaulters. |
-| `pkg/vault` | OCI Vault integration for model encryption (KMS crypto, key management, secrets). Uses uber/fx modules. |
 | `pkg/configutils` | Viper-based config with `imports` key resolution, used by ome-agent sub-commands. |
-| `internal/ome-agent` | Agent implementations: enigma (encryption/decryption), replica (cross-region replication), serving-agent (sidecar). |
+| `internal/ome-agent` | Agent implementations: replica (cross-region replication), serving-agent (sidecar). |
 
 ### Helm Charts (`charts/`)
 - **ome-crd** — CRD-only chart. CRDs are copied from `config/crd/full/` during `make manifests`.

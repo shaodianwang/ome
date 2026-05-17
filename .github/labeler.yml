@@ -52,7 +52,6 @@ auth:
   - changed-files:
     - any-glob-to-any-file:
       - 'pkg/principals/**/*'
-      - 'pkg/vault/**/*'
 
 # Model Agent
 model-agent:

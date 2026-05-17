@@ -301,11 +301,6 @@ run-model-agent: fmt vet ## Run model-agent binary from local host against the c
 	@echo "🏃‍♂️ Running model-agent..."
 	$(GO_BUILD_ENV) $(GO_CMD) run ./cmd/model-agent/main.go
 
-.PHONY: run-ome-agent-enigma
-run-ome-agent-enigma: fmt vet ome-agent ## Run ome-agent binary from local host against the configured Kubernetes cluster in ~/.kube/config or KUBECONFIG env.
-	@echo "🏃‍♂️ Running ome-agent enigma..."
-	bin/ome-agent enigma -d -c config/ome-agent/ome-agent.yaml
-
 .PHONY: run-ome-agent-hf-download
 run-ome-agent-hf-download: fmt vet ome-agent ## Run ome-agent binary from local host against the configured Kubernetes cluster in ~/.kube/config or KUBECONFIG env.
 	@echo "🏃‍♂️ Running ome-agent hf-download..."
