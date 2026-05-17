@@ -5,9 +5,6 @@ import (
 	"fmt"
 	"os"
 	"sync"
-
-	"github.com/ome-projects/ome/pkg/imds"
-	"github.com/ome-projects/ome/pkg/logging"
 )
 
 const (
@@ -83,18 +80,6 @@ func loadInstanceTypeMapFromEnv() (map[string]string, error) {
 	}
 
 	return configMap, nil
-}
-
-// GetNodeInstanceType retrieves the instance type of the node.
-// NOTE: This implementation is currently specific to Oracle Cloud Infrastructure (OCI)
-// and uses the OCI IMDS client. A future refactor is needed to support
-// other cloud providers' metadata services.
-func GetNodeInstanceType(logger logging.Interface) (string, error) {
-	client, err := imds.NewClient(imds.DefaultConfig(), logger)
-	if err != nil {
-		return "", err
-	}
-	return client.GetInstanceShape()
 }
 
 func GetInstanceTypeShortName(currentInstanceType string) (string, error) {
