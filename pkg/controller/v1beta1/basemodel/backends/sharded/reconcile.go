@@ -66,9 +66,32 @@ func Reconcile(ctx context.Context, kubeClient client.Client, log logr.Logger, p
 
 	readyCondition := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionReady)
 	if readyCondition != nil && readyCondition.Status == metav1.ConditionTrue {
-		return ctrl.Result{}, updateModelStatusWithRetry(ctx, kubeClient, log, obj, modelType, provider.Name, nil)
+		// Calling updateModelStatusWithRetry here would re-run
+		// applyInitialModelStatus and force state back to Importing —
+		// silently regressing a Ready model on every poll. Just stamp
+		// observedGeneration if the spec has changed since we last
+		// reconciled.
+		return ctrl.Result{}, stampObservedGenerationIfStale(ctx, kubeClient, log, obj)
 	}
 	return reconcileModelMetadata(ctx, kubeClient, log, cacheClient, source, obj, modelType, provider.Name)
+}
+
+// stampObservedGenerationIfStale advances status.observedGeneration to
+// match obj.Generation without mutating state or conditions. Idempotent:
+// returns immediately when already in sync. Used by the Ready=True
+// reconcile path so that a healthy model isn't churned every poll.
+func stampObservedGenerationIfStale(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object) error {
+	return shared.RetryUpdate(ctx, kubeClient, log, obj, "sharded stamp generation", func(ctx context.Context, c client.Client, latest client.Object) error {
+		_, status, err := shared.ModelSpecAndStatus(latest)
+		if err != nil {
+			return err
+		}
+		if status.ObservedGeneration == latest.GetGeneration() {
+			return nil
+		}
+		shared.StampObservedReconcile(latest, status)
+		return c.Status().Update(ctx, latest)
+	})
 }
 
 func reconcileModelMetadata(ctx context.Context, kubeClient client.Client, log logr.Logger, cacheClient Client, source Source, obj client.Object, modelType, backend string) (ctrl.Result, error) {

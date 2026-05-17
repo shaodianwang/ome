@@ -115,3 +115,71 @@ func findCondition(conditions []metav1.Condition, t string) *metav1.Condition {
 	}
 	return nil
 }
+
+// TestReconcileReadyModelDoesNotRegressToImporting pins the fix for
+// the production regression where every poll after a Sharded model
+// reached Ready overwrote state back to Importing. The Ready=True
+// reconcile branch must not call applyInitialModelStatus (which
+// unconditionally forces state=Importing); a no-touch stamp is the
+// correct shape — preserve conditions and state, only bump
+// observedGeneration if the spec moved.
+func TestReconcileReadyModelDoesNotRegressToImporting(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).To(gomega.Succeed())
+
+	const (
+		uri     = "s3://bucket/ready-model"
+		backend = ProviderClusterCache
+	)
+	cbm := &v1beta1.ClusterBaseModel{
+		ObjectMeta: metav1.ObjectMeta{Name: "ready-cbm", Generation: 4},
+		Spec: v1beta1.BaseModelSpec{
+			Storage: &v1beta1.StorageSpec{StorageUri: ptr.To(uri)},
+		},
+		Status: v1beta1.ModelStatusSpec{
+			State:              v1beta1.LifeCycleStateReady,
+			ObservedGeneration: 2,
+			Cache:              &v1beta1.ModelCacheStatus{Backend: backend, SourceUri: uri},
+			Conditions: []metav1.Condition{
+				{Type: v1beta1.ModelConditionSourceReachable, Status: metav1.ConditionTrue, Reason: v1beta1.ModelConditionReasonSourceReachable, ObservedGeneration: 2, LastTransitionTime: metav1.Now()},
+				{Type: v1beta1.ModelConditionMetadataExtracted, Status: metav1.ConditionTrue, Reason: v1beta1.ModelConditionReasonMetadataParsed, ObservedGeneration: 2, LastTransitionTime: metav1.Now()},
+				{Type: v1beta1.ModelConditionReady, Status: metav1.ConditionTrue, Reason: v1beta1.ModelConditionReasonMetadataParsed, ObservedGeneration: 2, LastTransitionTime: metav1.Now()},
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(cbm).
+		WithStatusSubresource(cbm).
+		Build()
+
+	// CheckSource must NOT be invoked — SourceReachable=True already.
+	// InspectSource must NOT be invoked — Ready=True already.
+	provider := Provider{Name: backend, Client: &stubClient{
+		checkSourceFunc: func(context.Context, Source) (*SourceStatus, error) {
+			t.Fatal("CheckSource called on a Ready model")
+			return nil, nil
+		},
+		inspectSourceFunc: func(context.Context, Source) (*SourceInspection, error) {
+			t.Fatal("InspectSource called on a Ready model")
+			return nil, nil
+		},
+	}}
+
+	_, err := Reconcile(context.Background(), kubeClient, logr.Discard(), provider, cbm, "ClusterBaseModel")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.ClusterBaseModel{}
+	g.Expect(kubeClient.Get(context.Background(), client.ObjectKeyFromObject(cbm), got)).To(gomega.Succeed())
+	g.Expect(got.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateReady),
+		"Ready model must stay Ready across reconciles")
+	g.Expect(got.Status.ObservedGeneration).To(gomega.Equal(int64(4)),
+		"observedGeneration must catch up to spec generation")
+
+	ready := findCondition(got.Status.Conditions, v1beta1.ModelConditionReady)
+	g.Expect(ready).NotTo(gomega.BeNil())
+	g.Expect(ready.Status).To(gomega.Equal(metav1.ConditionTrue),
+		"Ready condition must not be flipped back to False")
+}
