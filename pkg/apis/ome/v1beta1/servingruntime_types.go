@@ -236,10 +236,6 @@ type ServingRuntimeSpec struct {
 	// PodSpec for the serving runtime
 	ServingRuntimePodSpec `json:",inline"`
 
-	// WorkerPodSpec for the serving runtime, this is used for multi-node serving without Ray Cluster
-	// +optional
-	WorkerPodSpec *WorkerPodSpec `json:"workers,omitempty"`
-
 	// AcceleratorRequirements specifies the accelerator requirements for this runtime
 	// +optional
 	AcceleratorRequirements *AcceleratorRequirements `json:"acceleratorRequirements,omitempty"`
@@ -278,17 +274,6 @@ type AcceleratorRequirements struct {
 	// +optional
 	// +listType=atomic
 	PreferredPrecisions []string `json:"preferredPrecisions,omitempty"`
-}
-
-type WorkerPodSpec struct {
-	// Size of the worker, this is the number of pods in the worker.
-	// +immutable
-	// +optional
-	Size *int `json:"size"`
-
-	// PodSpec for the worker
-	// +optional
-	ServingRuntimePodSpec `json:",inline"`
 }
 
 // ModelSizeRangeSpec defines the range of model sizes supported by this runtime

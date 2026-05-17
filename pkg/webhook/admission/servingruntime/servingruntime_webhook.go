@@ -24,7 +24,6 @@ const (
 	PriorityIsNotSameServingRuntimeError        = "%s under the servingruntime %s"
 	PriorityIsNotSameClusterServingRuntimeError = "%s under the clusterservingruntime %s"
 	ChainsawInjectAnnotationNotAllowError       = "chainsaw inject annotation is not allowed"
-	InvalidConfigurationError                   = "invalid configuration: %s"
 	UnknownAcceleratorClassError                = "unknown accelerator classes referenced in AcceleratorRequirements: %v"
 )
 
@@ -58,11 +57,6 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 	// Only validate for priority if the new serving runtime is not disabled
 	if servingRuntime.Spec.IsDisabled() {
 		return admission.Allowed("")
-	}
-
-	// Validate the configuration based on engineConfig and decoderConfig
-	if err := validation.ValidateServingRuntimeConfiguration(&servingRuntime.Spec); err != nil {
-		return admission.Denied(fmt.Sprintf(InvalidConfigurationError, err.Error()))
 	}
 
 	// Validate that all referenced accelerator classes exist
@@ -104,11 +98,6 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 	// Only validate for priority if the new cluster serving runtime is not disabled
 	if clusterServingRuntime.Spec.IsDisabled() {
 		return admission.Allowed("")
-	}
-
-	// Validate the configuration based on engineConfig and decoderConfig
-	if err := validation.ValidateServingRuntimeConfiguration(&clusterServingRuntime.Spec); err != nil {
-		return admission.Denied(fmt.Sprintf(InvalidConfigurationError, err.Error()))
 	}
 
 	// Validate that all referenced accelerator classes exist
