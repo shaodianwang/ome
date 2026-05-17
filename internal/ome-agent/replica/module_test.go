@@ -13,7 +13,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/ociobjectstore"
 	"github.com/ome-projects/ome/pkg/principals"
-	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 func TestModule(t *testing.T) {

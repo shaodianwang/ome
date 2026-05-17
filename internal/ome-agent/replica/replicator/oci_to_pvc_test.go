@@ -8,8 +8,8 @@ import (
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 	"github.com/ome-projects/ome/pkg/ociobjectstore"
-	testingPkg "github.com/ome-projects/ome/pkg/testing"
 	"github.com/ome-projects/ome/pkg/utils/storage"
+	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
 	"github.com/stretchr/testify/assert"
 )
 

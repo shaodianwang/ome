@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ome-projects/ome/pkg/principals"
-	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 func TestNewOCIOSDataStore(t *testing.T) {

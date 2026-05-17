@@ -8,7 +8,7 @@ import (
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 	"github.com/ome-projects/ome/pkg/afero"
 	"github.com/ome-projects/ome/pkg/ociobjectstore"
-	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

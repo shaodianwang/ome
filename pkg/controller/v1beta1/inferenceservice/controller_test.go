@@ -28,7 +28,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
-	omeTesting "github.com/ome-projects/ome/pkg/testing"
+	omeTesting "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 func TestInferenceServiceReconcile(t *testing.T) {

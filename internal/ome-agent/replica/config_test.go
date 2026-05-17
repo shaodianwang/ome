@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/ome-projects/ome/pkg/ociobjectstore"
-	testingPkg "github.com/ome-projects/ome/pkg/testing"
 	"github.com/ome-projects/ome/pkg/utils/storage"
+	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 // Define reusable struct types to avoid repetition

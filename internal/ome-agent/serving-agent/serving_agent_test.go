@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ome-projects/ome/pkg/ociobjectstore"
-	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 // MockCasperDataStore mocks the OCIOSDataStore for testing

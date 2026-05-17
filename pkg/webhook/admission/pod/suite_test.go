@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	pkgtest "github.com/ome-projects/ome/pkg/testing"
+	pkgtest "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 var cfg *rest.Config

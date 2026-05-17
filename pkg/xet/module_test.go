@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/ome-projects/ome/pkg/logging"
-	testingPkg "github.com/ome-projects/ome/pkg/testing"
+	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -15,8 +15,8 @@ import (
 	"github.com/ome-projects/ome/pkg/afero"
 	"github.com/ome-projects/ome/pkg/ociobjectstore"
 	"github.com/ome-projects/ome/pkg/principals"
-	testingPkg "github.com/ome-projects/ome/pkg/testing"
 	"github.com/ome-projects/ome/pkg/utils/storage"
+	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 type TestReplicaAgent struct {
