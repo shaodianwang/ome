@@ -37,6 +37,7 @@ import (
 
 	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/components"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/external_service"
@@ -44,7 +45,6 @@ import (
 	multimodelconfig "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/modelconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
-	"github.com/ome-projects/ome/pkg/modelcache"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 )
@@ -112,7 +112,7 @@ type InferenceServiceReconciler struct {
 	StatusManager            *status.StatusReconciler
 	RuntimeSelector          runtimeselector.Selector
 	AcceleratorClassSelector acceleratorclassselector.Selector
-	ModelCache               modelcache.Provider
+	ModelCache               sharded.Provider
 }
 
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

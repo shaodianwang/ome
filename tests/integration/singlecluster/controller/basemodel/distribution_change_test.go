@@ -10,7 +10,6 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/modelagent"
-	"github.com/ome-projects/ome/pkg/modelcache"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -30,12 +29,12 @@ var _ = ginkgo.Describe("BaseModel Distribution change at runtime", ginkgo.Order
 
 	ginkgo.BeforeEach(setSuiteFakeMCDefaults)
 
-	ginkgo.It("PerNode → Sharded: controller switches branches and Sharded conditions appear", func() {
+	ginkgo.It("PerNode → Sharded: controller switches branches and Sharded Ready appears", func() {
 		// Start as PerNode (the default — no Distribution set), drive
 		// it to a per-node Ready state via a fake agent CM, then
 		// flip Distribution=Sharded. The next reconcile should run
-		// the sharded path, fire CheckSource/InspectSource/
-		// StartPrewarm, and surface Cached + Ready conditions.
+		// the sharded path, fire CheckSource/InspectSource, and
+		// flip the Ready condition via metadata parse.
 		nodeName := "dist-pn2sharded-node"
 		makeNode(suiteCtx, k8sClient, nodeName)
 		ginkgo.DeferCleanup(deleteNode(k8sClient, nodeName))
@@ -67,23 +66,15 @@ var _ = ginkgo.Describe("BaseModel Distribution change at runtime", ginkgo.Order
 		got.Spec.Distribution = &dist
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 
-		// Sharded path produces a Cached condition. NodesReady
-		// belongs to the per-node path; the controller does NOT
-		// proactively clear stale per-node fields when switching
-		// branches, so we deliberately don't assert NodesReady is
-		// empty here. We only assert the new branch's signals
-		// appeared.
+		// Sharded path drives Ready=True via inline metadata parse.
+		// NodesReady belongs to the per-node path; the controller
+		// does NOT proactively clear stale per-node fields when
+		// switching branches, so we deliberately don't assert
+		// NodesReady is empty here. We only assert the new branch's
+		// Ready signal appeared.
 		Eventually(func(g Gomega) {
 			latest := &v1beta1.ClusterBaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "dist-pn2sharded"}, latest)).To(Succeed())
-			cached := meta.FindStatusCondition(latest.Status.Conditions, v1beta1.ModelConditionCached)
-			g.Expect(cached).NotTo(BeNil(),
-				"Cached condition must appear once the sharded branch takes over")
-			g.Expect(string(cached.Status)).To(Equal("True"))
-			g.Expect(cached.Reason).To(Equal(v1beta1.ModelConditionReasonPrewarmSucceeded))
-
-			// Ready should also have flipped to True via inline
-			// metadata parse (PR #56 flow).
 			ready := meta.FindStatusCondition(latest.Status.Conditions, v1beta1.ModelConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(string(ready.Status)).To(Equal("True"))
@@ -91,19 +82,11 @@ var _ = ginkgo.Describe("BaseModel Distribution change at runtime", ginkgo.Order
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("Sharded → PerNode: controller switches branches; sharded prewarm continues orphaned on the provider side", func() {
-		// Mirror of the above. Start Sharded with prewarm Running
-		// (so we observe in-flight state), then flip back to
-		// PerNode. The reconciler should stop sharded reconciles
-		// and start consuming per-node CMs.
-		//
-		// Same provider-orphan caveat as sharded_deletion_test.go:
-		// no CancelPrewarm exists, so in-flight cache work
-		// continues silently.
-		suiteFakeMC.GetPrewarmStatusFunc = func(_ context.Context, op modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-			return &modelcache.PrewarmStatus{Operation: op, Phase: modelcache.PrewarmPhaseRunning}, nil
-		}
-
+	ginkgo.It("Sharded → PerNode: controller switches branches once distribution flips", func() {
+		// Mirror of the above. Start Sharded (gets to Ready via
+		// metadata parse), then flip back to PerNode. The
+		// reconciler should stop sharded reconciles and start
+		// consuming per-node CMs.
 		nodeName := "dist-sharded2pn-node"
 		makeNode(suiteCtx, k8sClient, nodeName)
 		ginkgo.DeferCleanup(deleteNode(k8sClient, nodeName))
@@ -117,12 +100,12 @@ var _ = ginkgo.Describe("BaseModel Distribution change at runtime", ginkgo.Order
 		Expect(k8sClient.Create(suiteCtx, cbm)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, cbm) })
 
-		ginkgo.By("wait for sharded prewarm to be in flight (Status.Cache.PrewarmID populated)")
+		ginkgo.By("wait for sharded path to write Status.Cache (Backend + SourceUri populated)")
 		Eventually(func(g Gomega) {
 			got := &v1beta1.ClusterBaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "dist-sharded2pn"}, got)).To(Succeed())
 			g.Expect(got.Status.Cache).NotTo(BeNil())
-			g.Expect(got.Status.Cache.PrewarmID).NotTo(BeEmpty())
+			g.Expect(got.Status.Cache.Backend).NotTo(BeEmpty())
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("flip Distribution back to PerNode by clearing the field")

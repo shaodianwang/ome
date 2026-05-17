@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -31,12 +31,12 @@ var _ = ginkgo.Describe("Sharded BaseModel hf_quant_config.json detection", gink
 		// HFQuantConfigJSON. config.json is intentionally without a
 		// quantization_config block — the only signal for NVFP4 is
 		// the sibling hf_quant_config.json.
-		suiteFakeMC.InspectSourceFunc = func(_ context.Context, src modelcache.Source) (*modelcache.SourceInspection, error) {
-			return &modelcache.SourceInspection{
-				Objects: []modelcache.Object{
+		suiteFakeMC.InspectSourceFunc = func(_ context.Context, src sharded.Source) (*sharded.SourceInspection, error) {
+			return &sharded.SourceInspection{
+				Objects: []sharded.Object{
 					{Source: src, Path: src.URI + "/config.json"},
 				},
-				Metadata: modelcache.ModelMetadataInputs{
+				Metadata: sharded.ModelMetadataInputs{
 					ConfigJSON: []byte(`{
 						"model_type": "llama4x_text",
 						"architectures": ["Llama4xForCausalLM"],

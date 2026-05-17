@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -49,12 +49,12 @@ var _ = ginkgo.Describe("Sharded BaseModel metadata parsing", ginkgo.Ordered, fu
 		// that drive the Cached/Ready conditions. This spec proves the
 		// Spec write actually happens — none of the existing sharded
 		// tests assert on Spec fields after the metadata reparse.
-		suiteFakeMC.InspectSourceFunc = func(_ context.Context, src modelcache.Source) (*modelcache.SourceInspection, error) {
-			return &modelcache.SourceInspection{
-				Objects: []modelcache.Object{
+		suiteFakeMC.InspectSourceFunc = func(_ context.Context, src sharded.Source) (*sharded.SourceInspection, error) {
+			return &sharded.SourceInspection{
+				Objects: []sharded.Object{
 					{Source: src, Path: src.URI + "/config.json"},
 				},
-				Metadata: modelcache.ModelMetadataInputs{
+				Metadata: sharded.ModelMetadataInputs{
 					ConfigJSON: []byte(`{
 						"architectures": ["PhiModel"],
 						"model_type": "phi",
@@ -97,33 +97,24 @@ var _ = ginkgo.Describe("Sharded BaseModel metadata parsing", ginkgo.Ordered, fu
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("malformed ConfigJSON → Ready=False reason=MetadataPending, Cached never flips True (prewarm never starts)", func() {
-		// reconcileShardedModelMetadataSpec runs BEFORE StartPrewarm
-		// (sharded_cache_status.go:77). If parser fails on the
-		// inspection's metadata, markShardedModelMetadataPending sets
-		// Ready=False reason=MetadataPending and the controller bails
-		// without calling StartPrewarm — Cached stays at its initial
-		// PrewarmPending value. This pins that ordering: the parse
-		// gate is the FIRST gate after CheckSource, not a post-prewarm
-		// concern.
-		suiteFakeMC.InspectSourceFunc = func(_ context.Context, src modelcache.Source) (*modelcache.SourceInspection, error) {
-			return &modelcache.SourceInspection{
-				Objects: []modelcache.Object{
+	ginkgo.It("malformed ConfigJSON → Ready=False reason=MetadataPending", func() {
+		// reconcileShardedModelMetadataSpec calls InspectSource and
+		// runs the result through the parser. When the parser errors,
+		// markShardedModelMetadataPending sets Ready=False with
+		// reason=MetadataPending and the controller will keep retrying
+		// at the poll interval. There's no prewarm in the new flow, so
+		// the metadata parse is the only gate between SourceReachable
+		// and Ready.
+		suiteFakeMC.InspectSourceFunc = func(_ context.Context, src sharded.Source) (*sharded.SourceInspection, error) {
+			return &sharded.SourceInspection{
+				Objects: []sharded.Object{
 					{Source: src, Path: src.URI + "/config.json"},
 				},
-				Metadata: modelcache.ModelMetadataInputs{
+				Metadata: sharded.ModelMetadataInputs{
 					// Truncated mid-key — JSON parser will error.
 					ConfigJSON: []byte(`{"model_type":"phi", "architectures": ["PhiMo`),
 				},
 			}, nil
-		}
-		// If StartPrewarm is reached, this would store the URI. The
-		// spec asserts it stays nil to prove the parse gate fired
-		// FIRST and short-circuited the reconcile.
-		var prewarmInvoked = false
-		suiteFakeMC.StartPrewarmFunc = func(_ context.Context, _ modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
-			prewarmInvoked = true
-			return &modelcache.PrewarmOperation{ID: "should-not-be-called"}, nil
 		}
 
 		cbm := v1beta1testing.MakeClusterBaseModel("sharded-malformed-meta").
@@ -142,23 +133,7 @@ var _ = ginkgo.Describe("Sharded BaseModel metadata parsing", ginkgo.Ordered, fu
 			g.Expect(string(ready.Status)).To(Equal("False"))
 			g.Expect(ready.Reason).To(Equal(v1beta1.ModelConditionReasonMetadataPending))
 			g.Expect(ready.Message).To(ContainSubstring("model metadata"))
-
-			// Cached stays at initial PrewarmPending value — the
-			// metadata gate fired before StartPrewarm.
-			cached := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionCached)
-			g.Expect(cached).NotTo(BeNil())
-			g.Expect(string(cached.Status)).To(Equal("False"))
-			g.Expect(cached.Reason).To(Equal(v1beta1.ModelConditionReasonPrewarmPending))
-
-			// Cache.PrewarmID must be empty — StartPrewarm was never
-			// invoked, so no operation ID could be stashed.
-			g.Expect(got.Status.Cache).NotTo(BeNil())
-			g.Expect(got.Status.Cache.PrewarmID).To(BeEmpty(),
-				"StartPrewarm must NOT fire when metadata parse fails (parse is the gate)")
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
-
-		Expect(prewarmInvoked).To(BeFalse(),
-			"StartPrewarm must not be invoked when InspectSource returns metadata the parser cannot consume")
 	})
 
 	ginkgo.It("user-set Spec.ModelType + ModelArchitecture preserved when parser would write different values (fill-only contract)", func() {
@@ -169,12 +144,12 @@ var _ = ginkgo.Describe("Sharded BaseModel metadata parsing", ginkgo.Ordered, fu
 		// different function in pkg/modelparser/config_parser.go:621.
 		// Both must honor the same fill-only invariant: never overwrite
 		// fields the operator already populated.
-		suiteFakeMC.InspectSourceFunc = func(_ context.Context, src modelcache.Source) (*modelcache.SourceInspection, error) {
-			return &modelcache.SourceInspection{
-				Objects: []modelcache.Object{
+		suiteFakeMC.InspectSourceFunc = func(_ context.Context, src sharded.Source) (*sharded.SourceInspection, error) {
+			return &sharded.SourceInspection{
+				Objects: []sharded.Object{
 					{Source: src, Path: src.URI + "/config.json"},
 				},
-				Metadata: modelcache.ModelMetadataInputs{
+				Metadata: sharded.ModelMetadataInputs{
 					// Parser would write ModelType="phi", ModelArchitecture="PhiModel"
 					// — but spec already has user-curated values.
 					ConfigJSON: []byte(`{

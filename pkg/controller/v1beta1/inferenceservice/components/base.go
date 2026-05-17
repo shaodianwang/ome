@@ -18,10 +18,10 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
-	"github.com/ome-projects/ome/pkg/modelcache"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -353,7 +353,7 @@ func modelCacheEnvVars(b *BaseComponentFields) ([]corev1.EnvVar, error) {
 	}
 	if endpoint := strings.TrimSpace(config.Endpoint); endpoint != "" {
 		envVars = append(envVars, corev1.EnvVar{Name: constants.ModelCacheEndpointEnvVarKey, Value: endpoint})
-		if provider == modelcache.ProviderClusterCache {
+		if provider == sharded.ProviderClusterCache {
 			envVars = append(envVars, corev1.EnvVar{
 				Name:  constants.ClusterCacheHeadlessServiceEnvVarKey,
 				Value: modelCacheEndpointHostPort(endpoint),

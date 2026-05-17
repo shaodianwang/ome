@@ -11,7 +11,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 )
 
 const (
@@ -50,7 +50,7 @@ type PodConfig struct {
 type InferenceServicesConfig struct {
 	// ModelCache contains the configured model cache provider used by
 	// sharded model-serving runtimes.
-	ModelCache modelcache.ProviderConfig `json:"modelCache,omitempty"`
+	ModelCache sharded.ProviderConfig `json:"modelCache,omitempty"`
 }
 
 // +kubebuilder:object:generate=false
@@ -218,12 +218,12 @@ func NewDeployConfig(clientset kubernetes.Interface) (*DeployConfig, error) {
 	return deployConfig, nil
 }
 
-func NewModelCacheConfig(clientset kubernetes.Interface) (*modelcache.ProviderConfig, error) {
+func NewModelCacheConfig(clientset kubernetes.Interface) (*sharded.ProviderConfig, error) {
 	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
-	modelCacheConfig := &modelcache.ProviderConfig{}
+	modelCacheConfig := &sharded.ProviderConfig{}
 	if modelCache, ok := configMap.Data[ModelCacheConfigName]; ok {
 		err := json.Unmarshal([]byte(modelCache), modelCacheConfig)
 		if err != nil {

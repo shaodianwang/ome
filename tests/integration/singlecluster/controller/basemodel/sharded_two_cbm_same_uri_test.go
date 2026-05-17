@@ -10,37 +10,38 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // Two ClusterBaseModels with the same StorageURI but different names
-// must produce two DISTINCT cache identities — the per-BM
-// IdempotencyKey (sharded_cache_status.go:620:
-// "{kind}/{ns}/{name}/{generation}/{sourceHash}") includes the
-// object name, so the cache provider sees two separate prewarm
-// requests and can keep separate state per consumer. Without this
-// distinction, a delete or status change on one BM could affect the
-// other's cache identity.
+// must reconcile independently. The cache provider should see two
+// separate InspectSource calls (one per CBM), and a delete on one
+// must not affect the other's Ready state.
 var _ = ginkgo.Describe("Sharded BaseModel: two CBMs with the same StorageURI", ginkgo.Ordered, func() {
 
 	ginkgo.BeforeEach(setSuiteFakeMCDefaults)
 
-	ginkgo.It("two CBMs same URI → distinct IdempotencyKeys, both reach Cached=True independently", func() {
-		// Capture IdempotencyKeys per StartPrewarm call so we can
-		// assert two distinct keys after both BMs reconcile. Use a
-		// mutex to avoid a data race on the shared map.
+	ginkgo.It("two CBMs same URI → both reach Ready=True independently", func() {
+		// Capture the source URIs InspectSource is called with so we
+		// can sanity-check both CBMs drove the provider through the
+		// same path. Use a mutex to avoid a data race on the slice.
 		var (
-			keysMu sync.Mutex
-			keys   []string
+			mu      sync.Mutex
+			sources []string
 		)
-		suiteFakeMC.StartPrewarmFunc = func(_ context.Context, req modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
-			keysMu.Lock()
-			keys = append(keys, req.IdempotencyKey)
-			keysMu.Unlock()
-			return &modelcache.PrewarmOperation{ID: "fake-op-" + req.IdempotencyKey}, nil
+		suiteFakeMC.InspectSourceFunc = func(_ context.Context, src sharded.Source) (*sharded.SourceInspection, error) {
+			mu.Lock()
+			sources = append(sources, src.URI)
+			mu.Unlock()
+			return &sharded.SourceInspection{
+				Objects: []sharded.Object{{Source: src, Path: src.URI + "/config.json"}},
+				Metadata: sharded.ModelMetadataInputs{
+					ConfigJSON: []byte(`{"model_type":"phi","architectures":["PhiForCausalLM"]}`),
+				},
+			}, nil
 		}
 
 		const sharedURI = "oci://n/test/b/models/o/llama-shared"
@@ -57,33 +58,36 @@ var _ = ginkgo.Describe("Sharded BaseModel: two CBMs with the same StorageURI", 
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, cbmA) })
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, cbmB) })
 
-		ginkgo.By("both CBMs reach Cached=True independently")
+		ginkgo.By("both CBMs reach Ready=True independently")
 		for _, name := range []string{"two-cbm-a", "two-cbm-b"} {
 			Eventually(func(g Gomega) {
 				got := &v1beta1.ClusterBaseModel{}
 				g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: name}, got)).To(Succeed())
-				cached := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionCached)
-				g.Expect(cached).NotTo(BeNil(), "%s: Cached condition must exist", name)
-				g.Expect(string(cached.Status)).To(Equal("True"), "%s: Cached must be True", name)
+				ready := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionReady)
+				g.Expect(ready).NotTo(BeNil(), "%s: Ready condition must exist", name)
+				g.Expect(string(ready.Status)).To(Equal("True"), "%s: Ready must be True", name)
 			}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 		}
 
-		keysMu.Lock()
-		distinctKeys := uniqueStrings(keys)
-		keysMu.Unlock()
-		// At least 2 distinct keys, one per CBM. May see more if
-		// the controller retried (e.g. cache lag), but the SET must
-		// always include both BMs' identities.
-		Expect(distinctKeys).To(HaveLen(2),
-			"each CBM must produce its own IdempotencyKey even though their source URIs match; got %v", distinctKeys)
+		mu.Lock()
+		gotSources := append([]string(nil), sources...)
+		mu.Unlock()
+		// Both CBMs must have driven InspectSource for the shared URI
+		// — sources slice contains at least 2 entries, both pointing
+		// at sharedURI (controller may have retried; the SET matters).
+		Expect(len(gotSources)).To(BeNumerically(">=", 2),
+			"each CBM must drive its own InspectSource call; got %v", gotSources)
+		for _, s := range gotSources {
+			Expect(s).To(Equal(sharedURI))
+		}
 	})
 
-	ginkgo.It("deleting one CBM does NOT cancel the other's prewarm or affect its state", func() {
-		// The Cache.PrewarmID stash is per-BM (Status.Cache is
-		// per-CR), so deleting one BM should not touch the other's
-		// state. Cache provider sees no signal either way (no
-		// CancelPrewarm), so the test asserts ONLY the OME-side
-		// invariant: surviving BM's status remains Cached=True.
+	ginkgo.It("deleting one CBM does NOT affect the other's Ready state", func() {
+		// Status.Cache is per-CR, so deleting one BM should not touch
+		// the other's state. There's no cache-provider-side signal
+		// either way (lazy-fetch, no operation handle), so the test
+		// asserts ONLY the OME-side invariant: surviving BM's status
+		// remains Ready=True.
 		const sharedURI = "oci://n/test/b/models/o/llama-isolation"
 		cbmKeep := v1beta1testing.MakeClusterBaseModel("two-cbm-keep").
 			StorageURI(sharedURI).
@@ -97,46 +101,31 @@ var _ = ginkgo.Describe("Sharded BaseModel: two CBMs with the same StorageURI", 
 		Expect(k8sClient.Create(suiteCtx, cbmGo)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, cbmKeep) })
 
-		// Wait for both to flip Cached=True so we have a clean
+		// Wait for both to flip Ready=True so we have a clean
 		// "before" point.
 		for _, name := range []string{"two-cbm-keep", "two-cbm-go"} {
 			Eventually(func(g Gomega) {
 				got := &v1beta1.ClusterBaseModel{}
 				g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: name}, got)).To(Succeed())
-				cached := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionCached)
-				g.Expect(cached).NotTo(BeNil())
-				g.Expect(string(cached.Status)).To(Equal("True"))
+				ready := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionReady)
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(string(ready.Status)).To(Equal("True"))
 			}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 		}
 
 		Expect(k8sClient.Delete(suiteCtx, cbmGo)).To(Succeed())
 
-		// Surviving BM must STAY Cached=True — Consistently across a
+		// Surviving BM must STAY Ready=True — Consistently across a
 		// short window because a regression would presumably show as
-		// the surviving BM's Cached condition flipping or the BM
+		// the surviving BM's Ready condition flipping or the BM
 		// somehow getting GC'd alongside its sibling.
 		Consistently(func(g Gomega) {
 			got := &v1beta1.ClusterBaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "two-cbm-keep"}, got)).To(Succeed())
-			cached := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionCached)
-			g.Expect(cached).NotTo(BeNil())
-			g.Expect(string(cached.Status)).To(Equal("True"),
-				"surviving CBM with the same URI must keep its Cached=True state")
+			ready := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(string(ready.Status)).To(Equal("True"),
+				"surviving CBM with the same URI must keep its Ready=True state")
 		}).WithTimeout(util.ShortTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 })
-
-// uniqueStrings returns the set of distinct values in s, preserving
-// no particular order. Local helper kept private to this file.
-func uniqueStrings(s []string) []string {
-	seen := map[string]struct{}{}
-	out := []string{}
-	for _, v := range s {
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	return out
-}

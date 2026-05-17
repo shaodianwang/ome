@@ -3,7 +3,6 @@ module github.com/ome-projects/ome
 go 1.25
 
 require (
-	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-logr/logr v1.4.2
@@ -28,6 +27,7 @@ require (
 	github.com/stretchr/testify v1.10.0
 	go.uber.org/fx v1.22.2
 	go.uber.org/zap v1.27.0
+	golang.org/x/sync v0.16.0
 	golang.org/x/sys v0.39.0
 	gomodules.xyz/jsonpatch/v2 v2.4.0
 	google.golang.org/protobuf v1.36.11
@@ -67,6 +67,7 @@ require (
 	github.com/bytedance/sonic/loader v0.1.1 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/census-instrumentation/opencensus-proto v0.4.1 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.4 // indirect
 	github.com/cloudwego/iasm v0.2.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
@@ -158,7 +159,6 @@ require (
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
 	golang.org/x/net v0.42.0 // indirect
 	golang.org/x/oauth2 v0.29.0 // indirect
-	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/term v0.33.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 	golang.org/x/time v0.11.0 // indirect

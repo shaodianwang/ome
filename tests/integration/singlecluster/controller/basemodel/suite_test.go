@@ -16,9 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
+	mcfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/ome-projects/ome/pkg/modelcache"
-	mcfake "github.com/ome-projects/ome/pkg/modelcache/fake"
 
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/framework"
@@ -38,9 +38,9 @@ var (
 	k8sClient   client.Client
 
 	// suiteFakeMC is exposed package-private so the Sharded specs can
-	// re-script its CheckSourceFunc / StartPrewarmFunc /
-	// GetPrewarmStatusFunc per-test. PVC specs don't touch it because
-	// the PVC reconcile branch never invokes the modelcache provider.
+	// re-script its CheckSourceFunc / InspectSourceFunc per-test. PVC
+	// specs don't touch it because the PVC reconcile branch never
+	// invokes the modelcache provider.
 	suiteFakeMC *mcfake.Client
 )
 
@@ -56,7 +56,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	suiteCtx, suiteCancel = context.WithCancel(s.Ctx)
 
 	suiteFakeMC = &mcfake.Client{}
-	provider := modelcache.NewProvider("fake", suiteFakeMC)
+	provider := sharded.NewProvider("fake", suiteFakeMC)
 
 	mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
 		return components.SetupBaseModel(ctx, mgr,

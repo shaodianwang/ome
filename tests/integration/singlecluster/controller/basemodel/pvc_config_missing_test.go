@@ -10,8 +10,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/ome-projects/ome/pkg/modelcache"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/components"
@@ -41,7 +41,7 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile without ome-agent config", gink
 			// continue to work; OmeAgentConfig is intentionally not
 			// passed → cfg.Image is empty → PVCConfigMissing fires.
 			return components.SetupBaseModel(ctx, mgr,
-				components.WithModelCacheProvider(modelcache.NewProvider("fake", suiteFakeMC)))
+				components.WithModelCacheProvider(sharded.NewProvider("fake", suiteFakeMC)))
 		}
 		Expect(suiteFwk.StartManager(suiteCtx, suiteCfg, mgrSetup)).To(Succeed())
 	})
@@ -56,7 +56,7 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile without ome-agent config", gink
 					Image:          "ghcr.io/test/ome-agent:test",
 					ServiceAccount: "ome-model-metadata",
 				}),
-				components.WithModelCacheProvider(modelcache.NewProvider("fake", suiteFakeMC)))
+				components.WithModelCacheProvider(sharded.NewProvider("fake", suiteFakeMC)))
 		}
 		Expect(suiteFwk.StartManager(suiteCtx, suiteCfg, mgrSetup)).To(Succeed())
 	})

@@ -4698,7 +4698,7 @@ func schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref common.ReferenceCallb
 					},
 					"replacementInstance": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ReplacementInstance is the Instance index allocated for the surge replacement. Zero when the migration was rejected before allocation.",
+							Description: "ReplacementInstance is the Instance index allocated for the surge replacement. Nil when the migration was rejected before allocation. Distinct from index 0, which is a valid replacement index after sparse migration.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
@@ -4790,7 +4790,7 @@ func schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref common.ReferenceCallback) 
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ModelCacheStatus reports cluster-wide cache progress for models that use a sharded distribution backend.",
+				Description: "ModelCacheStatus reports the cluster-wide cache provider identity for models that use a sharded distribution backend. In the lazy- fetch flow, cluster_cache daemons pull bytes on demand at first inference, so there is no separate \"placement progress\" to report — Backend + SourceUri are enough to identify the cache mapping.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"backend": {
@@ -4807,59 +4807,9 @@ func schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref common.ReferenceCallback) 
 							Format:      "",
 						},
 					},
-					"prewarmID": {
-						SchemaProps: spec.SchemaProps{
-							Description: "PrewarmID is the operation ID returned by the cache prewarm API.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"totalBytes": {
-						SchemaProps: spec.SchemaProps{
-							Description: "TotalBytes is the total number of bytes in the model source, if known.",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"cachedBytes": {
-						SchemaProps: spec.SchemaProps{
-							Description: "CachedBytes is the number of bytes cached so far, if known.",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"totalChunks": {
-						SchemaProps: spec.SchemaProps{
-							Description: "TotalChunks is the total number of cache chunks for the model, if known.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"cachedChunks": {
-						SchemaProps: spec.SchemaProps{
-							Description: "CachedChunks is the number of cache chunks cached so far, if known.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"prewarmAttempts": {
-						SchemaProps: spec.SchemaProps{
-							Description: "PrewarmAttempts counts how many times the controller has submitted a prewarm operation for this source. Incremented after a transient PrewarmFailed phase before the controller re-submits. The terminal PrewarmExhausted reason fires when this hits the controller's retry budget.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"lastPrewarmFailureAt": {
-						SchemaProps: spec.SchemaProps{
-							Description: "LastPrewarmFailureAt records when the controller first observed the current failure cycle. The controller compares it against the exponential backoff (or long-tail interval) to decide whether the next reconcile is allowed to re-submit StartPrewarm. Required because k8s metav1.Condition.LastTransitionTime only updates on Status change, not Reason change — so a same-Status reason transition (PrewarmPending → PrewarmFailed → PrewarmFailed) does not refresh the condition timestamp and cannot be used to enforce retry cadence.",
-							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
-						},
-					},
 				},
 			},
 		},
-		Dependencies: []string{
-			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 
@@ -5190,6 +5140,19 @@ func schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref common.ReferenceCallback) c
 							Format:      "",
 						},
 					},
+					"observedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedGeneration is the .metadata.generation the controller last reconciled against. If this lags behind .metadata.generation, the controller has not yet observed the latest spec edit.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"lastReconcileTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastReconcileTime is the wall-clock timestamp of the controller's most recent reconcile pass for this object. Liveness signal — if it falls behind by more than the reconcile period, the controller is wedged or not scheduled. Distinct from Condition.lastTransitionTime, which only advances on actual status flips.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
 					"nodesReady": {
 						VendorExtensible: spec.VendorExtensible{
 							Extensions: spec.Extensions{
@@ -5238,7 +5201,7 @@ func schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref common.ReferenceCallback) c
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Conditions describe cluster-wide model readiness and cache state. Sharded models use conditions such as SourceReachable, Cached, and Ready. PerNode models continue to report node-level state through NodesReady and NodesFailed.",
+							Description: "Conditions describe cluster-wide model readiness and cache state. Sharded models report SourceReachable, MetadataExtracted, and Ready; PerNode models continue to report node-level state through NodesReady and NodesFailed.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -5261,7 +5224,7 @@ func schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref common.ReferenceCallback) c
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 

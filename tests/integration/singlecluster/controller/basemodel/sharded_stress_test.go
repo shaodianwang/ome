@@ -120,9 +120,9 @@ var _ = ginkgo.Describe("Sharded BaseModel operational stress", ginkgo.Ordered, 
 		// on every reconcile; convergence here proves the controller
 		// observed every URI change at least up to the final value.
 		// Ready=True proves the post-churn reconcile sequence
-		// (reset → CheckSource → InspectSource → StartPrewarm →
-		// GetPrewarmStatus(Succeeded) → metadata-parse) all completed
-		// without getting stuck on an intermediate URI version.
+		// (reset → CheckSource → InspectSource → metadata-parse) all
+		// completed without getting stuck on an intermediate URI
+		// version.
 		finalURI := uriFor(urisInChurn - 1)
 		Eventually(func(g Gomega) {
 			got := &v1beta1.ClusterBaseModel{}

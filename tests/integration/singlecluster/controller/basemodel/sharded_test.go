@@ -9,70 +9,61 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// setSuiteFakeMCDefaults restores the suite's fake modelcache.Client
+// setSuiteFakeMCDefaults restores the suite's fake sharded.Client
 // to the happy-path defaults: source reachable, inspectable with a
-// minimal valid config.json + one object, prewarm starts successfully
-// with op ID "fake-op-1", GetPrewarmStatus returns Succeeded.
+// minimal valid config.json + one object.
 //
 // Both this Describe and Sharded edge-case Describes share these
 // defaults. Each spec overrides the specific Func it cares about
 // after BeforeEach runs.
 //
-// InspectSource is required by the new sharded flow (PR #56):
-// reconcileShardedModelMetadataSpec calls InspectSource BEFORE
-// StartPrewarm so the controller can parse model metadata from the
-// source's config.json. Without this, the controller short-circuits
-// at markShardedModelMetadataPending and StartPrewarm never fires —
-// Cached condition never flips.
+// InspectSource is the sharded flow's load-bearing call:
+// reconcileShardedModelMetadataSpec calls InspectSource so the
+// controller can parse model metadata from the source's config.json.
+// Without it, the controller short-circuits at
+// markShardedModelMetadataPending and Ready never flips.
 func setSuiteFakeMCDefaults() {
-	suiteFakeMC.CheckSourceFunc = func(_ context.Context, _ modelcache.Source) (*modelcache.SourceStatus, error) {
-		return &modelcache.SourceStatus{Reachable: true, Reason: "SourceReachable"}, nil
+	suiteFakeMC.CheckSourceFunc = func(_ context.Context, _ sharded.Source) (*sharded.SourceStatus, error) {
+		return &sharded.SourceStatus{Reachable: true, Reason: "SourceReachable"}, nil
 	}
-	suiteFakeMC.InspectSourceFunc = func(_ context.Context, src modelcache.Source) (*modelcache.SourceInspection, error) {
-		return &modelcache.SourceInspection{
-			Objects: []modelcache.Object{
+	suiteFakeMC.InspectSourceFunc = func(_ context.Context, src sharded.Source) (*sharded.SourceInspection, error) {
+		return &sharded.SourceInspection{
+			Objects: []sharded.Object{
 				{Source: src, Path: src.URI + "/config.json"},
 			},
-			Metadata: modelcache.ModelMetadataInputs{
+			Metadata: sharded.ModelMetadataInputs{
 				// Minimal config.json the modelparser accepts.
 				// Mirrors pkg/.../sharded_cache_metadata_test.go.
 				ConfigJSON: []byte(`{"model_type":"phi","architectures":["PhiForCausalLM"]}`),
 			},
 		}, nil
 	}
-	suiteFakeMC.StartPrewarmFunc = func(_ context.Context, _ modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
-		return &modelcache.PrewarmOperation{ID: "fake-op-1"}, nil
-	}
-	suiteFakeMC.GetPrewarmStatusFunc = func(_ context.Context, op modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-		return &modelcache.PrewarmStatus{Operation: op, Phase: modelcache.PrewarmPhaseSucceeded}, nil
-	}
 }
 
-// Sharded distribution flow (sharded_cache_status.go):
+// Sharded distribution flow (sharded_cache_status.go) under lazy-fetch:
 //
 //  1. controller calls provider.Client.CheckSource → SourceReachable
-//     condition flips True (or False with reason=SourceNotReachable)
-//  2. controller calls provider.Client.StartPrewarm → PrewarmID stashed
-//     in Status.Cache; Cached condition reason = PrewarmPending
-//  3. controller polls provider.Client.GetPrewarmStatus every 5s →
-//     Phase=Succeeded transitions Cached=True with reason=PrewarmSucceeded
-//     AND Ready=False with reason=MetadataPending (Ready=True needs
-//     metadata parsing too, which is a separate flow not exercised here)
+//     flips True (or False with reason=SourceNotReachable)
+//  2. controller calls provider.Client.InspectSource → metadata is
+//     parsed and BaseModel spec fields populate
+//  3. Ready flips True with reason=MetadataParsed
 //
-// The fake Client (pkg/modelcache/fake) is dispatched through a
-// callback per method, so we re-script behavior between specs without
-// restarting the manager.
-var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func() {
+// Bytes themselves are pulled lazily by the cluster_cache daemon at
+// first inference — there is no separate prewarm step. The fake
+// Client (pkg/modelcache/fake) is dispatched through a callback per
+// method so we re-script behavior between specs without restarting
+// the manager.
+var _ = ginkgo.Describe("Sharded BaseModel cache flow", ginkgo.Ordered, func() {
 
 	ginkgo.BeforeEach(setSuiteFakeMCDefaults)
 
-	ginkgo.It("CheckSource→StartPrewarm→GetPrewarmStatus(Succeeded) drives Cached=True", func() {
+	ginkgo.It("CheckSource→InspectSource drives Ready=True", func() {
 		ginkgo.By("creating a Sharded ClusterBaseModel")
 		cbm := v1beta1testing.MakeClusterBaseModel("sharded-llama-7b").
 			StorageURI("oci://n/test/b/models/o/llama-7b").
@@ -81,31 +72,15 @@ var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func(
 		Expect(k8sClient.Create(suiteCtx, cbm)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, cbm) })
 
-		ginkgo.By("expecting Cached condition to flip True with reason=PrewarmSucceeded")
-		Eventually(func(g Gomega) {
-			got := &v1beta1.ClusterBaseModel{}
-			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-llama-7b"}, got)).To(Succeed())
-			cached := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionCached)
-			g.Expect(cached).NotTo(BeNil())
-			g.Expect(string(cached.Status)).To(Equal("True"))
-			g.Expect(cached.Reason).To(Equal(v1beta1.ModelConditionReasonPrewarmSucceeded))
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
-
-		ginkgo.By("Ready flips True with reason=MetadataParsed once prewarm completes (inline metadata parse via InspectSource)")
-		// reconcileShardedModelMetadata is called inline after Cached
-		// flips True (sharded_cache_status.go:65-69), parses the
-		// fake's ConfigJSON, and flips Ready=True.
-		//
+		ginkgo.By("expecting Ready condition to flip True with reason=MetadataParsed")
 		// NOTE: we deliberately do NOT also assert state=Ready here.
-		// applyInitialShardedModelStatus (sharded_cache_status.go:281)
-		// unconditionally resets state=Importing on every reconcile,
-		// and the post-Ready reconcile path (Cached=True+Ready=True
-		// branch at line 65-67) doesn't pass a transition that would
-		// re-flip state to Ready. So state oscillates: Importing →
-		// Ready (one reconcile) → Importing (next reconcile, sticks).
-		// The Ready *condition* stays True throughout, which is the
-		// truth source consumers should rely on. Status.State revert
-		// looks like a controller bug — tracking separately.
+		// applyInitialShardedModelStatus unconditionally resets
+		// state=Importing on every reconcile, and the post-Ready
+		// reconcile path doesn't pass a transition that would re-flip
+		// state to Ready. The Ready *condition* stays True throughout,
+		// which is the truth source consumers should rely on.
+		// Status.State revert looks like a controller bug — tracking
+		// separately.
 		Eventually(func(g Gomega) {
 			got := &v1beta1.ClusterBaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-llama-7b"}, got)).To(Succeed())
@@ -118,8 +93,8 @@ var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func(
 
 	ginkgo.It("CheckSource returning Reachable=false drives SourceReachable=False", func() {
 		ginkgo.By("flipping the fake to return SourceNotReachable")
-		suiteFakeMC.CheckSourceFunc = func(_ context.Context, _ modelcache.Source) (*modelcache.SourceStatus, error) {
-			return &modelcache.SourceStatus{Reachable: false, Reason: "SourceNotReachable", Message: "test injection"}, nil
+		suiteFakeMC.CheckSourceFunc = func(_ context.Context, _ sharded.Source) (*sharded.SourceStatus, error) {
+			return &sharded.SourceStatus{Reachable: false, Reason: "SourceNotReachable", Message: "test injection"}, nil
 		}
 
 		cbm := v1beta1testing.MakeClusterBaseModel("sharded-unreachable-7b").
@@ -138,45 +113,6 @@ var _ = ginkgo.Describe("Sharded BaseModel cache prewarm", ginkgo.Ordered, func(
 			g.Expect(cond.Reason).To(Equal(v1beta1.ModelConditionReasonSourceNotReachable))
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
-
-	ginkgo.It("GetPrewarmStatus(Failed) drives transient PrewarmFailed retry, NOT terminal state=Failed", func() {
-		suiteFakeMC.GetPrewarmStatusFunc = func(_ context.Context, op modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-			return &modelcache.PrewarmStatus{
-				Operation: op,
-				Phase:     modelcache.PrewarmPhaseFailed,
-				Reason:    "PrewarmFailed",
-				Message:   "fake provider injected failure",
-			}, nil
-		}
-
-		cbm := v1beta1testing.MakeClusterBaseModel("sharded-prewarm-fail").
-			StorageURI("oci://n/test/b/models/o/llama-7b").
-			Distribution(v1beta1.DistributionSharded).
-			ModelFormat("safetensors").Obj()
-		Expect(k8sClient.Create(suiteCtx, cbm)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, cbm) })
-
-		Eventually(func(g Gomega) {
-			got := &v1beta1.ClusterBaseModel{}
-			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-prewarm-fail"}, got)).To(Succeed())
-			g.Expect(got.Status.State).NotTo(Equal(v1beta1.LifeCycleStateFailed))
-			cached := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionCached)
-			g.Expect(cached).NotTo(BeNil())
-			g.Expect(string(cached.Status)).To(Equal("False"))
-			g.Expect(cached.Reason).To(Equal(v1beta1.ModelConditionReasonPrewarmFailed))
-			g.Expect(cached.Message).To(ContainSubstring("fake provider injected failure"))
-			g.Expect(cached.Message).To(ContainSubstring("will retry"))
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
-	})
-
-	// The URI-change → reset → fresh-StartPrewarm spec moved to a unit
-	// test in pkg/controller/v1beta1/basemodel/controller_test.go
-	// (TestSharded_URIChange_ResetsCacheAndFiresFreshPrewarm). The
-	// integration spec was racy under suite contention because it
-	// depended on the controller-runtime work queue + watch + informer
-	// cache to converge within a fixed wall-clock budget. The unit test
-	// drives Reconcile directly with an in-memory fake k8s client and
-	// the modelcache fake, asserting the same invariant deterministically.
 })
 
 // Note: provider-not-configured spec lives in

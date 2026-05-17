@@ -2,12 +2,10 @@ package basemodel
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,15 +20,13 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
+	shardedfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	"github.com/ome-projects/ome/pkg/modelagent"
-	"github.com/ome-projects/ome/pkg/modelcache"
-	modelcachefake "github.com/ome-projects/ome/pkg/modelcache/fake"
-	"github.com/ome-projects/ome/pkg/modelcache/providers/clustercache"
 )
 
 func TestBaseModelReconcile(t *testing.T) {
@@ -881,55 +877,50 @@ func TestClusterBaseModelReconcile(t *testing.T) {
 	}
 }
 
+// TestBaseModelReconcileWithModelCache covers the lazy-fetch flow:
+// (1) CheckSource → SourceReachable=True with 5s requeue, (2) metadata
+// parse after source reachable → Ready=True, (3) identity changes
+// (URI or backend) re-init the cache fields and re-run CheckSource.
+// Prewarm is intentionally absent — cluster_cache daemons pull bytes
+// on demand at first inference; there is no separate placement step.
 func TestBaseModelReconcileWithModelCache(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
 	scheme := runtime.NewScheme()
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
-	// batchv1 needed for cleanupStalePVCArtifacts which lists Jobs on
-	// every non-PVC reconcile (idempotent no-op when none exist; the
-	// List itself still requires the scheme).
 	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
-	totalBytes := int64(100)
-	cachedBytes := int64(40)
-	totalChunks := int32(10)
-	cachedChunks := int32(4)
-
 	tests := []struct {
-		name         string
-		status       v1beta1.ModelStatusSpec
-		providerName string
-		modelCache   *modelcachefake.Client
-		validate     func(*testing.T, client.Client, *modelcachefake.Client, ctrl.Result)
-		wantRequeue  time.Duration
+		name        string
+		status      v1beta1.ModelStatusSpec
+		modelCache  *shardedfake.Client
+		validate    func(*testing.T, client.Client, *shardedfake.Client, ctrl.Result)
+		wantRequeue time.Duration
 	}{
 		{
-			name:         "source check success sets SourceReachable",
-			providerName: "test_cache",
-			modelCache: &modelcachefake.Client{
-				CheckSourceFunc: func(ctx context.Context, source modelcache.Source) (*modelcache.SourceStatus, error) {
-					return &modelcache.SourceStatus{Reachable: true}, nil
+			name: "source check success sets SourceReachable and requeues",
+			modelCache: &shardedfake.Client{
+				CheckSourceFunc: func(ctx context.Context, source sharded.Source) (*sharded.SourceStatus, error) {
+					return &sharded.SourceStatus{Reachable: true}, nil
 				},
 			},
 			wantRequeue: 5 * time.Second,
-			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
+			validate: func(t *testing.T, c client.Client, cache *shardedfake.Client, result ctrl.Result) {
 				updated := getBaseModelForTest(t, c, "default", "cached-model")
 
 				sourceReachable := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionSourceReachable)
 				g.Expect(sourceReachable).ToNot(gomega.BeNil())
 				g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionTrue))
 				g.Expect(sourceReachable.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonSourceReachable))
-				g.Expect(updated.Status.Cache.Backend).To(gomega.Equal("test_cache"))
-				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.BeEmpty())
-				g.Expect(cache.CheckSourceCalls()).To(gomega.Equal([]modelcache.Source{{URI: "s3://bucket/cached-model"}}))
-				g.Expect(cache.StartPrewarmCalls()).To(gomega.BeEmpty())
+				g.Expect(updated.Status.Cache.Backend).To(gomega.Equal(sharded.ProviderClusterCache))
+				g.Expect(cache.CheckSourceCalls()).To(gomega.Equal([]sharded.Source{{URI: "s3://bucket/cached-model"}}))
+				g.Expect(cache.InspectSourceCalls()).To(gomega.BeEmpty())
 				g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
 			},
 		},
 		{
-			name: "starts prewarm after source is reachable",
+			name: "metadata parse succeeds and marks Ready after SourceReachable",
 			status: v1beta1.ModelStatusSpec{
 				Conditions: []metav1.Condition{
 					{
@@ -939,174 +930,12 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 					},
 				},
 			},
-			modelCache: &modelcachefake.Client{
-				InspectSourceFunc: func(ctx context.Context, source modelcache.Source) (*modelcache.SourceInspection, error) {
-					return shardedInspectionForTest(t, source), nil
-				},
-				StartPrewarmFunc: func(ctx context.Context, req modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
-					return &modelcache.PrewarmOperation{ID: "op-1"}, nil
-				},
-			},
-			wantRequeue: 5 * time.Second,
-			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
-				updated := getBaseModelForTest(t, c, "default", "cached-model")
-
-				g.Expect(updated.Status.Cache).ToNot(gomega.BeNil())
-				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.Equal("op-1"))
-				cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
-				g.Expect(cached).ToNot(gomega.BeNil())
-				g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
-				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmPending))
-				g.Expect(cache.CheckSourceCalls()).To(gomega.BeEmpty())
-				g.Expect(cache.InspectSourceCalls()).To(gomega.Equal([]modelcache.Source{{URI: "s3://bucket/cached-model"}}))
-				g.Expect(cache.StartPrewarmCalls()).To(gomega.HaveLen(1))
-				g.Expect(cache.StartPrewarmCalls()[0].Source.URI).To(gomega.Equal("s3://bucket/cached-model"))
-				g.Expect(cache.StartPrewarmCalls()[0].Objects).To(gomega.Equal([]modelcache.ObjectRef{{
-					Source: modelcache.Source{URI: "s3://bucket/cached-model"},
-					Path:   "s3://bucket/cached-model/model-00001-of-00001.safetensors",
-				}}))
-				g.Expect(cache.StartPrewarmCalls()[0].IdempotencyKey).To(gomega.HavePrefix("BaseModel/default/cached-model/0/"))
-				g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
-			},
-		},
-		{
-			name:        "source change resets stale prewarm status",
-			status:      shardedCachedStatusForSource("s3://bucket/old-model"),
-			modelCache:  &modelcachefake.Client{},
-			wantRequeue: 5 * time.Second,
-			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
-				updated := getBaseModelForTest(t, c, "default", "cached-model")
-
-				g.Expect(updated.Status.Cache).ToNot(gomega.BeNil())
-				g.Expect(updated.Status.Cache.SourceUri).To(gomega.Equal("s3://bucket/cached-model"))
-				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.BeEmpty())
-				g.Expect(updated.Status.Cache.TotalBytes).To(gomega.BeNil())
-				g.Expect(updated.Status.Cache.CachedBytes).To(gomega.BeNil())
-				g.Expect(updated.Status.Cache.TotalChunks).To(gomega.BeNil())
-				g.Expect(updated.Status.Cache.CachedChunks).To(gomega.BeNil())
-
-				sourceReachable := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionSourceReachable)
-				g.Expect(sourceReachable).ToNot(gomega.BeNil())
-				g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionUnknown))
-				g.Expect(sourceReachable.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonNotChecked))
-				cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
-				g.Expect(cached).ToNot(gomega.BeNil())
-				g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
-				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmPending))
-				g.Expect(cache.CheckSourceCalls()).To(gomega.BeEmpty())
-				g.Expect(cache.StartPrewarmCalls()).To(gomega.BeEmpty())
-				g.Expect(cache.GetPrewarmStatusCalls()).To(gomega.BeEmpty())
-				g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
-			},
-		},
-		{
-			name:         "provider change resets stale prewarm status",
-			status:       shardedCachedStatusForSource("s3://bucket/cached-model"),
-			providerName: "test_cache",
-			modelCache:   &modelcachefake.Client{},
-			wantRequeue:  5 * time.Second,
-			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
-				updated := getBaseModelForTest(t, c, "default", "cached-model")
-
-				g.Expect(updated.Status.Cache).ToNot(gomega.BeNil())
-				g.Expect(updated.Status.Cache.Backend).To(gomega.Equal("test_cache"))
-				g.Expect(updated.Status.Cache.SourceUri).To(gomega.Equal("s3://bucket/cached-model"))
-				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.BeEmpty())
-				g.Expect(updated.Status.Cache.TotalBytes).To(gomega.BeNil())
-				g.Expect(updated.Status.Cache.CachedBytes).To(gomega.BeNil())
-				g.Expect(updated.Status.Cache.TotalChunks).To(gomega.BeNil())
-				g.Expect(updated.Status.Cache.CachedChunks).To(gomega.BeNil())
-
-				sourceReachable := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionSourceReachable)
-				g.Expect(sourceReachable).ToNot(gomega.BeNil())
-				g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionUnknown))
-				g.Expect(sourceReachable.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonNotChecked))
-				cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
-				g.Expect(cached).ToNot(gomega.BeNil())
-				g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
-				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmPending))
-				g.Expect(cache.CheckSourceCalls()).To(gomega.BeEmpty())
-				g.Expect(cache.StartPrewarmCalls()).To(gomega.BeEmpty())
-				g.Expect(cache.GetPrewarmStatusCalls()).To(gomega.BeEmpty())
-				g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
-			},
-		},
-		{
-			name:   "polls running prewarm and writes progress",
-			status: shardedStatusWithPrewarmID("op-1"),
-			modelCache: &modelcachefake.Client{
-				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-					return &modelcache.PrewarmStatus{
-						Operation: operation,
-						Phase:     modelcache.PrewarmPhaseRunning,
-						Progress: modelcache.PrewarmProgress{
-							TotalBytes:   &totalBytes,
-							CachedBytes:  &cachedBytes,
-							TotalChunks:  &totalChunks,
-							CachedChunks: &cachedChunks,
-						},
-					}, nil
-				},
-			},
-			wantRequeue: 5 * time.Second,
-			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
-				updated := getBaseModelForTest(t, c, "default", "cached-model")
-
-				cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
-				g.Expect(cached).ToNot(gomega.BeNil())
-				g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
-				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmRunning))
-				g.Expect(*updated.Status.Cache.TotalBytes).To(gomega.Equal(totalBytes))
-				g.Expect(*updated.Status.Cache.CachedBytes).To(gomega.Equal(cachedBytes))
-				g.Expect(*updated.Status.Cache.TotalChunks).To(gomega.Equal(totalChunks))
-				g.Expect(*updated.Status.Cache.CachedChunks).To(gomega.Equal(cachedChunks))
-				g.Expect(cache.GetPrewarmStatusCalls()).To(gomega.Equal([]modelcache.PrewarmOperation{{ID: "op-1"}}))
-				g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
-			},
-		},
-		{
-			name:   "prewarm success waits for metadata inputs when unavailable",
-			status: shardedStatusWithPrewarmID("op-1"),
-			modelCache: &modelcachefake.Client{
-				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-					return &modelcache.PrewarmStatus{
-						Operation: operation,
-						Phase:     modelcache.PrewarmPhaseSucceeded,
-					}, nil
-				},
-			},
-			wantRequeue: 5 * time.Second,
-			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
-				updated := getBaseModelForTest(t, c, "default", "cached-model")
-
-				g.Expect(updated.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateImporting))
-				cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
-				g.Expect(cached).ToNot(gomega.BeNil())
-				g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionTrue))
-				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmSucceeded))
-				ready := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionReady)
-				g.Expect(ready).ToNot(gomega.BeNil())
-				g.Expect(ready.Status).To(gomega.Equal(metav1.ConditionFalse))
-				g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonMetadataPending))
-				g.Expect(ready.Message).To(gomega.ContainSubstring("metadata"))
-				g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
-			},
-		},
-		{
-			name:   "prewarm success parses metadata and marks Ready",
-			status: shardedStatusWithPrewarmID("op-1"),
-			modelCache: &modelcachefake.Client{
-				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-					return &modelcache.PrewarmStatus{
-						Operation: operation,
-						Phase:     modelcache.PrewarmPhaseSucceeded,
-					}, nil
-				},
-				InspectSourceFunc: func(ctx context.Context, source modelcache.Source) (*modelcache.SourceInspection, error) {
+			modelCache: &shardedfake.Client{
+				InspectSourceFunc: func(ctx context.Context, source sharded.Source) (*sharded.SourceInspection, error) {
 					return shardedInspectionForTest(t, source), nil
 				},
 			},
-			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
+			validate: func(t *testing.T, c client.Client, cache *shardedfake.Client, result ctrl.Result) {
 				updated := getBaseModelForTest(t, c, "default", "cached-model")
 
 				g.Expect(updated.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateReady))
@@ -1116,91 +945,40 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 				g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonMetadataParsed))
 				g.Expect(updated.Spec.ModelArchitecture).ToNot(gomega.BeNil())
 				g.Expect(*updated.Spec.ModelArchitecture).To(gomega.Equal("PhiModel"))
-				g.Expect(updated.Spec.ModelParameterSize).ToNot(gomega.BeNil())
-				g.Expect(cache.InspectSourceCalls()).To(gomega.Equal([]modelcache.Source{{URI: "s3://bucket/cached-model"}}))
+				g.Expect(cache.CheckSourceCalls()).To(gomega.BeEmpty())
+				g.Expect(cache.InspectSourceCalls()).To(gomega.Equal([]sharded.Source{{URI: "s3://bucket/cached-model"}}))
 				g.Expect(result).To(gomega.Equal(ctrl.Result{}))
 			},
 		},
 		{
-			name:        "prewarm failure within retry budget retries with backoff",
-			status:      shardedStatusWithPrewarmAttempts("op-1", 1),
-			wantRequeue: 30 * time.Second,
-			modelCache: &modelcachefake.Client{
-				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-					return &modelcache.PrewarmStatus{
-						Operation: operation,
-						Phase:     modelcache.PrewarmPhaseFailed,
-						Reason:    "ClusterCacheFetchFailed",
-						Message:   "cgroup pressure 2GB/2GB",
-					}, nil
+			name: "source URI change resets cache identity and re-runs CheckSource",
+			status: v1beta1.ModelStatusSpec{
+				State: v1beta1.LifeCycleStateImporting,
+				Cache: &v1beta1.ModelCacheStatus{
+					Backend:   sharded.ProviderClusterCache,
+					SourceUri: "s3://bucket/old-model",
+				},
+				Conditions: []metav1.Condition{
+					{
+						Type:   v1beta1.ModelConditionSourceReachable,
+						Status: metav1.ConditionTrue,
+						Reason: v1beta1.ModelConditionReasonSourceReachable,
+					},
 				},
 			},
-			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
+			modelCache:  &shardedfake.Client{},
+			wantRequeue: 5 * time.Second,
+			validate: func(t *testing.T, c client.Client, cache *shardedfake.Client, result ctrl.Result) {
 				updated := getBaseModelForTest(t, c, "default", "cached-model")
 
-				g.Expect(updated.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateImporting))
-				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.BeEmpty())
-				cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
-				g.Expect(cached).ToNot(gomega.BeNil())
-				g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
-				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmFailed))
-				g.Expect(cached.Message).To(gomega.ContainSubstring("attempt 1/10, will retry"))
-				g.Expect(cached.Message).To(gomega.ContainSubstring("ClusterCacheFetchFailed"))
-				g.Expect(cached.Message).To(gomega.ContainSubstring("cgroup pressure"))
-				ready := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionReady)
-				g.Expect(ready).ToNot(gomega.BeNil())
-				g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonCacheNotReady))
-				g.Expect(result.RequeueAfter).To(gomega.Equal(30 * time.Second))
-			},
-		},
-		{
-			name:        "prewarm failure at retry budget cap becomes exhausted with long-tail retry",
-			status:      shardedStatusWithPrewarmAttempts("op-final", 10),
-			wantRequeue: time.Hour,
-			modelCache: &modelcachefake.Client{
-				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-					return &modelcache.PrewarmStatus{
-						Operation: operation,
-						Phase:     modelcache.PrewarmPhaseFailed,
-						Reason:    "ClusterCacheFetchFailed",
-						Message:   "cgroup pressure 2GB/2GB",
-					}, nil
-				},
-			},
-			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
-				updated := getBaseModelForTest(t, c, "default", "cached-model")
-
-				g.Expect(updated.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateFailed))
-				g.Expect(updated.Status.Cache.PrewarmID).To(gomega.BeEmpty())
-				cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
-				g.Expect(cached).ToNot(gomega.BeNil())
-				g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmExhausted))
-				g.Expect(cached.Message).To(gomega.ContainSubstring("slow-retrying every 1h0m0s"))
-				g.Expect(cached.Message).To(gomega.ContainSubstring("cgroup pressure"))
-				ready := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionReady)
-				g.Expect(ready).ToNot(gomega.BeNil())
-				g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmExhausted))
-				g.Expect(result.RequeueAfter).To(gomega.Equal(time.Hour))
-			},
-		},
-		{
-			name:   "prewarm canceled is terminal regardless of attempts",
-			status: shardedStatusWithPrewarmAttempts("op-canceled", 1),
-			modelCache: &modelcachefake.Client{
-				GetPrewarmStatusFunc: func(ctx context.Context, operation modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-					return &modelcache.PrewarmStatus{
-						Operation: operation,
-						Phase:     modelcache.PrewarmPhaseCanceled,
-						Reason:    "OperatorCanceled",
-						Message:   "operator canceled the prewarm",
-					}, nil
-				},
-			},
-			validate: func(t *testing.T, c client.Client, cache *modelcachefake.Client, result ctrl.Result) {
-				updated := getBaseModelForTest(t, c, "default", "cached-model")
-
-				g.Expect(updated.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateFailed))
-				g.Expect(result).To(gomega.Equal(ctrl.Result{}))
+				g.Expect(updated.Status.Cache.SourceUri).To(gomega.Equal("s3://bucket/cached-model"))
+				sourceReachable := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionSourceReachable)
+				g.Expect(sourceReachable).ToNot(gomega.BeNil())
+				g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionUnknown))
+				g.Expect(sourceReachable.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonNotChecked))
+				g.Expect(cache.CheckSourceCalls()).To(gomega.BeEmpty(),
+					"identity-change reset returns before CheckSource; the next reconcile fires it")
+				g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
 			},
 		},
 	}
@@ -1214,12 +992,8 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 					Finalizers: []string{constants.BaseModelFinalizer},
 				},
 				Spec: v1beta1.BaseModelSpec{
-					ModelFormat: v1beta1.ModelFormat{
-						Name: "safetensors",
-					},
-					Storage: &v1beta1.StorageSpec{
-						StorageUri: stringPtr("s3://bucket/cached-model"),
-					},
+					ModelFormat:  v1beta1.ModelFormat{Name: "safetensors"},
+					Storage:      &v1beta1.StorageSpec{StorageUri: stringPtr("s3://bucket/cached-model")},
 					Distribution: distributionPtr(v1beta1.DistributionSharded),
 				},
 				Status: tt.status,
@@ -1231,14 +1005,10 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 				WithStatusSubresource(baseModel).
 				Build()
 
-			providerName := tt.providerName
-			if providerName == "" {
-				providerName = modelcache.ProviderClusterCache
-			}
 			reconciler := &BaseModelReconciler{
 				Client:     c,
 				Scheme:     c.Scheme(),
-				ModelCache: modelcache.NewProvider(providerName, tt.modelCache),
+				ModelCache: sharded.NewProvider(sharded.ProviderClusterCache, tt.modelCache),
 			}
 
 			result, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
@@ -1255,16 +1025,12 @@ func TestBaseModelReconcileWithModelCache(t *testing.T) {
 	}
 }
 
-// TestSharded_URIChange_ResetsCacheAndFiresFreshPrewarm exercises the
-// URI-change → reset → fresh-StartPrewarm flow directly via the
-// ClusterBaseModel reconciler with an in-memory fake k8s client and the
-// modelcache fake. It replaces an integration spec
-// (tests/integration/.../sharded_test.go) that depended on the
-// controller-runtime work queue + watch + informer cache to converge
-// within a fixed wall-clock budget — under heavy CI suite contention
-// that budget kept being insufficient. This unit test asserts the same
-// invariant deterministically by driving Reconcile in a tight loop.
-func TestSharded_URIChange_ResetsCacheAndFiresFreshPrewarm(t *testing.T) {
+// TestSharded_URIChange_ResetsCacheAndReRunsCheckSource pins the
+// URI-change → reset → re-CheckSource chain. Without prewarm in the
+// flow, the user-visible regression is "spec URI changes but
+// status.cache.sourceUri stays stale" — this drives Reconcile until
+// that update propagates.
+func TestSharded_URIChange_ResetsCacheAndReRunsCheckSource(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
 	scheme := runtime.NewScheme()
@@ -1272,32 +1038,17 @@ func TestSharded_URIChange_ResetsCacheAndFiresFreshPrewarm(t *testing.T) {
 	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
-	// Per-call unique PrewarmID so a fresh StartPrewarm is observable as
-	// a different PrewarmID on the CBM status — a counter alone races
-	// with conflict-retries, but PrewarmID changes only on a successful
-	// applyPrewarmStarted that wrote to status.
-	var prewarmSeq int32
-	cacheClient := &modelcachefake.Client{
-		CheckSourceFunc: func(_ context.Context, _ modelcache.Source) (*modelcache.SourceStatus, error) {
-			return &modelcache.SourceStatus{Reachable: true, Reason: "SourceReachable"}, nil
+	cacheClient := &shardedfake.Client{
+		CheckSourceFunc: func(_ context.Context, _ sharded.Source) (*sharded.SourceStatus, error) {
+			return &sharded.SourceStatus{Reachable: true, Reason: "SourceReachable"}, nil
 		},
-		InspectSourceFunc: func(_ context.Context, src modelcache.Source) (*modelcache.SourceInspection, error) {
-			return &modelcache.SourceInspection{
-				Objects: []modelcache.Object{{Source: src, Path: src.URI + "/config.json"}},
-				Metadata: modelcache.ModelMetadataInputs{
+		InspectSourceFunc: func(_ context.Context, src sharded.Source) (*sharded.SourceInspection, error) {
+			return &sharded.SourceInspection{
+				Objects: []sharded.Object{{Source: src, Path: src.URI + "/config.json"}},
+				Metadata: sharded.ModelMetadataInputs{
 					ConfigJSON: []byte(`{"model_type":"phi","architectures":["PhiForCausalLM"]}`),
 				},
 			}, nil
-		},
-		StartPrewarmFunc: func(_ context.Context, _ modelcache.PrewarmRequest) (*modelcache.PrewarmOperation, error) {
-			n := atomic.AddInt32(&prewarmSeq, 1)
-			return &modelcache.PrewarmOperation{ID: fmt.Sprintf("op-%d", n)}, nil
-		},
-		// Stay in Running; we don't want PrewarmPhaseSucceeded to push the
-		// status into Cached=True before the URI-change reset path runs,
-		// because Cached=True short-circuits the StartPrewarm branch.
-		GetPrewarmStatusFunc: func(_ context.Context, op modelcache.PrewarmOperation) (*modelcache.PrewarmStatus, error) {
-			return &modelcache.PrewarmStatus{Operation: op, Phase: modelcache.PrewarmPhaseRunning}, nil
 		},
 	}
 
@@ -1324,10 +1075,10 @@ func TestSharded_URIChange_ResetsCacheAndFiresFreshPrewarm(t *testing.T) {
 	reconciler := &ClusterBaseModelReconciler{
 		Client:     kubeClient,
 		Scheme:     kubeClient.Scheme(),
-		ModelCache: modelcache.NewProvider("test_cache", cacheClient),
+		ModelCache: sharded.NewProvider("test_cache", cacheClient),
 	}
 
-	reconcile := func() {
+	reconcileOnce := func() {
 		_, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
 			NamespacedName: types.NamespacedName{Name: cbm.Name},
 		})
@@ -1339,17 +1090,18 @@ func TestSharded_URIChange_ResetsCacheAndFiresFreshPrewarm(t *testing.T) {
 		return got
 	}
 
-	// Phase 1: drive reconciles until the initial StartPrewarm fires
-	// (URI=v1) and PrewarmID is recorded on status. The chain is reset
-	// → CheckSource → StartPrewarm; an upper bound of 10 iterations is
-	// generous (each iteration is a single in-process Reconcile call).
-	for i := 0; i < 10 && atomic.LoadInt32(&prewarmSeq) < 1; i++ {
-		reconcile()
+	// Phase 1: drive reconciles until CheckSource runs against v1 and
+	// status records that URI. Upper bound of 10 iterations is generous;
+	// in practice it converges in 2 (init → CheckSource).
+	for i := 0; i < 10; i++ {
+		reconcileOnce()
+		if got := get(); got.Status.Cache != nil && got.Status.Cache.SourceUri == v1URI {
+			break
+		}
 	}
-	g.Expect(int(atomic.LoadInt32(&prewarmSeq))).To(gomega.Equal(1), "initial StartPrewarm should have fired")
-	g.Expect(cacheClient.StartPrewarmCalls()[0].Source.URI).To(gomega.Equal(v1URI))
-	firstPrewarmID := get().Status.Cache.PrewarmID
-	g.Expect(firstPrewarmID).NotTo(gomega.BeEmpty())
+	g.Expect(get().Status.Cache.SourceUri).To(gomega.Equal(v1URI))
+	g.Expect(cacheClient.CheckSourceCalls()).To(gomega.HaveLen(1))
+	g.Expect(cacheClient.CheckSourceCalls()[0].URI).To(gomega.Equal(v1URI))
 
 	// Mutate spec to v2 — the user-visible event that should reset cache identity.
 	{
@@ -1358,410 +1110,15 @@ func TestSharded_URIChange_ResetsCacheAndFiresFreshPrewarm(t *testing.T) {
 		g.Expect(kubeClient.Update(context.TODO(), got)).To(gomega.Succeed())
 	}
 
-	// Phase 2: drive reconciles until the fresh StartPrewarm fires for
-	// v2. If the controller's URI-change → reset → re-prewarm chain
-	// regresses (e.g. cacheIdentityChanged stops firing on URI swap, or
-	// resetShardedCacheProgress stops clearing PrewarmID), prewarmSeq
-	// stays at 1 and the assertion below fails with a clear signal.
-	for i := 0; i < 10 && atomic.LoadInt32(&prewarmSeq) < 2; i++ {
-		reconcile()
+	// Phase 2: drive reconciles until the fresh CheckSource fires for v2.
+	for i := 0; i < 10 && len(cacheClient.CheckSourceCalls()) < 2; i++ {
+		reconcileOnce()
 	}
-	g.Expect(int(atomic.LoadInt32(&prewarmSeq))).To(gomega.Equal(2), "URI change must trigger a fresh StartPrewarm")
-	g.Expect(cacheClient.StartPrewarmCalls()[1].Source.URI).To(gomega.Equal(v2URI),
-		"fresh StartPrewarm must use the new URI")
-
-	final := get()
-	g.Expect(final.Status.Cache.SourceUri).To(gomega.Equal(v2URI))
-	g.Expect(final.Status.Cache.PrewarmID).NotTo(gomega.Equal(firstPrewarmID),
-		"PrewarmID should have been reset and re-populated, not unchanged from the v1 prewarm")
-}
-
-func TestBaseModelReconcileWithClusterCacheProvider(t *testing.T) {
-	g := gomega.NewGomegaWithT(t)
-
-	scheme := runtime.NewScheme()
-	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
-	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
-	// batchv1 needed for cleanupStalePVCArtifacts which lists Jobs on
-	// every non-PVC reconcile (idempotent no-op when none exist; the
-	// List itself still requires the scheme).
-	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
-
-	const sourceURI = "s3://bucket/cached-model"
-	configPath := sourceURI + "/config.json"
-	weightPath := sourceURI + "/model-00001-of-00001.safetensors"
-	fetchPaths := make(chan []string, 4)
-	fileMetadataPaths := make(chan string, 4)
-	prefetchOwnedChunksPaths := make(chan []string, 4)
-	configData := tinyPhiConfigForTest(t)
-	safetensorsData := safetensorsHeaderForTest(`{"weight":{"dtype":"F32","shape":[2,3],"data_offsets":[0,24]}}`)
-	configMTime := uint64(123)
-	weightMTime := uint64(124)
-	chunkSize := uint64(16)
-	var serverAddr string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/file_metadata":
-			if r.Method != http.MethodGet {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			fileMetadataPaths <- r.URL.Query().Get("path")
-			writeJSONForControllerTest(t, w, map[string]any{
-				"root": sourceURI,
-				"files": []map[string]any{
-					{"path": configPath, "relative_path": "config.json", "size": len(configData), "mtime": configMTime},
-					{"path": weightPath, "relative_path": "model-00001-of-00001.safetensors", "size": len(safetensorsData), "mtime": weightMTime},
-				},
-			})
-		case "/ring_info":
-			if r.Method != http.MethodGet {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			writeJSONForControllerTest(t, w, map[string]any{"nodes": []string{serverAddr}})
-		case "/packed_byte_ranges_by_key":
-			if r.Method != http.MethodPost {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			var req struct {
-				Ranges []struct {
-					Path        string `json:"path"`
-					ChunkOffset uint64 `json:"chunk_offset"`
-					RangeOffset uint64 `json:"range_offset"`
-					Length      uint64 `json:"length"`
-				} `json:"ranges"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			for _, rangeSpec := range req.Ranges {
-				data := map[string][]byte{
-					configPath: configData,
-					weightPath: safetensorsData,
-				}[rangeSpec.Path]
-				start := rangeSpec.ChunkOffset + rangeSpec.RangeOffset
-				end := start + rangeSpec.Length
-				if end > uint64(len(data)) {
-					http.Error(w, "range out of bounds", http.StatusBadRequest)
-					return
-				}
-				_, _ = w.Write(data[start:end])
-			}
-		case "/fetch":
-			if r.Method != http.MethodPost {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			var req struct {
-				Paths []string `json:"paths"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			fetchPaths <- req.Paths
-			results := make([]map[string]any, 0, len(req.Paths))
-			for _, fetchPath := range req.Paths {
-				size := len(configData)
-				mtime := configMTime
-				if fetchPath == weightPath {
-					size = len(safetensorsData)
-					mtime = weightMTime
-				}
-				results = append(results, map[string]any{
-					"path":          fetchPath,
-					"status":        "warmed",
-					"total_size":    size,
-					"mtime":         mtime,
-					"chunk_size":    chunkSize,
-					"total_chunks":  1,
-					"cached_chunks": 0,
-					"warmed_chunks": 1,
-				})
-			}
-			writeJSONForControllerTest(t, w, map[string]any{"results": results})
-		case "/prefetch_owned_chunks":
-			if r.Method != http.MethodPost {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			var req struct {
-				Chunks []struct {
-					Path   string `json:"path"`
-					Offset uint64 `json:"offset"`
-					MTime  uint64 `json:"mtime"`
-					Length uint64 `json:"length"`
-				} `json:"chunks"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			paths := make([]string, 0, len(req.Chunks))
-			seen := map[string]struct{}{}
-			for _, c := range req.Chunks {
-				if _, ok := seen[c.Path]; ok {
-					continue
-				}
-				seen[c.Path] = struct{}{}
-				paths = append(paths, c.Path)
-			}
-			prefetchOwnedChunksPaths <- paths
-			writeJSONForControllerTest(t, w, map[string]any{
-				"total_chunks":  len(req.Chunks),
-				"cached_chunks": 0,
-				"warmed_chunks": len(req.Chunks),
-				"errors":        []string{},
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	serverAddr = server.Listener.Addr().String()
-
-	cacheClient, err := clustercache.NewClient(modelcache.ProviderConfig{
-		Endpoint: server.URL,
-		Options: map[string]string{
-			"timeout":             "5s",
-			"operation_retention": "1m",
-		},
-	})
-	g.Expect(err).NotTo(gomega.HaveOccurred())
-	defer func() {
-		closeable, ok := cacheClient.(interface{ Close() error })
-		g.Expect(ok).To(gomega.BeTrue())
-		g.Expect(closeable.Close()).NotTo(gomega.HaveOccurred())
-	}()
-
-	baseModel := &v1beta1.BaseModel{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "cached-model",
-			Namespace:  "default",
-			Finalizers: []string{constants.BaseModelFinalizer},
-		},
-		Spec: v1beta1.BaseModelSpec{
-			ModelFormat: v1beta1.ModelFormat{Name: "safetensors"},
-			Storage: &v1beta1.StorageSpec{
-				StorageUri: stringPtr(sourceURI),
-			},
-			Distribution: distributionPtr(v1beta1.DistributionSharded),
-		},
-	}
-	kubeClient := ctrlclientfake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(baseModel).
-		WithStatusSubresource(baseModel).
-		Build()
-
-	reconciler := &BaseModelReconciler{
-		Client:     kubeClient,
-		Scheme:     kubeClient.Scheme(),
-		ModelCache: modelcache.NewProvider(modelcache.ProviderClusterCache, cacheClient),
-	}
-	reconcile := func() ctrl.Result {
-		result, err := reconciler.Reconcile(context.TODO(), ctrl.Request{
-			NamespacedName: types.NamespacedName{
-				Namespace: baseModel.Namespace,
-				Name:      baseModel.Name,
-			},
-		})
-		g.Expect(err).NotTo(gomega.HaveOccurred())
-		return result
-	}
-
-	result := reconcile()
-	g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
-	g.Eventually(fileMetadataPaths, time.Second).Should(gomega.Receive(gomega.Equal(sourceURI)))
-	updated := getBaseModelForTest(t, kubeClient, "default", "cached-model")
-	sourceReachable := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionSourceReachable)
-	g.Expect(sourceReachable).ToNot(gomega.BeNil())
-	g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionTrue))
-
-	result = reconcile()
-	g.Expect(result.RequeueAfter).To(gomega.Equal(5 * time.Second))
-	// /fetch is still used for chunk_size discovery, single-path.
-	g.Eventually(fetchPaths, time.Second).Should(gomega.Receive(gomega.Equal([]string{configPath})))
-	// The new owner-routed prewarm POSTs to /prefetch_owned_chunks (not /fetch).
-	// With a single-node ring (serverAddr is the only node), all chunks for
-	// both files route to that one owner in one POST.
-	g.Eventually(prefetchOwnedChunksPaths, time.Second).Should(gomega.Receive(gomega.ConsistOf(configPath, weightPath)))
-	updated = getBaseModelForTest(t, kubeClient, "default", "cached-model")
-	g.Expect(updated.Status.Cache).ToNot(gomega.BeNil())
-	g.Expect(updated.Status.Cache.PrewarmID).ToNot(gomega.BeEmpty())
-	prewarmID := updated.Status.Cache.PrewarmID
-
-	g.Eventually(func() modelcache.PrewarmPhase {
-		status, err := cacheClient.GetPrewarmStatus(context.TODO(), modelcache.PrewarmOperation{ID: prewarmID})
-		if err != nil {
-			return ""
-		}
-		return status.Phase
-	}, time.Second, 10*time.Millisecond).Should(gomega.Equal(modelcache.PrewarmPhaseSucceeded))
-
-	result = reconcile()
-	g.Expect(result).To(gomega.Equal(ctrl.Result{}))
-	updated = getBaseModelForTest(t, kubeClient, "default", "cached-model")
-	cached := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionCached)
-	g.Expect(cached).ToNot(gomega.BeNil())
-	g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionTrue))
-	g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonPrewarmSucceeded))
-	ready := meta.FindStatusCondition(updated.Status.Conditions, v1beta1.ModelConditionReady)
-	g.Expect(ready).ToNot(gomega.BeNil())
-	g.Expect(ready.Status).To(gomega.Equal(metav1.ConditionTrue))
-	g.Expect(ready.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonMetadataParsed))
-	g.Expect(updated.Spec.ModelArchitecture).ToNot(gomega.BeNil())
-	g.Expect(*updated.Spec.ModelArchitecture).To(gomega.Equal("PhiModel"))
-	g.Expect(updated.Status.Cache.Backend).To(gomega.Equal(modelcache.ProviderClusterCache))
-	g.Expect(updated.Status.Cache.SourceUri).To(gomega.Equal(sourceURI))
-	// /prefetch_owned_chunks doesn't surface per-chunk byte progress, but
-	// /file_metadata gives exact per-file sizes — TotalBytes is summed
-	// from there. On success, CachedBytes == TotalBytes.
-	expectedTotalBytes := int64(len(configData) + len(safetensorsData))
-	g.Expect(*updated.Status.Cache.TotalBytes).To(gomega.Equal(expectedTotalBytes))
-	g.Expect(*updated.Status.Cache.CachedBytes).To(gomega.Equal(expectedTotalBytes))
-	expectedChunks := int32(chunksForSize(uint64(len(configData)), chunkSize) +
-		chunksForSize(uint64(len(safetensorsData)), chunkSize))
-	g.Expect(*updated.Status.Cache.TotalChunks).To(gomega.Equal(expectedChunks))
-	g.Expect(*updated.Status.Cache.CachedChunks).To(gomega.Equal(expectedChunks))
-}
-
-// chunksForSize returns the number of chunks a file of size `size`
-// occupies given chunk_size (matches client-side computation in
-// pkg/modelcache/providers/clustercache/prefetch.go).
-func chunksForSize(size, chunkSize uint64) int {
-	if size == 0 || chunkSize == 0 {
-		return 0
-	}
-	return int((size + chunkSize - 1) / chunkSize)
-}
-
-func TestMapConfigMapToModelRequests(t *testing.T) {
-	g := gomega.NewGomegaWithT(t)
-	logger := ctrl.Log.WithName("test")
-
-	tests := []struct {
-		name          string
-		configMap     *corev1.ConfigMap
-		keyPrefix     string
-		isNamespaced  bool
-		expectedCount int
-		expectedFirst *types.NamespacedName
-	}{
-		{
-			name: "BaseModel mapping",
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-node",
-					Namespace: constants.OMENamespace,
-				},
-				Data: map[string]string{
-					"default.basemodel.my-model":     `{"status":"Ready"}`,
-					"test-ns.basemodel.other-model":  `{"status":"Failed"}`,
-					"clusterbasemodel.cluster-model": `{"status":"Ready"}`, // Should be ignored
-				},
-			},
-			keyPrefix:     "basemodel",
-			isNamespaced:  true,
-			expectedCount: 2,
-			expectedFirst: nil, // Don't check specific order since map iteration is random
-		},
-		{
-			name: "ClusterBaseModel mapping",
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "cluster-node",
-					Namespace: constants.OMENamespace,
-				},
-				Data: map[string]string{
-					"clusterbasemodel.global-model":    `{"status":"Ready"}`,
-					"clusterbasemodel.multi.part.name": `{"status":"InTransit"}`,
-					"basemodel.default.local-model":    `{"status":"Ready"}`, // Should be ignored
-				},
-			},
-			keyPrefix:     "clusterbasemodel",
-			isNamespaced:  false,
-			expectedCount: 2,
-			expectedFirst: nil, // Don't check specific order since map iteration is random
-		},
-		{
-			name: "Invalid JSON data",
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "invalid-node",
-					Namespace: constants.OMENamespace,
-				},
-				Data: map[string]string{
-					"default.basemodel.broken-model": `{invalid json}`,
-					"default.basemodel.valid-model":  `{"status":"Ready"}`,
-				},
-			},
-			keyPrefix:     "basemodel",
-			isNamespaced:  true,
-			expectedCount: 1, // Only valid entry should be processed
-			expectedFirst: &types.NamespacedName{
-				Namespace: "default",
-				Name:      "valid-model",
-			},
-		},
-		{
-			name:          "Non-ConfigMap object",
-			configMap:     nil, // Will pass a different object type
-			keyPrefix:     "basemodel",
-			isNamespaced:  true,
-			expectedCount: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var requests []reconcile.Request
-
-			if tt.configMap != nil {
-				if tt.isNamespaced {
-					// Test BaseModel mapping
-					reconciler := &BaseModelReconciler{Log: logger}
-					requests = reconciler.mapConfigMapToBaseModels(tt.configMap)
-				} else {
-					// Test ClusterBaseModel mapping
-					reconciler := &ClusterBaseModelReconciler{Log: logger}
-					requests = reconciler.mapConfigMapToClusterBaseModels(tt.configMap)
-				}
-			} else {
-				// Pass a non-ConfigMap object
-				reconciler := &BaseModelReconciler{Log: logger}
-				requests = reconciler.mapConfigMapToBaseModels(&corev1.Pod{})
-			}
-
-			g.Expect(requests).To(gomega.HaveLen(tt.expectedCount))
-
-			if tt.expectedFirst != nil && len(requests) > 0 {
-				g.Expect(requests[0].NamespacedName).To(gomega.Equal(*tt.expectedFirst))
-			} else if tt.expectedCount > 0 {
-				// Instead of checking order, verify that all expected requests are present
-				// For BaseModel mapping case
-				if tt.name == "BaseModel mapping" {
-					foundDefault := false
-					foundTestNs := false
-
-					for _, req := range requests {
-						if req.NamespacedName.Namespace == "default" && req.NamespacedName.Name == "my-model" {
-							foundDefault = true
-						}
-						if req.NamespacedName.Namespace == "test-ns" && req.NamespacedName.Name == "other-model" {
-							foundTestNs = true
-						}
-					}
-
-					g.Expect(foundDefault).To(gomega.BeTrue(), "Should find default.my-model")
-					g.Expect(foundTestNs).To(gomega.BeTrue(), "Should find test-ns.other-model")
-				}
-			}
-		})
-	}
+	g.Expect(cacheClient.CheckSourceCalls()).To(gomega.HaveLen(2),
+		"URI change must trigger a fresh CheckSource")
+	g.Expect(cacheClient.CheckSourceCalls()[1].URI).To(gomega.Equal(v2URI),
+		"fresh CheckSource must use the new URI")
+	g.Expect(get().Status.Cache.SourceUri).To(gomega.Equal(v2URI))
 }
 
 func TestUpdateSpecWithConfig(t *testing.T) {
@@ -1868,7 +1225,7 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			updated := updateSpecWithConfig(tt.initialSpec, tt.config)
+			updated := shared.UpdateSpecWithConfig(tt.initialSpec, tt.config)
 			g.Expect(updated).To(gomega.Equal(tt.expectUpdate))
 
 			if tt.validateSpec != nil && tt.initialSpec != nil {
@@ -1878,195 +1235,6 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 	}
 }
 
-func TestCalculateLifecycleState(t *testing.T) {
-	g := gomega.NewGomegaWithT(t)
-
-	tests := []struct {
-		name          string
-		nodesReady    []string
-		nodesFailed   []string
-		expectedState v1beta1.LifeCycleState
-	}{
-		{
-			name:          "Ready state with ready nodes",
-			nodesReady:    []string{"node1", "node2"},
-			nodesFailed:   []string{},
-			expectedState: v1beta1.LifeCycleStateReady,
-		},
-		{
-			name:          "Ready state with mixed nodes",
-			nodesReady:    []string{"node1"},
-			nodesFailed:   []string{"node2"},
-			expectedState: v1beta1.LifeCycleStateReady,
-		},
-		{
-			name:          "Failed state with only failed nodes",
-			nodesReady:    []string{},
-			nodesFailed:   []string{"node1", "node2"},
-			expectedState: v1beta1.LifeCycleStateFailed,
-		},
-		{
-			name:          "InTransit state with no nodes",
-			nodesReady:    []string{},
-			nodesFailed:   []string{},
-			expectedState: v1beta1.LifeCycleStateInTransit,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			state := calculateLifecycleState(tt.nodesReady, tt.nodesFailed)
-			g.Expect(state).To(gomega.Equal(tt.expectedState))
-		})
-	}
-}
-
-func TestCreateModelStatusConfigMapPredicate(t *testing.T) {
-	g := gomega.NewGomegaWithT(t)
-
-	predicate := createModelStatusConfigMapPredicate()
-
-	tests := []struct {
-		name     string
-		obj      client.Object
-		expected bool
-	}{
-		{
-			name: "Valid model status ConfigMap",
-			obj: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-node",
-					Namespace: constants.OMENamespace,
-					Labels: map[string]string{
-						constants.ModelStatusConfigMapLabel: "true",
-					},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "ConfigMap in wrong namespace",
-			obj: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-node",
-					Namespace: "wrong-namespace",
-					Labels: map[string]string{
-						constants.ModelStatusConfigMapLabel: "true",
-					},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "ConfigMap without label",
-			obj: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-node",
-					Namespace: constants.OMENamespace,
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "ConfigMap with wrong label value",
-			obj: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-node",
-					Namespace: constants.OMENamespace,
-					Labels: map[string]string{
-						constants.ModelStatusConfigMapLabel: "false",
-					},
-				},
-			},
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Test CreateFunc
-			result := predicate.Create(event.TypedCreateEvent[client.Object]{Object: tt.obj})
-			g.Expect(result).To(gomega.Equal(tt.expected))
-
-			// Test UpdateFunc
-			result = predicate.Update(event.TypedUpdateEvent[client.Object]{ObjectNew: tt.obj})
-			g.Expect(result).To(gomega.Equal(tt.expected))
-
-			// Test DeleteFunc
-			result = predicate.Delete(event.TypedDeleteEvent[client.Object]{Object: tt.obj})
-			g.Expect(result).To(gomega.Equal(tt.expected))
-		})
-	}
-}
-
-func TestAddToSlice(t *testing.T) {
-	g := gomega.NewGomegaWithT(t)
-
-	tests := []struct {
-		name     string
-		slice    []string
-		item     string
-		expected []string
-	}{
-		{
-			name:     "Add to empty slice",
-			slice:    []string{},
-			item:     "item1",
-			expected: []string{"item1"},
-		},
-		{
-			name:     "Add new item",
-			slice:    []string{"item1", "item2"},
-			item:     "item3",
-			expected: []string{"item1", "item2", "item3"},
-		},
-		{
-			name:     "Don't add existing item",
-			slice:    []string{"item1", "item2"},
-			item:     "item1",
-			expected: []string{"item1", "item2"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := addToSlice(tt.slice, tt.item)
-			g.Expect(result).To(gomega.Equal(tt.expected))
-		})
-	}
-}
-
-func TestCreateNodeDeletionPredicate(t *testing.T) {
-	g := gomega.NewGomegaWithT(t)
-
-	pred := createNodeDeletionPredicate()
-
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-node",
-		},
-	}
-
-	// CreateFunc should return false
-	createResult := pred.Create(event.TypedCreateEvent[client.Object]{Object: node})
-	g.Expect(createResult).To(gomega.BeFalse(), "CreateFunc should return false")
-
-	// UpdateFunc should return false
-	updateResult := pred.Update(event.TypedUpdateEvent[client.Object]{ObjectNew: node, ObjectOld: node})
-	g.Expect(updateResult).To(gomega.BeFalse(), "UpdateFunc should return false")
-
-	// DeleteFunc should return true
-	deleteResult := pred.Delete(event.TypedDeleteEvent[client.Object]{Object: node})
-	g.Expect(deleteResult).To(gomega.BeTrue(), "DeleteFunc should return true")
-}
-
-// TestShardedBaseModelDeletionShortCircuitsConfigMapWait pins the fix for
-// the production wedge where deleting a Sharded BaseModel/ClusterBaseModel
-// blocked indefinitely on per-node ConfigMap status (nodesWithModel=303,
-// nodesNotDeleted=303 in the logs). Sharded distributions bypass model-agent,
-// so the per-node handshake never converges and the finalizer is never
-// removed. The short-circuit must remove the finalizer immediately AND
-// best-effort scrub any leftover per-node entries.
 func TestShardedBaseModelDeletionShortCircuitsConfigMapWait(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
@@ -2294,149 +1462,6 @@ func TestShardedBaseModelDeletionShortCircuitsConfigMapWait(t *testing.T) {
 	})
 }
 
-func TestHandleNodeDeletion(t *testing.T) {
-	g := gomega.NewGomegaWithT(t)
-
-	// Create scheme
-	scheme := runtime.NewScheme()
-	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
-	g.Expect(corev1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
-	// batchv1 needed for cleanupStalePVCArtifacts which lists Jobs on
-	// every non-PVC reconcile (idempotent no-op when none exist; the
-	// List itself still requires the scheme).
-	g.Expect(batchv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
-
-	tests := []struct {
-		name       string
-		nodeName   string
-		setupMocks func(client.Client)
-		validate   func(*testing.T, client.Client, string)
-	}{
-		{
-			name:     "Node deletion cleans up associated ConfigMap",
-			nodeName: "node-with-configmap",
-			setupMocks: func(c client.Client) {
-				// Create ome namespace
-				omeNamespace := &corev1.Namespace{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: constants.OMENamespace,
-					},
-				}
-				err := c.Create(context.TODO(), omeNamespace)
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-
-				// Create a model status ConfigMap for this node
-				configMap := &corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "node-with-configmap",
-						Namespace: constants.OMENamespace,
-						Labels: map[string]string{
-							constants.ModelStatusConfigMapLabel: "true",
-						},
-					},
-					Data: map[string]string{
-						"clusterbasemodel.test-model": `{"status":"Ready"}`,
-					},
-				}
-				err = c.Create(context.TODO(), configMap)
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-			},
-			validate: func(t *testing.T, c client.Client, nodeName string) {
-				// ConfigMap should be deleted
-				configMap := &corev1.ConfigMap{}
-				err := c.Get(context.TODO(), types.NamespacedName{
-					Namespace: constants.OMENamespace,
-					Name:      nodeName,
-				}, configMap)
-				g.Expect(errors.IsNotFound(err)).To(gomega.BeTrue(), "ConfigMap should be deleted")
-			},
-		},
-		{
-			name:     "Node deletion with no ConfigMap does nothing",
-			nodeName: "node-without-configmap",
-			setupMocks: func(c client.Client) {
-				// Create ome namespace but no ConfigMap
-				omeNamespace := &corev1.Namespace{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: constants.OMENamespace,
-					},
-				}
-				err := c.Create(context.TODO(), omeNamespace)
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-			},
-			validate: func(t *testing.T, c client.Client, nodeName string) {
-				// No ConfigMap to check - just ensure no error occurred
-				// The function should silently skip
-			},
-		},
-		{
-			name:     "Node deletion skips non-model-status ConfigMap",
-			nodeName: "node-with-other-configmap",
-			setupMocks: func(c client.Client) {
-				// Create ome namespace
-				omeNamespace := &corev1.Namespace{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: constants.OMENamespace,
-					},
-				}
-				err := c.Create(context.TODO(), omeNamespace)
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-
-				// Create a ConfigMap without model status label
-				configMap := &corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "node-with-other-configmap",
-						Namespace: constants.OMENamespace,
-						// No model status label
-					},
-					Data: map[string]string{
-						"some-key": "some-value",
-					},
-				}
-				err = c.Create(context.TODO(), configMap)
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-			},
-			validate: func(t *testing.T, c client.Client, nodeName string) {
-				// ConfigMap should NOT be deleted (it's not a model status ConfigMap)
-				configMap := &corev1.ConfigMap{}
-				err := c.Get(context.TODO(), types.NamespacedName{
-					Namespace: constants.OMENamespace,
-					Name:      nodeName,
-				}, configMap)
-				g.Expect(err).NotTo(gomega.HaveOccurred(), "ConfigMap should still exist")
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := ctrlclientfake.NewClientBuilder().
-				WithScheme(scheme).
-				Build()
-
-			tt.setupMocks(c)
-
-			log := ctrl.Log.WithName("test")
-
-			// Create the node object that was "deleted"
-			deletedNode := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: tt.nodeName,
-				},
-			}
-
-			// Call handleNodeDeletion (shared function)
-			requests := handleNodeDeletion(context.TODO(), c, log, deletedNode)
-
-			// Should return nil (no reconcile requests needed)
-			g.Expect(requests).To(gomega.BeNil())
-
-			// Validate the result
-			tt.validate(t, c, tt.nodeName)
-		})
-	}
-}
-
 // Helper functions
 func stringPtr(s string) *string {
 	return &s
@@ -2464,81 +1489,22 @@ func tinyPhiConfigForTest(t *testing.T) []byte {
 	return data
 }
 
-func shardedStatusWithPrewarmID(prewarmID string) v1beta1.ModelStatusSpec {
-	return shardedStatusWithPrewarmAttempts(prewarmID, 1)
-}
-
-func shardedStatusWithPrewarmAttempts(prewarmID string, attempts int32) v1beta1.ModelStatusSpec {
-	return v1beta1.ModelStatusSpec{
-		Cache: &v1beta1.ModelCacheStatus{
-			Backend:         modelcache.ProviderClusterCache,
-			SourceUri:       "s3://bucket/cached-model",
-			PrewarmID:       prewarmID,
-			PrewarmAttempts: &attempts,
-		},
-		Conditions: []metav1.Condition{
-			{
-				Type:   v1beta1.ModelConditionSourceReachable,
-				Status: metav1.ConditionTrue,
-				Reason: v1beta1.ModelConditionReasonSourceReachable,
-			},
-		},
-	}
-}
-
-func shardedCachedStatusForSource(sourceURI string) v1beta1.ModelStatusSpec {
-	totalBytes := int64(100)
-	cachedBytes := int64(100)
-	totalChunks := int32(10)
-	cachedChunks := int32(10)
-
-	return v1beta1.ModelStatusSpec{
-		State: v1beta1.LifeCycleStateImporting,
-		Cache: &v1beta1.ModelCacheStatus{
-			Backend:      modelcache.ProviderClusterCache,
-			SourceUri:    sourceURI,
-			PrewarmID:    "op-old",
-			TotalBytes:   &totalBytes,
-			CachedBytes:  &cachedBytes,
-			TotalChunks:  &totalChunks,
-			CachedChunks: &cachedChunks,
-		},
-		Conditions: []metav1.Condition{
-			{
-				Type:   v1beta1.ModelConditionSourceReachable,
-				Status: metav1.ConditionTrue,
-				Reason: v1beta1.ModelConditionReasonSourceReachable,
-			},
-			{
-				Type:   v1beta1.ModelConditionCached,
-				Status: metav1.ConditionTrue,
-				Reason: v1beta1.ModelConditionReasonPrewarmSucceeded,
-			},
-			{
-				Type:   v1beta1.ModelConditionReady,
-				Status: metav1.ConditionFalse,
-				Reason: v1beta1.ModelConditionReasonMetadataPending,
-			},
-		},
-	}
-}
-
-func shardedInspectionForTest(t *testing.T, source modelcache.Source) *modelcache.SourceInspection {
+func shardedInspectionForTest(t *testing.T, source sharded.Source) *sharded.SourceInspection {
 	t.Helper()
 
 	safetensorsData := safetensorsHeaderForTest(`{"weight":{"dtype":"F32","shape":[2,3],"data_offsets":[0,24]}}`)
 	weightPath := source.URI + "/model-00001-of-00001.safetensors"
-	return &modelcache.SourceInspection{
-		Objects: []modelcache.Object{
+	return &sharded.SourceInspection{
+		Objects: []sharded.Object{
 			{
 				Source:    source,
 				Path:      weightPath,
 				SizeBytes: int64(len(safetensorsData)) + 1024,
 			},
 		},
-		Metadata: modelcache.ModelMetadataInputs{
+		Metadata: sharded.ModelMetadataInputs{
 			ConfigJSON: tinyPhiConfigForTest(t),
-			SafetensorHeaders: []modelcache.SafetensorHeader{
+			SafetensorHeaders: []sharded.SafetensorHeader{
 				{
 					Path:       weightPath,
 					SizeBytes:  int64(len(safetensorsData)) + 1024,
@@ -2549,6 +1515,24 @@ func shardedInspectionForTest(t *testing.T, source modelcache.Source) *modelcach
 	}
 }
 
+// safetensorsHeaderLenFieldBytes mirrors the safetensors 8-byte
+// little-endian header-length prefix used by the parser. Local helper
+// — the sharded sub-package has its own copy for its tests.
+const safetensorsHeaderLenFieldBytes = 8
+
+func safetensorsHeaderForTest(header string) []byte {
+	headerBytes := []byte(header)
+	data := make([]byte, safetensorsHeaderLenFieldBytes+len(headerBytes))
+	binary.LittleEndian.PutUint64(data[:safetensorsHeaderLenFieldBytes], uint64(len(headerBytes)))
+	copy(data[safetensorsHeaderLenFieldBytes:], headerBytes)
+	return data
+}
+
+func safetensorsHeaderJSONForTest(data []byte) []byte {
+	length := binary.LittleEndian.Uint64(data[:safetensorsHeaderLenFieldBytes])
+	return data[safetensorsHeaderLenFieldBytes : safetensorsHeaderLenFieldBytes+int(length)]
+}
+
 func getBaseModelForTest(t *testing.T, c client.Client, namespace, name string) *v1beta1.BaseModel {
 	t.Helper()
 	g := gomega.NewGomegaWithT(t)
@@ -2557,13 +1541,6 @@ func getBaseModelForTest(t *testing.T, c client.Client, namespace, name string) 
 	err := c.Get(context.TODO(), types.NamespacedName{Namespace: namespace, Name: name}, baseModel)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	return baseModel
-}
-
-func writeJSONForControllerTest(t *testing.T, w http.ResponseWriter, value any) {
-	t.Helper()
-
-	w.Header().Set("Content-Type", "application/json")
-	gomega.NewGomegaWithT(t).Expect(json.NewEncoder(w).Encode(value)).NotTo(gomega.HaveOccurred())
 }
 
 func validateProviderNotConfiguredShardedStatus(t *testing.T, status v1beta1.ModelStatusSpec, sourceURI string) {
@@ -2581,11 +1558,6 @@ func validateProviderNotConfiguredShardedStatus(t *testing.T, status v1beta1.Mod
 	g.Expect(sourceReachable).ToNot(gomega.BeNil())
 	g.Expect(sourceReachable.Status).To(gomega.Equal(metav1.ConditionUnknown))
 	g.Expect(sourceReachable.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonProviderNotConfigured))
-
-	cached := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionCached)
-	g.Expect(cached).ToNot(gomega.BeNil())
-	g.Expect(cached.Status).To(gomega.Equal(metav1.ConditionFalse))
-	g.Expect(cached.Reason).To(gomega.Equal(v1beta1.ModelConditionReasonProviderNotConfigured))
 
 	ready := meta.FindStatusCondition(status.Conditions, v1beta1.ModelConditionReady)
 	g.Expect(ready).ToNot(gomega.BeNil())

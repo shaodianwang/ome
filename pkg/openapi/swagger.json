@@ -2657,7 +2657,7 @@
           "type": "string"
         },
         "replacementInstance": {
-          "description": "ReplacementInstance is the Instance index allocated for the surge replacement. Zero when the migration was rejected before allocation.",
+          "description": "ReplacementInstance is the Instance index allocated for the surge replacement. Nil when the migration was rejected before allocation. Distinct from index 0, which is a valid replacement index after sparse migration.",
           "type": "integer",
           "format": "int32"
         },
@@ -2676,49 +2676,16 @@
       }
     },
     "v1beta1.ModelCacheStatus": {
-      "description": "ModelCacheStatus reports cluster-wide cache progress for models that use a sharded distribution backend.",
+      "description": "ModelCacheStatus reports the cluster-wide cache provider identity for models that use a sharded distribution backend. In the lazy- fetch flow, cluster_cache daemons pull bytes on demand at first inference, so there is no separate \"placement progress\" to report — Backend + SourceUri are enough to identify the cache mapping.",
       "type": "object",
       "properties": {
         "backend": {
           "description": "Backend identifies the configured cache provider.",
           "type": "string"
         },
-        "cachedBytes": {
-          "description": "CachedBytes is the number of bytes cached so far, if known.",
-          "type": "integer",
-          "format": "int64"
-        },
-        "cachedChunks": {
-          "description": "CachedChunks is the number of cache chunks cached so far, if known.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "lastPrewarmFailureAt": {
-          "description": "LastPrewarmFailureAt records when the controller first observed the current failure cycle. The controller compares it against the exponential backoff (or long-tail interval) to decide whether the next reconcile is allowed to re-submit StartPrewarm. Required because k8s metav1.Condition.LastTransitionTime only updates on Status change, not Reason change — so a same-Status reason transition (PrewarmPending → PrewarmFailed → PrewarmFailed) does not refresh the condition timestamp and cannot be used to enforce retry cadence.",
-          "$ref": "#/definitions/v1.Time"
-        },
-        "prewarmAttempts": {
-          "description": "PrewarmAttempts counts how many times the controller has submitted a prewarm operation for this source. Incremented after a transient PrewarmFailed phase before the controller re-submits. The terminal PrewarmExhausted reason fires when this hits the controller's retry budget.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "prewarmID": {
-          "description": "PrewarmID is the operation ID returned by the cache prewarm API.",
-          "type": "string"
-        },
         "sourceUri": {
           "description": "SourceUri is the model source URI being cached.",
           "type": "string"
-        },
-        "totalBytes": {
-          "description": "TotalBytes is the total number of bytes in the model source, if known.",
-          "type": "integer",
-          "format": "int64"
-        },
-        "totalChunks": {
-          "description": "TotalChunks is the total number of cache chunks for the model, if known.",
-          "type": "integer",
-          "format": "int32"
         }
       }
     },
@@ -2905,7 +2872,7 @@
           "$ref": "#/definitions/v1beta1.ModelCacheStatus"
         },
         "conditions": {
-          "description": "Conditions describe cluster-wide model readiness and cache state. Sharded models use conditions such as SourceReachable, Cached, and Ready. PerNode models continue to report node-level state through NodesReady and NodesFailed.",
+          "description": "Conditions describe cluster-wide model readiness and cache state. Sharded models report SourceReachable, MetadataExtracted, and Ready; PerNode models continue to report node-level state through NodesReady and NodesFailed.",
           "type": "array",
           "items": {
             "default": {},
@@ -2915,6 +2882,10 @@
             "type"
           ],
           "x-kubernetes-list-type": "map"
+        },
+        "lastReconcileTime": {
+          "description": "LastReconcileTime is the wall-clock timestamp of the controller's most recent reconcile pass for this object. Liveness signal — if it falls behind by more than the reconcile period, the controller is wedged or not scheduled. Distinct from Condition.lastTransitionTime, which only advances on actual status flips.",
+          "$ref": "#/definitions/v1.Time"
         },
         "lifecycle": {
           "description": "LifeCycle is an enum of Deprecated, Experiment, Public, Internal",
@@ -2935,6 +2906,11 @@
             "default": ""
           },
           "x-kubernetes-list-type": "atomic"
+        },
+        "observedGeneration": {
+          "description": "ObservedGeneration is the .metadata.generation the controller last reconciled against. If this lags behind .metadata.generation, the controller has not yet observed the latest spec edit.",
+          "type": "integer",
+          "format": "int64"
         },
         "state": {
           "description": "Status of the model weight",

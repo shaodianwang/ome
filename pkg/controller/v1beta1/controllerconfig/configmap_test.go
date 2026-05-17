@@ -12,7 +12,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 )
 
 const (
@@ -337,13 +337,12 @@ func TestNewModelCacheConfig(t *testing.T) {
 		name           string
 		configMapData  map[string]string
 		expectedError  bool
-		validateConfig func(*testing.T, *modelcache.ProviderConfig)
+		validateConfig func(*testing.T, *sharded.ProviderConfig)
 	}{
 		{
 			name: "valid config",
 			configMapData: map[string]string{
 				ModelCacheConfigName: `{
-					"provider": "test_cache",
 					"endpoint": "http://cache.example",
 					"options": {
 						"timeout": "5s"
@@ -351,8 +350,7 @@ func TestNewModelCacheConfig(t *testing.T) {
 				}`,
 			},
 			expectedError: false,
-			validateConfig: func(t *testing.T, cfg *modelcache.ProviderConfig) {
-				assert.Equal(t, "test_cache", cfg.Provider)
+			validateConfig: func(t *testing.T, cfg *sharded.ProviderConfig) {
 				assert.Equal(t, "http://cache.example", cfg.Endpoint)
 				assert.Equal(t, map[string]string{"timeout": "5s"}, cfg.Options)
 			},
@@ -368,8 +366,7 @@ func TestNewModelCacheConfig(t *testing.T) {
 			name:          "empty config",
 			configMapData: map[string]string{},
 			expectedError: false,
-			validateConfig: func(t *testing.T, cfg *modelcache.ProviderConfig) {
-				assert.Empty(t, cfg.Provider)
+			validateConfig: func(t *testing.T, cfg *sharded.ProviderConfig) {
 				assert.Empty(t, cfg.Endpoint)
 				assert.Empty(t, cfg.Options)
 			},

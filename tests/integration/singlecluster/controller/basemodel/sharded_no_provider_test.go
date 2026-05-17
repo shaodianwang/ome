@@ -10,8 +10,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/ome-projects/ome/pkg/modelcache"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/components"
@@ -49,7 +49,7 @@ var _ = ginkgo.Describe("Sharded BaseModel without a configured model-cache prov
 		ginkgo.By("restoring the suite's default manager (with provider injected) for subsequent specs")
 		Expect(suiteFwk.StopManager(suiteCtx)).To(Succeed())
 
-		provider := modelcache.NewProvider("fake", suiteFakeMC)
+		provider := sharded.NewProvider("fake", suiteFakeMC)
 		mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
 			return components.SetupBaseModel(ctx, mgr,
 				components.WithOmeAgentConfig(&controllerconfig.OmeAgentConfig{
@@ -74,7 +74,6 @@ var _ = ginkgo.Describe("Sharded BaseModel without a configured model-cache prov
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-no-provider"}, got)).To(Succeed())
 			for _, condType := range []string{
 				v1beta1.ModelConditionSourceReachable,
-				v1beta1.ModelConditionCached,
 				v1beta1.ModelConditionReady,
 			} {
 				cond := meta.FindStatusCondition(got.Status.Conditions, condType)

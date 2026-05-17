@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/modelcache"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -18,7 +18,7 @@ import (
 
 // Pins the OEP-0009 follow-up: providers signal "this source layout is
 // structurally unparseable, retrying won't help" via
-// modelcache.ErrSourceUnparseable; the BaseModel controller must transition
+// sharded.ErrSourceUnparseable; the BaseModel controller must transition
 // the model to state=Failed with reason=MetadataUnparseable instead of
 // looping forever in state=Importing reason=MetadataPending. Catches the
 // regression where the controller treats every InspectSource error as
@@ -30,11 +30,11 @@ var _ = ginkgo.Describe("Sharded BaseModel with unparseable source", ginkgo.Orde
 		// Reachable=true), but InspectSource fails with a wrapped
 		// ErrSourceUnparseable — mirroring the real cluster_cache
 		// "missing config.json" path.
-		suiteFakeMC.CheckSourceFunc = func(ctx context.Context, source modelcache.Source) (*modelcache.SourceStatus, error) {
-			return &modelcache.SourceStatus{Reachable: true, Reason: v1beta1.ModelConditionReasonSourceReachable}, nil
+		suiteFakeMC.CheckSourceFunc = func(ctx context.Context, source sharded.Source) (*sharded.SourceStatus, error) {
+			return &sharded.SourceStatus{Reachable: true, Reason: v1beta1.ModelConditionReasonSourceReachable}, nil
 		}
-		suiteFakeMC.InspectSourceFunc = func(ctx context.Context, source modelcache.Source) (*modelcache.SourceInspection, error) {
-			return nil, fmt.Errorf("source missing config.json: %w", modelcache.ErrSourceUnparseable)
+		suiteFakeMC.InspectSourceFunc = func(ctx context.Context, source sharded.Source) (*sharded.SourceInspection, error) {
+			return nil, fmt.Errorf("source missing config.json: %w", sharded.ErrSourceUnparseable)
 		}
 		ginkgo.DeferCleanup(func() {
 			suiteFakeMC.CheckSourceFunc = nil

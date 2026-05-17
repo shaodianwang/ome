@@ -11,8 +11,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/ome-projects/ome/pkg/modelcache"
 )
 
 func TestUpdatePodSpecNodeSelector(t *testing.T) {
@@ -199,8 +199,8 @@ func TestUpdateEnvVariablesForShardedModel(t *testing.T) {
 			Distribution: distributionPtr(v1beta1.DistributionSharded),
 		},
 		InferenceServiceConfig: &controllerconfig.InferenceServicesConfig{
-			ModelCache: modelcache.ProviderConfig{
-				Provider: modelcache.ProviderClusterCache,
+			ModelCache: sharded.ProviderConfig{
+				Provider: sharded.ProviderClusterCache,
 				Endpoint: "http://cluster-cache.ome.svc.cluster.local:10090",
 				Options: map[string]string{
 					"timeout": "5m",
@@ -225,7 +225,7 @@ func TestUpdateEnvVariablesForShardedModel(t *testing.T) {
 	}))
 	g.Expect(container.Env).To(gomega.ContainElement(v1.EnvVar{
 		Name:  constants.ModelCacheProviderEnvVarKey,
-		Value: modelcache.ProviderClusterCache,
+		Value: sharded.ProviderClusterCache,
 	}))
 	g.Expect(container.Env).To(gomega.ContainElement(v1.EnvVar{
 		Name:  constants.ModelCacheEndpointEnvVarKey,

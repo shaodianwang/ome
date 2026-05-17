@@ -23,8 +23,8 @@ import (
 	volcano "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/ome-projects/ome/pkg/modelcache"
 )
 
 func TestGetOptions(t *testing.T) {
@@ -104,13 +104,13 @@ func TestDefaultOptions(t *testing.T) {
 }
 
 func TestClusterCacheProviderRegistered(t *testing.T) {
-	provider, err := modelcache.BuildProvider(modelcache.ProviderConfig{
-		Provider: modelcache.ProviderClusterCache,
+	provider, err := sharded.BuildProvider(sharded.ProviderConfig{
+		Provider: sharded.ProviderClusterCache,
 		Endpoint: "http://cluster-cache.example:10090",
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, modelcache.ProviderClusterCache, provider.Name)
+	assert.Equal(t, sharded.ProviderClusterCache, provider.Name)
 	assert.True(t, provider.Configured())
 }
 

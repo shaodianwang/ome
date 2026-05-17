@@ -227,74 +227,8 @@ spec:
                 properties:
                   backend:
                     type: string
-                  cachedBytes:
-                    format: int64
-                    type: integer
-                  cachedChunks:
-                    format: int32
-                    type: integer
-                  failedObjects:
-                    items:
-                      properties:
-                        attempts:
-                          format: int32
-                          type: integer
-                        errorClass:
-                          enum:
-                          - Unknown
-                          - SourceObjectMissing
-                          - AuthDenied
-                          - BackendUnreachable
-                          - ChecksumMismatch
-                          - Throttled
-                          type: string
-                        errorCode:
-                          maxLength: 64
-                          type: string
-                        firstSeenAt:
-                          format: date-time
-                          type: string
-                        lastSeenAt:
-                          format: date-time
-                          type: string
-                        message:
-                          maxLength: 512
-                          type: string
-                        path:
-                          maxLength: 512
-                          type: string
-                        sizeBytes:
-                          format: int64
-                          type: integer
-                      required:
-                      - path
-                      type: object
-                    maxItems: 10
-                    type: array
-                    x-kubernetes-list-map-keys:
-                    - path
-                    x-kubernetes-list-type: map
-                  failedObjectsTotal:
-                    format: int32
-                    type: integer
-                  failedObjectsTruncated:
-                    type: boolean
-                  lastPrewarmFailureAt:
-                    format: date-time
-                    type: string
-                  prewarmAttempts:
-                    format: int32
-                    type: integer
-                  prewarmID:
-                    type: string
                   sourceUri:
                     type: string
-                  totalBytes:
-                    format: int64
-                    type: integer
-                  totalChunks:
-                    format: int32
-                    type: integer
                 type: object
               conditions:
                 items:

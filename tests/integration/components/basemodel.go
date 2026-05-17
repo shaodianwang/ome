@@ -23,8 +23,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	v1beta1basemodelcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/ome-projects/ome/pkg/modelcache"
 )
 
 // BaseModelOption mutates the BaseModel reconciler before it is
@@ -35,7 +35,7 @@ type BaseModelOption func(*baseModelOpts)
 
 type baseModelOpts struct {
 	omeAgentConfig     *controllerconfig.OmeAgentConfig
-	modelCacheProvider modelcache.Provider
+	modelCacheProvider sharded.Provider
 }
 
 // WithOmeAgentConfig provides the metadata-Job config the BaseModel
@@ -49,10 +49,10 @@ func WithOmeAgentConfig(cfg *controllerconfig.OmeAgentConfig) BaseModelOption {
 
 // WithModelCacheProvider injects a model-cache provider used by the
 // Sharded distribution flow. Tests pass a fake provider (e.g.
-// pkg/modelcache/fake) so the controller doesn't make real HTTP
+// pkg/controller/v1beta1/basemodel/backends/sharded/fake) so the controller doesn't make real HTTP
 // calls. Without this, BaseModels with Distribution=Sharded transition
 // to Ready=False with reason=ProviderNotConfigured.
-func WithModelCacheProvider(p modelcache.Provider) BaseModelOption {
+func WithModelCacheProvider(p sharded.Provider) BaseModelOption {
 	return func(o *baseModelOpts) { o.modelCacheProvider = p }
 }
 

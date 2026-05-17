@@ -19,8 +19,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ome-projects/ome/pkg/modelcache"
-	_ "github.com/ome-projects/ome/pkg/modelcache/providers/clustercache" // register provider factory
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
+	_ "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded" // register provider factory
 
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/framework"
@@ -88,8 +88,8 @@ var _ = ginkgo.BeforeSuite(func() {
 
 	// Build the REAL clustercache provider — registered via the
 	// blank-import in this file. Endpoint is the httptest server URL.
-	provider, err := modelcache.BuildProvider(modelcache.ProviderConfig{
-		Provider: modelcache.ProviderClusterCache,
+	provider, err := sharded.BuildProvider(sharded.ProviderConfig{
+		Provider: sharded.ProviderClusterCache,
 		Endpoint: suiteServer.URL,
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())

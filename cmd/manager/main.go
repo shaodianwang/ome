@@ -41,11 +41,10 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	v1beta1acceleratorclasscontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/acceleratorclass"
 	v1beta1basemodelcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	v1beta1benchmarkjobcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/benchmark"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
-	"github.com/ome-projects/ome/pkg/modelcache"
-	_ "github.com/ome-projects/ome/pkg/modelcache/providers/clustercache"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 	"github.com/ome-projects/ome/pkg/version"
@@ -217,7 +216,7 @@ func main() {
 		setupLog.Error(err, "Failed to initialize model cache configuration")
 		os.Exit(1)
 	}
-	modelCacheProvider, err := modelcache.BuildProvider(*modelCacheConfig)
+	modelCacheProvider, err := sharded.BuildProvider(*modelCacheConfig)
 	if err != nil {
 		setupLog.Error(err, "Failed to initialize model cache provider")
 		os.Exit(1)
@@ -285,7 +284,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Setup BaseModel and ClusterBaseModel controllers with the manager
 	setupLog.Info("Setting up BaseModel controller")
 	if err = (&v1beta1basemodelcontroller.BaseModelReconciler{
 		Client:         mgr.GetClient(),
