@@ -98,6 +98,7 @@ func ResolveIngressConfig(baseConfig *controllerconfig.IngressConfig, annotation
 		PathTemplate:               baseConfig.PathTemplate,
 		DisableIngressCreation:     baseConfig.DisableIngressCreation,
 		EnableGatewayAPI:           baseConfig.EnableGatewayAPI,
+		ConsistentHashHeaders:      baseConfig.ConsistentHashHeaders,
 	}
 
 	// Override with annotation values if present

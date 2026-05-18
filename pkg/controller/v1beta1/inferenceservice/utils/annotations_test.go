@@ -146,6 +146,15 @@ func TestResolveIngressConfig(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+
+	t.Run("consistent hash headers are preserved", func(t *testing.T) {
+		configWithHeaders := &controllerconfig.IngressConfig{
+			IngressDomain:         "svc.cluster.local",
+			ConsistentHashHeaders: []string{"x-routing-key", "X-SMG-Routing-Key"},
+		}
+		result := ResolveIngressConfig(configWithHeaders, map[string]string{})
+		assert.Equal(t, []string{"x-routing-key", "X-SMG-Routing-Key"}, result.ConsistentHashHeaders)
+	})
 }
 
 func TestGetDeploymentModeFromAnnotations(t *testing.T) {
