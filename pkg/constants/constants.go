@@ -139,6 +139,7 @@ var (
 	IngressPathTemplate            = OMEAPIGroupName + "/ingress-path-template"
 	IngressDisableIstioVirtualHost = OMEAPIGroupName + "/ingress-disable-istio-virtualhost"
 	IngressDisableCreation         = OMEAPIGroupName + "/ingress-disable-creation"
+	IngressConsistentHashHeaders   = OMEAPIGroupName + "/ingress-consistent-hash-headers"
 )
 
 // Label Constants

@@ -27,6 +27,8 @@ const (
 	DefaultUrlScheme = "http"
 )
 
+var DefaultConsistentHashHeaders = []string{"x-routing-key", "X-SMG-Routing-Key"}
+
 type SecretConfig struct {
 	WriteToCommonNamespace bool   `json:"writeToCommonNamespace"`
 	Namespace              string `json:"namespace"`
@@ -70,6 +72,7 @@ type IngressConfig struct {
 	PathTemplate               string    `json:"pathTemplate,omitempty"`
 	DisableIngressCreation     bool      `json:"disableIngressCreation,omitempty"`
 	EnableGatewayAPI           bool      `json:"enableGatewayAPI,omitempty"`
+	ConsistentHashHeaders      []string  `json:"consistentHashHeaders,omitempty"`
 }
 
 // +kubebuilder:object:generate=false
@@ -179,6 +182,10 @@ func NewIngressConfig(clientset kubernetes.Interface) (*IngressConfig, error) {
 
 	if ingressConfig.UrlScheme == "" {
 		ingressConfig.UrlScheme = DefaultUrlScheme
+	}
+
+	if len(ingressConfig.ConsistentHashHeaders) == 0 {
+		ingressConfig.ConsistentHashHeaders = DefaultConsistentHashHeaders
 	}
 
 	return ingressConfig, nil

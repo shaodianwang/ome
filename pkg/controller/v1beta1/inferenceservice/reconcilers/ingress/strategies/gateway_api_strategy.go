@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierr "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
@@ -31,27 +32,30 @@ const (
 
 // GatewayAPIStrategy handles ingress for Gateway API (raw deployment mode)
 type GatewayAPIStrategy struct {
-	client        client.Client
-	scheme        *runtime.Scheme
-	ingressConfig *controllerconfig.IngressConfig
-	isvcConfig    *controllerconfig.InferenceServicesConfig
-	domainService interfaces.DomainService
-	pathService   interfaces.PathService
-	builder       interfaces.HTTPRouteBuilder
+	client               client.Client
+	scheme               *runtime.Scheme
+	ingressConfig        *controllerconfig.IngressConfig
+	isvcConfig           *controllerconfig.InferenceServicesConfig
+	domainService        interfaces.DomainService
+	pathService          interfaces.PathService
+	httpRouteBuilder     interfaces.HTTPRouteBuilder
+	trafficPolicyBuilder *builders.BackendTrafficPolicyBuilder
 }
 
 // NewGatewayAPIStrategy creates a new Gateway API strategy
 func NewGatewayAPIStrategy(opts interfaces.ReconcilerOptions, domainService interfaces.DomainService, pathService interfaces.PathService) interfaces.IngressStrategy {
-	builder := builders.NewHTTPRouteBuilder(opts.IngressConfig, opts.IsvcConfig, domainService, pathService)
+	httpRouteBuilder := builders.NewHTTPRouteBuilder(opts.IngressConfig, opts.IsvcConfig, domainService, pathService)
+	trafficPolicyBuilder := builders.NewBackendTrafficPolicyBuilder(opts.IngressConfig)
 
 	return &GatewayAPIStrategy{
-		client:        opts.Client,
-		scheme:        opts.Scheme,
-		ingressConfig: opts.IngressConfig,
-		isvcConfig:    opts.IsvcConfig,
-		domainService: domainService,
-		pathService:   pathService,
-		builder:       builder,
+		client:               opts.Client,
+		scheme:               opts.Scheme,
+		ingressConfig:        opts.IngressConfig,
+		isvcConfig:           opts.IsvcConfig,
+		domainService:        domainService,
+		pathService:          pathService,
+		httpRouteBuilder:     httpRouteBuilder,
+		trafficPolicyBuilder: trafficPolicyBuilder,
 	}
 }
 
@@ -81,8 +85,16 @@ func (g *GatewayAPIStrategy) Reconcile(ctx context.Context, isvc *v1beta1.Infere
 			return err
 		}
 
-		// Check HTTPRoute statuses
+		if err := g.reconcileBackendTrafficPolicy(ctx, isvc); err != nil {
+			return err
+		}
+
+		// Check HTTPRoute and BackendTrafficPolicy statuses
 		if err := g.checkHTTPRouteStatuses(ctx, isvc); err != nil {
+			return err
+		}
+
+		if err := g.checkBackendTrafficPolicyStatus(ctx, isvc); err != nil {
 			return err
 		}
 
@@ -116,7 +128,7 @@ func (g *GatewayAPIStrategy) Reconcile(ctx context.Context, isvc *v1beta1.Infere
 
 func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService, componentType string) error {
 	// Use builder to create the HTTPRoute
-	desired, err := g.builder.BuildHTTPRoute(ctx, isvc, componentType)
+	desired, err := g.httpRouteBuilder.BuildHTTPRoute(ctx, isvc, componentType)
 	if err != nil {
 		return err
 	}
@@ -167,6 +179,33 @@ func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, is
 	return nil
 }
 
+func (g *GatewayAPIStrategy) reconcileBackendTrafficPolicy(ctx context.Context, isvc *v1beta1.InferenceService) error {
+	policy := g.trafficPolicyBuilder.Build(isvc)
+
+	if err := controllerutil.SetControllerReference(isvc, policy, g.scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference for BackendTrafficPolicy %s: %w", isvc.Name, err)
+	}
+
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(builders.BackendTrafficPolicyGVK)
+	err := g.client.Get(ctx, types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, existing)
+	if err != nil {
+		if apierr.IsNotFound(err) {
+			if err := g.client.Create(ctx, policy); err != nil {
+				return fmt.Errorf("failed to create BackendTrafficPolicy %s: %w", isvc.Name, err)
+			}
+		} else {
+			return err
+		}
+	} else {
+		policy.SetResourceVersion(existing.GetResourceVersion())
+		if err := g.client.Update(ctx, policy); err != nil {
+			return fmt.Errorf("failed to update BackendTrafficPolicy %s: %w", isvc.Name, err)
+		}
+	}
+	return nil
+}
+
 func (g *GatewayAPIStrategy) checkHTTPRouteStatuses(ctx context.Context, isvc *v1beta1.InferenceService) error {
 	components := []struct {
 		name      string
@@ -198,6 +237,44 @@ func (g *GatewayAPIStrategy) checkHTTPRouteStatuses(ctx context.Context, isvc *v
 				Status:  corev1.ConditionFalse,
 				Reason:  *reason,
 				Message: fmt.Sprintf("%s %s", componentType, *message),
+			})
+			return nil
+		}
+	}
+	return nil
+}
+
+func (g *GatewayAPIStrategy) checkBackendTrafficPolicyStatus(ctx context.Context, isvc *v1beta1.InferenceService) error {
+	policy := &unstructured.Unstructured{}
+	policy.SetGroupVersionKind(builders.BackendTrafficPolicyGVK)
+	if err := g.client.Get(ctx, types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, policy); err != nil {
+		if apierr.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	status, ok := policy.Object["status"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	conditions, ok := status["conditions"].([]interface{})
+	if !ok {
+		return nil
+	}
+	for _, c := range conditions {
+		cond, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if cond["status"] == "False" {
+			reason, _ := cond["reason"].(string)
+			message, _ := cond["message"].(string)
+			isvc.Status.SetCondition(v1beta1.IngressReady, &knapis.Condition{
+				Type:    v1beta1.IngressReady,
+				Status:  corev1.ConditionFalse,
+				Reason:  reason,
+				Message: fmt.Sprintf("BackendTrafficPolicy: %s", message),
 			})
 			return nil
 		}

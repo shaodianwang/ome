@@ -8,7 +8,9 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -18,6 +20,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/builders"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/interfaces"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
 )
@@ -536,5 +539,167 @@ func createNotReadyHTTPRoute(name, namespace string) *gatewayapiv1.HTTPRoute {
 			Namespace: namespace,
 		},
 		// Simplified without detailed status
+	}
+}
+
+func TestGatewayAPIStrategy_ReconcileBackendTrafficPolicy(t *testing.T) {
+	tests := []struct {
+		name           string
+		isvc           *v1beta1.InferenceService
+		existingPolicy bool
+		expectedError  bool
+	}{
+		{
+			name:          "create new policy",
+			isvc:          createTestInferenceServiceWithRouterGateway("test-isvc", "default"),
+			expectedError: false,
+		},
+		{
+			name:           "update existing policy",
+			isvc:           createTestInferenceServiceWithRouterGateway("test-isvc", "default"),
+			existingPolicy: true,
+			expectedError:  false,
+		},
+		{
+			name:          "create policy for non-PD",
+			isvc:          createTestInferenceServiceGateway("test-isvc", "default"),
+			expectedError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, v1beta1.AddToScheme(scheme))
+			require.NoError(t, gatewayapiv1.Install(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+
+			setComponentStatusReadyGateway(tt.isvc)
+
+			objs := []client.Object{tt.isvc}
+			if tt.existingPolicy {
+				existing := &unstructured.Unstructured{}
+				existing.SetGroupVersionKind(builders.BackendTrafficPolicyGVK)
+				existing.SetName(tt.isvc.Name)
+				existing.SetNamespace(tt.isvc.Namespace)
+				existing.Object["spec"] = map[string]interface{}{}
+				objs = append(objs, existing)
+			}
+
+			fakeClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objs...).
+				Build()
+
+			strategy := createGatewayAPIStrategyWithClient(t, fakeClient)
+
+			err := strategy.(*GatewayAPIStrategy).reconcileBackendTrafficPolicy(context.Background(), tt.isvc)
+
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+
+				// Verify the policy was created/updated
+				policy := &unstructured.Unstructured{}
+				policy.SetGroupVersionKind(builders.BackendTrafficPolicyGVK)
+				err := fakeClient.Get(context.Background(), types.NamespacedName{
+					Name:      tt.isvc.Name,
+					Namespace: tt.isvc.Namespace,
+				}, policy)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.isvc.Name, policy.GetName())
+			}
+		})
+	}
+}
+
+func TestGatewayAPIStrategy_CheckBackendTrafficPolicyStatus(t *testing.T) {
+	tests := []struct {
+		name              string
+		isvc              *v1beta1.InferenceService
+		policy            *unstructured.Unstructured
+		expectedCondition corev1.ConditionStatus
+	}{
+		{
+			name: "policy not found - no error",
+			isvc: createTestInferenceServiceGateway("test-isvc", "default"),
+		},
+		{
+			name: "policy accepted",
+			isvc: createTestInferenceServiceGateway("test-isvc", "default"),
+			policy: func() *unstructured.Unstructured {
+				p := &unstructured.Unstructured{}
+				p.SetGroupVersionKind(builders.BackendTrafficPolicyGVK)
+				p.SetName("test-isvc")
+				p.SetNamespace("default")
+				p.Object["status"] = map[string]interface{}{
+					"conditions": []interface{}{
+						map[string]interface{}{
+							"type":   "Accepted",
+							"status": "True",
+							"reason": "Accepted",
+						},
+					},
+				}
+				return p
+			}(),
+			expectedCondition: corev1.ConditionTrue,
+		},
+		{
+			name: "policy rejected",
+			isvc: createTestInferenceServiceGateway("test-isvc", "default"),
+			policy: func() *unstructured.Unstructured {
+				p := &unstructured.Unstructured{}
+				p.SetGroupVersionKind(builders.BackendTrafficPolicyGVK)
+				p.SetName("test-isvc")
+				p.SetNamespace("default")
+				p.Object["status"] = map[string]interface{}{
+					"conditions": []interface{}{
+						map[string]interface{}{
+							"type":    "Accepted",
+							"status":  "False",
+							"reason":  "Invalid",
+							"message": "target not found",
+						},
+					},
+				}
+				return p
+			}(),
+			expectedCondition: corev1.ConditionFalse,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, v1beta1.AddToScheme(scheme))
+			require.NoError(t, gatewayapiv1.Install(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+
+			setComponentStatusReadyGateway(tt.isvc)
+
+			objs := []client.Object{tt.isvc}
+			if tt.policy != nil {
+				objs = append(objs, tt.policy)
+			}
+
+			fakeClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objs...).
+				Build()
+
+			strategy := createGatewayAPIStrategyWithClient(t, fakeClient)
+
+			err := strategy.(*GatewayAPIStrategy).checkBackendTrafficPolicyStatus(context.Background(), tt.isvc)
+			assert.NoError(t, err)
+
+			if tt.expectedCondition == corev1.ConditionFalse {
+				condition := tt.isvc.Status.GetCondition(v1beta1.IngressReady)
+				require.NotNil(t, condition)
+				assert.Equal(t, corev1.ConditionFalse, condition.Status)
+				assert.Contains(t, condition.Message, "BackendTrafficPolicy")
+			}
+		})
 	}
 }
