@@ -12,6 +12,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
+	mcfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/framework"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -28,6 +30,11 @@ var (
 	suiteCancel context.CancelFunc
 	suiteFwk    *framework.Framework
 	k8sClient   client.Client
+	// suiteFakeMC is exposed package-private so Sharded-using specs can
+	// re-script CheckSourceFunc / InspectSourceFunc per-test. PVC and
+	// per-node specs never invoke this — their CBMs don't dispatch
+	// through the sharded backend.
+	suiteFakeMC *mcfake.Client
 )
 
 var _ = ginkgo.BeforeSuite(func() {
@@ -52,17 +59,63 @@ var _ = ginkgo.BeforeSuite(func() {
 	ginkgo.By("seeding inferenceservice-config + benchmarkjob-config so the reconciler can read them at reconcile time")
 	gomega.Expect(util.SeedDefaultConfigMaps(suiteCtx, k8sClient)).To(gomega.Succeed())
 
-	ginkgo.By("registering BaseModel + InferenceService reconcilers")
+	ginkgo.By("registering BaseModel + InferenceService reconcilers with a cluster_cache provider")
+	// Single provider instance shared by both reconcilers:
+	//   - BaseModel reconciler uses the Client to drive Sharded CBMs
+	//     through CheckSource/InspectSource → Ready.
+	//   - ISVC reconciler uses Name (→ runtimeselector.Config.ModelCacheProvider)
+	//     and Config (→ InferenceServicesConfig.ModelCache, which
+	//     components/base.go reads to inject MODEL_CACHE_PROVIDER /
+	//     MODEL_CACHE_ENDPOINT / CLUSTER_CACHE_HEADLESS_SERVICE /
+	//     MODEL_CACHE_OPTIONS on Sharded pods).
+	// Endpoint is a benign URL so the env-injection assertions in the
+	// swap tests have something to check against.
+	suiteFakeMC = &mcfake.Client{}
+	setSuiteFakeMCDefaults()
+	provider := sharded.NewProvider(
+		sharded.ProviderClusterCache,
+		suiteFakeMC,
+		sharded.ProviderConfig{
+			Provider: sharded.ProviderClusterCache,
+			Endpoint: "http://cluster-cache.clustercache.svc.cluster.local:10090",
+		},
+	)
 	mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
-		// SetupBaseModel without WithOmeAgentConfig is fine here —
-		// the ISVC tests don't use PVC-backed models.
-		if err := components.SetupBaseModel(ctx, mgr); err != nil {
+		// SetupBaseModel without WithOmeAgentConfig is fine — PVC tests
+		// pre-bind their PVCs by hand and never invoke the metadata Job.
+		if err := components.SetupBaseModel(ctx, mgr,
+			components.WithModelCacheProvider(provider)); err != nil {
 			return err
 		}
-		return components.SetupInferenceService(ctx, mgr)
+		return components.SetupInferenceService(ctx, mgr,
+			components.WithISVCModelCacheProvider(provider))
 	}
 	gomega.Expect(suiteFwk.StartManager(suiteCtx, s.Cfg, mgrSetup)).To(gomega.Succeed())
 })
+
+// setSuiteFakeMCDefaults restores the suite's fake mc client to a
+// reachable+Llama-config-returning baseline. Idempotent. Sharded specs
+// call this in BeforeEach to undo any per-test scripting from prior
+// specs (Ginkgo specs in the same Ordered Describe share package state
+// since the fake is a suite-level singleton).
+func setSuiteFakeMCDefaults() {
+	suiteFakeMC.CheckSourceFunc = func(_ context.Context, _ sharded.Source) (*sharded.SourceStatus, error) {
+		return &sharded.SourceStatus{Reachable: true, Reason: "SourceReachable"}, nil
+	}
+	suiteFakeMC.InspectSourceFunc = func(_ context.Context, src sharded.Source) (*sharded.SourceInspection, error) {
+		return &sharded.SourceInspection{
+			Objects: []sharded.Object{
+				{Source: src, Path: src.URI + "/config.json"},
+			},
+			Metadata: sharded.ModelMetadataInputs{
+				// Minimal config.json the modelparser accepts.
+				// Architecture matches the runtime fixtures the swap
+				// tests build.
+				ConfigJSON: []byte(`{"model_type":"llama","architectures":["LlamaForCausalLM"]}`),
+			},
+		}, nil
+	}
+}
 
 var _ = ginkgo.AfterSuite(func() {
 	if suiteCancel != nil {

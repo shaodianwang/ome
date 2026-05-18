@@ -7,6 +7,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
 )
@@ -17,8 +18,9 @@ import (
 type InferenceServiceOption func(*inferenceServiceOpts)
 
 type inferenceServiceOpts struct {
-	deployConfig  *controllerconfig.DeployConfig
-	ingressConfig *controllerconfig.IngressConfig
+	deployConfig       *controllerconfig.DeployConfig
+	ingressConfig      *controllerconfig.IngressConfig
+	modelCacheProvider sharded.Provider
 }
 
 // WithDeployConfig overrides the default DeployConfig (which is
@@ -33,6 +35,23 @@ func WithDeployConfig(cfg *controllerconfig.DeployConfig) InferenceServiceOption
 // reach a non-existent ingress controller).
 func WithIngressConfig(cfg *controllerconfig.IngressConfig) InferenceServiceOption {
 	return func(o *inferenceServiceOpts) { o.ingressConfig = cfg }
+}
+
+// WithISVCModelCacheProvider sets the ISVC reconciler's ModelCache.
+// Distinct from the BaseModel option of the same role because both
+// reconcilers carry their own ModelCache field and the package's
+// existing WithModelCacheProvider is owned by basemodel.go.
+//
+// The provider's Name flows into runtimeselector.Config.ModelCacheProvider
+// (gating Sharded models to runtimes whose supportedModelFormats list
+// the matching modelCacheProviders), and its Config flows into the
+// InferenceServicesConfig.ModelCache that components/base.go reads to
+// inject MODEL_CACHE_PROVIDER / MODEL_CACHE_ENDPOINT /
+// CLUSTER_CACHE_HEADLESS_SERVICE / MODEL_CACHE_OPTIONS env vars on
+// Sharded pods. Suites that exercise Sharded ↔ PVC behaviour need this;
+// PVC-only suites can omit it.
+func WithISVCModelCacheProvider(p sharded.Provider) InferenceServiceOption {
+	return func(o *inferenceServiceOpts) { o.modelCacheProvider = p }
 }
 
 // SetupInferenceService registers the InferenceServiceReconciler with
@@ -76,11 +95,12 @@ func SetupInferenceService(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 	}
 
 	r := &v1beta1isvccontroller.InferenceServiceReconciler{
-		Client:    mgr.GetClient(),
-		Clientset: clientset,
-		Log:       ctrl.Log.WithName("InferenceService"),
-		Scheme:    mgr.GetScheme(),
-		Recorder:  mgr.GetEventRecorderFor("InferenceService"),
+		Client:     mgr.GetClient(),
+		Clientset:  clientset,
+		Log:        ctrl.Log.WithName("InferenceService"),
+		Scheme:     mgr.GetScheme(),
+		Recorder:   mgr.GetEventRecorderFor("InferenceService"),
+		ModelCache: cfg.modelCacheProvider,
 	}
 	if err := r.SetupWithManager(mgr, cfg.deployConfig, cfg.ingressConfig); err != nil {
 		return fmt.Errorf("SetupInferenceService: SetupWithManager: %w", err)
