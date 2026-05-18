@@ -19,6 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/rbac"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -46,6 +47,7 @@ func NewRouter(
 	routerSpec *v1beta1.RouterSpec,
 	runtime *v1beta1.ServingRuntimeSpec,
 	runtimeName string,
+	overlays []isvcutils.ResolvedOverlay,
 ) Component {
 	base := BaseComponentFields{
 		Client:                 client,
@@ -59,6 +61,7 @@ func NewRouter(
 		RuntimeName:            runtimeName,
 		StatusManager:          status.NewStatusReconciler(),
 		Log:                    ctrl.Log.WithName("RouterReconciler"),
+		Overlays:               overlays,
 	}
 
 	return &Router{

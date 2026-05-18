@@ -2738,3 +2738,73 @@ func TestInferenceService_KEDAAutoscalerIntegration(t *testing.T) {
 func boolPtr(b bool) *bool {
 	return &b
 }
+
+// TestValidateOverlays_StructuralChecks covers the schema-level overlay
+// rejections (duplicates, self-reference, env-name collision) that fire
+// before any apiserver lookups happen — no fake client needed.
+func TestValidateOverlays_StructuralChecks(t *testing.T) {
+	v := &InferenceServiceValidator{}
+	clusterKind := "ClusterBaseModel"
+	apiGroup := "ome.io"
+	tests := []struct {
+		name     string
+		overlays []v1beta1.ModelOverlayRef
+		wantErr  string // empty = expect success
+	}{
+		{
+			name:     "empty overlays accepted",
+			overlays: nil,
+		},
+		{
+			name: "single overlay accepted",
+			overlays: []v1beta1.ModelOverlayRef{
+				{Name: "foo-pvc", Kind: &clusterKind, APIGroup: &apiGroup},
+			},
+		},
+		{
+			name: "empty overlay name rejected",
+			overlays: []v1beta1.ModelOverlayRef{
+				{Name: "", Kind: &clusterKind, APIGroup: &apiGroup},
+			},
+			wantErr: "overlay name cannot be empty",
+		},
+		{
+			name: "overlay matching primary rejected",
+			overlays: []v1beta1.ModelOverlayRef{
+				{Name: "primary", Kind: &clusterKind, APIGroup: &apiGroup},
+			},
+			wantErr: "must not reference the primary model",
+		},
+		{
+			name: "duplicate overlay name rejected",
+			overlays: []v1beta1.ModelOverlayRef{
+				{Name: "foo-pvc"}, {Name: "foo-pvc"},
+			},
+			wantErr: "declared more than once",
+		},
+		{
+			name: "sanitized env-var collision rejected",
+			overlays: []v1beta1.ModelOverlayRef{
+				{Name: "foo-bar"}, {Name: "foo_bar"},
+			},
+			wantErr: "both sanitize to env var OVERLAY_FOO_BAR_MODEL_PATH",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isvc := &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Model: &v1beta1.ModelRef{Name: "primary", Overlays: tc.overlays},
+				},
+			}
+			err := v.validateOverlays(isvc)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}

@@ -36,6 +36,25 @@ type InferenceServiceStatus struct {
 	// +optional
 	// +listType=atomic
 	MigrationHistory []MigrationHistoryEntry `json:"migrationHistory,omitempty"`
+
+	// MountedOverlays lists overlays the controller attached to the
+	// pod spec. Skipped overlays (disabled, NotReady, NotFound) surface
+	// via the OverlaysReady condition.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	MountedOverlays []MountedOverlay `json:"mountedOverlays,omitempty"`
+}
+
+// MountedOverlay records one overlay the controller wired into the
+// current pod spec.
+type MountedOverlay struct {
+	Name   string `json:"name"`
+	EnvVar string `json:"envVar"`
+	// MountPath is empty for Sharded overlays (fetched at runtime).
+	// +optional
+	MountPath    string `json:"mountPath,omitempty"`
+	Distribution string `json:"distribution"`
 }
 
 // ComponentStatusSpec describes the state of the component
@@ -125,6 +144,10 @@ const (
 	RoutesReady apis.ConditionType = "RoutesReady"
 	// LatestDeploymentReady is set when underlying configurations for all components have reported readiness.
 	LatestDeploymentReady apis.ConditionType = "LatestDeploymentReady"
+	// OverlaysReady is True iff every declared overlay was attached.
+	// False with a reason when one or more were skipped; informational —
+	// the primary still drives the deployment.
+	OverlaysReady apis.ConditionType = "OverlaysReady"
 )
 
 // RouterConditionType represents a Router condition value

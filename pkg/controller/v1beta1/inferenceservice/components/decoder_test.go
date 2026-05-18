@@ -352,6 +352,7 @@ func TestDecoderReconcile(t *testing.T) {
 				nil, // supportedModelFormat
 				nil, // acceleratorClass
 				"",  // acceleratorClassName
+				nil, // overlays
 			)
 
 			// Reconcile
@@ -477,6 +478,7 @@ func TestDecoderReconcileObjectMeta(t *testing.T) {
 				nil, // supportedModelFormat
 				nil, // acceleratorClass
 				"",  // acceleratorClassName
+				nil, // overlays
 			).(*Decoder)
 
 			// Test reconcileObjectMeta
@@ -587,6 +589,7 @@ func TestDecoderWorkerPodSpec(t *testing.T) {
 				nil, // supportedModelFormat
 				nil, // acceleratorClass
 				"",  // acceleratorClassName
+				nil, // overlays
 			).(*Decoder)
 
 			podSpec, err := decoder.reconcileWorkerPodSpec(isvc, objectMeta)
@@ -665,6 +668,7 @@ func TestDecoderComponentConfig(t *testing.T) {
 				nil, // supportedModelFormat
 				nil, // acceleratorClass
 				"",  // acceleratorClassName
+				nil, // overlays
 			).(*Decoder)
 
 			// Test GetComponentType
@@ -818,6 +822,7 @@ func TestDecoderAcceleratorOverride(t *testing.T) {
 				nil, // supportedModelFormat
 				nil, // acceleratorClass
 				"",  // acceleratorClassName
+				nil, // overlays
 			)
 
 			// Test that decoder implements ComponentConfig interface
@@ -1191,6 +1196,7 @@ func TestDecoderResourceMerging(t *testing.T) {
 				nil, // supportedModelFormat
 				tt.acceleratorClass,
 				"test-accel-class",
+				nil, // overlays
 			).(*Decoder)
 
 			// Call reconcilePodSpec which internally calls MergeDecoderResources
@@ -1372,6 +1378,7 @@ func TestDecoderAffinityMerging(t *testing.T) {
 				nil, // supportedModelFormat
 				tt.acceleratorClass,
 				"test-accel-class",
+				nil, // overlays
 			).(*Decoder)
 
 			// Call reconcilePodSpec which internally calls UpdateDecoderAffinity

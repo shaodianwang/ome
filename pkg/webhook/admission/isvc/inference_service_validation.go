@@ -106,6 +106,10 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
+	if err := v.validateOverlays(isvc); err != nil {
+		return allWarnings, err
+	}
+
 	// Validate runtime and model resolution for new architecture
 	if isvc.Spec.Engine != nil {
 		warnings, err := v.validateRuntimeAndModelResolution(ctx, isvc)
@@ -137,6 +141,19 @@ func (v *InferenceServiceValidator) validateModelExists(ctx context.Context, isv
 		}
 		if err := validateClusterBaseModelPVCNamespace(spec, meta, isvc); err != nil {
 			return err
+		}
+		// Each overlay's BaseModel must also be reachable. Cross-namespace
+		// PVC rules apply per-overlay since each gets its own mount.
+		if isvc.Spec.Model != nil {
+			for _, ov := range isvc.Spec.Model.Overlays {
+				ovSpec, ovMeta, err := isvcutils.GetBaseModel(v.Client, ov.Name, isvc.Namespace)
+				if err != nil {
+					return fmt.Errorf("overlay %q not found in namespace %q: %w", ov.Name, isvc.Namespace, err)
+				}
+				if err := validateClusterBaseModelPVCNamespace(ovSpec, ovMeta, isvc); err != nil {
+					return fmt.Errorf("overlay %q: %w", ov.Name, err)
+				}
+			}
 		}
 	}
 
@@ -174,6 +191,40 @@ func validateClusterBaseModelPVCNamespace(spec *v1beta1.BaseModelSpec, meta *met
 			"Kubernetes does not allow pods to mount PVCs from another namespace. "+
 			"Either move the InferenceService to namespace %q or replicate the PVC into namespace %q.",
 		isvc.Spec.Model.Name, components.Namespace, isvc.Namespace, components.Namespace, isvc.Namespace)
+}
+
+// validateOverlays rejects overlay sets that would produce a broken
+// pod spec: duplicate Name, env-var name collision after sanitization
+// (foo-bar and foo_bar both → FOO_BAR), or self-reference.
+// Per-overlay existence + runtime compatibility live in
+// validateRuntimeAndModelResolution.
+func (v *InferenceServiceValidator) validateOverlays(isvc *v1beta1.InferenceService) error {
+	if isvc.Spec.Model == nil || len(isvc.Spec.Model.Overlays) == 0 {
+		return nil
+	}
+	primary := isvc.Spec.Model.Name
+	seenName := map[string]bool{}
+	seenEnv := map[string]string{} // sanitized → original name
+	for _, ov := range isvc.Spec.Model.Overlays {
+		if ov.Name == "" {
+			return fmt.Errorf("overlay name cannot be empty")
+		}
+		if ov.Name == primary {
+			return fmt.Errorf("overlay %q must not reference the primary model of the same kind/apiGroup", ov.Name)
+		}
+		if seenName[ov.Name] {
+			return fmt.Errorf("overlay %q is declared more than once", ov.Name)
+		}
+		seenName[ov.Name] = true
+
+		envName := isvcutils.OverlayEnvVarName(ov.Name)
+		if prev, ok := seenEnv[envName]; ok {
+			return fmt.Errorf("overlays %q and %q both sanitize to env var %s; rename one (hyphens and underscores collapse to the same form)",
+				prev, ov.Name, envName)
+		}
+		seenEnv[envName] = ov.Name
+	}
+	return nil
 }
 
 // validateRuntimeAndModelResolution validates runtime and model resolution for new architecture

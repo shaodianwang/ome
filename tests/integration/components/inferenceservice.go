@@ -38,18 +38,11 @@ func WithIngressConfig(cfg *controllerconfig.IngressConfig) InferenceServiceOpti
 }
 
 // WithISVCModelCacheProvider sets the ISVC reconciler's ModelCache.
-// Distinct from the BaseModel option of the same role because both
-// reconcilers carry their own ModelCache field and the package's
-// existing WithModelCacheProvider is owned by basemodel.go.
-//
-// The provider's Name flows into runtimeselector.Config.ModelCacheProvider
-// (gating Sharded models to runtimes whose supportedModelFormats list
-// the matching modelCacheProviders), and its Config flows into the
-// InferenceServicesConfig.ModelCache that components/base.go reads to
-// inject MODEL_CACHE_PROVIDER / MODEL_CACHE_ENDPOINT /
-// CLUSTER_CACHE_HEADLESS_SERVICE / MODEL_CACHE_OPTIONS env vars on
-// Sharded pods. Suites that exercise Sharded ↔ PVC behaviour need this;
-// PVC-only suites can omit it.
+// Distinct from basemodel's WithModelCacheProvider because both
+// reconcilers carry their own ModelCache field. Suites that exercise
+// Sharded models need this — the provider's Name flows into the
+// runtimeselector config, and its Config flows into the env-injection
+// path that components/base.go reads.
 func WithISVCModelCacheProvider(p sharded.Provider) InferenceServiceOption {
 	return func(o *inferenceServiceOpts) { o.modelCacheProvider = p }
 }

@@ -48,6 +48,7 @@ func NewDecoder(
 	supportedModelFormat *v1beta1.SupportedModelFormat,
 	acceleratorClass *v1beta1.AcceleratorClassSpec,
 	acceleratorClassName string,
+	overlays []isvcutils.ResolvedOverlay,
 ) Component {
 	base := BaseComponentFields{
 		Client:                 client,
@@ -64,6 +65,7 @@ func NewDecoder(
 		AcceleratorClass:       acceleratorClass,
 		AcceleratorClassName:   acceleratorClassName,
 		SupportedModelFormat:   supportedModelFormat,
+		Overlays:               overlays,
 	}
 
 	return &Decoder{

@@ -1,19 +1,16 @@
 package components
 
 import (
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/utils/storage"
 )
 
 // isPVCBaseModel reports whether b's referenced BaseModel is PVC-backed.
 func isPVCBaseModel(b *BaseComponentFields) bool {
-	if b == nil || b.BaseModel == nil || b.BaseModel.Storage == nil || b.BaseModel.Storage.StorageUri == nil {
+	if b == nil || b.BaseModel == nil {
 		return false
 	}
-	t, err := storage.GetStorageType(*b.BaseModel.Storage.StorageUri)
-	if err != nil {
-		return false
-	}
-	return t == storage.StorageTypePVC
+	return isPVCStorage(b.BaseModel.Storage)
 }
 
 // parsePVCComponents returns the parsed PVC URI for b's BaseModel. Returns
@@ -25,7 +22,27 @@ func parsePVCComponents(b *BaseComponentFields) *storage.PVCStorageComponents {
 	if !isPVCBaseModel(b) {
 		return nil
 	}
-	components, err := storage.ParsePVCStorageURI(*b.BaseModel.Storage.StorageUri)
+	return parsePVCStorage(b.BaseModel.Storage)
+}
+
+// isPVCStorage / parsePVCStorage: Storage-spec-level forms used by
+// overlay.go so it doesn't need a BaseComponentFields.
+func isPVCStorage(s *v1beta1.StorageSpec) bool {
+	if s == nil || s.StorageUri == nil {
+		return false
+	}
+	t, err := storage.GetStorageType(*s.StorageUri)
+	if err != nil {
+		return false
+	}
+	return t == storage.StorageTypePVC
+}
+
+func parsePVCStorage(s *v1beta1.StorageSpec) *storage.PVCStorageComponents {
+	if !isPVCStorage(s) {
+		return nil
+	}
+	components, err := storage.ParsePVCStorageURI(*s.StorageUri)
 	if err != nil {
 		return nil
 	}

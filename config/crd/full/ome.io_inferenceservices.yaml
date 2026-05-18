@@ -28794,6 +28794,26 @@ spec:
                   required:
                     - transitionStatus
                   type: object
+                mountedOverlays:
+                  items:
+                    properties:
+                      distribution:
+                        type: string
+                      envVar:
+                        type: string
+                      mountPath:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                      - distribution
+                      - envVar
+                      - name
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - name
+                  x-kubernetes-list-type: map
                 observedGeneration:
                   format: int64
                   type: integer

@@ -3,6 +3,7 @@ package inferenceservice
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ome-projects/ome/pkg/acceleratorclassselector"
@@ -232,6 +233,18 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
+	// Resolve overlays. Failures here (NotFound, disabled, sharded
+	// NotReady) become Skipped entries — only transient client errors
+	// abort the reconcile.
+	resolvedOverlays, err := isvcutils.ResolveOverlays(r.Client, isvc)
+	if err != nil {
+		r.Log.Error(err, "Failed to resolve overlays", "isvc", isvc.Name)
+		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "OverlayResolveError", err.Error())
+		return reconcile.Result{}, err
+	}
+	isvc.Status.MountedOverlays = components.MountedOverlaySummary(resolvedOverlays)
+	setOverlaysReadyCondition(isvc, resolvedOverlays)
+
 	// Step 2: Get runtime spec (either specified or auto-selected based on model)
 	var rt *v1beta1.ServingRuntimeSpec
 	var rtName string
@@ -322,6 +335,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			engineSupportedModelFormats,
 			engineAC,
 			engineAcName,
+			resolvedOverlays,
 		)
 		reconcilers = append(reconcilers, engineReconciler)
 	}
@@ -356,6 +370,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			decoderSupportedModelFormats,
 			decoderAC,
 			decoderAcName,
+			resolvedOverlays,
 		)
 		reconcilers = append(reconcilers, decoderReconciler)
 	}
@@ -374,6 +389,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			mergedRouter, // Using the merged router spec instead of isvc.Spec.Router
 			rt,
 			rtName,
+			resolvedOverlays,
 		)
 		reconcilers = append(reconcilers, routerReconciler)
 	}
@@ -723,4 +739,28 @@ func (r *InferenceServiceReconciler) setExternalServiceURL(ctx context.Context, 
 	}
 
 	return nil
+}
+
+// setOverlaysReadyCondition flips OverlaysReady=True when every
+// declared overlay was attached; False with reasons in the Message
+// when one or more were skipped. Informational — the primary still
+// drives the deployment regardless.
+func setOverlaysReadyCondition(isvc *v1beta1.InferenceService, overlays []isvcutils.ResolvedOverlay) {
+	if isvc.Spec.Model == nil || len(isvc.Spec.Model.Overlays) == 0 {
+		return
+	}
+	cond := knapis.Condition{
+		Type:               v1beta1.OverlaysReady,
+		LastTransitionTime: knapis.VolatileTime{Inner: metav1.Now()},
+	}
+	skipped := components.SkippedOverlayReasons(overlays)
+	if len(skipped) == 0 {
+		cond.Status = v1.ConditionTrue
+		cond.Reason = "AllOverlaysMounted"
+	} else {
+		cond.Status = v1.ConditionFalse
+		cond.Reason = "OverlaysSkipped"
+		cond.Message = strings.Join(skipped, "; ")
+	}
+	isvc.Status.SetConditions(knapis.Conditions{cond})
 }

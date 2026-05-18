@@ -49,6 +49,7 @@ func NewEngine(
 	supportedModelFormat *v1beta1.SupportedModelFormat,
 	acceleratorClass *v1beta1.AcceleratorClassSpec,
 	acceleratorClassName string,
+	overlays []isvcutils.ResolvedOverlay,
 ) Component {
 	base := BaseComponentFields{
 		Client:                 client,
@@ -65,6 +66,7 @@ func NewEngine(
 		AcceleratorClass:       acceleratorClass,
 		AcceleratorClassName:   acceleratorClassName,
 		SupportedModelFormat:   supportedModelFormat,
+		Overlays:               overlays,
 	}
 
 	return &Engine{

@@ -587,6 +587,7 @@ func TestEngineReconcile(t *testing.T) {
 				nil, // supportedModelFormat
 				nil, // acceleratorClass
 				"",  // acceleratorClassName
+				nil, // overlays
 			).(*Engine)
 
 			// Set fine-tuned fields if needed
@@ -768,6 +769,7 @@ func TestEngineReconcileObjectMeta(t *testing.T) {
 				nil, // supportedModelFormat
 				nil, // acceleratorClass
 				"",  // acceleratorClassName
+				nil, // overlays
 			).(*Engine)
 
 			// Set fine-tuned fields if needed
@@ -907,6 +909,7 @@ func TestEngineWorkerPodSpec(t *testing.T) {
 				nil, // supportedModelFormat
 				nil, // acceleratorClass
 				"",  // acceleratorClassName
+				nil, // overlays
 			).(*Engine)
 
 			podSpec, err := engine.reconcileWorkerPodSpec(isvc, objectMeta)
@@ -1104,6 +1107,7 @@ func TestEngineResourceMerging(t *testing.T) {
 				nil, // supportedModelFormat
 				tt.acceleratorClass,
 				"test-accel-class",
+				nil, // overlays
 			).(*Engine)
 
 			// Call reconcilePodSpec which internally calls MergeEngineResources
@@ -1285,6 +1289,7 @@ func TestEngineAffinityMerging(t *testing.T) {
 				nil, // supportedModelFormat
 				tt.acceleratorClass,
 				"test-accel-class",
+				nil, // overlays
 			).(*Engine)
 
 			// Call reconcilePodSpec which internally calls UpdateEngineAffinity

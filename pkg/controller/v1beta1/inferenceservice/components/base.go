@@ -44,6 +44,10 @@ type BaseComponentFields struct {
 	StatusManager                     *status.StatusReconciler
 	Log                               logr.Logger
 	SupportedModelFormat              *v1beta1.SupportedModelFormat
+	// Overlays is the resolver output for spec.model.overlays; nil when
+	// none declared. Consumed by UpdateVolumeMounts / UpdateEnvVariables
+	// / UpdatePodSpecVolumes.
+	Overlays []isvcutils.ResolvedOverlay
 }
 
 // Common methods as functions that operate on BaseComponentFields
@@ -114,6 +118,8 @@ func UpdateVolumeMounts(b *BaseComponentFields, isvc *v1beta1.InferenceService, 
 		}
 	}
 
+	AppendOverlayVolumeMounts(b, b.Overlays, container)
+
 	// Add fine-tuned serving volume mounts
 	if b.FineTunedServing {
 		defaultModelVolumeMount := corev1.VolumeMount{
@@ -157,11 +163,15 @@ func UpdateEnvVariables(b *BaseComponentFields, isvc *v1beta1.InferenceService, 
 				{Name: constants.ModelPathEnvVarKey, Value: modelPath},
 			})
 		}
-		if envVars, err := modelCacheEnvVars(b); err != nil {
+		// Cluster_cache envs fire when primary OR any overlay is Sharded
+		// (cross-distribution: PVC primary + Sharded overlay still needs
+		// the daemon client wired in).
+		if envVars, err := modelCacheEnvVarsForOverlays(b); err != nil {
 			b.Log.Error(err, "Failed to build model cache environment variables", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
 		} else if len(envVars) > 0 {
 			isvcutils.AppendEnvVarsIfNotExist(container, &envVars)
 		}
+		AppendOverlayEnvVars(b, b.Overlays, container)
 	} else {
 		// Fine-tuned serving - add vendor-specific environment variables
 		if b.BaseModel != nil && b.BaseModel.Vendor != nil {
@@ -297,6 +307,8 @@ func UpdatePodSpecVolumes(b *BaseComponentFields, isvc *v1beta1.InferenceService
 		}
 	}
 
+	AppendOverlayVolumes(b, b.Overlays, podSpec)
+
 	// Add empty model directory volume if required for fine-tuned serving
 	if isvcutils.IsEmptyModelDirVolumeRequired(objectMeta.Annotations) {
 		emptyModelDirVolume := corev1.Volume{
@@ -337,11 +349,23 @@ func modelPathEnvValue(b *BaseComponentFields, objectMeta *metav1.ObjectMeta) (s
 	return *b.BaseModel.Storage.Path, true
 }
 
-func modelCacheEnvVars(b *BaseComponentFields) ([]corev1.EnvVar, error) {
-	if b == nil || !isShardedModel(b.BaseModel) || b.InferenceServiceConfig == nil {
+// modelCacheEnvVarsForOverlays fires when primary OR any overlay is
+// Sharded — covers the cross-distribution PVC-primary + Sharded-overlay
+// case where the pod still needs the cluster_cache client.
+func modelCacheEnvVarsForOverlays(b *BaseComponentFields) ([]corev1.EnvVar, error) {
+	if b == nil {
 		return nil, nil
 	}
+	if isShardedModel(b.BaseModel) || AnyOverlayIsSharded(b.Overlays) {
+		return clusterCacheEnvVars(b)
+	}
+	return nil, nil
+}
 
+func clusterCacheEnvVars(b *BaseComponentFields) ([]corev1.EnvVar, error) {
+	if b.InferenceServiceConfig == nil {
+		return nil, nil
+	}
 	config := b.InferenceServiceConfig.ModelCache
 	provider := strings.TrimSpace(config.Provider)
 	if provider == "" {
@@ -370,7 +394,6 @@ func modelCacheEnvVars(b *BaseComponentFields) ([]corev1.EnvVar, error) {
 		return nil, err
 	}
 	envVars = append(envVars, corev1.EnvVar{Name: constants.ModelCacheOptionsEnvVarKey, Value: string(optionsJSON)})
-
 	return envVars, nil
 }
 

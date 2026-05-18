@@ -12,6 +12,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 )
 
 // ComponentBuilder helps build components with common configuration
@@ -28,6 +29,7 @@ type ComponentBuilder struct {
 	supportedModelFormat   *v1beta1.SupportedModelFormat
 	acceleratorClass       *v1beta1.AcceleratorClassSpec
 	acceleratorClassName   string
+	overlays               []isvcutils.ResolvedOverlay
 	logger                 logr.Logger
 }
 
@@ -86,6 +88,13 @@ func (b *ComponentBuilder) WithSupportedModelFormat(format *v1beta1.SupportedMod
 	return b
 }
 
+// WithOverlays threads the resolver output for spec.model.overlays
+// through to the built component's BaseComponentFields.
+func (b *ComponentBuilder) WithOverlays(overlays []isvcutils.ResolvedOverlay) *ComponentBuilder {
+	b.overlays = overlays
+	return b
+}
+
 // buildBaseFields creates the common base fields
 func (b *ComponentBuilder) buildBaseFields() BaseComponentFields {
 	return BaseComponentFields{
@@ -100,12 +109,12 @@ func (b *ComponentBuilder) buildBaseFields() BaseComponentFields {
 		RuntimeName:            b.runtimeName,
 		StatusManager:          status.NewStatusReconciler(),
 		Log:                    b.logger,
+		Overlays:               b.overlays,
 	}
 }
 
 // BuildEngine creates an Engine component
 func (b *ComponentBuilder) BuildEngine(spec *v1beta1.EngineSpec) Component {
-	// For now, using the existing Engine constructor
 	return NewEngine(
 		b.client,
 		b.clientset,
@@ -120,12 +129,12 @@ func (b *ComponentBuilder) BuildEngine(spec *v1beta1.EngineSpec) Component {
 		b.supportedModelFormat,
 		b.acceleratorClass,
 		b.acceleratorClassName,
+		b.overlays,
 	)
 }
 
 // BuildDecoder creates a Decoder component
 func (b *ComponentBuilder) BuildDecoder(spec *v1beta1.DecoderSpec) Component {
-	// For now, using the existing Decoder constructor
 	return NewDecoder(
 		b.client,
 		b.clientset,
@@ -140,12 +149,12 @@ func (b *ComponentBuilder) BuildDecoder(spec *v1beta1.DecoderSpec) Component {
 		b.supportedModelFormat,
 		b.acceleratorClass,
 		b.acceleratorClassName,
+		b.overlays,
 	)
 }
 
 // BuildRouter creates a Router component
 func (b *ComponentBuilder) BuildRouter(spec *v1beta1.RouterSpec) Component {
-	// For now, using the existing Router constructor (from router_v2.go)
 	return NewRouter(
 		b.client,
 		b.clientset,
@@ -157,6 +166,7 @@ func (b *ComponentBuilder) BuildRouter(spec *v1beta1.RouterSpec) Component {
 		spec,
 		b.runtime,
 		b.runtimeName,
+		b.overlays,
 	)
 }
 
@@ -209,6 +219,7 @@ func (f *ComponentBuilderFactory) CreateEngineComponent(
 	supportedModelFormat *v1beta1.SupportedModelFormat,
 	acceleratorClass *v1beta1.AcceleratorClassSpec,
 	acceleratorClassName string,
+	overlays []isvcutils.ResolvedOverlay,
 ) Component {
 	return f.NewBuilder().
 		WithDeploymentMode(deploymentMode).
@@ -216,6 +227,7 @@ func (f *ComponentBuilderFactory) CreateEngineComponent(
 		WithRuntime(runtime, runtimeName).
 		WithAcceleratorClass(acceleratorClass, acceleratorClassName).
 		WithSupportedModelFormat(supportedModelFormat).
+		WithOverlays(overlays).
 		BuildEngine(engineSpec)
 }
 
@@ -230,6 +242,7 @@ func (f *ComponentBuilderFactory) CreateDecoderComponent(
 	supportedModelFormat *v1beta1.SupportedModelFormat,
 	acceleratorClass *v1beta1.AcceleratorClassSpec,
 	acceleratorClassName string,
+	overlays []isvcutils.ResolvedOverlay,
 ) Component {
 	return f.NewBuilder().
 		WithDeploymentMode(deploymentMode).
@@ -237,6 +250,7 @@ func (f *ComponentBuilderFactory) CreateDecoderComponent(
 		WithRuntime(runtime, runtimeName).
 		WithAcceleratorClass(acceleratorClass, acceleratorClassName).
 		WithSupportedModelFormat(supportedModelFormat).
+		WithOverlays(overlays).
 		BuildDecoder(decoderSpec)
 }
 
@@ -248,10 +262,12 @@ func (f *ComponentBuilderFactory) CreateRouterComponent(
 	routerSpec *v1beta1.RouterSpec,
 	runtime *v1beta1.ServingRuntimeSpec,
 	runtimeName string,
+	overlays []isvcutils.ResolvedOverlay,
 ) Component {
 	return f.NewBuilder().
 		WithDeploymentMode(deploymentMode).
 		WithBaseModel(baseModel, baseModelMeta).
 		WithRuntime(runtime, runtimeName).
+		WithOverlays(overlays).
 		BuildRouter(routerSpec)
 }
