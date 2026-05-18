@@ -24652,6 +24652,24 @@ spec:
                       type: string
                     name:
                       type: string
+                    overlays:
+                      items:
+                        properties:
+                          apiGroup:
+                            default: ome.io
+                            type: string
+                          kind:
+                            default: ClusterBaseModel
+                            type: string
+                          name:
+                            type: string
+                        required:
+                          - name
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - name
+                      x-kubernetes-list-type: map
                   required:
                     - name
                   type: object

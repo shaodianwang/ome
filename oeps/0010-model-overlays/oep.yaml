@@ -1,0 +1,23 @@
+title: ISVC Model Overlays
+oep-number: 0010
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-05-18
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "/oeps/0009-ome-cluster-cache-integration"
+
+# The target maturity stage in the current dev cycle.
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"

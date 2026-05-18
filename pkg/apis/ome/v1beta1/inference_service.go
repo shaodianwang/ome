@@ -290,6 +290,55 @@ type ModelRef struct {
 	// +optional
 	// +listType=atomic
 	FineTunedWeights []string `json:"fineTunedWeights,omitempty"`
+
+	// Overlays declares additional BaseModels whose storage is attached
+	// to every serving pod alongside the primary model. Each overlay is
+	// mounted (PVC, PerNode) or addressable via env var (Sharded) at a
+	// deterministic location the runner container can consult.
+	// Selection between primary and overlays is performed by the runner
+	// container at request time, not by OME.
+	//
+	// Each overlay produces:
+	//   - For PVC / PerNode distributions: a Volume + VolumeMount at
+	//     /opt/ml/model-overlays/<name>, ReadOnly.
+	//   - For Sharded distribution: no mount; runner uses the same
+	//     cluster_cache client wired in for the primary.
+	//   - For every overlay: an env var named
+	//     OVERLAY_<SANITIZED_NAME>_MODEL_PATH on every container that
+	//     receives the primary's MODEL_PATH. SANITIZED_NAME is the
+	//     overlay's Name uppercased with hyphens replaced by underscores.
+	//
+	// Disabled or NotReady overlays are silently omitted from the pod
+	// spec; the primary continues to drive the deployment.
+	//
+	// See OEP-0010 for the full design.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Overlays []ModelOverlayRef `json:"overlays,omitempty"`
+}
+
+// ModelOverlayRef references a BaseModel/ClusterBaseModel attached to a
+// serving pod in addition to the primary model. Intentionally narrower
+// than ModelRef:
+//   - no nested Overlays field — overlays cannot themselves declare
+//     overlays, enforced by the type system rather than admission
+//   - no FineTunedWeights — the overlay is whichever BaseModel it
+//     points at; weight composition is a separate concern that lives on
+//     the primary ModelRef
+type ModelOverlayRef struct {
+	// Name of the overlay BaseModel/ClusterBaseModel.
+	Name string `json:"name"`
+
+	// Kind of the overlay being referenced.
+	// Defaults to ClusterBaseModel.
+	// +kubebuilder:default="ClusterBaseModel"
+	Kind *string `json:"kind,omitempty"`
+
+	// APIGroup of the resource being referenced.
+	// Defaults to `ome.io`.
+	// +kubebuilder:default="ome.io"
+	APIGroup *string `json:"apiGroup,omitempty"`
 }
 
 type ServingRuntimeRef struct {
