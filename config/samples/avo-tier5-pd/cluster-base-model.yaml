@@ -1,0 +1,11 @@
+apiVersion: ome.io/v1beta1
+kind: ClusterBaseModel
+metadata:
+  name: avo-tier5-pd-test
+spec:
+  distribution: Sharded
+  vendor: msl
+  displayName: msl.avo-tier5-pd-test
+  disabled: false
+  storage:
+    storageUri: manifold://fair_llms_prod/tree/vllm_test/avo_integ_tier5_42b_b1_128k_rc3p2_agent_reasoning_joint-dznkgwsc/checkpoint_0000260/checkpoint_ptq_config_final

@@ -1,0 +1,19 @@
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: avo-tier5-pd-test
+  namespace: playground
+spec:
+  model:
+    name: avo-tier5-pd-test
+  runtime:
+    name: srt-llama4x-nvfp4-pd-cc-test
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+  decoder:
+    minReplicas: 1
+    maxReplicas: 1
+  router:
+    minReplicas: 1
+    maxReplicas: 1
