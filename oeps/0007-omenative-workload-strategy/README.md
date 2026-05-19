@@ -683,13 +683,26 @@ controller-owned drain or surge migration semantics.
 
 ### Restart Policy
 
-A typed enum field on each Component spec:
+A typed enum field on each Component's `omenative:` sub-block:
 
 ```yaml
 spec:
   engine:
-    restartPolicy: RecreateInstanceOnPodRestart
+    omenative:
+      restartPolicy: RecreateInstanceOnPodRestart
 ```
+
+> **Why nested under `omenative:`?** `EngineSpec` / `DecoderSpec` /
+> `RouterSpec` already inline `corev1.PodSpec` via Go's `json:",inline"`,
+> which exposes the kubelet-facing `restartPolicy` (values
+> `Always`/`OnFailure`/`Never`) at the same level. Adding the OMENative
+> Instance-group restart policy as a flat sibling would shadow that
+> field. The two policies have different scopes (container-restart vs.
+> Instance-group-restart) and legitimately need to coexist on the same
+> EngineSpec, so OMENative spec fields are nested under a single
+> `omenative:` sub-block. The nesting also mirrors the status side
+> (`status.components.<component>.omenative.{...}`) and signals
+> "applies only when `ome.io/deploymentMode: OMENative`".
 
 Three values:
 
@@ -712,7 +725,7 @@ Three values:
 **Implementation**: the OMENative pod watch watches pods with
 `ome.io/managed-by: OMENative`. On a pod failure event:
 
-- Read the Component's `restartPolicy` from InferenceService spec.
+- Read the Component's `omenative.restartPolicy` from InferenceService spec.
 - If `RecreateInstanceOnPodRestart`: enumerate all live pods with the
   same `ome.io/instance-index`, patch `ome.io/serving=False` on the
   still-live siblings, wait for drain, then delete and recreate the
@@ -728,19 +741,20 @@ window.
 
 ### Update Strategy (In-Place and Recreate)
 
-Per-Component field. Default `InPlaceIfPossible`.
+Per-Component field nested under `omenative:`. Default `InPlaceIfPossible`.
 
 ```yaml
 spec:
   engine:
-    updateStrategy:
-      type: InPlaceIfPossible       # RecreatePod / InPlaceIfPossible / InPlaceOnly
-      rollingUpdate:
-        partition: 0                 # 0 = update all; N = canary hold-back
-        maxUnavailable: 1            # concurrent Instances not-Ready during rollout
-      inPlaceUpdateStrategy:
-        gracePeriodSeconds: 30
-        markNotReadyDuringLifecycle: true
+    omenative:
+      updateStrategy:
+        type: InPlaceIfPossible       # RecreatePod / InPlaceIfPossible / InPlaceOnly
+        rollingUpdate:
+          partition: 0                 # 0 = update all; N = canary hold-back
+          maxUnavailable: 1            # concurrent Instances not-Ready during rollout
+        inPlaceUpdateStrategy:
+          gracePeriodSeconds: 30
+          markNotReadyDuringLifecycle: true
 ```
 
 **Three modes:**
@@ -887,13 +901,14 @@ declaring additional env via `RunnerSpec.Env` are merged.
 
 ### Readiness and Warmup
 
-Per-Component fields:
+Per-Component fields nested under `omenative:`:
 
 ```yaml
 spec:
   engine:
-    readyPolicy: AllPodReady         # AllPodReady | None
-    instanceReadyTimeout: 30m        # OMENative's wait ceiling
+    omenative:
+      readyPolicy: AllPodReady         # AllPodReady | None
+      instanceReadyTimeout: 30m        # OMENative's wait ceiling
 ```
 
 **Runtime-native readiness probe is authoritative**. The inference
@@ -1061,7 +1076,7 @@ else:
     reject             (Reason: InsufficientCapacity)
 ```
 
-Override via `InferenceService.Spec.<component>.migrationPolicy.mode`:
+Override via `InferenceService.Spec.<component>.omenative.migrationPolicy.mode`:
 `auto` (default), `surge`, `never`.
 
 In v1, `auto` resolves to `surge` or rejection. There is no rolling
@@ -1535,8 +1550,8 @@ gang scheduling. Fake GPU device plugin for resource accounting.
 8. Scale up/down: change MinReplicas. Verify new Instance pod sets
    created/deleted.
 9. Group restart on pod failure: kill a worker pod with
-   `restartPolicy: RecreateInstanceOnPodRestart`. Verify all pods of
-   the Instance are restarted.
+   `omenative.restartPolicy: RecreateInstanceOnPodRestart`. Verify all
+   pods of the Instance are restarted.
 10. Migration (surge mode). Verify surge Instance with fresh index is
     created, Ready, old Instance drained and terminated, sparse
     indices are tolerated, and `migrationHistory` records

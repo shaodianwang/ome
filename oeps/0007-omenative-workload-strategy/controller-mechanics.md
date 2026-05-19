@@ -1996,10 +1996,10 @@ CRD schema change that clients must learn. The cost of reserving the
 field in v1 is zero; the cost of adding it later is non-trivial.
 
 **Proposed resolution for v1.** Add
-`updateStrategy.rollingUpdate.partition` (type `*intstr.IntOrString`)
-to the Component spec surface. The v1 controller may reject non-zero
-values with `PartitionNotSupportedInV1`; later versions activate it
-without an API break.
+`omenative.updateStrategy.rollingUpdate.partition` (type
+`*intstr.IntOrString`) to the Component spec surface. The v1 controller
+may reject non-zero values with `PartitionNotSupportedInV1`; later
+versions activate it without an API break.
 
 ### B.3 Clarify `ome.io/serving` Semantics Before v1 Ships
 
