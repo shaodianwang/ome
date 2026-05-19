@@ -63,9 +63,12 @@ func ReconcileBaseModel(cl client.Client, isvc *v1beta1.InferenceService) (*v1be
 
 // ReconcileBaseModelWithStatus retrieves and validates the base model for an
 // InferenceService and also returns the model status for readiness checks.
+// Returns (nil, nil, nil, nil) when the ISVC has no model reference — the
+// lean path where the operator specifies runtime directly and skips
+// model-parsing/auto-selection.
 func ReconcileBaseModelWithStatus(cl client.Client, isvc *v1beta1.InferenceService) (*v1beta1.BaseModelSpec, *metav1.ObjectMeta, *v1beta1.ModelStatusSpec, error) {
 	if isvc.Spec.Model == nil || isvc.Spec.Model.Name == "" {
-		return nil, nil, nil, goerrors.New("model reference is required")
+		return nil, nil, nil, nil
 	}
 
 	baseModel, baseModelMeta, baseModelStatus, err := GetBaseModelWithStatus(cl, isvc.Spec.Model.Name, isvc.Namespace)

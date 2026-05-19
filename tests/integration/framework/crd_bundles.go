@@ -4,6 +4,7 @@ import (
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -90,5 +91,19 @@ var GatewayAPI = OptionalCRDBundle{
 	CRDDir: "gateway-api",
 	Schemes: []func(*apiruntime.Scheme) error{
 		gatewayapiv1.Install,
+	},
+}
+
+// PrometheusOperator bundle: monitoring.coreos.com/v1.PodMonitor.
+// Required for the ISVC RawDeployment path (added in #158) which
+// always reconciles a PodMonitor via owner-ref + Create. The
+// prometheus-operator Go module ships the types but not the CRD
+// YAMLs, so the YAML in dep-crds/prometheus-operator/ is hand-vendored
+// (same pattern as envoy-gateway). See that directory's SOURCE file.
+var PrometheusOperator = OptionalCRDBundle{
+	Name:   "prometheus-operator",
+	CRDDir: "prometheus-operator",
+	Schemes: []func(*apiruntime.Scheme) error{
+		monitoringv1.AddToScheme,
 	},
 }

@@ -78,7 +78,9 @@ func TestInferenceServiceValidator_ValidateCreate(t *testing.T) {
 					Name:      "test-isvc",
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
+				},
 			},
 			wantErr: false,
 		},
@@ -89,7 +91,9 @@ func TestInferenceServiceValidator_ValidateCreate(t *testing.T) {
 					Name:      "Test-ISVC", // Invalid name format
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
+				},
 			},
 			wantErr: true,
 		},
@@ -124,14 +128,18 @@ func TestInferenceServiceValidator_ValidateUpdate(t *testing.T) {
 					Name:      "test-isvc",
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
+				},
 			},
 			newIsvc: &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-isvc",
 					Namespace: "default",
 				},
-				Spec: v1beta1.InferenceServiceSpec{},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
+				},
 			},
 			wantErr: false,
 		},
@@ -540,6 +548,7 @@ func TestInferenceService_OMENativeEngineDecoderCoupling(t *testing.T) {
 			isvc: &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
 					Engine: &v1beta1.EngineSpec{
 						ComponentExtensionSpec: annot(string(constants.OMENative)),
 						Runner:                 withRunner,
@@ -615,6 +624,7 @@ func TestInferenceService_LeaderWorkerPairing(t *testing.T) {
 			isvc: &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
 					Engine: &v1beta1.EngineSpec{
 						Runner: withRunner,
 						Leader: &v1beta1.LeaderSpec{},
@@ -1249,7 +1259,35 @@ func TestValidateInferenceService_ComprehensiveErrorPaths(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "model reference is required",
+			errMsg:  "at least one of spec.model or spec.runtime must be set",
+		},
+		{
+			// Lean path: model omitted, runtime named explicitly. The
+			// validator must accept this — model parsing + runtime
+			// auto-select is skipped by the controller, and the runtime
+			// is fetched as-is.
+			name: "no model + runtime named (lean path) - passes",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-lean", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "test-runtime"},
+					Engine:  &v1beta1.EngineSpec{},
+				},
+			},
+		},
+		{
+			// Lean path failure: only spec.runtime.name=="" — caught by
+			// the same Model-OR-Runtime rule.
+			name: "no model + empty runtime name should fail",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-lean-bad", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: ""},
+					Engine:  &v1beta1.EngineSpec{},
+				},
+			},
+			wantErr: true,
+			errMsg:  "at least one of spec.model or spec.runtime must be set",
 		},
 	}
 

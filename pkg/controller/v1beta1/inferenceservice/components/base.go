@@ -52,6 +52,9 @@ type BaseComponentFields struct {
 
 // ReconcileFineTunedWeights reconciles fine-tuned weights for any component
 func ReconcileFineTunedWeights(b *BaseComponentFields, isvc *v1beta1.InferenceService) error {
+	if isvc.Spec.Model == nil {
+		return nil
+	}
 	numOfFineTunedWeights := len(isvc.Spec.Model.FineTunedWeights)
 	if numOfFineTunedWeights == 0 {
 		return nil

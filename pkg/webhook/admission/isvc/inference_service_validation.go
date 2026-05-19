@@ -148,6 +148,16 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
+	// At least one of spec.model or spec.runtime must be set. When
+	// spec.model is omitted (lean path), spec.runtime must name the
+	// runtime to use — the controller skips model-fetch and runtime
+	// auto-selection in that mode.
+	modelSet := isvc.Spec.Model != nil && isvc.Spec.Model.Name != ""
+	runtimeSet := isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != ""
+	if !modelSet && !runtimeSet {
+		return allWarnings, fmt.Errorf("at least one of spec.model or spec.runtime must be set")
+	}
+
 	// Validate that referenced model exists (for new Engine architecture using isvc.Spec.Model)
 	if err := v.validateModelExists(ctx, isvc); err != nil {
 		return allWarnings, err

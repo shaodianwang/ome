@@ -131,3 +131,8 @@ tests/integration/dep-crds/*/
 # hand-authored stubs and stay tracked. See its SOURCE file.
 !tests/integration/dep-crds/envoy-gateway/
 !tests/integration/dep-crds/envoy-gateway/**
+# Prometheus Operator ships Go types in a subpackage of go.mod but the
+# CRD YAMLs live in the parent repo (not Go-importable). Hand-vendor
+# the PodMonitor CRD stub for envtest. See its SOURCE file.
+!tests/integration/dep-crds/prometheus-operator/
+!tests/integration/dep-crds/prometheus-operator/**

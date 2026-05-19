@@ -322,7 +322,11 @@ func getModelName(model *v1beta1.BaseModelSpec) string {
 // if userSpecifiedRuntime is true, the function will consider all supportedModelFormats in the runtime
 // if userSpecifiedRuntime is false, the function will only consider supportedModelFormats with autoSelect enabled
 func (s *defaultSelector) GetSupportedModelFormat(ctx context.Context, runtime *v1beta1.ServingRuntimeSpec, model *v1beta1.BaseModelSpec, userSpecifiedRuntime bool) *v1beta1.SupportedModelFormat {
-	if runtime.SupportedModelFormats == nil {
+	// Lean path (no model): no format to match against; downstream
+	// components treat a nil SupportedModelFormat as "no model-format
+	// metadata available", which is the right shape for runtime-only
+	// ISVCs that don't use model parsing.
+	if model == nil || runtime == nil || runtime.SupportedModelFormats == nil {
 		return nil
 	}
 	maxScore := int64(0)

@@ -223,7 +223,10 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "ModelReconcileError", err.Error())
 		return reconcile.Result{}, err
 	}
-	if isvcutils.IsShardedBaseModel(baseModel) {
+	// Lean path: no spec.model. Operator must specify spec.runtime
+	// directly; we skip model fetch, sharded-readiness gating, overlay
+	// resolution, and runtime-vs-model validation.
+	if baseModel != nil && isvcutils.IsShardedBaseModel(baseModel) {
 		ready, message := isvcutils.ShardedBaseModelReady(baseModelStatus, baseModelMeta.Generation)
 		if !ready {
 			if message == "" {
@@ -250,23 +253,26 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	isvc.Status.MountedOverlays = components.MountedOverlaySummary(resolvedOverlays)
 	setOverlaysReadyCondition(isvc, resolvedOverlays)
 
-	// Step 2: Get runtime spec (either specified or auto-selected based on model)
+	// Step 2: Get runtime spec.
+	//   - runtime explicit  → fetch by name; validate against model only
+	//     if model is present.
+	//   - runtime omitted  → auto-select from model; requires a model.
 	var rt *v1beta1.ServingRuntimeSpec
 	var rtName string
 	userSpecifiedRuntime := false
 
-	if isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != "" {
-		// Validate specified runtime
+	switch {
+	case isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != "":
 		rtName = isvc.Spec.Runtime.Name
 		userSpecifiedRuntime = true
-		if err := r.RuntimeSelector.ValidateRuntime(ctx, rtName, baseModel, isvc); err != nil {
-			r.Log.Error(err, "Runtime validation failed", "runtime", rtName, "model", isvc.Spec.Model.Name)
-			r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimeValidationError",
-				"Runtime %s does not support model %s: %v", rtName, isvc.Spec.Model.Name, err)
-			return reconcile.Result{}, err
+		if baseModel != nil {
+			if err := r.RuntimeSelector.ValidateRuntime(ctx, rtName, baseModel, isvc); err != nil {
+				r.Log.Error(err, "Runtime validation failed", "runtime", rtName, "model", isvc.Spec.Model.Name)
+				r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimeValidationError",
+					"Runtime %s does not support model %s: %v", rtName, isvc.Spec.Model.Name, err)
+				return reconcile.Result{}, err
+			}
 		}
-
-		// Get the runtime spec using selector
 		rtSpec, _, err := r.RuntimeSelector.GetRuntime(ctx, rtName, isvc.Namespace)
 		if err != nil {
 			r.Log.Error(err, "Failed to get runtime spec", "runtime", rtName)
@@ -274,8 +280,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return reconcile.Result{}, err
 		}
 		rt = rtSpec
-	} else {
-		// Auto-select runtime
+	case baseModel != nil:
 		selection, err := r.RuntimeSelector.SelectRuntime(ctx, baseModel, isvc)
 		if err != nil {
 			r.Log.Error(err, "Failed to auto-select runtime", "model", isvc.Spec.Model.Name)
@@ -286,6 +291,13 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		rt = selection.Spec
 		rtName = selection.Name
 		r.Log.Info("Auto-selected runtime", "runtime", rtName, "model", isvc.Spec.Model.Name)
+	default:
+		// No model, no runtime — webhook should have caught this; defensive
+		// guard for direct client writes that bypass admission.
+		err := fmt.Errorf("InferenceService must specify spec.runtime when spec.model is omitted")
+		r.Log.Error(err, "Cannot reconcile", "Name", isvc.Name)
+		r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimeSelectionError", err.Error())
+		return reconcile.Result{}, err
 	}
 
 	// Step 3: Merge rt and isvc specs to get final engine, decoder, and router specs

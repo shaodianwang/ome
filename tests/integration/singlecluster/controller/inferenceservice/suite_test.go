@@ -59,6 +59,11 @@ var _ = ginkgo.BeforeSuite(func() {
 			// that apply HTTPRoute objects produced by the builder
 			// can read them back from envtest.
 			framework.GatewayAPI,
+			// PrometheusOperator registers PodMonitor (scheme + CRD).
+			// The ISVC RawDeployment path unconditionally reconciles a
+			// PodMonitor since #158 — without this the SetControllerReference
+			// call fails with "no kind is registered for the type v1.PodMonitor".
+			framework.PrometheusOperator,
 		},
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
