@@ -3,6 +3,7 @@ package framework
 import (
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 
+	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
@@ -37,5 +38,19 @@ var LWS = OptionalCRDBundle{
 	CRDDir: "lws",
 	Schemes: []func(*apiruntime.Scheme) error{
 		lwsv1.AddToScheme,
+	},
+}
+
+// KEDA bundle: keda.sh/v1alpha1.{ScaledObject,ScaledJob,
+// TriggerAuthentication,ClusterTriggerAuthentication}. Required for
+// InferenceService autoscalerClass=keda (or default-when-no-class-set
+// per shouldCreateScaledObject in pkg/controller/.../keda/keda_reconciler.go).
+// The ISVC reconciler creates ScaledObject; the other 3 CRDs come
+// along because keda's `make manifests` emits them as one bundle.
+var KEDA = OptionalCRDBundle{
+	Name:   "keda",
+	CRDDir: "keda",
+	Schemes: []func(*apiruntime.Scheme) error{
+		kedav1.AddToScheme,
 	},
 }

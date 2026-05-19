@@ -48,6 +48,7 @@ var _ = ginkgo.BeforeSuite(func() {
 		OptionalCRDs: []framework.OptionalCRDBundle{
 			framework.Knative,
 			framework.LWS,
+			framework.KEDA,
 		},
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())

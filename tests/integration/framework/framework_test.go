@@ -90,6 +90,19 @@ var _ = ginkgo.Describe("Framework optional CRD bundles", func() {
 		// If the CRD is missing or the scheme fails to register, NewSuite
 		// would have errored already.
 	})
+
+	ginkgo.It("KEDA bundle: CRDs install and the scheme registers", func() {
+		// Same smoke-shape as the Knative case: if the keda.sh CRDs
+		// failed to install or kedav1.AddToScheme errored, NewSuite
+		// would have errored above. Keeps framework_test independent
+		// of keda's typed Go API (which lives behind a separate
+		// import path and would couple this package to it).
+		s, err := framework.NewSuite(&framework.Framework{
+			OptionalCRDs: []framework.OptionalCRDBundle{framework.KEDA},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		ginkgo.DeferCleanup(func() { _ = s.Fwk.Teardown() })
+	})
 })
 
 var _ = ginkgo.Describe("Framework StartManager / StopManager", func() {

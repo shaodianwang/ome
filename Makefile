@@ -548,7 +548,7 @@ coverage: ## Show coverage summary and enforce threshold
 		exit 1; \
 	fi
 .PHONY: dep-crds
-dep-crds: knative-crds lws-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
+dep-crds: knative-crds lws-crds keda-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
 
 DEP_CRDS_DIR := tests/integration/dep-crds
 
@@ -576,6 +576,14 @@ lws-crds: ## Vendor sigs.k8s.io/lws CRDs (leaderworkerset.x-k8s.io)
 	if [ -z "$$LWS_DIR" ]; then echo "sigs.k8s.io/lws not in go.mod; skipping lws-crds" >&2; exit 0; fi ; \
 	cp -f "$$LWS_DIR/config/crd/bases/"*.yaml $(DEP_CRDS_DIR)/lws/ ; \
 	echo "✅ Vendored LWS CRDs to $(DEP_CRDS_DIR)/lws/"
+
+.PHONY: keda-crds
+keda-crds: ## Vendor github.com/kedacore/keda CRDs (keda.sh — ScaledObject, ScaledJob, TriggerAuthentication, ClusterTriggerAuthentication)
+	@mkdir -p $(DEP_CRDS_DIR)/keda
+	@KEDA_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" github.com/kedacore/keda/v2 2>/dev/null) ; \
+	if [ -z "$$KEDA_DIR" ]; then echo "github.com/kedacore/keda/v2 not in go.mod; skipping keda-crds" >&2; exit 0; fi ; \
+	cp -f "$$KEDA_DIR/config/crd/bases/"*.yaml $(DEP_CRDS_DIR)/keda/ ; \
+	echo "✅ Vendored KEDA CRDs to $(DEP_CRDS_DIR)/keda/"
 
 .PHONY: integration-test
 integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tests
