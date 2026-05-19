@@ -290,3 +290,160 @@ type MigrationHistoryEntry struct {
 	// +optional
 	OutcomeReason string `json:"outcomeReason,omitempty"`
 }
+
+// OMENativeComponentSpec groups OMENative-specific lifecycle policies on a
+// Component. Embedded via ComponentExtensionSpec.OMENative; all fields are
+// no-ops unless the Component is annotated ome.io/deploymentMode=OMENative.
+// Nested under `omenative:` so the fields don't collide with corev1.PodSpec
+// fields (notably restartPolicy) that are also inlined into EngineSpec /
+// DecoderSpec / RouterSpec.
+type OMENativeComponentSpec struct {
+	// RestartPolicy controls what OMENative does when a managed pod fails.
+	// Distinct from the inlined corev1.PodSpec.RestartPolicy: that one tells
+	// kubelet whether to restart a container in-place; this one tells the
+	// OMENative controller whether to recreate the whole Instance.
+	// +optional
+	RestartPolicy *OMENativeRestartPolicy `json:"restartPolicy,omitempty"`
+
+	// UpdateStrategy controls how OMENative rolls template changes across
+	// the Component's Instances.
+	// +optional
+	UpdateStrategy *OMENativeUpdateStrategy `json:"updateStrategy,omitempty"`
+
+	// ReadyPolicy controls how Instance-level readiness is aggregated from
+	// the underlying pods.
+	// +optional
+	ReadyPolicy *OMENativeReadyPolicy `json:"readyPolicy,omitempty"`
+
+	// InstanceReadyTimeout is OMENative's upper bound for waiting on a
+	// newly-created Instance to become Ready (during migration, rollout,
+	// or initial creation).
+	// +optional
+	InstanceReadyTimeout *metav1.Duration `json:"instanceReadyTimeout,omitempty"`
+
+	// MigrationPolicy controls whether and how OMENative honors a migration
+	// request annotation for this Component.
+	// +optional
+	MigrationPolicy *OMENativeMigrationPolicy `json:"migrationPolicy,omitempty"`
+}
+
+// OMENativeRestartPolicy controls what OMENative does when a managed pod
+// fails. Applies only when the Component is annotated
+// ome.io/deploymentMode=OMENative.
+// +kubebuilder:validation:Enum=None;RecreateInstanceOnPodRestart;RecreateISVCOnPodRestart
+type OMENativeRestartPolicy string
+
+const (
+	// OMENativeRestartPolicyNone restarts only the failed pod; OMENative
+	// does not trigger cross-pod coordination.
+	OMENativeRestartPolicyNone OMENativeRestartPolicy = "None"
+	// OMENativeRestartPolicyRecreateInstance drains, deletes, and recreates
+	// every pod in the failed pod's Instance. Default for multi-pod Instances.
+	OMENativeRestartPolicyRecreateInstance OMENativeRestartPolicy = "RecreateInstanceOnPodRestart"
+	// OMENativeRestartPolicyRecreateISVC cascades the recreate across every
+	// OMENative-managed Component-Instance in the InferenceService. Reserved
+	// for workloads with cross-Component state coupling.
+	OMENativeRestartPolicyRecreateISVC OMENativeRestartPolicy = "RecreateISVCOnPodRestart"
+)
+
+// OMENativeUpdateStrategy controls how OMENative rolls template changes
+// across an Instance's pods.
+type OMENativeUpdateStrategy struct {
+	// Type selects the rollout mechanism. Defaults to InPlaceIfPossible.
+	// +optional
+	Type OMENativeUpdateStrategyType `json:"type,omitempty"`
+
+	// RollingUpdate paces the rollout across Instances of the Component.
+	// +optional
+	RollingUpdate *OMENativeRollingUpdate `json:"rollingUpdate,omitempty"`
+
+	// InPlaceUpdateStrategy tunes the per-pod in-place update sequence.
+	// Ignored when Type is RecreatePod.
+	// +optional
+	InPlaceUpdateStrategy *OMENativeInPlaceUpdateStrategy `json:"inPlaceUpdateStrategy,omitempty"`
+}
+
+// OMENativeUpdateStrategyType selects the rollout mechanism.
+// +kubebuilder:validation:Enum=RecreatePod;InPlaceIfPossible;InPlaceOnly
+type OMENativeUpdateStrategyType string
+
+const (
+	// OMENativeUpdateStrategyRecreatePod always deletes pods and recreates them.
+	OMENativeUpdateStrategyRecreatePod OMENativeUpdateStrategyType = "RecreatePod"
+	// OMENativeUpdateStrategyInPlaceIfPossible tries in-place first; falls
+	// back to recreate if the template change is not in-place-capable.
+	// Default.
+	OMENativeUpdateStrategyInPlaceIfPossible OMENativeUpdateStrategyType = "InPlaceIfPossible"
+	// OMENativeUpdateStrategyInPlaceOnly rejects updates that cannot be
+	// applied in-place.
+	OMENativeUpdateStrategyInPlaceOnly OMENativeUpdateStrategyType = "InPlaceOnly"
+)
+
+// OMENativeRollingUpdate paces rollout across Instances of one Component.
+type OMENativeRollingUpdate struct {
+	// Partition holds back updates for Instances whose index is < Partition.
+	// 0 (the default) updates all Instances. Used for canary holds.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Partition *int32 `json:"partition,omitempty"`
+
+	// MaxUnavailable is the maximum number of Instances allowed to be in a
+	// non-Ready state during the rollout.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxUnavailable *int32 `json:"maxUnavailable,omitempty"`
+}
+
+// OMENativeInPlaceUpdateStrategy tunes the per-pod in-place update sequence.
+type OMENativeInPlaceUpdateStrategy struct {
+	// GracePeriodSeconds is the time OMENative waits between marking the
+	// pod not-ready and applying the in-place mutation.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GracePeriodSeconds *int32 `json:"gracePeriodSeconds,omitempty"`
+
+	// MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on
+	// the pod before the in-place mutation so EndpointSlice drains traffic
+	// first. Defaults to true.
+	// +optional
+	MarkNotReadyDuringLifecycle *bool `json:"markNotReadyDuringLifecycle,omitempty"`
+}
+
+// OMENativeReadyPolicy controls how Instance-level readiness is aggregated
+// from the underlying pods.
+// +kubebuilder:validation:Enum=AllPodReady;None
+type OMENativeReadyPolicy string
+
+const (
+	// OMENativeReadyPolicyAllPodReady reports the Instance Ready only when
+	// every pod in the Instance has Ready=True. Default for multi-pod Instances.
+	OMENativeReadyPolicyAllPodReady OMENativeReadyPolicy = "AllPodReady"
+	// OMENativeReadyPolicyNone disables Instance-level aggregation; pods
+	// are reported individually.
+	OMENativeReadyPolicyNone OMENativeReadyPolicy = "None"
+)
+
+// OMENativeMigrationPolicy controls whether and how OMENative honors a
+// migration request annotation for this Component.
+type OMENativeMigrationPolicy struct {
+	// Mode selects the migration disposition. Defaults to auto.
+	// +optional
+	Mode OMENativeMigrationPolicyMode `json:"mode,omitempty"`
+}
+
+// OMENativeMigrationPolicyMode is the requested migration disposition.
+// In v1, `auto` resolves to `surge` or rejection — there is no rolling
+// per-pod migration path.
+// +kubebuilder:validation:Enum=auto;surge;never
+type OMENativeMigrationPolicyMode string
+
+const (
+	// OMENativeMigrationPolicyModeAuto lets OMENative pick the mechanism.
+	// In v1 this resolves to surge when capacity is available, or rejection.
+	OMENativeMigrationPolicyModeAuto OMENativeMigrationPolicyMode = "auto"
+	// OMENativeMigrationPolicyModeSurge forces surge migration.
+	OMENativeMigrationPolicyModeSurge OMENativeMigrationPolicyMode = "surge"
+	// OMENativeMigrationPolicyModeNever opts the Component out of migration
+	// entirely. Migration requests are rejected with reason MigrationDisabled.
+	OMENativeMigrationPolicyModeNever OMENativeMigrationPolicyMode = "never"
+)

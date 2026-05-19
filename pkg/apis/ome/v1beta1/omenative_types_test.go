@@ -2,6 +2,7 @@ package v1beta1
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,6 +170,114 @@ func TestMigrationPhase_Values(t *testing.T) {
 		MigrationPhaseInProgress: "InProgress",
 		MigrationPhaseCompleted:  "Completed",
 		MigrationPhaseFailed:     "Failed",
+	}
+	for got, want := range pairs {
+		if string(got) != want {
+			t.Errorf("got %q want %q", string(got), want)
+		}
+	}
+}
+
+func TestOMENativeComponentSpec_JSONRoundTrip(t *testing.T) {
+	restartPolicy := OMENativeRestartPolicyRecreateInstance
+	updateType := OMENativeUpdateStrategyInPlaceIfPossible
+	readyPolicy := OMENativeReadyPolicyAllPodReady
+	timeout := metav1.Duration{Duration: 30 * time.Minute}
+	graceSecs := int32(30)
+	markNotReady := true
+	partition := int32(0)
+	maxUnavail := int32(1)
+
+	original := EngineSpec{
+		ComponentExtensionSpec: ComponentExtensionSpec{
+			OMENative: &OMENativeComponentSpec{
+				RestartPolicy: &restartPolicy,
+				UpdateStrategy: &OMENativeUpdateStrategy{
+					Type: updateType,
+					RollingUpdate: &OMENativeRollingUpdate{
+						Partition:      &partition,
+						MaxUnavailable: &maxUnavail,
+					},
+					InPlaceUpdateStrategy: &OMENativeInPlaceUpdateStrategy{
+						GracePeriodSeconds:          &graceSecs,
+						MarkNotReadyDuringLifecycle: &markNotReady,
+					},
+				},
+				ReadyPolicy:          &readyPolicy,
+				InstanceReadyTimeout: &timeout,
+				MigrationPolicy: &OMENativeMigrationPolicy{
+					Mode: OMENativeMigrationPolicyModeSurge,
+				},
+			},
+		},
+	}
+
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded EngineSpec
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if diff := cmp.Diff(original, decoded); diff != "" {
+		t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOMENativeComponentSpec_JSONKeyIsNestedUnderOmenative(t *testing.T) {
+	// Confirm the OMENative restart policy serializes under
+	// `omenative.restartPolicy`, not at the top level where it would collide
+	// with the inlined corev1.PodSpec.RestartPolicy.
+	policy := OMENativeRestartPolicyRecreateInstance
+	spec := EngineSpec{
+		ComponentExtensionSpec: ComponentExtensionSpec{
+			OMENative: &OMENativeComponentSpec{RestartPolicy: &policy},
+		},
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(encoded)
+	if !strings.Contains(got, `"omenative":{"restartPolicy":"RecreateInstanceOnPodRestart"}`) {
+		t.Fatalf("expected nested omenative.restartPolicy, got: %s", got)
+	}
+}
+
+func TestOMENativeRestartPolicy_Values(t *testing.T) {
+	pairs := map[OMENativeRestartPolicy]string{
+		OMENativeRestartPolicyNone:             "None",
+		OMENativeRestartPolicyRecreateInstance: "RecreateInstanceOnPodRestart",
+		OMENativeRestartPolicyRecreateISVC:     "RecreateISVCOnPodRestart",
+	}
+	for got, want := range pairs {
+		if string(got) != want {
+			t.Errorf("got %q want %q", string(got), want)
+		}
+	}
+}
+
+func TestOMENativeUpdateStrategyType_Values(t *testing.T) {
+	pairs := map[OMENativeUpdateStrategyType]string{
+		OMENativeUpdateStrategyRecreatePod:       "RecreatePod",
+		OMENativeUpdateStrategyInPlaceIfPossible: "InPlaceIfPossible",
+		OMENativeUpdateStrategyInPlaceOnly:       "InPlaceOnly",
+	}
+	for got, want := range pairs {
+		if string(got) != want {
+			t.Errorf("got %q want %q", string(got), want)
+		}
+	}
+}
+
+func TestOMENativeMigrationPolicyMode_Values(t *testing.T) {
+	pairs := map[OMENativeMigrationPolicyMode]string{
+		OMENativeMigrationPolicyModeAuto:  "auto",
+		OMENativeMigrationPolicyModeSurge: "surge",
+		OMENativeMigrationPolicyModeNever: "never",
 	}
 	for got, want := range pairs {
 		if string(got) != want {

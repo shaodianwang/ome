@@ -8107,6 +8107,60 @@ spec:
                         type: string
                       type: object
                       x-kubernetes-map-type: atomic
+                    omenative:
+                      properties:
+                        instanceReadyTimeout:
+                          type: string
+                        migrationPolicy:
+                          properties:
+                            mode:
+                              enum:
+                                - auto
+                                - surge
+                                - never
+                              type: string
+                          type: object
+                        readyPolicy:
+                          enum:
+                            - AllPodReady
+                            - None
+                          type: string
+                        restartPolicy:
+                          enum:
+                            - None
+                            - RecreateInstanceOnPodRestart
+                            - RecreateISVCOnPodRestart
+                          type: string
+                        updateStrategy:
+                          properties:
+                            inPlaceUpdateStrategy:
+                              properties:
+                                gracePeriodSeconds:
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                markNotReadyDuringLifecycle:
+                                  type: boolean
+                              type: object
+                            rollingUpdate:
+                              properties:
+                                maxUnavailable:
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                partition:
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                              type: object
+                            type:
+                              enum:
+                                - RecreatePod
+                                - InPlaceIfPossible
+                                - InPlaceOnly
+                              type: string
+                          type: object
+                      type: object
                     os:
                       properties:
                         name:
@@ -21022,6 +21076,60 @@ spec:
                         type: string
                       type: object
                       x-kubernetes-map-type: atomic
+                    omenative:
+                      properties:
+                        instanceReadyTimeout:
+                          type: string
+                        migrationPolicy:
+                          properties:
+                            mode:
+                              enum:
+                                - auto
+                                - surge
+                                - never
+                              type: string
+                          type: object
+                        readyPolicy:
+                          enum:
+                            - AllPodReady
+                            - None
+                          type: string
+                        restartPolicy:
+                          enum:
+                            - None
+                            - RecreateInstanceOnPodRestart
+                            - RecreateISVCOnPodRestart
+                          type: string
+                        updateStrategy:
+                          properties:
+                            inPlaceUpdateStrategy:
+                              properties:
+                                gracePeriodSeconds:
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                markNotReadyDuringLifecycle:
+                                  type: boolean
+                              type: object
+                            rollingUpdate:
+                              properties:
+                                maxUnavailable:
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                partition:
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                              type: object
+                            type:
+                              enum:
+                                - RecreatePod
+                                - InPlaceIfPossible
+                                - InPlaceOnly
+                              type: string
+                          type: object
+                      type: object
                     os:
                       properties:
                         name:
@@ -29699,6 +29807,60 @@ spec:
                         type: string
                       type: object
                       x-kubernetes-map-type: atomic
+                    omenative:
+                      properties:
+                        instanceReadyTimeout:
+                          type: string
+                        migrationPolicy:
+                          properties:
+                            mode:
+                              enum:
+                                - auto
+                                - surge
+                                - never
+                              type: string
+                          type: object
+                        readyPolicy:
+                          enum:
+                            - AllPodReady
+                            - None
+                          type: string
+                        restartPolicy:
+                          enum:
+                            - None
+                            - RecreateInstanceOnPodRestart
+                            - RecreateISVCOnPodRestart
+                          type: string
+                        updateStrategy:
+                          properties:
+                            inPlaceUpdateStrategy:
+                              properties:
+                                gracePeriodSeconds:
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                markNotReadyDuringLifecycle:
+                                  type: boolean
+                              type: object
+                            rollingUpdate:
+                              properties:
+                                maxUnavailable:
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                partition:
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                              type: object
+                            type:
+                              enum:
+                                - RecreatePod
+                                - InPlaceIfPossible
+                                - InPlaceOnly
+                              type: string
+                          type: object
+                      type: object
                     os:
                       properties:
                         name:

@@ -53,6 +53,13 @@ type ComponentExtensionSpec struct {
 	DeploymentStrategy *appsv1.DeploymentStrategy `json:"deploymentStrategy,omitempty"`
 
 	KedaConfig *KedaConfig `json:"kedaConfig,omitempty"`
+
+	// OMENative groups OMENative-specific lifecycle policies for this
+	// Component. Applies only when the Component is annotated
+	// ome.io/deploymentMode=OMENative; ignored otherwise. Mirrors the
+	// status side: spec.<component>.omenative <-> status.components.<component>.omenative.
+	// +optional
+	OMENative *OMENativeComponentSpec `json:"omenative,omitempty"`
 }
 
 // ScaleMetric enum
