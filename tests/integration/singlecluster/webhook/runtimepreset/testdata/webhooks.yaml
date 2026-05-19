@@ -1,0 +1,40 @@
+# Test-only fixture: MutatingWebhookConfiguration for the OEP-0012
+# Part C engine-preset mutators (namespaced + cluster scope). envtest
+# patches caBundle + clientConfig.service → clientConfig.url at install.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: servingruntime-preset.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /mutate-ome-io-v1beta1-servingruntime-preset
+    failurePolicy: Fail
+    name: servingruntime.ome-webhook-server.preset
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["servingruntimes"]
+        scope: "Namespaced"
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /mutate-ome-io-v1beta1-clusterservingruntime-preset
+    failurePolicy: Fail
+    name: clusterservingruntime.ome-webhook-server.preset
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["clusterservingruntimes"]
+        scope: "Cluster"

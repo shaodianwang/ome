@@ -34,7 +34,7 @@ func Merge(parent, child *v1beta1.ServingRuntimeSpec) (*v1beta1.ServingRuntimeSp
 	// Several ServingRuntimeSpec fields (e.g. Containers) lack
 	// omitempty, so a Go zero value marshals as `null` and strategic
 	// merge would wipe the parent. Strip nulls to recover fill-only-nil.
-	childJSON, err = stripJSONNulls(childJSON)
+	childJSON, err = StripJSONNulls(childJSON)
 	if err != nil {
 		return nil, fmt.Errorf("strip nulls from child: %w", err)
 	}
@@ -51,9 +51,12 @@ func Merge(parent, child *v1beta1.ServingRuntimeSpec) (*v1beta1.ServingRuntimeSp
 	return merged, nil
 }
 
-// stripJSONNulls returns the JSON document with all null-valued object
-// keys removed.
-func stripJSONNulls(in []byte) ([]byte, error) {
+// StripJSONNulls returns the JSON document with all null-valued object
+// keys removed. Exported because the OEP-0012 Part C webhook needs the
+// same treatment when marshaling a mutated runtime back to JSON — the
+// embedded ServingRuntimePodSpec.Containers field lacks omitempty, and
+// CRD validation rejects null arrays.
+func StripJSONNulls(in []byte) ([]byte, error) {
 	var v any
 	if err := json.Unmarshal(in, &v); err != nil {
 		return nil, err

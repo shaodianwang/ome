@@ -52,6 +52,7 @@ import (
 	basemodelwebhook "github.com/ome-projects/ome/pkg/webhook/admission/basemodel"
 	"github.com/ome-projects/ome/pkg/webhook/admission/isvc"
 	"github.com/ome-projects/ome/pkg/webhook/admission/pod"
+	"github.com/ome-projects/ome/pkg/webhook/admission/runtimepreset"
 	"github.com/ome-projects/ome/pkg/webhook/admission/servingruntime"
 )
 
@@ -355,6 +356,14 @@ func main() {
 		setupLog.Info("Registering serving runtime validator webhook to the webhook server")
 		hookServer.Register("/validate-ome-io-v1beta1-servingruntime", &webhook.Admission{
 			Handler: &servingruntime.ServingRuntimeValidator{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())},
+		})
+
+		setupLog.Info("Registering serving runtime engine-preset mutator webhooks to the webhook server")
+		hookServer.Register("/mutate-ome-io-v1beta1-servingruntime-preset", &webhook.Admission{
+			Handler: &runtimepreset.ServingRuntimeMutator{Decoder: admission.NewDecoder(mgr.GetScheme())},
+		})
+		hookServer.Register("/mutate-ome-io-v1beta1-clusterservingruntime-preset", &webhook.Admission{
+			Handler: &runtimepreset.ClusterServingRuntimeMutator{Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
 		setupLog.Info("Registering BaseModel validator webhook to the webhook server")

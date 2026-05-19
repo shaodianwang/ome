@@ -121,10 +121,14 @@ var (
 	RuntimeObservabilityPortAnnotationKey    = "runtime.ome.io/observability-port"
 
 	// OEP-0012: ServingRuntime inheritance + profile marker.
-	RuntimeProfileAnnotationKey              = OMEAPIGroupName + "/runtime-profile"
-	RuntimeInheritFromAnnotationKey          = OMEAPIGroupName + "/inherit-from"
-	RuntimeInheritMaxDepth                   = 5
-	InheritanceReadyConditionType            = "InheritanceReady"
+	RuntimeProfileAnnotationKey     = OMEAPIGroupName + "/runtime-profile"
+	RuntimeInheritFromAnnotationKey = OMEAPIGroupName + "/inherit-from"
+	RuntimeInheritMaxDepth          = 5
+	InheritanceReadyConditionType   = "InheritanceReady"
+	// OEP-0012 Part C: engine-preset annotation. Value selects an
+	// OME-shipped preset (e.g. "sglang-pd") whose engine defaults a
+	// mutating webhook injects into the runtime spec at admission.
+	RuntimeEngineAnnotationKey               = OMEAPIGroupName + "/engine"
 	DefaultPrometheusPath                    = "/metrics"
 	QueueProxyAggregatePrometheusMetricsPort = 9088
 	DefaultPodPrometheusPort                 = "9091"
