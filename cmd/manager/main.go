@@ -389,6 +389,11 @@ func main() {
 			WithValidator(&isvc.InferenceServiceValidator{
 				Client:          mgr.GetClient(),
 				RuntimeSelector: runtimeSelector,
+				// Reject ome.io/btp.* (Envoy Gateway) when the active
+				// translator is Istio or Noop, and vice versa, at
+				// admission. Sourced from the same translator the
+				// reconciler uses so the two stay in sync.
+				KnownPassthroughPrefixes: trafficTranslator.SupportedPassthroughPrefixes(),
 			}).
 			Complete(); err != nil {
 			setupLog.Error(err, "Failed to create InferenceService webhook", "webhook", "v1beta1")

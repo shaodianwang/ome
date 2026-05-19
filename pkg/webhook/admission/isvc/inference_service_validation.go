@@ -32,6 +32,22 @@ var (
 type InferenceServiceValidator struct {
 	Client          client.Client
 	RuntimeSelector runtimeselector.Selector
+
+	// KnownPassthroughPrefixes lists the ome.io/* pass-through
+	// annotation prefixes the active Gateway-implementation translator
+	// supports (e.g. ["ome.io/btp."] when Envoy Gateway is loaded).
+	// When non-empty, the validator rejects pass-through annotations
+	// whose prefix is not in the set with `UnsupportedPassthrough`,
+	// surfacing the misconfiguration at admission instead of letting
+	// the controller catch it at runtime via the
+	// BackendPolicyUnsupportedFields condition.
+	//
+	// Empty (default) keeps the prior permissive behavior — all
+	// documented pass-through prefixes are accepted. Production
+	// (cmd/manager/main.go) populates this from the active translator's
+	// SupportedPassthroughPrefixes(); test wiring may leave it empty
+	// unless explicitly exercising the rejection path.
+	KnownPassthroughPrefixes []string
 }
 
 // +kubebuilder:webhook:verbs=create;update,path=/validate-ome-io-v1beta1-inferenceservice,mutating=false,failurePolicy=fail,groups=ome.io,resources=inferenceservices,versions=v1beta1,name=inferenceservice.ome-webhook-server.validator
@@ -113,7 +129,7 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 
 	// OEP-0011: validate ome.io/* traffic annotations (parsing,
 	// Did-you-mean, cross-rules).
-	trafficWarnings, err := validation.ValidateTrafficAnnotations(isvc.Annotations, isvc.Spec.Traffic)
+	trafficWarnings, err := validation.ValidateTrafficAnnotations(isvc.Annotations, isvc.Spec.Traffic, v.KnownPassthroughPrefixes...)
 	if err != nil {
 		return allWarnings, err
 	}

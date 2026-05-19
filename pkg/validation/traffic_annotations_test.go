@@ -201,7 +201,8 @@ func TestValidateTrafficAnnotations_DidYouMean(t *testing.T) {
 
 func TestValidateTrafficAnnotations_PassthroughIgnored(t *testing.T) {
 	// Pass-through namespaces accept any key; the translator validates
-	// the field path at emit time. Webhook must not reject these.
+	// the field path at emit time. Webhook must not reject these when
+	// no knownPassthroughPrefixes filter is set (back-compat default).
 	tests := []struct {
 		name string
 		key  string
@@ -224,6 +225,64 @@ func TestValidateTrafficAnnotations_PassthroughIgnored(t *testing.T) {
 			_, err := ValidateTrafficAnnotations(map[string]string{tc.key: "any-value"}, nil)
 			if err != nil {
 				t.Fatalf("pass-through %q must be accepted by webhook, got error: %v", tc.key, err)
+			}
+		})
+	}
+}
+
+func TestValidateTrafficAnnotations_PassthroughGatedByKnownPrefixes(t *testing.T) {
+	// When the validator is wired with the active translator's
+	// SupportedPassthroughPrefixes, pass-through annotations outside
+	// the set must be rejected at admission (UnsupportedPassthrough).
+	tests := []struct {
+		name         string
+		key          string
+		known        []string
+		wantErrMatch string // empty = expect success
+	}{
+		{
+			name:  "btp.* accepted when EG prefix known",
+			key:   constants.PassthroughEnvoyGatewayPrefix + "loadBalancer.slowStart.window",
+			known: []string{constants.PassthroughEnvoyGatewayPrefix},
+		},
+		{
+			name:         "btp.* rejected when only Istio prefix known",
+			key:          constants.PassthroughEnvoyGatewayPrefix + "loadBalancer.slowStart.window",
+			known:        []string{constants.PassthroughIstioPrefix},
+			wantErrMatch: "UnsupportedPassthrough",
+		},
+		{
+			name:  "dr.* accepted when Istio prefix known",
+			key:   constants.PassthroughIstioPrefix + "trafficPolicy.connectionPool.tcp.tcpKeepalive.time",
+			known: []string{constants.PassthroughIstioPrefix},
+		},
+		{
+			name:         "dr.* rejected when only EG prefix known",
+			key:          constants.PassthroughIstioPrefix + "trafficPolicy.connectionPool.tcp.tcpKeepalive.time",
+			known:        []string{constants.PassthroughEnvoyGatewayPrefix},
+			wantErrMatch: "UnsupportedPassthrough",
+		},
+		{
+			name:         "any pass-through rejected when prefix list is non-empty but doesn't match",
+			key:          constants.PassthroughEnvoyGatewayPrefix + "loadBalancer.x",
+			known:        []string{"ome.io/future-translator."},
+			wantErrMatch: "UnsupportedPassthrough",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ValidateTrafficAnnotations(map[string]string{tc.key: "v"}, nil, tc.known...)
+			if tc.wantErrMatch == "" {
+				if err != nil {
+					t.Fatalf("expected accept, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error matching %q, got nil", tc.wantErrMatch)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrMatch) {
+				t.Fatalf("err = %v, want substring %q", err, tc.wantErrMatch)
 			}
 		})
 	}
@@ -302,6 +361,24 @@ func TestValidateTrafficAnnotations_CrossRules(t *testing.T) {
 			name: "rollout timeout > 1 minute no warning",
 			annotations: map[string]string{
 				constants.RolloutReadyTimeoutAnnotation: "10m",
+			},
+			wantOK: true,
+		},
+		{
+			name: "rollout-promote without spec.traffic.rollout warns (annotation is a no-op)",
+			annotations: map[string]string{
+				constants.RolloutPromoteAnnotation: "2",
+			},
+			wantOK:      true,
+			wantWarning: "no-op without spec.traffic.rollout",
+		},
+		{
+			name: "rollout-promote with spec.traffic.rollout — no warning",
+			annotations: map[string]string{
+				constants.RolloutPromoteAnnotation: "2",
+			},
+			traffic: &v1beta1.TrafficSpec{
+				Rollout: &v1beta1.RolloutSpec{},
 			},
 			wantOK: true,
 		},

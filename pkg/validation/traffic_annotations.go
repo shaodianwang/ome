@@ -76,10 +76,18 @@ var validRetryOnTokens = map[string]struct{}{
 // known keys, surfaces Did-you-mean for near-miss unknown keys in the
 // ome.io/ namespace, and enforces cross-annotation rules.
 //
+// knownPassthroughPrefixes is the set of ome.io/* pass-through prefixes
+// the active Gateway-implementation translator supports. When
+// non-empty, pass-through keys outside the set are rejected with
+// UnsupportedPassthrough (fast-fail at admission instead of relying on
+// the controller's BackendPolicyUnsupportedFields condition). When
+// empty (legacy / test default), all documented pass-through prefixes
+// are accepted.
+//
 // Returns admission warnings (for non-fatal hints like
 // "perEndpointMaxConnections > 1 with ConsistentHash usually defeats
 // stickiness") alongside the first hard error.
-func ValidateTrafficAnnotations(annotations map[string]string, traffic *v1beta1.TrafficSpec) (warnings []string, err error) {
+func ValidateTrafficAnnotations(annotations map[string]string, traffic *v1beta1.TrafficSpec, knownPassthroughPrefixes ...string) (warnings []string, err error) {
 	// Per-key parse + type check.
 	for key, value := range annotations {
 		kind, known := trafficAnnotationKinds[key]
@@ -90,10 +98,17 @@ func ValidateTrafficAnnotations(annotations map[string]string, traffic *v1beta1.
 			continue
 		}
 
-		// Pass-through namespaces accept any key under the prefix
-		// (the translator validates the path).
+		// Pass-through namespaces. Either accept all documented prefixes
+		// (back-compat when knownPassthroughPrefixes is empty) or only
+		// those the active translator can honor.
 		if strings.HasPrefix(key, constants.PassthroughEnvoyGatewayPrefix) ||
 			strings.HasPrefix(key, constants.PassthroughIstioPrefix) {
+			if len(knownPassthroughPrefixes) > 0 && !hasMatchingPrefix(key, knownPassthroughPrefixes) {
+				return warnings, fmt.Errorf(
+					"annotation %q uses a pass-through prefix the active Gateway-implementation translator does not honor; supported prefixes: %v (UnsupportedPassthrough)",
+					key, knownPassthroughPrefixes,
+				)
+			}
 			continue
 		}
 
@@ -121,6 +136,9 @@ func ValidateTrafficAnnotations(annotations map[string]string, traffic *v1beta1.
 	if w, err := crossRuleRolloutTimeoutSanity(annotations); err != nil {
 		return warnings, err
 	} else if w != "" {
+		warnings = append(warnings, w)
+	}
+	if w := crossRulePromoteWithoutRollout(annotations, traffic); w != "" {
 		warnings = append(warnings, w)
 	}
 
@@ -287,4 +305,34 @@ func min3(a, b, c int) int {
 		m = c
 	}
 	return m
+}
+
+// crossRulePromoteWithoutRollout warns when ome.io/rollout-promote is
+// set without a corresponding spec.traffic.rollout block. The
+// annotation is a no-op in that case (the controller has no step list
+// to advance), so the warning surfaces the misconfiguration at
+// admission instead of letting the operator wait for nothing to happen.
+func crossRulePromoteWithoutRollout(annotations map[string]string, traffic *v1beta1.TrafficSpec) string {
+	if _, ok := annotations[constants.RolloutPromoteAnnotation]; !ok {
+		return ""
+	}
+	if traffic != nil && traffic.Rollout != nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"annotation %q is a no-op without spec.traffic.rollout; the controller has no step list to advance — set spec.traffic.rollout or remove the annotation",
+		constants.RolloutPromoteAnnotation,
+	)
+}
+
+// hasMatchingPrefix reports whether key starts with any prefix in the
+// list. Used to gate ome.io/btp.* and ome.io/dr.* pass-throughs against
+// the active translator's SupportedPassthroughPrefixes.
+func hasMatchingPrefix(key string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
 }
