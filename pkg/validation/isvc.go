@@ -24,6 +24,50 @@ func ValidateEngineDecoderConfig(spec *v1beta1.InferenceServiceSpec) error {
 	return nil
 }
 
+// ValidateLeaderWorkerPairing enforces that the Leader / Worker spec
+// pair on each Component (Engine, Decoder) is internally consistent:
+// either both are absent (single-pod) or both are present with
+// Worker.Size > 0 (multi-pod). Rejects orphan-leader, orphan-worker, and
+// declared-worker-with-no-positive-size configurations.
+func ValidateLeaderWorkerPairing(spec *v1beta1.InferenceServiceSpec) error {
+	if spec.Engine != nil {
+		if err := validateLeaderWorkerPairing("engine", spec.Engine.Leader, spec.Engine.Worker); err != nil {
+			return err
+		}
+	}
+	if spec.Decoder != nil {
+		if err := validateLeaderWorkerPairing("decoder", spec.Decoder.Leader, spec.Decoder.Worker); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateLeaderWorkerPairing(component string, leader *v1beta1.LeaderSpec, worker *v1beta1.WorkerSpec) error {
+	if leader == nil && worker == nil {
+		return nil
+	}
+	if leader != nil && worker == nil {
+		return fmt.Errorf(
+			"InvalidLeaderWorkerPairing: %s.leader is set but %s.worker is not; multi-pod configurations require both",
+			component, component,
+		)
+	}
+	if leader == nil && worker != nil {
+		return fmt.Errorf(
+			"InvalidLeaderWorkerPairing: %s.worker is set but %s.leader is not; multi-pod configurations require both",
+			component, component,
+		)
+	}
+	if worker.Size == nil || *worker.Size <= 0 {
+		return fmt.Errorf(
+			"InvalidLeaderWorkerPairing: %s.worker is set but worker.size is not a positive integer; multi-pod configurations require worker.size > 0",
+			component,
+		)
+	}
+	return nil
+}
+
 // ValidateEngineDecoderDeploymentMode enforces that when both Engine and
 // Decoder are present and either carries ome.io/deploymentMode=OMENative,
 // both components carry the same value for that annotation.

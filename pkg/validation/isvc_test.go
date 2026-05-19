@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -169,6 +170,117 @@ func TestValidateEngineDecoderDeploymentMode(t *testing.T) {
 				t.Fatalf("expected error, got nil")
 			}
 			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateLeaderWorkerPairing(t *testing.T) {
+	sizePtr := func(v int) *int { return &v }
+	withWorker := func(size *int) *v1beta1.WorkerSpec { return &v1beta1.WorkerSpec{Size: size} }
+
+	tests := []struct {
+		name    string
+		spec    *v1beta1.InferenceServiceSpec
+		wantErr bool
+		errSub  string
+	}{
+		{
+			name: "no engine, no decoder",
+			spec: &v1beta1.InferenceServiceSpec{},
+		},
+		{
+			name: "engine: neither leader nor worker — single-pod OK",
+			spec: &v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{}},
+		},
+		{
+			name: "engine: leader + worker(size=3) — valid multi-pod",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: withWorker(sizePtr(3)),
+				},
+			},
+		},
+		{
+			name: "engine: leader without worker — rejected",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{Leader: &v1beta1.LeaderSpec{}},
+			},
+			wantErr: true,
+			errSub:  "engine.leader is set but engine.worker is not",
+		},
+		{
+			name: "engine: worker without leader — rejected",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{Worker: withWorker(sizePtr(3))},
+			},
+			wantErr: true,
+			errSub:  "engine.worker is set but engine.leader is not",
+		},
+		{
+			name: "engine: worker with nil size — rejected",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: withWorker(nil),
+				},
+			},
+			wantErr: true,
+			errSub:  "worker.size is not a positive integer",
+		},
+		{
+			name: "engine: worker with size=0 — rejected",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: withWorker(sizePtr(0)),
+				},
+			},
+			wantErr: true,
+			errSub:  "worker.size is not a positive integer",
+		},
+		{
+			name: "decoder: leader without worker — rejected",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  &v1beta1.EngineSpec{},
+				Decoder: &v1beta1.DecoderSpec{Leader: &v1beta1.LeaderSpec{}},
+			},
+			wantErr: true,
+			errSub:  "decoder.leader is set but decoder.worker is not",
+		},
+		{
+			name: "engine OK, decoder OK — both single-pod, both pass",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  &v1beta1.EngineSpec{},
+				Decoder: &v1beta1.DecoderSpec{},
+			},
+		},
+		{
+			name: "engine fails first — engine error surfaces (decoder not checked)",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  &v1beta1.EngineSpec{Leader: &v1beta1.LeaderSpec{}},
+				Decoder: &v1beta1.DecoderSpec{Worker: withWorker(sizePtr(2))},
+			},
+			wantErr: true,
+			errSub:  "engine.leader",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateLeaderWorkerPairing(tc.spec)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
+					t.Fatalf("expected error to contain %q, got %v", tc.errSub, err)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})

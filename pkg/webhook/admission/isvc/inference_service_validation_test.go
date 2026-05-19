@@ -600,6 +600,89 @@ func TestInferenceService_OMENativeEngineDecoderCoupling(t *testing.T) {
 	}
 }
 
+func TestInferenceService_LeaderWorkerPairing(t *testing.T) {
+	sizePtr := func(v int) *int { return &v }
+	withRunner := &v1beta1.RunnerSpec{Container: v1.Container{Image: "test-image:latest"}}
+
+	tests := []struct {
+		name    string
+		isvc    *v1beta1.InferenceService
+		wantErr bool
+		errSub  string
+	}{
+		{
+			name: "engine: leader + worker(size=3) - valid",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						Runner: withRunner,
+						Leader: &v1beta1.LeaderSpec{},
+						Worker: &v1beta1.WorkerSpec{Size: sizePtr(3)},
+					},
+				},
+			},
+		},
+		{
+			name: "engine: leader only - rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						Runner: withRunner,
+						Leader: &v1beta1.LeaderSpec{},
+					},
+				},
+			},
+			wantErr: true,
+			errSub:  "InvalidLeaderWorkerPairing",
+		},
+		{
+			name: "engine: worker only - rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						Runner: withRunner,
+						Worker: &v1beta1.WorkerSpec{Size: sizePtr(3)},
+					},
+				},
+			},
+			wantErr: true,
+			errSub:  "InvalidLeaderWorkerPairing",
+		},
+		{
+			name: "decoder: leader only - rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{Runner: withRunner},
+					Decoder: &v1beta1.DecoderSpec{
+						Leader: &v1beta1.LeaderSpec{},
+					},
+				},
+			},
+			wantErr: true,
+			errSub:  "decoder.leader",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := &InferenceServiceValidator{}
+			_, err := v.ValidateCreate(context.Background(), tt.isvc)
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errSub != "" {
+					assert.Contains(t, err.Error(), tt.errSub)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestHasFullRunnerConfig(t *testing.T) {
 	tests := []struct {
 		name     string
