@@ -178,20 +178,13 @@ func ReplacePlaceholders(container *v1.Container, meta metav1.ObjectMeta) error 
 	return json.Unmarshal(buf.Bytes(), container)
 }
 
-// MergeNodeSelector merges node selectors from runtime, accelerator class, and inference service (isvc).
-// Only add mergedNodeSelector to engine and decoder component.
-func MergeNodeSelector(runtime *v1beta1.ServingRuntimeSpec, acceleratorClass *v1beta1.AcceleratorClassSpec, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[string]string {
+// MergeNodeSelector merges node selectors from runtime and the inference
+// service. Only used for engine and decoder components.
+func MergeNodeSelector(runtime *v1beta1.ServingRuntimeSpec, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[string]string {
 	// Start with runtime node selector
 	mergedNodeSelector := map[string]string{}
 	if runtime != nil && runtime.ServingRuntimePodSpec.NodeSelector != nil {
 		for k, v := range runtime.ServingRuntimePodSpec.NodeSelector {
-			mergedNodeSelector[k] = v
-		}
-	}
-
-	// Merge in accelerator class node selector, overriding any conflicts
-	if acceleratorClass != nil && acceleratorClass.Discovery.NodeSelector != nil {
-		for k, v := range acceleratorClass.Discovery.NodeSelector {
 			mergedNodeSelector[k] = v
 		}
 	}
@@ -218,10 +211,11 @@ func MergeNodeSelector(runtime *v1beta1.ServingRuntimeSpec, acceleratorClass *v1
 	return mergedNodeSelector
 }
 
-// MergeResource merges resource requests and limits from runtime, accelerator class, and container spec.
-// It only merges resources from the runtime and accelerator class when the user has not explicitly specified resources in the InferenceService spec.
-// The acceleratorClass takes precedence and overrides the runtime resource, if it existed.
-func MergeResource(container *v1.Container, acceleratorClass *v1beta1.AcceleratorClassSpec, runtime *v1beta1.ServingRuntimeSpec) {
+// MergeResource fills the container's resource requests/limits from
+// the matching runtime container when the operator hasn't set them on
+// the InferenceService spec. Fill-only — never overwrites operator
+// values.
+func MergeResource(container *v1.Container, runtime *v1beta1.ServingRuntimeSpec) {
 	if container == nil {
 		return
 	}
@@ -243,15 +237,6 @@ func MergeResource(container *v1.Container, acceleratorClass *v1beta1.Accelerato
 			}
 		}
 	}
-	// Merge resource requests from accelerator class.
-	// AcceleratorClass takes precedence and overrides runtime resources.
-	if acceleratorClass != nil && acceleratorClass.Resources != nil {
-		for _, resource := range acceleratorClass.Resources {
-			resourceName := v1.ResourceName(resource.Name)
-			quantity := resource.Quantity
-			container.Resources.Requests[resourceName] = quantity.DeepCopy()
-		}
-	}
 
 	// Merge resource limits
 	if container.Resources.Limits == nil {
@@ -268,14 +253,6 @@ func MergeResource(container *v1.Container, acceleratorClass *v1beta1.Accelerato
 				}
 				break
 			}
-		}
-	}
-	// AcceleratorClass takes precedence and overrides runtime resource limits.
-	if acceleratorClass != nil && acceleratorClass.Resources != nil {
-		for _, resource := range acceleratorClass.Resources {
-			resourceName := v1.ResourceName(resource.Name)
-			quantity := resource.Quantity
-			container.Resources.Limits[resourceName] = quantity.DeepCopy()
 		}
 	}
 }

@@ -23,7 +23,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
-	"github.com/ome-projects/ome/pkg/acceleratorclassselector"
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
@@ -542,15 +541,14 @@ func TestInferenceServiceReconcile(t *testing.T) {
 
 			// Create reconciler
 			reconciler := &InferenceServiceReconciler{
-				Client:                   c,
-				ClientConfig:             &rest.Config{},
-				Clientset:                clientset,
-				Log:                      ctrl.Log.WithName("test"),
-				Scheme:                   scheme,
-				Recorder:                 recorder,
-				StatusManager:            status.NewStatusReconciler(),
-				RuntimeSelector:          runtimeselector.New(c),
-				AcceleratorClassSelector: acceleratorclassselector.New(c),
+				Client:          c,
+				ClientConfig:    &rest.Config{},
+				Clientset:       clientset,
+				Log:             ctrl.Log.WithName("test"),
+				Scheme:          scheme,
+				Recorder:        recorder,
+				StatusManager:   status.NewStatusReconciler(),
+				RuntimeSelector: runtimeselector.New(c),
 			}
 
 			// Ensure the InferenceService exists in the client

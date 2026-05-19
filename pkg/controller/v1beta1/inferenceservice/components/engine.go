@@ -47,8 +47,6 @@ func NewEngine(
 	runtime *v1beta1.ServingRuntimeSpec,
 	runtimeName string,
 	supportedModelFormat *v1beta1.SupportedModelFormat,
-	acceleratorClass *v1beta1.AcceleratorClassSpec,
-	acceleratorClassName string,
 	overlays []isvcutils.ResolvedOverlay,
 ) Component {
 	base := BaseComponentFields{
@@ -63,8 +61,6 @@ func NewEngine(
 		RuntimeName:            runtimeName,
 		StatusManager:          status.NewStatusReconciler(),
 		Log:                    ctrl.Log.WithName("EngineReconciler"),
-		AcceleratorClass:       acceleratorClass,
-		AcceleratorClassName:   acceleratorClassName,
 		SupportedModelFormat:   supportedModelFormat,
 		Overlays:               overlays,
 	}
@@ -295,10 +291,7 @@ func (e *Engine) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *me
 		UpdateEnvVariables(&e.BaseComponentFields, isvc, &runnerSpec.Container, objectMeta)
 		UpdateVolumeMounts(&e.BaseComponentFields, isvc, &runnerSpec.Container, objectMeta)
 		MergeEngineResources(&e.BaseComponentFields, isvc, &runnerSpec.Container)
-		MergeRuntimeArgumentsOverride(&e.BaseComponentFields, &runnerSpec.Container)
-		if e.AcceleratorClass == nil {
-			e.setParallelismEnvVarForEngine(&runnerSpec.Container, e.getWorkerSize())
-		}
+		e.setParallelismEnvVarForEngine(&runnerSpec.Container, e.getWorkerSize())
 	}
 
 	// Use common pod spec reconciler for base logic
@@ -308,7 +301,6 @@ func (e *Engine) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *me
 	}
 	UpdatePodSpecVolumes(&e.BaseComponentFields, isvc, podSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&e.BaseComponentFields, isvc, podSpec, v1beta1.EngineComponent)
-	UpdateEngineAffinity(&e.BaseComponentFields, isvc, podSpec)
 
 	e.Log.Info("Engine PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return podSpec, nil
@@ -329,10 +321,7 @@ func (e *Engine) reconcileWorkerPodSpec(isvc *v1beta1.InferenceService, objectMe
 			UpdateVolumeMounts(&e.BaseComponentFields, isvc, &workerRunner.Container, objectMeta)
 			UpdateEnvVariables(&e.BaseComponentFields, isvc, &workerRunner.Container, objectMeta)
 			MergeEngineResources(&e.BaseComponentFields, isvc, &workerRunner.Container)
-			MergeRuntimeArgumentsOverride(&e.BaseComponentFields, &workerRunner.Container)
-			if e.AcceleratorClass == nil {
-				e.setParallelismEnvVarForEngine(&workerRunner.Container, e.getWorkerSize())
-			}
+			e.setParallelismEnvVarForEngine(&workerRunner.Container, e.getWorkerSize())
 		}
 	}
 
@@ -343,7 +332,6 @@ func (e *Engine) reconcileWorkerPodSpec(isvc *v1beta1.InferenceService, objectMe
 	}
 	UpdatePodSpecVolumes(&e.BaseComponentFields, isvc, workerPodSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&e.BaseComponentFields, isvc, workerPodSpec, v1beta1.EngineComponent)
-	UpdateEngineAffinity(&e.BaseComponentFields, isvc, workerPodSpec)
 	e.Log.Info("Engine Worker PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return workerPodSpec, nil
 }

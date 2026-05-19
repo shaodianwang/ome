@@ -46,8 +46,6 @@ func NewDecoder(
 	runtime *v1beta1.ServingRuntimeSpec,
 	runtimeName string,
 	supportedModelFormat *v1beta1.SupportedModelFormat,
-	acceleratorClass *v1beta1.AcceleratorClassSpec,
-	acceleratorClassName string,
 	overlays []isvcutils.ResolvedOverlay,
 ) Component {
 	base := BaseComponentFields{
@@ -62,8 +60,6 @@ func NewDecoder(
 		RuntimeName:            runtimeName,
 		StatusManager:          status.NewStatusReconciler(),
 		Log:                    ctrl.Log.WithName("DecoderReconciler"),
-		AcceleratorClass:       acceleratorClass,
-		AcceleratorClassName:   acceleratorClassName,
 		SupportedModelFormat:   supportedModelFormat,
 		Overlays:               overlays,
 	}
@@ -291,10 +287,7 @@ func (d *Decoder) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *m
 		UpdateEnvVariables(&d.BaseComponentFields, isvc, &runnerSpec.Container, objectMeta)
 		UpdateVolumeMounts(&d.BaseComponentFields, isvc, &runnerSpec.Container, objectMeta)
 		MergeDecoderResources(&d.BaseComponentFields, isvc, &runnerSpec.Container)
-		MergeRuntimeArgumentsOverride(&d.BaseComponentFields, &runnerSpec.Container)
-		if d.AcceleratorClass == nil {
-			d.setParallelismEnvVarForDecoder(&runnerSpec.Container, d.getWorkerSize())
-		}
+		d.setParallelismEnvVarForDecoder(&runnerSpec.Container, d.getWorkerSize())
 	}
 
 	// Use common pod spec reconciler for base logic
@@ -305,7 +298,6 @@ func (d *Decoder) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *m
 
 	UpdatePodSpecVolumes(&d.BaseComponentFields, isvc, podSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&d.BaseComponentFields, isvc, podSpec, v1beta1.DecoderComponent)
-	UpdateDecoderAffinity(&d.BaseComponentFields, isvc, podSpec)
 
 	d.Log.Info("Decoder PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return podSpec, nil
@@ -326,10 +318,7 @@ func (d *Decoder) reconcileWorkerPodSpec(isvc *v1beta1.InferenceService, objectM
 			UpdateVolumeMounts(&d.BaseComponentFields, isvc, &workerRunner.Container, objectMeta)
 			UpdateEnvVariables(&d.BaseComponentFields, isvc, &workerRunner.Container, objectMeta)
 			MergeDecoderResources(&d.BaseComponentFields, isvc, &workerRunner.Container)
-			MergeRuntimeArgumentsOverride(&d.BaseComponentFields, &workerRunner.Container)
-			if d.AcceleratorClass == nil {
-				d.setParallelismEnvVarForDecoder(&workerRunner.Container, d.getWorkerSize())
-			}
+			d.setParallelismEnvVarForDecoder(&workerRunner.Container, d.getWorkerSize())
 		}
 	}
 
@@ -340,7 +329,6 @@ func (d *Decoder) reconcileWorkerPodSpec(isvc *v1beta1.InferenceService, objectM
 	}
 	UpdatePodSpecVolumes(&d.BaseComponentFields, isvc, workerPodSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&d.BaseComponentFields, isvc, workerPodSpec, v1beta1.DecoderComponent)
-	UpdateDecoderAffinity(&d.BaseComponentFields, isvc, workerPodSpec)
 
 	d.Log.Info("Decoder Worker PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return workerPodSpec, nil

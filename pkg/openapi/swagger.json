@@ -7,503 +7,29 @@
   },
   "paths": {},
   "definitions": {
-    "v1beta1.AcceleratorCapabilities": {
-      "type": "object",
-      "properties": {
-        "clockSpeedMHz": {
-          "description": "Clock speeds",
-          "type": "integer",
-          "format": "int32"
-        },
-        "computeCapability": {
-          "description": "Compute capability (NVIDIA) or equivalent",
-          "type": "string"
-        },
-        "features": {
-          "description": "Features supported by this accelerator",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "levelZeroVersion": {
-          "description": "Level Zero version (for Intel accelerators)",
-          "type": "string"
-        },
-        "memoryBandwidthGBps": {
-          "description": "Memory bandwidth",
-          "$ref": "#/definitions/resource.Quantity"
-        },
-        "memoryGB": {
-          "description": "Memory capacity in GB",
-          "$ref": "#/definitions/resource.Quantity"
-        },
-        "performance": {
-          "description": "Performance metrics",
-          "$ref": "#/definitions/v1beta1.AcceleratorPerformance"
-        }
-      }
-    },
-    "v1beta1.AcceleratorClass": {
-      "type": "object",
-      "properties": {
-        "apiVersion": {
-          "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
-          "type": "string"
-        },
-        "kind": {
-          "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
-          "type": "string"
-        },
-        "metadata": {
-          "default": {},
-          "$ref": "#/definitions/v1.ObjectMeta"
-        },
-        "spec": {
-          "default": {},
-          "$ref": "#/definitions/v1beta1.AcceleratorClassSpec"
-        },
-        "status": {
-          "default": {},
-          "$ref": "#/definitions/v1beta1.AcceleratorClassStatus"
-        }
-      }
-    },
-    "v1beta1.AcceleratorClassList": {
-      "description": "AcceleratorClassList contains a list of AcceleratorClass",
+    "v1beta1.BackendPolicyRef": {
+      "description": "BackendPolicyRef identifies the OME-emitted backend policy resource sibling to the InferenceService.",
       "type": "object",
       "required": [
-        "items"
+        "apiVersion",
+        "kind",
+        "name"
       ],
       "properties": {
         "apiVersion": {
-          "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
-          "type": "string"
-        },
-        "items": {
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/v1beta1.AcceleratorClass"
-          }
+          "description": "APIVersion of the resource (e.g. \"gateway.envoyproxy.io/v1alpha1\").",
+          "type": "string",
+          "default": ""
         },
         "kind": {
-          "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
-          "type": "string"
-        },
-        "metadata": {
-          "default": {},
-          "$ref": "#/definitions/v1.ListMeta"
-        }
-      }
-    },
-    "v1beta1.AcceleratorClassSpec": {
-      "type": "object",
-      "required": [
-        "discovery",
-        "capabilities"
-      ],
-      "properties": {
-        "capabilities": {
-          "description": "Capabilities of this accelerator class",
-          "default": {},
-          "$ref": "#/definitions/v1beta1.AcceleratorCapabilities"
-        },
-        "cost": {
-          "description": "Cost information for optimization decisions",
-          "$ref": "#/definitions/v1beta1.AcceleratorCost"
-        },
-        "discovery": {
-          "description": "Discovery patterns to identify nodes with this accelerator",
-          "default": {},
-          "$ref": "#/definitions/v1beta1.AcceleratorDiscovery"
-        },
-        "family": {
-          "description": "Family of the accelerator (ampere, hopper, cdna2, etc.)",
-          "type": "string"
-        },
-        "integration": {
-          "description": "Integration with external systems",
-          "$ref": "#/definitions/v1beta1.AcceleratorIntegration"
-        },
-        "model": {
-          "description": "Model name (a100, h100, mi250x, etc.)",
-          "type": "string"
-        },
-        "resources": {
-          "description": "Resources exposed by this accelerator",
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/v1beta1.AcceleratorResource"
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "vendor": {
-          "description": "Vendor of the accelerator (nvidia, amd, intel, etc.)",
-          "type": "string"
-        }
-      }
-    },
-    "v1beta1.AcceleratorClassStatus": {
-      "type": "object",
-      "properties": {
-        "availableAccelerators": {
-          "description": "Available accelerators (not allocated)",
-          "type": "integer",
-          "format": "int32"
-        },
-        "availableNodes": {
-          "description": "AvailableNodes is the number of nodes that have this accelerator available",
-          "type": "integer",
-          "format": "int32"
-        },
-        "conditions": {
-          "description": "Conditions represent the latest available observations",
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/v1.Condition"
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "lastUpdated": {
-          "description": "Last update time",
-          "$ref": "#/definitions/v1.Time"
-        },
-        "nodes": {
-          "description": "Nodes that have this accelerator",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "totalAccelerators": {
-          "description": "Total number of accelerators in the cluster",
-          "type": "integer",
-          "format": "int32"
-        }
-      }
-    },
-    "v1beta1.AcceleratorConstraints": {
-      "description": "AcceleratorConstraints defines requirements for accelerator selection",
-      "type": "object",
-      "properties": {
-        "architectureFamilies": {
-          "description": "ArchitectureFamilies limits selection to specific families Examples: [\"nvidia-hopper\", \"nvidia-ampere\"]",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "excludedClasses": {
-          "description": "ExcludedClasses lists AcceleratorClasses to avoid",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "maxMemory": {
-          "description": "MaxMemory in GB (useful for cost control)",
-          "type": "integer",
-          "format": "int64"
-        },
-        "minArchitectureVersion": {
-          "description": "MinArchitectureVersion Compute capability (NVIDIA) or equivalent",
-          "type": "string"
-        },
-        "minComputePerformanceTFLOPS": {
-          "description": "MinComputePerformanceTFLOPS in TFLOPS",
-          "type": "integer",
-          "format": "int64"
-        },
-        "minMemory": {
-          "description": "MinMemory in GB",
-          "type": "integer",
-          "format": "int64"
-        },
-        "preferredPrecisions": {
-          "description": "PreferredPrecisions lists numeric precisions in order of preference Examples: [\"fp8\", \"fp16\", \"fp32\"]",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "requiredFeatures": {
-          "description": "RequiredFeatures that must be present",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        }
-      }
-    },
-    "v1beta1.AcceleratorCost": {
-      "type": "object",
-      "properties": {
-        "perHour": {
-          "description": "Cost per hour in dollars",
-          "$ref": "#/definitions/resource.Quantity"
-        },
-        "perMillionTokens": {
-          "description": "Cost per million tokens (for usage-based pricing)",
-          "$ref": "#/definitions/resource.Quantity"
-        },
-        "spotPerHour": {
-          "description": "Spot instance pricing if available",
-          "$ref": "#/definitions/resource.Quantity"
-        },
-        "tier": {
-          "description": "Cost tier for simplified selection (low, medium, high)",
-          "type": "string"
-        }
-      }
-    },
-    "v1beta1.AcceleratorDiscovery": {
-      "type": "object",
-      "properties": {
-        "affinity": {
-          "description": "Affinity for more complex node selection",
-          "$ref": "#/definitions/v1.Affinity"
-        },
-        "deviceIDs": {
-          "description": "DeviceIDs list of PCI device IDs",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "nodeSelector": {
-          "description": "NodeSelector to identify nodes with this accelerator",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string",
-            "default": ""
-          }
-        },
-        "pciVendorID": {
-          "description": "PCIVendorID for device discovery (e.g., \"10de\" for NVIDIA)",
-          "type": "string"
-        }
-      }
-    },
-    "v1beta1.AcceleratorIntegration": {
-      "type": "object",
-      "properties": {
-        "kueueResourceFlavor": {
-          "description": "KueueResourceFlavor name to sync with",
-          "type": "string"
-        },
-        "volcanoGPUType": {
-          "description": "VolcanoGPUType for Volcano integration",
-          "type": "string"
-        }
-      }
-    },
-    "v1beta1.AcceleratorLatency": {
-      "type": "object",
-      "properties": {
-        "averageMillis": {
-          "description": "Average latency in milliseconds",
-          "type": "integer",
-          "format": "int64"
-        },
-        "maximumMillis": {
-          "description": "Maximum latency in milliseconds",
-          "type": "integer",
-          "format": "int64"
-        }
-      }
-    },
-    "v1beta1.AcceleratorModelConfig": {
-      "description": "AcceleratorModelConfig provides accelerator-specific overrides for this model format",
-      "type": "object",
-      "properties": {
-        "environmentOverride": {
-          "description": "EnvironmentOverride provides accelerator-specific environment variables",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string",
-            "default": ""
-          }
-        },
-        "minMemoryPerBillionParams": {
-          "description": "MinMemoryPerBillionParams specifies memory required per billion parameters Used to calculate if a model fits on the accelerator",
-          "type": "integer",
-          "format": "int64"
-        },
-        "runtimeArgsOverride": {
-          "description": "RuntimeArgsOverride provides accelerator-specific runtime arguments",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "tensorParallelismOverride": {
-          "description": "TensorParallelismOverride overrides the default tensor parallelism settings",
-          "$ref": "#/definitions/v1beta1.TensorParallelismConfig"
-        }
-      }
-    },
-    "v1beta1.AcceleratorPerformance": {
-      "type": "object",
-      "properties": {
-        "fp16Tflops": {
-          "description": "FP16 performance in TFLOPS",
-          "type": "integer",
-          "format": "int64"
-        },
-        "fp32Tflops": {
-          "description": "FP32 performance in TFLOPS",
-          "type": "integer",
-          "format": "int64"
-        },
-        "int4Tops": {
-          "description": "INT4 performance in TOPS",
-          "type": "integer",
-          "format": "int64"
-        },
-        "int8Tops": {
-          "description": "INT8 performance in TOPS",
-          "type": "integer",
-          "format": "int64"
-        },
-        "latency": {
-          "description": "Latency metrics",
-          "$ref": "#/definitions/v1beta1.AcceleratorLatency"
-        }
-      }
-    },
-    "v1beta1.AcceleratorRequirements": {
-      "description": "AcceleratorRequirements specifies the accelerator requirements for this runtime",
-      "type": "object",
-      "properties": {
-        "acceleratorClasses": {
-          "description": "AcceleratorClasses lists the names of AcceleratorClasses this runtime supports",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "minArchitectureVersion": {
-          "description": "MinArchitectureVersion Compute capability (NVIDIA) or equivalent",
-          "type": "string"
-        },
-        "minComputePerformanceTFLOPS": {
-          "description": "MinComputePerformanceTFLOPS specifies minimum compute capability in TFLOPS",
-          "type": "integer",
-          "format": "int64"
-        },
-        "minMemory": {
-          "description": "MinMemory specifies minimum GPU memory required in GB",
-          "type": "integer",
-          "format": "int64"
-        },
-        "preferredPrecisions": {
-          "description": "PreferredPrecisions lists numeric precisions in order of preference Examples: [\"fp8\", \"fp16\", \"fp32\"]",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
-        "requiredFeatures": {
-          "description": "RequiredFeatures lists hardware features that must be present Examples: [\"tensor-cores\", \"fp8\", \"nvlink\"]",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "default": ""
-          },
-          "x-kubernetes-list-type": "atomic"
-        }
-      }
-    },
-    "v1beta1.AcceleratorResource": {
-      "type": "object",
-      "properties": {
-        "divisible": {
-          "description": "Divisible indicates if the resource can be subdivided",
-          "type": "boolean"
+          "description": "Kind of the resource (e.g. \"BackendTrafficPolicy\").",
+          "type": "string",
+          "default": ""
         },
         "name": {
-          "description": "Name of the resource (e.g., nvidia.com/gpu)",
+          "description": "Name of the resource, in the same namespace as the InferenceService.",
           "type": "string",
           "default": ""
-        },
-        "quantity": {
-          "description": "Quantity per accelerator",
-          "$ref": "#/definitions/resource.Quantity"
-        }
-      }
-    },
-    "v1beta1.AcceleratorSelection": {
-      "description": "AcceleratorSelection shows what accelerator was selected and why",
-      "type": "object",
-      "required": [
-        "acceleratorClass"
-      ],
-      "properties": {
-        "acceleratorClass": {
-          "description": "AcceleratorClass that was selected",
-          "type": "string",
-          "default": ""
-        },
-        "nodeSelector": {
-          "description": "NodeSelector that was applied to pods",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string",
-            "default": ""
-          }
-        },
-        "reason": {
-          "description": "Reason explains why this accelerator was selected",
-          "type": "string"
-        },
-        "resourceRequests": {
-          "description": "ResourceRequests that were applied to pods",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string",
-            "default": ""
-          }
-        }
-      }
-    },
-    "v1beta1.AcceleratorSelector": {
-      "description": "AcceleratorSelector defines how to select accelerators for the InferenceService",
-      "type": "object",
-      "properties": {
-        "acceleratorClass": {
-          "description": "AcceleratorClass explicitly selects a specific AcceleratorClass Takes precedence over other selectors",
-          "type": "string"
-        },
-        "constraints": {
-          "description": "Constraints defines requirements that accelerators must meet",
-          "$ref": "#/definitions/v1beta1.AcceleratorConstraints"
-        },
-        "policy": {
-          "description": "Policy defines the selection policy when multiple accelerators match",
-          "type": "string"
         }
       }
     },
@@ -1051,9 +577,9 @@
           "description": "REST endpoint of the component if available.",
           "$ref": "#/definitions/knative.URL"
         },
-        "selectedAccelerator": {
-          "description": "SelectedAccelerator shows which AcceleratorClass was selected",
-          "$ref": "#/definitions/v1beta1.AcceleratorSelection"
+        "rolloutPhase": {
+          "description": "RolloutPhase reflects the current rollout state for this Component (OEP-0011 Part 2). One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
+          "type": "string"
         },
         "traffic": {
           "description": "Traffic holds the configured traffic distribution for latest ready revision and previous rolled out revision.",
@@ -1070,14 +596,37 @@
         }
       }
     },
+    "v1beta1.ConsistentHashSpec": {
+      "description": "ConsistentHashSpec selects what request attribute to hash on when LoadBalancingType=ConsistentHash. Exactly one of Headers or Cookie must be set when Type is Header or Cookie respectively; both forbidden when Type is SourceIP.",
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "cookie": {
+          "description": "Cookie configuration. Required when Type=Cookie. Forbidden when Type is not Cookie.",
+          "$ref": "#/definitions/v1beta1.HashCookie"
+        },
+        "headers": {
+          "description": "Headers to hash on. Required when Type=Header (one or more). Multiple headers are concatenated by the translator before hashing. Forbidden when Type is not Header.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.HashHeader"
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "type": {
+          "description": "Type selects the hash source.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
     "v1beta1.DecoderSpec": {
       "description": "DecoderSpec defines the configuration for the Decoder component (token generation in PD-disaggregated deployment) Used specifically for prefill-decode disaggregated deployments to handle the token generation phase. Similar to EngineSpec in structure, it allows for detailed pod and container configuration, but is specifically used for the decode phase when separating prefill and decode processes.",
       "type": "object",
       "properties": {
-        "acceleratorOverride": {
-          "description": "AcceleratorOverride allows overriding the global accelerator selection for this component",
-          "$ref": "#/definitions/v1beta1.AcceleratorSelector"
-        },
         "activeDeadlineSeconds": {
           "description": "Optional duration in seconds the pod may be active on the node relative to StartTime before the system will actively try to mark it failed and kill associated containers. Value must be a positive integer.",
           "type": "integer",
@@ -1502,6 +1051,29 @@
         }
       }
     },
+    "v1beta1.EndpointOverrideSpec": {
+      "description": "EndpointOverrideSpec configures Envoy Gateway's loadBalancer endpoint-override feature. When a request carries an endpoint reference (typically a header), the gateway routes the request to that exact endpoint if healthy, otherwise falls back to the configured LoadBalancer Algorithm.",
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "headers": {
+          "description": "Headers to read the endpoint reference from. Required when Type=Header. Each header value must be \"\u003chost\u003e:\u003cport\u003e\" or \"\u003cip\u003e:\u003cport\u003e\".",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.HashHeader"
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "type": {
+          "description": "Type selects where to read the endpoint override from.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
     "v1beta1.EndpointSpec": {
       "description": "EndpointSpec defines a reference to an inference service. It supports either a Kubernetes-style reference (InferenceService) or an Endpoint struct for a direct URL. Cross-namespace references are supported for InferenceService but require appropriate RBAC permissions to access resources in the target namespace.",
       "type": "object",
@@ -1520,10 +1092,6 @@
       "description": "EngineSpec defines the configuration for the Engine component (can be used for both single-node and multi-node deployments) Provides a comprehensive specification for deploying model serving containers and pods. It allows for complete Kubernetes pod configuration including main containers, init containers, sidecars, volumes, and other pod-level settings. For distributed deployments, it supports leader-worker architecture configuration.",
       "type": "object",
       "properties": {
-        "acceleratorOverride": {
-          "description": "AcceleratorOverride allows overriding the global accelerator selection for this component",
-          "$ref": "#/definitions/v1beta1.AcceleratorSelector"
-        },
         "activeDeadlineSeconds": {
           "description": "Optional duration in seconds the pod may be active on the node relative to StartTime before the system will actively try to mark it failed and kill associated containers. Value must be a positive integer.",
           "type": "integer",
@@ -2012,6 +1580,33 @@
         }
       }
     },
+    "v1beta1.HashCookie": {
+      "description": "HashCookie names a cookie and an optional TTL for auto-issuance.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Name is the cookie name.",
+          "type": "string",
+          "default": ""
+        },
+        "ttlSeconds": {
+          "description": "TTLSeconds, when greater than zero, makes the gateway auto-issue the cookie if absent on the request. When zero or unset, the client is responsible for sending the cookie.",
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "v1beta1.HashHeader": {
+      "description": "HashHeader names a single request header to include in the consistent-hash input.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Name is the header name (case-insensitive per HTTP).",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
     "v1beta1.HuggingFaceSecretReference": {
       "description": "HuggingFaceSecretReference defines a reference to a Kubernetes Secret containing the Hugging Face API key. This secret must reside in the same namespace as the BenchmarkJob. Cross-namespace references are not allowed for security and simplicity.",
       "type": "object",
@@ -2101,10 +1696,6 @@
       "description": "InferenceServiceSpec is the top level type for this resource",
       "type": "object",
       "properties": {
-        "acceleratorSelector": {
-          "description": "AcceleratorSelector specifies accelerator selection preferences",
-          "$ref": "#/definitions/v1beta1.AcceleratorSelector"
-        },
         "decoder": {
           "description": "Decoder defines the decoder spec This is specifically used for PD (Prefill-Decode) disaggregated serving deployments. Similar to Engine in structure, it allows for container and pod specifications, but is only utilized when implementing the disaggregated serving pattern to separate the prefill and decode phases of inference.",
           "$ref": "#/definitions/v1beta1.DecoderSpec"
@@ -2128,6 +1719,10 @@
         "runtime": {
           "description": "Runtime defines the serving runtime environment that will be used to execute the model. It is an inference service spec template that determines how the service should be deployed. Runtime is optional - if not defined, the operator will automatically select the best runtime based on the model's size, architecture, format, quantization, and framework.",
           "$ref": "#/definitions/v1beta1.ServingRuntimeRef"
+        },
+        "traffic": {
+          "description": "Traffic configures the load-balancing policy applied to all HTTPRoutes OME emits for this InferenceService. See OEP-0011 and the TrafficSpec doc for details.",
+          "$ref": "#/definitions/v1beta1.TrafficSpec"
         }
       }
     },
@@ -2179,10 +1774,26 @@
           "default": {},
           "$ref": "#/definitions/v1beta1.ModelStatus"
         },
+        "mountedOverlays": {
+          "description": "MountedOverlays lists overlays the controller attached to the pod spec. Skipped overlays (disabled, NotReady, NotFound) surface via the OverlaysReady condition.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.MountedOverlay"
+          },
+          "x-kubernetes-list-map-keys": [
+            "name"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
         "observedGeneration": {
           "description": "ObservedGeneration is the 'Generation' of the Service that was last processed by the controller.",
           "type": "integer",
           "format": "int64"
+        },
+        "traffic": {
+          "description": "Traffic reflects the resolved backend traffic policy (OEP-0011) and the emitted policy resource. Populated only when traffic intent is declared via spec.traffic or any ome.io/* traffic annotation; otherwise nil so older clients see nothing.",
+          "$ref": "#/definitions/v1beta1.TrafficStatus"
         },
         "url": {
           "description": "URL holds the url that will distribute traffic over the provided traffic targets. It generally has the form http[s]://{route-name}.{route-namespace}.{cluster-level-suffix}",
@@ -2778,6 +2389,22 @@
         }
       }
     },
+    "v1beta1.ModelOverlayRef": {
+      "description": "ModelOverlayRef references a BaseModel attached as an overlay. Narrower than ModelRef on purpose: no nested Overlays (type-system forbids recursion) and no FineTunedWeights (weight composition lives on the primary).",
+      "type": "object",
+      "properties": {
+        "apiGroup": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
     "v1beta1.ModelRef": {
       "type": "object",
       "properties": {
@@ -2802,6 +2429,18 @@
           "description": "Name of the model being referenced Identifies the specific model to be used for inference.",
           "type": "string",
           "default": ""
+        },
+        "overlays": {
+          "description": "Overlays declares additional BaseModels attached to every serving pod alongside the primary. Each overlay is mounted (PVC/PerNode) or env-addressable (Sharded) at /opt/ml/model-overlays/\u003cname\u003e and exposed via OVERLAY_\u003cUPPERCASED_NAME\u003e_MODEL_PATH. Runner selects at request time; OME does not detect failures or auto-swap. Disabled or NotReady overlays are silently omitted. See OEP-0011.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.ModelOverlayRef"
+          },
+          "x-kubernetes-list-map-keys": [
+            "name"
+          ],
+          "x-kubernetes-list-type": "map"
         }
       }
     },
@@ -2914,6 +2553,33 @@
         },
         "state": {
           "description": "Status of the model weight",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "v1beta1.MountedOverlay": {
+      "description": "MountedOverlay records one overlay the controller wired into the current pod spec.",
+      "type": "object",
+      "required": [
+        "name",
+        "envVar",
+        "distribution"
+      ],
+      "properties": {
+        "distribution": {
+          "type": "string",
+          "default": ""
+        },
+        "envVar": {
+          "type": "string",
+          "default": ""
+        },
+        "mountPath": {
+          "description": "MountPath is empty for Sharded overlays (fetched at runtime).",
+          "type": "string"
+        },
+        "name": {
           "type": "string",
           "default": ""
         }
@@ -3439,6 +3105,70 @@
           "x-kubernetes-list-type": "map",
           "x-kubernetes-patch-merge-key": "name",
           "x-kubernetes-patch-strategy": "merge,retainKeys"
+        }
+      }
+    },
+    "v1beta1.RolloutPause": {
+      "description": "RolloutPause holds a rollout at a step boundary.",
+      "type": "object",
+      "properties": {
+        "duration": {
+          "description": "Duration to pause before auto-advancing.\n  - If unset and PromotionPolicy is Manual, the controller waits\n    indefinitely for the ome.io/rollout-promote annotation.\n  - If PromotionPolicy is Auto and Duration is unset, the\n    controller advances immediately (i.e., the Pause is a no-op).\n  - If both are set, the controller advances after Duration\n    regardless of policy.",
+          "$ref": "#/definitions/v1.Duration"
+        }
+      }
+    },
+    "v1beta1.RolloutSpec": {
+      "description": "RolloutSpec defines a multi-step progressive rollout plan. When set on TrafficSpec.Rollout, the controller advances through the steps under the configured PromotionPolicy and the simple per-Component ComponentExtensionSpec.CanaryTrafficPercent MUST NOT be set on the same Component (admission rejects).\n\nStep semantics:\n  - Each step specifies pod capacity (NewCapacity, OldCapacity)\n    independently of traffic weight (TrafficWeight). This lets\n    operators run the new revision at full capacity with 0% traffic\n    for validation, then atomically shift traffic.\n  - The final step's TrafficWeight must be 100 (admission enforces)\n    so the rollout always completes.\n  - Each step's optional Pause holds the rollout. Under Manual\n    promotion, operators advance via the ome.io/rollout-promote\n    annotation; under Auto, the controller advances based on\n    Pause.Duration.",
+      "type": "object",
+      "required": [
+        "steps"
+      ],
+      "properties": {
+        "promotionPolicy": {
+          "description": "PromotionPolicy controls how the rollout advances between steps.\n  - Manual (default): operator advances via the\n    ome.io/rollout-promote annotation.\n  - Auto: controller advances based on each step's Pause.Duration.",
+          "type": "string"
+        },
+        "scaleDownDelaySeconds": {
+          "description": "ScaleDownDelaySeconds is the wait between shifting traffic away from the old revision and scaling its pods down, to drain in-flight requests. Default: 30.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "steps": {
+          "description": "Steps is the ordered list of rollout stages.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.RolloutStep"
+          }
+        }
+      }
+    },
+    "v1beta1.RolloutStep": {
+      "description": "RolloutStep specifies one stage of a progressive rollout.\n\nNewCapacity and TrafficWeight are independent dimensions. Common patterns:\n  - Symmetric canary: NewCapacity=10%, OldCapacity=90%, TrafficWeight=10\n  - Capacity surge:   NewCapacity=10%, OldCapacity=100%, TrafficWeight=10\n  - Blue-green:       NewCapacity=100%, OldCapacity=100%, TrafficWeight=0\n    (validate at full scale; later step sets TrafficWeight=100)",
+      "type": "object",
+      "required": [
+        "newCapacity",
+        "trafficWeight"
+      ],
+      "properties": {
+        "newCapacity": {
+          "description": "NewCapacity is the fraction of desired replicas to run for the new revision at this step. Percentage (\"25%\") or absolute (\"3\").",
+          "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
+        },
+        "oldCapacity": {
+          "description": "OldCapacity is the fraction of desired replicas to keep for the old revision at this step. Defaults to (100% - NewCapacity). Setting both \u003e50% allows a temporary capacity surge — useful for keeping full old capacity while the new revision validates at the same scale.",
+          "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
+        },
+        "pause": {
+          "description": "Pause holds the rollout at this step. If absent, the controller advances to the next step immediately after the step's capacity, traffic, and drain operations complete.",
+          "$ref": "#/definitions/v1beta1.RolloutPause"
+        },
+        "trafficWeight": {
+          "description": "TrafficWeight is the percentage of traffic routed to the new revision at this step. The old revision receives (100 - TrafficWeight).",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
         }
       }
     },
@@ -4182,10 +3912,6 @@
       "description": "ServingRuntimeSpec defines the desired state of ServingRuntime. This spec is currently provisional and are subject to change as details regarding single-model serving and multi-model serving are hammered out.",
       "type": "object",
       "properties": {
-        "acceleratorRequirements": {
-          "description": "AcceleratorRequirements specifies the accelerator requirements for this runtime",
-          "$ref": "#/definitions/v1beta1.AcceleratorRequirements"
-        },
         "affinity": {
           "description": "If specified, the pod's scheduling constraints",
           "$ref": "#/definitions/v1.Affinity"
@@ -4318,10 +4044,6 @@
           "x-kubernetes-list-type": "map",
           "x-kubernetes-patch-merge-key": "name",
           "x-kubernetes-patch-strategy": "merge,retainKeys"
-        },
-        "workers": {
-          "description": "WorkerPodSpec for the serving runtime, this is used for multi-node serving without Ray Cluster",
-          "$ref": "#/definitions/v1beta1.WorkerPodSpec"
         }
       }
     },
@@ -4385,13 +4107,6 @@
         "modelFramework"
       ],
       "properties": {
-        "acceleratorConfig": {
-          "description": "AcceleratorConfig provides accelerator-specific overrides for this model format",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/definitions/v1beta1.AcceleratorModelConfig"
-          }
-        },
         "autoSelect": {
           "description": "Set to true to allow the ServingRuntime to be used for automatic model placement if this model format is specified with no explicit runtime.",
           "type": "boolean"
@@ -4463,129 +4178,60 @@
         }
       }
     },
-    "v1beta1.TensorParallelismConfig": {
-      "description": "TensorParallelismConfig specifies tensor parallelism settings",
+    "v1beta1.TrafficSpec": {
+      "description": "TrafficSpec configures the load-balancing policy applied to all HTTPRoutes OME emits for the InferenceService. The translated backend policy resource (e.g. Envoy Gateway BackendTrafficPolicy) targets every OME-managed HTTPRoute via targetRefs, so behavior is consistent whether clients address the top-level URL or a per-Component subdomain.\n\nFor less-common settings (circuit breaker, retries, sub-second timeouts), see the ome.io/* annotation contract documented in OEP-0011.\n\nFor Component-specific routing (one Component needs a different LB algorithm), hand-author a separate BackendTrafficPolicy targeting only that Component's HTTPRoute — OME defers (see OEP-0011 \"Coexistence with Hand-Authored Policies\").",
       "type": "object",
       "properties": {
-        "dataParallelSize": {
-          "description": "dataParallelSize specifies the size of the data parallelism",
-          "type": "integer",
-          "format": "int64"
+        "algorithm": {
+          "description": "Algorithm selects the load-balancing algorithm. Absent = the Gateway implementation's default (LeastRequest for Envoy Gateway).",
+          "type": "string"
         },
-        "pipelineParallelSize": {
-          "description": "pipelineParallelSize specifies the size of the pipeline parallelism",
-          "type": "integer",
-          "format": "int64"
+        "consistentHash": {
+          "description": "ConsistentHash configures the hash key. Required when Algorithm=ConsistentHash; rejected otherwise (webhook).",
+          "$ref": "#/definitions/v1beta1.ConsistentHashSpec"
         },
-        "tensorParallelSize": {
-          "description": "tensorParallelSize specifies the size of the tensor parallelism",
-          "type": "integer",
-          "format": "int64"
+        "endpointOverride": {
+          "description": "EndpointOverride routes requests to a specific pod when a request header (e.g. \"X-Endpoint-HostPort: 10.0.0.5:30000\") is present and the endpoint is healthy; falls back to the configured Algorithm when the endpoint is unhealthy or the header is absent.\n\nEnvoy Gateway only in alpha (no Istio equivalent). Translators that do not support endpoint override surface this as an UnsupportedField condition on the InferenceService.",
+          "$ref": "#/definitions/v1beta1.EndpointOverrideSpec"
+        },
+        "rollout": {
+          "description": "Rollout configures a step-based progressive rollout plan. When set, the controller advances through the steps under the configured PromotionPolicy and the per-Component ComponentExtensionSpec.CanaryTrafficPercent MUST NOT be set on the same Component (admission rejects with MixedRolloutForms). When unset, operators drive rollouts directly via ComponentExtensionSpec.CanaryTrafficPercent.",
+          "$ref": "#/definitions/v1beta1.RolloutSpec"
         }
       }
     },
-    "v1beta1.WorkerPodSpec": {
+    "v1beta1.TrafficStatus": {
+      "description": "TrafficStatus reflects the resolved backend traffic policy and the emitted policy resource (e.g. Envoy Gateway BackendTrafficPolicy) for an InferenceService. Lives at InferenceServiceStatus.Traffic. Populated only when traffic intent is declared via spec.traffic or any ome.io/* traffic annotation; otherwise nil so older clients see nothing.",
       "type": "object",
       "properties": {
-        "affinity": {
-          "description": "If specified, the pod's scheduling constraints",
-          "$ref": "#/definitions/v1.Affinity"
-        },
-        "annotations": {
-          "description": "Annotations that will be add to the pod. More info: http://kubernetes.io/docs/user-guide/annotations",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string",
-            "default": ""
-          }
-        },
-        "containers": {
-          "description": "List of containers belonging to the pod. Containers cannot currently be added or removed. Cannot be updated.",
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/v1.Container"
-          },
-          "x-kubernetes-list-map-keys": [
-            "name"
-          ],
-          "x-kubernetes-list-type": "map",
-          "x-kubernetes-patch-merge-key": "name",
-          "x-kubernetes-patch-strategy": "merge"
-        },
-        "dnsPolicy": {
-          "description": "Set DNS policy for the pod. Defaults to \"ClusterFirst\". Valid values are 'ClusterFirstWithHostNet', 'ClusterFirst', 'Default' or 'None'. DNS parameters given in DNSConfig will be merged with the policy selected with DNSPolicy. To have DNS options set along with hostNetwork, you have to specify DNS policy explicitly to 'ClusterFirstWithHostNet'.",
+        "algorithm": {
+          "description": "Algorithm reflects the resolved load-balancing algorithm. One of RoundRobin | LeastRequest | Random | ConsistentHash | Default. \"Default\" means no Algorithm was set on spec.traffic and the Gateway implementation default applies.",
           "type": "string"
         },
-        "hostIPC": {
-          "description": "Use the host's ipc namespace. Optional: Default to false.",
-          "type": "boolean"
+        "backendPolicyResource": {
+          "description": "BackendPolicyResource references the OME-emitted backend policy (typically a gateway.envoyproxy.io/v1alpha1.BackendTrafficPolicy). Empty when no policy was emitted (e.g. translator deferred to a conflicting hand-authored policy).",
+          "$ref": "#/definitions/v1beta1.BackendPolicyRef"
         },
-        "hostNetwork": {
-          "description": "Host networking requested for this pod. Use the host's network namespace. If this option is set, the ports that will be used must be specified. Default to false.",
-          "type": "boolean"
-        },
-        "imagePullSecrets": {
-          "description": "ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images used by this PodSpec. If specified, these secrets will be passed to individual puller implementations for them to use. More info: https://kubernetes.io/docs/concepts/containers/images#specifying-imagepullsecrets-on-a-pod",
+        "conditions": {
+          "description": "Conditions surface translation, conflict, and gateway-acceptance state. The well-known condition type is BackendPolicyReady.",
           "type": "array",
           "items": {
             "default": {},
-            "$ref": "#/definitions/v1.LocalObjectReference"
+            "$ref": "#/definitions/v1.Condition"
           },
           "x-kubernetes-list-map-keys": [
-            "name"
+            "type"
           ],
-          "x-kubernetes-list-type": "map",
-          "x-kubernetes-patch-merge-key": "name",
-          "x-kubernetes-patch-strategy": "merge"
+          "x-kubernetes-list-type": "map"
         },
-        "labels": {
-          "description": "Labels that will be add to the pod. More info: http://kubernetes.io/docs/user-guide/labels",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string",
-            "default": ""
-          }
-        },
-        "nodeSelector": {
-          "description": "NodeSelector is a selector which must be true for the pod to fit on a node. Selector which must match a node's labels for the pod to be scheduled on that node. More info: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string",
-            "default": ""
-          }
-        },
-        "schedulerName": {
-          "description": "If specified, the pod will be dispatched by specified scheduler. If not specified, the pod will be dispatched by default scheduler.",
-          "type": "string"
-        },
-        "size": {
-          "description": "Size of the worker, this is the number of pods in the worker.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "tolerations": {
-          "description": "If specified, the pod's tolerations.",
+        "targetedHTTPRoutes": {
+          "description": "TargetedHTTPRoutes lists the HTTPRoute names the emitted policy targets. Operators read this to understand which routes the policy applies to without inspecting the emitted resource. Empty when no policy was emitted.",
           "type": "array",
           "items": {
-            "default": {},
-            "$ref": "#/definitions/v1.Toleration"
+            "type": "string",
+            "default": ""
           },
           "x-kubernetes-list-type": "atomic"
-        },
-        "volumes": {
-          "description": "List of volumes that can be mounted by containers belonging to the pod. More info: https://kubernetes.io/docs/concepts/storage/volumes",
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/v1.Volume"
-          },
-          "x-kubernetes-list-map-keys": [
-            "name"
-          ],
-          "x-kubernetes-list-type": "map",
-          "x-kubernetes-patch-merge-key": "name",
-          "x-kubernetes-patch-strategy": "merge,retainKeys"
         }
       }
     },

@@ -1,7 +1,6 @@
 package servingruntime
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
@@ -9,9 +8,6 @@ import (
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -1808,110 +1804,4 @@ func TestContainsComplete(t *testing.T) {
 // StringPointer returns a pointer to the given string value
 func stringPointer(s string) *string {
 	return &s
-}
-
-// TestValidateAcceleratorClasses tests the validateAcceleratorClasses function
-func TestValidateAcceleratorClasses(t *testing.T) {
-	// Create fake client with pre-populated AcceleratorClasses
-	existingClasses := []client.Object{
-		&v1beta1.AcceleratorClass{
-			ObjectMeta: metav1.ObjectMeta{Name: "nvidia-h100-80gb"},
-		},
-		&v1beta1.AcceleratorClass{
-			ObjectMeta: metav1.ObjectMeta{Name: "nvidia-a100-80gb"},
-		},
-	}
-
-	scheme := runtime.NewScheme()
-	_ = v1beta1.AddToScheme(scheme)
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(existingClasses...).
-		Build()
-
-	testcases := []struct {
-		name        string
-		spec        *v1beta1.ServingRuntimeSpec
-		expectError bool
-		errorMsg    string
-	}{
-		{
-			name: "No accelerator requirements",
-			spec: &v1beta1.ServingRuntimeSpec{
-				AcceleratorRequirements: nil,
-			},
-			expectError: false,
-		},
-		{
-			name: "Empty accelerator classes list",
-			spec: &v1beta1.ServingRuntimeSpec{
-				AcceleratorRequirements: &v1beta1.AcceleratorRequirements{
-					AcceleratorClasses: []string{},
-				},
-			},
-			expectError: false,
-		},
-		{
-			name: "Valid accelerator class - nvidia-h100-80gb",
-			spec: &v1beta1.ServingRuntimeSpec{
-				AcceleratorRequirements: &v1beta1.AcceleratorRequirements{
-					AcceleratorClasses: []string{"nvidia-h100-80gb"},
-				},
-			},
-			expectError: false,
-		},
-		{
-			name: "Unknown accelerator class",
-			spec: &v1beta1.ServingRuntimeSpec{
-				AcceleratorRequirements: &v1beta1.AcceleratorRequirements{
-					AcceleratorClasses: []string{"unknown-accelerator"},
-				},
-			},
-			expectError: true,
-			errorMsg:    "unknown accelerator classes",
-		},
-		{
-			name: "Multiple accelerator classes - all valid",
-			spec: &v1beta1.ServingRuntimeSpec{
-				AcceleratorRequirements: &v1beta1.AcceleratorRequirements{
-					AcceleratorClasses: []string{"nvidia-h100-80gb", "nvidia-a100-80gb"},
-				},
-			},
-			expectError: false,
-		},
-		{
-			name: "Multiple accelerator classes - one invalid",
-			spec: &v1beta1.ServingRuntimeSpec{
-				AcceleratorRequirements: &v1beta1.AcceleratorRequirements{
-					AcceleratorClasses: []string{"nvidia-h100-80gb", "invalid-class"},
-				},
-			},
-			expectError: true,
-			errorMsg:    "unknown accelerator classes",
-		},
-		{
-			name: "Multiple accelerator classes - all invalid",
-			spec: &v1beta1.ServingRuntimeSpec{
-				AcceleratorRequirements: &v1beta1.AcceleratorRequirements{
-					AcceleratorClasses: []string{"invalid-class-1", "invalid-class-2"},
-				},
-			},
-			expectError: true,
-			errorMsg:    "unknown accelerator classes",
-		},
-	}
-
-	for _, tc := range testcases {
-		t.Run(tc.name, func(t *testing.T) {
-			g := gomega.NewGomegaWithT(t)
-			err := validateAcceleratorClasses(context.Background(), fakeClient, tc.spec)
-
-			if tc.expectError {
-				g.Expect(err).ToNot(gomega.BeNil())
-				g.Expect(err.Error()).To(gomega.ContainSubstring(tc.errorMsg))
-			} else {
-				g.Expect(err).To(gomega.BeNil())
-			}
-		})
-	}
 }

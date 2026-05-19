@@ -18,8 +18,6 @@ OME (Open Model Engine) is a Kubernetes operator for enterprise-grade management
 
 - **Runtime Integrations:** First-class support for SGLang and vLLM for high-throughput inference, and Triton for general model inference.
 
-- **Accelerator Management:** Hardware-aware scheduling through AcceleratorClass resources that define GPU capabilities, discovery patterns, and cost information.
-
 - **Kubernetes Ecosystem Integration:** Deep integration with Kueue, LeaderWorkerSet, KEDA, Gateway API, and Gateway API Inference Extension.
 
 ## Architecture
@@ -30,15 +28,13 @@ OME uses a component-based architecture built on Kubernetes custom resources:
 - **FineTunedWeight:** Define LoRA adapters and fine-tuned weights that extend base models
 - **ServingRuntime/ClusterServingRuntime:** Define how models are served with runtime-specific configurations
 - **InferenceService:** Connects models to runtimes for deployment with support for prefill-decode disaggregation and multi-node inference
-- **AcceleratorClass:** Define GPU hardware classes with capabilities, discovery patterns, and cost information for intelligent scheduling
 - **BenchmarkJob:** Measures model performance under different workloads with configurable traffic patterns
 
 OME's controller automatically:
 1. Downloads and parses models to understand their characteristics
 2. Selects the optimal runtime configuration for each model
-3. Matches models to appropriate accelerators based on requirements
-4. Generates Kubernetes resources for efficient deployment
-5. Continuously optimizes resource utilization across the cluster
+3. Generates Kubernetes resources for efficient deployment
+4. Continuously optimizes resource utilization across the cluster
 
 ## Development
 

@@ -876,125 +876,31 @@ func TestMatcherPicksRuntimeByModelSize(t *testing.T) {
 	assert.Equal(t, "mid-runtime", selected)
 }
 
-func TestGetCompatibilityDetails_AcceleratorClasses(t *testing.T) {
-	matcher := NewDefaultRuntimeMatcher(NewConfig(nil))
-
-	mkRuntime := func(classes []string) *v1beta1.ServingRuntimeSpec {
-		return &v1beta1.ServingRuntimeSpec{
-			SupportedModelFormats: []v1beta1.SupportedModelFormat{
-				{
-					ModelFormat: &v1beta1.ModelFormat{
-						Name:   "pytorch",
-						Weight: 10,
-					},
-					AutoSelect: ptr(true),
-				},
-			},
-			AcceleratorRequirements: &v1beta1.AcceleratorRequirements{AcceleratorClasses: classes},
-		}
-	}
-
-	baseModel := &v1beta1.BaseModelSpec{
-		ModelFormat: v1beta1.ModelFormat{Name: "pytorch"},
-	}
-
-	t.Run("isvc selector matches class", func(t *testing.T) {
-		rt := mkRuntime([]string{"nvidia-a100", "nvidia-tesla-t4"})
-		cls := "nvidia-a100"
-		isvc := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{AcceleratorSelector: &v1beta1.AcceleratorSelector{AcceleratorClass: &cls}}}
-
-		report, err := matcher.GetCompatibilityDetails(rt, baseModel, isvc, "rt")
-		assert.NoError(t, err)
-		assert.True(t, report.IsCompatible)
-	})
-
-	t.Run("isvc selector mismatches class", func(t *testing.T) {
-		rt := mkRuntime([]string{"nvidia-a100", "nvidia-tesla-t4"})
-		cls := "H100"
-		isvc := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{AcceleratorSelector: &v1beta1.AcceleratorSelector{AcceleratorClass: &cls}}}
-
-		report, err := matcher.GetCompatibilityDetails(rt, baseModel, isvc, "rt")
-		assert.NoError(t, err)
-		assert.False(t, report.IsCompatible)
-		assert.NotEmpty(t, report.IncompatibilityReasons)
-		found := false
-		for _, r := range report.IncompatibilityReasons {
-			if strings.Contains(r, "required accelerator class") {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found)
-	})
-
-	t.Run("engine override matches class", func(t *testing.T) {
-		rt := mkRuntime([]string{"H100"})
-		cls := "H100"
-		isvc := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{AcceleratorOverride: &v1beta1.AcceleratorSelector{AcceleratorClass: &cls}}}}
-
-		report, err := matcher.GetCompatibilityDetails(rt, baseModel, isvc, "rt")
-		assert.NoError(t, err)
-		assert.True(t, report.IsCompatible)
-	})
-
-	t.Run("decoder override mismatches class", func(t *testing.T) {
-		rt := mkRuntime([]string{"nvidia-a100"})
-		cls := "H100"
-		isvc := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{Decoder: &v1beta1.DecoderSpec{AcceleratorOverride: &v1beta1.AcceleratorSelector{AcceleratorClass: &cls}}}}
-
-		report, err := matcher.GetCompatibilityDetails(rt, baseModel, isvc, "rt")
-		assert.NoError(t, err)
-		assert.False(t, report.IsCompatible)
-	})
-
-	t.Run("no accelerator classes in runtime => compatible", func(t *testing.T) {
-		rt := mkRuntime([]string{}) // empty means no restriction
-		isvc := &v1beta1.InferenceService{}
-		report, err := matcher.GetCompatibilityDetails(rt, baseModel, isvc, "rt")
-		assert.NoError(t, err)
-		assert.True(t, report.IsCompatible)
-	})
-}
-
-func TestIsCompatible_DisabledAndAcceleratorErrors(t *testing.T) {
+func TestIsCompatible_DisabledRuntime(t *testing.T) {
 	matcher := NewDefaultRuntimeMatcher(NewConfig(nil))
 
 	baseModel := &v1beta1.BaseModelSpec{ModelFormat: v1beta1.ModelFormat{Name: "pytorch"}}
 	isvc := &v1beta1.InferenceService{}
 
-	t.Run("disabled runtime returns error", func(t *testing.T) {
-		rt := &v1beta1.ServingRuntimeSpec{Disabled: ptr(true)}
-		ok, err := matcher.IsCompatible(rt, baseModel, isvc, "rt")
-		assert.False(t, ok)
-		assert.Error(t, err)
-		assert.True(t, IsRuntimeDisabledError(err))
-	})
+	rt := &v1beta1.ServingRuntimeSpec{Disabled: ptr(true)}
+	ok, err := matcher.IsCompatible(rt, baseModel, isvc, "rt")
+	assert.False(t, ok)
+	assert.Error(t, err)
+	assert.True(t, IsRuntimeDisabledError(err))
+}
 
-	t.Run("accelerator mismatch returns compatibility error", func(t *testing.T) {
-		rt := &v1beta1.ServingRuntimeSpec{
-			SupportedModelFormats:   []v1beta1.SupportedModelFormat{{ModelFormat: &v1beta1.ModelFormat{Name: "pytorch"}}},
-			AcceleratorRequirements: &v1beta1.AcceleratorRequirements{AcceleratorClasses: []string{"A100"}},
-		}
-		cls := "H100"
-		isvc := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{AcceleratorSelector: &v1beta1.AcceleratorSelector{AcceleratorClass: &cls}}}
+func TestIsCompatible_SizeMismatchNoError(t *testing.T) {
+	matcher := NewDefaultRuntimeMatcher(NewConfig(nil))
 
-		ok, err := matcher.IsCompatible(rt, baseModel, isvc, "rt")
-		assert.False(t, ok)
-		assert.Error(t, err)
-		assert.True(t, IsRuntimeCompatibilityError(err))
-	})
-
-	t.Run("size mismatch does not return error, only false", func(t *testing.T) {
-		rt := &v1beta1.ServingRuntimeSpec{
-			SupportedModelFormats:   []v1beta1.SupportedModelFormat{{ModelFormat: &v1beta1.ModelFormat{Name: "pytorch"}}},
-			ModelSizeRange:          &v1beta1.ModelSizeRangeSpec{Min: ptr("1B"), Max: ptr("2B")},
-			AcceleratorRequirements: &v1beta1.AcceleratorRequirements{},
-		}
-		model := &v1beta1.BaseModelSpec{ModelFormat: v1beta1.ModelFormat{Name: "pytorch"}, ModelParameterSize: ptr("70B")}
-		ok, err := matcher.IsCompatible(rt, model, isvc, "rt")
-		assert.False(t, ok)
-		assert.NoError(t, err)
-	})
+	isvc := &v1beta1.InferenceService{}
+	rt := &v1beta1.ServingRuntimeSpec{
+		SupportedModelFormats: []v1beta1.SupportedModelFormat{{ModelFormat: &v1beta1.ModelFormat{Name: "pytorch"}}},
+		ModelSizeRange:        &v1beta1.ModelSizeRangeSpec{Min: ptr("1B"), Max: ptr("2B")},
+	}
+	model := &v1beta1.BaseModelSpec{ModelFormat: v1beta1.ModelFormat{Name: "pytorch"}, ModelParameterSize: ptr("70B")}
+	ok, err := matcher.IsCompatible(rt, model, isvc, "rt")
+	assert.False(t, ok)
+	assert.NoError(t, err)
 }
 
 func TestCompareModelFormatVersions(t *testing.T) {

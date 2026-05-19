@@ -27,8 +27,6 @@ type ComponentBuilder struct {
 	runtime                *v1beta1.ServingRuntimeSpec
 	runtimeName            string
 	supportedModelFormat   *v1beta1.SupportedModelFormat
-	acceleratorClass       *v1beta1.AcceleratorClassSpec
-	acceleratorClassName   string
 	overlays               []isvcutils.ResolvedOverlay
 	logger                 logr.Logger
 }
@@ -72,13 +70,6 @@ func (b *ComponentBuilder) WithRuntime(spec *v1beta1.ServingRuntimeSpec, name st
 // WithLogger sets a custom logger
 func (b *ComponentBuilder) WithLogger(logger logr.Logger) *ComponentBuilder {
 	b.logger = logger
-	return b
-}
-
-// WithAcceleratorClass sets the accelerator class
-func (b *ComponentBuilder) WithAcceleratorClass(acceleratorClass *v1beta1.AcceleratorClassSpec, acceleratorClassName string) *ComponentBuilder {
-	b.acceleratorClass = acceleratorClass
-	b.acceleratorClassName = acceleratorClassName
 	return b
 }
 
@@ -127,8 +118,6 @@ func (b *ComponentBuilder) BuildEngine(spec *v1beta1.EngineSpec) Component {
 		b.runtime,
 		b.runtimeName,
 		b.supportedModelFormat,
-		b.acceleratorClass,
-		b.acceleratorClassName,
 		b.overlays,
 	)
 }
@@ -147,8 +136,6 @@ func (b *ComponentBuilder) BuildDecoder(spec *v1beta1.DecoderSpec) Component {
 		b.runtime,
 		b.runtimeName,
 		b.supportedModelFormat,
-		b.acceleratorClass,
-		b.acceleratorClassName,
 		b.overlays,
 	)
 }
@@ -217,15 +204,12 @@ func (f *ComponentBuilderFactory) CreateEngineComponent(
 	runtime *v1beta1.ServingRuntimeSpec,
 	runtimeName string,
 	supportedModelFormat *v1beta1.SupportedModelFormat,
-	acceleratorClass *v1beta1.AcceleratorClassSpec,
-	acceleratorClassName string,
 	overlays []isvcutils.ResolvedOverlay,
 ) Component {
 	return f.NewBuilder().
 		WithDeploymentMode(deploymentMode).
 		WithBaseModel(baseModel, baseModelMeta).
 		WithRuntime(runtime, runtimeName).
-		WithAcceleratorClass(acceleratorClass, acceleratorClassName).
 		WithSupportedModelFormat(supportedModelFormat).
 		WithOverlays(overlays).
 		BuildEngine(engineSpec)
@@ -240,15 +224,12 @@ func (f *ComponentBuilderFactory) CreateDecoderComponent(
 	runtime *v1beta1.ServingRuntimeSpec,
 	runtimeName string,
 	supportedModelFormat *v1beta1.SupportedModelFormat,
-	acceleratorClass *v1beta1.AcceleratorClassSpec,
-	acceleratorClassName string,
 	overlays []isvcutils.ResolvedOverlay,
 ) Component {
 	return f.NewBuilder().
 		WithDeploymentMode(deploymentMode).
 		WithBaseModel(baseModel, baseModelMeta).
 		WithRuntime(runtime, runtimeName).
-		WithAcceleratorClass(acceleratorClass, acceleratorClassName).
 		WithSupportedModelFormat(supportedModelFormat).
 		WithOverlays(overlays).
 		BuildDecoder(decoderSpec)

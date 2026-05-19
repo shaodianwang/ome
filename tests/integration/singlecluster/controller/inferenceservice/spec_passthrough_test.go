@@ -174,8 +174,7 @@ var _ = ginkgo.Describe("InferenceService Engine pod-spec passthrough", ginkgo.O
 	ginkgo.It("Container Resources (requests + limits) on Engine.Runner propagate to the Deployment container", func() {
 		// Resources go on the container, not the pod. utils/merging.go
 		// has a non-trivial path for resource merging — runtime
-		// supplies a base, ISVC overrides per-key, and any
-		// AcceleratorClass injects extended resources on top.
+		// supplies a base; ISVC overrides per-key.
 		cbm, rt := makeBaseModelAndRuntime("resources")
 		isvc := v1beta1testing.MakeInferenceService("passthrough-resources", ns.Name).
 			Model(cbm).Runtime(rt).

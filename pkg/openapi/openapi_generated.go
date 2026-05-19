@@ -12,22 +12,7 @@ import (
 
 func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
 	return map[string]common.OpenAPIDefinition{
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapabilities":    schema_pkg_apis_ome_v1beta1_AcceleratorCapabilities(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClass":           schema_pkg_apis_ome_v1beta1_AcceleratorClass(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClassList":       schema_pkg_apis_ome_v1beta1_AcceleratorClassList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClassSpec":       schema_pkg_apis_ome_v1beta1_AcceleratorClassSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClassStatus":     schema_pkg_apis_ome_v1beta1_AcceleratorClassStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorConstraints":     schema_pkg_apis_ome_v1beta1_AcceleratorConstraints(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCost":            schema_pkg_apis_ome_v1beta1_AcceleratorCost(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorDiscovery":       schema_pkg_apis_ome_v1beta1_AcceleratorDiscovery(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorIntegration":     schema_pkg_apis_ome_v1beta1_AcceleratorIntegration(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorLatency":         schema_pkg_apis_ome_v1beta1_AcceleratorLatency(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorModelConfig":     schema_pkg_apis_ome_v1beta1_AcceleratorModelConfig(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorPerformance":     schema_pkg_apis_ome_v1beta1_AcceleratorPerformance(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorRequirements":    schema_pkg_apis_ome_v1beta1_AcceleratorRequirements(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorResource":        schema_pkg_apis_ome_v1beta1_AcceleratorResource(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelection":       schema_pkg_apis_ome_v1beta1_AcceleratorSelection(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector":        schema_pkg_apis_ome_v1beta1_AcceleratorSelector(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef":           schema_pkg_apis_ome_v1beta1_BackendPolicyRef(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                  schema_pkg_apis_ome_v1beta1_BaseModel(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":              schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":              schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
@@ -41,16 +26,20 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList":  schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentExtensionSpec":     schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec":        schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec":         schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec":                schema_pkg_apis_ome_v1beta1_DecoderSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionComponentSpec":     schema_pkg_apis_ome_v1beta1_DiffusionComponentSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec":      schema_pkg_apis_ome_v1beta1_DiffusionPipelineSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Endpoint":                   schema_pkg_apis_ome_v1beta1_Endpoint(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec":       schema_pkg_apis_ome_v1beta1_EndpointOverrideSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointSpec":               schema_pkg_apis_ome_v1beta1_EndpointSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec":                 schema_pkg_apis_ome_v1beta1_EngineSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FailureInfo":                schema_pkg_apis_ome_v1beta1_FailureInfo(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeight":            schema_pkg_apis_ome_v1beta1_FineTunedWeight(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightList":        schema_pkg_apis_ome_v1beta1_FineTunedWeightList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":        schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                 schema_pkg_apis_ome_v1beta1_HashCookie(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                 schema_pkg_apis_ome_v1beta1_HashHeader(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HuggingFaceSecretReference": schema_pkg_apis_ome_v1beta1_HuggingFaceSecretReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceService":           schema_pkg_apis_ome_v1beta1_InferenceService(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceList":       schema_pkg_apis_ome_v1beta1_InferenceServiceList(ref),
@@ -67,16 +56,21 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelExtensionSpec":         schema_pkg_apis_ome_v1beta1_ModelExtensionSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat":                schema_pkg_apis_ome_v1beta1_ModelFormat(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec":         schema_pkg_apis_ome_v1beta1_ModelFrameworkSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelOverlayRef":            schema_pkg_apis_ome_v1beta1_ModelOverlayRef(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef":                   schema_pkg_apis_ome_v1beta1_ModelRef(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRevisionStates":        schema_pkg_apis_ome_v1beta1_ModelRevisionStates(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec":         schema_pkg_apis_ome_v1beta1_ModelSizeRangeSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus":                schema_pkg_apis_ome_v1beta1_ModelStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatusSpec":            schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay":             schema_pkg_apis_ome_v1beta1_MountedOverlay(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus":   schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":    schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":            schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodOverride":                schema_pkg_apis_ome_v1beta1_PodOverride(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                    schema_pkg_apis_ome_v1beta1_PodSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause":               schema_pkg_apis_ome_v1beta1_RolloutPause(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep":                schema_pkg_apis_ome_v1beta1_RolloutStep(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                 schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                 schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalerAuthenticationRef":    schema_pkg_apis_ome_v1beta1_ScalerAuthenticationRef(ref),
@@ -90,949 +84,47 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec":                schema_pkg_apis_ome_v1beta1_StorageSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat":       schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedRuntime":           schema_pkg_apis_ome_v1beta1_SupportedRuntime(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TensorParallelismConfig":    schema_pkg_apis_ome_v1beta1_TensorParallelismConfig(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec":                schema_pkg_apis_ome_v1beta1_TrafficSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus":              schema_pkg_apis_ome_v1beta1_TrafficStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec":                 schema_pkg_apis_ome_v1beta1_WorkerSpec(ref),
 	}
 }
 
-func schema_pkg_apis_ome_v1beta1_AcceleratorCapabilities(ref common.ReferenceCallback) common.OpenAPIDefinition {
+func schema_pkg_apis_ome_v1beta1_BackendPolicyRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
+				Description: "BackendPolicyRef identifies the OME-emitted backend policy resource sibling to the InferenceService.",
+				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"memoryGB": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Memory capacity in GB",
-							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
-						},
-					},
-					"computeCapability": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Compute capability (NVIDIA) or equivalent",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"levelZeroVersion": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Level Zero version (for Intel accelerators)",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"clockSpeedMHz": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Clock speeds",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"memoryBandwidthGBps": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Memory bandwidth",
-							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
-						},
-					},
-					"features": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "Features supported by this accelerator",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"performance": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Performance metrics",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorPerformance"),
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorPerformance", "k8s.io/apimachinery/pkg/api/resource.Quantity"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorClass(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
-					"kind": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
 					"apiVersion": {
 						SchemaProps: spec.SchemaProps{
-							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Description: "APIVersion of the resource (e.g. \"gateway.envoyproxy.io/v1alpha1\").",
+							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
-					"metadata": {
-						SchemaProps: spec.SchemaProps{
-							Default: map[string]interface{}{},
-							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
-						},
-					},
-					"spec": {
-						SchemaProps: spec.SchemaProps{
-							Default: map[string]interface{}{},
-							Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClassSpec"),
-						},
-					},
-					"status": {
-						SchemaProps: spec.SchemaProps{
-							Default: map[string]interface{}{},
-							Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClassStatus"),
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClassSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClassStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorClassList(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "AcceleratorClassList contains a list of AcceleratorClass",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
 					"kind": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Description: "Kind of the resource (e.g. \"BackendTrafficPolicy\").",
+							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
-					"apiVersion": {
-						SchemaProps: spec.SchemaProps{
-							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"metadata": {
-						SchemaProps: spec.SchemaProps{
-							Default: map[string]interface{}{},
-							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
-						},
-					},
-					"items": {
-						SchemaProps: spec.SchemaProps{
-							Type: []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClass"),
-									},
-								},
-							},
-						},
-					},
-				},
-				Required: []string{"items"},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClass", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorClassSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
-					"vendor": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Vendor of the accelerator (nvidia, amd, intel, etc.)",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"family": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Family of the accelerator (ampere, hopper, cdna2, etc.)",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"model": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Model name (a100, h100, mi250x, etc.)",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"discovery": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Discovery patterns to identify nodes with this accelerator",
-							Default:     map[string]interface{}{},
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorDiscovery"),
-						},
-					},
-					"capabilities": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Capabilities of this accelerator class",
-							Default:     map[string]interface{}{},
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapabilities"),
-						},
-					},
-					"resources": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "Resources exposed by this accelerator",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorResource"),
-									},
-								},
-							},
-						},
-					},
-					"integration": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Integration with external systems",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorIntegration"),
-						},
-					},
-					"cost": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Cost information for optimization decisions",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCost"),
-						},
-					},
-				},
-				Required: []string{"discovery", "capabilities"},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapabilities", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCost", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorDiscovery", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorIntegration", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorResource"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorClassStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
-					"nodes": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "Nodes that have this accelerator",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"totalAccelerators": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Total number of accelerators in the cluster",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"availableAccelerators": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Available accelerators (not allocated)",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"lastUpdated": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Last update time",
-							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
-						},
-					},
-					"conditions": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "Conditions represent the latest available observations",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
-									},
-								},
-							},
-						},
-					},
-					"availableNodes": {
-						SchemaProps: spec.SchemaProps{
-							Description: "AvailableNodes is the number of nodes that have this accelerator available",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"k8s.io/apimachinery/pkg/apis/meta/v1.Condition", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorConstraints(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "AcceleratorConstraints defines requirements for accelerator selection",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"minMemory": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MinMemory in GB",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"maxMemory": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MaxMemory in GB (useful for cost control)",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"minComputePerformanceTFLOPS": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MinComputePerformanceTFLOPS in TFLOPS",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"minArchitectureVersion": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MinArchitectureVersion Compute capability (NVIDIA) or equivalent",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"requiredFeatures": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "RequiredFeatures that must be present",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"excludedClasses": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "ExcludedClasses lists AcceleratorClasses to avoid",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"architectureFamilies": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "ArchitectureFamilies limits selection to specific families Examples: [\"nvidia-hopper\", \"nvidia-ampere\"]",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"preferredPrecisions": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "PreferredPrecisions lists numeric precisions in order of preference Examples: [\"fp8\", \"fp16\", \"fp32\"]",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorCost(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
-					"perHour": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Cost per hour in dollars",
-							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
-						},
-					},
-					"perMillionTokens": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Cost per million tokens (for usage-based pricing)",
-							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
-						},
-					},
-					"spotPerHour": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Spot instance pricing if available",
-							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
-						},
-					},
-					"tier": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Cost tier for simplified selection (low, medium, high)",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"k8s.io/apimachinery/pkg/api/resource.Quantity"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorDiscovery(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
-					"nodeSelector": {
-						SchemaProps: spec.SchemaProps{
-							Description: "NodeSelector to identify nodes with this accelerator",
-							Type:        []string{"object"},
-							AdditionalProperties: &spec.SchemaOrBool{
-								Allows: true,
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"affinity": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Affinity for more complex node selection",
-							Ref:         ref("k8s.io/api/core/v1.Affinity"),
-						},
-					},
-					"pciVendorID": {
-						SchemaProps: spec.SchemaProps{
-							Description: "PCIVendorID for device discovery (e.g., \"10de\" for NVIDIA)",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"deviceIDs": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "DeviceIDs list of PCI device IDs",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"k8s.io/api/core/v1.Affinity"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorIntegration(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
-					"kueueResourceFlavor": {
-						SchemaProps: spec.SchemaProps{
-							Description: "KueueResourceFlavor name to sync with",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"volcanoGPUType": {
-						SchemaProps: spec.SchemaProps{
-							Description: "VolcanoGPUType for Volcano integration",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorLatency(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
-					"averageMillis": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Average latency in milliseconds",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"maximumMillis": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Maximum latency in milliseconds",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorModelConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "AcceleratorModelConfig provides accelerator-specific overrides for this model format",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"minMemoryPerBillionParams": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MinMemoryPerBillionParams specifies memory required per billion parameters Used to calculate if a model fits on the accelerator",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"tensorParallelismOverride": {
-						SchemaProps: spec.SchemaProps{
-							Description: "TensorParallelismOverride overrides the default tensor parallelism settings",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TensorParallelismConfig"),
-						},
-					},
-					"runtimeArgsOverride": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "RuntimeArgsOverride provides accelerator-specific runtime arguments",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"environmentOverride": {
-						SchemaProps: spec.SchemaProps{
-							Description: "EnvironmentOverride provides accelerator-specific environment variables",
-							Type:        []string{"object"},
-							AdditionalProperties: &spec.SchemaOrBool{
-								Allows: true,
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TensorParallelismConfig"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorPerformance(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
-					"fp32Tflops": {
-						SchemaProps: spec.SchemaProps{
-							Description: "FP32 performance in TFLOPS",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"fp16Tflops": {
-						SchemaProps: spec.SchemaProps{
-							Description: "FP16 performance in TFLOPS",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"int8Tops": {
-						SchemaProps: spec.SchemaProps{
-							Description: "INT8 performance in TOPS",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"int4Tops": {
-						SchemaProps: spec.SchemaProps{
-							Description: "INT4 performance in TOPS",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"latency": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Latency metrics",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorLatency"),
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorLatency"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorRequirements(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "AcceleratorRequirements specifies the accelerator requirements for this runtime",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"acceleratorClasses": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "AcceleratorClasses lists the names of AcceleratorClasses this runtime supports",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"minMemory": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MinMemory specifies minimum GPU memory required in GB",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"minComputePerformanceTFLOPS": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MinComputePerformanceTFLOPS specifies minimum compute capability in TFLOPS",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"minArchitectureVersion": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MinArchitectureVersion Compute capability (NVIDIA) or equivalent",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"requiredFeatures": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "RequiredFeatures lists hardware features that must be present Examples: [\"tensor-cores\", \"fp8\", \"nvlink\"]",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"preferredPrecisions": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "PreferredPrecisions lists numeric precisions in order of preference Examples: [\"fp8\", \"fp16\", \"fp32\"]",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorResource(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
 					"name": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Name of the resource (e.g., nvidia.com/gpu)",
+							Description: "Name of the resource, in the same namespace as the InferenceService.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
-					"quantity": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Quantity per accelerator",
-							Ref:         ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
-						},
-					},
-					"divisible": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Divisible indicates if the resource can be subdivided",
-							Type:        []string{"boolean"},
-							Format:      "",
-						},
-					},
 				},
+				Required: []string{"apiVersion", "kind", "name"},
 			},
 		},
-		Dependencies: []string{
-			"k8s.io/apimachinery/pkg/api/resource.Quantity"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorSelection(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "AcceleratorSelection shows what accelerator was selected and why",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"acceleratorClass": {
-						SchemaProps: spec.SchemaProps{
-							Description: "AcceleratorClass that was selected",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"reason": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Reason explains why this accelerator was selected",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"nodeSelector": {
-						SchemaProps: spec.SchemaProps{
-							Description: "NodeSelector that was applied to pods",
-							Type:        []string{"object"},
-							AdditionalProperties: &spec.SchemaOrBool{
-								Allows: true,
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"resourceRequests": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ResourceRequests that were applied to pods",
-							Type:        []string{"object"},
-							AdditionalProperties: &spec.SchemaOrBool{
-								Allows: true,
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-				},
-				Required: []string{"acceleratorClass"},
-			},
-		},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_AcceleratorSelector(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "AcceleratorSelector defines how to select accelerators for the InferenceService",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"acceleratorClass": {
-						SchemaProps: spec.SchemaProps{
-							Description: "AcceleratorClass explicitly selects a specific AcceleratorClass Takes precedence over other selectors",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"constraints": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Constraints defines requirements that accelerators must meet",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorConstraints"),
-						},
-					},
-					"policy": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Policy defines the selection policy when multiple accelerators match",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorConstraints"},
 	}
 }
 
@@ -2002,23 +1094,73 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 							Ref:         ref("knative.dev/pkg/apis/duck/v1.Addressable"),
 						},
 					},
-					"selectedAccelerator": {
-						SchemaProps: spec.SchemaProps{
-							Description: "SelectedAccelerator shows which AcceleratorClass was selected",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelection"),
-						},
-					},
 					"omenative": {
 						SchemaProps: spec.SchemaProps{
 							Description: "OMENative reports OMENative-managed state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus"),
 						},
 					},
+					"rolloutPhase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RolloutPhase reflects the current rollout state for this Component (OEP-0011 Part 2). One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelection", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable", "knative.dev/serving/pkg/apis/serving/v1.TrafficTarget"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable", "knative.dev/serving/pkg/apis/serving/v1.TrafficTarget"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ConsistentHashSpec selects what request attribute to hash on when LoadBalancingType=ConsistentHash. Exactly one of Headers or Cookie must be set when Type is Header or Cookie respectively; both forbidden when Type is SourceIP.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Type selects the hash source.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"headers": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Headers to hash on. Required when Type=Header (one or more). Multiple headers are concatenated by the translator before hashing. Forbidden when Type is not Header.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader"),
+									},
+								},
+							},
+						},
+					},
+					"cookie": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Cookie configuration. Required when Type=Cookie. Forbidden when Type is not Cookie.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie"),
+						},
+					},
+				},
+				Required: []string{"type"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader"},
 	}
 }
 
@@ -2619,17 +1761,11 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec"),
 						},
 					},
-					"acceleratorOverride": {
-						SchemaProps: spec.SchemaProps{
-							Description: "AcceleratorOverride allows overriding the global accelerator selection for this component",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector"),
-						},
-					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -2766,6 +1902,49 @@ func schema_pkg_apis_ome_v1beta1_Endpoint(ref common.ReferenceCallback) common.O
 				Required: []string{"url", "apiFormat"},
 			},
 		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_EndpointOverrideSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "EndpointOverrideSpec configures Envoy Gateway's loadBalancer endpoint-override feature. When a request carries an endpoint reference (typically a header), the gateway routes the request to that exact endpoint if healthy, otherwise falls back to the configured LoadBalancer Algorithm.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Type selects where to read the endpoint override from.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"headers": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Headers to read the endpoint reference from. Required when Type=Header. Each header value must be \"<host>:<port>\" or \"<ip>:<port>\".",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"type"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader"},
 	}
 }
 
@@ -3393,17 +2572,11 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec"),
 						},
 					},
-					"acceleratorOverride": {
-						SchemaProps: spec.SchemaProps{
-							Description: "AcceleratorOverride allows overriding the global accelerator selection for this component",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector"),
-						},
-					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -3647,6 +2820,55 @@ func schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref common.ReferenceCallbac
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_HashCookie(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "HashCookie names a cookie and an optional TTL for auto-issuance.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is the cookie name.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"ttlSeconds": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TTLSeconds, when greater than zero, makes the gateway auto-issue the cookie if absent on the request. When zero or unset, the client is responsible for sending the cookie.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_HashHeader(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "HashHeader names a single request header to include in the consistent-hash input.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is the header name (case-insensitive per HTTP).",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_HuggingFaceSecretReference(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -3837,17 +3059,17 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig"),
 						},
 					},
-					"acceleratorSelector": {
+					"traffic": {
 						SchemaProps: spec.SchemaProps{
-							Description: "AcceleratorSelector specifies accelerator selection preferences",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector"),
+							Description: "Traffic configures the load-balancing policy applied to all HTTPRoutes OME emits for this InferenceService. See OEP-0011 and the TrafficSpec doc for details.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"),
 						},
 					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
 	}
 }
 
@@ -3954,11 +3176,39 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 							},
 						},
 					},
+					"mountedOverlays": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"name",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "MountedOverlays lists overlays the controller attached to the pod spec. Skipped overlays (disabled, NotReady, NotFound) surface via the OverlaysReady condition.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay"),
+									},
+								},
+							},
+						},
+					},
+					"traffic": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Traffic reflects the resolved backend traffic policy (OEP-0011) and the emitted policy resource. Populated only when traffic intent is declared via spec.traffic or any ome.io/* traffic annotation; otherwise nil so older clients see nothing.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus", "knative.dev/pkg/apis.Condition", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus", "knative.dev/pkg/apis.Condition", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
 	}
 }
 
@@ -4968,6 +4218,38 @@ func schema_pkg_apis_ome_v1beta1_ModelFrameworkSpec(ref common.ReferenceCallback
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_ModelOverlayRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ModelOverlayRef references a BaseModel attached as an overlay. Narrower than ModelRef on purpose: no nested Overlays (type-system forbids recursion) and no FineTunedWeights (weight composition lives on the primary).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"apiGroup": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_ModelRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -5016,9 +4298,33 @@ func schema_pkg_apis_ome_v1beta1_ModelRef(ref common.ReferenceCallback) common.O
 							},
 						},
 					},
+					"overlays": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"name",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Overlays declares additional BaseModels attached to every serving pod alongside the primary. Each overlay is mounted (PVC/PerNode) or env-addressable (Sharded) at /opt/ml/model-overlays/<name> and exposed via OVERLAY_<UPPERCASED_NAME>_MODEL_PATH. Runner selects at request time; OME does not detect failures or auto-swap. Disabled or NotReady overlays are silently omitted. See OEP-0011.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelOverlayRef"),
+									},
+								},
+							},
+						},
+					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelOverlayRef"},
 	}
 }
 
@@ -5224,6 +4530,48 @@ func schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref common.ReferenceCallback) c
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_MountedOverlay(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "MountedOverlay records one overlay the controller wired into the current pod spec.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"envVar": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"mountPath": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MountPath is empty for Sharded overlays (fetched at runtime).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"distribution": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+				},
+				Required: []string{"name", "envVar", "distribution"},
+			},
+		},
 	}
 }
 
@@ -6149,6 +5497,113 @@ func schema_pkg_apis_ome_v1beta1_PodSpec(ref common.ReferenceCallback) common.Op
 		},
 		Dependencies: []string{
 			"k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RolloutPause(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutPause holds a rollout at a step boundary.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"duration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Duration to pause before auto-advancing.\n  - If unset and PromotionPolicy is Manual, the controller waits\n    indefinitely for the ome.io/rollout-promote annotation.\n  - If PromotionPolicy is Auto and Duration is unset, the\n    controller advances immediately (i.e., the Pause is a no-op).\n  - If both are set, the controller advances after Duration\n    regardless of policy.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RolloutSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutSpec defines a multi-step progressive rollout plan. When set on TrafficSpec.Rollout, the controller advances through the steps under the configured PromotionPolicy and the simple per-Component ComponentExtensionSpec.CanaryTrafficPercent MUST NOT be set on the same Component (admission rejects).\n\nStep semantics:\n  - Each step specifies pod capacity (NewCapacity, OldCapacity)\n    independently of traffic weight (TrafficWeight). This lets\n    operators run the new revision at full capacity with 0% traffic\n    for validation, then atomically shift traffic.\n  - The final step's TrafficWeight must be 100 (admission enforces)\n    so the rollout always completes.\n  - Each step's optional Pause holds the rollout. Under Manual\n    promotion, operators advance via the ome.io/rollout-promote\n    annotation; under Auto, the controller advances based on\n    Pause.Duration.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"steps": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Steps is the ordered list of rollout stages.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep"),
+									},
+								},
+							},
+						},
+					},
+					"promotionPolicy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PromotionPolicy controls how the rollout advances between steps.\n  - Manual (default): operator advances via the\n    ome.io/rollout-promote annotation.\n  - Auto: controller advances based on each step's Pause.Duration.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"scaleDownDelaySeconds": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ScaleDownDelaySeconds is the wait between shifting traffic away from the old revision and scaling its pods down, to drain in-flight requests. Default: 30.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+				Required: []string{"steps"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RolloutStep(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutStep specifies one stage of a progressive rollout.\n\nNewCapacity and TrafficWeight are independent dimensions. Common patterns:\n  - Symmetric canary: NewCapacity=10%, OldCapacity=90%, TrafficWeight=10\n  - Capacity surge:   NewCapacity=10%, OldCapacity=100%, TrafficWeight=10\n  - Blue-green:       NewCapacity=100%, OldCapacity=100%, TrafficWeight=0\n    (validate at full scale; later step sets TrafficWeight=100)",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"newCapacity": {
+						SchemaProps: spec.SchemaProps{
+							Description: "NewCapacity is the fraction of desired replicas to run for the new revision at this step. Percentage (\"25%\") or absolute (\"3\").",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+					"oldCapacity": {
+						SchemaProps: spec.SchemaProps{
+							Description: "OldCapacity is the fraction of desired replicas to keep for the old revision at this step. Defaults to (100% - NewCapacity). Setting both >50% allows a temporary capacity surge — useful for keeping full old capacity while the new revision validates at the same scale.",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+					"trafficWeight": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TrafficWeight is the percentage of traffic routed to the new revision at this step. The old revision receives (100 - TrafficWeight).",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"pause": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Pause holds the rollout at this step. If absent, the controller advances to the next step immediately after the step's capacity, traffic, and drain operations complete.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause"),
+						},
+					},
+				},
+				Required: []string{"newCapacity", "trafficWeight"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -7700,17 +7155,11 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref common.ReferenceCallback
 							Format:      "",
 						},
 					},
-					"acceleratorRequirements": {
-						SchemaProps: spec.SchemaProps{
-							Description: "AcceleratorRequirements specifies the accelerator requirements for this runtime",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorRequirements"),
-						},
-					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorRequirements", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.Volume"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.Volume"},
 	}
 }
 
@@ -7912,26 +7361,12 @@ func schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref common.ReferenceCallba
 							Format:      "int32",
 						},
 					},
-					"acceleratorConfig": {
-						SchemaProps: spec.SchemaProps{
-							Description: "AcceleratorConfig provides accelerator-specific overrides for this model format",
-							Type:        []string{"object"},
-							AdditionalProperties: &spec.SchemaOrBool{
-								Allows: true,
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Ref: ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorModelConfig"),
-									},
-								},
-							},
-						},
-					},
 				},
 				Required: []string{"modelFormat", "modelFramework"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorModelConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec"},
 	}
 }
 
@@ -7964,37 +7399,113 @@ func schema_pkg_apis_ome_v1beta1_SupportedRuntime(ref common.ReferenceCallback) 
 	}
 }
 
-func schema_pkg_apis_ome_v1beta1_TensorParallelismConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
+func schema_pkg_apis_ome_v1beta1_TrafficSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "TensorParallelismConfig specifies tensor parallelism settings",
+				Description: "TrafficSpec configures the load-balancing policy applied to all HTTPRoutes OME emits for the InferenceService. The translated backend policy resource (e.g. Envoy Gateway BackendTrafficPolicy) targets every OME-managed HTTPRoute via targetRefs, so behavior is consistent whether clients address the top-level URL or a per-Component subdomain.\n\nFor less-common settings (circuit breaker, retries, sub-second timeouts), see the ome.io/* annotation contract documented in OEP-0011.\n\nFor Component-specific routing (one Component needs a different LB algorithm), hand-author a separate BackendTrafficPolicy targeting only that Component's HTTPRoute — OME defers (see OEP-0011 \"Coexistence with Hand-Authored Policies\").",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"tensorParallelSize": {
+					"algorithm": {
 						SchemaProps: spec.SchemaProps{
-							Description: "tensorParallelSize specifies the size of the tensor parallelism",
-							Type:        []string{"integer"},
-							Format:      "int64",
+							Description: "Algorithm selects the load-balancing algorithm. Absent = the Gateway implementation's default (LeastRequest for Envoy Gateway).",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
-					"pipelineParallelSize": {
+					"consistentHash": {
 						SchemaProps: spec.SchemaProps{
-							Description: "pipelineParallelSize specifies the size of the pipeline parallelism",
-							Type:        []string{"integer"},
-							Format:      "int64",
+							Description: "ConsistentHash configures the hash key. Required when Algorithm=ConsistentHash; rejected otherwise (webhook).",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec"),
 						},
 					},
-					"dataParallelSize": {
+					"endpointOverride": {
 						SchemaProps: spec.SchemaProps{
-							Description: "dataParallelSize specifies the size of the data parallelism",
-							Type:        []string{"integer"},
-							Format:      "int64",
+							Description: "EndpointOverride routes requests to a specific pod when a request header (e.g. \"X-Endpoint-HostPort: 10.0.0.5:30000\") is present and the endpoint is healthy; falls back to the configured Algorithm when the endpoint is unhealthy or the header is absent.\n\nEnvoy Gateway only in alpha (no Istio equivalent). Translators that do not support endpoint override surface this as an UnsupportedField condition on the InferenceService.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec"),
+						},
+					},
+					"rollout": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Rollout configures a step-based progressive rollout plan. When set, the controller advances through the steps under the configured PromotionPolicy and the per-Component ComponentExtensionSpec.CanaryTrafficPercent MUST NOT be set on the same Component (admission rejects with MixedRolloutForms). When unset, operators drive rollouts directly via ComponentExtensionSpec.CanaryTrafficPercent.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec"),
 						},
 					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_TrafficStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "TrafficStatus reflects the resolved backend traffic policy and the emitted policy resource (e.g. Envoy Gateway BackendTrafficPolicy) for an InferenceService. Lives at InferenceServiceStatus.Traffic. Populated only when traffic intent is declared via spec.traffic or any ome.io/* traffic annotation; otherwise nil so older clients see nothing.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"algorithm": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Algorithm reflects the resolved load-balancing algorithm. One of RoundRobin | LeastRequest | Random | ConsistentHash | Default. \"Default\" means no Algorithm was set on spec.traffic and the Gateway implementation default applies.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"backendPolicyResource": {
+						SchemaProps: spec.SchemaProps{
+							Description: "BackendPolicyResource references the OME-emitted backend policy (typically a gateway.envoyproxy.io/v1alpha1.BackendTrafficPolicy). Empty when no policy was emitted (e.g. translator deferred to a conflicting hand-authored policy).",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef"),
+						},
+					},
+					"targetedHTTPRoutes": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "TargetedHTTPRoutes lists the HTTPRoute names the emitted policy targets. Operators read this to understand which routes the policy applies to without inspecting the emitted resource. Empty when no policy was emitted.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions surface translation, conflict, and gateway-acceptance state. The well-known condition type is BackendPolicyReady.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 

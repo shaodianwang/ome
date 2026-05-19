@@ -93,9 +93,6 @@ type ComponentStatusSpec struct {
 	// Addressable endpoint for the InferenceService
 	// +optional
 	Address *duckv1.Addressable `json:"address,omitempty"`
-	// SelectedAccelerator shows which AcceleratorClass was selected
-	// +optional
-	SelectedAccelerator *AcceleratorSelection `json:"selectedAccelerator,omitempty"`
 
 	// OMENative reports OMENative-managed state for this Component when the
 	// Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.
@@ -112,24 +109,6 @@ type ComponentStatusSpec struct {
 	// +optional
 	// +kubebuilder:validation:Enum=Stable;Canarying;BlueGreenStandby;Pending;Paused;Promoting;RollingBack;Failed
 	RolloutPhase RolloutPhase `json:"rolloutPhase,omitempty"`
-}
-
-// AcceleratorSelection shows what accelerator was selected and why
-type AcceleratorSelection struct {
-	// AcceleratorClass that was selected
-	AcceleratorClass string `json:"acceleratorClass"`
-
-	// Reason explains why this accelerator was selected
-	// +optional
-	Reason string `json:"reason,omitempty"`
-
-	// NodeSelector that was applied to pods
-	// +optional
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-
-	// ResourceRequests that were applied to pods
-	// +optional
-	ResourceRequests map[string]string `json:"resourceRequests,omitempty"`
 }
 
 // ComponentType contains the different types of components of the service

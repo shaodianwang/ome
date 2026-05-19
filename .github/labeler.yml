@@ -149,13 +149,6 @@ multi-node:
       - 'pkg/controller/v1beta1/inferenceservice/reconcilers/multinode/**/*'
       - 'pkg/controller/v1beta1/inferenceservice/reconcilers/lws/**/*'
 
-# Accelerator
-accelerator:
-  - changed-files:
-    - any-glob-to-any-file:
-      - 'pkg/acceleratorclassselector/**/*'
-      - 'pkg/controller/v1beta1/acceleratorclass/**/*'
-
 # Xet (HuggingFace acceleration)
 xet:
   - changed-files:

@@ -8,4 +8,3 @@ resources:
   - ome.io_basemodels.yaml
   - ome.io_clusterbasemodels.yaml
   - ome.io_benchmarkjobs.yaml
-  - ome.io_acceleratorclasses.yaml

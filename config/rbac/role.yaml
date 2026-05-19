@@ -209,7 +209,6 @@ rules:
 - apiGroups:
   - ome.io
   resources:
-  - acceleratorclasses
   - basemodels
   - basemodels/finalizers
   - benchmarkjobs
@@ -233,14 +232,6 @@ rules:
 - apiGroups:
   - ome.io
   resources:
-  - acceleratorclasses/finalizers
-  - clusterbasemodels/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - ome.io
-  resources:
-  - acceleratorclasses/status
   - basemodels/status
   - benchmarkjobs/finalizers
   - benchmarkjobs/status
@@ -252,6 +243,12 @@ rules:
   verbs:
   - get
   - patch
+  - update
+- apiGroups:
+  - ome.io
+  resources:
+  - clusterbasemodels/finalizers
+  verbs:
   - update
 - apiGroups:
   - policy
