@@ -156,6 +156,9 @@ func (d *Decoder) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta
 	case constants.Serverless:
 		return d.deploymentReconciler.ReconcileKnativeDeployment(isvc, objectMeta, podSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent)
 	case constants.OMENative:
+		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
+		// the only valid multi-pod shape has both fields set.
+		multiPod := d.decoderSpec.Leader != nil && d.decoderSpec.Worker != nil
 		return omenative.ReconcileComponent(context.TODO(), omenative.ReconcileParams{
 			ISVC:          isvc,
 			ObjectMeta:    objectMeta,
@@ -164,6 +167,7 @@ func (d *Decoder) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta
 			ComponentExt:  &d.decoderSpec.ComponentExtensionSpec,
 			WorkerSize:    workerSize,
 			WorkerPodSpec: workerPodSpec,
+			MultiPod:      multiPod,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for decoder")

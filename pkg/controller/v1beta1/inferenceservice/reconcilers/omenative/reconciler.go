@@ -50,6 +50,12 @@ type ReconcileParams struct {
 	// WorkerPodSpec is the rendered pod template for the Worker runner.
 	// Nil when WorkerSize is 0.
 	WorkerPodSpec *v1.PodSpec
+
+	// MultiPod indicates the Component declares Leader or Worker (Size > 0),
+	// i.e., each Instance materializes more than one pod. Router is always
+	// single-pod (MultiPod=false). Set at the dispatch site since
+	// EngineSpec/DecoderSpec/RouterSpec aren't carried through this bag.
+	MultiPod bool
 }
 
 // ReconcileComponent is the Loop A entry point for OMENative-managed
@@ -57,9 +63,16 @@ type ReconcileParams struct {
 // `case constants.OMENative` branch of each Component's
 // reconcileDeployment switch.
 //
-// The skeleton returns a sentinel error so callers get a clear signal that
-// they hit the OMENative path on a build that has not implemented it.
+// Computes the desired ComponentPlan from ReconcileParams. The plan is
+// not yet consumed — operations (Create / Update / Restart / Delete /
+// Migrate) ship in follow-up PRs. ReconcileComponent currently returns
+// a not-implemented error after a successful plan build, or the plan
+// error itself when input is invalid.
 func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, error) {
 	_ = ctx
-	return ctrl.Result{}, fmt.Errorf("OMENative reconciler not implemented (component=%s)", p.Component)
+	plan, err := BuildPlan(p)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: build plan (component=%s): %w", p.Component, err)
+	}
+	return ctrl.Result{}, fmt.Errorf("OMENative reconciler not implemented (component=%s, replicas=%d)", plan.Component, plan.Replicas)
 }

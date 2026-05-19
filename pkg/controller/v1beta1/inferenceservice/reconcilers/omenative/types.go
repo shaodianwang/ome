@@ -1,17 +1,68 @@
 package omenative
 
+import (
+	"time"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+)
+
 // ComponentPlan is the desired Component → Instance → Runner → Pod shape
 // computed each reconcile from the InferenceService spec, ServingRuntime,
-// and BaseModel. Not persisted; recomputed every iteration.
-type ComponentPlan struct{}
+// and BaseModel. Not persisted; recomputed every iteration. The policy
+// fields hold the effective values after defaults are applied.
+type ComponentPlan struct {
+	// Component identifies which of router / engine / decoder this plan
+	// describes.
+	Component v1beta1.ComponentType
+
+	// Replicas is the desired number of Instances for this Component
+	// (= MinReplicas, or 1 when MinReplicas is unset).
+	Replicas int32
+
+	// Instances enumerates the desired Instances, one entry per index
+	// 0..Replicas-1. Sparse indices (resulting from surge migration)
+	// are introduced in a follow-up PR.
+	Instances []InstancePlan
+
+	// RestartPolicy is the effective Instance-group restart policy.
+	RestartPolicy v1beta1.OMENativeRestartPolicy
+
+	// UpdateStrategy is the effective rollout policy across Instances.
+	UpdateStrategy v1beta1.OMENativeUpdateStrategy
+
+	// ReadyPolicy is the effective Instance-level readiness aggregation.
+	ReadyPolicy v1beta1.OMENativeReadyPolicy
+
+	// InstanceReadyTimeout is OMENative's wait ceiling on a newly-created
+	// Instance becoming Ready.
+	InstanceReadyTimeout time.Duration
+
+	// MigrationMode is the effective migration disposition (auto / surge /
+	// never).
+	MigrationMode v1beta1.OMENativeMigrationPolicyMode
+}
 
 // InstancePlan is the desired state for one Instance — the atomic unit of
 // gang scheduling, restart, and migration.
-type InstancePlan struct{}
+type InstancePlan struct {
+	// Index is the stable Instance ordinal. May become sparse after surge
+	// migration in a follow-up PR; single-pod plans always start dense.
+	Index int32
 
-// RunnerPlan is the desired state for one Runner within an Instance
-// (leader / worker / default).
-type RunnerPlan struct{}
+	// Runners enumerates the Runners that constitute this Instance.
+	// Single-pod Instances have one Runner named "default" of size 1.
+	// Multi-pod Instances (leader + worker) are introduced in a follow-up.
+	Runners []RunnerPlan
+}
+
+// RunnerPlan is the desired state for one Runner within an Instance.
+type RunnerPlan struct {
+	// Name is "leader", "worker", or "default" (single-pod).
+	Name string
+
+	// Size is the number of pods of this Runner within the Instance.
+	Size int32
+}
 
 // OperationStep is the fine-grained resume point stored in
 // InstanceStatus.Operation.Step (Drain, DeletePods, WaitZero, Recreate,

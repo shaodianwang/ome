@@ -157,6 +157,9 @@ func (e *Engine) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 	case constants.Serverless:
 		return e.deploymentReconciler.ReconcileKnativeDeployment(isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
 	case constants.OMENative:
+		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
+		// the only valid multi-pod shape has both fields set.
+		multiPod := e.engineSpec.Leader != nil && e.engineSpec.Worker != nil
 		return omenative.ReconcileComponent(context.TODO(), omenative.ReconcileParams{
 			ISVC:          isvc,
 			ObjectMeta:    objectMeta,
@@ -165,6 +168,7 @@ func (e *Engine) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 			ComponentExt:  &e.engineSpec.ComponentExtensionSpec,
 			WorkerSize:    workerSize,
 			WorkerPodSpec: workerPodSpec,
+			MultiPod:      multiPod,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for engine")

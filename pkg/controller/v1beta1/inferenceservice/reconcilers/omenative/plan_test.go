@@ -1,0 +1,184 @@
+package omenative
+
+import (
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+)
+
+func intPtr(v int) *int       { return &v }
+func int32Ptr(v int32) *int32 { return &v }
+func boolPtr(v bool) *bool    { return &v }
+func restartPolicyPtr(v v1beta1.OMENativeRestartPolicy) *v1beta1.OMENativeRestartPolicy {
+	return &v
+}
+func readyPolicyPtr(v v1beta1.OMENativeReadyPolicy) *v1beta1.OMENativeReadyPolicy {
+	return &v
+}
+
+func TestBuildPlan_NilComponentExt(t *testing.T) {
+	_, err := BuildPlan(ReconcileParams{Component: v1beta1.EngineComponent})
+	if err == nil {
+		t.Fatal("expected error for nil ComponentExt, got nil")
+	}
+}
+
+func TestBuildPlan_MultiPodRejected(t *testing.T) {
+	_, err := BuildPlan(ReconcileParams{
+		Component:    v1beta1.EngineComponent,
+		ComponentExt: &v1beta1.ComponentExtensionSpec{},
+		MultiPod:     true,
+	})
+	if !errors.Is(err, ErrMultiPodNotYetSupported) {
+		t.Fatalf("expected ErrMultiPodNotYetSupported, got %v", err)
+	}
+}
+
+func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
+	// Simulates an InferenceService that went through the mutating webhook
+	// defaulter (#152) — omenative.* is fully populated.
+	plan, err := BuildPlan(ReconcileParams{
+		Component: v1beta1.EngineComponent,
+		ComponentExt: &v1beta1.ComponentExtensionSpec{
+			MinReplicas: intPtr(2),
+			OMENative: &v1beta1.OMENativeComponentSpec{
+				RestartPolicy: restartPolicyPtr(v1beta1.OMENativeRestartPolicyNone),
+				ReadyPolicy:   readyPolicyPtr(v1beta1.OMENativeReadyPolicyNone),
+				UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+					Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+					InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+						GracePeriodSeconds:          int32Ptr(30),
+						MarkNotReadyDuringLifecycle: boolPtr(true),
+					},
+				},
+				InstanceReadyTimeout: &metav1.Duration{Duration: 30 * time.Minute},
+				MigrationPolicy:      &v1beta1.OMENativeMigrationPolicy{Mode: v1beta1.OMENativeMigrationPolicyModeAuto},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := ComponentPlan{
+		Component: v1beta1.EngineComponent,
+		Replicas:  2,
+		Instances: []InstancePlan{
+			{Index: 0, Runners: []RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Runners: []RunnerPlan{{Name: "default", Size: 1}}},
+		},
+		RestartPolicy: v1beta1.OMENativeRestartPolicyNone,
+		UpdateStrategy: v1beta1.OMENativeUpdateStrategy{
+			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+				GracePeriodSeconds:          int32Ptr(30),
+				MarkNotReadyDuringLifecycle: boolPtr(true),
+			},
+		},
+		ReadyPolicy:          v1beta1.OMENativeReadyPolicyNone,
+		InstanceReadyTimeout: 30 * time.Minute,
+		MigrationMode:        v1beta1.OMENativeMigrationPolicyModeAuto,
+	}
+	if diff := cmp.Diff(want, plan); diff != "" {
+		t.Fatalf("plan mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
+	// Simulates an ISVC that never went through the defaulter (e.g.,
+	// pre-#152 object on disk). BuildPlan applies the same defaults inline.
+	plan, err := BuildPlan(ReconcileParams{
+		Component:    v1beta1.EngineComponent,
+		ComponentExt: &v1beta1.ComponentExtensionSpec{},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.Replicas != 1 {
+		t.Errorf("Replicas: got %d want 1", plan.Replicas)
+	}
+	if plan.RestartPolicy != v1beta1.OMENativeRestartPolicyNone {
+		t.Errorf("RestartPolicy: got %q want None", plan.RestartPolicy)
+	}
+	if plan.ReadyPolicy != v1beta1.OMENativeReadyPolicyNone {
+		t.Errorf("ReadyPolicy: got %q want None", plan.ReadyPolicy)
+	}
+	if plan.UpdateStrategy.Type != v1beta1.OMENativeUpdateStrategyInPlaceIfPossible {
+		t.Errorf("UpdateStrategy.Type: got %q want InPlaceIfPossible", plan.UpdateStrategy.Type)
+	}
+	if plan.UpdateStrategy.InPlaceUpdateStrategy == nil ||
+		plan.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds == nil ||
+		*plan.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds != 30 {
+		t.Errorf("gracePeriodSeconds: got %+v want 30", plan.UpdateStrategy.InPlaceUpdateStrategy)
+	}
+	if plan.InstanceReadyTimeout != 30*time.Minute {
+		t.Errorf("InstanceReadyTimeout: got %v want 30m", plan.InstanceReadyTimeout)
+	}
+	if plan.MigrationMode != v1beta1.OMENativeMigrationPolicyModeAuto {
+		t.Errorf("MigrationMode: got %q want auto", plan.MigrationMode)
+	}
+}
+
+func TestBuildPlan_ReplicaCount(t *testing.T) {
+	tests := []struct {
+		name   string
+		minRep *int
+		want   int32
+	}{
+		{name: "nil MinReplicas defaults to 1", minRep: nil, want: 1},
+		{name: "zero MinReplicas defaults to 1", minRep: intPtr(0), want: 1},
+		{name: "explicit 1", minRep: intPtr(1), want: 1},
+		{name: "explicit 4", minRep: intPtr(4), want: 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, err := BuildPlan(ReconcileParams{
+				Component: v1beta1.EngineComponent,
+				ComponentExt: &v1beta1.ComponentExtensionSpec{
+					MinReplicas: tt.minRep,
+				},
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if plan.Replicas != tt.want {
+				t.Errorf("Replicas: got %d want %d", plan.Replicas, tt.want)
+			}
+			if int32(len(plan.Instances)) != tt.want {
+				t.Errorf("len(Instances): got %d want %d", len(plan.Instances), tt.want)
+			}
+			for i, inst := range plan.Instances {
+				if inst.Index != int32(i) {
+					t.Errorf("Instances[%d].Index: got %d", i, inst.Index)
+				}
+				if len(inst.Runners) != 1 ||
+					inst.Runners[0].Name != "default" ||
+					inst.Runners[0].Size != 1 {
+					t.Errorf("Instances[%d].Runners: got %+v want [{default 1}]", i, inst.Runners)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildPlan_RestartPolicyExplicitWinsOverDefault(t *testing.T) {
+	plan, err := BuildPlan(ReconcileParams{
+		Component: v1beta1.EngineComponent,
+		ComponentExt: &v1beta1.ComponentExtensionSpec{
+			OMENative: &v1beta1.OMENativeComponentSpec{
+				RestartPolicy: restartPolicyPtr(v1beta1.OMENativeRestartPolicyRecreateISVC),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.RestartPolicy != v1beta1.OMENativeRestartPolicyRecreateISVC {
+		t.Errorf("RestartPolicy: got %q want RecreateISVCOnPodRestart", plan.RestartPolicy)
+	}
+}
