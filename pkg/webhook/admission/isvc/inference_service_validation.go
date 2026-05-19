@@ -101,6 +101,33 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
+	// OEP-0011: validate spec.traffic (typed core: LB algorithm, hash
+	// key, endpoint override).
+	if err := validation.ValidateTrafficSpec(isvc.Spec.Traffic); err != nil {
+		return allWarnings, err
+	}
+
+	// OEP-0011: validate ome.io/* traffic annotations (parsing,
+	// Did-you-mean, cross-rules).
+	trafficWarnings, err := validation.ValidateTrafficAnnotations(isvc.Annotations, isvc.Spec.Traffic)
+	if err != nil {
+		return allWarnings, err
+	}
+	allWarnings = append(allWarnings, trafficWarnings...)
+
+	// OEP-0011: validate spec.traffic.rollout (multi-step plan + mutual
+	// exclusivity with the simple canaryTrafficPercent form).
+	if err := validation.ValidateRollout(&isvc.Spec); err != nil {
+		return allWarnings, err
+	}
+
+	// OEP-0011: range-check each Component's CanaryTrafficPercent and
+	// enforce PD coupling (engine.canaryTrafficPercent ==
+	// decoder.canaryTrafficPercent).
+	if err := validation.ValidateCanaryPercent(&isvc.Spec); err != nil {
+		return allWarnings, err
+	}
+
 	// Validate that referenced model exists (for new Engine architecture using isvc.Spec.Model)
 	if err := v.validateModelExists(ctx, isvc); err != nil {
 		return allWarnings, err

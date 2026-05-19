@@ -157,6 +157,12 @@ func (w *InferenceServiceWrapper) Label(k, v string) *InferenceServiceWrapper {
 	return w
 }
 
+// Traffic sets spec.traffic (OEP-0011 typed core).
+func (w *InferenceServiceWrapper) Traffic(t *v1beta1.TrafficSpec) *InferenceServiceWrapper {
+	w.Spec.Traffic = t
+	return w
+}
+
 // init registers a CleanupFunc that strips the ISVC finalizer from
 // any InferenceService in the namespace. Without this, the namespace
 // (and the test) hangs waiting on the ISVC to clear its finalizer.
