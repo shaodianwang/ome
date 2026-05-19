@@ -44,6 +44,13 @@ type InferenceServiceStatus struct {
 	// +listType=map
 	// +listMapKey=name
 	MountedOverlays []MountedOverlay `json:"mountedOverlays,omitempty"`
+
+	// Traffic reflects the resolved backend traffic policy (OEP-0011)
+	// and the emitted policy resource. Populated only when traffic
+	// intent is declared via spec.traffic or any ome.io/* traffic
+	// annotation; otherwise nil so older clients see nothing.
+	// +optional
+	Traffic *TrafficStatus `json:"traffic,omitempty"`
 }
 
 // MountedOverlay records one overlay the controller wired into the
@@ -94,6 +101,17 @@ type ComponentStatusSpec struct {
 	// Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.
 	// +optional
 	OMENative *OMENativeComponentStatus `json:"omenative,omitempty"`
+
+	// RolloutPhase reflects the current rollout state for this
+	// Component (OEP-0011 Part 2). One of Stable, Canarying,
+	// BlueGreenStandby, Pending, Paused, Promoting, RollingBack,
+	// Failed. Empty when no rollout is in flight on this Component
+	// (also empty for Components on deployment modes that haven't
+	// implemented the rollout contract yet — e.g. RawDeployment in
+	// alpha).
+	// +optional
+	// +kubebuilder:validation:Enum=Stable;Canarying;BlueGreenStandby;Pending;Paused;Promoting;RollingBack;Failed
+	RolloutPhase RolloutPhase `json:"rolloutPhase,omitempty"`
 }
 
 // AcceleratorSelection shows what accelerator was selected and why

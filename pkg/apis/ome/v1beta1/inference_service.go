@@ -47,6 +47,12 @@ type InferenceServiceSpec struct {
 	// AcceleratorSelector specifies accelerator selection preferences
 	// +optional
 	AcceleratorSelector *AcceleratorSelector `json:"acceleratorSelector,omitempty"`
+
+	// Traffic configures the load-balancing policy applied to all
+	// HTTPRoutes OME emits for this InferenceService. See OEP-0011
+	// and the TrafficSpec doc for details.
+	// +optional
+	Traffic *TrafficSpec `json:"traffic,omitempty"`
 }
 
 // AcceleratorSelector defines how to select accelerators for the InferenceService
@@ -297,7 +303,7 @@ type ModelRef struct {
 	// exposed via OVERLAY_<UPPERCASED_NAME>_MODEL_PATH. Runner selects
 	// at request time; OME does not detect failures or auto-swap.
 	// Disabled or NotReady overlays are silently omitted.
-	// See OEP-0010.
+	// See OEP-0011.
 	// +optional
 	// +listType=map
 	// +listMapKey=name

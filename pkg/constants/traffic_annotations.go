@@ -1,0 +1,98 @@
+// OEP-0011 traffic-management annotation keys.
+//
+// All annotations live under the OME group prefix (ome.io/). Operators
+// set them on the InferenceService metadata; the traffic translator
+// reads them and threads the values into the emitted backend policy
+// resource. The simple-form `canaryTrafficPercent` stays on the
+// per-Component ComponentExtensionSpec; everything else is on the
+// InferenceService.
+package constants
+
+// Backend-policy annotation keys.
+//
+// Long-tail load-balancing knobs that did not graduate to the typed
+// core (TrafficSpec) in alpha. Each key is independently validated by
+// the admission webhook; unknown keys with the `ome.io/` prefix that
+// look like one of these (Levenshtein 2) are rejected with a
+// Did-you-mean suggestion.
+//
+// Field-coverage matrix per translator lives in OEP-0011.
+var (
+	// Circuit breaker.
+	CircuitBreakerMaxConnectionsAnnotation            = OMEAPIGroupName + "/circuit-breaker-max-connections"
+	CircuitBreakerMaxParallelRequestsAnnotation       = OMEAPIGroupName + "/circuit-breaker-max-parallel-requests"
+	CircuitBreakerMaxPendingRequestsAnnotation        = OMEAPIGroupName + "/circuit-breaker-max-pending-requests"
+	CircuitBreakerMaxParallelRetriesAnnotation        = OMEAPIGroupName + "/circuit-breaker-max-parallel-retries"
+	CircuitBreakerPerEndpointMaxConnectionsAnnotation = OMEAPIGroupName + "/circuit-breaker-per-endpoint-max-connections"
+
+	// Retries.
+	RetryAttemptsAnnotation      = OMEAPIGroupName + "/retry-attempts"
+	RetryOnAnnotation            = OMEAPIGroupName + "/retry-on"
+	RetryPerTryTimeoutAnnotation = OMEAPIGroupName + "/retry-per-try-timeout"
+
+	// Connection / sub-second timeouts. Request-level timeout stays on
+	// ComponentExtensionSpec.TimeoutSeconds; these cover the rest.
+	TimeoutIdleAnnotation                  = OMEAPIGroupName + "/timeout-idle"
+	TimeoutMaxConnectionDurationAnnotation = OMEAPIGroupName + "/timeout-max-connection-duration"
+	TimeoutTCPConnectAnnotation            = OMEAPIGroupName + "/timeout-tcp-connect"
+)
+
+// Operational annotation keys.
+var (
+	// ManagedByConflictAckedAnnotation, when set to "true" on the
+	// InferenceService, acknowledges a hand-authored backend policy
+	// with the conflicting name OME would use. Suppresses the GA
+	// admission rejection while OME continues to defer to the
+	// manually-authored resource.
+	ManagedByConflictAckedAnnotation = OMEAPIGroupName + "/managed-by-conflict-acked"
+
+	// RolloutReadyTimeoutAnnotation overrides the default timeout for
+	// new-revision pods to reach Ready before the rollout is marked
+	// Failed. Duration string (e.g. "15m"). Default: 15m.
+	RolloutReadyTimeoutAnnotation = OMEAPIGroupName + "/rollout-ready-timeout"
+
+	// RevisionHistoryLimitAnnotation overrides the default number of
+	// non-active revisions per Component retained before garbage
+	// collection (in addition to LatestRolledoutRevision and
+	// PreviousRolledoutRevision). Default: 3.
+	RevisionHistoryLimitAnnotation = OMEAPIGroupName + "/revision-history-limit"
+
+	// RolloutPromoteAnnotation is the operator verb for step-based
+	// rollouts: advance the rollout to the named step (integer index)
+	// or to completion ("full"). The controller clears the annotation
+	// after consuming it. No-op when spec.traffic.rollout is unset.
+	RolloutPromoteAnnotation = OMEAPIGroupName + "/rollout-promote"
+
+	// RolloutRollbackAnnotation is the operator verb for instant
+	// rollback. Value: "true". Traffic shifts to 100% old, new
+	// revision drains after scaleDownDelaySeconds. Controller clears
+	// the annotation after consuming it. Works for both the simple
+	// canaryTrafficPercent form and step-based rollouts.
+	RolloutRollbackAnnotation = OMEAPIGroupName + "/rollout-rollback"
+)
+
+// Pass-through annotation prefixes.
+//
+// Operators can reach implementation-specific fields OME does not
+// type-model by setting annotations under these prefixes. The
+// translator stitches the value verbatim into the named path on the
+// emitted resource. OME performs no schema validation; the gateway
+// controller catches errors and OME surfaces GatewayRejected.
+//
+// Each prefix is per-translator. Using a prefix whose translator is
+// not active surfaces UnsupportedPassthrough at admission.
+//
+// These are var rather than const because OMEAPIGroupName itself is
+// declared as var in this package; same pattern as the existing
+// annotation block in constants.go.
+var (
+	// PassthroughEnvoyGatewayPrefix maps to
+	// gateway.envoyproxy.io/v1alpha1.BackendTrafficPolicy.spec.<path>
+	// when the Envoy Gateway translator is active.
+	PassthroughEnvoyGatewayPrefix = OMEAPIGroupName + "/btp."
+
+	// PassthroughIstioPrefix maps to
+	// networking.istio.io/.../DestinationRule.spec.<path>
+	// when the Istio translator is active.
+	PassthroughIstioPrefix = OMEAPIGroupName + "/dr."
+)
