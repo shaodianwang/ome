@@ -417,10 +417,7 @@ install: kustomize ## 🚀 Deploy controller in the configured Kubernetes cluste
 		kubectl wait --for=condition=ready pod -l control-plane=ome-controller-manager -n ome --timeout=300s; \
 	fi
 
-	@echo "\n🔄 Step 5: Applying cluster resources..."
-	kubectl apply --server-side --force-conflicts -k config/clusterresources
-
-	@echo "\n🧹 Step 6: Cleanup..."
+	@echo "\n🧹 Step 5: Cleanup..."
 	@git checkout HEAD -- config/certmanager/certificate.yaml
 	@echo "✅ Cleanup complete"
 
@@ -434,14 +431,12 @@ uninstall: kustomize ## 🧹 Uninstall controller from the configured Kubernetes
 	@echo "## 💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥💥 ##"
 	@read -p "Press enter to continue" var
 	kubectl delete --ignore-not-found=$(ignore-not-found) -k config/default
-	kubectl delete --ignore-not-found=$(ignore-not-found) -k config/clusterresources
 	@echo "✅ Controller uninstalled"
 
 .PHONY: kustomize-validate
 kustomize-validate: kustomize ## 🔍 Validate kustomize configuration without applying to cluster
 	@echo "\n🔍 Validating kustomize configuration..."
 	@cd config/default && $(KUSTOMIZE) build --load-restrictor=LoadRestrictionsNone . > /dev/null && echo "✅ Default configuration is valid" || (echo "❌ Error in default configuration" && exit 1)
-	@cd config/clusterresources && $(KUSTOMIZE) build --load-restrictor=LoadRestrictionsNone . > /dev/null && echo "✅ Cluster resources configuration is valid" || (echo "❌ Error in cluster resources configuration" && exit 1)
 	@echo "\n✅ Kustomize validation completed successfully!\n"
 
 .PHONY: push-manager-image
@@ -475,7 +470,6 @@ artifacts: kustomize ## Generate artifacts for release.
 	@echo "📦 Generating artifacts..."
 	@mkdir -p artifacts
 	$(KUSTOMIZE) build config/default -o artifacts/manifests.yaml
-	$(KUSTOMIZE) build config/clusterresources -o artifacts/clusterresources.yaml
 	@echo "✅ Artifacts generated"
 
 ##@ 🧪 Testing

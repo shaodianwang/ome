@@ -19,23 +19,17 @@ inferenceservice:
 # Benchmark
 benchmark:
   - changed-files:
-    - any-glob-to-any-file:
-      - 'pkg/controller/v1beta1/benchmark/**/*'
-      - 'config/samples/benchmark/**/*'
+    - any-glob-to-any-file: 'pkg/controller/v1beta1/benchmark/**/*'
 
 # Runtime
 runtime:
   - changed-files:
-    - any-glob-to-any-file:
-      - 'config/runtimes/**/*'
-      - 'pkg/runtimeselector/**/*'
+    - any-glob-to-any-file: 'pkg/runtimeselector/**/*'
 
 # Models
 models:
   - changed-files:
-    - any-glob-to-any-file:
-      - 'config/models/**/*'
-      - 'pkg/hfutil/**/*'
+    - any-glob-to-any-file: 'pkg/hfutil/**/*'
 
 # Webhook
 webhook:

@@ -132,9 +132,12 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 - **ome-crd** — CRD-only chart. CRDs are copied from `config/crd/full/` during `make manifests`.
 - **ome-resources** — Controller deployment, model-agent DaemonSet, RBAC, webhooks, cluster resources.
 
-### Pre-configured Resources
-- `config/runtimes/` — ClusterServingRuntime YAMLs for SGLang (`srt/`) and vLLM (`vllm/`). Includes prefill-decode disaggregated variants (`-pd-rt.yaml`).
-- `config/models/` — 100+ pre-configured ClusterBaseModel YAMLs organized by vendor (meta-llama, Qwen, deepseek-ai, etc.).
+### Sample Manifests (`config/samples/`)
+- `avo-tier5-pd/` — end-to-end PD-disaggregated walkthrough (CBM + CSR + ISVC).
+- `basemodel/` — PVC-backed BaseModel and ClusterBaseModel fixtures.
+- `modelcache/` — Sharded BaseModel + `cluster_cache` values.
+
+Runtime/model catalog YAMLs (vendor-specific ClusterServingRuntime / ClusterBaseModel) live in operators' own GitOps repos, not in-tree.
 
 ## PR Conventions
 
