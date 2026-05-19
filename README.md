@@ -28,7 +28,6 @@ OME uses a component-based architecture built on Kubernetes custom resources:
 - **FineTunedWeight:** Define LoRA adapters and fine-tuned weights that extend base models
 - **ServingRuntime/ClusterServingRuntime:** Define how models are served with runtime-specific configurations
 - **InferenceService:** Connects models to runtimes for deployment with support for prefill-decode disaggregation and multi-node inference
-- **BenchmarkJob:** Measures model performance under different workloads with configurable traffic patterns
 
 OME's controller automatically:
 1. Downloads and parses models to understand their characteristics

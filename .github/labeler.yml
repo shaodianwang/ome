@@ -16,11 +16,6 @@ inferenceservice:
   - changed-files:
     - any-glob-to-any-file: 'pkg/controller/v1beta1/inferenceservice/**/*'
 
-# Benchmark
-benchmark:
-  - changed-files:
-    - any-glob-to-any-file: 'pkg/controller/v1beta1/benchmark/**/*'
-
 # Runtime
 runtime:
   - changed-files:

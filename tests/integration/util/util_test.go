@@ -59,7 +59,7 @@ var _ = ginkgo.Describe("util.CreateNamespaceFromPrefix", func() {
 })
 
 var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
-	ginkgo.It("creates inferenceservice-config and benchmarkjob-config in the OME namespace", func() {
+	ginkgo.It("creates inferenceservice-config in the OME namespace", func() {
 		Expect(util.SeedDefaultConfigMaps(suiteCtx, suiteClient)).To(Succeed())
 
 		ginkgo.By("idempotent: a second call returns nil without erroring")
@@ -69,8 +69,8 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 		// We don't call NewIngressConfig directly here (it uses
 		// kubernetes.Interface, not controller-runtime client). The
 		// real validation of these JSON shapes happens in the ISVC
-		// suite that consumes them. Here we only assert the
-		// ConfigMaps exist with the right keys.
+		// suite that consumes them. Here we only assert the ConfigMap
+		// exists with the right keys.
 		cm := &corev1.ConfigMap{}
 		Expect(suiteClient.Get(suiteCtx,
 			types.NamespacedName{Namespace: "ome", Name: "inferenceservice-config"},
@@ -78,11 +78,6 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 		Expect(cm.Data).To(HaveKey("ingress"))
 		Expect(cm.Data).To(HaveKey("deploy"))
 		Expect(cm.Data).To(HaveKey("omeAgent"))
-
-		Expect(suiteClient.Get(suiteCtx,
-			types.NamespacedName{Namespace: "ome", Name: "benchmarkjob-config"},
-			cm)).To(Succeed())
-		Expect(cm.Data).To(HaveKey("benchmarkjob"))
 	})
 })
 

@@ -89,12 +89,11 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 
 ## Architecture
 
-### CRDs (7 types in `pkg/apis/ome/v1beta1/`)
+### CRDs (6 types in `pkg/apis/ome/v1beta1/`)
 - **BaseModel / ClusterBaseModel** — Model source definitions (HuggingFace, S3, OCI, Azure, GCS, GitHub). Auto-parsed for architecture, parameters, capabilities.
 - **ServingRuntime / ClusterServingRuntime** — How models are served. Defines container images, supported model formats/architectures, multi-node worker configs.
 - **InferenceService** (short name: `isvc`) — The central deployment resource. Links a model to a runtime. Supports Engine/Decoder components for prefill-decode disaggregation.
 - **FineTunedWeight** — LoRA adapters and fine-tuned weight deltas referencing a base model.
-- **BenchmarkJob** — Performance benchmarks against inference endpoints.
 
 ### Key relationships
 - `InferenceService.spec.model` → `BaseModel` or `ClusterBaseModel`
@@ -111,7 +110,6 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 ### Controllers (`pkg/controller/v1beta1/`)
 - **InferenceServiceReconciler** — The largest controller. Auto-selects runtimes via `runtimeselector`, generates Deployments/Knative Services/LeaderWorkerSets/HPAs/KEDA ScaledObjects. Supports RawDeployment, Serverless, MultiNode, PDDisaggregated, and VirtualDeployment modes.
 - **BaseModelReconciler / ClusterBaseModelReconciler** — Manages model lifecycle. Monitors download status via ConfigMaps. Requeues every 5s during importing/transit states.
-- **BenchmarkJobReconciler** — Creates Kubernetes batch Jobs for benchmarking.
 
 ### Key Packages
 | Package | Purpose |
@@ -120,7 +118,7 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 | `pkg/modelagent` | Scout (model watcher) + Gopher (concurrent downloader) used by model-agent DaemonSet. Manages per-node-per-model ConfigMaps for download state. |
 | `pkg/hfutil/hub` | HuggingFace Hub client: file download with resume, progress tracking, LFS support. |
 | `pkg/xet` | CGo bridge to Rust `libxet` library for high-performance HuggingFace downloads. Build with `cd pkg/xet && make build`. |
-| `pkg/webhook/admission` | Pod mutator (injects config into ISVC pods), ServingRuntime/InferenceService/BenchmarkJob validators and defaulters. |
+| `pkg/webhook/admission` | Pod mutator (injects config into ISVC pods), ServingRuntime/InferenceService validators and defaulters. |
 | `pkg/configutils` | Viper-based config with `imports` key resolution, used by ome-agent sub-commands. |
 | `internal/ome-agent` | Agent implementations: replica (cross-region replication), serving-agent (sidecar). |
 

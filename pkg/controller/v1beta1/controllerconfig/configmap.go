@@ -15,11 +15,10 @@ import (
 )
 
 const (
-	IngressConfigKeyName   = "ingress"
-	DeployConfigName       = "deploy"
-	OmeAgentConfigName     = "omeAgent"
-	BenchmarkJobConfigName = "benchmarkjob"
-	ModelCacheConfigName   = "modelCache"
+	IngressConfigKeyName = "ingress"
+	DeployConfigName     = "deploy"
+	OmeAgentConfigName   = "omeAgent"
+	ModelCacheConfigName = "modelCache"
 
 	DefaultDomainTemplate = "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"
 	DefaultIngressDomain  = "example.com"
@@ -33,19 +32,6 @@ type SecretConfig struct {
 	WriteToCommonNamespace bool   `json:"writeToCommonNamespace"`
 	Namespace              string `json:"namespace"`
 	SecretName             string `json:"secretName"`
-}
-
-type BenchmarkJobConfig struct {
-	// PodConfig contains all Pod Configuration
-	PodConfig PodConfig `json:"podConfig"`
-}
-
-type PodConfig struct {
-	Image         string `json:"image"`
-	CPURequest    string `json:"cpuRequest"`
-	MemoryRequest string `json:"memoryRequest"`
-	CPULimit      string `json:"cpuLimit"`
-	MemoryLimit   string `json:"memoryLimit"`
 }
 
 // +kubebuilder:object:generate=false
@@ -238,20 +224,4 @@ func NewModelCacheConfig(clientset kubernetes.Interface) (*sharded.ProviderConfi
 		}
 	}
 	return modelCacheConfig, nil
-}
-
-func NewBenchmarkJobConfig(clientset kubernetes.Interface) (*BenchmarkJobConfig, error) {
-	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.BenchmarkJobConfigMapName, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	benchmarkJobConfig := &BenchmarkJobConfig{}
-	for _, err := range []error{
-		getComponentConfig(BenchmarkJobConfigName, configMap, &benchmarkJobConfig),
-	} {
-		if err != nil {
-			return nil, err
-		}
-	}
-	return benchmarkJobConfig, nil
 }

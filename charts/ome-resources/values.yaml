@@ -26,13 +26,6 @@ ome:
     #   timeout: per-request timeout, e.g. 5m
     #   operation_retention: completed prewarm status retention, e.g. 10m
     options: {}
-  benchmarkJob:
-    image: genai-bench
-    tag: 0.1.113
-    cpuRequest: "2"
-    memoryRequest: "2Gi"
-    cpuLimit: "2"
-    memoryLimit: "2Gi"
   controller:
     replicaCount: 3
     deploymentMode: "RawDeployment"

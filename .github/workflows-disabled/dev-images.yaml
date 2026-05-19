@@ -152,7 +152,6 @@ jobs:
             if [[ -f ${dev_chart}/values.yaml ]] && [[ $chart_name == "ome-resources" ]]; then
               # Update all image tags to use dev
               yq eval -i ".ome.version = \"dev\"" ${dev_chart}/values.yaml
-              yq eval -i ".ome.benchmarkJob.tag = \"dev\"" ${dev_chart}/values.yaml
               yq eval -i ".ome.omeAgent.tag = \"dev\"" ${dev_chart}/values.yaml
               yq eval -i ".modelAgent.image.tag = \"dev\"" ${dev_chart}/values.yaml
             fi

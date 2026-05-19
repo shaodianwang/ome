@@ -41,14 +41,12 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	v1beta1basemodelcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
-	v1beta1benchmarkjobcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/benchmark"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 	"github.com/ome-projects/ome/pkg/version"
 	basemodelwebhook "github.com/ome-projects/ome/pkg/webhook/admission/basemodel"
-	"github.com/ome-projects/ome/pkg/webhook/admission/benchmark"
 	"github.com/ome-projects/ome/pkg/webhook/admission/isvc"
 	"github.com/ome-projects/ome/pkg/webhook/admission/pod"
 	"github.com/ome-projects/ome/pkg/webhook/admission/servingruntime"
@@ -307,20 +305,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	benchmarkJobEventBroadcaster := record.NewBroadcaster()
-	setupLog.Info("Setting up BenchmarkJob controller")
-	benchmarkJobEventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
-	if err = (&v1beta1benchmarkjobcontroller.BenchmarkJobReconciler{
-		Client:    mgr.GetClient(),
-		Clientset: clientSet,
-		Log:       ctrl.Log.WithName("BenchmarkJob"),
-		Scheme:    mgr.GetScheme(),
-		Recorder:  benchmarkJobEventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create Benchmark Job controller")
-		os.Exit(1)
-	}
-
 	if options.enableWebhook {
 		setupLog.Info("Configuring webhook server", "port", options.webhookPort)
 		hookServer := mgr.GetWebhookServer()
@@ -338,11 +322,6 @@ func main() {
 		setupLog.Info("Registering serving runtime validator webhook to the webhook server")
 		hookServer.Register("/validate-ome-io-v1beta1-servingruntime", &webhook.Admission{
 			Handler: &servingruntime.ServingRuntimeValidator{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())},
-		})
-
-		setupLog.Info("Registering benchmark job validator webhook to the webhook server")
-		hookServer.Register("/validate-ome-io-v1beta1-benchmarkjob", &webhook.Admission{
-			Handler: &benchmark.BenchmarkJobValidator{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
 		setupLog.Info("Registering BaseModel validator webhook to the webhook server")

@@ -14,8 +14,6 @@ import (
 // Public to allow building arbitrary schemes.
 // All generated defaulters are covering - they call all nested defaulters.
 func RegisterDefaults(scheme *runtime.Scheme) error {
-	scheme.AddTypeDefaultingFunc(&BenchmarkJob{}, func(obj interface{}) { SetObjectDefaults_BenchmarkJob(obj.(*BenchmarkJob)) })
-	scheme.AddTypeDefaultingFunc(&BenchmarkJobList{}, func(obj interface{}) { SetObjectDefaults_BenchmarkJobList(obj.(*BenchmarkJobList)) })
 	scheme.AddTypeDefaultingFunc(&ClusterServingRuntime{}, func(obj interface{}) { SetObjectDefaults_ClusterServingRuntime(obj.(*ClusterServingRuntime)) })
 	scheme.AddTypeDefaultingFunc(&ClusterServingRuntimeList{}, func(obj interface{}) { SetObjectDefaults_ClusterServingRuntimeList(obj.(*ClusterServingRuntimeList)) })
 	scheme.AddTypeDefaultingFunc(&InferenceService{}, func(obj interface{}) { SetObjectDefaults_InferenceService(obj.(*InferenceService)) })
@@ -23,63 +21,6 @@ func RegisterDefaults(scheme *runtime.Scheme) error {
 	scheme.AddTypeDefaultingFunc(&ServingRuntime{}, func(obj interface{}) { SetObjectDefaults_ServingRuntime(obj.(*ServingRuntime)) })
 	scheme.AddTypeDefaultingFunc(&ServingRuntimeList{}, func(obj interface{}) { SetObjectDefaults_ServingRuntimeList(obj.(*ServingRuntimeList)) })
 	return nil
-}
-
-func SetObjectDefaults_BenchmarkJob(in *BenchmarkJob) {
-	if in.Spec.PodOverride != nil {
-		for i := range in.Spec.PodOverride.Volumes {
-			a := &in.Spec.PodOverride.Volumes[i]
-			if a.VolumeSource.ISCSI != nil {
-				if a.VolumeSource.ISCSI.ISCSIInterface == "" {
-					a.VolumeSource.ISCSI.ISCSIInterface = "default"
-				}
-			}
-			if a.VolumeSource.RBD != nil {
-				if a.VolumeSource.RBD.RBDPool == "" {
-					a.VolumeSource.RBD.RBDPool = "rbd"
-				}
-				if a.VolumeSource.RBD.RadosUser == "" {
-					a.VolumeSource.RBD.RadosUser = "admin"
-				}
-				if a.VolumeSource.RBD.Keyring == "" {
-					a.VolumeSource.RBD.Keyring = "/etc/ceph/keyring"
-				}
-			}
-			if a.VolumeSource.AzureDisk != nil {
-				if a.VolumeSource.AzureDisk.CachingMode == nil {
-					ptrVar1 := v1.AzureDataDiskCachingMode(v1.AzureDataDiskCachingReadWrite)
-					a.VolumeSource.AzureDisk.CachingMode = &ptrVar1
-				}
-				if a.VolumeSource.AzureDisk.FSType == nil {
-					var ptrVar1 string = "ext4"
-					a.VolumeSource.AzureDisk.FSType = &ptrVar1
-				}
-				if a.VolumeSource.AzureDisk.ReadOnly == nil {
-					var ptrVar1 bool = false
-					a.VolumeSource.AzureDisk.ReadOnly = &ptrVar1
-				}
-				if a.VolumeSource.AzureDisk.Kind == nil {
-					ptrVar1 := v1.AzureDataDiskKind(v1.AzureSharedBlobDisk)
-					a.VolumeSource.AzureDisk.Kind = &ptrVar1
-				}
-			}
-			if a.VolumeSource.ScaleIO != nil {
-				if a.VolumeSource.ScaleIO.StorageMode == "" {
-					a.VolumeSource.ScaleIO.StorageMode = "ThinProvisioned"
-				}
-				if a.VolumeSource.ScaleIO.FSType == "" {
-					a.VolumeSource.ScaleIO.FSType = "xfs"
-				}
-			}
-		}
-	}
-}
-
-func SetObjectDefaults_BenchmarkJobList(in *BenchmarkJobList) {
-	for i := range in.Items {
-		a := &in.Items[i]
-		SetObjectDefaults_BenchmarkJob(a)
-	}
 }
 
 func SetObjectDefaults_ClusterServingRuntime(in *ClusterServingRuntime) {

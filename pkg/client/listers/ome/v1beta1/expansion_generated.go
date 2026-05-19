@@ -10,14 +10,6 @@ type BaseModelListerExpansion interface{}
 // BaseModelNamespaceLister.
 type BaseModelNamespaceListerExpansion interface{}
 
-// BenchmarkJobListerExpansion allows custom methods to be added to
-// BenchmarkJobLister.
-type BenchmarkJobListerExpansion interface{}
-
-// BenchmarkJobNamespaceListerExpansion allows custom methods to be added to
-// BenchmarkJobNamespaceLister.
-type BenchmarkJobNamespaceListerExpansion interface{}
-
 // ClusterBaseModelListerExpansion allows custom methods to be added to
 // ClusterBaseModelLister.
 type ClusterBaseModelListerExpansion interface{}

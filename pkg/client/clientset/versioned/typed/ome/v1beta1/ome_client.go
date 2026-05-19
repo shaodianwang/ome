@@ -13,7 +13,6 @@ import (
 type OmeV1beta1Interface interface {
 	RESTClient() rest.Interface
 	BaseModelsGetter
-	BenchmarkJobsGetter
 	ClusterBaseModelsGetter
 	ClusterServingRuntimesGetter
 	FineTunedWeightsGetter
@@ -28,10 +27,6 @@ type OmeV1beta1Client struct {
 
 func (c *OmeV1beta1Client) BaseModels(namespace string) BaseModelInterface {
 	return newBaseModels(c, namespace)
-}
-
-func (c *OmeV1beta1Client) BenchmarkJobs(namespace string) BenchmarkJobInterface {
-	return newBenchmarkJobs(c, namespace)
 }
 
 func (c *OmeV1beta1Client) ClusterBaseModels() ClusterBaseModelInterface {

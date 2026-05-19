@@ -2,7 +2,7 @@
 # config/webhook/manifests.yaml containing ONLY the BaseModel and
 # ClusterBaseModel ValidatingWebhookConfigurations. We can't use the
 # full manifests.yaml in envtest because it would install all 8 OME
-# webhooks (Pod mutator, ISVC, ServingRuntime, BenchmarkJob, …),
+# webhooks (Pod mutator, ISVC, ServingRuntime, …),
 # requiring every corresponding handler to be registered in this
 # suite's manager — too much for a focused BaseModel-validation suite.
 #

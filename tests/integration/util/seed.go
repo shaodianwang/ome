@@ -13,14 +13,12 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
-// SeedDefaultConfigMaps creates the two ConfigMaps the controllers
-// read at reconcile time:
+// SeedDefaultConfigMaps creates the ConfigMap the controllers read at
+// reconcile time:
 //
 //   - inferenceservice-config — keys: ingress, deploy, omeAgent. The
 //     ISVC reconciler reads ingress + deploy; the BaseModel PVC path
 //     reads omeAgent.
-//   - benchmarkjob-config — key: benchmarkjob. Read by the BenchmarkJob
-//     reconciler.
 //
 // Values are minimal-viable defaults that satisfy each helper's
 // validation:
@@ -66,20 +64,6 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
 }`,
 	}); err != nil {
 		return fmt.Errorf("seed inferenceservice-config: %w", err)
-	}
-
-	if err := createConfigMapIfAbsent(ctx, c, constants.BenchmarkJobConfigMapName, map[string]string{
-		"benchmarkjob": `{
-  "podConfig": {
-    "image": "ghcr.io/test/genai-bench:test",
-    "cpuRequest": "1",
-    "memoryRequest": "1Gi",
-    "cpuLimit": "1",
-    "memoryLimit": "1Gi"
-  }
-}`,
-	}); err != nil {
-		return fmt.Errorf("seed benchmarkjob-config: %w", err)
 	}
 
 	return nil

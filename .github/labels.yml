@@ -16,10 +16,6 @@
   color: "0E8A16"
   description: "InferenceService controller changes"
 
-- name: benchmark
-  color: "006B75"
-  description: "Benchmark related changes"
-
 - name: webhook
   color: "5319E7"
   description: "Webhook changes"

@@ -57,7 +57,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	k8sClient = s.Client
 	suiteCtx, suiteCancel = context.WithCancel(s.Ctx)
 
-	ginkgo.By("seeding inferenceservice-config + benchmarkjob-config so the reconciler can read them at reconcile time")
+	ginkgo.By("seeding inferenceservice-config so the reconciler can read it at reconcile time")
 	gomega.Expect(util.SeedDefaultConfigMaps(suiteCtx, k8sClient)).To(gomega.Succeed())
 
 	ginkgo.By("registering BaseModel + InferenceService reconcilers with a cluster_cache provider")

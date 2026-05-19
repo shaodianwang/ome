@@ -16,10 +16,6 @@ func (c *FakeOmeV1beta1) BaseModels(namespace string) v1beta1.BaseModelInterface
 	return newFakeBaseModels(c, namespace)
 }
 
-func (c *FakeOmeV1beta1) BenchmarkJobs(namespace string) v1beta1.BenchmarkJobInterface {
-	return newFakeBenchmarkJobs(c, namespace)
-}
-
 func (c *FakeOmeV1beta1) ClusterBaseModels() v1beta1.ClusterBaseModelInterface {
 	return newFakeClusterBaseModels(c)
 }

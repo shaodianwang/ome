@@ -12,81 +12,71 @@ import (
 
 func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
 	return map[string]common.OpenAPIDefinition{
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef":           schema_pkg_apis_ome_v1beta1_BackendPolicyRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                  schema_pkg_apis_ome_v1beta1_BaseModel(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":              schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":              schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BenchmarkJob":               schema_pkg_apis_ome_v1beta1_BenchmarkJob(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BenchmarkJobList":           schema_pkg_apis_ome_v1beta1_BenchmarkJobList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BenchmarkJobSpec":           schema_pkg_apis_ome_v1beta1_BenchmarkJobSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BenchmarkJobStatus":         schema_pkg_apis_ome_v1beta1_BenchmarkJobStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":           schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":       schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":      schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList":  schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentExtensionSpec":     schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec":        schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec":         schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec":                schema_pkg_apis_ome_v1beta1_DecoderSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionComponentSpec":     schema_pkg_apis_ome_v1beta1_DiffusionComponentSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec":      schema_pkg_apis_ome_v1beta1_DiffusionPipelineSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Endpoint":                   schema_pkg_apis_ome_v1beta1_Endpoint(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec":       schema_pkg_apis_ome_v1beta1_EndpointOverrideSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointSpec":               schema_pkg_apis_ome_v1beta1_EndpointSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec":                 schema_pkg_apis_ome_v1beta1_EngineSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FailureInfo":                schema_pkg_apis_ome_v1beta1_FailureInfo(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeight":            schema_pkg_apis_ome_v1beta1_FineTunedWeight(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightList":        schema_pkg_apis_ome_v1beta1_FineTunedWeightList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":        schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                 schema_pkg_apis_ome_v1beta1_HashCookie(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                 schema_pkg_apis_ome_v1beta1_HashHeader(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HuggingFaceSecretReference": schema_pkg_apis_ome_v1beta1_HuggingFaceSecretReference(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceService":           schema_pkg_apis_ome_v1beta1_InferenceService(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceList":       schema_pkg_apis_ome_v1beta1_InferenceServiceList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceReference":  schema_pkg_apis_ome_v1beta1_InferenceServiceReference(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceSpec":       schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":     schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation":          schema_pkg_apis_ome_v1beta1_InstanceOperation(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig":                 schema_pkg_apis_ome_v1beta1_KedaConfig(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                 schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":             schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry":      schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus":           schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCopies":                schema_pkg_apis_ome_v1beta1_ModelCopies(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelExtensionSpec":         schema_pkg_apis_ome_v1beta1_ModelExtensionSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat":                schema_pkg_apis_ome_v1beta1_ModelFormat(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec":         schema_pkg_apis_ome_v1beta1_ModelFrameworkSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelOverlayRef":            schema_pkg_apis_ome_v1beta1_ModelOverlayRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef":                   schema_pkg_apis_ome_v1beta1_ModelRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRevisionStates":        schema_pkg_apis_ome_v1beta1_ModelRevisionStates(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec":         schema_pkg_apis_ome_v1beta1_ModelSizeRangeSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus":                schema_pkg_apis_ome_v1beta1_ModelStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatusSpec":            schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay":             schema_pkg_apis_ome_v1beta1_MountedOverlay(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus":   schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":    schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":            schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodOverride":                schema_pkg_apis_ome_v1beta1_PodOverride(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                    schema_pkg_apis_ome_v1beta1_PodSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause":               schema_pkg_apis_ome_v1beta1_RolloutPause(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep":                schema_pkg_apis_ome_v1beta1_RolloutStep(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                 schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                 schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalerAuthenticationRef":    schema_pkg_apis_ome_v1beta1_ScalerAuthenticationRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServiceMetadata":            schema_pkg_apis_ome_v1beta1_ServiceMetadata(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntime":             schema_pkg_apis_ome_v1beta1_ServingRuntime(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeList":         schema_pkg_apis_ome_v1beta1_ServingRuntimeList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimePodSpec":      schema_pkg_apis_ome_v1beta1_ServingRuntimePodSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef":          schema_pkg_apis_ome_v1beta1_ServingRuntimeRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeSpec":         schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeStatus":       schema_pkg_apis_ome_v1beta1_ServingRuntimeStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec":                schema_pkg_apis_ome_v1beta1_StorageSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat":       schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedRuntime":           schema_pkg_apis_ome_v1beta1_SupportedRuntime(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec":                schema_pkg_apis_ome_v1beta1_TrafficSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus":              schema_pkg_apis_ome_v1beta1_TrafficStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec":                 schema_pkg_apis_ome_v1beta1_WorkerSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef":          schema_pkg_apis_ome_v1beta1_BackendPolicyRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                 schema_pkg_apis_ome_v1beta1_BaseModel(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":             schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":             schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":          schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":      schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":     schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList": schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentExtensionSpec":    schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec":       schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec":        schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec":               schema_pkg_apis_ome_v1beta1_DecoderSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionComponentSpec":    schema_pkg_apis_ome_v1beta1_DiffusionComponentSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec":     schema_pkg_apis_ome_v1beta1_DiffusionPipelineSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec":      schema_pkg_apis_ome_v1beta1_EndpointOverrideSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec":                schema_pkg_apis_ome_v1beta1_EngineSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FailureInfo":               schema_pkg_apis_ome_v1beta1_FailureInfo(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeight":           schema_pkg_apis_ome_v1beta1_FineTunedWeight(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightList":       schema_pkg_apis_ome_v1beta1_FineTunedWeightList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":       schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                schema_pkg_apis_ome_v1beta1_HashCookie(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                schema_pkg_apis_ome_v1beta1_HashHeader(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceService":          schema_pkg_apis_ome_v1beta1_InferenceService(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceList":      schema_pkg_apis_ome_v1beta1_InferenceServiceList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceSpec":      schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":    schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation":         schema_pkg_apis_ome_v1beta1_InstanceOperation(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig":                schema_pkg_apis_ome_v1beta1_KedaConfig(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":            schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry":     schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus":          schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCopies":               schema_pkg_apis_ome_v1beta1_ModelCopies(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelExtensionSpec":        schema_pkg_apis_ome_v1beta1_ModelExtensionSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat":               schema_pkg_apis_ome_v1beta1_ModelFormat(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec":        schema_pkg_apis_ome_v1beta1_ModelFrameworkSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelOverlayRef":           schema_pkg_apis_ome_v1beta1_ModelOverlayRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef":                  schema_pkg_apis_ome_v1beta1_ModelRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRevisionStates":       schema_pkg_apis_ome_v1beta1_ModelRevisionStates(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec":        schema_pkg_apis_ome_v1beta1_ModelSizeRangeSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus":               schema_pkg_apis_ome_v1beta1_ModelStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatusSpec":           schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay":            schema_pkg_apis_ome_v1beta1_MountedOverlay(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus":  schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":   schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":           schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                   schema_pkg_apis_ome_v1beta1_PodSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause":              schema_pkg_apis_ome_v1beta1_RolloutPause(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":               schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep":               schema_pkg_apis_ome_v1beta1_RolloutStep(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalerAuthenticationRef":   schema_pkg_apis_ome_v1beta1_ScalerAuthenticationRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntime":            schema_pkg_apis_ome_v1beta1_ServingRuntime(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeList":        schema_pkg_apis_ome_v1beta1_ServingRuntimeList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimePodSpec":     schema_pkg_apis_ome_v1beta1_ServingRuntimePodSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef":         schema_pkg_apis_ome_v1beta1_ServingRuntimeRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeSpec":        schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeStatus":      schema_pkg_apis_ome_v1beta1_ServingRuntimeStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec":               schema_pkg_apis_ome_v1beta1_StorageSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat":      schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedRuntime":          schema_pkg_apis_ome_v1beta1_SupportedRuntime(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec":               schema_pkg_apis_ome_v1beta1_TrafficSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus":             schema_pkg_apis_ome_v1beta1_TrafficStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec":                schema_pkg_apis_ome_v1beta1_WorkerSpec(ref),
 	}
 }
 
@@ -418,296 +408,6 @@ func schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref common.ReferenceCallback) com
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec", "k8s.io/apimachinery/pkg/runtime.RawExtension"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_BenchmarkJob(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "BenchmarkJob is the schema for the BenchmarkJobs API",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"kind": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"apiVersion": {
-						SchemaProps: spec.SchemaProps{
-							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"metadata": {
-						SchemaProps: spec.SchemaProps{
-							Default: map[string]interface{}{},
-							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
-						},
-					},
-					"spec": {
-						SchemaProps: spec.SchemaProps{
-							Default: map[string]interface{}{},
-							Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BenchmarkJobSpec"),
-						},
-					},
-					"status": {
-						SchemaProps: spec.SchemaProps{
-							Default: map[string]interface{}{},
-							Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BenchmarkJobStatus"),
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BenchmarkJobSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BenchmarkJobStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_BenchmarkJobList(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "BenchmarkJobList contains a list of BenchmarkJob",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"kind": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"apiVersion": {
-						SchemaProps: spec.SchemaProps{
-							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"metadata": {
-						SchemaProps: spec.SchemaProps{
-							Default: map[string]interface{}{},
-							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
-						},
-					},
-					"items": {
-						SchemaProps: spec.SchemaProps{
-							Type: []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BenchmarkJob"),
-									},
-								},
-							},
-						},
-					},
-				},
-				Required: []string{"items"},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BenchmarkJob", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_BenchmarkJobSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "BenchmarkJobSpec defines the specification for a benchmark job. All fields within this specification collectively represent the desired state and configuration of a BenchmarkJob.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"huggingFaceSecretReference": {
-						SchemaProps: spec.SchemaProps{
-							Description: "HuggingFaceSecretReference is a reference to a Kubernetes Secret containing the Hugging Face API key. The referenced Secret must reside in the same namespace as the BenchmarkJob. This field replaces the raw HuggingFaceAPIKey field for improved security.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HuggingFaceSecretReference"),
-						},
-					},
-					"endpoint": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Endpoint is the reference to the inference service to benchmark.",
-							Default:     map[string]interface{}{},
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointSpec"),
-						},
-					},
-					"serviceMetadata": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ServiceMetadata records metadata about the backend model server or service being benchmarked. This includes details such as server engine, version, and GPU configuration for filtering experiments.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServiceMetadata"),
-						},
-					},
-					"task": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Task specifies the task to benchmark, pattern: <input-modality>-to-<output-modality> (e.g., \"text-to-text\", \"image-to-text\").",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"trafficScenarios": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "set",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "TrafficScenarios contains a list of traffic scenarios to simulate during the benchmark. If not provided, defaults will be assigned via genai-bench.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"numConcurrency": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "set",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "NumConcurrency defines a list of concurrency levels to test during the benchmark. If not provided, defaults will be assigned via genai-bench.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: 0,
-										Type:    []string{"integer"},
-										Format:  "int32",
-									},
-								},
-							},
-						},
-					},
-					"maxTimePerIteration": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MaxTimePerIteration specifies the maximum time (in minutes) for a single iteration. Each iteration runs for a specific combination of TrafficScenarios and NumConcurrency.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"maxRequestsPerIteration": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MaxRequestsPerIteration specifies the maximum number of requests for a single iteration. Each iteration runs for a specific combination of TrafficScenarios and NumConcurrency.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"additionalRequestParams": {
-						SchemaProps: spec.SchemaProps{
-							Description: "AdditionalRequestParams contains additional request parameters as a map.",
-							Type:        []string{"object"},
-							AdditionalProperties: &spec.SchemaOrBool{
-								Allows: true,
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"dataset": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Dataset is the dataset used for benchmarking. It is optional and only required for tasks other than \"text-to-<output-modality>\".",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec"),
-						},
-					},
-					"outputLocation": {
-						SchemaProps: spec.SchemaProps{
-							Description: "OutputLocation specifies where the benchmark results will be stored (e.g., object storage).",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec"),
-						},
-					},
-					"resultFolderName": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ResultFolderName specifies the name of the folder that stores the benchmark result. A default name will be assigned if not specified.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"podOverride": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Pod defines the pod configuration for the benchmark job. This is optional, if not provided, default values will be used.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodOverride"),
-						},
-					},
-				},
-				Required: []string{"endpoint", "task", "maxTimePerIteration", "maxRequestsPerIteration", "outputLocation"},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HuggingFaceSecretReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodOverride", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServiceMetadata", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_BenchmarkJobStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "BenchmarkJobStatus reflects the state and results of the benchmark job. It will be set and updated by the controller.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"state": {
-						SchemaProps: spec.SchemaProps{
-							Description: "State represents the current state of the benchmark job: \"Pending\", \"Running\", \"Completed\", \"Failed\".",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"startTime": {
-						SchemaProps: spec.SchemaProps{
-							Description: "StartTime is the timestamp for when the benchmark job started.",
-							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
-						},
-					},
-					"completionTime": {
-						SchemaProps: spec.SchemaProps{
-							Description: "CompletionTime is the timestamp for when the benchmark job completed, either successfully or unsuccessfully.",
-							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
-						},
-					},
-					"lastReconcileTime": {
-						SchemaProps: spec.SchemaProps{
-							Description: "LastReconcileTime is the timestamp for the last time the job was reconciled by the controller.",
-							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
-						},
-					},
-					"failureMessage": {
-						SchemaProps: spec.SchemaProps{
-							Description: "FailureMessage contains any error messages if the benchmark job failed.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"details": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Details provide additional information or metadata about the benchmark job.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-				},
-				Required: []string{"state"},
-			},
-		},
-		Dependencies: []string{
-			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 
@@ -1868,43 +1568,6 @@ func schema_pkg_apis_ome_v1beta1_DiffusionPipelineSpec(ref common.ReferenceCallb
 	}
 }
 
-func schema_pkg_apis_ome_v1beta1_Endpoint(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "Endpoint defines a direct URL-based inference service with additional API configuration.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"url": {
-						SchemaProps: spec.SchemaProps{
-							Description: "URL represents the endpoint URL for the inference service.",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"apiFormat": {
-						SchemaProps: spec.SchemaProps{
-							Description: "APIFormat specifies the type of API, such as \"openai\" or \"oci-cohere\".",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"modelName": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ModelName specifies the name of the model being served at the endpoint. Useful for endpoints that require model-specific configuration. For instance, for openai API, this is a required field in the payload",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-				},
-				Required: []string{"url", "apiFormat"},
-			},
-		},
-	}
-}
-
 func schema_pkg_apis_ome_v1beta1_EndpointOverrideSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -1945,33 +1608,6 @@ func schema_pkg_apis_ome_v1beta1_EndpointOverrideSpec(ref common.ReferenceCallba
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_EndpointSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "EndpointSpec defines a reference to an inference service. It supports either a Kubernetes-style reference (InferenceService) or an Endpoint struct for a direct URL. Cross-namespace references are supported for InferenceService but require appropriate RBAC permissions to access resources in the target namespace.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"inferenceService": {
-						SchemaProps: spec.SchemaProps{
-							Description: "InferenceService holds a Kubernetes reference to an internal inference service.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceReference"),
-						},
-					},
-					"endpoint": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Endpoint holds the details of a direct endpoint for an external inference service, including URL and API details.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Endpoint"),
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Endpoint", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceReference"},
 	}
 }
 
@@ -2869,27 +2505,6 @@ func schema_pkg_apis_ome_v1beta1_HashHeader(ref common.ReferenceCallback) common
 	}
 }
 
-func schema_pkg_apis_ome_v1beta1_HuggingFaceSecretReference(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "HuggingFaceSecretReference defines a reference to a Kubernetes Secret containing the Hugging Face API key. This secret must reside in the same namespace as the BenchmarkJob. Cross-namespace references are not allowed for security and simplicity.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"name": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Name of the secret containing the Hugging Face API key. The secret must reside in the same namespace as the BenchmarkJob.",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
 func schema_pkg_apis_ome_v1beta1_InferenceService(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -2983,36 +2598,6 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceList(ref common.ReferenceCallba
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceService", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_InferenceServiceReference(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "InferenceServiceReference defines the reference to a Kubernetes inference service.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"name": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Name specifies the name of the inference service to benchmark.",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"namespace": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Namespace specifies the Kubernetes namespace where the inference service is deployed. Cross-namespace references are allowed but require appropriate RBAC permissions.",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-				},
-				Required: []string{"name", "namespace"},
-			},
-		},
 	}
 }
 
@@ -4860,163 +4445,6 @@ func schema_pkg_apis_ome_v1beta1_ObjectReference(ref common.ReferenceCallback) c
 	}
 }
 
-func schema_pkg_apis_ome_v1beta1_PodOverride(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Type: []string{"object"},
-				Properties: map[string]spec.Schema{
-					"image": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Image specifies the container image to use for the benchmark job.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"env": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-map-keys": []interface{}{
-									"name",
-								},
-								"x-kubernetes-list-type": "map",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "List of environment variables to set in the container.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("k8s.io/api/core/v1.EnvVar"),
-									},
-								},
-							},
-						},
-					},
-					"envFrom": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "List of sources to populate environment variables in the container.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("k8s.io/api/core/v1.EnvFromSource"),
-									},
-								},
-							},
-						},
-					},
-					"volumeMounts": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-map-keys": []interface{}{
-									"name",
-								},
-								"x-kubernetes-list-type": "map",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "Pod volumes to mount into the container's filesystem.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("k8s.io/api/core/v1.VolumeMount"),
-									},
-								},
-							},
-						},
-					},
-					"resources": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Compute Resources required by this container. Cannot be updated. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/",
-							Ref:         ref("k8s.io/api/core/v1.ResourceRequirements"),
-						},
-					},
-					"tolerations": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "If specified, the pod's tolerations.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("k8s.io/api/core/v1.Toleration"),
-									},
-								},
-							},
-						},
-					},
-					"nodeSelector": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-map-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "NodeSelector is a selector which must be true for the pod to fit on a node. Selector which must match a node's labels for the pod to be scheduled on that node. More info: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/",
-							Type:        []string{"object"},
-							AdditionalProperties: &spec.SchemaOrBool{
-								Allows: true,
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"affinity": {
-						SchemaProps: spec.SchemaProps{
-							Description: "If specified, the pod's scheduling constraints",
-							Ref:         ref("k8s.io/api/core/v1.Affinity"),
-						},
-					},
-					"volumes": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type":       "atomic",
-								"x-kubernetes-patch-merge-key": "name",
-								"x-kubernetes-patch-strategy":  "merge,retainKeys",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "List of volumes that can be mounted by containers belonging to the pod. More info: https://kubernetes.io/docs/concepts/storage/volumes",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("k8s.io/api/core/v1.Volume"),
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.EnvFromSource", "k8s.io/api/core/v1.EnvVar", "k8s.io/api/core/v1.ResourceRequirements", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.Volume", "k8s.io/api/core/v1.VolumeMount"},
-	}
-}
-
 func schema_pkg_apis_ome_v1beta1_PodSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -6537,52 +5965,6 @@ func schema_pkg_apis_ome_v1beta1_ScalerAuthenticationRef(ref common.ReferenceCal
 						},
 					},
 				},
-			},
-		},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_ServiceMetadata(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "ServiceMetadata contains metadata fields for recording the backend model server's configuration and version details. This information helps track experiment context, enabling users to filter and query experiments based on server properties.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"engine": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Engine specifies the backend model server engine. Supported values: \"vLLM\", \"SGLang\", \"TGI\".",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"version": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Version specifies the version of the model server (e.g., \"0.5.3\").",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"gpuType": {
-						SchemaProps: spec.SchemaProps{
-							Description: "GpuType specifies the type of GPU used by the model server. Supported values: \"H100\", \"A100\", \"MI300\", \"A10\".",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"gpuCount": {
-						SchemaProps: spec.SchemaProps{
-							Description: "GpuCount indicates the number of GPU cards available on the model server.",
-							Default:     0,
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-				},
-				Required: []string{"engine", "version", "gpuType", "gpuCount"},
 			},
 		},
 	}

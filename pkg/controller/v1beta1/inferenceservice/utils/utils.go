@@ -96,8 +96,6 @@ func GetTargetServicePort(ctx context.Context, c client.Client, isvc *v1beta1.In
 
 // AddNodeSelectorForModelReadyNode adds a node selector to the pod spec
 // for scheduling pods on nodes where the base model is ready.
-// This is used by both InferenceService and BenchmarkJob controllers to ensure pods
-// are scheduled on nodes with the model available.
 //
 // Parameters:
 //   - podSpec: The pod spec to update (must not be nil)
