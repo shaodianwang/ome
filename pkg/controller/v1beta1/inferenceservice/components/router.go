@@ -17,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/rbac"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
@@ -137,7 +138,13 @@ func (r *Router) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 	case constants.Serverless:
 		return r.deploymentReconciler.ReconcileKnativeDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
 	case constants.OMENative:
-		return ctrl.Result{}, errors.New("OMENative deployment mode is not implemented in this build (router)")
+		return omenative.ReconcileComponent(context.TODO(), omenative.ReconcileParams{
+			ISVC:         isvc,
+			ObjectMeta:   objectMeta,
+			PodSpec:      podSpec,
+			Component:    v1beta1.RouterComponent,
+			ComponentExt: &r.routerSpec.ComponentExtensionSpec,
+		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for router")
 	}

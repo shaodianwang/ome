@@ -18,6 +18,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/utils"
@@ -156,7 +157,15 @@ func (e *Engine) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 	case constants.Serverless:
 		return e.deploymentReconciler.ReconcileKnativeDeployment(isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
 	case constants.OMENative:
-		return ctrl.Result{}, errors.New("OMENative deployment mode is not implemented in this build (engine)")
+		return omenative.ReconcileComponent(context.TODO(), omenative.ReconcileParams{
+			ISVC:          isvc,
+			ObjectMeta:    objectMeta,
+			PodSpec:       podSpec,
+			Component:     v1beta1.EngineComponent,
+			ComponentExt:  &e.engineSpec.ComponentExtensionSpec,
+			WorkerSize:    workerSize,
+			WorkerPodSpec: workerPodSpec,
+		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for engine")
 	}

@@ -923,6 +923,7 @@ func TestEngineWorkerPodSpec(t *testing.T) {
 func TestEngineReconcileDeployment_OMENativeReturnsNotImplemented(t *testing.T) {
 	e := &Engine{
 		BaseComponentFields: BaseComponentFields{DeploymentMode: constants.OMENative},
+		engineSpec:          &v1beta1.EngineSpec{},
 	}
 	_, err := e.reconcileDeployment(nil, metav1.ObjectMeta{}, nil, 0, nil)
 	if err == nil {

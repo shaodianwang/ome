@@ -6,12 +6,14 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
 func TestRouterReconcileDeployment_OMENativeReturnsNotImplemented(t *testing.T) {
 	r := &Router{
 		BaseComponentFields: BaseComponentFields{DeploymentMode: constants.OMENative},
+		routerSpec:          &v1beta1.RouterSpec{},
 	}
 	_, err := r.reconcileDeployment(nil, metav1.ObjectMeta{}, nil)
 	if err == nil {

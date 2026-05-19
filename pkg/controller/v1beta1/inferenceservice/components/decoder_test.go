@@ -761,6 +761,7 @@ func TestDecoderSetupMocks(t *testing.T) {
 func TestDecoderReconcileDeployment_OMENativeReturnsNotImplemented(t *testing.T) {
 	d := &Decoder{
 		BaseComponentFields: BaseComponentFields{DeploymentMode: constants.OMENative},
+		decoderSpec:         &v1beta1.DecoderSpec{},
 	}
 	_, err := d.reconcileDeployment(nil, metav1.ObjectMeta{}, nil, 0, nil)
 	if err == nil {
