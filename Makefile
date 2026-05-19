@@ -548,7 +548,7 @@ coverage: ## Show coverage summary and enforce threshold
 		exit 1; \
 	fi
 .PHONY: dep-crds
-dep-crds: knative-crds lws-crds keda-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
+dep-crds: knative-crds lws-crds keda-crds gateway-api-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
 
 DEP_CRDS_DIR := tests/integration/dep-crds
 
@@ -584,6 +584,14 @@ keda-crds: ## Vendor github.com/kedacore/keda CRDs (keda.sh — ScaledObject, Sc
 	if [ -z "$$KEDA_DIR" ]; then echo "github.com/kedacore/keda/v2 not in go.mod; skipping keda-crds" >&2; exit 0; fi ; \
 	cp -f "$$KEDA_DIR/config/crd/bases/"*.yaml $(DEP_CRDS_DIR)/keda/ ; \
 	echo "✅ Vendored KEDA CRDs to $(DEP_CRDS_DIR)/keda/"
+
+.PHONY: gateway-api-crds
+gateway-api-crds: ## Vendor sigs.k8s.io/gateway-api standard-channel CRDs (HTTPRoute)
+	@mkdir -p $(DEP_CRDS_DIR)/gateway-api
+	@GA_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" sigs.k8s.io/gateway-api 2>/dev/null) ; \
+	if [ -z "$$GA_DIR" ]; then echo "sigs.k8s.io/gateway-api not in go.mod; skipping gateway-api-crds" >&2; exit 0; fi ; \
+	cp -f "$$GA_DIR/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml" $(DEP_CRDS_DIR)/gateway-api/ ; \
+	echo "✅ Vendored Gateway API CRDs to $(DEP_CRDS_DIR)/gateway-api/"
 
 .PHONY: integration-test
 integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tests

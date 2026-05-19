@@ -1,6 +1,8 @@
 package inferenceservice
 
 import (
+	"math"
+
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -8,15 +10,37 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	knapis "knative.dev/pkg/apis"
+	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/builders"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/translators/envoygateway"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
 )
+
+// newHTTPRouteBuilderForTest constructs an HTTPRouteBuilder with the
+// minimal config the integration suite needs to drive the builder
+// against a real apiserver.
+func newHTTPRouteBuilderForTest() *builders.HTTPRouteBuilder {
+	return builders.NewHTTPRouteBuilder(
+		&controllerconfig.IngressConfig{
+			IngressDomain:     "example.com",
+			DomainTemplate:    "{{.Name}}.{{.Namespace}}.{{.IngressDomain}}",
+			OmeIngressGateway: "istio-system/gateway",
+		},
+		&controllerconfig.InferenceServicesConfig{},
+		services.NewDomainService(),
+		services.NewPathService(),
+	).(*builders.HTTPRouteBuilder)
+}
 
 // OEP-0011 traffic-management integration specs.
 //
@@ -236,4 +260,1425 @@ var _ = ginkgo.Describe("OEP-0011 traffic reconciler", ginkgo.Ordered, func() {
 		err = k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-no-intent"}, got)
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
+
+	ginkgo.It("A1: BTP targetRefs lists every OME-managed HTTPRoute (engine-only ISVC)", func() {
+		alg := v1beta1.LoadBalancingTypeLeastRequest
+		isvc := isvcWith("isvc-targets", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+		// Engine-only ISVC: expect <isvc> (top-level) + <isvc>-engine.
+		routes := []string{"isvc-targets", "isvc-targets-engine"}
+
+		_, err := r.Reconcile(suiteCtx, isvc, routes)
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-targets"}, got)).To(Succeed())
+
+		targetRefs, found, err := unstructured.NestedSlice(got.Object, "spec", "targetRefs")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue(), "spec.targetRefs missing on emitted BTP")
+		Expect(targetRefs).To(HaveLen(2), "expected 2 targetRefs (top-level + engine) for engine-only ISVC")
+
+		names := make([]string, 0, len(targetRefs))
+		for _, ref := range targetRefs {
+			refMap, ok := ref.(map[string]interface{})
+			Expect(ok).To(BeTrue())
+			Expect(refMap["group"]).To(Equal("gateway.networking.k8s.io"))
+			Expect(refMap["kind"]).To(Equal("HTTPRoute"))
+			names = append(names, refMap["name"].(string))
+		}
+		Expect(names).To(ConsistOf("isvc-targets", "isvc-targets-engine"))
+	})
+
+	ginkgo.It("A3: single circuit-breaker annotation → BTP circuitBreaker, no loadBalancer block", func() {
+		isvc := isvcWith("isvc-cb-perep", func(i *v1beta1.InferenceService) {
+			i.Annotations = map[string]string{
+				"ome.io/circuit-breaker-per-endpoint-max-connections": "1",
+			}
+		})
+
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-cb-perep"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-cb-perep"}, got)).To(Succeed())
+
+		// Annotation maps to perEndpoint.maxConnections.
+		perEpMaxConn, found, err := unstructured.NestedInt64(got.Object, "spec", "circuitBreaker", "perEndpoint", "maxConnections")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue(), "circuitBreaker.perEndpoint.maxConnections missing")
+		Expect(perEpMaxConn).To(Equal(int64(1)))
+
+		// Annotation-only intent (no spec.traffic.algorithm) → no loadBalancer block.
+		_, foundLB, _ := unstructured.NestedMap(got.Object, "spec", "loadBalancer")
+		Expect(foundLB).To(BeFalse(), "annotation-only intent must not emit a loadBalancer block")
+	})
+
+	ginkgo.It("A2: endpointOverride.type=Header → BTP loadBalancer.endpointOverride.extractFrom", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-endpoint-override", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{
+				Algorithm: &alg,
+				EndpointOverride: &v1beta1.EndpointOverrideSpec{
+					Type:    v1beta1.EndpointOverrideTypeHeader,
+					Headers: []v1beta1.HashHeader{{Name: "X-Endpoint-HostPort"}},
+				},
+			}
+		})
+
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-endpoint-override"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-endpoint-override"}, got)).To(Succeed())
+
+		extractFrom, found, err := unstructured.NestedSlice(got.Object, "spec", "loadBalancer", "endpointOverride", "extractFrom")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue(), "endpointOverride.extractFrom missing on emitted BTP")
+		Expect(extractFrom).To(HaveLen(1))
+		first, ok := extractFrom[0].(map[string]interface{})
+		Expect(ok).To(BeTrue())
+		Expect(first["header"]).To(Equal("X-Endpoint-HostPort"))
+	})
+
+	ginkgo.It("A4: ome.io/btp.* pass-through stitched into BTP + condition message lists key", func() {
+		isvc := isvcWith("isvc-passthrough", func(i *v1beta1.InferenceService) {
+			i.Annotations = map[string]string{
+				"ome.io/btp.loadBalancer.slowStart.window": "30s",
+			}
+		})
+
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-passthrough"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status).NotTo(BeNil())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-passthrough"}, got)).To(Succeed())
+
+		// The pass-through key was stitched verbatim into the BTP at
+		// the same dotted path.
+		window, found, err := unstructured.NestedString(got.Object, "spec", "loadBalancer", "slowStart", "window")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue(), "spec.loadBalancer.slowStart.window missing on emitted BTP")
+		Expect(window).To(Equal("30s"))
+
+		// TrafficStatus condition message lists the pass-through key so
+		// operators can audit what was applied.
+		Expect(status.Conditions).NotTo(BeEmpty())
+		var ready *metav1.Condition
+		for i := range status.Conditions {
+			if status.Conditions[i].Type == v1beta1.TrafficConditionBackendPolicyReady {
+				ready = &status.Conditions[i]
+			}
+		}
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Message).To(ContainSubstring("loadBalancer.slowStart.window"),
+			"condition message must list the pass-through key applied")
+	})
+
+	ginkgo.It("A5: ISVC owner-reference on BTP is GC-correct (controller=true, BlockOwnerDeletion, UID match)", func() {
+		// envtest doesn't run the kube-controller-manager so we can't
+		// observe an actual cascade delete; instead we assert the
+		// OwnerReference fields that Kubernetes' GC controller relies on
+		// (Controller=true + BlockOwnerDeletion=true + UID match), so
+		// that a real cluster would GC the BTP on ISVC delete.
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-gc-contract", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-gc-contract"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-gc-contract"}, got)).To(Succeed())
+
+		refs := got.GetOwnerReferences()
+		Expect(refs).To(HaveLen(1), "BTP must carry exactly one owner reference")
+		ref := refs[0]
+		Expect(ref.APIVersion).To(Equal("ome.io/v1beta1"))
+		Expect(ref.Kind).To(Equal("InferenceService"))
+		Expect(ref.Name).To(Equal("isvc-gc-contract"))
+		Expect(ref.UID).To(Equal(isvc.UID), "owner-ref UID must match the ISVC's UID")
+		Expect(ref.Controller).NotTo(BeNil())
+		Expect(*ref.Controller).To(BeTrue(), "Controller=true required so GC follows the ref")
+		Expect(ref.BlockOwnerDeletion).NotTo(BeNil())
+		Expect(*ref.BlockOwnerDeletion).To(BeTrue(), "BlockOwnerDeletion=true so Foreground delete waits")
+	})
+
+	ginkgo.It("B1: algorithm=RoundRobin → BTP loadBalancer.type=RoundRobin, no consistentHash", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-b1", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-b1"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-b1"}, got)).To(Succeed())
+
+		typ, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "type")
+		Expect(typ).To(Equal("RoundRobin"))
+		_, foundCH, _ := unstructured.NestedMap(got.Object, "spec", "loadBalancer", "consistentHash")
+		Expect(foundCH).To(BeFalse(), "RoundRobin must NOT emit a consistentHash block")
+	})
+
+	ginkgo.It("B2: algorithm=LeastRequest → BTP loadBalancer.type=LeastRequest", func() {
+		alg := v1beta1.LoadBalancingTypeLeastRequest
+		isvc := isvcWith("isvc-b2", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-b2"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-b2"}, got)).To(Succeed())
+		typ, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "type")
+		Expect(typ).To(Equal("LeastRequest"))
+	})
+
+	ginkgo.It("B3: algorithm=Random → BTP loadBalancer.type=Random", func() {
+		alg := v1beta1.LoadBalancingTypeRandom
+		isvc := isvcWith("isvc-b3", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-b3"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-b3"}, got)).To(Succeed())
+		typ, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "type")
+		Expect(typ).To(Equal("Random"))
+	})
+
+	ginkgo.It("B4: ConsistentHash type=Cookie + TTL → BTP consistentHash.cookie.{name,ttl}", func() {
+		alg := v1beta1.LoadBalancingTypeConsistentHash
+		ttl := int64(3600)
+		isvc := isvcWith("isvc-b4", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{
+				Algorithm: &alg,
+				ConsistentHash: &v1beta1.ConsistentHashSpec{
+					Type:   v1beta1.HashTypeCookie,
+					Cookie: &v1beta1.HashCookie{Name: "session", TTLSeconds: &ttl},
+				},
+			}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-b4"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-b4"}, got)).To(Succeed())
+		name, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "consistentHash", "cookie", "name")
+		Expect(name).To(Equal("session"))
+		ttlOut, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "consistentHash", "cookie", "ttl")
+		Expect(ttlOut).To(Equal("3600s"))
+		// No header / sourceIP blocks should sneak in.
+		_, foundHeader, _ := unstructured.NestedMap(got.Object, "spec", "loadBalancer", "consistentHash", "header")
+		Expect(foundHeader).To(BeFalse())
+	})
+
+	ginkgo.It("B5: ConsistentHash type=SourceIP → BTP consistentHash.type=SourceIP, no header/cookie", func() {
+		alg := v1beta1.LoadBalancingTypeConsistentHash
+		isvc := isvcWith("isvc-b5", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{
+				Algorithm:      &alg,
+				ConsistentHash: &v1beta1.ConsistentHashSpec{Type: v1beta1.HashTypeSourceIP},
+			}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-b5"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-b5"}, got)).To(Succeed())
+		hashType, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "consistentHash", "type")
+		Expect(hashType).To(Equal("SourceIP"))
+		// EG infers source-IP hashing from type alone; no header/cookie sub-blocks expected.
+		_, foundHeader, _ := unstructured.NestedMap(got.Object, "spec", "loadBalancer", "consistentHash", "header")
+		Expect(foundHeader).To(BeFalse())
+		_, foundCookie, _ := unstructured.NestedMap(got.Object, "spec", "loadBalancer", "consistentHash", "cookie")
+		Expect(foundCookie).To(BeFalse())
+	})
+
+	ginkgo.It("B6: ConsistentHash with multiple headers → BTP consistentHash.headers[] (plural EG v1.7+ form)", func() {
+		// EG v1.7+ supports multi-header consistent hashing via the
+		// plural form: spec.loadBalancer.consistentHash.type="Headers"
+		// + headers[] list. OME's API exposes the singular "Header"
+		// enum value; the translator promotes to the plural EG form
+		// when the operator declares 2+ headers.
+		alg := v1beta1.LoadBalancingTypeConsistentHash
+		isvc := isvcWith("isvc-b6", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{
+				Algorithm: &alg,
+				ConsistentHash: &v1beta1.ConsistentHashSpec{
+					Type: v1beta1.HashTypeHeader,
+					Headers: []v1beta1.HashHeader{
+						{Name: "X-User"},
+						{Name: "X-Session"},
+					},
+				},
+			}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-b6"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-b6"}, got)).To(Succeed())
+
+		// Type promoted to plural "Headers".
+		typ, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "consistentHash", "type")
+		Expect(typ).To(Equal("Headers"), "translator must promote type to Headers when multiple headers are declared")
+
+		// Plural headers[] populated with both entries, in order.
+		headers, found, err := unstructured.NestedSlice(got.Object, "spec", "loadBalancer", "consistentHash", "headers")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue(), "consistentHash.headers (plural list) must be set")
+		Expect(headers).To(HaveLen(2))
+		names := make([]string, 0, len(headers))
+		for _, h := range headers {
+			m, ok := h.(map[string]interface{})
+			Expect(ok).To(BeTrue())
+			names = append(names, m["name"].(string))
+		}
+		Expect(names).To(Equal([]string{"X-User", "X-Session"}), "header order must be preserved")
+
+		// Singular header field must NOT also be set (EG CEL: type/field XOR).
+		_, foundSingular, _ := unstructured.NestedMap(got.Object, "spec", "loadBalancer", "consistentHash", "header")
+		Expect(foundSingular).To(BeFalse(), "type=Headers must not also set the singular header object")
+	})
+
+	ginkgo.It("B7: annotation-only intent (no spec.traffic) → no loadBalancer block, status.algorithm=Default", func() {
+		isvc := isvcWith("isvc-b7", func(i *v1beta1.InferenceService) {
+			i.Annotations = map[string]string{
+				"ome.io/circuit-breaker-max-connections": "512",
+			}
+		})
+
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-b7"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status).NotTo(BeNil())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-b7"}, got)).To(Succeed())
+
+		// Circuit breaker field present.
+		maxConn, found, err := unstructured.NestedInt64(got.Object, "spec", "circuitBreaker", "maxConnections")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(maxConn).To(Equal(int64(512)))
+		// No loadBalancer block since no algorithm declared.
+		_, foundLB, _ := unstructured.NestedMap(got.Object, "spec", "loadBalancer")
+		Expect(foundLB).To(BeFalse())
+		// Status carries the "Default" sentinel so operators can distinguish
+		// "OME defaulted" from any concrete algorithm name.
+		Expect(status.Algorithm).To(Equal("Default"))
+	})
+
+	// cbField sets one circuit-breaker annotation, reconciles, and
+	// asserts the BTP integer field at the given nested path.
+	cbField := func(name, annotation, valueStr string, want int64, path ...string) {
+		isvc := isvcWith(name, func(i *v1beta1.InferenceService) {
+			i.Annotations = map[string]string{annotation: valueStr}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{name})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: name}, got)).To(Succeed())
+		v, found, err := unstructured.NestedInt64(got.Object, append([]string{"spec", "circuitBreaker"}, path...)...)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue(), "field %v missing on BTP", path)
+		Expect(v).To(Equal(want))
+	}
+
+	ginkgo.It("C1: ome.io/circuit-breaker-max-connections → BTP circuitBreaker.maxConnections", func() {
+		cbField("isvc-c1", "ome.io/circuit-breaker-max-connections", "1024", 1024, "maxConnections")
+	})
+
+	ginkgo.It("C2: ome.io/circuit-breaker-max-parallel-requests → BTP circuitBreaker.maxParallelRequests", func() {
+		cbField("isvc-c2", "ome.io/circuit-breaker-max-parallel-requests", "256", 256, "maxParallelRequests")
+	})
+
+	ginkgo.It("C3: ome.io/circuit-breaker-max-pending-requests → BTP circuitBreaker.maxPendingRequests", func() {
+		cbField("isvc-c3", "ome.io/circuit-breaker-max-pending-requests", "128", 128, "maxPendingRequests")
+	})
+
+	ginkgo.It("C4: ome.io/circuit-breaker-max-parallel-retries → BTP circuitBreaker.maxParallelRetries", func() {
+		cbField("isvc-c4", "ome.io/circuit-breaker-max-parallel-retries", "8", 8, "maxParallelRetries")
+	})
+
+	ginkgo.It("C5: per-endpoint CB annotation + ConsistentHash → BTP carries both blocks (recommended composition)", func() {
+		// Per OEP-0011 README, the perEndpoint CB knob is the
+		// recommended pairing with ConsistentHash so a single hot
+		// session can't open many connections to one pod and starve
+		// other sessions sharing the same hash bucket.
+		alg := v1beta1.LoadBalancingTypeConsistentHash
+		isvc := isvcWith("isvc-c5", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{
+				Algorithm: &alg,
+				ConsistentHash: &v1beta1.ConsistentHashSpec{
+					Type:    v1beta1.HashTypeHeader,
+					Headers: []v1beta1.HashHeader{{Name: "X-Session-ID"}},
+				},
+			}
+			i.Annotations = map[string]string{
+				"ome.io/circuit-breaker-per-endpoint-max-connections": "1",
+			}
+		})
+
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-c5"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-c5"}, got)).To(Succeed())
+
+		// ConsistentHash block is intact.
+		typ, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "type")
+		Expect(typ).To(Equal("ConsistentHash"))
+		hdr, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "consistentHash", "header", "name")
+		Expect(hdr).To(Equal("X-Session-ID"))
+		// perEndpoint.maxConnections is present from the annotation.
+		v, found, _ := unstructured.NestedInt64(got.Object, "spec", "circuitBreaker", "perEndpoint", "maxConnections")
+		Expect(found).To(BeTrue())
+		Expect(v).To(Equal(int64(1)))
+	})
+
+	ginkgo.It("C6: retry-attempts + retry-on (5xx, reset) → BTP retry.numRetries + retry.retryOn.triggers", func() {
+		isvc := isvcWith("isvc-c6", func(i *v1beta1.InferenceService) {
+			i.Annotations = map[string]string{
+				"ome.io/retry-attempts": "3",
+				"ome.io/retry-on":       "5xx,reset",
+			}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-c6"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-c6"}, got)).To(Succeed())
+
+		n, _, _ := unstructured.NestedInt64(got.Object, "spec", "retry", "numRetries")
+		Expect(n).To(Equal(int64(3)))
+		triggers, found, _ := unstructured.NestedSlice(got.Object, "spec", "retry", "retryOn", "triggers")
+		Expect(found).To(BeTrue())
+		got2 := make([]string, 0, len(triggers))
+		for _, t := range triggers {
+			got2 = append(got2, t.(string))
+		}
+		Expect(got2).To(ConsistOf("5xx", "reset"))
+	})
+
+	ginkgo.It("C7: retry-per-try-timeout → BTP retry.perRetry.timeout", func() {
+		isvc := isvcWith("isvc-c7", func(i *v1beta1.InferenceService) {
+			i.Annotations = map[string]string{
+				"ome.io/retry-attempts":        "3",
+				"ome.io/retry-on":              "5xx",
+				"ome.io/retry-per-try-timeout": "2s",
+			}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-c7"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-c7"}, got)).To(Succeed())
+		v, _, _ := unstructured.NestedString(got.Object, "spec", "retry", "perRetry", "timeout")
+		Expect(v).To(Equal("2s"))
+	})
+
+	ginkgo.It("C8: timeout-idle → BTP timeout.http.connectionIdleTimeout", func() {
+		isvc := isvcWith("isvc-c8", func(i *v1beta1.InferenceService) {
+			i.Annotations = map[string]string{"ome.io/timeout-idle": "2m0s"}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-c8"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-c8"}, got)).To(Succeed())
+		v, _, _ := unstructured.NestedString(got.Object, "spec", "timeout", "http", "connectionIdleTimeout")
+		Expect(v).To(Equal("2m0s"))
+	})
+
+	ginkgo.It("C9: timeout-max-connection-duration → BTP timeout.http.maxConnectionDuration", func() {
+		isvc := isvcWith("isvc-c9", func(i *v1beta1.InferenceService) {
+			i.Annotations = map[string]string{"ome.io/timeout-max-connection-duration": "5m0s"}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-c9"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-c9"}, got)).To(Succeed())
+		v, _, _ := unstructured.NestedString(got.Object, "spec", "timeout", "http", "maxConnectionDuration")
+		Expect(v).To(Equal("5m0s"))
+	})
+
+	ginkgo.It("C10: timeout-tcp-connect → BTP timeout.tcp.connectTimeout", func() {
+		isvc := isvcWith("isvc-c10", func(i *v1beta1.InferenceService) {
+			i.Annotations = map[string]string{"ome.io/timeout-tcp-connect": "5s"}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-c10"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-c10"}, got)).To(Succeed())
+		v, _, _ := unstructured.NestedString(got.Object, "spec", "timeout", "tcp", "connectTimeout")
+		Expect(v).To(Equal("5s"))
+	})
+
+	ginkgo.It("C11: two ome.io/btp.* pass-through keys at once → both stitched into sibling fields, both in condition message", func() {
+		// Two pass-throughs targeting sibling fields under the same
+		// parent map. Verifies the translator's unstructured stitch
+		// builds (not clobbers) the intermediate slowStart map so both
+		// children persist after the second SetNestedField call.
+		// Value "30s" parses as string; "1.5" parses as float64
+		// (parseScalar best-effort coerces); both shapes must round-
+		// trip through unstructured.SetNestedField unchanged.
+		isvc := isvcWith("isvc-c11", func(i *v1beta1.InferenceService) {
+			i.Annotations = map[string]string{
+				"ome.io/btp.loadBalancer.slowStart.window":     "30s",
+				"ome.io/btp.loadBalancer.slowStart.aggression": "1.5",
+			}
+		})
+
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-c11"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-c11"}, got)).To(Succeed())
+
+		win, foundWin, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "slowStart", "window")
+		Expect(foundWin).To(BeTrue(), "window field missing")
+		Expect(win).To(Equal("30s"))
+
+		// aggression came in as "1.5"; parseScalar coerces to float64.
+		// Use the generic NestedFieldNoCopy accessor since NestedString
+		// would return found=false on a non-string value.
+		aggVal, foundAgg, err := unstructured.NestedFieldNoCopy(got.Object, "spec", "loadBalancer", "slowStart", "aggression")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(foundAgg).To(BeTrue(), "aggression field missing — multi-pass-through under same parent dropped a sibling")
+		Expect(aggVal).To(BeAssignableToTypeOf(float64(0)), "aggression must round-trip as the parseScalar-inferred type")
+		Expect(aggVal.(float64)).To(Equal(1.5))
+
+		// Condition message lists BOTH keys so operators can audit.
+		var ready *metav1.Condition
+		for i := range status.Conditions {
+			if status.Conditions[i].Type == v1beta1.TrafficConditionBackendPolicyReady {
+				ready = &status.Conditions[i]
+			}
+		}
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Message).To(ContainSubstring("loadBalancer.slowStart.window"))
+		Expect(ready.Message).To(ContainSubstring("loadBalancer.slowStart.aggression"))
+	})
+
+	ginkgo.It("C12: kitchen-sink — typed algorithm + every documented annotation → BTP has every field, no collisions", func() {
+		// Catches field-collision bugs in the unstructured-stitch
+		// translator: if two annotations write overlapping nested
+		// paths one would clobber the other.
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-c12", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+			i.Annotations = map[string]string{
+				"ome.io/circuit-breaker-max-connections":              "1024",
+				"ome.io/circuit-breaker-max-parallel-requests":        "256",
+				"ome.io/circuit-breaker-max-pending-requests":         "128",
+				"ome.io/circuit-breaker-max-parallel-retries":         "8",
+				"ome.io/circuit-breaker-per-endpoint-max-connections": "2",
+				"ome.io/retry-attempts":                               "3",
+				"ome.io/retry-on":                                     "5xx,reset",
+				"ome.io/retry-per-try-timeout":                        "2s",
+				"ome.io/timeout-idle":                                 "2m0s",
+				"ome.io/timeout-max-connection-duration":              "5m0s",
+				"ome.io/timeout-tcp-connect":                          "5s",
+			}
+		})
+
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-c12"})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-c12"}, got)).To(Succeed())
+
+		// Typed algorithm.
+		typ, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "type")
+		Expect(typ).To(Equal("RoundRobin"))
+
+		// Every circuit-breaker field present.
+		assertCBInt := func(want int64, path ...string) {
+			v, found, _ := unstructured.NestedInt64(got.Object, append([]string{"spec", "circuitBreaker"}, path...)...)
+			Expect(found).To(BeTrue(), "circuitBreaker.%v missing", path)
+			Expect(v).To(Equal(want), "circuitBreaker.%v value", path)
+		}
+		assertCBInt(1024, "maxConnections")
+		assertCBInt(256, "maxParallelRequests")
+		assertCBInt(128, "maxPendingRequests")
+		assertCBInt(8, "maxParallelRetries")
+		assertCBInt(2, "perEndpoint", "maxConnections")
+
+		// Retry fields.
+		n, _, _ := unstructured.NestedInt64(got.Object, "spec", "retry", "numRetries")
+		Expect(n).To(Equal(int64(3)))
+		perRetry, _, _ := unstructured.NestedString(got.Object, "spec", "retry", "perRetry", "timeout")
+		Expect(perRetry).To(Equal("2s"))
+		triggers, _, _ := unstructured.NestedSlice(got.Object, "spec", "retry", "retryOn", "triggers")
+		Expect(triggers).To(HaveLen(2))
+
+		// Timeout fields.
+		idle, _, _ := unstructured.NestedString(got.Object, "spec", "timeout", "http", "connectionIdleTimeout")
+		Expect(idle).To(Equal("2m0s"))
+		maxConn, _, _ := unstructured.NestedString(got.Object, "spec", "timeout", "http", "maxConnectionDuration")
+		Expect(maxConn).To(Equal("5m0s"))
+		tcp, _, _ := unstructured.NestedString(got.Object, "spec", "timeout", "tcp", "connectTimeout")
+		Expect(tcp).To(Equal("5s"))
+	})
+
+	// assertTargetRefNames verifies the BTP's spec.targetRefs list has
+	// exactly the given HTTPRoute names (each ref is also expected to
+	// be a gateway.networking.k8s.io HTTPRoute kind).
+	assertTargetRefNames := func(btp *unstructured.Unstructured, want ...string) {
+		targetRefs, found, err := unstructured.NestedSlice(btp.Object, "spec", "targetRefs")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue(), "spec.targetRefs missing")
+		Expect(targetRefs).To(HaveLen(len(want)))
+		got := make([]string, 0, len(targetRefs))
+		for _, ref := range targetRefs {
+			refMap, ok := ref.(map[string]interface{})
+			Expect(ok).To(BeTrue())
+			Expect(refMap["group"]).To(Equal("gateway.networking.k8s.io"))
+			Expect(refMap["kind"]).To(Equal("HTTPRoute"))
+			got = append(got, refMap["name"].(string))
+		}
+		Expect(got).To(ConsistOf(want))
+	}
+
+	ginkgo.It("D2: Engine + Router ISVC → BTP targetRefs contains top-level + engine + router", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-d2", func(i *v1beta1.InferenceService) {
+			i.Spec.Engine = &v1beta1.EngineSpec{}
+			i.Spec.Router = &v1beta1.RouterSpec{}
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+		routes := []string{"isvc-d2", "isvc-d2-engine", "isvc-d2-router"}
+
+		_, err := r.Reconcile(suiteCtx, isvc, routes)
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-d2"}, got)).To(Succeed())
+		assertTargetRefNames(got, "isvc-d2", "isvc-d2-engine", "isvc-d2-router")
+	})
+
+	ginkgo.It("D3: Engine + Decoder (PD) ISVC → BTP targetRefs contains top-level + engine + decoder", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-d3", func(i *v1beta1.InferenceService) {
+			i.Spec.Engine = &v1beta1.EngineSpec{}
+			i.Spec.Decoder = &v1beta1.DecoderSpec{}
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+		routes := []string{"isvc-d3", "isvc-d3-engine", "isvc-d3-decoder"}
+
+		_, err := r.Reconcile(suiteCtx, isvc, routes)
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-d3"}, got)).To(Succeed())
+		assertTargetRefNames(got, "isvc-d3", "isvc-d3-engine", "isvc-d3-decoder")
+	})
+
+	ginkgo.It("D4: Engine + Router + Decoder ISVC → BTP targetRefs contains all four route names", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-d4", func(i *v1beta1.InferenceService) {
+			i.Spec.Engine = &v1beta1.EngineSpec{}
+			i.Spec.Router = &v1beta1.RouterSpec{}
+			i.Spec.Decoder = &v1beta1.DecoderSpec{}
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+		routes := []string{"isvc-d4", "isvc-d4-engine", "isvc-d4-router", "isvc-d4-decoder"}
+
+		_, err := r.Reconcile(suiteCtx, isvc, routes)
+		Expect(err).NotTo(HaveOccurred())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-d4"}, got)).To(Succeed())
+		assertTargetRefNames(got, "isvc-d4", "isvc-d4-engine", "isvc-d4-router", "isvc-d4-decoder")
+	})
+
+	ginkgo.It("D5: ComputeTargetHTTPRoutes builds the right set per Component flags (C1 regression)", func() {
+		// ComputeTargetHTTPRoutes is the helper the full ISVC
+		// reconciler uses to determine which HTTPRoute names to pass
+		// the traffic reconciler. Pre-OEP C1, engine and top-level
+		// collided (both isvc.Name); the helper must now produce
+		// "<isvc>-engine" distinct from "<isvc>" (top-level).
+		isvc := isvcWith("isvc-d5", nil)
+
+		// Engine-only.
+		got := traffic.ComputeTargetHTTPRoutes(isvc, false, false)
+		Expect(got).To(ConsistOf("isvc-d5", "isvc-d5-engine"))
+
+		// With decoder.
+		got = traffic.ComputeTargetHTTPRoutes(isvc, true, false)
+		Expect(got).To(ConsistOf("isvc-d5", "isvc-d5-engine", "isvc-d5-decoder"))
+
+		// With router.
+		got = traffic.ComputeTargetHTTPRoutes(isvc, false, true)
+		Expect(got).To(ConsistOf("isvc-d5", "isvc-d5-engine", "isvc-d5-router"))
+
+		// All three.
+		got = traffic.ComputeTargetHTTPRoutes(isvc, true, true)
+		Expect(got).To(ConsistOf("isvc-d5", "isvc-d5-engine", "isvc-d5-router", "isvc-d5-decoder"))
+	})
+
+	ginkgo.It("F2: fake gateway Accepted=True on BTP → next reconcile flips BackendPolicyReady to True/AcceptedByGateway", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-f2", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+
+		// First reconcile: BTP emitted, no gateway ack yet → Pending.
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-f2"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status.Conditions[0].Status).To(Equal(metav1.ConditionUnknown))
+		Expect(status.Conditions[0].Reason).To(Equal(v1beta1.TrafficReasonPending))
+
+		// Simulate the EG controller stamping Accepted=True on the BTP.
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-f2"}, got)).To(Succeed())
+		// Conditions live under status.ancestors[0].conditions in real EG BTP
+		// shape; but the translator's ObserveAcceptance reads top-level
+		// status.conditions for backward-compat. Set both to be safe.
+		acceptedCond := map[string]interface{}{
+			"type":               "Accepted",
+			"status":             "True",
+			"reason":             "Accepted",
+			"message":            "Policy accepted by gateway",
+			"lastTransitionTime": metav1.Now().Format("2006-01-02T15:04:05Z"),
+		}
+		Expect(unstructured.SetNestedSlice(got.Object, []interface{}{acceptedCond}, "status", "conditions")).To(Succeed())
+		Expect(k8sClient.Status().Update(suiteCtx, got)).To(Succeed())
+
+		// Second reconcile: should observe acceptance.
+		status2, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-f2"})
+		Expect(err).NotTo(HaveOccurred())
+		var ready *metav1.Condition
+		for i := range status2.Conditions {
+			if status2.Conditions[i].Type == v1beta1.TrafficConditionBackendPolicyReady {
+				ready = &status2.Conditions[i]
+			}
+		}
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionTrue), "BackendPolicyReady must flip to True after gateway Accepted=True")
+		Expect(ready.Reason).To(Equal(v1beta1.TrafficReasonAcceptedByGateway))
+	})
+
+	ginkgo.It("F3: pre-existing same-name BTP with NO owner-ref → ConflictingPolicy, hand-authored preserved", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-f3", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+
+		// Pre-existing hand-authored BTP with the same name OME would
+		// use, no owner reference.
+		handAuthored := newBTP()
+		handAuthored.SetName("isvc-f3")
+		handAuthored.SetNamespace(ns.Name)
+		handAuthored.SetLabels(map[string]string{"hand-authored": "true"})
+		// Distinctive spec so we can verify it isn't overwritten.
+		Expect(unstructured.SetNestedField(handAuthored.Object, "LeastRequest", "spec", "loadBalancer", "type")).To(Succeed())
+		Expect(k8sClient.Create(suiteCtx, handAuthored)).To(Succeed())
+
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-f3"})
+		Expect(err).To(HaveOccurred(), "Reconcile must surface the conflict error")
+		Expect(err.Error()).To(ContainSubstring("backend policy with the OME-managed name exists"))
+		Expect(status).NotTo(BeNil())
+		Expect(status.Conditions).NotTo(BeEmpty())
+		var ready *metav1.Condition
+		for i := range status.Conditions {
+			if status.Conditions[i].Type == v1beta1.TrafficConditionBackendPolicyReady {
+				ready = &status.Conditions[i]
+			}
+		}
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(v1beta1.TrafficReasonConflictingPolicy))
+
+		// Hand-authored BTP must NOT have been overwritten.
+		preserved := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-f3"}, preserved)).To(Succeed())
+		Expect(preserved.GetLabels()).To(HaveKeyWithValue("hand-authored", "true"))
+		typ, _, _ := unstructured.NestedString(preserved.Object, "spec", "loadBalancer", "type")
+		Expect(typ).To(Equal("LeastRequest"), "hand-authored BTP spec must be untouched")
+	})
+
+	ginkgo.It("F4: pre-existing BTP with controller-ref to a DIFFERENT ISVC → ConflictingPolicy, original preserved", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		// "Other" ISVC owns the pre-existing BTP.
+		other := isvcWith("isvc-f4-other", nil)
+		// Subject ISVC of this test.
+		isvc := isvcWith("isvc-f4", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+
+		// Pre-existing BTP with the OME-managed name "isvc-f4" but
+		// owned by "isvc-f4-other".
+		preexisting := newBTP()
+		preexisting.SetName("isvc-f4")
+		preexisting.SetNamespace(ns.Name)
+		preexisting.SetOwnerReferences([]metav1.OwnerReference{{
+			APIVersion: "ome.io/v1beta1",
+			Kind:       "InferenceService",
+			Name:       other.Name,
+			UID:        other.UID,
+			Controller: ptrToBool(true),
+		}})
+		Expect(unstructured.SetNestedField(preexisting.Object, "LeastRequest", "spec", "loadBalancer", "type")).To(Succeed())
+		Expect(k8sClient.Create(suiteCtx, preexisting)).To(Succeed())
+
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-f4"})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("backend policy with the OME-managed name exists"))
+
+		// Pre-existing BTP still owned by the other ISVC.
+		preserved := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-f4"}, preserved)).To(Succeed())
+		Expect(preserved.GetOwnerReferences()).To(HaveLen(1))
+		Expect(preserved.GetOwnerReferences()[0].Name).To(Equal(other.Name))
+	})
+
+	ginkgo.It("F5: delete the conflicting hand-authored BTP → next reconcile takes ownership, status flips to Pending", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-f5", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+
+		// Pre-existing hand-authored BTP triggers conflict.
+		handAuthored := newBTP()
+		handAuthored.SetName("isvc-f5")
+		handAuthored.SetNamespace(ns.Name)
+		Expect(unstructured.SetNestedField(handAuthored.Object, "Random", "spec", "loadBalancer", "type")).To(Succeed())
+		Expect(k8sClient.Create(suiteCtx, handAuthored)).To(Succeed())
+
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-f5"})
+		Expect(err).To(HaveOccurred())
+
+		// Operator deletes the conflicting BTP.
+		Expect(k8sClient.Delete(suiteCtx, handAuthored)).To(Succeed())
+		// Eventually the apiserver settles the delete.
+		Eventually(func() bool {
+			tmp := newBTP()
+			err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-f5"}, tmp)
+			return apierrors.IsNotFound(err)
+		}).WithTimeout(util.ShortTimeout).WithPolling(util.PollInterval).Should(BeTrue())
+
+		// Next reconcile takes ownership: creates a fresh OME-owned BTP.
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-f5"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status.Conditions[0].Reason).To(Equal(v1beta1.TrafficReasonPending),
+			"after the conflict clears, status should flip back to Pending (gateway hasn't ack'd yet)")
+
+		// New BTP has OME's controller-ref.
+		now := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-f5"}, now)).To(Succeed())
+		Expect(now.GetOwnerReferences()).To(HaveLen(1))
+		Expect(now.GetOwnerReferences()[0].Name).To(Equal("isvc-f5"))
+		Expect(now.GetOwnerReferences()[0].UID).To(Equal(isvc.UID))
+		typ, _, _ := unstructured.NestedString(now.Object, "spec", "loadBalancer", "type")
+		Expect(typ).To(Equal("RoundRobin"), "new BTP carries OME's translated spec, not the hand-authored one")
+	})
+
+	ginkgo.It("F6: generation bump → ObservedGeneration in condition matches the new generation", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-f6", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+
+		// Reconcile against the initial generation.
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-f6"})
+		Expect(err).NotTo(HaveOccurred())
+		gen1 := isvc.Generation
+		Expect(status.Conditions[0].ObservedGeneration).To(Equal(gen1),
+			"first reconcile must stamp the initial generation")
+
+		// Bump spec to force the apiserver to advance generation.
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(isvc), fresh)).To(Succeed())
+			newAlg := v1beta1.LoadBalancingTypeLeastRequest
+			fresh.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &newAlg}
+			g.Expect(k8sClient.Update(suiteCtx, fresh)).To(Succeed())
+			isvc.ResourceVersion = fresh.ResourceVersion
+			isvc.Generation = fresh.Generation
+			isvc.Spec = fresh.Spec
+		}).WithTimeout(util.ShortTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		Expect(isvc.Generation).To(BeNumerically(">", gen1), "spec change must bump generation")
+
+		// Reconcile again; ObservedGeneration must advance.
+		status2, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-f6"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status2.Conditions[0].ObservedGeneration).To(Equal(isvc.Generation),
+			"second reconcile's condition must record the new generation")
+	})
+
+	// applyHTTPRouteAndReadBack builds a component HTTPRoute via the
+	// production builder, applies it to envtest, retrieves it, and
+	// returns the round-tripped typed object. Status population on the
+	// isvc is in-memory only — the builder consumes the Go struct, not
+	// the apiserver — which sidesteps the race between Status().Update
+	// and the background ISVC controller.
+	applyHTTPRouteAndReadBack := func(isvc *v1beta1.InferenceService, componentType string) *gatewayapiv1.HTTPRoute {
+		builder := newHTTPRouteBuilderForTest()
+		obj, err := builder.BuildHTTPRoute(suiteCtx, isvc, componentType)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(obj).NotTo(BeNil(), "builder returned nil — required Component condition likely missing on isvc.Status")
+		route, ok := obj.(*gatewayapiv1.HTTPRoute)
+		Expect(ok).To(BeTrue(), "builder must return a typed HTTPRoute when the scheme is registered")
+		// Strip resourceVersion so envtest accepts the Create.
+		route.ResourceVersion = ""
+		Expect(k8sClient.Create(suiteCtx, route)).To(Succeed())
+		fetched := &gatewayapiv1.HTTPRoute{}
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(route), fetched)).To(Succeed())
+		return fetched
+	}
+
+	// markComponentReady stamps the EngineReady condition on an ISVC
+	// status (in-memory). The HTTPRoute builder short-circuits when the
+	// component isn't Ready, so this is required setup for E1-E5.
+	markEngineReady := func(isvc *v1beta1.InferenceService) {
+		isvc.Status.SetCondition(v1beta1.EngineReady, &knapis.Condition{
+			Type:   v1beta1.EngineReady,
+			Status: corev1.ConditionTrue,
+		})
+	}
+	markRouterReady := func(isvc *v1beta1.InferenceService) {
+		isvc.Status.SetCondition(v1beta1.RouterReady, &knapis.Condition{
+			Type:   v1beta1.RouterReady,
+			Status: corev1.ConditionTrue,
+		})
+	}
+
+	ginkgo.It("E1: status.Traffic[stable=90,canary=10] → HTTPRoute persists 2 weighted backendRefs (90/10) through apiserver", func() {
+		isvc := isvcWith("isvc-e1", func(i *v1beta1.InferenceService) {
+			i.Spec.Engine = &v1beta1.EngineSpec{}
+		})
+		markEngineReady(isvc)
+		stable := int64(90)
+		canary := int64(10)
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+			v1beta1.EngineComponent: {
+				Traffic: []knservingv1.TrafficTarget{
+					{RevisionName: "isvc-e1-engine-rev-stable", Percent: &stable},
+					{RevisionName: "isvc-e1-engine-rev-canary", Percent: &canary},
+				},
+			},
+		}
+
+		fetched := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
+		Expect(fetched.Spec.Rules).To(HaveLen(1))
+		refs := fetched.Spec.Rules[0].BackendRefs
+		Expect(refs).To(HaveLen(2), "weighted form must persist 2 backendRefs through the apiserver")
+		Expect(string(refs[0].Name)).To(Equal("isvc-e1-engine-rev-stable"))
+		Expect(refs[0].Weight).NotTo(BeNil())
+		Expect(*refs[0].Weight).To(Equal(int32(90)))
+		Expect(string(refs[1].Name)).To(Equal("isvc-e1-engine-rev-canary"))
+		Expect(*refs[1].Weight).To(Equal(int32(10)))
+	})
+
+	ginkgo.It("E2: status.Traffic[stable=100,canary=0] blue-green standby → HTTPRoute persists 2 backendRefs (100/0)", func() {
+		// weight=0 is valid Gateway API — endpoint resolves but no
+		// traffic flows. Required for blue-green standby (Story 4
+		// in the OEP).
+		isvc := isvcWith("isvc-e2", func(i *v1beta1.InferenceService) {
+			i.Spec.Engine = &v1beta1.EngineSpec{}
+		})
+		markEngineReady(isvc)
+		stable := int64(100)
+		canary := int64(0)
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+			v1beta1.EngineComponent: {
+				Traffic: []knservingv1.TrafficTarget{
+					{RevisionName: "isvc-e2-engine-rev-stable", Percent: &stable},
+					{RevisionName: "isvc-e2-engine-rev-canary", Percent: &canary},
+				},
+			},
+		}
+
+		fetched := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
+		refs := fetched.Spec.Rules[0].BackendRefs
+		Expect(refs).To(HaveLen(2),
+			"blue-green standby must keep both backendRefs so the route still references the standby Service")
+		Expect(*refs[0].Weight).To(Equal(int32(100)))
+		Expect(*refs[1].Weight).To(Equal(int32(0)),
+			"canary at 0% must persist as weight 0 (valid Gateway API; no traffic flows but endpoint is resolved)")
+	})
+
+	ginkgo.It("E3: only engine has status.Traffic[]; router has no Components entry → engine route weighted, router falls back to single backendRef", func() {
+		// Realistic mid-rollout state: engine is rolling out but the
+		// router hasn't been touched, so per-mode reconciler hasn't
+		// populated router's Traffic[]. The engine route must reflect
+		// the rollout; the router route must NOT artificially split.
+		isvc := isvcWith("isvc-e3", func(i *v1beta1.InferenceService) {
+			i.Spec.Engine = &v1beta1.EngineSpec{}
+			i.Spec.Router = &v1beta1.RouterSpec{}
+		})
+		markEngineReady(isvc)
+		markRouterReady(isvc)
+		stable := int64(80)
+		canary := int64(20)
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+			v1beta1.EngineComponent: {
+				Traffic: []knservingv1.TrafficTarget{
+					{RevisionName: "isvc-e3-engine-rev-stable", Percent: &stable},
+					{RevisionName: "isvc-e3-engine-rev-canary", Percent: &canary},
+				},
+			},
+			// Router intentionally omitted — Traffic[] empty.
+			v1beta1.RouterComponent: {},
+		}
+
+		engineRoute := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
+		Expect(engineRoute.Spec.Rules[0].BackendRefs).To(HaveLen(2),
+			"engine route reflects its own 80/20 split")
+
+		routerRoute := applyHTTPRouteAndReadBack(isvc, builders.RouterComponent)
+		Expect(routerRoute.Spec.Rules[0].BackendRefs).To(HaveLen(1),
+			"router has no Traffic[] entries → single-backend fallback")
+		Expect(string(routerRoute.Spec.Rules[0].BackendRefs[0].Name)).To(Equal("isvc-e3-router"))
+		// The builder emits Weight=nil for the single-backend fallback
+		// (verified by the unit test); the Gateway API CRD has
+		// `weight: default: 1`, so the apiserver fills it in on Create.
+		// Either nil (in-memory) or 1 (post-apply) is semantically the
+		// same — single backend, all traffic routes here.
+		Expect(routerRoute.Spec.Rules[0].BackendRefs[0].Weight).NotTo(BeNil(),
+			"apiserver applies the CRD default weight=1 on Create")
+		Expect(*routerRoute.Spec.Rules[0].BackendRefs[0].Weight).To(Equal(int32(1)),
+			"single fallback backend post-apply has weight=1 (Gateway API CRD default)")
+	})
+
+	ginkgo.It("E4: top-level inherits router's status.Traffic[] when router is present", func() {
+		// Top-level route on an Engine+Router ISVC inherits the
+		// fallback Component's traffic — that's the router when
+		// present (the operator's intent is that the router fronts
+		// the externally-visible address).
+		isvc := isvcWith("isvc-e4", func(i *v1beta1.InferenceService) {
+			i.Spec.Engine = &v1beta1.EngineSpec{}
+			i.Spec.Router = &v1beta1.RouterSpec{}
+		})
+		markEngineReady(isvc)
+		markRouterReady(isvc)
+		// Engine has its own split that should NOT leak into top-level.
+		engStable := int64(50)
+		engCanary := int64(50)
+		// Router's split is what top-level should reflect.
+		rtrStable := int64(70)
+		rtrCanary := int64(30)
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+			v1beta1.EngineComponent: {
+				Traffic: []knservingv1.TrafficTarget{
+					{RevisionName: "isvc-e4-engine-rev-stable", Percent: &engStable},
+					{RevisionName: "isvc-e4-engine-rev-canary", Percent: &engCanary},
+				},
+			},
+			v1beta1.RouterComponent: {
+				Traffic: []knservingv1.TrafficTarget{
+					{RevisionName: "isvc-e4-router-rev-stable", Percent: &rtrStable},
+					{RevisionName: "isvc-e4-router-rev-canary", Percent: &rtrCanary},
+				},
+			},
+		}
+
+		topLevel := applyHTTPRouteAndReadBack(isvc, builders.TopLevelComponent)
+		refs := topLevel.Spec.Rules[0].BackendRefs
+		Expect(refs).To(HaveLen(2),
+			"top-level inherits router's 70/30 split (not engine's 50/50)")
+		Expect(string(refs[0].Name)).To(Equal("isvc-e4-router-rev-stable"))
+		Expect(*refs[0].Weight).To(Equal(int32(70)))
+		Expect(string(refs[1].Name)).To(Equal("isvc-e4-router-rev-canary"))
+		Expect(*refs[1].Weight).To(Equal(int32(30)))
+	})
+
+	ginkgo.It("E5: out-of-range Percent in status.Traffic → HTTPRoute persists clamped weights through apiserver", func() {
+		// Per-mode reconciler with bad math — the builder's clamp is
+		// the last line of defense. Negative → 0, overflow → Gateway
+		// API max (1_000_000). Verify both ends of the clamp survive
+		// the apiserver round-trip.
+		isvc := isvcWith("isvc-e5", func(i *v1beta1.InferenceService) {
+			i.Spec.Engine = &v1beta1.EngineSpec{}
+		})
+		markEngineReady(isvc)
+		negative := int64(-50)
+		overflow := int64(math.MaxInt32) + 1
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+			v1beta1.EngineComponent: {
+				Traffic: []knservingv1.TrafficTarget{
+					{RevisionName: "isvc-e5-engine-rev-bad", Percent: &negative},
+					{RevisionName: "isvc-e5-engine-rev-huge", Percent: &overflow},
+				},
+			},
+		}
+
+		fetched := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
+		Expect(fetched.Spec.Rules[0].BackendRefs).To(HaveLen(2))
+		Expect(*fetched.Spec.Rules[0].BackendRefs[0].Weight).To(Equal(int32(0)),
+			"negative Percent must clamp to 0, not wrap to a negative int32")
+		Expect(*fetched.Spec.Rules[0].BackendRefs[1].Weight).To(Equal(int32(1_000_000)),
+			"overflow Percent must clamp to Gateway API max (1_000_000)")
+	})
+
+	ginkgo.It("G1: add spec.traffic to existing ISVC (didn't have one) → BTP created on next reconcile", func() {
+		// Start with no traffic intent.
+		isvc := isvcWith("isvc-g1", nil)
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g1"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status).To(BeNil(), "no intent → no status")
+		miss := newBTP()
+		Expect(apierrors.IsNotFound(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g1"}, miss))).To(BeTrue())
+
+		// Patch to add traffic intent.
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+
+		status2, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g1"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status2).NotTo(BeNil())
+		Expect(status2.BackendPolicyResource).NotTo(BeNil())
+
+		got := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g1"}, got)).To(Succeed())
+		typ, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "type")
+		Expect(typ).To(Equal("RoundRobin"))
+	})
+
+	ginkgo.It("G2: algorithm swap RoundRobin → ConsistentHash+Header → BTP updated, consistentHash block now present", func() {
+		alg1 := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-g2", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg1}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g2"})
+		Expect(err).NotTo(HaveOccurred())
+		gotV1 := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g2"}, gotV1)).To(Succeed())
+		typ1, _, _ := unstructured.NestedString(gotV1.Object, "spec", "loadBalancer", "type")
+		Expect(typ1).To(Equal("RoundRobin"))
+		_, hadCHv1, _ := unstructured.NestedMap(gotV1.Object, "spec", "loadBalancer", "consistentHash")
+		Expect(hadCHv1).To(BeFalse(), "RoundRobin must not emit consistentHash")
+
+		// Swap to ConsistentHash + Header.
+		alg2 := v1beta1.LoadBalancingTypeConsistentHash
+		isvc.Spec.Traffic = &v1beta1.TrafficSpec{
+			Algorithm: &alg2,
+			ConsistentHash: &v1beta1.ConsistentHashSpec{
+				Type:    v1beta1.HashTypeHeader,
+				Headers: []v1beta1.HashHeader{{Name: "X-Session"}},
+			},
+		}
+		status2, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g2"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status2.Algorithm).To(Equal("ConsistentHash"))
+
+		gotV2 := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g2"}, gotV2)).To(Succeed())
+		Expect(gotV2.GetUID()).To(Equal(gotV1.GetUID()), "BTP updated in place, not recreated")
+		typ2, _, _ := unstructured.NestedString(gotV2.Object, "spec", "loadBalancer", "type")
+		Expect(typ2).To(Equal("ConsistentHash"))
+		hdr, foundCH, _ := unstructured.NestedString(gotV2.Object, "spec", "loadBalancer", "consistentHash", "header", "name")
+		Expect(foundCH).To(BeTrue(), "ConsistentHash must emit consistentHash.header block after swap")
+		Expect(hdr).To(Equal("X-Session"))
+	})
+
+	ginkgo.It("G3: field removal ConsistentHash+Header → RoundRobin → BTP no longer has consistentHash block", func() {
+		// The translator builds a fresh BTP each call, so Update
+		// replaces the full spec — the consistentHash block from the
+		// previous version must not linger after the swap.
+		alg1 := v1beta1.LoadBalancingTypeConsistentHash
+		isvc := isvcWith("isvc-g3", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{
+				Algorithm: &alg1,
+				ConsistentHash: &v1beta1.ConsistentHashSpec{
+					Type:    v1beta1.HashTypeHeader,
+					Headers: []v1beta1.HashHeader{{Name: "X-Session"}},
+				},
+			}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g3"})
+		Expect(err).NotTo(HaveOccurred())
+		// Confirm consistentHash is present after first reconcile.
+		gotV1 := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g3"}, gotV1)).To(Succeed())
+		_, hadCHv1, _ := unstructured.NestedMap(gotV1.Object, "spec", "loadBalancer", "consistentHash")
+		Expect(hadCHv1).To(BeTrue())
+
+		// Swap to RoundRobin, drop ConsistentHash entirely.
+		alg2 := v1beta1.LoadBalancingTypeRoundRobin
+		isvc.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg2}
+		_, err = r.Reconcile(suiteCtx, isvc, []string{"isvc-g3"})
+		Expect(err).NotTo(HaveOccurred())
+
+		gotV2 := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g3"}, gotV2)).To(Succeed())
+		typ2, _, _ := unstructured.NestedString(gotV2.Object, "spec", "loadBalancer", "type")
+		Expect(typ2).To(Equal("RoundRobin"))
+		_, hadCHv2, _ := unstructured.NestedMap(gotV2.Object, "spec", "loadBalancer", "consistentHash")
+		Expect(hadCHv2).To(BeFalse(), "consistentHash block must be GONE after swap to RoundRobin (Update replaces full spec)")
+	})
+
+	ginkgo.It("G4: out-of-band BTP deletion → next reconcile recreates it", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		isvc := isvcWith("isvc-g4", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g4"})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Capture the first UID so we can verify recreation, not in-place restoration.
+		first := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g4"}, first)).To(Succeed())
+		firstUID := first.GetUID()
+
+		// Out-of-band delete (e.g. operator clicks Delete by mistake).
+		Expect(k8sClient.Delete(suiteCtx, first)).To(Succeed())
+		Eventually(func() bool {
+			tmp := newBTP()
+			return apierrors.IsNotFound(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g4"}, tmp))
+		}).WithTimeout(util.ShortTimeout).WithPolling(util.PollInterval).Should(BeTrue())
+
+		// Next reconcile recreates.
+		_, err = r.Reconcile(suiteCtx, isvc, []string{"isvc-g4"})
+		Expect(err).NotTo(HaveOccurred())
+
+		recreated := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g4"}, recreated)).To(Succeed())
+		Expect(recreated.GetUID()).NotTo(Equal(firstUID), "BTP must be a fresh object (new UID), not the same one")
+		typ, _, _ := unstructured.NestedString(recreated.Object, "spec", "loadBalancer", "type")
+		Expect(typ).To(Equal("RoundRobin"))
+	})
+
+	ginkgo.It("H1: ConsistentHash + status.Traffic[(stable,90),(canary,10)] → BTP has consistentHash AND engine HTTPRoute has weighted backendRefs", func() {
+		alg := v1beta1.LoadBalancingTypeConsistentHash
+		isvc := isvcWith("isvc-h1", func(i *v1beta1.InferenceService) {
+			i.Spec.Engine = &v1beta1.EngineSpec{}
+			i.Spec.Traffic = &v1beta1.TrafficSpec{
+				Algorithm: &alg,
+				ConsistentHash: &v1beta1.ConsistentHashSpec{
+					Type:    v1beta1.HashTypeHeader,
+					Headers: []v1beta1.HashHeader{{Name: "X-Session-ID"}},
+				},
+			}
+		})
+		// Mark engine Ready + populate in-memory rollout status.
+		isvc.Status.SetCondition(v1beta1.EngineReady, &knapis.Condition{Type: v1beta1.EngineReady, Status: corev1.ConditionTrue})
+		stable := int64(90)
+		canary := int64(10)
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+			v1beta1.EngineComponent: {
+				Traffic: []knservingv1.TrafficTarget{
+					{RevisionName: "isvc-h1-engine-rev-stable", Percent: &stable},
+					{RevisionName: "isvc-h1-engine-rev-canary", Percent: &canary},
+				},
+			},
+		}
+
+		// Layer 1: BTP via traffic reconciler — must have consistentHash.
+		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-h1", "isvc-h1-engine"})
+		Expect(err).NotTo(HaveOccurred())
+		btp := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-h1"}, btp)).To(Succeed())
+		hashType, _, _ := unstructured.NestedString(btp.Object, "spec", "loadBalancer", "consistentHash", "type")
+		Expect(hashType).To(Equal("Header"))
+		hdr, _, _ := unstructured.NestedString(btp.Object, "spec", "loadBalancer", "consistentHash", "header", "name")
+		Expect(hdr).To(Equal("X-Session-ID"))
+
+		// Layer 2: engine HTTPRoute via builder — must have weighted backendRefs.
+		engineRoute := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
+		refs := engineRoute.Spec.Rules[0].BackendRefs
+		Expect(refs).To(HaveLen(2), "engine HTTPRoute must reflect the rollout split independently of the BTP")
+		Expect(*refs[0].Weight).To(Equal(int32(90)))
+		Expect(*refs[1].Weight).To(Equal(int32(10)))
+
+		// Layers are independent: BTP applies to both backends, HTTPRoute
+		// splits traffic across them. In production, EG enforces
+		// consistent hashing within each weighted pool.
+	})
+
+	ginkgo.It("H2: ConsistentHash + canary + ome.io/btp.* pass-through → all three layers compose", func() {
+		alg := v1beta1.LoadBalancingTypeConsistentHash
+		isvc := isvcWith("isvc-h2", func(i *v1beta1.InferenceService) {
+			i.Spec.Engine = &v1beta1.EngineSpec{}
+			i.Spec.Traffic = &v1beta1.TrafficSpec{
+				Algorithm: &alg,
+				ConsistentHash: &v1beta1.ConsistentHashSpec{
+					Type:    v1beta1.HashTypeHeader,
+					Headers: []v1beta1.HashHeader{{Name: "X-Session-ID"}},
+				},
+			}
+			i.Annotations = map[string]string{
+				"ome.io/btp.loadBalancer.slowStart.window": "30s",
+			}
+		})
+		isvc.Status.SetCondition(v1beta1.EngineReady, &knapis.Condition{Type: v1beta1.EngineReady, Status: corev1.ConditionTrue})
+		stable := int64(70)
+		canary := int64(30)
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+			v1beta1.EngineComponent: {
+				Traffic: []knservingv1.TrafficTarget{
+					{RevisionName: "isvc-h2-engine-rev-stable", Percent: &stable},
+					{RevisionName: "isvc-h2-engine-rev-canary", Percent: &canary},
+				},
+			},
+		}
+
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-h2", "isvc-h2-engine"})
+		Expect(err).NotTo(HaveOccurred())
+		btp := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-h2"}, btp)).To(Succeed())
+
+		// All three layers present in the BTP:
+		// (1) typed algorithm + consistentHash
+		alg2, _, _ := unstructured.NestedString(btp.Object, "spec", "loadBalancer", "type")
+		Expect(alg2).To(Equal("ConsistentHash"))
+		hdr, _, _ := unstructured.NestedString(btp.Object, "spec", "loadBalancer", "consistentHash", "header", "name")
+		Expect(hdr).To(Equal("X-Session-ID"))
+		// (2) pass-through stitched verbatim
+		window, _, _ := unstructured.NestedString(btp.Object, "spec", "loadBalancer", "slowStart", "window")
+		Expect(window).To(Equal("30s"))
+		// (3) condition message lists the pass-through
+		var ready *metav1.Condition
+		for i := range status.Conditions {
+			if status.Conditions[i].Type == v1beta1.TrafficConditionBackendPolicyReady {
+				ready = &status.Conditions[i]
+			}
+		}
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Message).To(ContainSubstring("loadBalancer.slowStart.window"))
+
+		// Layer (4): weighted HTTPRoute backendRefs (canary 70/30)
+		engineRoute := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
+		refs := engineRoute.Spec.Rules[0].BackendRefs
+		Expect(refs).To(HaveLen(2))
+		Expect(*refs[0].Weight).To(Equal(int32(70)))
+		Expect(*refs[1].Weight).To(Equal(int32(30)))
+	})
+
+	ginkgo.It("I1: empty spec.traffic struct (all fields nil) → HasIntent=false, no BTP emitted", func() {
+		// Operator declared the struct but didn't fill anything in.
+		// HasIntent must treat this as "no intent" (rather than
+		// emitting a BTP with default LB).
+		isvc := isvcWith("isvc-i1", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{} // all fields nil
+		})
+
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-i1"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status).To(BeNil(), "empty TrafficSpec must not emit a BTP or surface a status")
+
+		miss := newBTP()
+		Expect(apierrors.IsNotFound(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-i1"}, miss))).To(BeTrue())
+	})
+
+	ginkgo.It("I2: two ISVCs in the same namespace with traffic intent → two distinct BTPs, no cross-talk", func() {
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+		a := isvcWith("isvc-i2-a", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+		b := isvcWith("isvc-i2-b", func(i *v1beta1.InferenceService) {
+			alg2 := v1beta1.LoadBalancingTypeLeastRequest
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg2}
+		})
+
+		_, errA := r.Reconcile(suiteCtx, a, []string{"isvc-i2-a"})
+		_, errB := r.Reconcile(suiteCtx, b, []string{"isvc-i2-b"})
+		Expect(errA).NotTo(HaveOccurred())
+		Expect(errB).NotTo(HaveOccurred())
+
+		gotA := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-i2-a"}, gotA)).To(Succeed())
+		typA, _, _ := unstructured.NestedString(gotA.Object, "spec", "loadBalancer", "type")
+		Expect(typA).To(Equal("RoundRobin"))
+		// Owned by A.
+		Expect(gotA.GetOwnerReferences()).To(HaveLen(1))
+		Expect(gotA.GetOwnerReferences()[0].UID).To(Equal(a.UID))
+
+		gotB := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-i2-b"}, gotB)).To(Succeed())
+		typB, _, _ := unstructured.NestedString(gotB.Object, "spec", "loadBalancer", "type")
+		Expect(typB).To(Equal("LeastRequest"))
+		Expect(gotB.GetOwnerReferences()[0].UID).To(Equal(b.UID))
+
+		// Distinct objects.
+		Expect(gotA.GetUID()).NotTo(Equal(gotB.GetUID()))
+	})
+
+	ginkgo.It("I3: two ISVCs with the SAME name in different namespaces → namespace-scoped BTPs, no collision", func() {
+		// Create a second namespace alongside the per-test one and
+		// place an identically-named ISVC + BTP there.
+		ns2, err := util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "traffic-reco-")
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { _ = util.DeleteNamespace(suiteCtx, k8sClient, ns2.Name) }()
+
+		alg := v1beta1.LoadBalancingTypeRoundRobin
+
+		// ISVC #1 in `ns`.
+		a := isvcWith("isvc-i3", func(i *v1beta1.InferenceService) {
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+
+		// ISVC #2 in `ns2` (same name, different namespace).
+		w := v1beta1testing.MakeInferenceService("isvc-i3", ns2.Name)
+		b := w.Obj()
+		Expect(k8sClient.Create(suiteCtx, b)).To(Succeed())
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(b), b)).To(Succeed())
+		alg2 := v1beta1.LoadBalancingTypeLeastRequest
+		b.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg2}
+
+		_, errA := r.Reconcile(suiteCtx, a, []string{"isvc-i3"})
+		_, errB := r.Reconcile(suiteCtx, b, []string{"isvc-i3"})
+		Expect(errA).NotTo(HaveOccurred())
+		Expect(errB).NotTo(HaveOccurred())
+
+		// Each BTP scoped to its own namespace.
+		gotA := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-i3"}, gotA)).To(Succeed())
+		typA, _, _ := unstructured.NestedString(gotA.Object, "spec", "loadBalancer", "type")
+		Expect(typA).To(Equal("RoundRobin"))
+		Expect(gotA.GetOwnerReferences()[0].UID).To(Equal(a.UID))
+
+		gotB := newBTP()
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns2.Name, Name: "isvc-i3"}, gotB)).To(Succeed())
+		typB, _, _ := unstructured.NestedString(gotB.Object, "spec", "loadBalancer", "type")
+		Expect(typB).To(Equal("LeastRequest"))
+		Expect(gotB.GetOwnerReferences()[0].UID).To(Equal(b.UID))
+
+		// Two distinct objects.
+		Expect(gotA.GetUID()).NotTo(Equal(gotB.GetUID()))
+	})
+
+	ginkgo.It("I4: bypass-admission case — ConsistentHash without consistentHash block → TranslationFailed in status", func() {
+		// Admission would reject this (MissingConsistentHashSpec) but
+		// we bypass admission by constructing the ISVC spec directly
+		// in the test fixture. The translator must reject — silently
+		// emitting a malformed BTP would be worse than failing fast.
+		alg := v1beta1.LoadBalancingTypeConsistentHash
+		isvc := isvcWith("isvc-i4", func(i *v1beta1.InferenceService) {
+			// Algorithm=ConsistentHash but no consistentHash block.
+			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+		})
+
+		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-i4"})
+		Expect(err).To(HaveOccurred(), "Reconcile must surface the translator error")
+		Expect(status).NotTo(BeNil())
+
+		var ready *metav1.Condition
+		for i := range status.Conditions {
+			if status.Conditions[i].Type == v1beta1.TrafficConditionBackendPolicyReady {
+				ready = &status.Conditions[i]
+			}
+		}
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(v1beta1.TrafficReasonTranslationFailed))
+
+		// No BTP should be created when translation fails.
+		miss := newBTP()
+		Expect(apierrors.IsNotFound(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-i4"}, miss))).To(BeTrue())
+	})
 })
+
+// ptrToBool is a tiny helper for owner-ref construction.
+func ptrToBool(v bool) *bool { return &v }

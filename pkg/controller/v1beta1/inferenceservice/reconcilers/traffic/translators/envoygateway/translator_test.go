@@ -151,7 +151,7 @@ func TestTranslate_ConsistentHash_Header(t *testing.T) {
 			Algorithm: &alg,
 			ConsistentHash: &v1beta1.ConsistentHashSpec{
 				Type:    v1beta1.HashTypeHeader,
-				Headers: []v1beta1.HashHeader{{Name: "X-Session-ID"}, {Name: "X-User-ID"}},
+				Headers: []v1beta1.HashHeader{{Name: "X-Session-ID"}},
 			},
 		},
 	}
@@ -160,9 +160,49 @@ func TestTranslate_ConsistentHash_Header(t *testing.T) {
 	if got := nestedString(t, u, "spec", "loadBalancer", "consistentHash", "type"); got != "Header" {
 		t.Fatalf("consistentHash.type = %q", got)
 	}
-	// EG accepts a single header — translator pins to first.
 	if got := nestedString(t, u, "spec", "loadBalancer", "consistentHash", "header", "name"); got != "X-Session-ID" {
 		t.Fatalf("consistentHash.header.name = %q", got)
+	}
+}
+
+func TestTranslate_ConsistentHash_MultiHeader_PluralForm(t *testing.T) {
+	// EG v1.7+ adds the "Headers" (plural) consistent-hash type and a
+	// headers[] list — the singular "Header"/header is marked Deprecated
+	// in v1.7 but kept for back-compat. The OME API exposes only the
+	// singular "Header" enum value; the translator promotes the EG-side
+	// type to "Headers" when more than one header is declared.
+	alg := v1beta1.LoadBalancingTypeConsistentHash
+	intent := &traffic.ResolvedIntent{
+		Traffic: &v1beta1.TrafficSpec{
+			Algorithm: &alg,
+			ConsistentHash: &v1beta1.ConsistentHashSpec{
+				Type:    v1beta1.HashTypeHeader,
+				Headers: []v1beta1.HashHeader{{Name: "X-Session-ID"}, {Name: "X-User-ID"}},
+			},
+		},
+	}
+	u, _ := translate(t, newISVC("isvc", "ns"), []string{"isvc"}, intent)
+
+	if got := nestedString(t, u, "spec", "loadBalancer", "consistentHash", "type"); got != "Headers" {
+		t.Fatalf("multi-header must promote type to Headers (plural), got %q", got)
+	}
+	// Singular header field must NOT be set (CEL validation in EG
+	// requires header XOR headers per type).
+	if _, found, _ := unstructured.NestedMap(u.Object, "spec", "loadBalancer", "consistentHash", "header"); found {
+		t.Fatalf("type=Headers must not set the singular header field; got header present")
+	}
+	headers, found, err := unstructured.NestedSlice(u.Object, "spec", "loadBalancer", "consistentHash", "headers")
+	if err != nil || !found {
+		t.Fatalf("consistentHash.headers missing: err=%v", err)
+	}
+	if len(headers) != 2 {
+		t.Fatalf("len(headers)=%d, want 2", len(headers))
+	}
+	for i, want := range []string{"X-Session-ID", "X-User-ID"} {
+		got := headers[i].(map[string]interface{})["name"]
+		if got != want {
+			t.Fatalf("headers[%d].name = %v, want %q", i, got, want)
+		}
 	}
 }
 

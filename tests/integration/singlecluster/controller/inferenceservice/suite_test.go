@@ -55,6 +55,10 @@ var _ = ginkgo.BeforeSuite(func() {
 			// HasIntent=false and the translator is never invoked,
 			// so other suites in this directory are unaffected.
 			framework.EnvoyGateway,
+			// GatewayAPI registers HTTPRoute (scheme + CRD) so specs
+			// that apply HTTPRoute objects produced by the builder
+			// can read them back from envtest.
+			framework.GatewayAPI,
 		},
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())

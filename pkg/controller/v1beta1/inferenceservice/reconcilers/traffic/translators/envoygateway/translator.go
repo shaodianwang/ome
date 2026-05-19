@@ -221,6 +221,21 @@ func setTargetRefs(btp *unstructured.Unstructured, routes []string) error {
 
 func applyLoadBalancer(btp *unstructured.Unstructured, spec *v1beta1.TrafficSpec) error {
 	if spec.Algorithm != nil {
+		// EG BackendTrafficPolicy CRD has CEL validation
+		//   self.type == 'ConsistentHash' ? has(self.consistentHash) : !has(self.consistentHash)
+		// Admission catches the missing consistentHash block (the
+		// MissingConsistentHashSpec rule), but if admission is
+		// bypassed the translator must still fail safe rather than
+		// emit a malformed BTP that the gateway controller will
+		// reject silently. Same for the inverse — a consistentHash
+		// block without algorithm=ConsistentHash would violate the
+		// CEL rule from the other side.
+		if *spec.Algorithm == v1beta1.LoadBalancingTypeConsistentHash && spec.ConsistentHash == nil {
+			return fmt.Errorf("spec.traffic.algorithm=ConsistentHash requires spec.traffic.consistentHash to be set")
+		}
+		if *spec.Algorithm != v1beta1.LoadBalancingTypeConsistentHash && spec.ConsistentHash != nil {
+			return fmt.Errorf("spec.traffic.consistentHash must not be set when algorithm=%q", *spec.Algorithm)
+		}
 		if err := unstructured.SetNestedField(
 			btp.Object, string(*spec.Algorithm),
 			"spec", "loadBalancer", "type",
@@ -242,8 +257,18 @@ func applyLoadBalancer(btp *unstructured.Unstructured, spec *v1beta1.TrafficSpec
 }
 
 func applyConsistentHash(btp *unstructured.Unstructured, ch *v1beta1.ConsistentHashSpec) error {
+	// Map the OME enum to the EG-side type field. EG v1.7+ added the
+	// plural "Headers" type + headers[] list for multi-header hashing
+	// (the singular "Header"/header is marked Deprecated in EG v1.7).
+	// The OME API exposes a single "Header" enum value; the translator
+	// picks the EG-side type based on header count so that older EG
+	// clusters keep working with one header.
+	egType := string(ch.Type)
+	if ch.Type == v1beta1.HashTypeHeader && len(ch.Headers) > 1 {
+		egType = "Headers"
+	}
 	if err := unstructured.SetNestedField(
-		btp.Object, string(ch.Type),
+		btp.Object, egType,
 		"spec", "loadBalancer", "consistentHash", "type",
 	); err != nil {
 		return fmt.Errorf("set consistentHash.type: %w", err)
@@ -253,15 +278,30 @@ func applyConsistentHash(btp *unstructured.Unstructured, ch *v1beta1.ConsistentH
 		if len(ch.Headers) == 0 {
 			return errors.New("consistentHash.type=Header requires at least one header")
 		}
-		// Envoy Gateway's consistentHash.header is a single header.
-		// Multiple headers concatenate at the gateway side via
-		// runtime config; the translator pins to the first header.
-		// The webhook also enforces this constraint at admission.
-		if err := unstructured.SetNestedField(
-			btp.Object, ch.Headers[0].Name,
-			"spec", "loadBalancer", "consistentHash", "header", "name",
-		); err != nil {
-			return fmt.Errorf("set consistentHash.header.name: %w", err)
+		if len(ch.Headers) == 1 {
+			// Singular form — works on EG <v1.7 too.
+			if err := unstructured.SetNestedField(
+				btp.Object, ch.Headers[0].Name,
+				"spec", "loadBalancer", "consistentHash", "header", "name",
+			); err != nil {
+				return fmt.Errorf("set consistentHash.header.name: %w", err)
+			}
+		} else {
+			// Plural form — requires EG v1.7+ which exposes
+			// spec.loadBalancer.consistentHash.headers[] alongside the
+			// new "Headers" type enum value. CEL validation in the EG
+			// CRD enforces type/field correspondence; the type
+			// override above keeps us aligned with that.
+			items := make([]interface{}, 0, len(ch.Headers))
+			for _, h := range ch.Headers {
+				items = append(items, map[string]interface{}{"name": h.Name})
+			}
+			if err := unstructured.SetNestedSlice(
+				btp.Object, items,
+				"spec", "loadBalancer", "consistentHash", "headers",
+			); err != nil {
+				return fmt.Errorf("set consistentHash.headers: %w", err)
+			}
 		}
 	case v1beta1.HashTypeCookie:
 		if ch.Cookie == nil {

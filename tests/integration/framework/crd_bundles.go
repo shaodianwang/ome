@@ -5,6 +5,7 @@ import (
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
@@ -69,4 +70,25 @@ var EnvoyGateway = OptionalCRDBundle{
 	Name:    "envoy-gateway",
 	CRDDir:  "envoy-gateway",
 	Schemes: nil,
+}
+
+// GatewayAPI bundle: gateway.networking.k8s.io/v1.HTTPRoute (plus
+// supporting types). Required for integration tests that exercise the
+// HTTPRoute builder's weighted-backendRef path against a real
+// apiserver. The full Gateway API standard channel includes Gateway,
+// GatewayClass, HTTPRoute, ReferenceGrant, GRPCRoute — we vendor just
+// HTTPRoute since that's what OME emits and what the traffic-test
+// suite needs.
+//
+// The CRD YAML in dep-crds/gateway-api/ comes from upstream
+// sigs.k8s.io/gateway-api; see that directory's SOURCE file for the
+// pinned version and refresh procedure. The Go type registration
+// (gatewayapiv1.Install) mirrors what cmd/manager/main.go does at
+// runtime when ingressConfig.EnableGatewayAPI is set.
+var GatewayAPI = OptionalCRDBundle{
+	Name:   "gateway-api",
+	CRDDir: "gateway-api",
+	Schemes: []func(*apiruntime.Scheme) error{
+		gatewayapiv1.Install,
+	},
 }
