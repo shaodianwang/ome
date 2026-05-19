@@ -1,0 +1,52 @@
+title: Inference Service Traffic Management
+oep-number: 0011
+authors:
+  - "@slin1237"
+status: provisional
+creation-date: 2026-05-15
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "/oeps/0007-omenative-workload-strategy"
+
+# The target maturity stage in the current dev cycle for this OEP.
+stage: alpha
+
+# Draft — implementation phasing assumes annotation-first alpha, with
+# a beta decision on whether to promote knobs to typed Component
+# fields based on real-world usage.
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# OMENative-style decision: no Kubernetes feature gate. Opt-in is
+# per-Component via the existing ome.io annotation namespace; OMENative
+# already established that pattern and there's no operational reason to
+# diverge.
+feature-gates: []
+disable-supported: true
+
+metrics:
+  # Backend traffic policy (Part 1)
+  - ome_traffic_policy_translated_total
+  - ome_traffic_policy_translation_failures_total
+  - ome_traffic_annotation_used_total
+  - ome_traffic_passthrough_field_total
+  - ome_traffic_unsupported_field_total
+  - ome_traffic_per_component_fallback_total
+  - ome_backend_policy_accepted_total
+  - ome_backend_policy_rejected_total
+  # Rollout strategies (Part 2)
+  - ome_rollout_phase_total           # labels: mode,isvc,phase  (Stable, Canarying, BlueGreenStandby, Paused, Pending, Promoting, RollingBack, Failed)
+  - ome_rollout_transition_total      # labels: mode,from,to,outcome  (operator-initiated transitions)
+  - ome_rollout_failure_total         # labels: mode,reason  (timeout, recovery)
+  - ome_rollout_revision_count        # labels: isvc,component  (per-Component revision count; alert if > retention limit)
+  - ome_rollout_step_total            # labels: mode,isvc,step,outcome  (step-based rollouts: per-step entry / completion)
+  - ome_rollout_promote_annotation_total  # labels: isvc,target  (consumption of ome.io/rollout-promote)
+  - ome_rollout_rollback_annotation_total # labels: isvc,source_phase  (consumption of ome.io/rollout-rollback)
