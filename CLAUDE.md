@@ -11,9 +11,8 @@ OME (Open Model Engine) is a Kubernetes operator for managing and serving Large 
 ### Build
 ```bash
 make ome-manager          # Build controller manager binary
-make model-agent          # Build model-agent binary (requires xet-build)
 make ome-agent            # Build ome-agent binary (requires xet-build)
-make xet-build            # Build the Rust xet native library (required before model-agent/ome-agent)
+make xet-build            # Build the Rust xet native library (required before ome-agent)
 ```
 
 ### Test
@@ -104,8 +103,11 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 | Binary | Role |
 |---|---|
 | `cmd/manager` | Main Kubernetes operator. Runs all controllers and webhooks. Dynamically registers schemes for Knative, LWS, Volcano, KEDA, Istio based on cluster CRD availability. |
-| `cmd/model-agent` | DaemonSet on GPU nodes. Scout watches models, Gopher downloads from storage backends. Labels nodes with model readiness. Uses xet (CGo/Rust) for HuggingFace downloads. |
 | `cmd/ome-agent` | Multi-command CLI (Cobra + uber/fx): hf-download, replica (cross-region replication), serving-agent (sidecar), fine-tuned-adapter, model-metadata. |
+| `cmd/crd-gen` | Post-processes generated CRD YAML (strips unwanted validation fields). Invoked by `make manifests`. |
+| `cmd/spec-gen` | Emits the OpenAPI JSON for the CRDs. Invoked by `make generate`; consumed by the Python SDK generator and the API reference site. |
+
+The `model-agent` DaemonSet deployed by `charts/ome-resources/` runs an image built outside this repo.
 
 ### Controllers (`pkg/controller/v1beta1/`)
 - **InferenceServiceReconciler** — The largest controller. Auto-selects runtimes via `runtimeselector`, generates Deployments/Knative Services/LeaderWorkerSets/HPAs/KEDA ScaledObjects. Supports RawDeployment, Serverless, MultiNode, PDDisaggregated, and VirtualDeployment modes.
@@ -115,12 +117,12 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 | Package | Purpose |
 |---|---|
 | `pkg/runtimeselector` | Fetch-match-score pipeline for auto-selecting the best ServingRuntime for a model based on format, architecture, framework, quantization, size. |
-| `pkg/modelagent` | Scout (model watcher) + Gopher (concurrent downloader) used by model-agent DaemonSet. Manages per-node-per-model ConfigMaps for download state. |
-| `pkg/hfutil/hub` | HuggingFace Hub client: file download with resume, progress tracking, LFS support. |
+| `pkg/modelconfig` / `pkg/modelparser` | Parse and normalize model metadata (architecture, params, capabilities) from HuggingFace config files. |
+| `pkg/validation` | Pure validation helpers (no K8s deps) shared between CRD validators and webhooks. |
 | `pkg/xet` | CGo bridge to Rust `libxet` library for high-performance HuggingFace downloads. Build with `cd pkg/xet && make build`. |
 | `pkg/webhook/admission` | Pod mutator (injects config into ISVC pods), ServingRuntime/InferenceService validators and defaulters. |
-| `pkg/configutils` | Viper-based config with `imports` key resolution, used by ome-agent sub-commands. |
-| `internal/ome-agent` | Agent implementations: replica (cross-region replication), serving-agent (sidecar). |
+| `pkg/constants`, `pkg/version`, `pkg/utils` | Shared label/annotation strings, build-time version stamps, and tiny cross-cutting helpers. |
+| `internal/ome-agent` | Agent implementations dispatched as `ome-agent` subcommands: `replica` (cross-region replication), `serving-agent` (sidecar), `fine-tuned-adapter`, `model-metadata`. |
 
 ### Helm Charts (`charts/`)
 - **ome-crd** — CRD-only chart. CRDs are copied from `config/crd/full/` during `make manifests`.
