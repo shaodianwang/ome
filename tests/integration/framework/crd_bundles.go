@@ -54,3 +54,19 @@ var KEDA = OptionalCRDBundle{
 		kedav1.AddToScheme,
 	},
 }
+
+// EnvoyGateway bundle: gateway.envoyproxy.io/v1alpha1.BackendTrafficPolicy.
+// Required for the OEP-0011 traffic translator (Envoy Gateway path)
+// integration tests. The translator emits unstructured BTPs so the
+// bundle has no schemes — the apiserver-side CRD is the only thing
+// envtest needs.
+//
+// The CRD YAML in dep-crds/envoy-gateway/ is hand-authored (Envoy
+// Gateway has no Go module distribution we can pull from go.mod); see
+// that directory's SOURCE file for the upstream reference and the
+// refresh procedure.
+var EnvoyGateway = OptionalCRDBundle{
+	Name:    "envoy-gateway",
+	CRDDir:  "envoy-gateway",
+	Schemes: nil,
+}

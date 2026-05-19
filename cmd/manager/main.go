@@ -43,6 +43,8 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
+	trafficfactory "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/factory"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 	"github.com/ome-projects/ome/pkg/version"
@@ -264,18 +266,33 @@ func main() {
 		utilruntime.Must(gatewayapiv1.Install(mgr.GetScheme()))
 	}
 
+	// OEP-0010: select the active traffic translator based on
+	// installed backend-policy CRDs (Envoy Gateway BackendTrafficPolicy,
+	// Istio DestinationRule, else Noop). The selection is process-
+	// level — the translator stays stable for the controller's
+	// lifetime — so we build it once at startup.
+	setupLog.Info("Selecting traffic translator")
+	trafficTranslator, err := trafficfactory.New(cfg)
+	if err != nil {
+		setupLog.Error(err, "Failed to select traffic translator")
+		os.Exit(1)
+	}
+	setupLog.Info("Selected traffic translator", "translator", trafficTranslator.Name())
+	trafficReconciler := traffic.NewReconciler(mgr.GetClient(), mgr.GetScheme(), trafficTranslator)
+
 	// Setup Event Broadcaster
 	setupLog.Info("Configuring event broadcaster")
 	eventBroadcaster := record.NewBroadcaster()
 	setupLog.Info("Setting up InferenceService controller")
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
 	if err = (&v1beta1isvccontroller.InferenceServiceReconciler{
-		Client:     mgr.GetClient(),
-		Clientset:  clientSet,
-		Log:        ctrl.Log.WithName("InferenceService"),
-		Scheme:     mgr.GetScheme(),
-		Recorder:   eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
-		ModelCache: modelCacheProvider,
+		Client:            mgr.GetClient(),
+		Clientset:         clientSet,
+		Log:               ctrl.Log.WithName("InferenceService"),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+		ModelCache:        modelCacheProvider,
+		TrafficReconciler: trafficReconciler,
 	}).SetupWithManager(mgr, deployConfig, ingressConfig); err != nil {
 		setupLog.Error(err, "Failed to create InferenceService controller")
 		os.Exit(1)

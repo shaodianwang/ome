@@ -49,6 +49,12 @@ var _ = ginkgo.BeforeSuite(func() {
 			framework.Knative,
 			framework.LWS,
 			framework.KEDA,
+			// EnvoyGateway gives the OEP-0011 traffic translator a
+			// real BackendTrafficPolicy CRD to write against. Tests
+			// without spec.traffic / ome.io/* annotations see
+			// HasIntent=false and the translator is never invoked,
+			// so other suites in this directory are unaffected.
+			framework.EnvoyGateway,
 		},
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())

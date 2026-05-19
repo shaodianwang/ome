@@ -42,6 +42,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/external_service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress"
 	multimodelconfig "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/modelconfig"
+	traffic "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
@@ -112,6 +113,11 @@ type InferenceServiceReconciler struct {
 	StatusManager   *status.StatusReconciler
 	RuntimeSelector runtimeselector.Selector
 	ModelCache      sharded.Provider
+	// TrafficReconciler is the OEP-0011 backend-policy reconciler.
+	// Built from the active translator at controller startup; the
+	// active translator is selected by traffic/factory.New based on
+	// installed Gateway-implementation CRDs.
+	TrafficReconciler *traffic.Reconciler
 }
 
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -415,6 +421,30 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile external service")
 	}
 
+	// OEP-0011 traffic management. Skipped when the InferenceService
+	// declares no traffic intent (spec.traffic or ome.io/* annotation).
+	// The reconciler invokes the active translator (chosen at startup
+	// by the factory), applies the emitted backend policy resource,
+	// and returns the TrafficStatus to write back. A nil reconciler
+	// means the controller was set up without traffic management
+	// (legitimate for tests / minimal configurations).
+	if r.TrafficReconciler != nil {
+		targetRoutes := traffic.ComputeTargetHTTPRoutes(isvc, mergedDecoder != nil, mergedRouter != nil)
+		trafficStatus, err := r.TrafficReconciler.Reconcile(ctx, isvc, targetRoutes)
+		if err != nil {
+			r.Log.Error(err, "Failed to reconcile traffic policy",
+				"namespace", isvc.Namespace, "inferenceService", isvc.Name,
+				"translator", r.TrafficReconciler.TranslatorName())
+			r.Recorder.Eventf(isvc, v1.EventTypeWarning, "TrafficReconcileError", err.Error())
+			// Surface the status even on error so operators see the
+			// TranslationFailed reason without waiting for the next
+			// successful reconcile.
+			isvc.Status.Traffic = trafficStatus
+			return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile traffic policy")
+		}
+		isvc.Status.Traffic = trafficStatus
+	}
+
 	// Set Status.Address for external service and add ingress disable annotation when ingress is disabled
 	if resolvedIngressConfig.DisableIngressCreation {
 		// Add annotation to InferenceService so cleanup logic knows to keep the external service
@@ -658,6 +688,19 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		ctrlBuilder = ctrlBuilder.Owns(&istioclientv1beta1.VirtualService{})
 	} else {
 		r.Log.Info("The InferenceService controller won't watch networking.istio.io/v1beta1/VirtualService resources because the CRD is not available.")
+	}
+
+	// OEP-0011: register an Owns() watch on the backend policy
+	// resource type the active translator emits, so changes to the
+	// policy re-enqueue the owning InferenceService. The noop
+	// translator returns nil, in which case there is nothing to watch.
+	if r.TrafficReconciler != nil {
+		if watch := r.TrafficReconciler.Watches(); watch != nil {
+			ctrlBuilder = ctrlBuilder.Owns(watch)
+		} else {
+			r.Log.Info("The InferenceService controller won't watch a backend policy resource (active translator emits nothing)",
+				"translator", r.TrafficReconciler.TranslatorName())
+		}
 	}
 
 	// Add watches for ServingRuntime and ClusterServingRuntime to populate cache

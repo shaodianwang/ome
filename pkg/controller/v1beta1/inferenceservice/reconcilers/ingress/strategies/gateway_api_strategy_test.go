@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierr "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -156,6 +157,96 @@ func TestGatewayAPIStrategy_Reconcile(t *testing.T) {
 	}
 }
 
+func TestGatewayAPIStrategy_Reconcile_GateOnOEPIntent(t *testing.T) {
+	// The default BackendTrafficPolicy created by this strategy and the
+	// per-ISVC BTP created by the OEP-0011 traffic.Reconciler write the
+	// same resource name. To prevent the two loops from fighting, this
+	// strategy must skip BTP create/check when the operator has declared
+	// OEP-0011 traffic intent (spec.traffic or any ome.io/* annotation).
+	//
+	// Cases:
+	//   - no intent  -> default BTP created (preserves PR #118 behavior)
+	//   - intent set -> default BTP NOT created (traffic.Reconciler owns it)
+	alg := v1beta1.LoadBalancingTypeRoundRobin
+
+	tests := []struct {
+		name             string
+		mutateIsvc       func(isvc *v1beta1.InferenceService)
+		expectBTPCreated bool
+	}{
+		{
+			name:             "no OEP intent: default BTP is created",
+			mutateIsvc:       func(_ *v1beta1.InferenceService) {},
+			expectBTPCreated: true,
+		},
+		{
+			name: "OEP intent via spec.traffic: default BTP skipped",
+			mutateIsvc: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
+			},
+			expectBTPCreated: false,
+		},
+		{
+			name: "OEP intent via ome.io annotation: default BTP skipped",
+			mutateIsvc: func(isvc *v1beta1.InferenceService) {
+				if isvc.Annotations == nil {
+					isvc.Annotations = map[string]string{}
+				}
+				isvc.Annotations["ome.io/circuit-breaker-max-connections"] = "1024"
+			},
+			expectBTPCreated: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, v1beta1.AddToScheme(scheme))
+			require.NoError(t, gatewayapiv1.Install(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+
+			isvc := createTestInferenceServiceGateway("test-isvc", "default")
+			setComponentStatusReadyGateway(isvc)
+			tt.mutateIsvc(isvc)
+
+			fakeClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(isvc).
+				Build()
+
+			opts := interfaces.ReconcilerOptions{
+				Client: fakeClient,
+				Scheme: scheme,
+				IngressConfig: &controllerconfig.IngressConfig{
+					EnableGatewayAPI:      true,
+					IngressDomain:         "example.com",
+					OmeIngressGateway:     "istio-system/gateway",
+					DomainTemplate:        "{{.Name}}.{{.Namespace}}.{{.IngressDomain}}",
+					UrlScheme:             "https",
+					ConsistentHashHeaders: []string{"x-routing-key"},
+				},
+				IsvcConfig: &controllerconfig.InferenceServicesConfig{},
+			}
+			strategy := NewGatewayAPIStrategy(opts, services.NewDomainService(), services.NewPathService())
+
+			require.NoError(t, strategy.Reconcile(context.Background(), isvc))
+
+			policy := &unstructured.Unstructured{}
+			policy.SetGroupVersionKind(builders.BackendTrafficPolicyGVK)
+			err := fakeClient.Get(context.Background(), types.NamespacedName{
+				Name: isvc.Name, Namespace: isvc.Namespace,
+			}, policy)
+
+			if tt.expectBTPCreated {
+				assert.NoError(t, err, "expected default BTP to be created")
+			} else {
+				assert.True(t, apierr.IsNotFound(err),
+					"expected default BTP NOT to be created (traffic.Reconciler owns it); got err=%v", err)
+			}
+		})
+	}
+}
+
 func TestGatewayAPIStrategy_ReconcileComponentHTTPRoute(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -243,11 +334,13 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses(t *testing.T) {
 		expectedCondition corev1.ConditionStatus
 	}{
 		{
+			// OEP-0011 C1: engine HTTPRoute is "<isvc>-engine"; top-level
+			// is "<isvc>". Both lookups must succeed.
 			name: "all HTTPRoutes ready",
 			isvc: createTestInferenceServiceGateway("test-isvc", "default"),
 			httpRoutes: []client.Object{
-				createReadyHTTPRoute("test-isvc", "default"),     // engine (same name as isvc)
-				createReadyHTTPRoute("test-isvc-top", "default"), // toplevel (different name)
+				createReadyHTTPRoute("test-isvc-engine", "default"), // engine
+				createReadyHTTPRoute("test-isvc", "default"),        // toplevel
 			},
 			expectedError:     false,
 			expectedCondition: corev1.ConditionTrue,
@@ -256,8 +349,8 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses(t *testing.T) {
 			name: "HTTPRoute not ready",
 			isvc: createTestInferenceServiceGateway("test-isvc", "default"),
 			httpRoutes: []client.Object{
-				createNotReadyHTTPRoute("test-isvc", "default"),  // engine
-				createReadyHTTPRoute("test-isvc-top", "default"), // toplevel
+				createNotReadyHTTPRoute("test-isvc-engine", "default"), // engine
+				createReadyHTTPRoute("test-isvc", "default"),           // toplevel
 			},
 			expectedError:     false,
 			expectedCondition: corev1.ConditionFalse,
@@ -336,9 +429,11 @@ func TestGatewayAPIStrategy_GetRawServiceHost(t *testing.T) {
 			expectedHost: "test-isvc-router.default.svc.cluster.local",
 		},
 		{
+			// Engine Service is named "<isvc>-engine" (constants.EngineServiceName).
+			// Pre-fix this returned "<isvc>" which doesn't resolve to a real Service.
 			name:         "without router",
 			isvc:         createTestInferenceServiceGateway("test-isvc", "default"),
-			expectedHost: "test-isvc.default.svc.cluster.local",
+			expectedHost: "test-isvc-engine.default.svc.cluster.local",
 		},
 	}
 
@@ -383,8 +478,10 @@ func TestGatewayAPIStrategy_GetComponentType(t *testing.T) {
 		expectedType string
 	}{
 		{
+			// OEP-0011 C1: engine HTTPRoute is "<isvc>-engine" (distinct
+			// from the top-level "<isvc>"). Pre-C1 they collided.
 			name:         "engine component",
-			serviceName:  "test-isvc",
+			serviceName:  "test-isvc-engine",
 			isvc:         createTestInferenceServiceGateway("test-isvc", "default"),
 			expectedType: "Engine",
 		},
@@ -401,10 +498,12 @@ func TestGatewayAPIStrategy_GetComponentType(t *testing.T) {
 			expectedType: "Decoder",
 		},
 		{
+			// Top-level HTTPRoute is named "<isvc>"; distinct from the
+			// engine route post-OEP-0011 C1.
 			name:         "toplevel component",
 			serviceName:  "test-isvc",
 			isvc:         createTestInferenceServiceGateway("test-isvc", "default"),
-			expectedType: "Engine", // For engine service name it returns Engine
+			expectedType: "TopLevel",
 		},
 	}
 

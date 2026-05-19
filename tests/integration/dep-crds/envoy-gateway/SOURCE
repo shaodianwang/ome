@@ -1,0 +1,23 @@
+Upstream: https://github.com/envoyproxy/gateway
+Version: v1alpha1
+
+The CRDs in this directory are hand-authored stubs sufficient for
+envtest-based integration tests of the OEP-0011 traffic translator.
+The stubs preserve unknown fields (x-kubernetes-preserve-unknown-fields)
+on .spec and .status so the translator's unstructured writes succeed
+without modeling the full BTP schema.
+
+Production correctness is NOT validated by these stubs — the real EG
+controller does that on a live cluster. The stubs only need to let
+envtest accept Create / Update / Get / Patch on the GVK.
+
+To refresh from upstream:
+
+  # On a machine with internet access:
+  curl -fsSL \
+    https://raw.githubusercontent.com/envoyproxy/gateway/v1.X.Y/charts/gateway-helm/crds/generated/gateway.envoyproxy.io_backendtrafficpolicies.yaml \
+    > tests/integration/dep-crds/envoy-gateway/backendtrafficpolicies.yaml
+
+If a future EG release breaks the BTP API shape (rare for v1alpha1+),
+update the OME translator paths (translators/envoygateway/translator.go)
+and refresh the CRD here.

@@ -126,3 +126,8 @@ hack/python-sdk/openapi-generator-cli-*.jar
 # is ~30 YAMLs). The README in this dir documents the contract.
 tests/integration/dep-crds/*/
 !tests/integration/dep-crds/README.md
+# Envoy Gateway has no Go module distribution we can pull from go.mod
+# (the operator is shipped as a binary). CRDs in this bundle are
+# hand-authored stubs and stay tracked. See its SOURCE file.
+!tests/integration/dep-crds/envoy-gateway/
+!tests/integration/dep-crds/envoy-gateway/**

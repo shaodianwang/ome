@@ -20,9 +20,11 @@ import (
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/builders"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/interfaces"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 )
 
 const (
@@ -85,17 +87,28 @@ func (g *GatewayAPIStrategy) Reconcile(ctx context.Context, isvc *v1beta1.Infere
 			return err
 		}
 
-		if err := g.reconcileBackendTrafficPolicy(ctx, isvc); err != nil {
-			return err
+		// The default BTP (ConsistentHash on configured headers) is
+		// emitted here only when the operator has NOT declared any
+		// OEP-0011 traffic intent. When intent is declared, the
+		// per-ISVC traffic.Reconciler owns the BTP — both
+		// reconcilers writing the same resource name would fight on
+		// every loop.
+		ownsBackendTrafficPolicy := !traffic.Resolve(isvc).HasIntent()
+		if ownsBackendTrafficPolicy {
+			if err := g.reconcileBackendTrafficPolicy(ctx, isvc); err != nil {
+				return err
+			}
 		}
 
-		// Check HTTPRoute and BackendTrafficPolicy statuses
+		// Check HTTPRoute and (optionally) BackendTrafficPolicy statuses
 		if err := g.checkHTTPRouteStatuses(ctx, isvc); err != nil {
 			return err
 		}
 
-		if err := g.checkBackendTrafficPolicyStatus(ctx, isvc); err != nil {
-			return err
+		if ownsBackendTrafficPolicy {
+			if err := g.checkBackendTrafficPolicyStatus(ctx, isvc); err != nil {
+				return err
+			}
 		}
 
 		// If we are here, then all the HTTPRoutes are ready, Mark ingress as ready
@@ -207,14 +220,17 @@ func (g *GatewayAPIStrategy) reconcileBackendTrafficPolicy(ctx context.Context, 
 }
 
 func (g *GatewayAPIStrategy) checkHTTPRouteStatuses(ctx context.Context, isvc *v1beta1.InferenceService) error {
+	// OEP-0011 C1: the engine HTTPRoute is always emitted as
+	// "<isvc>-engine" (distinct from the top-level "<isvc>"); these
+	// lookups must match the builder-produced names.
 	components := []struct {
 		name      string
 		condition func() bool
 	}{
-		{isvc.Name, func() bool { return true }},                                  // Engine
+		{constants.EngineServiceName(isvc.Name), func() bool { return true }},     // Engine: "<isvc>-engine"
 		{isvc.Name + "-router", func() bool { return isvc.Spec.Router != nil }},   // Router
 		{isvc.Name + "-decoder", func() bool { return isvc.Spec.Decoder != nil }}, // Decoder
-		{isvc.Name, func() bool { return true }},                                  // Top level (same as engine for HTTPRoute names)
+		{isvc.Name, func() bool { return true }},                                  // Top level: "<isvc>"
 	}
 
 	for _, comp := range components {
@@ -298,7 +314,8 @@ func (g *GatewayAPIStrategy) getRawServiceHost(isvc *v1beta1.InferenceService) s
 		routerName := isvc.Name + "-router" // Actual router service name
 		return routerName + "." + isvc.Namespace + ".svc.cluster.local"
 	}
-	engineName := isvc.Name // Actual engine service name
+	// Engine Service is named "<isvc>-engine" (constants.EngineServiceName).
+	engineName := constants.EngineServiceName(isvc.Name)
 	return engineName + "." + isvc.Namespace + ".svc.cluster.local"
 }
 
@@ -321,15 +338,18 @@ func (g *GatewayAPIStrategy) isHTTPRouteReady(httpRouteStatus gatewayapiv1.HTTPR
 	return true, nil, nil
 }
 
-// getComponentType returns the component type name for display purposes
+// getComponentType returns the component type name for display purposes.
+// OEP-0011 C1: engine HTTPRoute is "<isvc>-engine", top-level is "<isvc>".
 func (g *GatewayAPIStrategy) getComponentType(name string, isvc *v1beta1.InferenceService) string {
-	switch {
-	case name == isvc.Name: // Engine service name
+	switch name {
+	case constants.EngineServiceName(isvc.Name): // "<isvc>-engine"
 		return "Engine"
-	case name == isvc.Name+"-router": // Router service name
+	case isvc.Name + "-router":
 		return "Router"
-	case name == isvc.Name+"-decoder": // Decoder service name
+	case isvc.Name + "-decoder":
 		return "Decoder"
+	case isvc.Name:
+		return "TopLevel"
 	default:
 		return "Component"
 	}
