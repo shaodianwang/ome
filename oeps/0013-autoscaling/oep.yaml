@@ -1,0 +1,24 @@
+title: Component-Scoped Autoscaling
+oep-number: 0013
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-05-19
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "/oeps/0010-model-overlays"
+  - "/oeps/0011-inference-traffic-policy"
+
+# The target maturity stage in the current dev cycle.
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
