@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/ome-projects/ome/pkg/ociobjectstore"
+	"github.com/sgl-project/ome/pkg/ociobjectstore"
 )
 
 func TestParseLocalStorageURI(t *testing.T) {

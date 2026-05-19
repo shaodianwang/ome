@@ -13,7 +13,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/framework"
@@ -76,7 +76,7 @@ var _ = ginkgo.Describe("v1beta1testing.MakeBaseModel", func() {
 var _ = ginkgo.Describe("v1beta1testing.SimulatePVCAgent helpers", func() {
 
 	ginkgo.It("Ready writes a ConfigMap with the right labels + ModelEntry shape", func() {
-		cfg := &modelagent.ModelConfig{
+		cfg := &shared.ModelConfig{
 			ModelType:         "llama",
 			ModelArchitecture: "LlamaForCausalLM",
 			MaxTokens:         4096,

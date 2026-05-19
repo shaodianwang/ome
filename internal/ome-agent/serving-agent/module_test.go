@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ome-projects/ome/pkg/ociobjectstore"
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
+	"github.com/sgl-project/ome/pkg/ociobjectstore"
 )
 
 func TestModule(t *testing.T) {

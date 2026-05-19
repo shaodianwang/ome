@@ -17,7 +17,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -58,7 +58,7 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile", ginkgo.Ordered, func() {
 
 		ginkgo.By("simulating the agent writing Status=Ready and expecting state→Ready + spec populated")
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient, "llama-7b", ns, false,
-			&modelagent.ModelConfig{
+			&shared.ModelConfig{
 				ModelType:         "llama",
 				ModelArchitecture: "LlamaForCausalLM",
 				MaxTokens:         4096,
@@ -95,7 +95,7 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile", ginkgo.Ordered, func() {
 
 		ginkgo.By("simulating Ready and expecting the cluster-scoped CR to flip to Ready")
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient, "shared-llama", "", true,
-			&modelagent.ModelConfig{ModelType: "llama", ModelArchitecture: "LlamaForCausalLM", MaxTokens: 4096})).To(Succeed())
+			&shared.ModelConfig{ModelType: "llama", ModelArchitecture: "LlamaForCausalLM", MaxTokens: 4096})).To(Succeed())
 		Eventually(func(g Gomega) {
 			got := &v1beta1.ClusterBaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "shared-llama"}, got)).To(Succeed())
@@ -219,7 +219,7 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile", ginkgo.Ordered, func() {
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient, "llama-7b", ns, false,
-			&modelagent.ModelConfig{ModelType: "llama", ModelArchitecture: "LlamaForCausalLM", MaxTokens: 4096})).To(Succeed())
+			&shared.ModelConfig{ModelType: "llama", ModelArchitecture: "LlamaForCausalLM", MaxTokens: 4096})).To(Succeed())
 
 		cmName := constants.GetPVCMetadataConfigMapName("llama-7b", ns, false)
 		cmKey := types.NamespacedName{Namespace: constants.OMENamespace, Name: cmName}
@@ -305,7 +305,7 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile", ginkgo.Ordered, func() {
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient, "del-llama", "", true,
-			&modelagent.ModelConfig{ModelType: "llama", ModelArchitecture: "LlamaForCausalLM", MaxTokens: 4096})).To(Succeed())
+			&shared.ModelConfig{ModelType: "llama", ModelArchitecture: "LlamaForCausalLM", MaxTokens: 4096})).To(Succeed())
 
 		cmName := constants.GetPVCMetadataConfigMapName("del-llama", "", true)
 		cmKey := types.NamespacedName{Namespace: constants.OMENamespace, Name: cmName}

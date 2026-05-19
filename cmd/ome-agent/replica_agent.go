@@ -10,9 +10,9 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica"
-	"github.com/ome-projects/ome/pkg/afero"
-	"github.com/ome-projects/ome/pkg/logging"
-	"github.com/ome-projects/ome/pkg/ociobjectstore"
+	"github.com/sgl-project/ome/pkg/afero"
+	"github.com/sgl-project/ome/pkg/logging"
+	"github.com/sgl-project/ome/pkg/ociobjectstore"
 )
 
 // ReplicaAgent implements the AgentModule interface for object storage replica agent

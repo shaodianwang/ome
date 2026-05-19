@@ -15,7 +15,6 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
-	"github.com/ome-projects/ome/pkg/modelagent"
 )
 
 // processModelStatus walks the per-node model-status ConfigMaps for
@@ -24,7 +23,7 @@ import (
 // agent flow through specUpdateFunc (filtered to entries that carry a
 // non-nil Config).
 func processModelStatus(ctx context.Context, kubeClient client.Client, log logr.Logger, namespace, name string, isClusterScope bool,
-	specUpdateFunc func(context.Context, *modelagent.ModelConfig) error,
+	specUpdateFunc func(context.Context, *shared.ModelConfig) error,
 	statusUpdateFunc func(context.Context, []string, []string) error) error {
 
 	modelInfo := name
@@ -69,7 +68,7 @@ func processModelStatus(ctx context.Context, kubeClient client.Client, log logr.
 			continue
 		}
 
-		var modelEntry modelagent.ModelEntry
+		var modelEntry shared.ModelEntry
 		if err := json.Unmarshal([]byte(data), &modelEntry); err != nil {
 			log.Error(err, "Failed to parse model entry", "node", configMap.Name, "key", modelKey)
 			continue
@@ -85,13 +84,13 @@ func processModelStatus(ctx context.Context, kubeClient client.Client, log logr.
 		}
 
 		switch modelEntry.Status {
-		case modelagent.ModelStatusReady:
+		case shared.ModelStatusReady:
 			nodesReady = addToSlice(nodesReady, configMap.Name)
 			readyNodes++
-		case modelagent.ModelStatusFailed:
+		case shared.ModelStatusFailed:
 			nodesFailed = addToSlice(nodesFailed, configMap.Name)
 			failedNodes++
-		case modelagent.ModelStatusUpdating, modelagent.ModelStatusDeleted:
+		case shared.ModelStatusUpdating, shared.ModelStatusDeleted:
 		default:
 			log.V(1).Info("Unknown model status", "node", configMap.Name, "status", modelEntry.Status)
 		}
@@ -113,7 +112,7 @@ func processModelStatus(ctx context.Context, kubeClient client.Client, log logr.
 	return statusUpdateFunc(ctx, nodesReady, nodesFailed)
 }
 
-func updateModelSpecWithConfig(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, spec *v1beta1.BaseModelSpec, config *modelagent.ModelConfig, modelType string) error {
+func updateModelSpecWithConfig(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, spec *v1beta1.BaseModelSpec, config *shared.ModelConfig, modelType string) error {
 	if updated := shared.UpdateSpecWithConfig(spec, config); updated {
 		if err := kubeClient.Update(ctx, obj); err != nil {
 			return fmt.Errorf("failed to update %s spec: %w", modelType, err)
@@ -174,7 +173,7 @@ func updateModelStatusWithRetry(ctx context.Context, kubeClient client.Client, l
 	return shared.RetryUpdate(ctx, kubeClient, log, obj, "status", updateFunc)
 }
 
-func retrySpecUpdate(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, config *modelagent.ModelConfig, updateFunc func(context.Context, client.Client, client.Object, *modelagent.ModelConfig) error) error {
+func retrySpecUpdate(ctx context.Context, kubeClient client.Client, log logr.Logger, obj client.Object, config *shared.ModelConfig, updateFunc func(context.Context, client.Client, client.Object, *shared.ModelConfig) error) error {
 	wrappedUpdateFunc := func(ctx context.Context, client client.Client, obj client.Object) error {
 		return updateFunc(ctx, client, obj, config)
 	}

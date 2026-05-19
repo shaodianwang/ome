@@ -21,8 +21,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/logging"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
+	"github.com/sgl-project/ome/pkg/logging"
 )
 
 func newTestScheme(t *testing.T) *runtime.Scheme {
@@ -103,9 +103,9 @@ func TestMetadataExtractor_Start_WritesReadyConfigMap(t *testing.T) {
 	rawEntry, ok := cm.Data[modelKey]
 	require.True(t, ok, "ConfigMap must carry an entry under the model key")
 
-	var entry modelagent.ModelEntry
+	var entry shared.ModelEntry
 	require.NoError(t, json.Unmarshal([]byte(rawEntry), &entry))
-	assert.Equal(t, modelagent.ModelStatusReady, entry.Status)
+	assert.Equal(t, shared.ModelStatusReady, entry.Status)
 	require.NotNil(t, entry.Config)
 	assert.Equal(t, "llama", entry.Config.ModelType)
 	assert.Equal(t, "LlamaForCausalLM", entry.Config.ModelArchitecture)
@@ -161,9 +161,9 @@ func TestMetadataExtractor_Start_NoConfigFile_WritesFailedAndReturnsError(t *tes
 
 	modelKey := constants.GetModelConfigMapKey(cfg.BaseModelNamespace, cfg.BaseModelName, cfg.ClusterScoped)
 	rawEntry := cm.Data[modelKey]
-	var entry modelagent.ModelEntry
+	var entry shared.ModelEntry
 	require.NoError(t, json.Unmarshal([]byte(rawEntry), &entry))
-	assert.Equal(t, modelagent.ModelStatusFailed, entry.Status)
+	assert.Equal(t, shared.ModelStatusFailed, entry.Status)
 	assert.NotEmpty(t, cm.Annotations[constants.PVCMetadataLastErrorAnnotation])
 }
 
@@ -270,9 +270,9 @@ func TestStart_DoesNotClobberReadyOnPostRunSignal(t *testing.T) {
 	modelKey := constants.GetModelConfigMapKey(cfg.BaseModelNamespace, cfg.BaseModelName, cfg.ClusterScoped)
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: constants.OMENamespace, Name: cmName}, cm))
 
-	var entry modelagent.ModelEntry
+	var entry shared.ModelEntry
 	require.NoError(t, json.Unmarshal([]byte(cm.Data[modelKey]), &entry))
-	require.Equal(t, modelagent.ModelStatusReady, entry.Status, "first run must write Ready")
+	require.Equal(t, shared.ModelStatusReady, entry.Status, "first run must write Ready")
 
 	// Sanity: the Ready entry must NOT carry the aborted-error annotation.
 	// If a regression made Start() always run the aborted-write block
@@ -303,7 +303,7 @@ func TestMetadataExtractor_AbortedWritesFailedConfigMap(t *testing.T) {
 	// Aborted Failed entry under a fresh, bounded context.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	require.NoError(t, ex.writeStatus(ctx, modelagent.ModelStatusFailed, nil, "metadata extraction aborted (pod received SIGTERM/SIGINT)"))
+	require.NoError(t, ex.writeStatus(ctx, shared.ModelStatusFailed, nil, "metadata extraction aborted (pod received SIGTERM/SIGINT)"))
 
 	cmName := constants.GetPVCMetadataConfigMapName(cfg.BaseModelName, cfg.BaseModelNamespace, cfg.ClusterScoped)
 	cm := &corev1.ConfigMap{}
@@ -311,9 +311,9 @@ func TestMetadataExtractor_AbortedWritesFailedConfigMap(t *testing.T) {
 	assert.NotEmpty(t, cm.Annotations[constants.PVCMetadataLastErrorAnnotation], "Aborted ConfigMap must carry the error annotation")
 
 	modelKey := constants.GetModelConfigMapKey(cfg.BaseModelNamespace, cfg.BaseModelName, cfg.ClusterScoped)
-	var entry modelagent.ModelEntry
+	var entry shared.ModelEntry
 	require.NoError(t, json.Unmarshal([]byte(cm.Data[modelKey]), &entry))
-	assert.Equal(t, modelagent.ModelStatusFailed, entry.Status)
+	assert.Equal(t, shared.ModelStatusFailed, entry.Status)
 }
 
 // TestMetadataExtractor_Run_AcceptsContext exercises the inner run(ctx)

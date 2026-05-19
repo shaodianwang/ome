@@ -6,6 +6,7 @@ package shared
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -17,8 +18,131 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/modelparser"
 )
+
+// ModelStatus represents the status of a model on a node.
+type ModelStatus string
+
+const (
+	ModelStatusReady    ModelStatus = "Ready"
+	ModelStatusUpdating ModelStatus = "Updating"
+	ModelStatusFailed   ModelStatus = "Failed"
+	ModelStatusDeleted  ModelStatus = "Deleted"
+)
+
+// ModelConfig is the structured per-model entry stored in per-node
+// ConfigMaps by the model-agent daemon. The controller reads it back to
+// fill in BaseModelSpec fields the operator left blank.
+type ModelConfig struct {
+	ModelType                 string                 `json:"modelType,omitempty"`
+	ModelArchitecture         string                 `json:"modelArchitecture,omitempty"`
+	ModelFramework            map[string]string      `json:"modelFramework,omitempty"`
+	ModelFormat               map[string]string      `json:"modelFormat,omitempty"`
+	ModelParameterSize        string                 `json:"modelParameterSize,omitempty"`
+	MaxTokens                 int32                  `json:"maxTokens,omitempty"`
+	ModelCapabilities         []string               `json:"modelCapabilities,omitempty"`
+	ApiCapabilities           []string               `json:"apiCapabilities,omitempty"`
+	DecodedModelConfiguration map[string]interface{} `json:"decodedModelConfiguration,omitempty"`
+	Quantization              string                 `json:"quantization,omitempty"`
+	Artifact                  modelparser.Artifact   `json:"artifact,omitempty"`
+}
+
+// DownloadProgress is the in-flight download progress reported by the
+// model-agent daemon for a single model.
+type DownloadProgress struct {
+	Phase            string  `json:"phase"`
+	TotalBytes       uint64  `json:"totalBytes"`
+	CompletedBytes   uint64  `json:"completedBytes"`
+	TotalFiles       uint32  `json:"totalFiles"`
+	CompletedFiles   uint32  `json:"completedFiles"`
+	SpeedBytesPerSec float64 `json:"speedBytesPerSec"`
+	LastUpdated      string  `json:"lastUpdated"`
+}
+
+func (p *DownloadProgress) Percentage() float64 {
+	if p == nil || p.TotalBytes == 0 {
+		return 0
+	}
+	return float64(p.CompletedBytes) / float64(p.TotalBytes) * 100
+}
+
+// ModelEntry is the top-level per-model record in the node ConfigMap.
+type ModelEntry struct {
+	Name     string            `json:"name"`
+	Status   ModelStatus       `json:"status"`
+	Config   *ModelConfig      `json:"config,omitempty"`
+	Progress *DownloadProgress `json:"progress,omitempty"`
+}
+
+// ConvertMetadataToModelConfig converts parser-produced metadata into
+// the on-wire ModelConfig the daemon writes to ConfigMaps.
+func ConvertMetadataToModelConfig(metadata modelparser.ModelMetadata) *ModelConfig {
+	var modelFramework map[string]string
+	if metadata.ModelFramework != nil {
+		modelFramework = map[string]string{"name": metadata.ModelFramework.Name}
+		if metadata.ModelFramework.Version != nil {
+			modelFramework["version"] = *metadata.ModelFramework.Version
+		}
+	}
+
+	var modelFormat map[string]string
+	if metadata.ModelFormat.Name != "" {
+		modelFormat = map[string]string{"name": metadata.ModelFormat.Name}
+		if metadata.ModelFormat.Version != nil {
+			modelFormat["version"] = *metadata.ModelFormat.Version
+		}
+	}
+
+	var quantization string
+	if metadata.Quantization != "" {
+		quantization = string(metadata.Quantization)
+	}
+
+	decodedConfig := metadata.DecodedModelConfiguration
+	if decodedConfig == nil && len(metadata.ModelConfiguration) > 0 {
+		var configMap map[string]interface{}
+		if err := json.Unmarshal(metadata.ModelConfiguration, &configMap); err == nil {
+			decodedConfig = configMap
+		}
+	}
+
+	var artifact modelparser.Artifact
+	if metadata.Artifact.Sha != "" || metadata.Artifact.ParentPath != nil || metadata.Artifact.ChildrenPaths != nil {
+		currentArtifact := metadata.Artifact
+		var parent map[string]string
+		if currentArtifact.ParentPath != nil {
+			parent = make(map[string]string, len(currentArtifact.ParentPath))
+			for k, v := range currentArtifact.ParentPath {
+				parent[k] = v
+			}
+		}
+		var children []string
+		if currentArtifact.ChildrenPaths != nil {
+			children = make([]string, len(currentArtifact.ChildrenPaths))
+			copy(children, currentArtifact.ChildrenPaths)
+		}
+		artifact = modelparser.Artifact{
+			Sha:           currentArtifact.Sha,
+			ParentPath:    parent,
+			ChildrenPaths: children,
+		}
+	}
+
+	return &ModelConfig{
+		ModelType:                 metadata.ModelType,
+		ModelArchitecture:         metadata.ModelArchitecture,
+		ModelFramework:            modelFramework,
+		ModelFormat:               modelFormat,
+		ModelParameterSize:        metadata.ModelParameterSize,
+		MaxTokens:                 metadata.MaxTokens,
+		ModelCapabilities:         metadata.ModelCapabilities,
+		ApiCapabilities:           metadata.ApiCapabilities,
+		DecodedModelConfiguration: decodedConfig,
+		Quantization:              quantization,
+		Artifact:                  artifact,
+	}
+}
 
 // Backend is one of OME's BaseModel distribution backends. The
 // controller dispatches Reconcile / HandleDeletion to the first
@@ -101,7 +225,7 @@ func RetryUpdate(ctx context.Context, kubeClient client.Client, log logr.Logger,
 // UpdateSpecWithConfig applies fields from config onto spec when spec
 // is empty for that field. Fill-only — never overwrites operator-set
 // values. Returns true iff anything changed.
-func UpdateSpecWithConfig(spec *v1beta1.BaseModelSpec, config *modelagent.ModelConfig) bool {
+func UpdateSpecWithConfig(spec *v1beta1.BaseModelSpec, config *ModelConfig) bool {
 	if spec == nil || config == nil {
 		return false
 	}

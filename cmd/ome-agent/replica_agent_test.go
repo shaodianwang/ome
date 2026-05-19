@@ -6,8 +6,8 @@ import (
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/ome-projects/ome/pkg/afero"
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
+	"github.com/sgl-project/ome/pkg/afero"
 )
 
 func TestOCIOSDataStoreListProvider(t *testing.T) {

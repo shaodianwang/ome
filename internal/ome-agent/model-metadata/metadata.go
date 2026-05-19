@@ -8,7 +8,7 @@
 //     [--basemodel-namespace Y | --cluster-scoped]`.
 //  2. We delegate parsing to pkg/modelparser, which already understands
 //     both config.json (HF text models) and model_index.json (diffusion).
-//  3. We convert the parser's metadata into the modelagent.ModelEntry
+//  3. We convert the parser's metadata into the shared.ModelEntry
 //     shape and upsert exactly one ConfigMap per PVC-backed model in
 //     the OME namespace. The ConfigMap name is deterministic
 //     (constants.GetPVCMetadataConfigMapName) so the controller can
@@ -38,9 +38,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/logging"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	"github.com/ome-projects/ome/pkg/modelparser"
+	"github.com/sgl-project/ome/pkg/logging"
 )
 
 // MetadataExtractor parses a PVC-mounted model and writes the result to a
@@ -98,7 +98,7 @@ func (m *MetadataExtractor) Start() error {
 		writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		msg := "metadata extraction aborted (pod received SIGTERM/SIGINT)"
-		if writeErr := m.writeStatus(writeCtx, modelagent.ModelStatusFailed, nil, msg); writeErr != nil {
+		if writeErr := m.writeStatus(writeCtx, shared.ModelStatusFailed, nil, msg); writeErr != nil {
 			m.logger.Errorf("Failed to write Aborted status on cancellation: %v", writeErr)
 		}
 	}
@@ -133,7 +133,7 @@ func (m *MetadataExtractor) run(ctx context.Context) error {
 		// Surface the parse failure through the ConfigMap so the controller
 		// can transition the BaseModel to Failed. We still return the
 		// underlying error so the Job pod exits non-zero.
-		writeErr := m.writeStatus(ctx, modelagent.ModelStatusFailed, nil, parseErr.Error())
+		writeErr := m.writeStatus(ctx, shared.ModelStatusFailed, nil, parseErr.Error())
 		if writeErr != nil {
 			m.logger.Errorf("Failed to write Failed status to ConfigMap: %v", writeErr)
 		}
@@ -141,15 +141,15 @@ func (m *MetadataExtractor) run(ctx context.Context) error {
 	}
 	if metadata == nil {
 		err := errors.New("model parser returned no metadata (skip-parsing annotation set or directory empty)")
-		writeErr := m.writeStatus(ctx, modelagent.ModelStatusFailed, nil, err.Error())
+		writeErr := m.writeStatus(ctx, shared.ModelStatusFailed, nil, err.Error())
 		if writeErr != nil {
 			m.logger.Errorf("Failed to write Failed status to ConfigMap: %v", writeErr)
 		}
 		return err
 	}
 
-	cfg := modelagent.ConvertMetadataToModelConfig(*metadata)
-	if err := m.writeStatus(ctx, modelagent.ModelStatusReady, cfg, ""); err != nil {
+	cfg := shared.ConvertMetadataToModelConfig(*metadata)
+	if err := m.writeStatus(ctx, shared.ModelStatusReady, cfg, ""); err != nil {
 		return fmt.Errorf("failed to write Ready status to ConfigMap: %w", err)
 	}
 	m.logger.Infof("Wrote Ready status with metadata to ConfigMap for model %s", m.modelInfo())
@@ -160,11 +160,11 @@ func (m *MetadataExtractor) run(ctx context.Context) error {
 // controller looks the ConfigMap up by exact name (no list-and-filter), so
 // we do NOT label it with the per-node `models.ome/basemodel-status`
 // selector — that label is reserved for the per-node ConfigMap pattern.
-func (m *MetadataExtractor) writeStatus(ctx context.Context, status modelagent.ModelStatus, cfg *modelagent.ModelConfig, errMessage string) error {
+func (m *MetadataExtractor) writeStatus(ctx context.Context, status shared.ModelStatus, cfg *shared.ModelConfig, errMessage string) error {
 	cmName := constants.GetPVCMetadataConfigMapName(m.config.BaseModelName, m.config.BaseModelNamespace, m.config.ClusterScoped)
 	modelKey := constants.GetModelConfigMapKey(m.config.BaseModelNamespace, m.config.BaseModelName, m.config.ClusterScoped)
 
-	entry := modelagent.ModelEntry{
+	entry := shared.ModelEntry{
 		Name:   m.config.BaseModelName,
 		Status: status,
 		Config: cfg,

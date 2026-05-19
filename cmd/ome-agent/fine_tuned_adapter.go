@@ -5,9 +5,9 @@ import (
 	"go.uber.org/fx"
 
 	finetunedadapter "github.com/ome-projects/ome/internal/ome-agent/fine-tuned-adapter"
-	"github.com/ome-projects/ome/pkg/afero"
-	"github.com/ome-projects/ome/pkg/logging"
-	"github.com/ome-projects/ome/pkg/ociobjectstore"
+	"github.com/sgl-project/ome/pkg/afero"
+	"github.com/sgl-project/ome/pkg/logging"
+	"github.com/sgl-project/ome/pkg/ociobjectstore"
 )
 
 // FineTunedAdapterAgent implements the AgentModule interface for fine-tuned adapter agent

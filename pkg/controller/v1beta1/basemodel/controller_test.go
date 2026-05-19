@@ -26,7 +26,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	shardedfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
-	"github.com/ome-projects/ome/pkg/modelagent"
 )
 
 func TestBaseModelReconcile(t *testing.T) {
@@ -107,8 +106,8 @@ func TestBaseModelReconcile(t *testing.T) {
 				err := c.Create(context.TODO(), node)
 				g.Expect(err).NotTo(gomega.HaveOccurred())
 
-				modelEntry := modelagent.ModelEntry{
-					Status: modelagent.ModelStatusReady,
+				modelEntry := shared.ModelEntry{
+					Status: shared.ModelStatusReady,
 				}
 				entryData, _ := json.Marshal(modelEntry)
 
@@ -173,9 +172,9 @@ func TestBaseModelReconcile(t *testing.T) {
 				g.Expect(err).NotTo(gomega.HaveOccurred())
 
 				// Create ConfigMap with Ready status
-				modelEntry := modelagent.ModelEntry{
-					Status: modelagent.ModelStatusReady,
-					Config: &modelagent.ModelConfig{
+				modelEntry := shared.ModelEntry{
+					Status: shared.ModelStatusReady,
+					Config: &shared.ModelConfig{
 						ModelType:         "gpt2",
 						ModelArchitecture: "GPT2LMHeadModel",
 						MaxTokens:         2048,
@@ -257,14 +256,14 @@ func TestBaseModelReconcile(t *testing.T) {
 				}
 
 				// Create ConfigMaps with different statuses
-				statuses := map[string]modelagent.ModelStatus{
-					"node-1": modelagent.ModelStatusReady,
-					"node-2": modelagent.ModelStatusFailed,
-					"node-3": modelagent.ModelStatusUpdating,
+				statuses := map[string]shared.ModelStatus{
+					"node-1": shared.ModelStatusReady,
+					"node-2": shared.ModelStatusFailed,
+					"node-3": shared.ModelStatusUpdating,
 				}
 
 				for nodeName, status := range statuses {
-					modelEntry := modelagent.ModelEntry{
+					modelEntry := shared.ModelEntry{
 						Status: status,
 					}
 					entryData, _ := json.Marshal(modelEntry)
@@ -381,8 +380,8 @@ func TestBaseModelReconcile(t *testing.T) {
 
 				// Create ConfigMaps with entries not yet deleted
 				for _, nodeName := range []string{"node-1", "node-2"} {
-					modelEntry := modelagent.ModelEntry{
-						Status: modelagent.ModelStatusReady, // Not marked for deletion
+					modelEntry := shared.ModelEntry{
+						Status: shared.ModelStatusReady, // Not marked for deletion
 					}
 					entryData, _ := json.Marshal(modelEntry)
 
@@ -455,8 +454,8 @@ func TestBaseModelReconcile(t *testing.T) {
 
 				// Create ConfigMaps with entries marked as deleted
 				for _, nodeName := range []string{"node-1", "node-2"} {
-					modelEntry := modelagent.ModelEntry{
-						Status: modelagent.ModelStatusDeleted, // Marked for deletion
+					modelEntry := shared.ModelEntry{
+						Status: shared.ModelStatusDeleted, // Marked for deletion
 					}
 					entryData, _ := json.Marshal(modelEntry)
 
@@ -528,14 +527,14 @@ func TestBaseModelReconcile(t *testing.T) {
 				}
 
 				// Create ConfigMaps with mixed deletion status
-				statuses := map[string]modelagent.ModelStatus{
-					"node-1": modelagent.ModelStatusDeleted, // Marked for deletion
-					"node-2": modelagent.ModelStatusReady,   // Not deleted
-					"node-3": modelagent.ModelStatusFailed,  // Not deleted
+				statuses := map[string]shared.ModelStatus{
+					"node-1": shared.ModelStatusDeleted, // Marked for deletion
+					"node-2": shared.ModelStatusReady,   // Not deleted
+					"node-3": shared.ModelStatusFailed,  // Not deleted
 				}
 
 				for nodeName, status := range statuses {
-					modelEntry := modelagent.ModelEntry{
+					modelEntry := shared.ModelEntry{
 						Status: status,
 					}
 					entryData, _ := json.Marshal(modelEntry)
@@ -584,8 +583,8 @@ func TestBaseModelReconcile(t *testing.T) {
 			},
 			setupMocks: func(c client.Client) {
 				// Create ConfigMap for non-existent node
-				modelEntry := modelagent.ModelEntry{
-					Status: modelagent.ModelStatusReady,
+				modelEntry := shared.ModelEntry{
+					Status: shared.ModelStatusReady,
 				}
 				entryData, _ := json.Marshal(modelEntry)
 
@@ -725,8 +724,8 @@ func TestClusterBaseModelReconcile(t *testing.T) {
 				err := c.Create(context.TODO(), node)
 				g.Expect(err).NotTo(gomega.HaveOccurred())
 
-				modelEntry := modelagent.ModelEntry{
-					Status: modelagent.ModelStatusReady,
+				modelEntry := shared.ModelEntry{
+					Status: shared.ModelStatusReady,
 				}
 				entryData, _ := json.Marshal(modelEntry)
 
@@ -791,9 +790,9 @@ func TestClusterBaseModelReconcile(t *testing.T) {
 
 				// Create ConfigMaps - all ready
 				for i := 1; i <= 3; i++ {
-					modelEntry := modelagent.ModelEntry{
-						Status: modelagent.ModelStatusReady,
-						Config: &modelagent.ModelConfig{
+					modelEntry := shared.ModelEntry{
+						Status: shared.ModelStatusReady,
+						Config: &shared.ModelConfig{
 							ModelFramework: map[string]string{
 								"name":    "transformers",
 								"version": "4.21.0",
@@ -1127,7 +1126,7 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 	tests := []struct {
 		name         string
 		initialSpec  *v1beta1.BaseModelSpec
-		config       *modelagent.ModelConfig
+		config       *shared.ModelConfig
 		expectUpdate bool
 		validateSpec func(*v1beta1.BaseModelSpec)
 	}{
@@ -1138,7 +1137,7 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 					Name: "", // Empty so it can be updated
 				},
 			},
-			config: &modelagent.ModelConfig{
+			config: &shared.ModelConfig{
 				ModelType:          "llama",
 				ModelArchitecture:  "LlamaForCausalLM",
 				Quantization:       "nvfp4",
@@ -1186,7 +1185,7 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 				},
 				MaxTokens: int32Ptr(2048),
 			},
-			config: &modelagent.ModelConfig{
+			config: &shared.ModelConfig{
 				ModelType:         "new-type",
 				ModelArchitecture: "new-arch",
 				Quantization:      "new-quant",
@@ -1210,7 +1209,7 @@ func TestUpdateSpecWithConfig(t *testing.T) {
 		{
 			name:         "Nil inputs return false",
 			initialSpec:  nil,
-			config:       &modelagent.ModelConfig{},
+			config:       &shared.ModelConfig{},
 			expectUpdate: false,
 		},
 		{
@@ -1268,7 +1267,7 @@ func TestShardedBaseModelDeletionShortCircuitsConfigMapWait(t *testing.T) {
 		// and model-agent never marked them deleted — either way the wait
 		// never converged before this fix).
 		modelKey := constants.GetModelConfigMapKey("default", "sharded-delete-me", false)
-		entry, _ := json.Marshal(modelagent.ModelEntry{Status: modelagent.ModelStatusReady})
+		entry, _ := json.Marshal(shared.ModelEntry{Status: shared.ModelStatusReady})
 		for i := 1; i <= 5; i++ {
 			node := fmt.Sprintf("node-%d", i)
 			cm := &corev1.ConfigMap{
@@ -1329,7 +1328,7 @@ func TestShardedBaseModelDeletionShortCircuitsConfigMapWait(t *testing.T) {
 			Build()
 
 		modelKey := constants.GetModelConfigMapKey("", "sharded-cbm-delete-me", true)
-		entry, _ := json.Marshal(modelagent.ModelEntry{Status: modelagent.ModelStatusReady})
+		entry, _ := json.Marshal(shared.ModelEntry{Status: shared.ModelStatusReady})
 		for i := 1; i <= 3; i++ {
 			node := fmt.Sprintf("cluster-node-%d", i)
 			cm := &corev1.ConfigMap{
@@ -1431,7 +1430,7 @@ func TestShardedBaseModelDeletionShortCircuitsConfigMapWait(t *testing.T) {
 
 		// Stale entry NOT marked deleted — should keep finalizer + requeue.
 		modelKey := constants.GetModelConfigMapKey("default", "pernode-delete-me", false)
-		entry, _ := json.Marshal(modelagent.ModelEntry{Status: modelagent.ModelStatusReady})
+		entry, _ := json.Marshal(shared.ModelEntry{Status: shared.ModelStatusReady})
 		cm := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "node-1",

@@ -49,8 +49,9 @@ if [ "${CHART}" = "ome-resources" ]; then
   IMAGE_TAG="${SHORT_SHA}"
   sed -i "s|hub: \"ghcr.io/moirai-internal\"|hub: \"${PROD_ECR_REGISTRY}/msl_infra\"|" "charts/${CHART}/values.yaml"
   sed -i "s|version: \&defaultVersion .*|version: \&defaultVersion \"${IMAGE_TAG}\"|" "charts/${CHART}/values.yaml"
-  # Fix repository names to match ECR repo names
-  sed -i "s|repository: model-agent|repository: ome-model-agent|" "charts/${CHART}/values.yaml"
+  # model-agent is not built here; consumers who flip
+  # modelAgent.enabled=true must override image.hub/repository to
+  # point at an upstream-published image themselves.
 fi
 
 helm package "charts/${CHART}"

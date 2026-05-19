@@ -13,7 +13,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 )
 
 // HandleModelDeletion is the per-node deletion handler. Waits for every
@@ -73,10 +73,10 @@ func HandleModelDeletion(ctx context.Context, kubeClient client.Client, obj clie
 			nodesWithModel++
 
 			// Check if it's already marked for deletion
-			var modelEntry modelagent.ModelEntry
+			var modelEntry shared.ModelEntry
 			if err := json.Unmarshal([]byte(data), &modelEntry); err == nil {
 				// If model entry is present but not marked as deleted, add it to the list
-				if modelEntry.Status != modelagent.ModelStatusDeleted {
+				if modelEntry.Status != shared.ModelStatusDeleted {
 					modelsNotDeleted = append(modelsNotDeleted, configMap.Name)
 				}
 			} else {

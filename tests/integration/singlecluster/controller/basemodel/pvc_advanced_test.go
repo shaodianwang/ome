@@ -14,7 +14,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -49,9 +49,9 @@ var _ = ginkgo.Describe("BaseModel PVC edge cases", ginkgo.Ordered, func() {
 
 		ginkgo.By("simulating both agents writing Ready ConfigMaps — one per (model,namespace)")
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient, "multi-llama-7b", ns, false,
-			&modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			&shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient, "multi-llama-13b", ns, false,
-			&modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			&shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 
 		ginkgo.By("expecting both BaseModels to flip Ready independently")
 		Eventually(func(g Gomega) {
@@ -158,7 +158,7 @@ var _ = ginkgo.Describe("BaseModel PVC edge cases", ginkgo.Ordered, func() {
 
 		ginkgo.By("simulating Ready and expecting state→Ready via the new branch")
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient, "swap-llama", ns, false,
-			&modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			&shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 		Eventually(func(g Gomega) {
 			latest := &v1beta1.BaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "swap-llama", Namespace: ns}, latest)).To(Succeed())
@@ -186,7 +186,7 @@ var _ = ginkgo.Describe("BaseModel PVC edge cases", ginkgo.Ordered, func() {
 			jobName = jobs.Items[0].Name
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient, "swap-out-llama", ns, false,
-			&modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			&shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "swap-out-llama", Namespace: ns}, got)).To(Succeed())

@@ -20,8 +20,6 @@ OME (Open Model Engine) is a Kubernetes operator for enterprise-grade management
 
 - **Accelerator Management:** Hardware-aware scheduling through AcceleratorClass resources that define GPU capabilities, discovery patterns, and cost information.
 
-- **Web Console:** Modern web interface for managing models, serving runtimes, and inference services.
-
 - **Kubernetes Ecosystem Integration:** Deep integration with Kueue, LeaderWorkerSet, KEDA, Gateway API, and Gateway API Inference Extension.
 
 ## Architecture

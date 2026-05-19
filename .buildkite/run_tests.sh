@@ -17,10 +17,10 @@ apt-get update
 apt-get install -y --no-install-recommends jq libssl-dev pkg-config build-essential curl ca-certificates
 
 # Rust toolchain for `pkg/xet` (CGo wrapper around a Rust staticlib).
-# cmd/manager and cmd/model-agent transitively link libxet, so the
-# "no-xet" target still requires it at link time today. Tracked for
-# follow-up: extract the model controller out of cmd/manager so the
-# manager binary no longer depends on libxet.
+# cmd/manager transitively links libxet, so the "no-xet" target still
+# requires it at link time today. Tracked for follow-up: extract the
+# model controller out of cmd/manager so the manager binary no longer
+# depends on libxet.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
 sh /tmp/rustup.sh -y --default-toolchain stable --profile minimal
 

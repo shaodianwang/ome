@@ -12,11 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
-	"github.com/ome-projects/ome/pkg/afero"
-	"github.com/ome-projects/ome/pkg/ociobjectstore"
-	"github.com/ome-projects/ome/pkg/principals"
 	"github.com/ome-projects/ome/pkg/utils/storage"
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
+	"github.com/sgl-project/ome/pkg/afero"
+	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"github.com/sgl-project/ome/pkg/principals"
 )
 
 type TestReplicaAgent struct {

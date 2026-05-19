@@ -10,7 +10,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -53,7 +53,7 @@ var _ = ginkgo.Describe("BaseModel per-node Node-deletion auto-cleanup", func() 
 		Expect(k8sClient.Create(suiteCtx, bm)).To(Succeed())
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient,
 			nodeName, "node-watch-bm", ns.Name, false,
-			modelagent.ModelStatusReady, nil)).To(Succeed())
+			shared.ModelStatusReady, nil)).To(Succeed())
 
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}

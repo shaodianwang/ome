@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 )
 
 // SimulatePVCAgentReady writes the per-PVC status ConfigMap that the
@@ -26,14 +26,14 @@ import (
 // Idempotent: if the ConfigMap already exists this is a no-op (the
 // test's own loop will overwrite as needed).
 func SimulatePVCAgentReady(ctx context.Context, c client.Client,
-	modelName, modelNamespace string, isClusterScoped bool, cfg *modelagent.ModelConfig) error {
+	modelName, modelNamespace string, isClusterScoped bool, cfg *shared.ModelConfig) error {
 
 	cmName := constants.GetPVCMetadataConfigMapName(modelName, modelNamespace, isClusterScoped)
 	modelKey := constants.GetModelConfigMapKey(modelNamespace, modelName, isClusterScoped)
 
-	entry := modelagent.ModelEntry{
+	entry := shared.ModelEntry{
 		Name:   modelName,
-		Status: modelagent.ModelStatusReady,
+		Status: shared.ModelStatusReady,
 		Config: cfg,
 	}
 	data, err := json.Marshal(entry)
@@ -72,7 +72,7 @@ func SimulatePVCAgentFailed(ctx context.Context, c client.Client,
 	cmName := constants.GetPVCMetadataConfigMapName(modelName, modelNamespace, isClusterScoped)
 	modelKey := constants.GetModelConfigMapKey(modelNamespace, modelName, isClusterScoped)
 
-	entry := modelagent.ModelEntry{Name: modelName, Status: modelagent.ModelStatusFailed}
+	entry := shared.ModelEntry{Name: modelName, Status: shared.ModelStatusFailed}
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("marshal ModelEntry: %w", err)

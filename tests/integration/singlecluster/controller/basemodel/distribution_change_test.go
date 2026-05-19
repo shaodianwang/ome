@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -51,7 +51,7 @@ var _ = ginkgo.Describe("BaseModel Distribution change at runtime", ginkgo.Order
 		ginkgo.By("agent reports Ready in PerNode mode → state=Ready, NodesReady populated")
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient,
 			nodeName, "dist-pn2sharded", "", true,
-			modelagent.ModelStatusReady, nil)).To(Succeed())
+			shared.ModelStatusReady, nil)).To(Succeed())
 		Eventually(func(g Gomega) {
 			got := &v1beta1.ClusterBaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "dist-pn2sharded"}, got)).To(Succeed())
@@ -117,7 +117,7 @@ var _ = ginkgo.Describe("BaseModel Distribution change at runtime", ginkgo.Order
 		ginkgo.By("agent reports Ready on the per-node path — proves controller is now driving per-node, not sharded")
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient,
 			nodeName, "dist-sharded2pn", "", true,
-			modelagent.ModelStatusReady, nil)).To(Succeed())
+			shared.ModelStatusReady, nil)).To(Succeed())
 		Eventually(func(g Gomega) {
 			latest := &v1beta1.ClusterBaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "dist-sharded2pn"}, latest)).To(Succeed())

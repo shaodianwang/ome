@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 )
 
 func CreateNodeDeletionPredicate() predicate.Predicate {
@@ -112,7 +112,7 @@ func MapConfigMapToModelRequests(obj client.Object, log logr.Logger, isNamespace
 			continue
 		}
 
-		var modelEntry modelagent.ModelEntry
+		var modelEntry shared.ModelEntry
 		if err := json.Unmarshal([]byte(data), &modelEntry); err != nil {
 			log.V(1).Info("Failed to parse model entry in ConfigMap", "configMap", configMap.Name, "key", key, "error", err)
 			continue

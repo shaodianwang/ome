@@ -8,7 +8,7 @@ import (
 	"go.uber.org/zap"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/sgl-project/ome/pkg/logging"
 )
 
 type metadataParams struct {

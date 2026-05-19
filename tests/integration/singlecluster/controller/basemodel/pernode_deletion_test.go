@@ -10,7 +10,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -83,7 +83,7 @@ var _ = ginkgo.Describe("BaseModel per-node deletion handshake", func() {
 		Expect(k8sClient.Create(suiteCtx, bm)).To(Succeed())
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient,
 			nodeName, "pn-del-wait", nsName, false,
-			modelagent.ModelStatusReady, nil)).To(Succeed())
+			shared.ModelStatusReady, nil)).To(Succeed())
 
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}
@@ -105,7 +105,7 @@ var _ = ginkgo.Describe("BaseModel per-node deletion handshake", func() {
 		ginkgo.By("Agent flips entry to Status=Deleted → CM watch fires → controller clears finalizer")
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient,
 			nodeName, "pn-del-wait", nsName, false,
-			modelagent.ModelStatusDeleted, nil)).To(Succeed())
+			shared.ModelStatusDeleted, nil)).To(Succeed())
 		Eventually(func(g Gomega) {
 			err := k8sClient.Get(suiteCtx, types.NamespacedName{Name: "pn-del-wait", Namespace: nsName}, &v1beta1.BaseModel{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "BM should be fully gone after agent acknowledges deletion")
@@ -133,7 +133,7 @@ var _ = ginkgo.Describe("BaseModel per-node deletion handshake", func() {
 
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient,
 			nodeName, "pn-del-fast", nsName, false,
-			modelagent.ModelStatusDeleted, nil)).To(Succeed())
+			shared.ModelStatusDeleted, nil)).To(Succeed())
 
 		Expect(k8sClient.Delete(suiteCtx, bm)).To(Succeed())
 		Eventually(func(g Gomega) {
@@ -189,7 +189,7 @@ var _ = ginkgo.Describe("BaseModel per-node deletion handshake", func() {
 		ginkgo.By("Replace bad entry with a valid Deleted entry → finalizer can clear")
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient,
 			nodeName, "pn-del-bad", nsName, false,
-			modelagent.ModelStatusDeleted, nil)).To(Succeed())
+			shared.ModelStatusDeleted, nil)).To(Succeed())
 		Eventually(func(g Gomega) {
 			err := k8sClient.Get(suiteCtx, types.NamespacedName{Name: "pn-del-bad", Namespace: nsName}, &v1beta1.BaseModel{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())

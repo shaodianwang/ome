@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	modelVer "github.com/ome-projects/ome/pkg/modelver"
+	modelVer "github.com/sgl-project/ome/pkg/modelver"
 )
 
 // CompatibilityOptions configures model-to-format compatibility checks.

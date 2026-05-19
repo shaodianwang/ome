@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ome-projects/ome/pkg/ociobjectstore"
-	"github.com/ome-projects/ome/pkg/principals"
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
+	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"github.com/sgl-project/ome/pkg/principals"
 )
 
 func TestModule(t *testing.T) {

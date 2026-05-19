@@ -12,7 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -56,7 +56,7 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile lifecycle edges", ginkgo.Ordere
 
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient,
 			"ready-then-lost", ns, false,
-			&modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			&shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "ready-then-lost", Namespace: ns}, got)).To(Succeed())
@@ -178,7 +178,7 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile lifecycle edges", ginkgo.Ordere
 		Expect(k8sClient.Create(suiteCtx, bmB)).To(Succeed())
 
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient,
-			"iso-llama", nsA, false, &modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			"iso-llama", nsA, false, &shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 
 		// bmA reaches Ready (PVC exists in nsA, agent reports OK).
 		Eventually(func(g Gomega) {

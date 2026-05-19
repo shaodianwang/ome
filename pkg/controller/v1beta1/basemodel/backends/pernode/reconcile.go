@@ -7,7 +7,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
-	"github.com/ome-projects/ome/pkg/modelagent"
 )
 
 // ReconcileStatusFromConfigMaps drives the per-node ConfigMap
@@ -19,8 +18,8 @@ func ReconcileStatusFromConfigMaps(ctx context.Context, c client.Client, log log
 	if !isClusterScoped {
 		namespace = obj.GetNamespace()
 	}
-	specUpdate := func(ctx context.Context, config *modelagent.ModelConfig) error {
-		return retrySpecUpdate(ctx, c, log, obj, config, func(ctx context.Context, kubeClient client.Client, latest client.Object, config *modelagent.ModelConfig) error {
+	specUpdate := func(ctx context.Context, config *shared.ModelConfig) error {
+		return retrySpecUpdate(ctx, c, log, obj, config, func(ctx context.Context, kubeClient client.Client, latest client.Object, config *shared.ModelConfig) error {
 			latestSpec, _, err := shared.ModelSpecAndStatus(latest)
 			if err != nil {
 				return err

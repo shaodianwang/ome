@@ -7,8 +7,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 
-	"github.com/ome-projects/ome/pkg/configutils"
-	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/sgl-project/ome/pkg/configutils"
+	"github.com/sgl-project/ome/pkg/logging"
 )
 
 // Config defines the configuration for the model metadata extractor

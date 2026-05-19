@@ -62,9 +62,9 @@ COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
 
 # (label-suffix, ECR repo name under msl_infra/, Dockerfile)
 # Drop redundant "ome-" prefix in ECR names so we don't get "ome-ome-*".
+# model-agent is not built locally; we consume upstream-published images.
 IMAGES = [
     ("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile"),
-    ("model-agent", "ome-model-agent", "dockerfiles/model-agent.Dockerfile"),
     ("ome-agent", "ome-agent", "dockerfiles/ome-agent.Dockerfile"),
 ]
 

@@ -107,6 +107,9 @@ ome:
     scalingThreshold: "10"
     scalingOperator: "GreaterThanOrEqual"
 modelAgent:
+  # Disabled by default — this fork consumes upstream-published
+  # model-agent images rather than building/deploying locally.
+  enabled: false
   hostPath: /mnt/data/models
   priorityClassName: system-node-critical
   serviceAccountName: ome-model-agent

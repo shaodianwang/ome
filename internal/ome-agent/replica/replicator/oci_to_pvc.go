@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
-	"github.com/ome-projects/ome/pkg/logging"
-	"github.com/ome-projects/ome/pkg/ociobjectstore"
+	"github.com/sgl-project/ome/pkg/logging"
+	"github.com/sgl-project/ome/pkg/ociobjectstore"
 )
 
 type OCIToPVCReplicator struct {

@@ -279,12 +279,6 @@ ome-manager: xet-build ## 🏗️  Build ome-manager binary.
 	$(GO_BUILD_ENV) $(GO_CMD) build -ldflags="$(LD_FLAGS)" -o bin/manager ./cmd/manager
 	@echo "✅ Build complete"
 
-.PHONY: model-agent
-model-agent: xet-build ## 🤖 Build model-agent binary.
-	@echo "🤖 Building model-agent..."
-	$(GO_BUILD_ENV) $(GO_CMD) build -ldflags="$(LD_FLAGS)" -o bin/model-agent ./cmd/model-agent
-	@echo "✅ Build complete"
-
 .PHONY: ome-agent
 ome-agent: xet-build ## 🔄 Build ome-agent binary.
 	@echo "🔄 Building ome-agent..."
@@ -295,11 +289,6 @@ ome-agent: xet-build ## 🔄 Build ome-agent binary.
 run-ome-manager: manifests generate fmt vet ## Run ome-manager binary from local host against the configured Kubernetes cluster in ~/.kube/config or KUBECONFIG env.
 	@echo "🏃‍♂️ Running ome-manager..."
 	$(GO_BUILD_ENV) $(GO_CMD) run ./cmd/manager/main.go
-
-.PHONY: run-model-agent
-run-model-agent: fmt vet ## Run model-agent binary from local host against the configured Kubernetes cluster in ~/.kube/config or KUBECONFIG env.
-	@echo "🏃‍♂️ Running model-agent..."
-	$(GO_BUILD_ENV) $(GO_CMD) run ./cmd/model-agent/main.go
 
 .PHONY: run-ome-agent-hf-download
 run-ome-agent-hf-download: fmt vet ome-agent ## Run ome-agent binary from local host against the configured Kubernetes cluster in ~/.kube/config or KUBECONFIG env.
@@ -327,16 +316,6 @@ ome-image: fmt vet ## Build ome-manager image.
 		. -f dockerfiles/manager.Dockerfile -t $(MANAGER_IMG)
 	@echo "✅ Image built"
 
-.PHONY: model-agent-image
-model-agent-image: fmt vet ## Build model-agent image.
-	@echo "🚀 Building model-agent image..."
-	$(DOCKER_BUILD_CMD) build --platform=$(ARCH) \
-		--build-arg VERSION=$(GIT_TAG) \
-		--build-arg GIT_TAG=$(GIT_TAG) \
-		--build-arg GIT_COMMIT=$(shell git rev-parse HEAD) \
-		. -f dockerfiles/model-agent.Dockerfile -t $(REGISTRY)/model-agent:$(TAG)
-	@echo "✅ Image built"
-
 .PHONY: ome-agent-image
 ome-agent-image: fmt vet xet-build ## Build ome-agent image.
 	@echo "🚀 Building ome-agent image..."
@@ -358,7 +337,6 @@ docker-buildx-setup: ## 🔧 Setup Docker buildx for multi-arch builds
 build-all-images: fmt vet ## 🚀 Build all images for current architecture
 	@echo "🚀 Building all OME images for $(ARCH)..."
 	@$(MAKE) ome-image
-	@$(MAKE) model-agent-image
 	@$(MAKE) ome-agent-image
 	@echo "✅ All images built successfully"
 
@@ -370,11 +348,6 @@ build-all-images-multiarch: fmt vet docker-buildx-setup ## 🌍 Build all images
 		--build-arg GIT_TAG=$(GIT_TAG) \
 		--build-arg GIT_COMMIT=$(shell git rev-parse HEAD) \
 		. -f dockerfiles/manager.Dockerfile -t $(MANAGER_IMG) --push
-	$(DOCKER_BUILD_CMD) buildx build --platform=linux/amd64,linux/arm64 \
-		--build-arg VERSION=$(GIT_TAG) \
-		--build-arg GIT_TAG=$(GIT_TAG) \
-		--build-arg GIT_COMMIT=$(shell git rev-parse HEAD) \
-		. -f dockerfiles/model-agent.Dockerfile -t $(REGISTRY)/model-agent:$(TAG) --push
 	$(DOCKER_BUILD_CMD) buildx build --platform=linux/amd64,linux/arm64 \
 		--build-arg VERSION=$(GIT_TAG) \
 		--build-arg GIT_TAG=$(GIT_TAG) \
@@ -477,12 +450,6 @@ push-manager-image: ome-image ## Push manager image to registry.
 	$(DOCKER_BUILD_CMD) push $(MANAGER_IMG)
 	@echo "✅ Image pushed"
 
-.PHONY: push-model-agent-image
-push-model-agent-image: model-agent-image ## Push model-agent image to registry.
-	@echo "🚀 Pushing model-agent image to registry..."
-	$(DOCKER_BUILD_CMD) push $(REGISTRY)/model-agent:$(TAG)
-	@echo "✅ Image pushed"
-
 .PHONY: push-ome-agent-image
 push-ome-agent-image: ome-agent-image ## Push ome-agent image to registry.
 	@echo "🚀 Pushing ome-agent image to registry..."
@@ -494,13 +461,6 @@ patch-manager-dev: push-manager-image ## Deploy manager image to dev cluster.
 	@echo "🔄 Patching manager image to dev cluster..."
 	echo "Patch manager image to dev: $(MANAGER_IMG)"
 	./hack/patch_image_dev.sh $(MANAGER_IMG) manager
-	@echo "✅ Patch complete"
-
-.PHONY: patch-model-agent-dev
-patch-model-agent-dev: push-model-agent-image ## Deploy model-agent image to dev cluster.
-	@echo "🔄 Patching model-agent image to dev cluster..."
-	echo "Patch model-agent image to dev: $(REGISTRY)/model-agent:$(TAG)"
-	./hack/patch_image_dev.sh $(REGISTRY)/model-agent:$(TAG) model_agent
 	@echo "✅ Patch complete"
 
 .PHONY: deploy-helm

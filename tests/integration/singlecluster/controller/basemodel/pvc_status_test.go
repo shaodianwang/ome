@@ -14,7 +14,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -43,7 +43,7 @@ var _ = ginkgo.Describe("BaseModel PVC status conditions", ginkgo.Ordered, func(
 		Expect(k8sClient.Create(suiteCtx, bm)).To(Succeed())
 
 		Expect(writePVCAgentEntry(suiteCtx, k8sClient,
-			"updating-llama", ns, false, modelagent.ModelStatusUpdating, nil)).To(Succeed())
+			"updating-llama", ns, false, shared.ModelStatusUpdating, nil)).To(Succeed())
 
 		ginkgo.By("Updating status keeps the model in InTransit, not Ready")
 		Eventually(func(g Gomega) {
@@ -65,7 +65,7 @@ var _ = ginkgo.Describe("BaseModel PVC status conditions", ginkgo.Ordered, func(
 
 		// 1. Updating
 		Expect(writePVCAgentEntry(suiteCtx, k8sClient,
-			"flicker-llama", ns, false, modelagent.ModelStatusUpdating, nil)).To(Succeed())
+			"flicker-llama", ns, false, shared.ModelStatusUpdating, nil)).To(Succeed())
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "flicker-llama", Namespace: ns}, got)).To(Succeed())
@@ -74,8 +74,8 @@ var _ = ginkgo.Describe("BaseModel PVC status conditions", ginkgo.Ordered, func(
 
 		// 2. Ready
 		Expect(writePVCAgentEntry(suiteCtx, k8sClient,
-			"flicker-llama", ns, false, modelagent.ModelStatusReady,
-			&modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			"flicker-llama", ns, false, shared.ModelStatusReady,
+			&shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "flicker-llama", Namespace: ns}, got)).To(Succeed())
@@ -85,7 +85,7 @@ var _ = ginkgo.Describe("BaseModel PVC status conditions", ginkgo.Ordered, func(
 		// 3. Back to Updating (e.g., agent recomputes after a model
 		//    file change). State must drop back to InTransit.
 		Expect(writePVCAgentEntry(suiteCtx, k8sClient,
-			"flicker-llama", ns, false, modelagent.ModelStatusUpdating, nil)).To(Succeed())
+			"flicker-llama", ns, false, shared.ModelStatusUpdating, nil)).To(Succeed())
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "flicker-llama", Namespace: ns}, got)).To(Succeed())
@@ -94,8 +94,8 @@ var _ = ginkgo.Describe("BaseModel PVC status conditions", ginkgo.Ordered, func(
 
 		// 4. Ready again
 		Expect(writePVCAgentEntry(suiteCtx, k8sClient,
-			"flicker-llama", ns, false, modelagent.ModelStatusReady,
-			&modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			"flicker-llama", ns, false, shared.ModelStatusReady,
+			&shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "flicker-llama", Namespace: ns}, got)).To(Succeed())
@@ -123,7 +123,7 @@ var _ = ginkgo.Describe("BaseModel PVC status conditions", ginkgo.Ordered, func(
 
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient,
 			"autofill-llama", ns, false,
-			&modelagent.ModelConfig{
+			&shared.ModelConfig{
 				ModelType:          "llama",
 				ModelArchitecture:  "LlamaForCausalLM",
 				ModelParameterSize: "70B",
@@ -202,12 +202,12 @@ var _ = ginkgo.Describe("BaseModel PVC status conditions", ginkgo.Ordered, func(
 // expose) into the per-PVC ConfigMap. Idempotent: updates if exists.
 func writePVCAgentEntry(ctx context.Context, c client.Client,
 	modelName, modelNamespace string, isClusterScoped bool,
-	status modelagent.ModelStatus, cfg *modelagent.ModelConfig) error {
+	status shared.ModelStatus, cfg *shared.ModelConfig) error {
 
 	cmName := constants.GetPVCMetadataConfigMapName(modelName, modelNamespace, isClusterScoped)
 	modelKey := constants.GetModelConfigMapKey(modelNamespace, modelName, isClusterScoped)
 
-	entry := modelagent.ModelEntry{Name: modelName, Status: status, Config: cfg}
+	entry := shared.ModelEntry{Name: modelName, Status: status, Config: cfg}
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return err

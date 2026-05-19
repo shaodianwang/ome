@@ -10,7 +10,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -56,9 +56,9 @@ var _ = ginkgo.Describe("BaseModel PVC URI and scope handling", ginkgo.Ordered, 
 
 		ginkgo.By("simulate both agents Ready — each writes its own scope-named ConfigMap")
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient,
-			"bmcbm-shared", ns, false, &modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			"bmcbm-shared", ns, false, &shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient,
-			"bmcbm-shared", ns, true, &modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			"bmcbm-shared", ns, true, &shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 
 		ginkgo.By("both CRs reach Ready independently and their per-PVC CMs have different names")
 		Eventually(func(g Gomega) {
@@ -99,7 +99,7 @@ var _ = ginkgo.Describe("BaseModel PVC URI and scope handling", ginkgo.Ordered, 
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient,
-			"deep-llama", ns, false, &modelagent.ModelConfig{ModelType: "llama"})).To(Succeed())
+			"deep-llama", ns, false, &shared.ModelConfig{ModelType: "llama"})).To(Succeed())
 
 		ginkgo.By("agent Ready propagates through the long-path Job")
 		Eventually(func(g Gomega) {

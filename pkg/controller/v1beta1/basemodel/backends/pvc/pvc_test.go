@@ -20,7 +20,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	"github.com/ome-projects/ome/pkg/utils/storage"
 )
 
@@ -349,9 +349,9 @@ func TestApplyPVCStatusFromConfigMap(t *testing.T) {
 	ctx := context.Background()
 	log := logf.Log.WithName("test")
 
-	makeCM := func(modelName, ns string, isCluster bool, status modelagent.ModelStatus, cfg *modelagent.ModelConfig, errMsg string) *corev1.ConfigMap {
+	makeCM := func(modelName, ns string, isCluster bool, status shared.ModelStatus, cfg *shared.ModelConfig, errMsg string) *corev1.ConfigMap {
 		t.Helper()
-		entry := modelagent.ModelEntry{Name: modelName, Status: status, Config: cfg}
+		entry := shared.ModelEntry{Name: modelName, Status: status, Config: cfg}
 		data, err := json.Marshal(entry)
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
@@ -382,7 +382,7 @@ func TestApplyPVCStatusFromConfigMap(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "llama-7b", Namespace: "models"},
 			Spec:       v1beta1.BaseModelSpec{Storage: &v1beta1.StorageSpec{StorageUri: ptr.To("pvc://my-pvc/p")}},
 		}
-		cm := makeCM("llama-7b", "models", false, modelagent.ModelStatusReady, &modelagent.ModelConfig{
+		cm := makeCM("llama-7b", "models", false, shared.ModelStatusReady, &shared.ModelConfig{
 			ModelType: "llama", ModelArchitecture: "LlamaForCausalLM", MaxTokens: 4096,
 		}, "")
 		c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).
@@ -414,7 +414,7 @@ func TestApplyPVCStatusFromConfigMap(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "llama-7b", Namespace: "models"},
 			Spec:       v1beta1.BaseModelSpec{Storage: &v1beta1.StorageSpec{StorageUri: ptr.To("pvc://my-pvc/p")}},
 		}
-		cm := makeCM("llama-7b", "models", false, modelagent.ModelStatusFailed, nil, "config.json missing")
+		cm := makeCM("llama-7b", "models", false, shared.ModelStatusFailed, nil, "config.json missing")
 		c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(bm, cm).
 			WithStatusSubresource(&v1beta1.BaseModel{}).

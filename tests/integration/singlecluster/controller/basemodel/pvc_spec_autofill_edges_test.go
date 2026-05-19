@@ -6,7 +6,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -44,7 +44,7 @@ var _ = ginkgo.Describe("BaseModel PVC spec auto-fill edges", ginkgo.Ordered, fu
 		// Agent publishes DIFFERENT values from what the user set.
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient,
 			"preset-llama", ns, false,
-			&modelagent.ModelConfig{
+			&shared.ModelConfig{
 				ModelType:          "agent-discovered-type",
 				ModelArchitecture:  "agent-discovered-arch",
 				ModelParameterSize: "70B", // unset on spec, so this WILL fill
@@ -86,7 +86,7 @@ var _ = ginkgo.Describe("BaseModel PVC spec auto-fill edges", ginkgo.Ordered, fu
 
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient,
 			"caps-llama", ns, false,
-			&modelagent.ModelConfig{
+			&shared.ModelConfig{
 				ModelCapabilities: []string{"AGENT_CAP_A", "AGENT_CAP_B"},
 			})).To(Succeed())
 
@@ -115,7 +115,7 @@ var _ = ginkgo.Describe("BaseModel PVC spec auto-fill edges", ginkgo.Ordered, fu
 
 		Expect(v1beta1testing.SimulatePVCAgentReady(suiteCtx, k8sClient,
 			"quant-llama", ns, false,
-			&modelagent.ModelConfig{
+			&shared.ModelConfig{
 				ModelType:    "llama",
 				Quantization: "fp8", // valid ModelQuantization value
 			})).To(Succeed())

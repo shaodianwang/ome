@@ -8,9 +8,9 @@ import (
 	"github.com/spf13/viper"
 	"go.uber.org/fx"
 
-	"github.com/ome-projects/ome/pkg/afero"
-	"github.com/ome-projects/ome/pkg/logging"
 	"github.com/ome-projects/ome/pkg/xet"
+	"github.com/sgl-project/ome/pkg/afero"
+	"github.com/sgl-project/ome/pkg/logging"
 )
 
 // hfDownloadAgentParams represents the parameters for dependency injection

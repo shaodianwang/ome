@@ -8,14 +8,14 @@ import (
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 
-	"github.com/ome-projects/ome/pkg/afero"
+	"github.com/sgl-project/ome/pkg/afero"
 
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/ome-projects/ome/pkg/ociobjectstore"
 	"github.com/ome-projects/ome/pkg/utils/storage"
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
+	"github.com/sgl-project/ome/pkg/ociobjectstore"
 )
 
 // Define reusable struct types to avoid repetition

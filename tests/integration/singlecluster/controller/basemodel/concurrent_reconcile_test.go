@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -60,7 +60,7 @@ var _ = ginkgo.Describe("BaseModel reconciler under concurrent load", func() {
 		for _, name := range names {
 			Expect(writeNodeAgentEntry(suiteCtx, k8sClient,
 				nodeName, name, ns.Name, false,
-				modelagent.ModelStatusReady, nil)).To(Succeed())
+				shared.ModelStatusReady, nil)).To(Succeed())
 		}
 
 		ginkgo.By("every BM must reach state=Ready with NodesReady=[node] — no event dropped")

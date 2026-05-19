@@ -14,7 +14,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -60,7 +60,7 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 		ginkgo.By("agent writes Ready ConfigMap for the single node")
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient,
 			nodeName, "pn-single-llama", nsName, false,
-			modelagent.ModelStatusReady, nil)).To(Succeed())
+			shared.ModelStatusReady, nil)).To(Succeed())
 		ginkgo.DeferCleanup(deleteNodeConfigMap(k8sClient, nodeName))
 
 		Eventually(func(g Gomega) {
@@ -89,7 +89,7 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 		for _, n := range nodes {
 			Expect(writeNodeAgentEntry(suiteCtx, k8sClient,
 				n, "pn-twonodes-llama", nsName, false,
-				modelagent.ModelStatusReady, nil)).To(Succeed())
+				shared.ModelStatusReady, nil)).To(Succeed())
 			ginkgo.DeferCleanup(deleteNodeConfigMap(k8sClient, n))
 		}
 
@@ -116,9 +116,9 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 		Expect(k8sClient.Create(suiteCtx, bm)).To(Succeed())
 
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient, readyNode,
-			"pn-mixed-llama", nsName, false, modelagent.ModelStatusReady, nil)).To(Succeed())
+			"pn-mixed-llama", nsName, false, shared.ModelStatusReady, nil)).To(Succeed())
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient, failedNode,
-			"pn-mixed-llama", nsName, false, modelagent.ModelStatusFailed, nil)).To(Succeed())
+			"pn-mixed-llama", nsName, false, shared.ModelStatusFailed, nil)).To(Succeed())
 
 		ginkgo.By("calculateLifecycleState: any Ready wins over Failed — state=Ready, both arrays populated")
 		Eventually(func(g Gomega) {
@@ -140,7 +140,7 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 		Expect(k8sClient.Create(suiteCtx, bm)).To(Succeed())
 
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient, nodeName,
-			"pn-failed-llama", nsName, false, modelagent.ModelStatusFailed, nil)).To(Succeed())
+			"pn-failed-llama", nsName, false, shared.ModelStatusFailed, nil)).To(Succeed())
 		ginkgo.DeferCleanup(deleteNodeConfigMap(k8sClient, nodeName))
 
 		Eventually(func(g Gomega) {
@@ -162,7 +162,7 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 		Expect(k8sClient.Create(suiteCtx, bm)).To(Succeed())
 
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient, nodeName,
-			"pn-updating-llama", nsName, false, modelagent.ModelStatusUpdating, nil)).To(Succeed())
+			"pn-updating-llama", nsName, false, shared.ModelStatusUpdating, nil)).To(Succeed())
 		ginkgo.DeferCleanup(deleteNodeConfigMap(k8sClient, nodeName))
 
 		ginkgo.By("Updating nodes are not added to either array → both empty → state=InTransit")
@@ -193,7 +193,7 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 
 		ginkgo.By("agent reports Updating first")
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient, nodeName,
-			"pn-flip-llama", nsName, false, modelagent.ModelStatusUpdating, nil)).To(Succeed())
+			"pn-flip-llama", nsName, false, shared.ModelStatusUpdating, nil)).To(Succeed())
 		ginkgo.DeferCleanup(deleteNodeConfigMap(k8sClient, nodeName))
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}
@@ -203,7 +203,7 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 
 		ginkgo.By("agent flips entry to Ready → controller must transition state to Ready")
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient, nodeName,
-			"pn-flip-llama", nsName, false, modelagent.ModelStatusReady, nil)).To(Succeed())
+			"pn-flip-llama", nsName, false, shared.ModelStatusReady, nil)).To(Succeed())
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "pn-flip-llama", Namespace: nsName}, got)).To(Succeed())
@@ -229,7 +229,7 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 
 		for _, n := range []string{stayNode, goNode} {
 			Expect(writeNodeAgentEntry(suiteCtx, k8sClient, n,
-				"pn-nodedel-llama", nsName, false, modelagent.ModelStatusReady, nil)).To(Succeed())
+				"pn-nodedel-llama", nsName, false, shared.ModelStatusReady, nil)).To(Succeed())
 			ginkgo.DeferCleanup(deleteNodeConfigMap(k8sClient, n))
 		}
 
@@ -264,8 +264,8 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 		Expect(k8sClient.Create(suiteCtx, bm)).To(Succeed())
 
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient, nodeName,
-			"pn-autofill-llama", nsName, false, modelagent.ModelStatusReady,
-			&modelagent.ModelConfig{
+			"pn-autofill-llama", nsName, false, shared.ModelStatusReady,
+			&shared.ModelConfig{
 				ModelType:          "llama",
 				ModelArchitecture:  "LlamaForCausalLM",
 				ModelParameterSize: "7B",
@@ -309,9 +309,9 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 		Expect(k8sClient.Create(suiteCtx, bm)).To(Succeed())
 
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient, nodeName,
-			"pn-isolation-shared", "", true, modelagent.ModelStatusReady, nil)).To(Succeed())
+			"pn-isolation-shared", "", true, shared.ModelStatusReady, nil)).To(Succeed())
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient, nodeName,
-			"pn-isolation-shared", nsName, false, modelagent.ModelStatusFailed, nil)).To(Succeed())
+			"pn-isolation-shared", nsName, false, shared.ModelStatusFailed, nil)).To(Succeed())
 
 		ginkgo.By("ClusterBaseModel sees Ready, BaseModel sees Failed — keys are isolated by GetModelConfigMapKey")
 		Eventually(func(g Gomega) {
@@ -345,7 +345,7 @@ var _ = ginkgo.Describe("BaseModel per-node download flow", func() {
 
 		// Write an entry for a DIFFERENT model name — not ours.
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient, nodeName,
-			"some-other-model", nsName, false, modelagent.ModelStatusReady, nil)).To(Succeed())
+			"some-other-model", nsName, false, shared.ModelStatusReady, nil)).To(Succeed())
 
 		// Give the controller a few reconciles, then assert the rollup
 		// for OUR model is still empty. Consistently here is the right
@@ -407,10 +407,10 @@ func deleteNodeConfigMap(kc client.Client, nodeName string) func() {
 // modelNamespace is "" for ClusterBaseModel.
 func writeNodeAgentEntry(ctx context.Context, c client.Client,
 	nodeName, modelName, modelNamespace string, isClusterScoped bool,
-	status modelagent.ModelStatus, cfg *modelagent.ModelConfig) error {
+	status shared.ModelStatus, cfg *shared.ModelConfig) error {
 
 	modelKey := constants.GetModelConfigMapKey(modelNamespace, modelName, isClusterScoped)
-	entry := modelagent.ModelEntry{
+	entry := shared.ModelEntry{
 		Name:   modelName,
 		Status: status,
 		Config: cfg,

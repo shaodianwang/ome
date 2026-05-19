@@ -15,8 +15,8 @@ import (
 
 	modelmetadata "github.com/ome-projects/ome/internal/ome-agent/model-metadata"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/logging"
-	"github.com/ome-projects/ome/pkg/modelagent"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
+	"github.com/sgl-project/ome/pkg/logging"
 )
 
 // Each It uses a distinct model name so the deterministic per-PVC
@@ -50,9 +50,9 @@ var _ = ginkgo.Describe("Metadata Agent PVC writes", ginkgo.Ordered, func() {
 		modelKey := constants.GetModelConfigMapKey(cfg.BaseModelNamespace, cfg.BaseModelName, cfg.ClusterScoped)
 		Expect(cm.Data).To(HaveKey(modelKey))
 
-		var entry modelagent.ModelEntry
+		var entry shared.ModelEntry
 		Expect(json.Unmarshal([]byte(cm.Data[modelKey]), &entry)).To(Succeed())
-		Expect(entry.Status).To(Equal(modelagent.ModelStatusReady))
+		Expect(entry.Status).To(Equal(shared.ModelStatusReady))
 		Expect(entry.Config).NotTo(BeNil())
 		Expect(entry.Config.ModelType).To(Equal("llama"))
 		Expect(entry.Config.ModelArchitecture).To(Equal("LlamaForCausalLM"))
@@ -77,9 +77,9 @@ var _ = ginkgo.Describe("Metadata Agent PVC writes", ginkgo.Ordered, func() {
 		Expect(cm.Annotations[constants.PVCMetadataLastErrorAnnotation]).NotTo(BeEmpty())
 
 		modelKey := constants.GetModelConfigMapKey(cfg.BaseModelNamespace, cfg.BaseModelName, cfg.ClusterScoped)
-		var entry modelagent.ModelEntry
+		var entry shared.ModelEntry
 		Expect(json.Unmarshal([]byte(cm.Data[modelKey]), &entry)).To(Succeed())
-		Expect(entry.Status).To(Equal(modelagent.ModelStatusFailed))
+		Expect(entry.Status).To(Equal(shared.ModelStatusFailed))
 	})
 
 	ginkgo.It("a second extraction overwrites in place rather than duplicating", func() {

@@ -8,8 +8,8 @@ import (
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 
-	"github.com/ome-projects/ome/pkg/logging"
 	"github.com/ome-projects/ome/pkg/utils/storage"
+	"github.com/sgl-project/ome/pkg/logging"
 )
 
 const (

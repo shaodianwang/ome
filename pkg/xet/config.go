@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/go-playground/validator/v10"
-	"github.com/ome-projects/ome/pkg/configutils"
-	"github.com/ome-projects/ome/pkg/logging"
+	"github.com/sgl-project/ome/pkg/configutils"
+	"github.com/sgl-project/ome/pkg/logging"
 	"github.com/spf13/viper"
 )
 
