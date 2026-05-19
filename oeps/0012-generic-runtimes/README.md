@@ -62,6 +62,32 @@ Net change in YAML across the org for a typical 10-model fleet:
 ISVCs where it belongs (model teams own ISVCs; platform owns runtimes
 and profiles).
 
+## Implementation status
+
+Part B shipped via PR #149. Two deviations from the design below
+landed during implementation; the rest of this document reflects the
+original design intent.
+
+- **`Status.EffectiveSpec` was dropped.** Consumers no longer read a
+  controller-resolved spec field on the runtime. They call client-side
+  helpers (`runtimeinheritance.ResolveClusterRuntime` /
+  `ResolveNamespacedRuntime`) or `runtimeselector.GetRuntime`, which
+  returns the resolved spec inline. `ServingRuntimeStatus` now carries
+  only `InheritanceChain` and an `InheritanceReady` condition.
+- **The runtime controller still drives status.** Chain + condition
+  reflect resolvability so admission webhooks and operators can see
+  why a chain is broken without re-walking it. The controller no
+  longer materializes a merged spec.
+
+Anywhere this document says "writes Status.EffectiveSpec" or "reads
+Status.EffectiveSpec", read it as "client-side resolve via the
+helpers above." The merge contract (fill-only-nil, root-first walk,
+cycle detection, depth limit) is unchanged.
+
+Part C below composes with Part B as designed: Part C mutates the
+stored runtime spec at admission, and Part B's resolver runs on the
+already-engine-populated spec at consumer call sites.
+
 ## Motivation
 
 The ServingRuntime CRD exists so that many InferenceServices can share
@@ -447,12 +473,12 @@ metadata:
 ```
 
 Ordering: Part C's webhook runs at admission (mutates stored runtime
-with engine defaults). Part B's runtime controller runs after, sees
-the now-engine-populated runtime, walks the inherit-from chain, fills
-remaining gaps from the operator infra profile, stores
-`Status.EffectiveSpec`. ISVC controller reads that. Both merges are
-fill-only-nil, so order is commutative for any field set by exactly
-one source.
+with engine defaults). Part B's resolver runs on demand at consumer
+call sites, sees the now-engine-populated runtime, walks the
+inherit-from chain, and fills remaining gaps from the operator infra
+profile. The ISVC controller calls the resolver to get the merged
+spec. Both merges are fill-only-nil, so order is commutative for any
+field set by exactly one source.
 
 #### Scope of the first PR for Part C
 
