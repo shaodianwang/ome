@@ -2,7 +2,9 @@ package isvc
 
 import (
 	"context"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -110,6 +112,8 @@ func defaultEngine(engine *v1beta1.EngineSpec) {
 	if engine.MaxReplicas == 0 {
 		engine.MaxReplicas = 3
 	}
+
+	defaultOMENativeComponent(&engine.ComponentExtensionSpec, engineIsMultiPod(engine))
 }
 
 // defaultDecoder sets default values for the Decoder component
@@ -124,6 +128,8 @@ func defaultDecoder(decoder *v1beta1.DecoderSpec) {
 	if decoder.MaxReplicas == 0 {
 		decoder.MaxReplicas = 3
 	}
+
+	defaultOMENativeComponent(&decoder.ComponentExtensionSpec, decoderIsMultiPod(decoder))
 }
 
 // defaultRouter sets default values for the Router component
@@ -137,5 +143,96 @@ func defaultRouter(router *v1beta1.RouterSpec) {
 	// MaxReplicas is not a pointer type, so check if it's 0 (default value)
 	if router.MaxReplicas == 0 {
 		router.MaxReplicas = 2
+	}
+
+	// Router has no Leader/Worker; always single-pod.
+	defaultOMENativeComponent(&router.ComponentExtensionSpec, false)
+}
+
+// engineIsMultiPod reports whether the Engine spawns more than one pod per
+// Instance — true when a Leader is declared or when Worker.Size > 0.
+func engineIsMultiPod(engine *v1beta1.EngineSpec) bool {
+	if engine == nil {
+		return false
+	}
+	if engine.Leader != nil {
+		return true
+	}
+	return engine.Worker != nil && engine.Worker.Size != nil && *engine.Worker.Size > 0
+}
+
+// decoderIsMultiPod reports whether the Decoder spawns more than one pod per
+// Instance — true when a Leader is declared or when Worker.Size > 0.
+func decoderIsMultiPod(decoder *v1beta1.DecoderSpec) bool {
+	if decoder == nil {
+		return false
+	}
+	if decoder.Leader != nil {
+		return true
+	}
+	return decoder.Worker != nil && decoder.Worker.Size != nil && *decoder.Worker.Size > 0
+}
+
+// defaultOMENativeComponent fills in OEP-0007 lifecycle-policy defaults on
+// the Component's omenative sub-block. Only acts when the Component is
+// annotated ome.io/deploymentMode=OMENative; for any other mode the block is
+// left untouched. multiPod toggles the restart/ready policy defaults: a
+// multi-pod Instance defaults to group restart + AllPodReady aggregation;
+// a single-pod Instance defaults to None for both.
+func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod bool) {
+	if ext == nil {
+		return
+	}
+	if ext.Annotations[constants.DeploymentMode] != string(constants.OMENative) {
+		return
+	}
+	if ext.OMENative == nil {
+		ext.OMENative = &v1beta1.OMENativeComponentSpec{}
+	}
+	spec := ext.OMENative
+
+	if spec.RestartPolicy == nil {
+		rp := v1beta1.OMENativeRestartPolicyNone
+		if multiPod {
+			rp = v1beta1.OMENativeRestartPolicyRecreateInstance
+		}
+		spec.RestartPolicy = &rp
+	}
+
+	if spec.UpdateStrategy == nil {
+		spec.UpdateStrategy = &v1beta1.OMENativeUpdateStrategy{}
+	}
+	if spec.UpdateStrategy.Type == "" {
+		spec.UpdateStrategy.Type = v1beta1.OMENativeUpdateStrategyInPlaceIfPossible
+	}
+	if spec.UpdateStrategy.InPlaceUpdateStrategy == nil {
+		spec.UpdateStrategy.InPlaceUpdateStrategy = &v1beta1.OMENativeInPlaceUpdateStrategy{}
+	}
+	if spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds == nil {
+		grace := int32(30)
+		spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds = &grace
+	}
+	if spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle == nil {
+		mark := true
+		spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle = &mark
+	}
+
+	if spec.ReadyPolicy == nil {
+		rp := v1beta1.OMENativeReadyPolicyNone
+		if multiPod {
+			rp = v1beta1.OMENativeReadyPolicyAllPodReady
+		}
+		spec.ReadyPolicy = &rp
+	}
+
+	if spec.InstanceReadyTimeout == nil {
+		spec.InstanceReadyTimeout = &metav1.Duration{Duration: 30 * time.Minute}
+	}
+
+	if spec.MigrationPolicy == nil {
+		spec.MigrationPolicy = &v1beta1.OMENativeMigrationPolicy{}
+	}
+	if spec.MigrationPolicy.Mode == "" {
+		spec.MigrationPolicy.Mode = v1beta1.OMENativeMigrationPolicyModeAuto
 	}
 }

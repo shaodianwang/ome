@@ -3,6 +3,7 @@ package isvc
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -301,6 +302,174 @@ func TestDefaultComponents(t *testing.T) {
 		}
 	})
 }
+
+func int32Ptr(v int32) *int32 { return &v }
+
+func TestDefaultOMENativeComponent(t *testing.T) {
+	omenativeMode := map[string]string{constants.DeploymentMode: string(constants.OMENative)}
+
+	t.Run("not OMENative — omenative block untouched", func(t *testing.T) {
+		ext := &v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{constants.DeploymentMode: string(constants.MultiNode)},
+		}
+		defaultOMENativeComponent(ext, true)
+		assert.Nil(t, ext.OMENative)
+	})
+
+	t.Run("no annotation — omenative block untouched", func(t *testing.T) {
+		ext := &v1beta1.ComponentExtensionSpec{}
+		defaultOMENativeComponent(ext, true)
+		assert.Nil(t, ext.OMENative)
+	})
+
+	t.Run("OMENative + multi-pod — full defaults applied", func(t *testing.T) {
+		ext := &v1beta1.ComponentExtensionSpec{Annotations: omenativeMode}
+		defaultOMENativeComponent(ext, true)
+
+		require.NotNil(t, ext.OMENative)
+		spec := ext.OMENative
+
+		require.NotNil(t, spec.RestartPolicy)
+		assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *spec.RestartPolicy)
+
+		require.NotNil(t, spec.UpdateStrategy)
+		assert.Equal(t, v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, spec.UpdateStrategy.Type)
+		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy)
+		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
+		assert.Equal(t, int32(30), *spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
+		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
+		assert.True(t, *spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
+
+		require.NotNil(t, spec.ReadyPolicy)
+		assert.Equal(t, v1beta1.OMENativeReadyPolicyAllPodReady, *spec.ReadyPolicy)
+
+		require.NotNil(t, spec.InstanceReadyTimeout)
+		assert.Equal(t, 30*time.Minute, spec.InstanceReadyTimeout.Duration)
+
+		require.NotNil(t, spec.MigrationPolicy)
+		assert.Equal(t, v1beta1.OMENativeMigrationPolicyModeAuto, spec.MigrationPolicy.Mode)
+	})
+
+	t.Run("OMENative + single-pod — restart/ready default to None", func(t *testing.T) {
+		ext := &v1beta1.ComponentExtensionSpec{Annotations: omenativeMode}
+		defaultOMENativeComponent(ext, false)
+
+		require.NotNil(t, ext.OMENative)
+		require.NotNil(t, ext.OMENative.RestartPolicy)
+		assert.Equal(t, v1beta1.OMENativeRestartPolicyNone, *ext.OMENative.RestartPolicy)
+		require.NotNil(t, ext.OMENative.ReadyPolicy)
+		assert.Equal(t, v1beta1.OMENativeReadyPolicyNone, *ext.OMENative.ReadyPolicy)
+	})
+
+	t.Run("OMENative + existing values — preserved, nil siblings filled", func(t *testing.T) {
+		customRestart := v1beta1.OMENativeRestartPolicyRecreateISVC
+		customTimeout := metav1.Duration{Duration: 5 * time.Minute}
+		ext := &v1beta1.ComponentExtensionSpec{
+			Annotations: omenativeMode,
+			OMENative: &v1beta1.OMENativeComponentSpec{
+				RestartPolicy:        &customRestart,
+				InstanceReadyTimeout: &customTimeout,
+			},
+		}
+		defaultOMENativeComponent(ext, true)
+
+		// preserved
+		require.NotNil(t, ext.OMENative.RestartPolicy)
+		assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateISVC, *ext.OMENative.RestartPolicy)
+		assert.Equal(t, 5*time.Minute, ext.OMENative.InstanceReadyTimeout.Duration)
+
+		// filled
+		require.NotNil(t, ext.OMENative.UpdateStrategy)
+		assert.Equal(t, v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, ext.OMENative.UpdateStrategy.Type)
+		require.NotNil(t, ext.OMENative.ReadyPolicy)
+		assert.Equal(t, v1beta1.OMENativeReadyPolicyAllPodReady, *ext.OMENative.ReadyPolicy)
+		require.NotNil(t, ext.OMENative.MigrationPolicy)
+		assert.Equal(t, v1beta1.OMENativeMigrationPolicyModeAuto, ext.OMENative.MigrationPolicy.Mode)
+	})
+
+	t.Run("OMENative + partial UpdateStrategy — only nil leaves filled", func(t *testing.T) {
+		customType := v1beta1.OMENativeUpdateStrategyRecreatePod
+		customGrace := int32(60)
+		ext := &v1beta1.ComponentExtensionSpec{
+			Annotations: omenativeMode,
+			OMENative: &v1beta1.OMENativeComponentSpec{
+				UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+					Type: customType,
+					InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+						GracePeriodSeconds: &customGrace,
+					},
+				},
+			},
+		}
+		defaultOMENativeComponent(ext, true)
+
+		assert.Equal(t, v1beta1.OMENativeUpdateStrategyRecreatePod, ext.OMENative.UpdateStrategy.Type)
+		assert.Equal(t, int32(60), *ext.OMENative.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
+		// MarkNotReadyDuringLifecycle was nil → defaulted to true
+		require.NotNil(t, ext.OMENative.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
+		assert.True(t, *ext.OMENative.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
+	})
+}
+
+func TestEngineIsMultiPod(t *testing.T) {
+	tests := []struct {
+		name string
+		spec *v1beta1.EngineSpec
+		want bool
+	}{
+		{name: "nil", spec: nil, want: false},
+		{name: "empty", spec: &v1beta1.EngineSpec{}, want: false},
+		{name: "leader only", spec: &v1beta1.EngineSpec{Leader: &v1beta1.LeaderSpec{}}, want: true},
+		{
+			name: "worker size 0",
+			spec: &v1beta1.EngineSpec{Worker: &v1beta1.WorkerSpec{Size: func() *int { v := 0; return &v }()}},
+			want: false,
+		},
+		{
+			name: "worker size 1",
+			spec: &v1beta1.EngineSpec{Worker: &v1beta1.WorkerSpec{Size: func() *int { v := 1; return &v }()}},
+			want: true,
+		},
+		{
+			name: "worker size nil",
+			spec: &v1beta1.EngineSpec{Worker: &v1beta1.WorkerSpec{}},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, engineIsMultiPod(tt.spec))
+		})
+	}
+}
+
+func TestDefaultEngine_OMENativeAnnotationTriggersDefaults(t *testing.T) {
+	engine := &v1beta1.EngineSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+		},
+		Worker: &v1beta1.WorkerSpec{Size: func() *int { v := 3; return &v }()},
+	}
+	defaultEngine(engine)
+	require.NotNil(t, engine.OMENative)
+	require.NotNil(t, engine.OMENative.RestartPolicy)
+	assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *engine.OMENative.RestartPolicy)
+}
+
+func TestDefaultRouter_OMENativeAlwaysSinglePod(t *testing.T) {
+	router := &v1beta1.RouterSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+		},
+	}
+	defaultRouter(router)
+	require.NotNil(t, router.OMENative)
+	require.NotNil(t, router.OMENative.RestartPolicy)
+	assert.Equal(t, v1beta1.OMENativeRestartPolicyNone, *router.OMENative.RestartPolicy)
+}
+
+// silence unused-helper lint if int32Ptr isn't referenced elsewhere
+var _ = int32Ptr
 
 // =============================================================================
 // Webhook Integration Tests
