@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
+	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -155,6 +156,108 @@ func (b *HTTPRouteBuilder) createHTTPRouteRule(routeMatches []gatewayapiv1.HTTPR
 	}
 }
 
+// createWeightedHTTPRouteRule emits a rule whose backendRefs are
+// derived from ComponentStatusSpec.Traffic[]. OEP-0011 contract:
+//
+//   - When traffic is nil or has a single entry, the route collapses
+//     to a single backendRef pointing at defaultServiceName (today's
+//     behavior — backward compatible).
+//   - When traffic has multiple entries, each entry maps to a
+//     weighted backendRef. The backend Service name is taken from
+//     TrafficTarget.RevisionName, which the per-mode reconciler must
+//     populate with the full per-revision Service name (typically
+//     "<isvc>-<component>-rev-<hash>"). Entries with empty
+//     RevisionName fall back to defaultServiceName so the stable
+//     entry on a freshly-started rollout still has a backend.
+//
+// All weighted entries land in one rule (one set of matches +
+// filters); the gateway distributes traffic across the listed
+// backends per Gateway API standard weight semantics.
+func (b *HTTPRouteBuilder) createWeightedHTTPRouteRule(
+	routeMatches []gatewayapiv1.HTTPRouteMatch,
+	filters []gatewayapiv1.HTTPRouteFilter,
+	defaultServiceName, namespace string,
+	port int32,
+	timeout *gatewayapiv1.Duration,
+	traffic []knservingv1.TrafficTarget,
+) gatewayapiv1.HTTPRouteRule {
+	// No traffic split declared — collapse to a single backend
+	// (preserves today's pre-OEP-0011 behavior).
+	if len(traffic) == 0 {
+		return b.createHTTPRouteRule(routeMatches, filters, defaultServiceName, namespace, port, timeout)
+	}
+
+	backendRefs := make([]gatewayapiv1.HTTPBackendRef, 0, len(traffic))
+	for _, target := range traffic {
+		backendName := target.RevisionName
+		if backendName == "" {
+			backendName = defaultServiceName
+		}
+		var weight *int32
+		if target.Percent != nil {
+			w := clampBackendWeight(*target.Percent)
+			weight = &w
+		}
+		backendRefs = append(backendRefs, gatewayapiv1.HTTPBackendRef{
+			BackendRef: gatewayapiv1.BackendRef{
+				BackendObjectReference: gatewayapiv1.BackendObjectReference{
+					Kind:      ptr.To(gatewayapiv1.Kind(constants.ServiceKind)),
+					Name:      gatewayapiv1.ObjectName(backendName),
+					Namespace: (*gatewayapiv1.Namespace)(&namespace),
+					Port:      (*gatewayapiv1.PortNumber)(&port),
+				},
+				Weight: weight,
+			},
+		})
+	}
+	return gatewayapiv1.HTTPRouteRule{
+		Matches:     routeMatches,
+		Filters:     filters,
+		BackendRefs: backendRefs,
+		Timeouts: &gatewayapiv1.HTTPRouteTimeouts{
+			Request: timeout,
+		},
+	}
+}
+
+// gatewayAPIMaxWeight is the upper bound Gateway API permits on
+// BackendRef.Weight (per the v1 spec). Per-mode reconcilers populate
+// status.Traffic[].Percent from Knative-style 0-100 values, but the
+// type is *int64 so the cast to int32 needs a guard against
+// out-of-spec / overflow values.
+const gatewayAPIMaxWeight = 1_000_000
+
+// clampBackendWeight maps a Knative TrafficTarget.Percent (*int64,
+// nominally 0-100) into the int32 BackendRef.Weight that Gateway API
+// expects, clamping out-of-spec inputs into the [0, 1_000_000] range
+// instead of silently overflowing or sending negative weights to the
+// gateway controller.
+func clampBackendWeight(percent int64) int32 {
+	switch {
+	case percent < 0:
+		return 0
+	case percent > gatewayAPIMaxWeight:
+		return gatewayAPIMaxWeight
+	default:
+		return int32(percent)
+	}
+}
+
+// componentTraffic returns the Traffic[] entries the per-mode
+// reconciler has populated for the given Component. Nil when no
+// status exists yet (first reconcile) or when the Component's
+// reconciler has not declared any traffic split.
+func componentTraffic(isvc *v1beta1.InferenceService, c v1beta1.ComponentType) []knservingv1.TrafficTarget {
+	if isvc.Status.Components == nil {
+		return nil
+	}
+	status, ok := isvc.Status.Components[c]
+	if !ok {
+		return nil
+	}
+	return status.Traffic
+}
+
 func (b *HTTPRouteBuilder) buildEngineHTTPRoute(isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
 	if !isvc.Status.IsConditionReady(v1beta1.EngineReady) {
 		isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
@@ -184,8 +287,12 @@ func (b *HTTPRouteBuilder) buildEngineHTTPRoute(isvc *v1beta1.InferenceService) 
 	}
 
 	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
+	// OEP-0011 C2: weighted backendRefs from
+	// status.components[engine].traffic[]. Collapses to a single
+	// backendRef when no traffic split is declared (today's behavior).
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
-		b.createHTTPRouteRule(routeMatch, filters, engineName, isvc.Namespace, EngineDefaultPort, timeout),
+		b.createWeightedHTTPRouteRule(routeMatch, filters, engineName, isvc.Namespace, EngineDefaultPort, timeout,
+			componentTraffic(isvc, v1beta1.EngineComponent)),
 	}
 
 	return b.buildHTTPRouteResource(isvc, engineName,
@@ -212,8 +319,11 @@ func (b *HTTPRouteBuilder) buildRouterHTTPRoute(isvc *v1beta1.InferenceService) 
 	}
 
 	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
+	// OEP-0011 C2: weighted backendRefs from
+	// status.components[router].traffic[].
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
-		b.createHTTPRouteRule(routeMatch, filters, routerName, isvc.Namespace, RouterDefaultPort, timeout),
+		b.createWeightedHTTPRouteRule(routeMatch, filters, routerName, isvc.Namespace, RouterDefaultPort, timeout,
+			componentTraffic(isvc, v1beta1.RouterComponent)),
 	}
 
 	return b.buildHTTPRouteResource(isvc, constants.RouterServiceName(isvc.Name),
@@ -240,8 +350,11 @@ func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(isvc *v1beta1.InferenceService)
 	}
 
 	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
+	// OEP-0011 C2: weighted backendRefs from
+	// status.components[decoder].traffic[].
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
-		b.createHTTPRouteRule(routeMatch, filters, decoderName, isvc.Namespace, DecoderDefaultPort, timeout),
+		b.createWeightedHTTPRouteRule(routeMatch, filters, decoderName, isvc.Namespace, DecoderDefaultPort, timeout,
+			componentTraffic(isvc, v1beta1.DecoderComponent)),
 	}
 
 	return b.buildHTTPRouteResource(isvc, constants.DecoderServiceName(isvc.Name),
@@ -254,6 +367,13 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 	var serviceName string
 	var port int32
 	var timeout *gatewayapiv1.Duration
+	// fallbackComponent identifies which Component's
+	// status.components[*].traffic[] drives the top-level route's
+	// weighted backends. When router is present, top-level falls
+	// back to router (and inherits router's traffic split during a
+	// router rollout). When no router, top-level falls back to
+	// engine.
+	var fallbackComponent v1beta1.ComponentType
 
 	if isvc.Spec.Router != nil {
 		if !isvc.Status.IsConditionReady(v1beta1.RouterReady) {
@@ -270,6 +390,7 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 		if isvc.Spec.Router.TimeoutSeconds != nil {
 			timeout = toGatewayAPIDuration(*isvc.Spec.Router.TimeoutSeconds)
 		}
+		fallbackComponent = v1beta1.RouterComponent
 	} else {
 		if !isvc.Status.IsConditionReady(v1beta1.EngineReady) {
 			isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
@@ -291,12 +412,16 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 		if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
 			timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
 		}
+		fallbackComponent = v1beta1.EngineComponent
 	}
 
 	prefix := b.pathPrefix(isvc, isvc.Name)
 	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
+	// OEP-0011 C2: top-level route inherits the weighted backendRefs
+	// of whichever Component it falls back to (router or engine).
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
-		b.createHTTPRouteRule(routeMatch, filters, serviceName, isvc.Namespace, port, timeout),
+		b.createWeightedHTTPRouteRule(routeMatch, filters, serviceName, isvc.Namespace, port, timeout,
+			componentTraffic(isvc, fallbackComponent)),
 	}
 
 	return b.buildHTTPRouteResource(isvc, isvc.Name,
