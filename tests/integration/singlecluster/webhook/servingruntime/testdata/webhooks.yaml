@@ -1,0 +1,47 @@
+# Test-only webhook fixture: ServingRuntime + ClusterServingRuntime
+# ValidatingWebhookConfigurations. envtest patches the placeholder
+# caBundle and clientConfig.service → clientConfig.url at install
+# time; values here are only scaffolding.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: servingruntime.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-servingruntime
+    failurePolicy: Fail
+    name: servingruntime.ome-webhook-server.validator
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["servingruntimes"]
+        scope: "Namespaced"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: clusterservingruntime.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-clusterservingruntime
+    failurePolicy: Fail
+    name: clusterservingruntime.ome-webhook-server.validator
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["clusterservingruntimes"]
+        scope: "Cluster"

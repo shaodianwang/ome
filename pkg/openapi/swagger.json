@@ -3797,7 +3797,30 @@
     },
     "v1beta1.ServingRuntimeStatus": {
       "description": "ServingRuntimeStatus defines the observed state of ServingRuntime",
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "conditions": {
+          "description": "Conditions reflect the runtime controller's view of inheritance resolution. Currently only InheritanceReady (True/False) is surfaced. Informational — consumers can block on InheritanceReady=False if they want to gate on chain health.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1.Condition"
+          },
+          "x-kubernetes-list-map-keys": [
+            "type"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "inheritanceChain": {
+          "description": "InheritanceChain lists the runtime names walked when resolving the ome.io/inherit-from chain, in root-first order. Single-entry list ([self]) when no inheritance is declared. Operator-visible only — consumers re-walk the chain in-memory at use time rather than reading a pre-computed spec from status (avoids storing the fully-merged spec, which is large).",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "atomic"
+        }
+      }
     },
     "v1beta1.StorageSpec": {
       "type": "object",

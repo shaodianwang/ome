@@ -6735,8 +6735,54 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimeStatus(ref common.ReferenceCallba
 			SchemaProps: spec.SchemaProps{
 				Description: "ServingRuntimeStatus defines the observed state of ServingRuntime",
 				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"inheritanceChain": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "InheritanceChain lists the runtime names walked when resolving the ome.io/inherit-from chain, in root-first order. Single-entry list ([self]) when no inheritance is declared. Operator-visible only — consumers re-walk the chain in-memory at use time rather than reading a pre-computed spec from status (avoids storing the fully-merged spec, which is large).",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions reflect the runtime controller's view of inheritance resolution. Currently only InheritanceReady (True/False) is surfaced. Informational — consumers can block on InheritanceReady=False if they want to gate on chain health.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+				},
 			},
 		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 

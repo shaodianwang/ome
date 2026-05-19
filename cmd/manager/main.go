@@ -45,6 +45,7 @@ import (
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	trafficfactory "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/factory"
+	v1beta1servingruntimecontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/servingruntime"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 	"github.com/ome-projects/ome/pkg/version"
@@ -319,6 +320,21 @@ func main() {
 		OmeAgentConfig: omeAgentConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create ClusterBaseModel controller")
+		os.Exit(1)
+	}
+
+	// OEP-0012: single inheritance reconciler that handles both CSR and
+	// SR via one source per GVK. Reconcile branches on req.Namespace.
+	servingRuntimeEventBroadcaster := record.NewBroadcaster()
+	servingRuntimeEventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
+	setupLog.Info("Setting up ServingRuntime inheritance controller")
+	if err = (&v1beta1servingruntimecontroller.InheritanceReconciler{
+		Client:   mgr.GetClient(),
+		Log:      ctrl.Log.WithName("ServingRuntimeInheritance"),
+		Scheme:   mgr.GetScheme(),
+		Recorder: servingRuntimeEventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create ServingRuntime inheritance controller")
 		os.Exit(1)
 	}
 

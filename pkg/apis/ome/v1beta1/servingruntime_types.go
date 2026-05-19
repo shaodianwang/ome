@@ -207,12 +207,31 @@ type ModelSizeRangeSpec struct {
 // ServingRuntimeStatus defines the observed state of ServingRuntime
 // +k8s:openapi-gen=true
 type ServingRuntimeStatus struct {
+	// InheritanceChain lists the runtime names walked when resolving
+	// the ome.io/inherit-from chain, in root-first order. Single-entry
+	// list ([self]) when no inheritance is declared. Operator-visible
+	// only — consumers re-walk the chain in-memory at use time rather
+	// than reading a pre-computed spec from status (avoids storing
+	// the fully-merged spec, which is large).
+	// +optional
+	// +listType=atomic
+	InheritanceChain []string `json:"inheritanceChain,omitempty"`
+
+	// Conditions reflect the runtime controller's view of inheritance
+	// resolution. Currently only InheritanceReady (True/False) is
+	// surfaced. Informational — consumers can block on
+	// InheritanceReady=False if they want to gate on chain health.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // ServingRuntime is the Schema for the servingruntimes API
 // +k8s:openapi-gen=true
 // +genclient
 // +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Disabled",type="boolean",JSONPath=".spec.disabled"
 // +kubebuilder:printcolumn:name="ModelFormat",type=string,JSONPath=".spec.supportedModelFormats[*].modelFormat.name"
 // +kubebuilder:printcolumn:name="ModelFramework",type=string,JSONPath=".spec.supportedModelFormats[*].modelFramework.name"
@@ -245,6 +264,7 @@ type ServingRuntimeList struct {
 // +genclient:nonNamespaced
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope="Cluster"
+// +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Disabled",type="boolean",JSONPath=".spec.disabled"
 // +kubebuilder:printcolumn:name="ModelFormat",type=string,JSONPath=".spec.supportedModelFormats[*].modelFormat.name"
 // +kubebuilder:printcolumn:name="ModelFramework",type=string,JSONPath=".spec.supportedModelFormats[*].modelFramework.name"

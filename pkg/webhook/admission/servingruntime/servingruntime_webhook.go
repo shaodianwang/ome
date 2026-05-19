@@ -47,6 +47,15 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
+	// OEP-0012 validation runs before the disabled-shortcut below so a
+	// broken profile can't slip through "because it was disabled anyway".
+	if err := validateProfileMarker(servingRuntime.Annotations, servingRuntime.Spec.Disabled); err != nil {
+		return admission.Denied(err.Error())
+	}
+	if err := validateNamespacedRuntimeInheritance(ctx, sr.Client, servingRuntime); err != nil {
+		return admission.Denied(err.Error())
+	}
+
 	ExistingRuntimes := &v1beta1.ServingRuntimeList{}
 	if err := sr.Client.List(context.TODO(), ExistingRuntimes, client.InNamespace(servingRuntime.Namespace)); err != nil {
 		log.Error(err, "Failed to get serving runtime list", "namespace", servingRuntime.Namespace)
@@ -80,6 +89,13 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 	if err := csr.Decoder.Decode(req, clusterServingRuntime); err != nil {
 		log.Error(err, "Failed to decode cluster serving runtime", "name", clusterServingRuntime.Name)
 		return admission.Errored(http.StatusBadRequest, err)
+	}
+
+	if err := validateProfileMarker(clusterServingRuntime.Annotations, clusterServingRuntime.Spec.Disabled); err != nil {
+		return admission.Denied(err.Error())
+	}
+	if err := validateClusterRuntimeInheritance(ctx, csr.Client, clusterServingRuntime); err != nil {
+		return admission.Denied(err.Error())
 	}
 
 	ExistingRuntimes := &v1beta1.ClusterServingRuntimeList{}

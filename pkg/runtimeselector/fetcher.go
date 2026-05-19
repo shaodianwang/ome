@@ -9,6 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/runtimeinheritance"
 )
 
 // DefaultRuntimeFetcher implements RuntimeFetcher using the controller-runtime client.
@@ -59,40 +60,48 @@ func (f *DefaultRuntimeFetcher) FetchRuntimes(ctx context.Context, namespace str
 	}, nil
 }
 
-// GetRuntime fetches a specific runtime by name.
-// It first checks namespace-scoped runtimes, then cluster-scoped ones.
-// Returns the runtime spec, whether it's a cluster runtime, and any error.
+// GetRuntime fetches a runtime by name and returns its OEP-0012
+// merged spec. Namespace-scoped takes precedence over cluster-scoped
+// on name collision.
 func (f *DefaultRuntimeFetcher) GetRuntime(ctx context.Context, name string, namespace string) (*v1beta1.ServingRuntimeSpec, bool, error) {
 	logger := log.FromContext(ctx)
 
-	// First, try to get namespace-scoped runtime
-	runtime := &v1beta1.ServingRuntime{}
-	err := f.client.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, runtime)
-	if err == nil {
+	if _, err := f.getNamespacedHead(ctx, namespace, name); err == nil {
 		logger.V(1).Info("Found namespace-scoped runtime", "name", name, "namespace", namespace)
-		return &runtime.Spec, false, nil
-	}
-
-	if !errors.IsNotFound(err) {
+		spec, _, resolveErr := runtimeinheritance.ResolveNamespacedRuntime(ctx, f.client, namespace, name)
+		return spec, false, resolveErr
+	} else if !errors.IsNotFound(err) {
 		return nil, false, err
 	}
 
-	// If not found, try cluster-scoped runtime
-	clusterRuntime := &v1beta1.ClusterServingRuntime{}
-	err = f.client.Get(ctx, client.ObjectKey{Name: name}, clusterRuntime)
-	if err == nil {
+	if _, err := f.getClusterHead(ctx, name); err == nil {
 		logger.V(1).Info("Found cluster-scoped runtime", "name", name)
-		return &clusterRuntime.Spec, true, nil
-	}
-
-	if errors.IsNotFound(err) {
+		spec, _, resolveErr := runtimeinheritance.ResolveClusterRuntime(ctx, f.client, name)
+		return spec, true, resolveErr
+	} else if errors.IsNotFound(err) {
 		return nil, false, &RuntimeNotFoundError{
 			RuntimeName: name,
 			Namespace:   namespace,
 		}
+	} else {
+		return nil, false, err
 	}
+}
 
-	return nil, false, err
+func (f *DefaultRuntimeFetcher) getNamespacedHead(ctx context.Context, namespace, name string) (*v1beta1.ServingRuntime, error) {
+	sr := &v1beta1.ServingRuntime{}
+	if err := f.client.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, sr); err != nil {
+		return nil, err
+	}
+	return sr, nil
+}
+
+func (f *DefaultRuntimeFetcher) getClusterHead(ctx context.Context, name string) (*v1beta1.ClusterServingRuntime, error) {
+	csr := &v1beta1.ClusterServingRuntime{}
+	if err := f.client.Get(ctx, client.ObjectKey{Name: name}, csr); err != nil {
+		return nil, err
+	}
+	return csr, nil
 }
 
 // sortServingRuntimeList sorts a list of ServingRuntimes by creation timestamp (desc) and name (asc).

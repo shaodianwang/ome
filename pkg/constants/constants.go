@@ -119,6 +119,12 @@ var (
 	RuntimeProbePortAnnotationKey            = "runtime.ome.io/probe-port"
 	RuntimeObservabilityProfileAnnotationKey = "runtime.ome.io/observability-profile"
 	RuntimeObservabilityPortAnnotationKey    = "runtime.ome.io/observability-port"
+
+	// OEP-0012: ServingRuntime inheritance + profile marker.
+	RuntimeProfileAnnotationKey              = OMEAPIGroupName + "/runtime-profile"
+	RuntimeInheritFromAnnotationKey          = OMEAPIGroupName + "/inherit-from"
+	RuntimeInheritMaxDepth                   = 5
+	InheritanceReadyConditionType            = "InheritanceReady"
 	DefaultPrometheusPath                    = "/metrics"
 	QueueProxyAggregatePrometheusMetricsPort = 9088
 	DefaultPodPrometheusPort                 = "9091"
