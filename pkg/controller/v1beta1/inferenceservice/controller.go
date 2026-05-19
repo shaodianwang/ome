@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	policyv1 "k8s.io/api/policy/v1"
 
 	"github.com/go-logr/logr"
@@ -89,6 +90,7 @@ import (
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets/finalizers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=podmonitors,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=backendtrafficpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -656,6 +658,11 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		return err
 	}
 
+	podMonitorFound, err := utils.IsCrdAvailable(r.ClientConfig, monitoringv1.SchemeGroupVersion.String(), constants.PodMonitorKind)
+	if err != nil {
+		return err
+	}
+
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.InferenceService{}).
 		Owns(&appsv1.Deployment{}).
@@ -676,6 +683,12 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		ctrlBuilder = ctrlBuilder.Owns(&kedav1.ScaledObject{})
 	} else {
 		r.Log.Info("The InferenceService controller won't watch keda.sh/v1/ScaledObject resources because the CRD is not available.")
+	}
+
+	if podMonitorFound {
+		ctrlBuilder = ctrlBuilder.Owns(&monitoringv1.PodMonitor{})
+	} else {
+		r.Log.Info("The InferenceService controller won't watch monitoring.coreos.com/v1/PodMonitor resources because the CRD is not available.")
 	}
 
 	if lwsFound {

@@ -8,6 +8,7 @@ import (
 	"os"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	zaplog "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	istionetworking "istio.io/api/networking/v1beta1"
@@ -245,6 +246,7 @@ func main() {
 		{volcano.SchemeGroupVersion, constants.VolcanoQueueKind, volcano.AddToScheme},
 		{volcanobatch.SchemeGroupVersion, constants.VolcanoJobKind, volcanobatch.AddToScheme},
 		{kedav1.SchemeGroupVersion, constants.KEDAScaledObjectKind, kedav1.AddToScheme},
+		{monitoringv1.SchemeGroupVersion, constants.PodMonitorKind, monitoringv1.AddToScheme},
 	}
 
 	for _, s := range optionalSchemes {

@@ -126,6 +126,9 @@ func (r *DeploymentReconciler) setRawReferences(isvc *v1beta1.InferenceService, 
 	if err := controllerutil.SetControllerReference(isvc, reconciler.PodDisruptionBudget.PDB, r.Scheme); err != nil {
 		return errors.Wrapf(err, "failed to set pdb owner reference")
 	}
+	if err := controllerutil.SetControllerReference(isvc, reconciler.PodMonitor.PodMonitor, r.Scheme); err != nil {
+		return errors.Wrapf(err, "failed to set podmonitor owner reference")
+	}
 
 	return reconciler.Scaler.Autoscaler.SetControllerReferences(isvc, r.Scheme)
 }
@@ -136,5 +139,8 @@ func (r *DeploymentReconciler) setMultiNodeReferences(isvc *v1beta1.InferenceSer
 	if err != nil {
 		return errors.Wrapf(err, "failed to set lws owner reference")
 	}
-	return controllerutil.SetControllerReference(isvc, mnr.Service.Service, r.Scheme)
+	if err := controllerutil.SetControllerReference(isvc, mnr.Service.Service, r.Scheme); err != nil {
+		return errors.Wrapf(err, "failed to set service owner reference")
+	}
+	return controllerutil.SetControllerReference(isvc, mnr.PodMonitor.PodMonitor, r.Scheme)
 }

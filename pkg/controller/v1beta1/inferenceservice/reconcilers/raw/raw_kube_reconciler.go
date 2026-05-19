@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/deployment"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/podmonitor"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 )
 
@@ -26,6 +27,7 @@ type RawKubeReconciler struct {
 	Service             *service.ServiceReconciler
 	Scaler              *autoscaler.AutoscalerReconciler
 	PodDisruptionBudget *pdb.PDBReconciler
+	PodMonitor          *podmonitor.PodMonitorReconciler
 	URL                 *knapis.URL
 }
 
@@ -43,6 +45,7 @@ func NewRawKubeReconciler(client client.Client,
 	}
 
 	pdb := pdb.NewPDBReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Engine.ComponentExtensionSpec)
+	pm := podmonitor.NewPodMonitorReconciler(client, scheme, componentMeta, podSpec)
 	url, err := createRawURL(clientset, componentMeta)
 	if err != nil {
 		return nil, err
@@ -60,6 +63,7 @@ func NewRawKubeReconciler(client client.Client,
 		Service:             service.NewServiceReconciler(client, scheme, componentMeta, componentExt, podSpec, nil),
 		Scaler:              as,
 		PodDisruptionBudget: pdb,
+		PodMonitor:          pm,
 		URL:                 url,
 	}, nil
 }
@@ -99,6 +103,11 @@ func (r *RawKubeReconciler) Reconcile() (*appsv1.Deployment, error) {
 	}
 	// reconcile PDB
 	_, err = r.PodDisruptionBudget.Reconcile()
+	if err != nil {
+		return nil, err
+	}
+	// reconcile PodMonitor
+	_, err = r.PodMonitor.Reconcile()
 	if err != nil {
 		return nil, err
 	}

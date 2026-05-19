@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -53,6 +54,7 @@ var _ = BeforeSuite(func() {
 	Expect(knservingv1.AddToScheme(testScheme)).To(Succeed())
 	Expect(lws.AddToScheme(testScheme)).To(Succeed())
 	Expect(autoscalingv2.AddToScheme(testScheme)).To(Succeed())
+	Expect(monitoringv1.AddToScheme(testScheme)).To(Succeed())
 
 	By("Creating fake client")
 	// Create initial objects for the fake client

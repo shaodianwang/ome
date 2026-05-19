@@ -479,6 +479,7 @@ const (
 	LWSKind                 = "LeaderWorkerSet"
 	GatewayKind             = "Gateway"
 	ServiceKind             = "Service"
+	PodMonitorKind          = "PodMonitor"
 )
 
 // Volcano Job Labels

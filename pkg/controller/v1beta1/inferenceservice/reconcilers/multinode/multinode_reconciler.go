@@ -17,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/istiosidecar"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/lws"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/podmonitor"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 )
 
@@ -27,6 +28,7 @@ type MultiNodeReconciler struct {
 	URL          *knapis.URL
 	IstioSidecar *istiosidecar.IstioSidecarReconciler
 	Service      *service.ServiceReconciler
+	PodMonitor   *podmonitor.PodMonitorReconciler
 }
 
 func NewMultiNodeReconciler(client client.Client,
@@ -56,6 +58,7 @@ func NewMultiNodeReconciler(client client.Client,
 		URL:          url,
 		IstioSidecar: istiosidecar.NewIstioSidecarReconciler(client, scheme, componentMeta, enabled),
 		Service:      service.NewServiceReconciler(client, scheme, componentMeta, componentExt, headPodSpec, selector),
+		PodMonitor:   podmonitor.NewPodMonitorReconciler(client, scheme, componentMeta, headPodSpec),
 	}, nil
 }
 
@@ -85,6 +88,9 @@ func (r *MultiNodeReconciler) Reconcile() (*lwsSpec.LeaderWorkerSet, error) {
 		return nil, err
 	}
 	if _, err := r.Service.Reconcile(); err != nil {
+		return nil, err
+	}
+	if _, err := r.PodMonitor.Reconcile(); err != nil {
 		return nil, err
 	}
 	return existingLWS, nil
