@@ -376,14 +376,6 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 	var fallbackComponent v1beta1.ComponentType
 
 	if isvc.Spec.Router != nil {
-		if !isvc.Status.IsConditionReady(v1beta1.RouterReady) {
-			isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
-				Type:   v1beta1.IngressReady,
-				Status: corev1.ConditionFalse,
-				Reason: "Router not ready",
-			})
-			return nil, nil
-		}
 		serviceName = constants.RouterServiceName(isvc.Name)
 		port = RouterDefaultPort
 		timeout = DefaultTimeout

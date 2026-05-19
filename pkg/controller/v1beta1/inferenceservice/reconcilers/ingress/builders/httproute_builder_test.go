@@ -248,55 +248,61 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_DecoderComponent(t *testing.T) {
 
 func TestHTTPRouteBuilder_BuildHTTPRoute_TopLevelComponent(t *testing.T) {
 	tests := []struct {
-		name          string
-		isvc          *v1beta1.InferenceService
-		expectedName  string
-		expectedError bool
-		expectedRules int
-		expectNil     bool
+		name           string
+		isvc           *v1beta1.InferenceService
+		setupReadiness func(*v1beta1.InferenceService)
+		expectedName   string
+		expectedError  bool
+		expectedRules  int
+		expectNil      bool
 	}{
 		{
-			name:          "top level with engine only",
-			isvc:          createTestInferenceServiceHTTPRoute("test-isvc", "default"),
+			name:           "top level with engine only",
+			isvc:           createTestInferenceServiceHTTPRoute("test-isvc", "default"),
+			setupReadiness: func(isvc *v1beta1.InferenceService) { setEngineReady(isvc) },
+			expectedName:   "test-isvc",
+			expectedRules:  1,
+		},
+		{
+			name: "top level with router",
+			isvc: createTestInferenceServiceWithRouterHTTPRoute("test-isvc", "default"),
+			setupReadiness: func(isvc *v1beta1.InferenceService) {
+				setEngineReady(isvc)
+				setRouterReady(isvc)
+			},
 			expectedName:  "test-isvc",
-			expectedError: false,
 			expectedRules: 1,
 		},
 		{
-			name:          "top level with router",
-			isvc:          createTestInferenceServiceWithRouterHTTPRoute("test-isvc", "default"),
+			name: "top level with router and decoder",
+			isvc: createTestInferenceServiceWithRouterAndDecoderHTTPRoute("test-isvc", "default"),
+			setupReadiness: func(isvc *v1beta1.InferenceService) {
+				setEngineReady(isvc)
+				setRouterReady(isvc)
+				setDecoderReady(isvc)
+			},
 			expectedName:  "test-isvc",
-			expectedError: false,
 			expectedRules: 1,
 		},
 		{
-			name:          "top level with router and decoder",
-			isvc:          createTestInferenceServiceWithRouterAndDecoderHTTPRoute("test-isvc", "default"),
-			expectedName:  "test-isvc",
-			expectedError: false,
-			expectedRules: 1, // router only, decoder goes through router
+			name:           "top level engine not ready returns nil",
+			isvc:           createTestInferenceServiceHTTPRoute("test-isvc", "default"),
+			setupReadiness: func(_ *v1beta1.InferenceService) {},
+			expectNil:      true,
 		},
 		{
-			name:          "top level predictor not ready",
-			isvc:          createTestInferenceServiceHTTPRoute("test-isvc", "default"),
-			expectNil:     true,
-			expectedError: false,
+			name:           "top level router not ready still creates route",
+			isvc:           createTestInferenceServiceWithRouterHTTPRoute("test-isvc", "default"),
+			setupReadiness: func(_ *v1beta1.InferenceService) {},
+			expectedName:   "test-isvc",
+			expectedRules:  1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			builder := createHTTPRouteBuilder()
-
-			if !tt.expectNil {
-				setEngineReady(tt.isvc)
-				if tt.isvc.Spec.Router != nil {
-					setRouterReady(tt.isvc)
-				}
-				if tt.isvc.Spec.Decoder != nil {
-					setDecoderReady(tt.isvc)
-				}
-			}
+			tt.setupReadiness(tt.isvc)
 
 			result, err := builder.BuildHTTPRoute(context.Background(), tt.isvc, TopLevelComponent)
 
@@ -537,6 +543,28 @@ func TestHTTPRouteBuilder_TopLevelInheritsTrafficFromFallbackComponent(t *testin
 		assert.Equal(t, "test-isvc-router-rev-stable", string(route.Spec.Rules[0].BackendRefs[0].Name))
 		assert.Equal(t, "test-isvc-router-rev-canary", string(route.Spec.Rules[0].BackendRefs[1].Name))
 	})
+}
+
+// TestHTTPRouteBuilder_TopLevelRoutesToRouterEvenWhenNotReady verifies
+// that the top-level HTTPRoute always points to the router service when
+// isvc.Spec.Router is present, regardless of RouterReady condition.
+// This prevents stale routes pointing to non-existent services during
+// scale-up.
+func TestHTTPRouteBuilder_TopLevelRoutesToRouterEvenWhenNotReady(t *testing.T) {
+	builder := createHTTPRouteBuilder()
+	isvc := createTestInferenceServiceWithRouterHTTPRoute("test-isvc", "default")
+
+	result, err := builder.BuildHTTPRoute(context.Background(), isvc, TopLevelComponent)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	route := result.(*gatewayapiv1.HTTPRoute)
+
+	require.Len(t, route.Spec.Rules, 1)
+	require.Len(t, route.Spec.Rules[0].BackendRefs, 1)
+	assert.Equal(t, "test-isvc-router", string(route.Spec.Rules[0].BackendRefs[0].Name),
+		"top-level HTTPRoute must point to router service even when RouterReady is false")
+	assert.Equal(t, int32(30080), int32(*route.Spec.Rules[0].BackendRefs[0].Port),
+		"top-level HTTPRoute must use router port even when RouterReady is false")
 }
 
 // TestHTTPRouteBuilder_EngineAndTopLevel_DistinctNames is the
