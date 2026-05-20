@@ -319,11 +319,6 @@
           "type": "integer",
           "format": "int64"
         },
-        "containerConcurrency": {
-          "description": "ContainerConcurrency specifies how many requests can be processed concurrently, this sets the hard limit of the container concurrency(https://knative.dev/docs/serving/autoscaling/concurrency).",
-          "type": "integer",
-          "format": "int64"
-        },
         "deploymentStrategy": {
           "description": "The deployment strategy to use to replace existing pods with new ones. Only applicable for raw deployment mode.",
           "$ref": "#/definitions/k8s.io.api.apps.v1.DeploymentStrategy"
@@ -362,11 +357,11 @@
           "$ref": "#/definitions/v1beta1.OMENativeComponentSpec"
         },
         "scaleMetric": {
-          "description": "ScaleMetric defines the scaling metric type watched by autoscaler possible values are concurrency, rps, cpu, memory. concurrency, rps are supported via Knative Pod Autoscaler(https://knative.dev/docs/serving/autoscaling/autoscaling-metrics).",
+          "description": "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
           "type": "string"
         },
         "scaleTarget": {
-          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for. concurrency and rps targets are supported by Knative Pod Autoscaler (https://knative.dev/docs/serving/autoscaling/autoscaling-targets/).",
+          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
           "type": "integer",
           "format": "int32"
         },
@@ -385,25 +380,9 @@
           "description": "Addressable endpoint for the InferenceService",
           "$ref": "#/definitions/knative.Addressable"
         },
-        "latestCreatedRevision": {
-          "description": "Latest revision name that is created",
-          "type": "string"
-        },
-        "latestReadyRevision": {
-          "description": "Latest revision name that is in ready state",
-          "type": "string"
-        },
-        "latestRolledoutRevision": {
-          "description": "Latest revision name that is rolled out with 100 percent traffic",
-          "type": "string"
-        },
         "omenative": {
           "description": "OMENative reports OMENative-managed state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.",
           "$ref": "#/definitions/v1beta1.OMENativeComponentStatus"
-        },
-        "previousRolledoutRevision": {
-          "description": "Previous revision name that is rolled out with 100 percent traffic",
-          "type": "string"
         },
         "restURL": {
           "description": "REST endpoint of the component if available.",
@@ -413,17 +392,8 @@
           "description": "RolloutPhase reflects the current rollout state for this Component (OEP-0011 Part 2). One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
           "type": "string"
         },
-        "traffic": {
-          "description": "Traffic holds the configured traffic distribution for latest ready revision and previous rolled out revision.",
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/knative.dev.serving.pkg.apis.serving.v1.TrafficTarget"
-          },
-          "x-kubernetes-list-type": "atomic"
-        },
         "url": {
-          "description": "URL holds the primary url that will distribute traffic over the provided traffic targets. This will be one the REST or gRPC endpoints that are available. It generally has the form http[s]://{route-name}.{route-namespace}.{cluster-level-suffix}",
+          "description": "URL holds the primary url for this component. It generally has the form http[s]://{name}.{namespace}.{cluster-level-suffix}",
           "$ref": "#/definitions/knative.URL"
         }
       }
@@ -482,11 +452,6 @@
         },
         "canaryTrafficPercent": {
           "description": "CanaryTrafficPercent defines the traffic split percentage between the candidate revision and the last ready revision",
-          "type": "integer",
-          "format": "int64"
-        },
-        "containerConcurrency": {
-          "description": "ContainerConcurrency specifies how many requests can be processed concurrently, this sets the hard limit of the container concurrency(https://knative.dev/docs/serving/autoscaling/concurrency).",
           "type": "integer",
           "format": "int64"
         },
@@ -706,11 +671,11 @@
           "type": "string"
         },
         "scaleMetric": {
-          "description": "ScaleMetric defines the scaling metric type watched by autoscaler possible values are concurrency, rps, cpu, memory. concurrency, rps are supported via Knative Pod Autoscaler(https://knative.dev/docs/serving/autoscaling/autoscaling-metrics).",
+          "description": "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
           "type": "string"
         },
         "scaleTarget": {
-          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for. concurrency and rps targets are supported by Knative Pod Autoscaler (https://knative.dev/docs/serving/autoscaling/autoscaling-targets/).",
+          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
           "type": "integer",
           "format": "int32"
         },
@@ -913,11 +878,6 @@
         },
         "canaryTrafficPercent": {
           "description": "CanaryTrafficPercent defines the traffic split percentage between the candidate revision and the last ready revision",
-          "type": "integer",
-          "format": "int64"
-        },
-        "containerConcurrency": {
-          "description": "ContainerConcurrency specifies how many requests can be processed concurrently, this sets the hard limit of the container concurrency(https://knative.dev/docs/serving/autoscaling/concurrency).",
           "type": "integer",
           "format": "int64"
         },
@@ -1137,11 +1097,11 @@
           "type": "string"
         },
         "scaleMetric": {
-          "description": "ScaleMetric defines the scaling metric type watched by autoscaler possible values are concurrency, rps, cpu, memory. concurrency, rps are supported via Knative Pod Autoscaler(https://knative.dev/docs/serving/autoscaling/autoscaling-metrics).",
+          "description": "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
           "type": "string"
         },
         "scaleTarget": {
-          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for. concurrency and rps targets are supported by Knative Pod Autoscaler (https://knative.dev/docs/serving/autoscaling/autoscaling-targets/).",
+          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
           "type": "integer",
           "format": "int32"
         },
@@ -2987,11 +2947,6 @@
             "default": ""
           }
         },
-        "containerConcurrency": {
-          "description": "ContainerConcurrency specifies how many requests can be processed concurrently, this sets the hard limit of the container concurrency(https://knative.dev/docs/serving/autoscaling/concurrency).",
-          "type": "integer",
-          "format": "int64"
-        },
         "containers": {
           "description": "List of containers belonging to the pod. Containers cannot currently be added or removed. There must be at least one container in a Pod. Cannot be updated.",
           "type": "array",
@@ -3204,11 +3159,11 @@
           "type": "string"
         },
         "scaleMetric": {
-          "description": "ScaleMetric defines the scaling metric type watched by autoscaler possible values are concurrency, rps, cpu, memory. concurrency, rps are supported via Knative Pod Autoscaler(https://knative.dev/docs/serving/autoscaling/autoscaling-metrics).",
+          "description": "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
           "type": "string"
         },
         "scaleTarget": {
-          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for. concurrency and rps targets are supported by Knative Pod Autoscaler (https://knative.dev/docs/serving/autoscaling/autoscaling-targets/).",
+          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
           "type": "integer",
           "format": "int32"
         },

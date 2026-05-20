@@ -75,28 +75,12 @@ var _ = ginkgo.Describe("Framework SetupClient + NewSuite", func() {
 
 var _ = ginkgo.Describe("Framework optional CRD bundles", func() {
 
-	ginkgo.It("Knative bundle: CRDs install and the client can Create a KSvc", func() {
-		s, err := framework.NewSuite(&framework.Framework{
-			OptionalCRDs: []framework.OptionalCRDBundle{framework.Knative},
-		})
-		Expect(err).NotTo(HaveOccurred())
-		ginkgo.DeferCleanup(func() { _ = s.Fwk.Teardown() })
-
-		// We don't import knservingv1 here (would couple framework_test to
-		// Knative). The bundle install + scheme registration is the win;
-		// confirming the apiserver knows about the CRD is enough — we use
-		// an unstructured Get against the discovery endpoint rather than
-		// a typed Create.
-		// If the CRD is missing or the scheme fails to register, NewSuite
-		// would have errored already.
-	})
-
 	ginkgo.It("KEDA bundle: CRDs install and the scheme registers", func() {
-		// Same smoke-shape as the Knative case: if the keda.sh CRDs
-		// failed to install or kedav1.AddToScheme errored, NewSuite
-		// would have errored above. Keeps framework_test independent
-		// of keda's typed Go API (which lives behind a separate
-		// import path and would couple this package to it).
+		// Smoke-shape: if the keda.sh CRDs failed to install or
+		// kedav1.AddToScheme errored, NewSuite would have errored
+		// above. Keeps framework_test independent of keda's typed
+		// Go API (which lives behind a separate import path and
+		// would couple this package to it).
 		s, err := framework.NewSuite(&framework.Framework{
 			OptionalCRDs: []framework.OptionalCRDBundle{framework.KEDA},
 		})

@@ -1,7 +1,6 @@
 package inferenceservice
 
 import (
-	"math"
 
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -11,36 +10,15 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	knapis "knative.dev/pkg/apis"
-	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/builders"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/services"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/translators/envoygateway"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 
 	"github.com/ome-projects/ome/tests/integration/util"
 )
-
-// newHTTPRouteBuilderForTest constructs an HTTPRouteBuilder with the
-// minimal config the integration suite needs to drive the builder
-// against a real apiserver.
-func newHTTPRouteBuilderForTest() *builders.HTTPRouteBuilder {
-	return builders.NewHTTPRouteBuilder(
-		&controllerconfig.IngressConfig{
-			IngressDomain:     "example.com",
-			DomainTemplate:    "{{.Name}}.{{.Namespace}}.{{.IngressDomain}}",
-			OmeIngressGateway: "istio-system/gateway",
-		},
-		&controllerconfig.InferenceServicesConfig{},
-		services.NewDomainService(),
-		services.NewPathService(),
-	).(*builders.HTTPRouteBuilder)
-}
 
 // OEP-0011 traffic-management integration specs.
 //
@@ -1117,386 +1095,6 @@ var _ = ginkgo.Describe("OEP-0011 traffic reconciler", ginkgo.Ordered, func() {
 			"second reconcile's condition must record the new generation")
 	})
 
-	// applyHTTPRouteAndReadBack builds a component HTTPRoute via the
-	// production builder, applies it to envtest, retrieves it, and
-	// returns the round-tripped typed object. Status population on the
-	// isvc is in-memory only — the builder consumes the Go struct, not
-	// the apiserver — which sidesteps the race between Status().Update
-	// and the background ISVC controller.
-	applyHTTPRouteAndReadBack := func(isvc *v1beta1.InferenceService, componentType string) *gatewayapiv1.HTTPRoute {
-		builder := newHTTPRouteBuilderForTest()
-		obj, err := builder.BuildHTTPRoute(suiteCtx, isvc, componentType)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(obj).NotTo(BeNil(), "builder returned nil — required Component condition likely missing on isvc.Status")
-		route, ok := obj.(*gatewayapiv1.HTTPRoute)
-		Expect(ok).To(BeTrue(), "builder must return a typed HTTPRoute when the scheme is registered")
-		// Strip resourceVersion so envtest accepts the Create.
-		route.ResourceVersion = ""
-		Expect(k8sClient.Create(suiteCtx, route)).To(Succeed())
-		fetched := &gatewayapiv1.HTTPRoute{}
-		Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(route), fetched)).To(Succeed())
-		return fetched
-	}
-
-	// markComponentReady stamps the EngineReady condition on an ISVC
-	// status (in-memory). The HTTPRoute builder short-circuits when the
-	// component isn't Ready, so this is required setup for E1-E5.
-	markEngineReady := func(isvc *v1beta1.InferenceService) {
-		isvc.Status.SetCondition(v1beta1.EngineReady, &knapis.Condition{
-			Type:   v1beta1.EngineReady,
-			Status: corev1.ConditionTrue,
-		})
-	}
-	markRouterReady := func(isvc *v1beta1.InferenceService) {
-		isvc.Status.SetCondition(v1beta1.RouterReady, &knapis.Condition{
-			Type:   v1beta1.RouterReady,
-			Status: corev1.ConditionTrue,
-		})
-	}
-
-	ginkgo.It("E1: status.Traffic[stable=90,canary=10] → HTTPRoute persists 2 weighted backendRefs (90/10) through apiserver", func() {
-		isvc := isvcWith("isvc-e1", func(i *v1beta1.InferenceService) {
-			i.Spec.Engine = &v1beta1.EngineSpec{}
-		})
-		markEngineReady(isvc)
-		stable := int64(90)
-		canary := int64(10)
-		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {
-				Traffic: []knservingv1.TrafficTarget{
-					{RevisionName: "isvc-e1-engine-rev-stable", Percent: &stable},
-					{RevisionName: "isvc-e1-engine-rev-canary", Percent: &canary},
-				},
-			},
-		}
-
-		fetched := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
-		Expect(fetched.Spec.Rules).To(HaveLen(1))
-		refs := fetched.Spec.Rules[0].BackendRefs
-		Expect(refs).To(HaveLen(2), "weighted form must persist 2 backendRefs through the apiserver")
-		Expect(string(refs[0].Name)).To(Equal("isvc-e1-engine-rev-stable"))
-		Expect(refs[0].Weight).NotTo(BeNil())
-		Expect(*refs[0].Weight).To(Equal(int32(90)))
-		Expect(string(refs[1].Name)).To(Equal("isvc-e1-engine-rev-canary"))
-		Expect(*refs[1].Weight).To(Equal(int32(10)))
-	})
-
-	ginkgo.It("E2: status.Traffic[stable=100,canary=0] blue-green standby → HTTPRoute persists 2 backendRefs (100/0)", func() {
-		// weight=0 is valid Gateway API — endpoint resolves but no
-		// traffic flows. Required for blue-green standby (Story 4
-		// in the OEP).
-		isvc := isvcWith("isvc-e2", func(i *v1beta1.InferenceService) {
-			i.Spec.Engine = &v1beta1.EngineSpec{}
-		})
-		markEngineReady(isvc)
-		stable := int64(100)
-		canary := int64(0)
-		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {
-				Traffic: []knservingv1.TrafficTarget{
-					{RevisionName: "isvc-e2-engine-rev-stable", Percent: &stable},
-					{RevisionName: "isvc-e2-engine-rev-canary", Percent: &canary},
-				},
-			},
-		}
-
-		fetched := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
-		refs := fetched.Spec.Rules[0].BackendRefs
-		Expect(refs).To(HaveLen(2),
-			"blue-green standby must keep both backendRefs so the route still references the standby Service")
-		Expect(*refs[0].Weight).To(Equal(int32(100)))
-		Expect(*refs[1].Weight).To(Equal(int32(0)),
-			"canary at 0% must persist as weight 0 (valid Gateway API; no traffic flows but endpoint is resolved)")
-	})
-
-	ginkgo.It("E3: only engine has status.Traffic[]; router has no Components entry → engine route weighted, router falls back to single backendRef", func() {
-		// Realistic mid-rollout state: engine is rolling out but the
-		// router hasn't been touched, so per-mode reconciler hasn't
-		// populated router's Traffic[]. The engine route must reflect
-		// the rollout; the router route must NOT artificially split.
-		isvc := isvcWith("isvc-e3", func(i *v1beta1.InferenceService) {
-			i.Spec.Engine = &v1beta1.EngineSpec{}
-			i.Spec.Router = &v1beta1.RouterSpec{}
-		})
-		markEngineReady(isvc)
-		markRouterReady(isvc)
-		stable := int64(80)
-		canary := int64(20)
-		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {
-				Traffic: []knservingv1.TrafficTarget{
-					{RevisionName: "isvc-e3-engine-rev-stable", Percent: &stable},
-					{RevisionName: "isvc-e3-engine-rev-canary", Percent: &canary},
-				},
-			},
-			// Router intentionally omitted — Traffic[] empty.
-			v1beta1.RouterComponent: {},
-		}
-
-		engineRoute := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
-		Expect(engineRoute.Spec.Rules[0].BackendRefs).To(HaveLen(2),
-			"engine route reflects its own 80/20 split")
-
-		routerRoute := applyHTTPRouteAndReadBack(isvc, builders.RouterComponent)
-		Expect(routerRoute.Spec.Rules[0].BackendRefs).To(HaveLen(1),
-			"router has no Traffic[] entries → single-backend fallback")
-		Expect(string(routerRoute.Spec.Rules[0].BackendRefs[0].Name)).To(Equal("isvc-e3-router"))
-		// The builder emits Weight=nil for the single-backend fallback
-		// (verified by the unit test); the Gateway API CRD has
-		// `weight: default: 1`, so the apiserver fills it in on Create.
-		// Either nil (in-memory) or 1 (post-apply) is semantically the
-		// same — single backend, all traffic routes here.
-		Expect(routerRoute.Spec.Rules[0].BackendRefs[0].Weight).NotTo(BeNil(),
-			"apiserver applies the CRD default weight=1 on Create")
-		Expect(*routerRoute.Spec.Rules[0].BackendRefs[0].Weight).To(Equal(int32(1)),
-			"single fallback backend post-apply has weight=1 (Gateway API CRD default)")
-	})
-
-	ginkgo.It("E4: top-level inherits router's status.Traffic[] when router is present", func() {
-		// Top-level route on an Engine+Router ISVC inherits the
-		// fallback Component's traffic — that's the router when
-		// present (the operator's intent is that the router fronts
-		// the externally-visible address).
-		isvc := isvcWith("isvc-e4", func(i *v1beta1.InferenceService) {
-			i.Spec.Engine = &v1beta1.EngineSpec{}
-			i.Spec.Router = &v1beta1.RouterSpec{}
-		})
-		markEngineReady(isvc)
-		markRouterReady(isvc)
-		// Engine has its own split that should NOT leak into top-level.
-		engStable := int64(50)
-		engCanary := int64(50)
-		// Router's split is what top-level should reflect.
-		rtrStable := int64(70)
-		rtrCanary := int64(30)
-		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {
-				Traffic: []knservingv1.TrafficTarget{
-					{RevisionName: "isvc-e4-engine-rev-stable", Percent: &engStable},
-					{RevisionName: "isvc-e4-engine-rev-canary", Percent: &engCanary},
-				},
-			},
-			v1beta1.RouterComponent: {
-				Traffic: []knservingv1.TrafficTarget{
-					{RevisionName: "isvc-e4-router-rev-stable", Percent: &rtrStable},
-					{RevisionName: "isvc-e4-router-rev-canary", Percent: &rtrCanary},
-				},
-			},
-		}
-
-		topLevel := applyHTTPRouteAndReadBack(isvc, builders.TopLevelComponent)
-		refs := topLevel.Spec.Rules[0].BackendRefs
-		Expect(refs).To(HaveLen(2),
-			"top-level inherits router's 70/30 split (not engine's 50/50)")
-		Expect(string(refs[0].Name)).To(Equal("isvc-e4-router-rev-stable"))
-		Expect(*refs[0].Weight).To(Equal(int32(70)))
-		Expect(string(refs[1].Name)).To(Equal("isvc-e4-router-rev-canary"))
-		Expect(*refs[1].Weight).To(Equal(int32(30)))
-	})
-
-	ginkgo.It("E5: out-of-range Percent in status.Traffic → HTTPRoute persists clamped weights through apiserver", func() {
-		// Per-mode reconciler with bad math — the builder's clamp is
-		// the last line of defense. Negative → 0, overflow → Gateway
-		// API max (1_000_000). Verify both ends of the clamp survive
-		// the apiserver round-trip.
-		isvc := isvcWith("isvc-e5", func(i *v1beta1.InferenceService) {
-			i.Spec.Engine = &v1beta1.EngineSpec{}
-		})
-		markEngineReady(isvc)
-		negative := int64(-50)
-		overflow := int64(math.MaxInt32) + 1
-		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {
-				Traffic: []knservingv1.TrafficTarget{
-					{RevisionName: "isvc-e5-engine-rev-bad", Percent: &negative},
-					{RevisionName: "isvc-e5-engine-rev-huge", Percent: &overflow},
-				},
-			},
-		}
-
-		fetched := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
-		Expect(fetched.Spec.Rules[0].BackendRefs).To(HaveLen(2))
-		Expect(*fetched.Spec.Rules[0].BackendRefs[0].Weight).To(Equal(int32(0)),
-			"negative Percent must clamp to 0, not wrap to a negative int32")
-		Expect(*fetched.Spec.Rules[0].BackendRefs[1].Weight).To(Equal(int32(1_000_000)),
-			"overflow Percent must clamp to Gateway API max (1_000_000)")
-	})
-
-	ginkgo.It("G1: add spec.traffic to existing ISVC (didn't have one) → BTP created on next reconcile", func() {
-		// Start with no traffic intent.
-		isvc := isvcWith("isvc-g1", nil)
-		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g1"})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(status).To(BeNil(), "no intent → no status")
-		miss := newBTP()
-		Expect(apierrors.IsNotFound(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g1"}, miss))).To(BeTrue())
-
-		// Patch to add traffic intent.
-		alg := v1beta1.LoadBalancingTypeRoundRobin
-		isvc.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
-
-		status2, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g1"})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(status2).NotTo(BeNil())
-		Expect(status2.BackendPolicyResource).NotTo(BeNil())
-
-		got := newBTP()
-		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g1"}, got)).To(Succeed())
-		typ, _, _ := unstructured.NestedString(got.Object, "spec", "loadBalancer", "type")
-		Expect(typ).To(Equal("RoundRobin"))
-	})
-
-	ginkgo.It("G2: algorithm swap RoundRobin → ConsistentHash+Header → BTP updated, consistentHash block now present", func() {
-		alg1 := v1beta1.LoadBalancingTypeRoundRobin
-		isvc := isvcWith("isvc-g2", func(i *v1beta1.InferenceService) {
-			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg1}
-		})
-		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g2"})
-		Expect(err).NotTo(HaveOccurred())
-		gotV1 := newBTP()
-		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g2"}, gotV1)).To(Succeed())
-		typ1, _, _ := unstructured.NestedString(gotV1.Object, "spec", "loadBalancer", "type")
-		Expect(typ1).To(Equal("RoundRobin"))
-		_, hadCHv1, _ := unstructured.NestedMap(gotV1.Object, "spec", "loadBalancer", "consistentHash")
-		Expect(hadCHv1).To(BeFalse(), "RoundRobin must not emit consistentHash")
-
-		// Swap to ConsistentHash + Header.
-		alg2 := v1beta1.LoadBalancingTypeConsistentHash
-		isvc.Spec.Traffic = &v1beta1.TrafficSpec{
-			Algorithm: &alg2,
-			ConsistentHash: &v1beta1.ConsistentHashSpec{
-				Type:    v1beta1.HashTypeHeader,
-				Headers: []v1beta1.HashHeader{{Name: "X-Session"}},
-			},
-		}
-		status2, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g2"})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(status2.Algorithm).To(Equal("ConsistentHash"))
-
-		gotV2 := newBTP()
-		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g2"}, gotV2)).To(Succeed())
-		Expect(gotV2.GetUID()).To(Equal(gotV1.GetUID()), "BTP updated in place, not recreated")
-		typ2, _, _ := unstructured.NestedString(gotV2.Object, "spec", "loadBalancer", "type")
-		Expect(typ2).To(Equal("ConsistentHash"))
-		hdr, foundCH, _ := unstructured.NestedString(gotV2.Object, "spec", "loadBalancer", "consistentHash", "header", "name")
-		Expect(foundCH).To(BeTrue(), "ConsistentHash must emit consistentHash.header block after swap")
-		Expect(hdr).To(Equal("X-Session"))
-	})
-
-	ginkgo.It("G3: field removal ConsistentHash+Header → RoundRobin → BTP no longer has consistentHash block", func() {
-		// The translator builds a fresh BTP each call, so Update
-		// replaces the full spec — the consistentHash block from the
-		// previous version must not linger after the swap.
-		alg1 := v1beta1.LoadBalancingTypeConsistentHash
-		isvc := isvcWith("isvc-g3", func(i *v1beta1.InferenceService) {
-			i.Spec.Traffic = &v1beta1.TrafficSpec{
-				Algorithm: &alg1,
-				ConsistentHash: &v1beta1.ConsistentHashSpec{
-					Type:    v1beta1.HashTypeHeader,
-					Headers: []v1beta1.HashHeader{{Name: "X-Session"}},
-				},
-			}
-		})
-		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g3"})
-		Expect(err).NotTo(HaveOccurred())
-		// Confirm consistentHash is present after first reconcile.
-		gotV1 := newBTP()
-		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g3"}, gotV1)).To(Succeed())
-		_, hadCHv1, _ := unstructured.NestedMap(gotV1.Object, "spec", "loadBalancer", "consistentHash")
-		Expect(hadCHv1).To(BeTrue())
-
-		// Swap to RoundRobin, drop ConsistentHash entirely.
-		alg2 := v1beta1.LoadBalancingTypeRoundRobin
-		isvc.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg2}
-		_, err = r.Reconcile(suiteCtx, isvc, []string{"isvc-g3"})
-		Expect(err).NotTo(HaveOccurred())
-
-		gotV2 := newBTP()
-		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g3"}, gotV2)).To(Succeed())
-		typ2, _, _ := unstructured.NestedString(gotV2.Object, "spec", "loadBalancer", "type")
-		Expect(typ2).To(Equal("RoundRobin"))
-		_, hadCHv2, _ := unstructured.NestedMap(gotV2.Object, "spec", "loadBalancer", "consistentHash")
-		Expect(hadCHv2).To(BeFalse(), "consistentHash block must be GONE after swap to RoundRobin (Update replaces full spec)")
-	})
-
-	ginkgo.It("G4: out-of-band BTP deletion → next reconcile recreates it", func() {
-		alg := v1beta1.LoadBalancingTypeRoundRobin
-		isvc := isvcWith("isvc-g4", func(i *v1beta1.InferenceService) {
-			i.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
-		})
-		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-g4"})
-		Expect(err).NotTo(HaveOccurred())
-
-		// Capture the first UID so we can verify recreation, not in-place restoration.
-		first := newBTP()
-		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g4"}, first)).To(Succeed())
-		firstUID := first.GetUID()
-
-		// Out-of-band delete (e.g. operator clicks Delete by mistake).
-		Expect(k8sClient.Delete(suiteCtx, first)).To(Succeed())
-		Eventually(func() bool {
-			tmp := newBTP()
-			return apierrors.IsNotFound(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g4"}, tmp))
-		}).WithTimeout(util.ShortTimeout).WithPolling(util.PollInterval).Should(BeTrue())
-
-		// Next reconcile recreates.
-		_, err = r.Reconcile(suiteCtx, isvc, []string{"isvc-g4"})
-		Expect(err).NotTo(HaveOccurred())
-
-		recreated := newBTP()
-		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-g4"}, recreated)).To(Succeed())
-		Expect(recreated.GetUID()).NotTo(Equal(firstUID), "BTP must be a fresh object (new UID), not the same one")
-		typ, _, _ := unstructured.NestedString(recreated.Object, "spec", "loadBalancer", "type")
-		Expect(typ).To(Equal("RoundRobin"))
-	})
-
-	ginkgo.It("H1: ConsistentHash + status.Traffic[(stable,90),(canary,10)] → BTP has consistentHash AND engine HTTPRoute has weighted backendRefs", func() {
-		alg := v1beta1.LoadBalancingTypeConsistentHash
-		isvc := isvcWith("isvc-h1", func(i *v1beta1.InferenceService) {
-			i.Spec.Engine = &v1beta1.EngineSpec{}
-			i.Spec.Traffic = &v1beta1.TrafficSpec{
-				Algorithm: &alg,
-				ConsistentHash: &v1beta1.ConsistentHashSpec{
-					Type:    v1beta1.HashTypeHeader,
-					Headers: []v1beta1.HashHeader{{Name: "X-Session-ID"}},
-				},
-			}
-		})
-		// Mark engine Ready + populate in-memory rollout status.
-		isvc.Status.SetCondition(v1beta1.EngineReady, &knapis.Condition{Type: v1beta1.EngineReady, Status: corev1.ConditionTrue})
-		stable := int64(90)
-		canary := int64(10)
-		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {
-				Traffic: []knservingv1.TrafficTarget{
-					{RevisionName: "isvc-h1-engine-rev-stable", Percent: &stable},
-					{RevisionName: "isvc-h1-engine-rev-canary", Percent: &canary},
-				},
-			},
-		}
-
-		// Layer 1: BTP via traffic reconciler — must have consistentHash.
-		_, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-h1", "isvc-h1-engine"})
-		Expect(err).NotTo(HaveOccurred())
-		btp := newBTP()
-		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "isvc-h1"}, btp)).To(Succeed())
-		hashType, _, _ := unstructured.NestedString(btp.Object, "spec", "loadBalancer", "consistentHash", "type")
-		Expect(hashType).To(Equal("Header"))
-		hdr, _, _ := unstructured.NestedString(btp.Object, "spec", "loadBalancer", "consistentHash", "header", "name")
-		Expect(hdr).To(Equal("X-Session-ID"))
-
-		// Layer 2: engine HTTPRoute via builder — must have weighted backendRefs.
-		engineRoute := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
-		refs := engineRoute.Spec.Rules[0].BackendRefs
-		Expect(refs).To(HaveLen(2), "engine HTTPRoute must reflect the rollout split independently of the BTP")
-		Expect(*refs[0].Weight).To(Equal(int32(90)))
-		Expect(*refs[1].Weight).To(Equal(int32(10)))
-
-		// Layers are independent: BTP applies to both backends, HTTPRoute
-		// splits traffic across them. In production, EG enforces
-		// consistent hashing within each weighted pool.
-	})
-
 	ginkgo.It("H2: ConsistentHash + canary + ome.io/btp.* pass-through → all three layers compose", func() {
 		alg := v1beta1.LoadBalancingTypeConsistentHash
 		isvc := isvcWith("isvc-h2", func(i *v1beta1.InferenceService) {
@@ -1513,16 +1111,6 @@ var _ = ginkgo.Describe("OEP-0011 traffic reconciler", ginkgo.Ordered, func() {
 			}
 		})
 		isvc.Status.SetCondition(v1beta1.EngineReady, &knapis.Condition{Type: v1beta1.EngineReady, Status: corev1.ConditionTrue})
-		stable := int64(70)
-		canary := int64(30)
-		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {
-				Traffic: []knservingv1.TrafficTarget{
-					{RevisionName: "isvc-h2-engine-rev-stable", Percent: &stable},
-					{RevisionName: "isvc-h2-engine-rev-canary", Percent: &canary},
-				},
-			},
-		}
 
 		status, err := r.Reconcile(suiteCtx, isvc, []string{"isvc-h2", "isvc-h2-engine"})
 		Expect(err).NotTo(HaveOccurred())
@@ -1547,13 +1135,10 @@ var _ = ginkgo.Describe("OEP-0011 traffic reconciler", ginkgo.Ordered, func() {
 		}
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Message).To(ContainSubstring("loadBalancer.slowStart.window"))
-
-		// Layer (4): weighted HTTPRoute backendRefs (canary 70/30)
-		engineRoute := applyHTTPRouteAndReadBack(isvc, builders.EngineComponent)
-		refs := engineRoute.Spec.Rules[0].BackendRefs
-		Expect(refs).To(HaveLen(2))
-		Expect(*refs[0].Weight).To(Equal(int32(70)))
-		Expect(*refs[1].Weight).To(Equal(int32(30)))
+		// Layer (4) weighted HTTPRoute backendRefs was originally written
+		// against ComponentStatusSpec.Traffic []knservingv1.TrafficTarget;
+		// removed during Serverless cleanup and to be re-introduced once
+		// a non-Knative per-revision producer exists. See OEP-0011.
 	})
 
 	ginkgo.It("I1: empty spec.traffic struct (all fields nil) → HasIntent=false, no BTP emitted", func() {

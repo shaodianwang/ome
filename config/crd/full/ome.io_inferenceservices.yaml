@@ -29,18 +29,6 @@ spec:
         - jsonPath: .spec.runtime.name
           name: Runtime
           type: string
-        - jsonPath: .status.components.engine.traffic[?(@.tag=='prev')].percent
-          name: Prev
-          type: integer
-        - jsonPath: .status.components.engine.traffic[?(@.latestRevision==true)].percent
-          name: Latest
-          type: integer
-        - jsonPath: .status.components.engine.traffic[?(@.tag=='prev')].revisionName
-          name: PrevRolledoutRevision
-          type: string
-        - jsonPath: .status.components.engine.traffic[?(@.latestRevision==true)].revisionName
-          name: LatestReadyRevision
-          type: string
         - jsonPath: .metadata.creationTimestamp
           name: Age
           type: date
@@ -507,9 +495,6 @@ spec:
                     automountServiceAccountToken:
                       type: boolean
                     canaryTrafficPercent:
-                      format: int64
-                      type: integer
-                    containerConcurrency:
                       format: int64
                       type: integer
                     containers:
@@ -7068,8 +7053,7 @@ spec:
                       enum:
                         - cpu
                         - memory
-                        - concurrency
-                        - rps
+                        - tps
                       type: string
                     scaleTarget:
                       type: integer
@@ -12771,9 +12755,6 @@ spec:
                     canaryTrafficPercent:
                       format: int64
                       type: integer
-                    containerConcurrency:
-                      format: int64
-                      type: integer
                     containers:
                       items:
                         properties:
@@ -19330,8 +19311,7 @@ spec:
                       enum:
                         - cpu
                         - memory
-                        - concurrency
-                        - rps
+                        - tps
                       type: string
                     scaleTarget:
                       type: integer
@@ -25100,9 +25080,6 @@ spec:
                       additionalProperties:
                         type: string
                       type: object
-                    containerConcurrency:
-                      format: int64
-                      type: integer
                     containers:
                       items:
                         properties:
@@ -27385,8 +27362,7 @@ spec:
                       enum:
                         - cpu
                         - memory
-                        - concurrency
-                        - rps
+                        - tps
                       type: string
                     scaleTarget:
                       type: integer
@@ -28507,12 +28483,6 @@ spec:
                           url:
                             type: string
                         type: object
-                      latestCreatedRevision:
-                        type: string
-                      latestReadyRevision:
-                        type: string
-                      latestRolledoutRevision:
-                        type: string
                       omenative:
                         properties:
                           availableReplicas:
@@ -28720,8 +28690,6 @@ spec:
                             format: int32
                             type: integer
                         type: object
-                      previousRolledoutRevision:
-                        type: string
                       restURL:
                         type: string
                       rolloutPhase:
@@ -28735,25 +28703,6 @@ spec:
                           - RollingBack
                           - Failed
                         type: string
-                      traffic:
-                        items:
-                          properties:
-                            configurationName:
-                              type: string
-                            latestRevision:
-                              type: boolean
-                            percent:
-                              format: int64
-                              type: integer
-                            revisionName:
-                              type: string
-                            tag:
-                              type: string
-                            url:
-                              type: string
-                          type: object
-                        type: array
-                        x-kubernetes-list-type: atomic
                       url:
                         type: string
                     type: object

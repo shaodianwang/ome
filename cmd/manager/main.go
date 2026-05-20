@@ -11,8 +11,6 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	zaplog "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	istionetworking "istio.io/api/networking/v1beta1"
-	istioclientv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -23,7 +21,6 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
-	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -84,10 +81,6 @@ func registerOptionalScheme(cfg *rest.Config, s *runtime.Scheme, groupVersion sc
 }
 
 func init() {
-	// Allow unknown fields in Istio API client for backwards compatibility if cluster has existing vs with deprecated fields.
-	istionetworking.VirtualServiceUnmarshaler.AllowUnknownFields = true
-	istionetworking.GatewayUnmarshaler.AllowUnknownFields = true
-
 	utilruntime.Must(v1beta1.AddToScheme(scheme))
 	utilruntime.Must(schedulerpluginsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -241,7 +234,6 @@ func main() {
 		kind         string
 		addToScheme  func(*runtime.Scheme) error
 	}{
-		{knservingv1.SchemeGroupVersion, constants.KnativeServiceKind, knservingv1.AddToScheme},
 		{lws.SchemeGroupVersion, constants.LWSKind, lws.AddToScheme},
 		{volcano.SchemeGroupVersion, constants.VolcanoQueueKind, volcano.AddToScheme},
 		{volcanobatch.SchemeGroupVersion, constants.VolcanoJobKind, volcanobatch.AddToScheme},
@@ -254,13 +246,6 @@ func main() {
 			setupLog.Error(err, "Failed to register optional scheme",
 				"groupVersion", s.groupVersion.String(),
 				"kind", s.kind)
-			os.Exit(1)
-		}
-	}
-
-	if !ingressConfig.DisableIstioVirtualHost {
-		if err := registerOptionalScheme(cfg, mgr.GetScheme(), istioclientv1beta1.SchemeGroupVersion, constants.IstioVirtualServiceKind, istioclientv1beta1.AddToScheme); err != nil {
-			setupLog.Error(err, "Failed to register Istio scheme")
 			os.Exit(1)
 		}
 	}

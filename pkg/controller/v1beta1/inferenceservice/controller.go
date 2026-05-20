@@ -12,7 +12,6 @@ import (
 	"github.com/go-logr/logr"
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/pkg/errors"
-	istioclientv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/core/v1"
@@ -27,7 +26,6 @@ import (
 	knapis "knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"knative.dev/pkg/network"
-	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -64,12 +62,6 @@ import (
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=serving.knative.dev,resources=services/finalizers,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=serving.knative.dev,resources=services/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=networking.istio.io,resources=virtualservices,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=networking.istio.io,resources=virtualservices/finalizers,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=networking.istio.io,resources=virtualservices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.istio.io,resources=sidecars,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations;validatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
@@ -178,13 +170,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Handle VirtualDeployment without actual reconciliation
 	if deploymentMode == constants.VirtualDeployment {
 		return r.handleVirtualDeployment(isvc)
-	}
-
-	// Abort early if the resolved deployment mode is Serverless, but Knative Services are not available
-	if deploymentMode == constants.Serverless {
-		if result, err := r.handleServerlessPrerequisites(isvc); err != nil {
-			return result, err
-		}
 	}
 
 	// Initialize status if not already initialized
@@ -471,18 +456,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	// Propagate status for all components
-	componentList := []v1beta1.ComponentType{v1beta1.EngineComponent}
-	if deploymentMode != constants.Serverless {
-		// For other modes (RawDeployment, etc.), we check all defined components.
-		if mergedDecoder != nil {
-			componentList = append(componentList, v1beta1.DecoderComponent)
-		}
-		if mergedRouter != nil {
-			componentList = append(componentList, v1beta1.RouterComponent)
-		}
-	}
-
 	// Clean up resources for components that no longer exist.
 	if err := r.cleanupRemovedComponents(ctx, isvc, mergedEngine, mergedDecoder, mergedRouter); err != nil {
 		r.Log.Error(err, "Failed to cleanup removed components", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
@@ -511,11 +484,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			delete(isvc.Status.Components, v1beta1.RouterComponent)
 			r.Log.Info("Deleted router from status", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
 		}
-	}
-
-	if deploymentMode == constants.Serverless {
-		r.StatusManager.PropagateCrossComponentStatus(&isvc.Status, componentList, v1beta1.RoutesReady)
-		r.StatusManager.PropagateCrossComponentStatus(&isvc.Status, componentList, v1beta1.LatestDeploymentReady)
 	}
 
 	if err = r.updateStatus(isvc, deploymentMode); err != nil {
@@ -557,23 +525,6 @@ func (r *InferenceServiceReconciler) handleVirtualDeployment(isvc *v1beta1.Infer
 	if err := r.updateStatus(isvc, constants.VirtualDeployment); err != nil {
 		r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 		return reconcile.Result{}, err
-	}
-
-	return ctrl.Result{}, nil
-}
-
-func (r *InferenceServiceReconciler) handleServerlessPrerequisites(isvc *v1beta1.InferenceService) (ctrl.Result, error) {
-	// Abort early if the resolved deployment mode is Serverless, but Knative Services are not available
-	ksvcAvailable, err := utils.IsCrdAvailable(r.ClientConfig, knservingv1.SchemeGroupVersion.String(), constants.KnativeServiceKind)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if !ksvcAvailable {
-		r.Recorder.Event(isvc, v1.EventTypeWarning, "ServerlessModeRejected",
-			"It is not possible to use Serverless deployment mode when Knative Services are not available")
-		return ctrl.Result{Requeue: false},
-			reconcile.TerminalError(fmt.Errorf("the resolved deployment mode of InferenceService '%s' is Serverless, but Knative Serving is not available", isvc.Name))
 	}
 
 	return ctrl.Result{}, nil
@@ -650,16 +601,6 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 	runtimeSelectorConfig.ModelCacheProvider = r.ModelCache.Name
 	r.RuntimeSelector = runtimeselector.NewWithConfig(runtimeSelectorConfig)
 
-	ksvcFound, err := utils.IsCrdAvailable(r.ClientConfig, knservingv1.SchemeGroupVersion.String(), constants.KnativeServiceKind)
-	if err != nil {
-		return err
-	}
-
-	vsFound, err := utils.IsCrdAvailable(r.ClientConfig, istioclientv1beta1.SchemeGroupVersion.String(), constants.IstioVirtualServiceKind)
-	if err != nil {
-		return err
-	}
-
 	lwsFound, err := utils.IsCrdAvailable(r.ClientConfig, lws.SchemeGroupVersion.String(), constants.LWSKind)
 	if err != nil {
 		return err
@@ -685,12 +626,6 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&policyv1.PodDisruptionBudget{})
 
-	if ksvcFound {
-		ctrlBuilder = ctrlBuilder.Owns(&knservingv1.Service{})
-	} else {
-		r.Log.Info("The InferenceService controller won't watch serving.knative.dev/v1/Service resources because the CRD is not available.")
-	}
-
 	if kedaFound {
 		ctrlBuilder = ctrlBuilder.Owns(&kedav1.ScaledObject{})
 	} else {
@@ -707,12 +642,6 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		ctrlBuilder = ctrlBuilder.Owns(&lws.LeaderWorkerSet{})
 	} else {
 		r.Log.Info("The InferenceService controller won't watch leaderworkerset.x-k8s.io/v1/LeaderWorkerSet resources because the CRD is not available.")
-	}
-
-	if vsFound && !ingressConfig.DisableIstioVirtualHost {
-		ctrlBuilder = ctrlBuilder.Owns(&istioclientv1beta1.VirtualService{})
-	} else {
-		r.Log.Info("The InferenceService controller won't watch networking.istio.io/v1beta1/VirtualService resources because the CRD is not available.")
 	}
 
 	// OEP-0011: register an Owns() watch on the backend policy

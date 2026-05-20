@@ -9,7 +9,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	istionetworking "istio.io/api/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -200,12 +199,6 @@ func TestMetricsConfiguration(t *testing.T) {
 	assert.Equal(t, ":9090", customOpts.metricsAddr, "Custom metrics address should be set correctly")
 }
 
-func TestInit(t *testing.T) {
-	// Test that init() function sets the Istio API client flags correctly
-	require.True(t, istionetworking.VirtualServiceUnmarshaler.AllowUnknownFields)
-	require.True(t, istionetworking.GatewayUnmarshaler.AllowUnknownFields)
-}
-
 // TestManagerSetup tests the manager configuration
 func TestManagerSetup(t *testing.T) {
 	tests := []struct {
@@ -280,7 +273,7 @@ func createMockConfigMap() *corev1.ConfigMap {
 		},
 		Data: map[string]string{
 			"deploy": `{
-				"defaultDeploymentMode": "Serverless"
+				"defaultDeploymentMode": "RawDeployment"
 			}`,
 			"ingress": `{
 				"ingressGateway": "test-gateway",

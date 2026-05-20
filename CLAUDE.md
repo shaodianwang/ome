@@ -102,7 +102,7 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 ### Binaries (`cmd/`)
 | Binary | Role |
 |---|---|
-| `cmd/manager` | Main Kubernetes operator. Runs all controllers and webhooks. Dynamically registers schemes for Knative, LWS, Volcano, KEDA, Istio based on cluster CRD availability. |
+| `cmd/manager` | Main Kubernetes operator. Runs all controllers and webhooks. Dynamically registers schemes for LWS, Volcano, KEDA based on cluster CRD availability. |
 | `cmd/ome-agent` | Multi-command CLI (Cobra + uber/fx): hf-download, replica (cross-region replication), serving-agent (sidecar), fine-tuned-adapter, model-metadata. |
 | `cmd/crd-gen` | Post-processes generated CRD YAML (strips unwanted validation fields). Invoked by `make manifests`. |
 | `cmd/spec-gen` | Emits the OpenAPI JSON for the CRDs. Invoked by `make generate`; consumed by the Python SDK generator and the API reference site. |
@@ -110,7 +110,7 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 The `model-agent` DaemonSet deployed by `charts/ome-resources/` runs an image built outside this repo.
 
 ### Controllers (`pkg/controller/v1beta1/`)
-- **InferenceServiceReconciler** — The largest controller. Auto-selects runtimes via `runtimeselector`, generates Deployments/Knative Services/LeaderWorkerSets/HPAs/KEDA ScaledObjects. Supports RawDeployment, Serverless, MultiNode, PDDisaggregated, and VirtualDeployment modes.
+- **InferenceServiceReconciler** — The largest controller. Auto-selects runtimes via `runtimeselector`, generates Deployments/LeaderWorkerSets/HPAs/KEDA ScaledObjects. Supports RawDeployment, MultiNode, PDDisaggregated, OMENative, and VirtualDeployment modes.
 - **BaseModelReconciler / ClusterBaseModelReconciler** — Manages model lifecycle. Monitors download status via ConfigMaps. Requeues every 5s during importing/transit states.
 
 ### Key Packages

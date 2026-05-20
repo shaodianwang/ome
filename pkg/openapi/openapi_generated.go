@@ -631,23 +631,16 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 					},
 					"scaleTarget": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for. concurrency and rps targets are supported by Knative Pod Autoscaler (https://knative.dev/docs/serving/autoscaling/autoscaling-targets/).",
+							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
 					},
 					"scaleMetric": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScaleMetric defines the scaling metric type watched by autoscaler possible values are concurrency, rps, cpu, memory. concurrency, rps are supported via Knative Pod Autoscaler(https://knative.dev/docs/serving/autoscaling/autoscaling-metrics).",
+							Description: "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
 							Type:        []string{"string"},
 							Format:      "",
-						},
-					},
-					"containerConcurrency": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ContainerConcurrency specifies how many requests can be processed concurrently, this sets the hard limit of the container concurrency(https://knative.dev/docs/serving/autoscaling/concurrency).",
-							Type:        []string{"integer"},
-							Format:      "int64",
 						},
 					},
 					"timeoutSeconds": {
@@ -740,56 +733,9 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 				Description: "ComponentStatusSpec describes the state of the component",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"latestReadyRevision": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Latest revision name that is in ready state",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"latestCreatedRevision": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Latest revision name that is created",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"previousRolledoutRevision": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Previous revision name that is rolled out with 100 percent traffic",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"latestRolledoutRevision": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Latest revision name that is rolled out with 100 percent traffic",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"traffic": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "Traffic holds the configured traffic distribution for latest ready revision and previous rolled out revision.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("knative.dev/serving/pkg/apis/serving/v1.TrafficTarget"),
-									},
-								},
-							},
-						},
-					},
 					"url": {
 						SchemaProps: spec.SchemaProps{
-							Description: "URL holds the primary url that will distribute traffic over the provided traffic targets. This will be one the REST or gRPC endpoints that are available. It generally has the form http[s]://{route-name}.{route-namespace}.{cluster-level-suffix}",
+							Description: "URL holds the primary url for this component. It generally has the form http[s]://{name}.{namespace}.{cluster-level-suffix}",
 							Ref:         ref("knative.dev/pkg/apis.URL"),
 						},
 					},
@@ -822,7 +768,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable", "knative.dev/serving/pkg/apis/serving/v1.TrafficTarget"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
 	}
 }
 
@@ -1366,23 +1312,16 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 					},
 					"scaleTarget": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for. concurrency and rps targets are supported by Knative Pod Autoscaler (https://knative.dev/docs/serving/autoscaling/autoscaling-targets/).",
+							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
 					},
 					"scaleMetric": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScaleMetric defines the scaling metric type watched by autoscaler possible values are concurrency, rps, cpu, memory. concurrency, rps are supported via Knative Pod Autoscaler(https://knative.dev/docs/serving/autoscaling/autoscaling-metrics).",
+							Description: "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
 							Type:        []string{"string"},
 							Format:      "",
-						},
-					},
-					"containerConcurrency": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ContainerConcurrency specifies how many requests can be processed concurrently, this sets the hard limit of the container concurrency(https://knative.dev/docs/serving/autoscaling/concurrency).",
-							Type:        []string{"integer"},
-							Format:      "int64",
 						},
 					},
 					"timeoutSeconds": {
@@ -2119,23 +2058,16 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					},
 					"scaleTarget": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for. concurrency and rps targets are supported by Knative Pod Autoscaler (https://knative.dev/docs/serving/autoscaling/autoscaling-targets/).",
+							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
 					},
 					"scaleMetric": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScaleMetric defines the scaling metric type watched by autoscaler possible values are concurrency, rps, cpu, memory. concurrency, rps are supported via Knative Pod Autoscaler(https://knative.dev/docs/serving/autoscaling/autoscaling-metrics).",
+							Description: "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
 							Type:        []string{"string"},
 							Format:      "",
-						},
-					},
-					"containerConcurrency": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ContainerConcurrency specifies how many requests can be processed concurrently, this sets the hard limit of the container concurrency(https://knative.dev/docs/serving/autoscaling/concurrency).",
-							Type:        []string{"integer"},
-							Format:      "int64",
 						},
 					},
 					"timeoutSeconds": {
@@ -2502,6 +2434,7 @@ func schema_pkg_apis_ome_v1beta1_HashCookie(ref common.ReferenceCallback) common
 						},
 					},
 				},
+				
 			},
 		},
 	}
@@ -2523,6 +2456,7 @@ func schema_pkg_apis_ome_v1beta1_HashHeader(ref common.ReferenceCallback) common
 						},
 					},
 				},
+				
 			},
 		},
 	}
@@ -3780,6 +3714,7 @@ func schema_pkg_apis_ome_v1beta1_ModelFormat(ref common.ReferenceCallback) commo
 						},
 					},
 				},
+				
 			},
 		},
 	}
@@ -3821,6 +3756,7 @@ func schema_pkg_apis_ome_v1beta1_ModelFrameworkSpec(ref common.ReferenceCallback
 						},
 					},
 				},
+				
 			},
 		},
 	}
@@ -3853,6 +3789,7 @@ func schema_pkg_apis_ome_v1beta1_ModelOverlayRef(ref common.ReferenceCallback) c
 						},
 					},
 				},
+				
 			},
 		},
 	}
@@ -3929,6 +3866,7 @@ func schema_pkg_apis_ome_v1beta1_ModelRef(ref common.ReferenceCallback) common.O
 						},
 					},
 				},
+				
 			},
 		},
 		Dependencies: []string{
@@ -4618,6 +4556,7 @@ func schema_pkg_apis_ome_v1beta1_ObjectReference(ref common.ReferenceCallback) c
 						},
 					},
 				},
+				
 			},
 		},
 	}
@@ -5704,23 +5643,16 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 					},
 					"scaleTarget": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for. concurrency and rps targets are supported by Knative Pod Autoscaler (https://knative.dev/docs/serving/autoscaling/autoscaling-targets/).",
+							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
 					},
 					"scaleMetric": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScaleMetric defines the scaling metric type watched by autoscaler possible values are concurrency, rps, cpu, memory. concurrency, rps are supported via Knative Pod Autoscaler(https://knative.dev/docs/serving/autoscaling/autoscaling-metrics).",
+							Description: "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
 							Type:        []string{"string"},
 							Format:      "",
-						},
-					},
-					"containerConcurrency": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ContainerConcurrency specifies how many requests can be processed concurrently, this sets the hard limit of the container concurrency(https://knative.dev/docs/serving/autoscaling/concurrency).",
-							Type:        []string{"integer"},
-							Format:      "int64",
 						},
 					},
 					"timeoutSeconds": {
@@ -6119,6 +6051,7 @@ func schema_pkg_apis_ome_v1beta1_RunnerSpec(ref common.ReferenceCallback) common
 						},
 					},
 				},
+				
 			},
 		},
 		Dependencies: []string{
@@ -6149,6 +6082,7 @@ func schema_pkg_apis_ome_v1beta1_ScalerAuthenticationRef(ref common.ReferenceCal
 						},
 					},
 				},
+				
 			},
 		},
 	}
@@ -6466,6 +6400,7 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimeRef(ref common.ReferenceCallback)
 						},
 					},
 				},
+				
 			},
 		},
 	}

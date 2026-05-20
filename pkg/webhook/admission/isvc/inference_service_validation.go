@@ -121,6 +121,10 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
+	if err := validation.ValidateScaleToZero(isvc); err != nil {
+		return allWarnings, err
+	}
+
 	// OEP-0011: validate spec.traffic (typed core: LB algorithm, hash
 	// key, endpoint override).
 	if err := validation.ValidateTrafficSpec(isvc.Spec.Traffic); err != nil {

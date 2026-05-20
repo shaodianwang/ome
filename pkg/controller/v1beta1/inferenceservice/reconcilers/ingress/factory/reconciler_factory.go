@@ -30,14 +30,14 @@ func NewStrategyFactory(clientset kubernetes.Interface) interfaces.StrategyFacto
 // CreateStrategyWithOptions creates the appropriate ingress strategy with options
 func (f *DefaultStrategyFactory) CreateStrategyWithOptions(deploymentMode string, opts interfaces.ReconcilerOptions) (interfaces.IngressStrategy, error) {
 	switch deploymentMode {
-	case string(constants.Serverless):
-		return strategies.NewServerlessStrategy(opts, f.clientset, f.domainService, f.pathService), nil
 	case string(constants.RawDeployment), string(constants.MultiNode):
+		if opts.IngressConfig == nil {
+			return nil, fmt.Errorf("ingress config is required for deployment mode: %s", deploymentMode)
+		}
 		if opts.IngressConfig.EnableGatewayAPI {
 			return strategies.NewGatewayAPIStrategy(opts, f.domainService, f.pathService), nil
-		} else {
-			return strategies.NewKubernetesIngressStrategy(opts, f.domainService, f.pathService), nil
 		}
+		return strategies.NewKubernetesIngressStrategy(opts, f.domainService, f.pathService), nil
 	default:
 		return nil, fmt.Errorf("unsupported deployment mode: %s", deploymentMode)
 	}

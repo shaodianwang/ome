@@ -548,7 +548,7 @@ coverage: ## Show coverage summary and enforce threshold
 		exit 1; \
 	fi
 .PHONY: dep-crds
-dep-crds: knative-crds lws-crds keda-crds gateway-api-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
+dep-crds: lws-crds keda-crds gateway-api-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
 
 DEP_CRDS_DIR := tests/integration/dep-crds
 
@@ -560,14 +560,6 @@ DEP_CRDS_DIR := tests/integration/dep-crds
 #
 # Pattern follows kueue/Makefile-deps.mk: locate via `go list -m
 # -mod=readonly`, copy via `cp -f`, never write to GOPATH.
-
-.PHONY: knative-crds
-knative-crds: ## Vendor knative.dev/serving CRDs
-	@mkdir -p $(DEP_CRDS_DIR)/knative-serving
-	@KNATIVE_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" knative.dev/serving 2>/dev/null) ; \
-	if [ -z "$$KNATIVE_DIR" ]; then echo "knative.dev/serving not in go.mod; skipping knative-crds" >&2; exit 0; fi ; \
-	cp -f "$$KNATIVE_DIR/config/core/300-resources/"*.yaml $(DEP_CRDS_DIR)/knative-serving/ ; \
-	echo "✅ Vendored Knative CRDs to $(DEP_CRDS_DIR)/knative-serving/"
 
 .PHONY: lws-crds
 lws-crds: ## Vendor sigs.k8s.io/lws CRDs (leaderworkerset.x-k8s.io)

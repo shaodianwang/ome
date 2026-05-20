@@ -7,10 +7,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
-	duckv1 "knative.dev/pkg/apis/duck/v1"
-	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	lwsspec "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -35,13 +32,11 @@ func TestInitializeComponentStatus(t *testing.T) {
 			status: &v1beta1.InferenceServiceStatus{
 				Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 					v1beta1.EngineComponent: {
-						LatestReadyRevision: "existing-rev",
 					},
 				},
 			},
 			component: v1beta1.EngineComponent,
 			expected: v1beta1.ComponentStatusSpec{
-				LatestReadyRevision: "existing-rev",
 			},
 		},
 		{
@@ -61,16 +56,12 @@ func TestInitializeComponentStatus(t *testing.T) {
 			status: &v1beta1.InferenceServiceStatus{
 				Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 					v1beta1.EngineComponent: {
-						LatestReadyRevision:   "engine-rev-1",
-						LatestCreatedRevision: "engine-rev-2",
 						URL:                   &apis.URL{Scheme: "http", Host: "engine.example.com"},
 					},
 				},
 			},
 			component: v1beta1.EngineComponent,
 			expected: v1beta1.ComponentStatusSpec{
-				LatestReadyRevision:   "engine-rev-1",
-				LatestCreatedRevision: "engine-rev-2",
 				URL:                   &apis.URL{Scheme: "http", Host: "engine.example.com"},
 			},
 		},
@@ -406,171 +397,6 @@ func TestGetReadyConditionsMap(t *testing.T) {
 	assert.NotNil(t, conditionsMap)
 	assert.Equal(t, v1beta1.EngineReady, conditionsMap[v1beta1.EngineComponent])
 	assert.Equal(t, v1beta1.DecoderReady, conditionsMap[v1beta1.DecoderComponent])
-}
-
-func TestGetRouteConditionsMap(t *testing.T) {
-	manager := NewStatusReconciler()
-	conditionsMap := manager.getRouteConditionsMap()
-
-	assert.NotNil(t, conditionsMap)
-	assert.Equal(t, v1beta1.EngineRouteReady, conditionsMap[v1beta1.EngineComponent])
-	assert.Equal(t, v1beta1.DecoderRouteReady, conditionsMap[v1beta1.DecoderComponent])
-}
-
-func TestGetConfigurationConditionsMap(t *testing.T) {
-	manager := NewStatusReconciler()
-	conditionsMap := manager.getConfigurationConditionsMap()
-
-	assert.NotNil(t, conditionsMap)
-	assert.Equal(t, v1beta1.EngineConfigurationReady, conditionsMap[v1beta1.EngineComponent])
-	assert.Equal(t, v1beta1.DecoderConfigurationReady, conditionsMap[v1beta1.DecoderComponent])
-}
-
-func TestGetConditionsMapIndex(t *testing.T) {
-	manager := NewStatusReconciler()
-	conditionsMapIndex := manager.getConditionsMapIndex()
-
-	assert.NotNil(t, conditionsMapIndex)
-	assert.Contains(t, conditionsMapIndex, v1beta1.RoutesReady)
-	assert.Contains(t, conditionsMapIndex, v1beta1.LatestDeploymentReady)
-}
-
-func TestHandleTrafficRouting(t *testing.T) {
-	tests := []struct {
-		name             string
-		statusSpec       *v1beta1.ComponentStatusSpec
-		serviceStatus    *knservingv1.ServiceStatus
-		revisionTraffic  map[string]int64
-		expectedLatest   string
-		expectedPrevious string
-	}{
-		{
-			name: "full traffic to latest revision",
-			statusSpec: &v1beta1.ComponentStatusSpec{
-				LatestRolledoutRevision: "",
-			},
-			serviceStatus: &knservingv1.ServiceStatus{
-				ConfigurationStatusFields: knservingv1.ConfigurationStatusFields{
-					LatestReadyRevisionName:   "rev-2",
-					LatestCreatedRevisionName: "rev-2",
-				},
-				RouteStatusFields: knservingv1.RouteStatusFields{
-					Traffic: []knservingv1.TrafficTarget{
-						{
-							RevisionName:   "rev-2",
-							Percent:        ptr.To(int64(100)),
-							LatestRevision: ptr.To(true),
-						},
-					},
-				},
-			},
-			revisionTraffic:  map[string]int64{"rev-2": 100},
-			expectedLatest:   "rev-2",
-			expectedPrevious: "",
-		},
-		{
-			name: "traffic split between revisions",
-			statusSpec: &v1beta1.ComponentStatusSpec{
-				LatestRolledoutRevision: "rev-1",
-			},
-			serviceStatus: &knservingv1.ServiceStatus{
-				ConfigurationStatusFields: knservingv1.ConfigurationStatusFields{
-					LatestReadyRevisionName:   "rev-2",
-					LatestCreatedRevisionName: "rev-2",
-				},
-				RouteStatusFields: knservingv1.RouteStatusFields{
-					Traffic: []knservingv1.TrafficTarget{
-						{
-							RevisionName:   "rev-2",
-							Percent:        ptr.To(int64(50)),
-							LatestRevision: ptr.To(true),
-						},
-					},
-				},
-			},
-			revisionTraffic:  map[string]int64{"rev-2": 50},
-			expectedLatest:   "rev-1", // Should remain unchanged
-			expectedPrevious: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manager := NewStatusReconciler()
-			manager.handleTrafficRouting(tt.statusSpec, tt.serviceStatus, tt.revisionTraffic)
-
-			assert.Equal(t, tt.expectedLatest, tt.statusSpec.LatestRolledoutRevision)
-			assert.Equal(t, tt.expectedPrevious, tt.statusSpec.PreviousRolledoutRevision)
-		})
-	}
-}
-
-func TestPropagateServiceConditions(t *testing.T) {
-	tests := []struct {
-		name          string
-		status        *v1beta1.InferenceServiceStatus
-		component     v1beta1.ComponentType
-		serviceStatus *knservingv1.ServiceStatus
-		expectedURL   *apis.URL
-		expectedAddr  *duckv1.Addressable
-	}{
-		{
-			name:      "service ready with URL and address",
-			status:    &v1beta1.InferenceServiceStatus{},
-			component: v1beta1.EngineComponent,
-			serviceStatus: &knservingv1.ServiceStatus{
-				Status: duckv1.Status{
-					Conditions: duckv1.Conditions{
-						{
-							Type:   knservingv1.ServiceConditionReady,
-							Status: corev1.ConditionTrue,
-						},
-					},
-				},
-				RouteStatusFields: knservingv1.RouteStatusFields{
-					URL: &apis.URL{Scheme: "https", Host: "test.example.com"},
-					Address: &duckv1.Addressable{
-						URL: &apis.URL{Scheme: "https", Host: "test.example.com"},
-					},
-				},
-			},
-			expectedURL:  &apis.URL{Scheme: "https", Host: "test.example.com"},
-			expectedAddr: &duckv1.Addressable{URL: &apis.URL{Scheme: "https", Host: "test.example.com"}},
-		},
-		{
-			name:      "service not ready",
-			status:    &v1beta1.InferenceServiceStatus{},
-			component: v1beta1.EngineComponent,
-			serviceStatus: &knservingv1.ServiceStatus{
-				Status: duckv1.Status{
-					Conditions: duckv1.Conditions{
-						{
-							Type:   knservingv1.ServiceConditionReady,
-							Status: corev1.ConditionFalse,
-						},
-					},
-				},
-			},
-			expectedURL:  nil,
-			expectedAddr: nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manager := NewStatusReconciler()
-			statusSpec := v1beta1.ComponentStatusSpec{}
-
-			manager.propagateServiceConditions(tt.status, tt.component, tt.serviceStatus, &statusSpec)
-
-			assert.Equal(t, tt.expectedURL, statusSpec.URL)
-			assert.Equal(t, tt.expectedAddr, statusSpec.Address)
-
-			// Check that conditions were set
-			readyCondition := tt.status.GetCondition(v1beta1.EngineReady)
-			assert.NotNil(t, readyCondition)
-		})
-	}
 }
 
 func TestCheckContainerStatuses(t *testing.T) {

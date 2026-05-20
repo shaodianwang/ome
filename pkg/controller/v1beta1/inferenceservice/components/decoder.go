@@ -153,8 +153,6 @@ func (d *Decoder) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta
 		return d.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent)
 	case constants.MultiNode:
 		return d.deploymentReconciler.ReconcileMultiNodeDeployment(isvc, objectMeta, podSpec, workerSize, workerPodSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent)
-	case constants.Serverless:
-		return d.deploymentReconciler.ReconcileKnativeDeployment(isvc, objectMeta, podSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent)
 	case constants.OMENative:
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
@@ -180,12 +178,13 @@ func (d *Decoder) updateDecoderStatus(isvc *v1beta1.InferenceService, objectMeta
 	return UpdateComponentStatus(&d.BaseComponentFields, isvc, v1beta1.DecoderComponent, objectMeta, d.getPodLabelInfo)
 }
 
-// getPodLabelInfo returns the pod label key and value based on the deployment mode
+// getPodLabelInfo returns the pod label key and value used to filter the
+// decoder's pods. All surviving deployment modes (raw, multi-node, OMENative)
+// emit pods carrying the raw-deployment app label.
 func (d *Decoder) getPodLabelInfo(rawDeployment bool, objectMeta metav1.ObjectMeta, statusSpec v1beta1.ComponentStatusSpec) (string, string) {
-	if rawDeployment {
-		return constants.RawDeploymentAppLabel, constants.GetRawServiceLabel(objectMeta.Name)
-	}
-	return constants.RevisionLabel, statusSpec.LatestCreatedRevision
+	_ = rawDeployment
+	_ = statusSpec
+	return constants.RawDeploymentAppLabel, constants.GetRawServiceLabel(objectMeta.Name)
 }
 
 // reconcileObjectMeta creates the object metadata for the decoder component

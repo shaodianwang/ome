@@ -6,28 +6,28 @@ themselves are **not committed** — they're regenerated from go.mod by
 `make dep-crds`, which `make integration-test` runs as a prerequisite.
 
 The single source of truth for CRD versions is `go.mod`. Checking the
-YAMLs in would create a drift surface and bloat the repo (Knative +
-LWS + KEDA + Istio together is ~25 files) without buying anything
-that the go.mod pin doesn't already give us.
+YAMLs in would create a drift surface and bloat the repo without
+buying anything that the go.mod pin doesn't already give us.
 
 ## Layout (after `make dep-crds`)
 
 ```
 dep-crds/
-├── knative-serving/    # knative.dev/serving CRDs (Service, Route, …)
-├── lws/                # leaderworkerset.x-k8s.io CRDs (TODO)
-├── keda/               # keda.sh CRDs (TODO)
-├── istio/              # networking.istio.io CRDs (TODO)
+├── lws/                  # leaderworkerset.x-k8s.io CRDs
+├── keda/                 # keda.sh CRDs
+├── envoy-gateway/        # gateway.envoyproxy.io BackendTrafficPolicy (hand-vendored)
+├── gateway-api/          # sigs.k8s.io/gateway-api HTTPRoute (hand-vendored)
+├── prometheus-operator/  # monitoring.coreos.com PodMonitor (hand-vendored)
 └── README.md
 ```
 
-`tests/integration/dep-crds/*/` is gitignored; only this README is
-tracked.
+Bundles sourced from a Go module are gitignored under `tests/integration/dep-crds/*/`;
+hand-vendored bundles carry a `SOURCE` file and are tracked.
 
 ## Bumping a vendored dep
 
 ```sh
-go get -u knative.dev/serving@v0.40.0
+go get -u sigs.k8s.io/lws@<version>
 go mod tidy
 make integration-test    # re-vendors via dep-crds prerequisite, runs the suite
 ```

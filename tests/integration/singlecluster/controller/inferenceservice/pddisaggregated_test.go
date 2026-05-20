@@ -22,9 +22,7 @@ import (
 //
 // Trigger condition: BOTH Engine AND Decoder are non-nil
 // (controller.go:280). Each component independently picks its mode
-// (RawDeployment / MultiNode etc.); validateDeploymentModeCompatibility
-// enforces that engine cannot be Serverless when a decoder is present
-// (utils/deployment.go:104).
+// (RawDeployment / MultiNode).
 //
 // In the simplest case (both engine + decoder are RawDeployment), we
 // expect TWO Deployments to materialize — one per component, each
@@ -121,10 +119,9 @@ var _ = ginkgo.Describe("InferenceService PDDisaggregated", ginkgo.Ordered, func
 	ginkgo.It("Mixed: Engine MultiNode + Decoder Raw → 1 LWS (engine) + 1 Deployment (decoder)", func() {
 		// Validates that engine + decoder pick their MODE INDEPENDENTLY.
 		// determineComponentDeploymentMode runs separately on each
-		// component spec (utils/deployment.go:38-67); MultiNode for
-		// engine because Leader/Worker is set; RawDeployment for
-		// decoder because Leader/Worker is NOT set (and decoder never
-		// supports Serverless).
+		// component spec (utils/deployment.go); MultiNode for engine
+		// because Leader/Worker is set; RawDeployment for decoder
+		// because Leader/Worker is NOT set.
 		ginkgo.By("creating BaseModel + Runtime baseline (engine carries leader/worker runners; decoder carries a single runner)")
 		cbm := v1beta1testing.MakeClusterBaseModel("pdmix-llama").
 			StorageURI("oci://n/test/b/models/o/llama").

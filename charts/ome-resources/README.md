@@ -30,15 +30,12 @@ OME Resources and Controller
 | ome.controller.image | string | `"ome-manager"` |  |
 | ome.controller.ingressGateway.additionalIngressDomains | string | `nil` |  |
 | ome.controller.ingressGateway.disableIngressCreation | bool | `true` |  |
-| ome.controller.ingressGateway.disableIstioVirtualHost | bool | `false` |  |
 | ome.controller.ingressGateway.domain | string | `"svc.cluster.local"` |  |
 | ome.controller.ingressGateway.domainTemplate | string | `"{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"` |  |
 | ome.controller.ingressGateway.enableGatewayAPI | bool | `false` |  |
 | ome.controller.ingressGateway.ingressGateway.className | string | `"istio"` |  |
-| ome.controller.ingressGateway.ingressGateway.gateway | string | `"knative-serving/knative-ingress-gateway"` |  |
+| ome.controller.ingressGateway.ingressGateway.gateway | string | `"istio-system/ingress-gateway"` |  |
 | ome.controller.ingressGateway.ingressGateway.gatewayService | string | `"istio-ingressgateway.istio-system.svc.cluster.local"` |  |
-| ome.controller.ingressGateway.localGateway.gateway | string | `"knative-serving/knative-local-gateway"` |  |
-| ome.controller.ingressGateway.localGateway.gatewayService | string | `"knative-local-gateway.istio-system.svc.cluster.local"` |  |
 | ome.controller.ingressGateway.omeIngressGateway | string | `""` |  |
 | ome.controller.ingressGateway.pathTemplate | string | `""` |  |
 | ome.controller.ingressGateway.urlScheme | string | `"http"` |  |

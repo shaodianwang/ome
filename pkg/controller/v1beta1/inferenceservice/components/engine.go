@@ -10,7 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -154,8 +153,6 @@ func (e *Engine) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 		return e.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
 	case constants.MultiNode:
 		return e.deploymentReconciler.ReconcileMultiNodeDeployment(isvc, objectMeta, podSpec, workerSize, workerPodSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
-	case constants.Serverless:
-		return e.deploymentReconciler.ReconcileKnativeDeployment(isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
 	case constants.OMENative:
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
@@ -181,12 +178,13 @@ func (e *Engine) updateEngineStatus(isvc *v1beta1.InferenceService, objectMeta m
 	return UpdateComponentStatus(&e.BaseComponentFields, isvc, v1beta1.EngineComponent, objectMeta, e.getPodLabelInfo)
 }
 
-// getPodLabelInfo returns the pod label key and value based on the deployment mode
+// getPodLabelInfo returns the pod label key and value used to filter the
+// engine's pods. All surviving deployment modes (raw, multi-node, OMENative)
+// emit pods carrying the raw-deployment app label.
 func (e *Engine) getPodLabelInfo(rawDeployment bool, objectMeta metav1.ObjectMeta, statusSpec v1beta1.ComponentStatusSpec) (string, string) {
-	if rawDeployment {
-		return constants.RawDeploymentAppLabel, constants.GetRawServiceLabel(objectMeta.Name)
-	}
-	return constants.RevisionLabel, statusSpec.LatestCreatedRevision
+	_ = rawDeployment
+	_ = statusSpec
+	return constants.RawDeploymentAppLabel, constants.GetRawServiceLabel(objectMeta.Name)
 }
 
 // reconcileObjectMeta creates the object metadata for the engine component
@@ -261,19 +259,11 @@ func (e *Engine) determineEngineName(isvc *v1beta1.InferenceService) (string, er
 	defaultEngineName := isvc.Name + "-engine"
 	existingName := defaultEngineName
 
-	if e.DeploymentMode == constants.RawDeployment {
-		existing := &v1.Service{}
-		if err := e.Client.Get(context.TODO(), types.NamespacedName{Name: defaultEngineName, Namespace: isvc.Namespace}, existing); err == nil {
-			return existingName, nil
-		}
-	} else {
-		existing := &knservingv1.Service{}
-		if err := e.Client.Get(context.TODO(), types.NamespacedName{Name: defaultEngineName, Namespace: isvc.Namespace}, existing); err == nil {
-			return existingName, nil
-		}
+	existing := &v1.Service{}
+	if err := e.Client.Get(context.TODO(), types.NamespacedName{Name: defaultEngineName, Namespace: isvc.Namespace}, existing); err == nil {
+		return existingName, nil
 	}
 
-	// If the default name doesn't exist, use it
 	return defaultEngineName, nil
 }
 

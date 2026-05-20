@@ -103,6 +103,39 @@ func ValidateReplicaBounds(min, max *int) error {
 	return nil
 }
 
+// ValidateScaleToZero rejects InferenceServices that explicitly set any
+// Component's MinReplicas=0 unless autoscalerClass=keda is configured.
+//
+// Before Serverless mode was removed, MinReplicas=0 auto-promoted the
+// engine to Knative-Serving (which natively supports scale-to-zero).
+// After removal, MinReplicas=0 falls through to RawDeployment and the
+// Deployment sits at zero replicas (broken). Operators needing
+// scale-to-zero must opt into KEDA's idleReplicaCount via the
+// autoscalerClass annotation.
+func ValidateScaleToZero(isvc *v1beta1.InferenceService) error {
+	hasZero := false
+	if isvc.Spec.Engine != nil && isvc.Spec.Engine.MinReplicas != nil && *isvc.Spec.Engine.MinReplicas == 0 {
+		hasZero = true
+	}
+	if isvc.Spec.Decoder != nil && isvc.Spec.Decoder.MinReplicas != nil && *isvc.Spec.Decoder.MinReplicas == 0 {
+		hasZero = true
+	}
+	if isvc.Spec.Router != nil && isvc.Spec.Router.MinReplicas != nil && *isvc.Spec.Router.MinReplicas == 0 {
+		hasZero = true
+	}
+	if !hasZero {
+		return nil
+	}
+	annotations := isvc.ObjectMeta.Annotations
+	if constants.AutoscalerClassType(annotations[constants.AutoscalerClass]) == constants.AutoscalerClassKEDA {
+		return nil
+	}
+	return fmt.Errorf(
+		"InvalidScaleToZero: MinReplicas=0 requires %s=%s annotation (Serverless mode no longer auto-promotes scale-to-zero)",
+		constants.AutoscalerClass, constants.AutoscalerClassKEDA,
+	)
+}
+
 // ValidateAutoscalerConfig validates autoscaler-related annotations and spec
 // fields. It returns warnings (non-fatal messages) and an error if validation
 // fails.

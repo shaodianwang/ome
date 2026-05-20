@@ -14,19 +14,12 @@ type ComponentExtensionSpec struct {
 	// +optional
 	MaxReplicas int `json:"maxReplicas,omitempty"`
 	// ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.
-	// concurrency and rps targets are supported by Knative Pod Autoscaler
-	// (https://knative.dev/docs/serving/autoscaling/autoscaling-targets/).
 	// +optional
 	ScaleTarget *int `json:"scaleTarget,omitempty"`
-	// ScaleMetric defines the scaling metric type watched by autoscaler
-	// possible values are concurrency, rps, cpu, memory. concurrency, rps are supported via
-	// Knative Pod Autoscaler(https://knative.dev/docs/serving/autoscaling/autoscaling-metrics).
+	// ScaleMetric defines the scaling metric type watched by autoscaler.
+	// Possible values are cpu, memory, tps.
 	// +optional
 	ScaleMetric *ScaleMetric `json:"scaleMetric,omitempty"`
-	// ContainerConcurrency specifies how many requests can be processed concurrently, this sets the hard limit of the container
-	// concurrency(https://knative.dev/docs/serving/autoscaling/concurrency).
-	// +optional
-	ContainerConcurrency *int64 `json:"containerConcurrency,omitempty"`
 	// TimeoutSeconds specifies the number of seconds to wait before timing out a request to the component.
 	// +optional
 	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
@@ -63,13 +56,11 @@ type ComponentExtensionSpec struct {
 }
 
 // ScaleMetric enum
-// +kubebuilder:validation:Enum=cpu;memory;concurrency;rps
+// +kubebuilder:validation:Enum=cpu;memory;tps
 type ScaleMetric string
 
 const (
-	MetricCPU         ScaleMetric = "cpu"
-	MetricMemory      ScaleMetric = "memory"
-	MetricConcurrency ScaleMetric = "concurrency"
-	MetricRPS         ScaleMetric = "rps"
-	MetricTPS         ScaleMetric = "tps"
+	MetricCPU    ScaleMetric = "cpu"
+	MetricMemory ScaleMetric = "memory"
+	MetricTPS    ScaleMetric = "tps"
 )

@@ -278,12 +278,12 @@ func TestNewDeployConfig(t *testing.T) {
 			name: "valid config",
 			configMapData: map[string]string{
 				DeployConfigName: `{
-					"defaultDeploymentMode": "Serverless"
+					"defaultDeploymentMode": "RawDeployment"
 				}`,
 			},
 			expectedError: false,
 			validateConfig: func(t *testing.T, cfg *DeployConfig) {
-				assert.Equal(t, "Serverless", cfg.DefaultDeploymentMode)
+				assert.Equal(t, "RawDeployment", cfg.DefaultDeploymentMode)
 			},
 		},
 		{

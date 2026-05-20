@@ -9,7 +9,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -135,8 +134,6 @@ func (r *Router) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 	switch r.DeploymentMode {
 	case constants.RawDeployment:
 		return r.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
-	case constants.Serverless:
-		return r.deploymentReconciler.ReconcileKnativeDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
 	case constants.OMENative:
 		return omenative.ReconcileComponent(context.TODO(), omenative.ReconcileParams{
 			ISVC:         isvc,
@@ -156,12 +153,13 @@ func (r *Router) updateRouterStatus(isvc *v1beta1.InferenceService, objectMeta m
 	return UpdateComponentStatus(&r.BaseComponentFields, isvc, v1beta1.RouterComponent, objectMeta, r.getPodLabelInfo)
 }
 
-// getPodLabelInfo returns the pod label key and value based on the deployment mode
+// getPodLabelInfo returns the pod label key and value used to filter the
+// router's pods. All surviving deployment modes (raw, multi-node, OMENative)
+// emit pods carrying the raw-deployment app label.
 func (r *Router) getPodLabelInfo(rawDeployment bool, objectMeta metav1.ObjectMeta, statusSpec v1beta1.ComponentStatusSpec) (string, string) {
-	if rawDeployment {
-		return constants.RawDeploymentAppLabel, constants.GetRawServiceLabel(objectMeta.Name)
-	}
-	return constants.RevisionLabel, statusSpec.LatestCreatedRevision
+	_ = rawDeployment
+	_ = statusSpec
+	return constants.RawDeploymentAppLabel, constants.GetRawServiceLabel(objectMeta.Name)
 }
 
 // reconcileObjectMeta creates the object metadata for the router component
@@ -237,19 +235,11 @@ func (r *Router) determineRouterName(isvc *v1beta1.InferenceService) (string, er
 	defaultRouterName := isvc.Name + "-router"
 	existingName := defaultRouterName
 
-	if r.DeploymentMode == constants.RawDeployment {
-		existing := &v1.Service{}
-		if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: defaultRouterName, Namespace: isvc.Namespace}, existing); err == nil {
-			return existingName, nil
-		}
-	} else {
-		existing := &knservingv1.Service{}
-		if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: defaultRouterName, Namespace: isvc.Namespace}, existing); err == nil {
-			return existingName, nil
-		}
+	existing := &v1.Service{}
+	if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: defaultRouterName, Namespace: isvc.Namespace}, existing); err == nil {
+		return existingName, nil
 	}
 
-	// If the default name doesn't exist, use it
 	return defaultRouterName, nil
 }
 

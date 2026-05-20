@@ -8,16 +8,12 @@ data:
     {
         "ingressGateway" : "{{ .Values.ome.controller.ingressGateway.ingressGateway.gateway }}",
         "ingressService" : "{{ .Values.ome.controller.ingressGateway.ingressGateway.gatewayService }}",
-        "localGateway" : "{{ .Values.ome.controller.ingressGateway.localGateway.gateway }}",
-        "localGatewayService" : "{{ .Values.ome.controller.ingressGateway.localGateway.gatewayService }}",
-        "knativeLocalGatewayService" : "{{ .Values.ome.controller.ingressGateway.localGateway.gatewayService }}",
         "omeIngressGateway" : "{{ .Values.ome.controller.ingressGateway.omeIngressGateway | default "" }}",
         "ingressDomain"  : "{{ .Values.ome.controller.ingressGateway.domain }}",
         "ingressClassName" : "{{ .Values.ome.controller.ingressGateway.ingressGateway.className }}",
         "additionalIngressDomains" : {{ .Values.ome.controller.ingressGateway.additionalIngressDomains | default "null" }},
         "domainTemplate": "{{ .Values.ome.controller.ingressGateway.domainTemplate }}",
         "urlScheme": "{{ .Values.ome.controller.ingressGateway.urlScheme }}",
-        "disableIstioVirtualHost": {{ .Values.ome.controller.ingressGateway.disableIstioVirtualHost }},
         "pathTemplate": "{{ .Values.ome.controller.ingressGateway.pathTemplate | default "" }}",
         "disableIngressCreation": {{ .Values.ome.controller.ingressGateway.disableIngressCreation | default false }},
         "enableGatewayAPI": {{ .Values.ome.controller.ingressGateway.enableGatewayAPI | default false }}

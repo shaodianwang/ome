@@ -128,8 +128,8 @@ func (w *InferenceServiceWrapper) Router(spec *v1beta1.RouterSpec) *InferenceSer
 
 // DeploymentMode sets the ome.io/deploymentMode annotation, which the
 // controller reads to override the cluster default. Pass
-// constants.RawDeployment / constants.Serverless / constants.MultiNode /
-// constants.PDDisaggregated / constants.VirtualDeployment.
+// constants.RawDeployment / constants.MultiNode / constants.PDDisaggregated
+// / constants.OMENative / constants.VirtualDeployment.
 func (w *InferenceServiceWrapper) DeploymentMode(mode constants.DeploymentModeType) *InferenceServiceWrapper {
 	if w.Annotations == nil {
 		w.Annotations = map[string]string{}
@@ -179,8 +179,8 @@ func init() {
 			isvc := &isvcs.Items[i]
 			// Strip ALL finalizers — the ISVC finalizer is a literal
 			// "inferenceservice.finalizers" string in the controller, but
-			// future commits may add more (KEDA, Knative cleanup, etc.).
-			// Stripping all is safe in tests where we control the resources.
+			// future commits may add more. Stripping all is safe in tests
+			// where we control the resources.
 			if len(isvc.Finalizers) == 0 {
 				continue
 			}

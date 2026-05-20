@@ -5,17 +5,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
-	knservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 )
 
 // InferenceServiceStatus defines the observed state of InferenceService
 type InferenceServiceStatus struct {
 	// Conditions for the InferenceService <br/>
-	// - EngineRouteReady: engine route readiness condition; <br/>
-	// - DecoderRouteReady: decoder route readiness condition; <br/>
 	// - EngineReady: engine readiness condition; <br/>
-	// - RoutesReady (serverless mode only): aggregated routing condition, i.e. endpoint readiness condition; <br/>
-	// - LatestDeploymentReady (serverless mode only): aggregated configuration condition, i.e. latest deployment readiness condition; <br/>
+	// - DecoderReady: decoder readiness condition; <br/>
+	// - RouterReady: router readiness condition; <br/>
+	// - IngressReady: ingress resource readiness; <br/>
 	// - Ready: aggregated condition; <br/>
 	duckv1.Status `json:",inline"`
 	// Addressable endpoint for the InferenceService
@@ -66,25 +64,8 @@ type MountedOverlay struct {
 
 // ComponentStatusSpec describes the state of the component
 type ComponentStatusSpec struct {
-	// Latest revision name that is in ready state
-	// +optional
-	LatestReadyRevision string `json:"latestReadyRevision,omitempty"`
-	// Latest revision name that is created
-	// +optional
-	LatestCreatedRevision string `json:"latestCreatedRevision,omitempty"`
-	// Previous revision name that is rolled out with 100 percent traffic
-	// +optional
-	PreviousRolledoutRevision string `json:"previousRolledoutRevision,omitempty"`
-	// Latest revision name that is rolled out with 100 percent traffic
-	// +optional
-	LatestRolledoutRevision string `json:"latestRolledoutRevision,omitempty"`
-	// Traffic holds the configured traffic distribution for latest ready revision and previous rolled out revision.
-	// +optional
-	// +listType=atomic
-	Traffic []knservingv1.TrafficTarget `json:"traffic,omitempty"`
-	// URL holds the primary url that will distribute traffic over the provided traffic targets.
-	// This will be one the REST or gRPC endpoints that are available.
-	// It generally has the form http[s]://{route-name}.{route-namespace}.{cluster-level-suffix}
+	// URL holds the primary url for this component.
+	// It generally has the form http[s]://{name}.{namespace}.{cluster-level-suffix}
 	// +optional
 	URL *apis.URL `json:"url,omitempty"`
 	// REST endpoint of the component if available.
@@ -123,38 +104,18 @@ const (
 
 // ConditionType represents a Service condition value
 const (
-	// EngineRouteReady is set when engine route is ready
-	EngineRouteReady apis.ConditionType = "EngineRouteReady"
-	// DecoderRouteReady is set when decoder route is ready
-	DecoderRouteReady apis.ConditionType = "DecoderRouteReady"
-	// EngineConfigurationReady is set when engine pods are ready.
-	EngineConfigurationReady apis.ConditionType = "EngineConfigurationReady"
-	// DecoderConfigurationReady is set when decoder pods are ready.
-	DecoderConfigurationReady apis.ConditionType = "DecoderConfigurationReady"
 	// EngineReady is set when engine pods are ready.
 	EngineReady apis.ConditionType = "EngineReady"
 	// DecoderReady is set when decoder pods are ready.
 	DecoderReady apis.ConditionType = "DecoderReady"
+	// RouterReady is set when router has reported readiness.
+	RouterReady apis.ConditionType = "RouterReady"
 	// IngressReady is set when Ingress is created
 	IngressReady apis.ConditionType = "IngressReady"
-	// RoutesReady is set when underlying routes for all components have reported readiness.
-	RoutesReady apis.ConditionType = "RoutesReady"
-	// LatestDeploymentReady is set when underlying configurations for all components have reported readiness.
-	LatestDeploymentReady apis.ConditionType = "LatestDeploymentReady"
 	// OverlaysReady is True iff every declared overlay was attached.
 	// False with a reason when one or more were skipped; informational —
 	// the primary still drives the deployment.
 	OverlaysReady apis.ConditionType = "OverlaysReady"
-)
-
-// RouterConditionType represents a Router condition value
-const (
-	// RouterRouteReady is set when network configuration has completed.
-	RouterRouteReady apis.ConditionType = "RouterRouteReady"
-	// RouterConfigurationReady is set when router pods are ready.
-	RouterConfigurationReady apis.ConditionType = "RouterConfigurationReady"
-	// RouterReady is set when router has reported readiness.
-	RouterReady apis.ConditionType = "RouterReady"
 )
 
 type ModelStatus struct {

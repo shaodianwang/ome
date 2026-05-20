@@ -68,8 +68,8 @@ func WithTrafficTranslator(tr traffic.Translator) InferenceServiceOption {
 //
 // Default DeployConfig.DefaultDeploymentMode is RawDeployment.
 // Default IngressConfig disables ingress creation so the controller
-// doesn't try to materialize Knative routes / Istio VirtualServices in
-// suites that haven't installed those CRDs.
+// doesn't try to materialize ingress resources in suites that haven't
+// installed those CRDs.
 //
 // Test suites that exercise different defaults supply WithDeployConfig
 // or WithIngressConfig.
@@ -86,7 +86,7 @@ func SetupInferenceService(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 	}
 	if cfg.ingressConfig == nil {
 		cfg.ingressConfig = &controllerconfig.IngressConfig{
-			IngressGateway:         "knative-serving/knative-ingress-gateway",
+			IngressGateway:         "istio-system/ingress-gateway",
 			IngressServiceName:     "istio-ingressgateway.istio-system.svc.cluster.local",
 			IngressDomain:          "svc.cluster.local",
 			DomainTemplate:         controllerconfig.DefaultDomainTemplate,

@@ -987,6 +987,29 @@ follow-up PD-mode reconciler OEPs must address it.
 
 #### HTTPRoute Weighted BackendRefs
 
+> **Implementation status (2026-05-20):** the first iteration of this
+> section was implemented using `knservingv1.TrafficTarget` for
+> `ComponentStatusSpec.Traffic[]`, which coupled OME to the Knative
+> Serving Go module and assumed a Knative status propagator as the
+> field's producer. Both were removed during the Serverless-mode
+> cleanup (see commit history on the `simolin/drop-serverless-mode`
+> branch). The HTTPRoute builder's weighted-backend code path
+> (`componentTraffic` + `createWeightedHTTPRouteRule`) and the
+> corresponding E1-E5 / H1 integration tests + the
+> `TestHTTPRouteBuilder_WeightedBackends_*` unit tests are deleted.
+>
+> The capability described below is still the OEP-0011 intent and the
+> Gateway API supports it natively (no Knative dependency required).
+> To re-introduce, a follow-up needs to (a) define an OME-native
+> `v1beta1.TrafficTarget` type with `BackendName` / `Tag` / `Percent`
+> fields, (b) restore `componentTraffic` and `createWeightedHTTPRouteRule`
+> in the HTTPRoute builder, and (c) wire a non-Knative producer
+> (per-mode reconciler emitting per-revision Services and updating
+> `status.components[<c>].traffic[]`) to populate the field. The
+> single-backendRef path (no traffic split) continues to work in the
+> interim — every per-Component HTTPRoute today carries one
+> `backendRef` pointing at the component's primary Service.
+
 The HTTPRoute builder
 (`pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/builders/httproute_builder.go`)
 reads `Status.Components[<c>].Traffic[]` and emits weighted backendRefs:

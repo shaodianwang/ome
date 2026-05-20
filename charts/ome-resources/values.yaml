@@ -33,12 +33,8 @@ ome:
       domain: svc.cluster.local
       domainTemplate: "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"
       urlScheme: http
-      disableIstioVirtualHost: false
-      localGateway:
-        gateway: knative-serving/knative-local-gateway
-        gatewayService: knative-local-gateway.istio-system.svc.cluster.local
       ingressGateway:
-        gateway: knative-serving/knative-ingress-gateway
+        gateway: istio-system/ingress-gateway
         gatewayService: istio-ingressgateway.istio-system.svc.cluster.local
         className: istio
       omeIngressGateway: ""

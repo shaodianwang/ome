@@ -10,17 +10,13 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/network"
-	"knative.dev/serving/pkg/apis/autoscaling"
 )
 
 // OME Constants
 var (
-	OMEName                          = "ome"
-	OMEAPIGroupName                  = "ome.io"
-	KnativeAutoscalingAPIGroupName   = "autoscaling.knative.dev"
-	KnativeServingAPIGroupNamePrefix = "serving.knative"
-	KnativeServingAPIGroupName       = KnativeServingAPIGroupNamePrefix + ".dev"
-	OMENamespace                     = getEnvOrDefault("POD_NAMESPACE", "ome")
+	OMEName         = "ome"
+	OMEAPIGroupName = "ome.io"
+	OMENamespace    = getEnvOrDefault("POD_NAMESPACE", "ome")
 )
 
 // InferenceService Constants
@@ -80,10 +76,6 @@ var (
 	AutoscalerMetrics                       = OMEAPIGroupName + "/metrics"
 	TargetUtilizationPercentage             = OMEAPIGroupName + "/targetUtilizationPercentage"
 	DeprecationWarning                      = OMEAPIGroupName + "/deprecation-warning"
-	MinScaleAnnotationKey                   = KnativeAutoscalingAPIGroupName + "/min-scale"
-	MaxScaleAnnotationKey                   = KnativeAutoscalingAPIGroupName + "/max-scale"
-	RollOutDurationAnnotationKey            = KnativeServingAPIGroupName + "/rollout-duration"
-	KnativeOpenshiftEnablePassthroughKey    = "serving.knative.openshift.io/enablePassthrough"
 	EnableMetricAggregation                 = OMEAPIGroupName + "/enable-metric-aggregation"
 	SetPrometheusAnnotation                 = OMEAPIGroupName + "/enable-prometheus-scraping"
 	DedicatedAICluster                      = OMEAPIGroupName + "/dedicated-ai-cluster"
@@ -285,16 +277,11 @@ type InferenceServiceVerb string
 
 type InferenceServiceProtocol string
 
-// Knative constants
+// VisibilityLabel is the cluster-local visibility marker. Kept for
+// backward compatibility with manifests that still carry the Knative
+// idiom even though OME no longer serves Knative.
 const (
-	KnativeLocalGateway   = "knative-serving/knative-local-gateway"
-	KnativeIngressGateway = "knative-serving/knative-ingress-gateway"
-	VisibilityLabel       = "networking.knative.dev/visibility"
-)
-
-var (
-	LocalGatewayHost = "knative-local-gateway.istio-system.svc." + network.GetClusterDomainName()
-	IstioMeshGateway = "mesh"
+	VisibilityLabel = "networking.knative.dev/visibility"
 )
 
 // InferenceService Component enums
@@ -387,8 +374,6 @@ const DefaultModelLocalMountPath = "/mnt/models"
 
 var (
 	ServiceAnnotationDisallowedList = []string{
-		autoscaling.MinScaleAnnotationKey,
-		autoscaling.MaxScaleAnnotationKey,
 		StorageInitializerSourceUriInternalAnnotationKey,
 		"kubectl.kubernetes.io/last-applied-configuration",
 	}
@@ -433,7 +418,6 @@ const (
 type DeploymentModeType string
 
 const (
-	Serverless        DeploymentModeType = "Serverless"
 	RawDeployment     DeploymentModeType = "RawDeployment"
 	PDDisaggregated   DeploymentModeType = "PDDisaggregated"
 	MultiNode         DeploymentModeType = "MultiNode"
@@ -444,20 +428,15 @@ const (
 // IsValid checks if the deployment mode is valid
 func (d DeploymentModeType) IsValid() bool {
 	switch d {
-	case Serverless, RawDeployment, MultiNode, VirtualDeployment, OMENative:
+	case RawDeployment, MultiNode, VirtualDeployment, OMENative:
 		return true
 	default:
 		return false
 	}
 }
 
+// app label
 const (
-	DefaultNSKnativeServing = "knative-serving"
-)
-
-// revision label
-const (
-	RevisionLabel         = "serving.knative.dev/revision"
 	RawDeploymentAppLabel = "app"
 )
 
@@ -471,15 +450,13 @@ const (
 
 // CRD Kinds
 const (
-	IstioVirtualServiceKind = "VirtualService"
-	KnativeServiceKind      = "Service"
-	VolcanoQueueKind        = "Queue"
-	KEDAScaledObjectKind    = "ScaledObject"
-	VolcanoJobKind          = "Job"
-	LWSKind                 = "LeaderWorkerSet"
-	GatewayKind             = "Gateway"
-	ServiceKind             = "Service"
-	PodMonitorKind          = "PodMonitor"
+	VolcanoQueueKind     = "Queue"
+	KEDAScaledObjectKind = "ScaledObject"
+	VolcanoJobKind       = "Job"
+	LWSKind              = "LeaderWorkerSet"
+	GatewayKind          = "Gateway"
+	ServiceKind          = "Service"
+	PodMonitorKind       = "PodMonitor"
 )
 
 // Volcano Job Labels

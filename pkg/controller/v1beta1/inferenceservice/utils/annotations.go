@@ -83,22 +83,18 @@ func RemovePodAnnotations(metadata *metav1.ObjectMeta, annotationsToRemove []str
 func ResolveIngressConfig(baseConfig *controllerconfig.IngressConfig, annotations map[string]string) *controllerconfig.IngressConfig {
 	// Start with a copy of the base config to avoid modifying the original
 	resolved := &controllerconfig.IngressConfig{
-		IngressGateway:             baseConfig.IngressGateway,
-		IngressServiceName:         baseConfig.IngressServiceName,
-		LocalGateway:               baseConfig.LocalGateway,
-		LocalGatewayServiceName:    baseConfig.LocalGatewayServiceName,
-		KnativeLocalGatewayService: baseConfig.KnativeLocalGatewayService,
-		OmeIngressGateway:          baseConfig.OmeIngressGateway,
-		IngressDomain:              baseConfig.IngressDomain,
-		IngressClassName:           baseConfig.IngressClassName,
-		AdditionalIngressDomains:   baseConfig.AdditionalIngressDomains,
-		DomainTemplate:             baseConfig.DomainTemplate,
-		UrlScheme:                  baseConfig.UrlScheme,
-		DisableIstioVirtualHost:    baseConfig.DisableIstioVirtualHost,
-		PathTemplate:               baseConfig.PathTemplate,
-		DisableIngressCreation:     baseConfig.DisableIngressCreation,
-		EnableGatewayAPI:           baseConfig.EnableGatewayAPI,
-		ConsistentHashHeaders:      baseConfig.ConsistentHashHeaders,
+		IngressGateway:           baseConfig.IngressGateway,
+		IngressServiceName:       baseConfig.IngressServiceName,
+		OmeIngressGateway:        baseConfig.OmeIngressGateway,
+		IngressDomain:            baseConfig.IngressDomain,
+		IngressClassName:         baseConfig.IngressClassName,
+		AdditionalIngressDomains: baseConfig.AdditionalIngressDomains,
+		DomainTemplate:           baseConfig.DomainTemplate,
+		UrlScheme:                baseConfig.UrlScheme,
+		PathTemplate:             baseConfig.PathTemplate,
+		DisableIngressCreation:   baseConfig.DisableIngressCreation,
+		EnableGatewayAPI:         baseConfig.EnableGatewayAPI,
+		ConsistentHashHeaders:    baseConfig.ConsistentHashHeaders,
 	}
 
 	// Override with annotation values if present
@@ -128,10 +124,6 @@ func ResolveIngressConfig(baseConfig *controllerconfig.IngressConfig, annotation
 	}
 
 	// Boolean overrides
-	if disableVirtualHost, exists := annotations[constants.IngressDisableIstioVirtualHost]; exists {
-		resolved.DisableIstioVirtualHost = disableVirtualHost == "true"
-	}
-
 	if disableCreation, exists := annotations[constants.IngressDisableCreation]; exists {
 		resolved.DisableIngressCreation = disableCreation == "true"
 	}

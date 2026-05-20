@@ -43,22 +43,18 @@ type InferenceServicesConfig struct {
 
 // +kubebuilder:object:generate=false
 type IngressConfig struct {
-	IngressGateway             string    `json:"ingressGateway,omitempty"`
-	IngressServiceName         string    `json:"ingressService,omitempty"`
-	LocalGateway               string    `json:"localGateway,omitempty"`
-	LocalGatewayServiceName    string    `json:"localGatewayService,omitempty"`
-	KnativeLocalGatewayService string    `json:"knativeLocalGatewayService,omitempty"`
-	OmeIngressGateway          string    `json:"omeIngressGateway,omitempty"`
-	IngressDomain              string    `json:"ingressDomain,omitempty"`
-	IngressClassName           *string   `json:"ingressClassName,omitempty"`
-	AdditionalIngressDomains   *[]string `json:"additionalIngressDomains,omitempty"`
-	DomainTemplate             string    `json:"domainTemplate,omitempty"`
-	UrlScheme                  string    `json:"urlScheme,omitempty"`
-	DisableIstioVirtualHost    bool      `json:"disableIstioVirtualHost,omitempty"`
-	PathTemplate               string    `json:"pathTemplate,omitempty"`
-	DisableIngressCreation     bool      `json:"disableIngressCreation,omitempty"`
-	EnableGatewayAPI           bool      `json:"enableGatewayAPI,omitempty"`
-	ConsistentHashHeaders      []string  `json:"consistentHashHeaders,omitempty"`
+	IngressGateway           string    `json:"ingressGateway,omitempty"`
+	IngressServiceName       string    `json:"ingressService,omitempty"`
+	OmeIngressGateway        string    `json:"omeIngressGateway,omitempty"`
+	IngressDomain            string    `json:"ingressDomain,omitempty"`
+	IngressClassName         *string   `json:"ingressClassName,omitempty"`
+	AdditionalIngressDomains *[]string `json:"additionalIngressDomains,omitempty"`
+	DomainTemplate           string    `json:"domainTemplate,omitempty"`
+	UrlScheme                string    `json:"urlScheme,omitempty"`
+	PathTemplate             string    `json:"pathTemplate,omitempty"`
+	DisableIngressCreation   bool      `json:"disableIngressCreation,omitempty"`
+	EnableGatewayAPI         bool      `json:"enableGatewayAPI,omitempty"`
+	ConsistentHashHeaders    []string  `json:"consistentHashHeaders,omitempty"`
 }
 
 // +kubebuilder:object:generate=false
@@ -203,9 +199,8 @@ func NewDeployConfig(clientset kubernetes.Interface) (*DeployConfig, error) {
 			return nil, fmt.Errorf("invalid deploy config, defaultDeploymentMode is required")
 		}
 
-		if deployConfig.DefaultDeploymentMode != string(constants.Serverless) &&
-			deployConfig.DefaultDeploymentMode != string(constants.RawDeployment) {
-			return nil, fmt.Errorf("invalid deployment mode. Supported modes are %s and %s", constants.Serverless, constants.RawDeployment)
+		if deployConfig.DefaultDeploymentMode != string(constants.RawDeployment) {
+			return nil, fmt.Errorf("invalid deployment mode. Supported default mode is %s", constants.RawDeployment)
 		}
 	}
 	return deployConfig, nil

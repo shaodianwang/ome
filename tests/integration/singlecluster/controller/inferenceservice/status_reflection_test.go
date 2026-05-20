@@ -15,10 +15,10 @@ import (
 
 // InferenceService Status reflection. The reconciler computes
 // Status.URL / Status.Address / Status.Components from the produced
-// child resources (Service hostname for RawDeployment, the Knative
-// Service's URL for Serverless, etc.). Specs here exercise that
-// observation loop end-to-end with the real apiserver feeding
-// child-resource events back into the controller.
+// child resources (Service hostname for RawDeployment / MultiNode /
+// OMENative). Specs here exercise that observation loop end-to-end
+// with the real apiserver feeding child-resource events back into
+// the controller.
 //
 // Catches regressions where Status fields are set in memory but
 // never persist (missing Status().Update call) or where the

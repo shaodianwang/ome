@@ -41,7 +41,7 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
 
 	if err := createConfigMapIfAbsent(ctx, c, constants.InferenceServiceConfigMapName, map[string]string{
 		"ingress": `{
-  "ingressGateway": "knative-serving/knative-ingress-gateway",
+  "ingressGateway": "istio-system/ingress-gateway",
   "ingressService": "istio-ingressgateway.istio-system.svc.cluster.local",
   "ingressDomain": "svc.cluster.local",
   "domainTemplate": "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}",
