@@ -144,6 +144,7 @@ func (r *Router) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 			PodSpec:      podSpec,
 			Component:    v1beta1.RouterComponent,
 			ComponentExt: &r.routerSpec.ComponentExtensionSpec,
+			Client:       r.Client,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for router")

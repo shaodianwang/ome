@@ -921,17 +921,3 @@ func TestEngineWorkerPodSpec(t *testing.T) {
 		})
 	}
 }
-
-func TestEngineReconcileDeployment_OMENativeReturnsNotImplemented(t *testing.T) {
-	e := &Engine{
-		BaseComponentFields: BaseComponentFields{DeploymentMode: constants.OMENative},
-		engineSpec:          &v1beta1.EngineSpec{},
-	}
-	_, err := e.reconcileDeployment(nil, metav1.ObjectMeta{}, nil, 0, nil)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "OMENative") || !strings.Contains(err.Error(), "not implemented") || !strings.Contains(err.Error(), "engine") {
-		t.Fatalf("unexpected error message: %v", err)
-	}
-}

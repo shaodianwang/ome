@@ -168,6 +168,7 @@ func (d *Decoder) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta
 			WorkerSize:    workerSize,
 			WorkerPodSpec: workerPodSpec,
 			MultiPod:      multiPod,
+			Client:        d.Client,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for decoder")

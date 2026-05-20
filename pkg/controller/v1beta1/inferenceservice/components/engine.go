@@ -169,6 +169,7 @@ func (e *Engine) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 			WorkerSize:    workerSize,
 			WorkerPodSpec: workerPodSpec,
 			MultiPod:      multiPod,
+			Client:        e.Client,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for engine")
