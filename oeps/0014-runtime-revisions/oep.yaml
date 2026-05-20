@@ -1,0 +1,22 @@
+title: Pinned ServingRuntime revisions for InferenceServices
+oep-number: 0014
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-05-20
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "/oeps/0012-generic-runtimes"
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
