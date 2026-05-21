@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,9 +17,10 @@ import (
 )
 
 // newFakeClient builds a controller-runtime fake client with the scheme
-// the omenative reconciler needs (corev1 + v1beta1) and tells the fake
-// about the status subresource for InferenceService so Status().Update
-// works as it would against a real API server.
+// the omenative reconciler needs (corev1 + v1beta1 + appsv1 for
+// ControllerRevision) and tells the fake about the status subresource
+// for InferenceService so Status().Update works as it would against a
+// real API server.
 func newFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -27,6 +29,9 @@ func newFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 	}
 	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1beta1: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add appsv1: %v", err)
 	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).

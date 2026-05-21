@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -59,6 +60,25 @@ type ReconcileParams struct {
 	// patch status, and observe cluster state. Set at the dispatch site
 	// from BaseComponentFields.Client.
 	Client client.Client
+
+	// APIReader is an optional live API reader, typically mgr.GetAPIReader().
+	// When set it is used for the correctness-critical reads in revision
+	// bookkeeping where stale cache contents could cause spurious
+	// collisions or duplicate Revision numbers. When nil the cached Client
+	// is used and the caller accepts the cache-lag exposure. Callers wire
+	// this in once the controller manager exposes a live reader; tests
+	// leave it nil since the fake client is a live source.
+	APIReader client.Reader
+}
+
+// reader returns the live API reader when APIReader is set; otherwise the
+// cached Client. Callers use this for revision bookkeeping and other
+// reads that must not observe a stale cache.
+func (p *ReconcileParams) reader() client.Reader {
+	if p.APIReader != nil {
+		return p.APIReader
+	}
+	return p.Client
 }
 
 // ReconcileComponent is the Loop A entry point for OMENative-managed
@@ -74,11 +94,15 @@ type ReconcileParams struct {
 //  3. Per-Instance restart: detect pod loss / pod-Failed triggers and
 //     dispatch Restart when the Component's restart policy allows it.
 //     Held to one pass per reconcile to keep the state machine simple.
-//  4. Scale up: drive Create toward every desired Instance. The
+//  4. Per-Instance update: compute the target ControllerRevision from
+//     the rendered PodSpec and drive Update on any Instance whose pods
+//     don't yet match. Mode (in-place vs recreate) is resolved per
+//     Instance from the UpdateStrategy and the observed diff.
+//  5. Scale up: drive Create toward every desired Instance. The
 //     operation is multi-pass — pods are created, ome.io/serving is
 //     flipped once runtime-ready, and Phase=Ready is recorded.
 //
-// Update / Migrate land in follow-up PRs.
+// Migrate lands in a follow-up PR.
 func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, error) {
 	if p.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: nil client (component=%s)", p.Component)
@@ -136,5 +160,113 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, er
 		return ctrl.Result{RequeueAfter: restartRequeueInterval}, nil
 	}
 
+	// Per-Instance update pass. Compute the target ControllerRevision
+	// from the current rendered PodSpec, then drive Update on any
+	// Instance whose pods don't yet match (or that is already
+	// mid-Update). RecreatePod / InPlaceIfPossible / InPlaceOnly are
+	// resolved per Instance inside Update; this layer just dispatches.
+	if p.PodSpec != nil {
+		target, rerr := ensureRevisionWithCollisionRetry(ctx, p, plan.Component)
+		if rerr != nil {
+			return ctrl.Result{}, fmt.Errorf("OMENative reconciler: ensure revision (component=%s): %w", plan.Component, rerr)
+		}
+		anyUpdating := false
+		for _, inst := range plan.Instances {
+			needs, derr := detectUpdateTrigger(ctx, p, plan, inst, target, p.PodSpec)
+			if derr != nil {
+				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: detect update trigger (instance=%d): %w", inst.Index, derr)
+			}
+			if !needs {
+				continue
+			}
+			done, uerr := Update(ctx, p, plan, inst, target, p.PodSpec)
+			if uerr != nil {
+				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: update instance %d: %w", inst.Index, uerr)
+			}
+			if !done {
+				anyUpdating = true
+			}
+		}
+		if anyUpdating {
+			return ctrl.Result{RequeueAfter: updateRequeueInterval}, nil
+		}
+	}
+
 	return Create(ctx, p, plan)
+}
+
+// ensureRevisionWithCollisionRetry computes the target ControllerRevision
+// for the Component's current PodSpec, honoring the collision contract
+// from revision.go: if EnsureControllerRevision reports a hash collision
+// (same revision name, different Data), bump
+// OMENativeComponentStatus.CollisionCount, persist the status, and retry
+// the revision creation with the new salt. The retry yields a different
+// hash and lands.
+//
+// Without this retry, ReconcileComponent would silently drive pods
+// toward the conflicting CR's Data, which is not the spec the user
+// wrote — exactly the bug the collision return value is designed to
+// prevent.
+func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType) (*appsv1.ControllerRevision, error) {
+	var collisionCount *int32
+	if cs, ok := p.ISVC.Status.Components[component]; ok && cs.OMENative != nil {
+		collisionCount = cs.OMENative.CollisionCount
+	}
+	target, collision, err := EnsureControllerRevision(ctx, p.Client, p.reader(), p.ISVC, component, p.PodSpec, collisionCount)
+	if err != nil {
+		return nil, err
+	}
+	if !collision {
+		return target, nil
+	}
+	// Bump CollisionCount on the Component status, then retry.
+	bumped, err := bumpCollisionCount(ctx, p, component)
+	if err != nil {
+		return nil, fmt.Errorf("bump CollisionCount after revision collision: %w", err)
+	}
+	target, collision, err = EnsureControllerRevision(ctx, p.Client, p.reader(), p.ISVC, component, p.PodSpec, bumped)
+	if err != nil {
+		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)
+	}
+	if collision {
+		return nil, fmt.Errorf("revision still collides after CollisionCount bump (count=%d)", *bumped)
+	}
+	return target, nil
+}
+
+// bumpCollisionCount increments OMENativeComponentStatus.CollisionCount
+// (initializing to 1 when nil) and persists the status. Returns the
+// new pointer for the retry caller.
+func bumpCollisionCount(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType) (*int32, error) {
+	fresh := &v1beta1.InferenceService{}
+	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+		return nil, fmt.Errorf("re-read ISVC for CollisionCount bump: %w", err)
+	}
+	if fresh.Status.Components == nil {
+		fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+	}
+	cs := fresh.Status.Components[component]
+	if cs.OMENative == nil {
+		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	}
+	next := int32(1)
+	if cs.OMENative.CollisionCount != nil {
+		next = *cs.OMENative.CollisionCount + 1
+	}
+	cs.OMENative.CollisionCount = &next
+	fresh.Status.Components[component] = cs
+	if err := p.Client.Status().Update(ctx, fresh); err != nil {
+		return nil, fmt.Errorf("persist CollisionCount: %w", err)
+	}
+	// Mirror onto the cached ISVC the caller is reading.
+	if p.ISVC.Status.Components == nil {
+		p.ISVC.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+	}
+	mirror := p.ISVC.Status.Components[component]
+	if mirror.OMENative == nil {
+		mirror.OMENative = &v1beta1.OMENativeComponentStatus{}
+	}
+	mirror.OMENative.CollisionCount = &next
+	p.ISVC.Status.Components[component] = mirror
+	return &next, nil
 }
