@@ -86,13 +86,53 @@ def _gh_status(key: str, indent: int = 12) -> str:
     )
 
 
+def _drift_check_step(key: str, label: str, make_target: str, apt_packages: str = "") -> str:
+    """Emit a CI step that runs `make <target>` then `git diff --exit-code`.
+
+    `git diff --exit-code` returns non-zero if the make target produced
+    any tracked-file changes, which fails the BK step — that's the whole
+    point: catches PRs that forgot to regenerate (fmt, tidy, manifests,
+    generate, dep-crds) before pushing.
+
+    apt_packages: space-separated list passed to `apt-get install` for
+    targets that need extra system tooling (e.g. `make manifests` needs
+    `jq` for CRD post-processing). Empty (the common case) skips apt.
+
+    The block is indented for direct concatenation onto `ci_steps()`'s
+    dedented output (steps at 2-space indent under `steps:`).
+    """
+    apt_block = ""
+    if apt_packages:
+        apt_block = (
+            f"      apt-get update\n"
+            f"      apt-get install -y --no-install-recommends {apt_packages}\n"
+        )
+    return (
+        f'  - label: "{label}"\n'
+        f'    key: "{key}"\n'
+        f"{_gh_status(key, indent=4)}\n"
+        f"    command: |\n"
+        f"{apt_block}"
+        f"      make {make_target}\n"
+        f"      git diff --exit-code\n"
+        f"    agents:\n"
+        f'      queue: "{DEFAULT_QUEUE}"\n'
+        f"    plugins:\n"
+        f"      - kubernetes:\n"
+        f"          podSpec:\n"
+        f"            containers:\n"
+        f"              - name: container-0\n"
+        f'                image: "{CI_IMAGE}"\n'
+    )
+
+
 # ---------------------------------------------------------------------------
 # CI pipeline (runs on every commit / PR)
 # ---------------------------------------------------------------------------
 
 
 def ci_steps() -> str:
-    return textwrap.dedent(
+    base = textwrap.dedent(
         f"""\
         steps:
           - label: ":golangci-lint: Lint"
@@ -123,7 +163,7 @@ def ci_steps() -> str:
                       - name: container-0
                         image: "{CI_IMAGE}"
 
-          - label: ":test_tube: Unit Tests"
+          - label: ":test_tube: Unit Tests + Coverage"
             key: "test"
 {_gh_status("test")}
             command: |
@@ -170,6 +210,32 @@ def ci_steps() -> str:
                         image: "{CI_IMAGE}"
         """
     )
+    # Drift checks: each runs a regen target and fails if the working
+    # tree differs from HEAD — catches PRs that forgot to regenerate.
+    drift_checks = [
+        _drift_check_step("fmt-drift", ":broom: Fmt Drift", "fmt"),
+        _drift_check_step("tidy-drift", ":package: Tidy Drift", "tidy"),
+        # `make manifests` post-processes CRD YAML through `jq`; the
+        # default golang:bookworm image doesn't ship it. perl is already
+        # present (pulled in by git in the base image).
+        _drift_check_step(
+            "manifests-drift",
+            ":memo: Manifests Drift",
+            "manifests",
+            apt_packages="jq",
+        ),
+        _drift_check_step(
+            "generate-drift",
+            ":arrows_counterclockwise: Generate Drift",
+            "generate",
+        ),
+        _drift_check_step(
+            "dep-crds-drift",
+            ":truck: Dep CRDs Drift",
+            "dep-crds",
+        ),
+    ]
+    return base + "\n" + "\n".join(drift_checks)
 
 
 # ---------------------------------------------------------------------------

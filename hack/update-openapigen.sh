@@ -58,6 +58,12 @@ go run k8s.io/kube-openapi/cmd/openapi-gen \
 sed -i'.bak' -e 's/Required: \[\]string{\"name\"},//g' $OPENAPI_SPEC_FILE && rm -rf $OPENAPI_SPEC_FILE.bak
 sed -i'.bak' -e 's/Required: \[\]string{\"modelFormat\", \"name\"},/Required: \[\]string{\"modelFormat\"},/g' $OPENAPI_SPEC_FILE && rm -rf $OPENAPI_SPEC_FILE.bak
 
+# kube-openapi's templates emit whitespace-only lines inside struct literals
+# (e.g., a `\t\t\t\t` line between `},` and `},`). gofmt normalizes them so the
+# generated file is byte-stable across runs and the CI generate-drift check
+# doesn't fail on tooling noise.
+gofmt -w $OPENAPI_SPEC_FILE
+
 test -f $CURRENT_VIOLATION_EXCEPTIONS || touch $CURRENT_VIOLATION_EXCEPTIONS
 
 # The API rule fails if generated API rule violation report differs from the
@@ -70,6 +76,12 @@ fi
 
 # Generating swagger file
 go run cmd/spec-gen/main.go 0.1 > pkg/openapi/swagger.json 2>&1
+
+# `go run k8s.io/kube-openapi/cmd/openapi-gen` resolves the tool's transitive
+# deps (k8s.io/gengo, etc.) and adds stat-only entries for them to go.sum even
+# though our module doesn't import them. `go mod tidy` removes the spurious
+# entries so the CI generate-drift check stays clean.
+go mod tidy
 
 popd > /dev/null
 

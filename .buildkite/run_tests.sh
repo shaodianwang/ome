@@ -58,4 +58,17 @@ WRAP
   chmod +x "$ENVTEST_ASSETS/kube-apiserver"
 fi
 
-make test-no-xet
+# `make test` (rather than the cheaper `test-no-xet`) is required
+# because the coverage step that follows reads coverage-{cmd,pkg,
+# internal}.out, which only `make test` produces — `make test-no-xet`
+# writes the *-no-xet.out variants that the threshold check ignores.
+# We already built libxet above so the marginal cost is the
+# cmd/ome-agent test packages (~tens of seconds), not a Rust recompile.
+make test
+
+# Enforce the 48% average coverage threshold defined in `make
+# coverage` (Makefile §coverage). Operates on the coverage-{cmd,
+# pkg,internal}.out files emitted by the preceding `make test`; if
+# the average drops below 48% the target exits non-zero and fails
+# this step.
+make coverage

@@ -44,6 +44,7 @@ func TestModelMetadataAgent_ShortDescription(t *testing.T) {
 
 func TestModelMetadataAgent_LongDescription(t *testing.T) {
 	agent := NewModelMetadataAgent()
-	expected := "Model metadata agent mounts PVCs and extracts model metadata to update BaseModel/ClusterBaseModel CRs"
+	expected := "Model metadata agent parses a PVC-mounted model directory and writes a per-model status ConfigMap " +
+		"that the BaseModel/ClusterBaseModel controller consumes to update the CR spec and lifecycle state."
 	assert.Equal(t, expected, agent.LongDescription())
 }
