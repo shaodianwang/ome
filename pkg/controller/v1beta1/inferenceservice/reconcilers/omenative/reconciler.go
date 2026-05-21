@@ -102,16 +102,50 @@ func (p *ReconcileParams) reader() client.Reader {
 //     operation is multi-pass — pods are created, ome.io/serving is
 //     flipped once runtime-ready, and Phase=Ready is recorded.
 //
-// Migrate lands in a follow-up PR.
-func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, error) {
+// At the tail of every reconcile pass the function runs
+// AggregateAndWriteStatus to refresh replica counters,
+// per-Instance counters, revision pointers, and CurrentRevision
+// promotion. That write runs regardless of whether the op chain
+// returned a requeue or an error.
+func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Result, err error) {
 	if p.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: nil client (component=%s)", p.Component)
 	}
-	plan, err := BuildPlan(p)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: build plan (component=%s): %w", p.Component, err)
+	plan, perr := BuildPlan(p)
+	if perr != nil {
+		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: build plan (component=%s): %w", p.Component, perr)
 	}
 
+	// target is computed early so the tail status write can stamp
+	// UpdateRevision / CurrentRevision even if the op chain returned
+	// without reaching the update branch.
+	var target *appsv1.ControllerRevision
+	if p.PodSpec != nil {
+		t, rerr := ensureRevisionWithCollisionRetry(ctx, p, plan.Component)
+		if rerr != nil {
+			return ctrl.Result{}, fmt.Errorf("OMENative reconciler: ensure revision (component=%s): %w", plan.Component, rerr)
+		}
+		target = t
+	}
+
+	defer func() {
+		if serr := AggregateAndWriteStatus(ctx, p, plan, target); serr != nil {
+			// Don't clobber a real op error with a status-write error,
+			// but surface it if everything else succeeded.
+			if err == nil {
+				err = fmt.Errorf("OMENative reconciler: write status: %w", serr)
+			}
+		}
+	}()
+
+	result, err = reconcileComponentOps(ctx, p, plan, target)
+	return
+}
+
+// reconcileComponentOps drives the five lifecycle operations. Lifted
+// out of ReconcileComponent so the deferred status write in the
+// caller runs unconditionally, even on early returns from this path.
+func reconcileComponentOps(ctx context.Context, p ReconcileParams, plan ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
 	// Scale-down first. An ISVC that drops MinReplicas leaves
 	// InstanceStatus entries above the new replica count; Delete drives
 	// each to gone.
@@ -127,16 +161,10 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, er
 		}
 	}
 	if !allDeleted {
-		// Hold off on Create until scale-down completes — running both
-		// at once would create churn against in-flight drains.
 		return ctrl.Result{RequeueAfter: deleteRequeueInterval}, nil
 	}
 
-	// Per-Instance restart pass. Trigger detection works on the cached
-	// pod list; the actual drain+recreate sequence runs inside Restart.
-	// Only RecreateInstanceOnPodRestart routes here today — None falls
-	// through to Create (which will recreate any missing-by-name pods),
-	// and RecreateISVCOnPodRestart is a future cross-Component slice.
+	// Per-Instance restart pass.
 	anyRestarting := false
 	if plan.RestartPolicy == v1beta1.OMENativeRestartPolicyRecreateInstance {
 		for _, inst := range plan.Instances {
@@ -160,11 +188,7 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, er
 		return ctrl.Result{RequeueAfter: restartRequeueInterval}, nil
 	}
 
-	// Per-Component migration pass. Detect any pending migration
-	// request annotation, dispatch Migrate. Migrate operates on its
-	// own (source, surge) pair and stamps the relevant statuses; the
-	// subsequent Create / Update passes will skip migration-in-flight
-	// indices via the Phase=Migrating guard in their trigger detectors.
+	// Per-Component migration pass.
 	if plan.MigrationMode != v1beta1.OMENativeMigrationPolicyModeNever {
 		uuid, req, sourceIdx, found, mderr := detectMigrationRequest(ctx, p, plan.Component)
 		if mderr != nil {
@@ -181,16 +205,8 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, er
 		}
 	}
 
-	// Per-Instance update pass. Compute the target ControllerRevision
-	// from the current rendered PodSpec, then drive Update on any
-	// Instance whose pods don't yet match (or that is already
-	// mid-Update). RecreatePod / InPlaceIfPossible / InPlaceOnly are
-	// resolved per Instance inside Update; this layer just dispatches.
-	if p.PodSpec != nil {
-		target, rerr := ensureRevisionWithCollisionRetry(ctx, p, plan.Component)
-		if rerr != nil {
-			return ctrl.Result{}, fmt.Errorf("OMENative reconciler: ensure revision (component=%s): %w", plan.Component, rerr)
-		}
+	// Per-Instance update pass.
+	if target != nil {
 		anyUpdating := false
 		for _, inst := range plan.Instances {
 			needs, derr := detectUpdateTrigger(ctx, p, plan, inst, target, p.PodSpec)

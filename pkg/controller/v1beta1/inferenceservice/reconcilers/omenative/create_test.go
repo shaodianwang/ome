@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,6 +33,9 @@ func newFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 	}
 	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add appsv1: %v", err)
+	}
+	if err := discoveryv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add discoveryv1: %v", err)
 	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
