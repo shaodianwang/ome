@@ -47,15 +47,6 @@ var _ = ginkgo.Describe("RuntimeRevision GC controller (OEP-0014 Phase 3)", func
 		}
 	}
 
-	listOMERevs := func(runtimeOf string) []appsv1.ControllerRevision {
-		var list appsv1.ControllerRevisionList
-		Expect(k8sClient.List(suiteCtx, &list,
-			client.InNamespace(constants.OMENamespace),
-			client.MatchingLabels{constants.RuntimeRevisionOfLabelKey: runtimeOf},
-		)).To(Succeed())
-		return list.Items
-	}
-
 	getRev := func(name string) (*appsv1.ControllerRevision, error) {
 		rev := &appsv1.ControllerRevision{}
 		err := k8sClient.Get(suiteCtx, types.NamespacedName{Namespace: constants.OMENamespace, Name: name}, rev)
@@ -196,6 +187,109 @@ var _ = ginkgo.Describe("RuntimeRevision GC controller (OEP-0014 Phase 3)", func
 		}, 12*time.Second, 500*time.Millisecond).Should(Succeed())
 	})
 
+	ginkgo.It("retains every revision when each one is referenced by an ISVC (refs beat retention)", func() {
+		// retention=2; create N=3 revisions for one runtime; create N
+		// ISVCs each pinning a different revision. The reference set
+		// should keep every revision marked Keep regardless of position
+		// (the existing "retains referenced revision" spec only covers
+		// the single-reference case).
+		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "gc-all-refs-")
+		Expect(err).NotTo(HaveOccurred())
+		ginkgo.DeferCleanup(func() { _ = util.DeleteNamespace(suiteCtx, k8sClient, ns.Name) })
+
+		names := []string{"cr-rt-allref-001", "cr-rt-allref-002", "cr-rt-allref-003"}
+
+		// Create ISVCs first so the reference set is populated from the
+		// first GC reconcile — same race-avoidance pattern as the
+		// "retains referenced revision" spec above.
+		for i, n := range names {
+			pin := n
+			isvc := &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("gc-all-pinner-%d", i), Namespace: ns.Name},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{
+						Name:     "rt-allref",
+						AutoSync: ptrBool(false),
+						Revision: &pin,
+					},
+					Engine: &v1beta1.EngineSpec{},
+				},
+			}
+			Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+		}
+
+		// Now create the 3 revisions. With retention=2 the oldest
+		// would normally be marked — but every revision is pinned.
+		Expect(k8sClient.Create(suiteCtx, mkRev(names[0], "rt-allref", 0, true))).To(Succeed())
+		time.Sleep(1100 * time.Millisecond)
+		createOrdered("rt-allref", names[1:])
+
+		Eventually(func(g Gomega) {
+			for _, n := range names {
+				r, err := getRev(n)
+				g.Expect(err).NotTo(HaveOccurred(), n)
+				g.Expect(r.Annotations).NotTo(HaveKey(constants.RuntimeRevisionGCEligibleSinceKey), n)
+			}
+		}, 5*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		Consistently(func(g Gomega) {
+			for _, n := range names {
+				r, err := getRev(n)
+				g.Expect(err).NotTo(HaveOccurred(), n)
+				g.Expect(r.Annotations).NotTo(HaveKey(constants.RuntimeRevisionGCEligibleSinceKey),
+					"all-referenced revision %s must NOT be marked", n)
+			}
+		}, 12*time.Second, 500*time.Millisecond).Should(Succeed())
+	})
+
+	ginkgo.It("marks a previously-pinned revision after its ISVC is deleted", func() {
+		// retention=2; oldest is pinned so it stays a Keep. Once the
+		// ISVC is deleted the reference set shrinks and the oldest
+		// should fall out → controller observes it and adds the
+		// gc-eligible-since annotation.
+		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "gc-isvc-del-")
+		Expect(err).NotTo(HaveOccurred())
+		ginkgo.DeferCleanup(func() { _ = util.DeleteNamespace(suiteCtx, k8sClient, ns.Name) })
+
+		oldest := "cr-rt-del-isvc-001"
+		isvc := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "gc-del-pinner", Namespace: ns.Name},
+			Spec: v1beta1.InferenceServiceSpec{
+				Runtime: &v1beta1.ServingRuntimeRef{
+					Name:     "rt-del-isvc",
+					AutoSync: ptrBool(false),
+					Revision: &oldest,
+				},
+				Engine: &v1beta1.EngineSpec{},
+			},
+		}
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+
+		Expect(k8sClient.Create(suiteCtx, mkRev(oldest, "rt-del-isvc", 0, true))).To(Succeed())
+		time.Sleep(1100 * time.Millisecond)
+		createOrdered("rt-del-isvc", []string{"cr-rt-del-isvc-002", "cr-rt-del-isvc-003"})
+
+		// Sanity-check: while the ISVC exists the oldest must NOT be
+		// marked. Same Eventually-then-Consistently pattern as the
+		// other reference-keeps-it specs.
+		Eventually(func(g Gomega) {
+			r, err := getRev(oldest)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(r.Annotations).NotTo(HaveKey(constants.RuntimeRevisionGCEligibleSinceKey))
+		}, 5*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		Expect(k8sClient.Delete(suiteCtx, isvc)).To(Succeed())
+
+		// ISVC delete event → GC singleton enqueue → reconcile sees
+		// the reference is gone, oldest is now over retention → Mark.
+		Eventually(func(g Gomega) {
+			r, err := getRev(oldest)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(r.Annotations).To(HaveKey(constants.RuntimeRevisionGCEligibleSinceKey),
+				"after ISVC delete the oldest revision should fall out of refs and be marked")
+		}, 8*time.Second, 200*time.Millisecond).Should(Succeed())
+	})
+
 	ginkgo.It("clears gc-eligible-since when a marked revision is referenced before grace expires", func() {
 		// retention=2; create 3 revisions. Oldest will be marked.
 		// Then create an ISVC pinning to it → annotation cleared.
@@ -249,8 +343,6 @@ var _ = ginkgo.Describe("RuntimeRevision GC controller (OEP-0014 Phase 3)", func
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(r.Annotations).NotTo(HaveKey(constants.RuntimeRevisionGCEligibleSinceKey))
 		}, 5*time.Second, 200*time.Millisecond).Should(Succeed())
-
-		_ = listOMERevs // silence unused (helper kept for future specs)
 	})
 })
 

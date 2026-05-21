@@ -36,7 +36,14 @@ var (
 var _ = ginkgo.BeforeSuite(func() {
 	framework.SetupTestLogger()
 
-	s, err := framework.NewSuite(&framework.Framework{})
+	// Install the immutability webhook alongside the GC controller.
+	// Without this the GC suite is blind to the real production
+	// interaction: the webhook denies UPDATEs, GC's Mark is an UPDATE.
+	// Reusing the webhook suite's testdata keeps a single source of
+	// truth for the ValidatingWebhookConfiguration shape.
+	s, err := framework.NewSuite(&framework.Framework{
+		WebhookPath: "tests/integration/singlecluster/webhook/runtimerevision/testdata",
+	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	suiteFwk = s.Fwk
@@ -52,6 +59,9 @@ var _ = ginkgo.BeforeSuite(func() {
 	}
 
 	mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
+		if err := components.SetupRuntimeRevisionWebhooks(mgr); err != nil {
+			return err
+		}
 		// Compressed retention + grace so specs can observe Mark →
 		// Wait → Delete transitions in seconds. Grace is long enough
 		// that specs can reliably catch the marked state before delete

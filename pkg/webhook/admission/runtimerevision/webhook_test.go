@@ -33,6 +33,35 @@ func encode(t *testing.T, obj *appsv1.ControllerRevision) []byte {
 	return raw
 }
 
+// omeRevision returns a baseline OME-owned ControllerRevision suitable
+// for cloning + mutating in update-path tests.
+func omeRevision() *appsv1.ControllerRevision {
+	return &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cr-srt-llama-pd-abc12345",
+			Namespace: "ome",
+			Annotations: map[string]string{
+				constants.RuntimeRevisionCreatedByKey: constants.RuntimeRevisionCreatedByOMEValue,
+			},
+			Labels: map[string]string{
+				constants.RuntimeRevisionOfLabelKey:   "srt-llama-pd",
+				constants.RuntimeRevisionHashLabelKey: "abc12345",
+			},
+		},
+		Data:     runtime.RawExtension{Raw: []byte(`{"k":"v"}`)},
+		Revision: 7,
+	}
+}
+
+func updateReq(t *testing.T, oldObj, newObj *appsv1.ControllerRevision) admission.Request {
+	t.Helper()
+	return admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		Operation: admissionv1.Update,
+		OldObject: runtime.RawExtension{Raw: encode(t, oldObj)},
+		Object:    runtime.RawExtension{Raw: encode(t, newObj)},
+	}}
+}
+
 func TestHandle_NonUpdate_PassesThrough(t *testing.T) {
 	g := gomega.NewWithT(t)
 	v := &ImmutabilityValidator{Decoder: newDecoder(t)}
@@ -47,34 +76,61 @@ func TestHandle_UpdateOnNonOMERevision_PassesThrough(t *testing.T) {
 	old := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "sts-foo-1", Namespace: "team-a"},
 	}
-	raw := encode(t, old)
 	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
 		Operation: admissionv1.Update,
-		OldObject: runtime.RawExtension{Raw: raw},
+		OldObject: runtime.RawExtension{Raw: encode(t, old)},
 	}}
 	v := &ImmutabilityValidator{Decoder: newDecoder(t)}
 	g.Expect(v.Handle(context.Background(), req).Allowed).To(gomega.BeTrue(),
 		"revisions not annotated as OME-created should be ignored")
 }
 
-func TestHandle_UpdateOnOMERevision_Denied(t *testing.T) {
+func TestHandle_DataChange_Denied(t *testing.T) {
 	g := gomega.NewWithT(t)
-	old := &appsv1.ControllerRevision{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "cr-srt-llama-pd-abc12345",
-			Namespace: "ome",
-			Annotations: map[string]string{
-				constants.RuntimeRevisionCreatedByKey: constants.RuntimeRevisionCreatedByOMEValue,
-			},
-		},
-	}
-	raw := encode(t, old)
-	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-		Operation: admissionv1.Update,
-		OldObject: runtime.RawExtension{Raw: raw},
-	}}
+	old := omeRevision()
+	new := omeRevision()
+	new.Data = runtime.RawExtension{Raw: []byte(`{"k":"tampered"}`)}
+
 	v := &ImmutabilityValidator{Decoder: newDecoder(t)}
-	resp := v.Handle(context.Background(), req)
+	resp := v.Handle(context.Background(), updateReq(t, old, new))
 	g.Expect(resp.Allowed).To(gomega.BeFalse())
-	g.Expect(resp.Result.Message).To(gomega.ContainSubstring("immutable"))
+	g.Expect(resp.Result.Message).To(gomega.ContainSubstring(".data is immutable"))
+}
+
+func TestHandle_LabelChange_Denied(t *testing.T) {
+	g := gomega.NewWithT(t)
+	old := omeRevision()
+	new := omeRevision()
+	new.Labels[constants.RuntimeRevisionOfLabelKey] = "srt-other-runtime"
+
+	v := &ImmutabilityValidator{Decoder: newDecoder(t)}
+	resp := v.Handle(context.Background(), updateReq(t, old, new))
+	g.Expect(resp.Allowed).To(gomega.BeFalse())
+	g.Expect(resp.Result.Message).To(gomega.ContainSubstring(".labels are immutable"))
+}
+
+func TestHandle_RevisionChange_Denied(t *testing.T) {
+	g := gomega.NewWithT(t)
+	old := omeRevision()
+	new := omeRevision()
+	new.Revision = 8
+
+	v := &ImmutabilityValidator{Decoder: newDecoder(t)}
+	resp := v.Handle(context.Background(), updateReq(t, old, new))
+	g.Expect(resp.Allowed).To(gomega.BeFalse())
+	g.Expect(resp.Result.Message).To(gomega.ContainSubstring(".revision is immutable"))
+}
+
+func TestHandle_AnnotationOnlyChange_Allowed(t *testing.T) {
+	g := gomega.NewWithT(t)
+	old := omeRevision()
+	new := omeRevision()
+	// This is the path the GC controller relies on: Mark sets
+	// ome.io/gc-eligible-since via an annotation update.
+	new.Annotations[constants.RuntimeRevisionGCEligibleSinceKey] = "2026-01-01T00:00:00Z"
+
+	v := &ImmutabilityValidator{Decoder: newDecoder(t)}
+	resp := v.Handle(context.Background(), updateReq(t, old, new))
+	g.Expect(resp.Allowed).To(gomega.BeTrue(),
+		"annotation-only updates must be permitted so GC can mark/clear")
 }

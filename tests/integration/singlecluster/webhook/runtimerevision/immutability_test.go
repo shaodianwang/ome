@@ -52,21 +52,48 @@ var _ = ginkgo.Describe("ControllerRevision immutability webhook (OEP-0014)", gi
 		gomega.Expect(strings.ToLower(err.Error())).To(gomega.ContainSubstring("immutable"))
 	})
 
-	ginkgo.It("rejects Update on an OME-created revision even when only labels/annotations change", func() {
+	ginkgo.It("rejects label changes on an OME-created revision", func() {
+		// Labels carry the cross-check inputs the GC + pinning code rely
+		// on (runtime-of, revision-hash). K8s does not enforce label
+		// immutability on ControllerRevisions — our webhook is the only
+		// thing preventing relabeling.
 		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "rev-imm-")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.DeferCleanup(func() { _ = util.DeleteNamespace(suiteCtx, k8sClient, ns.Name) })
 
-		rev := mkRevision("ome-cr-meta", true, `{"x":1}`)
+		rev := mkRevision("ome-cr-relabel", true, `{"x":1}`)
 		rev.Namespace = ns.Name
 		gomega.Expect(k8sClient.Create(suiteCtx, rev)).To(gomega.Succeed())
 
 		fetched := &appsv1.ControllerRevision{}
 		gomega.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(rev), fetched)).To(gomega.Succeed())
-		fetched.Labels["test"] = "meta-edit"
+		fetched.Labels[constants.RuntimeRevisionOfLabelKey] = "different-runtime"
 		err = k8sClient.Update(suiteCtx, fetched)
 		gomega.Expect(err).To(gomega.HaveOccurred(),
-			"webhook is intentionally strict — any Update on an OME revision is denied")
+			"relabeling would let a revision masquerade as another runtime's; must be denied")
+		gomega.Expect(strings.ToLower(err.Error())).To(gomega.ContainSubstring(".labels are immutable"))
+	})
+
+	ginkgo.It("allows annotation-only Update on an OME-created revision", func() {
+		// Load-bearing for the Phase 3 GC controller: Mark adds the
+		// ome.io/gc-eligible-since annotation via an Update. The webhook
+		// must NOT block this or GC stalls indefinitely.
+		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "rev-imm-")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(func() { _ = util.DeleteNamespace(suiteCtx, k8sClient, ns.Name) })
+
+		rev := mkRevision("ome-cr-mark", true, `{"x":1}`)
+		rev.Namespace = ns.Name
+		gomega.Expect(k8sClient.Create(suiteCtx, rev)).To(gomega.Succeed())
+
+		fetched := &appsv1.ControllerRevision{}
+		gomega.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(rev), fetched)).To(gomega.Succeed())
+		if fetched.Annotations == nil {
+			fetched.Annotations = map[string]string{}
+		}
+		fetched.Annotations[constants.RuntimeRevisionGCEligibleSinceKey] = "2026-01-01T00:00:00Z"
+		gomega.Expect(k8sClient.Update(suiteCtx, fetched)).To(gomega.Succeed(),
+			"the GC controller must be able to mark revisions for eligibility")
 	})
 
 	ginkgo.It("allows metadata Update on a revision NOT marked as OME-created (StatefulSet/DaemonSet behavior preserved)", func() {
