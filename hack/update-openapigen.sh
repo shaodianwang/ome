@@ -8,36 +8,41 @@ KNOWN_VIOLATION_EXCEPTIONS=hack/violation_exceptions.list
 CURRENT_VIOLATION_EXCEPTIONS=hack/current_violation_exceptions.list
 OPENAPI_SPEC_FILE=pkg/openapi/openapi_generated.go
 
-GOPATH=$(go env GOPATH)
-if [[ -z $GOPATH ]]
+# openapi-gen requires the working directory to live on a Go import path that
+# matches the module name declared in go.mod (github.com/ome-projects/ome).
+# Rather than mutating the user's real GOPATH (the legacy approach renamed any
+# existing checkout at $GOPATH/src/github.com/ome-projects/ome with a timestamp
+# suffix and accumulated symlink cruft), we synthesize a throwaway GOPATH in a
+# tmpdir whose only job is to satisfy that path requirement. This works
+# uniformly from git worktrees, arbitrary clone paths, and the canonical
+# $GOPATH/src/github.com/ome-projects/ome path, without touching anything
+# outside the tmpdir.
+
+ORIG_GOPATH=$(go env GOPATH)
+if [[ -z $ORIG_GOPATH ]]
 then
     echo >&2 "Error: GOPATH is not set. Please configure your GOPATH environment variable."
     exit 1
 fi
-TARGET_DIR="$GOPATH/src/github.com/ome-projects/ome"
+
 CURRENT_DIR=$(pwd)
+
+# Synthesize a throwaway path layout in a tmpdir. We do NOT touch GOPATH here:
+# the repo uses Go modules, so import resolution is governed by go.mod, not
+# GOPATH/src. The only thing openapi-gen cares about is that its cwd matches
+# the module path declared in go.mod, which is satisfied by the symlink below.
+SYMLINK_ROOT=$(mktemp -d -t ome-openapigen.XXXXXX)
+trap 'rm -rf "$SYMLINK_ROOT"' EXIT
+
+SYMLINK_PATH="$SYMLINK_ROOT/src/github.com/ome-projects/ome"
+mkdir -p "$(dirname "$SYMLINK_PATH")"
+ln -s "$CURRENT_DIR" "$SYMLINK_PATH"
 
 # Redirect stdout to /dev/null but keep stderr
 exec 3>&1 # Save the current stdout to file descriptor 3
 exec 1>/dev/null # Redirect stdout to /dev/null
 
-# Check if the current directory is the target directory
-if [[ "$CURRENT_DIR" != "$TARGET_DIR" ]]; then
-    echo >&2 "You are not in the target directory: $TARGET_DIR"
-
-    # Check if the target directory exists.
-    if [[ -d "$TARGET_DIR" ]]; then
-        mv $TARGET_DIR "${TARGET_DIR}_$(date +%Y%m%d_%H%M%S)"
-    fi
-
-    echo >&2 "Creating a symbolic link for the target directory ..."
-    mkdir -p "$(dirname "$TARGET_DIR")"
-    ln -s "$CURRENT_DIR" "$TARGET_DIR"
-
-    # Change to the target directory
-    echo >&2 "Changing to the target directory: $TARGET_DIR"
-    pushd "$TARGET_DIR" > /dev/null
-fi
+pushd "$SYMLINK_PATH" > /dev/null
 
 # Generating OpenAPI specification
 go run k8s.io/kube-openapi/cmd/openapi-gen \
@@ -66,11 +71,7 @@ fi
 # Generating swagger file
 go run cmd/spec-gen/main.go 0.1 > pkg/openapi/swagger.json 2>&1
 
-# Return to the original directory
-if [[ "$CURRENT_DIR" != "$TARGET_DIR" ]]; then
-    echo >&2 "Returning to the original directory: $CURRENT_DIR"
-    popd > /dev/null
-fi
+popd > /dev/null
 
 # Restore stdout
 exec 1>&3
