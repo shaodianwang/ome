@@ -130,9 +130,9 @@ func migrationModeOrDefault(p *v1beta1.OMENativeMigrationPolicy) v1beta1.OMENati
 
 // incarnationForIndex returns the current Incarnation for the (component, idx)
 // pair. If the ISVC has no InstanceStatus for that pair yet — first reconcile,
-// or after a delete — incarnation starts at 1. Recreate-update and
-// restart-on-loss increment Incarnation in later PRs; this function only
-// reads, never writes.
+// or after a delete — incarnation starts at 1. Otherwise the existing value
+// is preserved. This function only reads status; the writers are the
+// patchInstanceStatus* helpers that own each lifecycle transition.
 func incarnationForIndex(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) int64 {
 	if isvc == nil {
 		return 1
