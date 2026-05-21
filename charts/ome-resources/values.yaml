@@ -167,3 +167,31 @@ modelAgent:
     requests:
       cpu: '10'
       memory: 100Gi
+
+# ServiceMonitor for the controller-manager metrics endpoint.
+# Requires prometheus-operator (monitoring.coreos.com/v1) installed
+# in the cluster. Leave disabled for clusters that use vanilla
+# Prometheus pod-annotation discovery (the prometheus.io/scrape
+# annotations on the controller pod continue to work).
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  # Extra labels merged onto the ServiceMonitor (e.g., to match the
+  # operator's ruleSelector / serviceMonitorSelector).
+  additionalLabels: {}
+  # Prometheus relabel rules applied before scraping.
+  relabelings: []
+  # Prometheus relabel rules applied after scraping (drop/keep series).
+  metricRelabelings: []
+
+# PodMonitor for the model-agent DaemonSet. The DaemonSet has no
+# fronting Service (it's addressed via node-local hostPath, not
+# cluster DNS), so PodMonitor is the right scrape primitive.
+podMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  additionalLabels: {}
+  relabelings: []
+  metricRelabelings: []

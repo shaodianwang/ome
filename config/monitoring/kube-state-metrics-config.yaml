@@ -1,0 +1,221 @@
+# kube-state-metrics CustomResourceStateMetrics config for OME CRDs.
+#
+# Usage:
+#   1. Apply this ConfigMap to the namespace where your cluster's
+#      kube-state-metrics runs (commonly kube-system or monitoring):
+#        kubectl apply -n <ksm-namespace> -f kube-state-metrics-config.yaml
+#   2. Mount the ConfigMap onto the KSM pod (typically at
+#      /etc/ksm-custom-config/) and pass
+#        --custom-resource-state-config-file=/etc/ksm-custom-config/config.yaml
+#      to the KSM container.
+#   3. Restart/reload KSM. The ome_* metrics below appear in the KSM
+#      scrape target alongside the standard kube_* metrics.
+#
+# Metrics produced (one series per CR instance unless noted):
+#   ome_inferenceservice_info{name,namespace,model_name,runtime_name}      gauge=1
+#   ome_inferenceservice_created{name,namespace}                           gauge=<unix-ts>
+#   ome_inferenceservice_transition_status{name,namespace,status}          gauge=1 (StateSet)
+#   ome_inferenceservice_active_model_state{name,namespace,state}          gauge=1 (StateSet)
+#   ome_inferenceservice_target_model_state{name,namespace,state}          gauge=1 (StateSet)
+#   ome_basemodel_info{name,namespace,model_format,model_size_billions}    gauge=1
+#   ome_basemodel_state{name,namespace,state}                              gauge=1 (StateSet)
+#   ome_basemodel_created{name,namespace}                                  gauge=<unix-ts>
+#   ome_clusterbasemodel_info{name,model_format,model_size_billions}       gauge=1
+#   ome_clusterbasemodel_state{name,state}                                 gauge=1 (StateSet)
+#   ome_clusterbasemodel_created{name}                                     gauge=<unix-ts>
+#   ome_servingruntime_info{name,namespace}                                gauge=1
+#   ome_servingruntime_created{name,namespace}                             gauge=<unix-ts>
+#   ome_clusterservingruntime_info{name}                                   gauge=1
+#   ome_clusterservingruntime_created{name}                                gauge=<unix-ts>
+#
+# Conditions are intentionally not emitted as metrics — KSM's
+# CustomResourceStateMetrics handles them awkwardly. Use the
+# controller-runtime workqueue/reconcile-error metrics for operational
+# alerting and the StateSet metrics above for resource-inventory
+# dashboards.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ome-kube-state-metrics-config
+  # Set the namespace where your cluster's kube-state-metrics runs.
+  # Commonly kube-system or monitoring.
+  # namespace: monitoring
+  labels:
+    app.kubernetes.io/component: kube-state-metrics-config
+    app.kubernetes.io/part-of: ome
+data:
+  config.yaml: |-
+    kind: CustomResourceStateMetrics
+    spec:
+      resources:
+        - groupVersionKind:
+            group: ome.io
+            version: v1beta1
+            kind: InferenceService
+          metricNamePrefix: ome_inferenceservice
+          labelsFromPath:
+            name: [metadata, name]
+            namespace: [metadata, namespace]
+          metrics:
+            - name: info
+              help: "InferenceService basic info"
+              each:
+                type: Info
+                info:
+                  labelsFromPath:
+                    model_name: [spec, model, name]
+                    runtime_name: [spec, runtime, name]
+            - name: created
+              help: "Unix creation timestamp"
+              each:
+                type: Gauge
+                gauge:
+                  path: [metadata, creationTimestamp]
+            - name: transition_status
+              help: "InferenceService transition status"
+              each:
+                type: StateSet
+                stateSet:
+                  labelName: status
+                  path: [status, modelStatus, transitionStatus]
+                  list:
+                    - UpToDate
+                    - InProgress
+                    - BlockedByFailedLoad
+                    - InvalidSpec
+            - name: active_model_state
+              help: "Active model lifecycle state"
+              each:
+                type: StateSet
+                stateSet:
+                  labelName: state
+                  path: [status, modelStatus, states, activeModelState]
+                  list:
+                    - Pending
+                    - Standby
+                    - Loading
+                    - Loaded
+                    - FailedToLoad
+            - name: target_model_state
+              help: "Target model lifecycle state (in-flight rollout)"
+              each:
+                type: StateSet
+                stateSet:
+                  labelName: state
+                  path: [status, modelStatus, states, targetModelState]
+                  list:
+                    - Pending
+                    - Standby
+                    - Loading
+                    - Loaded
+                    - FailedToLoad
+
+        - groupVersionKind:
+            group: ome.io
+            version: v1beta1
+            kind: BaseModel
+          metricNamePrefix: ome_basemodel
+          labelsFromPath:
+            name: [metadata, name]
+            namespace: [metadata, namespace]
+          metrics:
+            - name: info
+              help: "BaseModel basic info"
+              each:
+                type: Info
+                info:
+                  labelsFromPath:
+                    model_format: [spec, modelFormat, name]
+                    model_size_billions: [spec, modelParameterSize]
+            - name: created
+              help: "Unix creation timestamp"
+              each:
+                type: Gauge
+                gauge:
+                  path: [metadata, creationTimestamp]
+            - name: state
+              help: "BaseModel lifecycle state"
+              each:
+                type: StateSet
+                stateSet:
+                  labelName: state
+                  path: [status, state]
+                  list:
+                    - In_Training
+                    - Ready
+                    - Failed
+
+        - groupVersionKind:
+            group: ome.io
+            version: v1beta1
+            kind: ClusterBaseModel
+          metricNamePrefix: ome_clusterbasemodel
+          labelsFromPath:
+            name: [metadata, name]
+          metrics:
+            - name: info
+              help: "ClusterBaseModel basic info"
+              each:
+                type: Info
+                info:
+                  labelsFromPath:
+                    model_format: [spec, modelFormat, name]
+                    model_size_billions: [spec, modelParameterSize]
+            - name: created
+              help: "Unix creation timestamp"
+              each:
+                type: Gauge
+                gauge:
+                  path: [metadata, creationTimestamp]
+            - name: state
+              help: "ClusterBaseModel lifecycle state"
+              each:
+                type: StateSet
+                stateSet:
+                  labelName: state
+                  path: [status, state]
+                  list:
+                    - In_Training
+                    - Ready
+                    - Failed
+
+        - groupVersionKind:
+            group: ome.io
+            version: v1beta1
+            kind: ServingRuntime
+          metricNamePrefix: ome_servingruntime
+          labelsFromPath:
+            name: [metadata, name]
+            namespace: [metadata, namespace]
+          metrics:
+            - name: info
+              help: "ServingRuntime basic info"
+              each:
+                type: Info
+                info: {}
+            - name: created
+              help: "Unix creation timestamp"
+              each:
+                type: Gauge
+                gauge:
+                  path: [metadata, creationTimestamp]
+
+        - groupVersionKind:
+            group: ome.io
+            version: v1beta1
+            kind: ClusterServingRuntime
+          metricNamePrefix: ome_clusterservingruntime
+          labelsFromPath:
+            name: [metadata, name]
+          metrics:
+            - name: info
+              help: "ClusterServingRuntime basic info"
+              each:
+                type: Info
+                info: {}
+            - name: created
+              help: "Unix creation timestamp"
+              each:
+                type: Gauge
+                gauge:
+                  path: [metadata, creationTimestamp]
