@@ -3,7 +3,6 @@
 <!-- toc -->
 - [Summary](#summary)
 - [Motivation](#motivation)
-  - [What's broken today](#whats-broken-today)
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
@@ -31,160 +30,32 @@
 
 ## Summary
 
-This OEP replaces the InferenceService autoscaling stack with a per-component model that pass-through KEDA triggers and HPA metric specs verbatim, publishes a documented scale target for user-owned autoscalers, implements a `/scale` subresource on InferenceService, and adds a `scalingPolicy` knob for PD-disaggregated services that need engine/decoder/router to scale in coordination. The new `autoscaler` and `scalingPolicy` blocks are mirrored onto `ServingRuntime` so the common 1:1 runtime-per-workload pairing can carry scaling defaults at the runtime layer with ISVC-level overrides per component.
+Per-component autoscaler block on `InferenceService` that pass-through KEDA triggers and HPA metric specs verbatim, a `/scale` subresource on the ISVC, and a `scalingPolicy` for PD-disaggregated services. Defaults can live on `ServingRuntime` (1:1 pairing pattern); the ISVC overrides per component.
 
-Mostly additive: `minReplicas`, `maxReplicas`, `scaleMetric`, `scaleTarget`, and the `ome.io/autoscalerClass` annotation keep working with deprecation warnings. The `kedaConfig` field and its hardcoded vLLM-shaped default query are **removed** — `Autoscaler.Keda.Triggers` is strictly more expressive and zero sample manifests use the old field.
+`KedaConfig` is removed (zero observed usage). Other legacy fields (`MinReplicas`, `MaxReplicas`, `ScaleMetric`, `ScaleTarget`, and the `ome.io/autoscalerClass` annotation) keep working with deprecation warnings.
 
 ## Motivation
 
-OME today wires every InferenceService to exactly one of HPA, KEDA, or no-controller-managed (`external`) — picked by a single annotation on the ISVC. The HPA path supports one resource metric; the KEDA path supports one prometheus trigger with a hard-coded vLLM-shaped default query. Engines, decoders, and routers in a PD-disaggregated ISVC are all forced into the same autoscaler class with no way to coordinate their replica counts.
-
-Production deployments routinely need:
-- Multiple triggers on the engine (Prometheus queue depth + GPU utilization via DCGM + cron-based pre-scaling for known traffic peaks).
-- Decoder scaled on a *different* signal than engine (e.g., HPA on GPU memory while engine is on a custom KEDA scaler).
-- An operator-owned `ScaledObject` that the OME controller doesn't fight — for cases where the autoscaling policy lives outside OME (a platform team standard, a custom controller, an external scaler).
-- `kubectl scale isvc/foo --replicas=5` working the same way it works for Deployments and StatefulSets.
-- A PD service where the engine drives scaling and the decoder follows in fixed ratio, rather than each component making independent decisions and going out of phase.
-
-None of these are reasonably expressible with the current API.
-
-### What's broken today
-
-A precise reading of the current state, from the code:
-
-| Concern | Current behavior |
-|---|---|
-| Per-component autoscaler class | **Not supported.** `autoscaler_reconciler.go:70` reads one ISVC-level annotation `ome.io/autoscalerClass`. Engine + decoder + router all forced to the same class. |
-| Multi-trigger KEDA | **Not supported.** `keda_reconciler.go:104` emits exactly one prometheus trigger; the default query (lines 202-214) is a hard-coded vLLM TPS-vs-RPS heuristic. |
-| HPA on external/object/pods metrics | **Not supported.** `hpa_reconciler.go:83` emits one resource-metric (CPU or memory only). |
-| User-owned ScaledObject targeting an ISVC | **Not supported.** OME's reconciler always asserts its own; `external` mode disables OME's autoscaler but offers no documented `scaleTargetRef` for the user to point at. |
-| `kubectl scale isvc/foo` | **Not supported.** InferenceService has no `/scale` subresource. |
-| Coordinated scaling for PD services | **Not supported.** Each component reconciles independently with no notion of an anchor or ratio. |
-| Scheduled / time-based scaling | **Not supported.** KEDA's `cron` trigger is unreachable through OME's API. |
-| Status visibility on scaling | **Not surfaced.** `ISVC.status` has no autoscaler info. Operators `kubectl get hpa,scaledobject -A` to debug. |
-| `ScaleMetric` enum (`cpu, memory, concurrency, rps, tps`) | **Partially dead.** `concurrency/rps/tps` only meant something under Knative Pod Autoscaler in serverless mode. In `RawDeployment`, the HPA reconciler maps them as if they were Kubernetes resource names — non-functional. |
-| Class-switching cleanup | **Fragile.** `deleteExistingScaledObject` / `deleteExistingHPA` run on every reconcile when the class changes. No owner refs, no finalizers — relies on the controller running and observing the transition. |
-
-Additionally, the per-component scaling that *does* work depends on an awkward indirection in `common/deployment_reconciler.go:38-46` that synthesizes an `InferenceServiceSpec` where the decoder or router's `ComponentExtensionSpec` is shoved into `inferenceServiceSpec.Engine.ComponentExtensionSpec` so that `autoscaler_reconciler.go:66` (which always reads from `.Engine.*`) sees the right values. Functional, but a trap for anyone adding a per-component feature.
+OME today scales an InferenceService through HPA on a single CPU or memory metric — no story for PD-disaggregated services where engine, decoder, and router need to scale on different signals or in coordination, and no `/scale` subresource for user-owned autoscalers or `kubectl scale`. This OEP fills those gaps.
 
 ### Goals
 
-- A per-component `spec.<component>.autoscaler` block that lets engine, decoder, and router each choose their own autoscaler class and configuration independently.
-- KEDA triggers as **verbatim pass-through** — operators write the same `[]kedav1.ScaleTriggers` they would write in a hand-authored ScaledObject. Multi-trigger, cron, external scalers all work for free.
-- HPA metrics as **verbatim pass-through** — operators write `[]autoscalingv2.MetricSpec`. Resource, external, pods, and object metrics all work.
-- `external` mode publishes `status.components.<comp>.scaleTargetRef` so operators can write their own ScaledObject/HPA targeting a stable name without guessing OME's naming conventions.
-- InferenceService implements the `/scale` subresource so `kubectl scale isvc/foo --replicas=N` and standard HPA/KEDA `scaleTargetRef: {apiVersion: ome.io/v1beta1, kind: InferenceService, ...}` work natively.
-- `spec.scalingPolicy` lets PD-disaggregated operators declare a `proportional` policy: engine autoscales, decoder/router follow as a function of engine replicas. Replaces independent autoscalers for the followers.
-- `status.components.<comp>.autoscaler` reports current/desired replicas, last scale time, and propagated conditions from the underlying HPA/ScaledObject so operators don't have to fan-out their debugging.
-- Mirror the new `autoscaler` and `scalingPolicy` blocks onto `ServingRuntime` so the 1:1 runtime-per-workload pairing pattern in common use can carry scaling defaults at the runtime layer; ISVC overrides per component via whole-block replace.
-- Backwards compatible for `MinReplicas`, `MaxReplicas`, `ScaleMetric`, `ScaleTarget`, and the `ome.io/autoscalerClass` annotation (one release of deprecation warnings). `KedaConfig` is removed — see [Backwards compatibility](#backwards-compatibility) for the migration snippet.
+- Per-component `spec.<component>.autoscaler` block with class = `hpa | keda | external | none`.
+- Verbatim pass-through of `[]kedav1.ScaleTriggers` and `[]autoscalingv2.MetricSpec` — operators write the same thing they would in a hand-authored ScaledObject / HPA.
+- `/scale` subresource on `InferenceService` so `kubectl scale isvc/foo` works and user-owned autoscalers can target the ISVC directly.
+- `spec.scalingPolicy` with `proportional` mode for PD-disaggregated coordination (engine autoscales, decoder/router follow by ratio).
+- Defaults mirrored onto `ServingRuntime` (1:1 pairing pattern), overridden per-component by the ISVC via whole-block replace. Status surface reports the active autoscaler + which layer drove it.
 
 ### Non-Goals
 
-- **Not building a prediction engine.** Time-based scaling is delivered via KEDA cron triggers (pass-through). Demand-prediction is left to external metric pipelines that write to Prometheus; OME consumes via the same triggers API.
-- **Not replacing KEDA or HPA.** OME continues to generate and manage `ScaledObject` / `HorizontalPodAutoscaler` resources; this OEP is about the API and lifecycle around them, not a new autoscaling engine.
-- **Not Serverless / Knative mode.** This OEP is `RawDeployment`-focused. Knative-managed services keep using KPA via the existing serverless path.
-- **Not auto-tuning replica policies.** The `proportional` policy expects operators to declare ratios. OME does not infer ratios from observed load.
-- **Not removing all legacy fields in Alpha.** `KedaConfig` is removed (zero observed usage); other legacy fields stay through Alpha with deprecation warnings, removal no earlier than Beta+1.
+- **Not building a prediction engine.** Time-based scaling is delivered via KEDA cron triggers (pass-through).
+- **Not replacing KEDA or HPA.** OME continues to generate and manage `ScaledObject` / `HPA` resources; this OEP is about the API and lifecycle around them.
+- **Not auto-tuning replica policies.** Operators declare ratios; OME does not infer them.
+- **Not removing all legacy fields in Alpha.** `KedaConfig` is removed (zero observed usage); other legacy fields stay through Alpha with deprecation warnings.
 
 ## Proposal
 
-Introduce one new field per component:
-
-```go
-type ComponentExtensionSpec struct {
-    // ... existing fields kept (MinReplicas, MaxReplicas, etc.) ...
-
-    // +optional — new in OEP-0013. When set, takes priority over the
-    // legacy ScaleMetric / ScaleTarget fields and the
-    // ome.io/autoscalerClass annotation for this component.
-    Autoscaler *ComponentAutoscaler `json:"autoscaler,omitempty"`
-}
-
-type ComponentAutoscaler struct {
-    // +kubebuilder:validation:Enum=hpa;keda;external;none
-    // +kubebuilder:default=hpa
-    Class AutoscalerClass `json:"class"`
-
-    // KEDA configuration. Required when Class == "keda".
-    // +optional
-    Keda *KedaAutoscaler `json:"keda,omitempty"`
-
-    // HPA configuration. Required when Class == "hpa" if non-default
-    // metrics are wanted; if Keda/HPA blocks are absent the class
-    // determines the autoscaler shape but uses defaults (HPA: CPU=80%).
-    // +optional
-    HPA *HPAAutoscaler `json:"hpa,omitempty"`
-}
-
-type KedaAutoscaler struct {
-    // Triggers passed through verbatim to kedav1.ScaledObjectSpec.Triggers.
-    // The full surface (prometheus, cron, external, kafka, etc.) is supported.
-    // +kubebuilder:validation:MinItems=1
-    Triggers []kedav1.ScaleTriggers `json:"triggers"`
-
-    // Advanced ScaledObject behavior — pollingInterval, cooldownPeriod,
-    // idleReplicaCount, fallback, advanced.{horizontalPodAutoscalerConfig, restoreToOriginalReplicaCount}.
-    // +optional
-    Advanced *kedav1.AdvancedConfig `json:"advanced,omitempty"`
-
-    // +optional
-    PollingInterval *int32 `json:"pollingInterval,omitempty"`
-
-    // +optional
-    CooldownPeriod *int32 `json:"cooldownPeriod,omitempty"`
-}
-
-type HPAAutoscaler struct {
-    // Metrics passed through verbatim to autoscalingv2.HorizontalPodAutoscalerSpec.Metrics.
-    // Supports Resource, ContainerResource, Pods, Object, External metric sources.
-    // If empty, defaults to a single CPU=80% Resource metric.
-    // +optional
-    // +listType=atomic
-    Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
-
-    // Scaling behavior — stabilizationWindowSeconds, policies, selectPolicy.
-    // +optional
-    Behavior *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
-}
-```
-
-And one new ISVC-level field:
-
-```go
-type InferenceServiceSpec struct {
-    // ... existing fields ...
-
-    // +optional — when nil, every component autoscales independently
-    // (today's behavior).
-    ScalingPolicy *ScalingPolicy `json:"scalingPolicy,omitempty"`
-}
-
-type ScalingPolicy struct {
-    // +kubebuilder:validation:Enum=independent;proportional;pinned
-    // +kubebuilder:default=independent
-    Mode ScalingMode `json:"mode"`
-
-    // Required when Mode == "proportional". Engine is the conventional
-    // anchor for PD; explicit so the controller doesn't have to guess.
-    // +optional
-    Proportional *ProportionalPolicy `json:"proportional,omitempty"`
-}
-
-type ProportionalPolicy struct {
-    // +kubebuilder:validation:Enum=engine;decoder;router
-    // +kubebuilder:default=engine
-    Anchor ComponentType `json:"anchor"`
-
-    // Per-component ratio relative to anchor replicas. A ratio of 1.0
-    // means parity; 0.25 means one for every four anchor replicas
-    // (rounded up). Components not listed scale independently.
-    // +optional
-    Ratios map[ComponentType]resource.Quantity `json:"ratios,omitempty"`
-}
-```
-
-The high-level shape per component when this OEP lands:
+A new `Autoscaler` block on `ComponentExtensionSpec` (so engine, decoder, and router each get their own) plus a `ScalingPolicy` on `InferenceServiceSpec` for cross-component coordination. Full Go type definitions are in [Design Details / API](#api-per-component-autoscaler-block). The minimal user-facing shape:
 
 ```yaml
 spec:
@@ -194,60 +65,25 @@ spec:
     autoscaler:
       class: keda
       keda:
-        pollingInterval: 15
         triggers:
           - type: prometheus
-            metadata:
-              serverAddress: http://prometheus.monitoring:9090
-              query: |
-                avg(rate(vllm:request_queue_size_total[1m])) by (ome_io_inferenceservice)
-              threshold: "20"
-          - type: prometheus
-            metadata:
-              serverAddress: http://prometheus.monitoring:9090
-              query: |
-                avg(DCGM_FI_DEV_GPU_UTIL{exported_pod=~"foo-engine-.*"})
-              threshold: "70"
-          - type: cron
-            metadata:
-              timezone: America/Los_Angeles
-              start:  "0 7 * * 1-5"
-              end:    "0 19 * * 1-5"
-              desiredReplicas: "10"
-
+            metadata: { serverAddress: "...", query: "...", threshold: "20" }
   decoder:
     minReplicas: 2
     maxReplicas: 50
-    # follows engine 1:1 via scalingPolicy; no autoscaler block needed
-
+    # no autoscaler block — follower under scalingPolicy
   router:
-    minReplicas: 1
-    maxReplicas: 4
-    autoscaler:
-      class: hpa
-      hpa:
-        metrics:
-          - type: Resource
-            resource:
-              name: cpu
-              target: { type: Utilization, averageUtilization: 70 }
-        behavior:
-          scaleDown:
-            stabilizationWindowSeconds: 600
-
+    autoscaler: { class: hpa }   # defaults to CPU=80%
   scalingPolicy:
     mode: proportional
-    proportional:
-      anchor: engine
-      ratios:
-        decoder: "1"
+    proportional: { anchor: engine, ratios: { decoder: "1" } }
 ```
 
 ### User Stories
 
 #### Story 1: Multi-trigger production engine
 
-Operator running vLLM on tier-5 GPUs wants to scale on queue depth + GPU utilization + a daily traffic floor.
+Operator wants to scale on queue depth + GPU utilization + a daily traffic floor.
 
 ```yaml
 spec:
@@ -259,14 +95,14 @@ spec:
       keda:
         triggers:
           - type: prometheus
-            metadata: { query: "avg(vllm:queue_depth)", threshold: "20", serverAddress: "…" }
+            metadata: { query: "<queue-depth-query>", threshold: "20", serverAddress: "…" }
           - type: prometheus
-            metadata: { query: "avg(DCGM_FI_DEV_GPU_UTIL{…})", threshold: "75", serverAddress: "…" }
+            metadata: { query: "<gpu-util-query>", threshold: "75", serverAddress: "…" }
           - type: cron
             metadata: { timezone: UTC, start: "0 12 * * *", end: "0 22 * * *", desiredReplicas: "20" }
 ```
 
-Today: not expressible. KEDA's `triggers` array supports this natively but `KedaConfig` only has fields for ONE prometheus trigger.
+Today: not expressible. KEDA's `triggers` array supports this natively but `KedaConfig` only had fields for one prometheus trigger.
 
 #### Story 2: User owns the ScaledObject
 
@@ -294,56 +130,14 @@ spec:
 
 OME publishes the ISVC's scale target via the new `/scale` subresource so the user-managed ScaledObject can scale-of-record through the ISVC; OME's reconciler refuses to touch any HPA/ScaledObject when class=external. `status.components.engine.scaleTargetRef` documents the underlying Deployment name for users who prefer that target.
 
-#### Story 3: PD-disaggregated with coordinated decoder
+#### Story 3: Runtime-defined defaults with ISVC override
 
-Operator's PD service must keep decoder count == engine count (a property of the tensor-parallel sharding they use). Today they manually edit both. Under proportional policy:
-
-```yaml
-spec:
-  engine:
-    minReplicas: 2
-    maxReplicas: 20
-    autoscaler:
-      class: keda
-      keda: { triggers: [...] }
-  decoder:
-    minReplicas: 2
-    maxReplicas: 20
-    # no autoscaler block — follower
-  router:
-    minReplicas: 1
-    maxReplicas: 4
-    autoscaler: { class: hpa }
-  scalingPolicy:
-    mode: proportional
-    proportional:
-      anchor: engine
-      ratios:
-        decoder: "1"   # 1 decoder per engine
-```
-
-OME's coordinator watches engine replica count and writes derived decoder replicas via `/scale` on the decoder Deployment. Router is independent.
-
-#### Story 4: `kubectl scale` works
-
-```sh
-kubectl scale isvc/foo --replicas=8
-# Sets spec.engine.minReplicas = 8 (or whichever component is the anchor)
-# HPA/KEDA respects the floor; manual override possible
-```
-
-Today: `kubectl scale isvc/foo` fails with "the server doesn't have a resource type 'inferenceservices/scale'".
-
-#### Story 5: Runtime-defined defaults with ISVC override
-
-Platform team authors a ServingRuntime that bundles the right autoscaler for vLLM Llama-70B chat workloads. Most ISVCs binding this runtime inherit; a latency-critical tenant overrides the engine block on its ISVC.
+Platform team authors a ServingRuntime that bundles the right autoscaler for a workload class. Most ISVCs binding this runtime inherit; a latency-critical tenant overrides on its ISVC.
 
 ```yaml
 # ServingRuntime — carries the default
-apiVersion: ome.io/v1beta1
 kind: ClusterServingRuntime
-metadata:
-  name: vllm-llama-70b-chat
+metadata: { name: runtime-a }
 spec:
   engine:
     minReplicas: 2
@@ -353,47 +147,31 @@ spec:
       keda:
         triggers:
           - type: prometheus
-            metadata:
-              query: "avg(vllm:num_requests_waiting)"
-              threshold: "15"
-              serverAddress: "http://prometheus.monitoring:9090"
-  scalingPolicy:
-    mode: proportional
-    proportional:
-      anchor: engine
-      ratios: { decoder: "1" }
+            metadata: { query: "...", threshold: "15", serverAddress: "..." }
 
 ---
-# ISVC — inherits autoscaler + scalingPolicy from runtime
-apiVersion: ome.io/v1beta1
+# ISVC — inherits runtime's autoscaler
 kind: InferenceService
 metadata: { name: foo }
 spec:
-  runtime: { name: vllm-llama-70b-chat }
-  model:   { name: llama-3-70b-instruct }
+  runtime: { name: runtime-a }
 
 ---
-# Different ISVC — overrides engine block for a latency-critical tenant
-apiVersion: ome.io/v1beta1
+# Different ISVC — overrides engine block for tighter scaling
 kind: InferenceService
 metadata: { name: foo-tenant-a }
 spec:
-  runtime: { name: vllm-llama-70b-chat }
-  model:   { name: llama-3-70b-instruct }
+  runtime: { name: runtime-a }
   engine:
-    minReplicas: 8
     autoscaler:
       class: keda
       keda:
         triggers:
           - type: prometheus
-            metadata:
-              query: "avg(vllm:num_requests_waiting)"
-              threshold: "5"
-              serverAddress: "http://prometheus.monitoring:9090"
+            metadata: { query: "...", threshold: "5", serverAddress: "..." }
 ```
 
-`status.components.engine.autoscaler.specSource` reports `runtime` for the first ISVC and `isvc` for the second — operators can tell at a glance who's driving scaling for any deployment.
+`status.components.engine.autoscaler.specSource` reports `runtime` for the first ISVC and `isvc` for the second.
 
 ### Notes/Constraints/Caveats
 
@@ -633,11 +411,12 @@ func ResolveComponentAutoscaler(
 
 Pure, table-testable, called from both the reconciler and the webhook validator. The returned `SpecSource` is propagated into `status.components.<comp>.autoscaler.specSource` (see "Status surface").
 
-### KEDA: triggers pass-through
+### KEDA + HPA pass-through
 
-`reconcilers/keda/keda_reconciler.go` is rewritten to consume `ComponentAutoscaler.Keda.Triggers` verbatim. The legacy `KedaConfig` path and the hardcoded vLLM default query (`getScaledObjectTriggers` at `keda_reconciler.go:202-214`) are deleted along with the field.
+`reconcilers/keda/` and `reconcilers/hpa/` are rewritten to consume `Autoscaler.Keda` / `Autoscaler.HPA` verbatim and emit a `ScaledObject` or `HorizontalPodAutoscaler` targeted at the component Deployment. The legacy `KedaConfig` path is deleted (along with its hardcoded SGLang default query); legacy `ScaleMetric` / `ScaleTarget` continue to drive the HPA fallback (default CPU=80% when neither legacy nor new field is set).
 
 ```go
+// KEDA path; HPA mirrors this shape with autoscalingv2.HPA + Metrics/Behavior.
 func buildScaledObject(meta metav1.ObjectMeta, k *v1beta1.KedaAutoscaler, minR, maxR int32, deployName string) *kedav1.ScaledObject {
     return &kedav1.ScaledObject{
         ObjectMeta: metav1.ObjectMeta{Name: utils.GetScaledObjectName(deployName), Namespace: meta.Namespace, Labels: meta.Labels},
@@ -651,46 +430,6 @@ func buildScaledObject(meta metav1.ObjectMeta, k *v1beta1.KedaAutoscaler, minR, 
             CooldownPeriod:   k.CooldownPeriod,
             IdleReplicaCount: k.IdleReplicaCount,
             Fallback:         k.Fallback,
-        },
-    }
-}
-```
-
-### HPA: metrics pass-through
-
-`pkg/controller/v1beta1/inferenceservice/reconcilers/hpa/hpa_reconciler.go` analogously consumes `ComponentAutoscaler.HPA.Metrics` verbatim. Legacy path generates the same single-resource-metric HPA as today.
-
-```go
-func buildHPA(componentMeta metav1.ObjectMeta, componentExt *v1beta1.ComponentExtensionSpec, deploymentName string) *autoscalingv2.HorizontalPodAutoscaler {
-    minR := calculateMinReplicas(componentExt)
-    maxR := calculateMaxReplicas(componentExt, minR)
-
-    var metrics []autoscalingv2.MetricSpec
-    var behavior *autoscalingv2.HorizontalPodAutoscalerBehavior
-
-    if componentExt.Autoscaler != nil && componentExt.Autoscaler.HPA != nil {
-        metrics = componentExt.Autoscaler.HPA.Metrics
-        behavior = componentExt.Autoscaler.HPA.Behavior
-    }
-    if len(metrics) == 0 {
-        metrics = legacyDefaultMetrics(componentMeta, componentExt)
-    }
-    if behavior == nil {
-        behavior = &autoscalingv2.HorizontalPodAutoscalerBehavior{}
-    }
-
-    return &autoscalingv2.HorizontalPodAutoscaler{
-        ObjectMeta: componentMeta,
-        Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
-            ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
-                APIVersion: "apps/v1",
-                Kind:       "Deployment",
-                Name:       deploymentName,
-            },
-            MinReplicas: &minR,
-            MaxReplicas: maxR,
-            Metrics:     metrics,
-            Behavior:    behavior,
         },
     }
 }
@@ -779,7 +518,7 @@ sequenceDiagram
     Co->>Co: target = ceil(N × ratio)
     Co->>D: PUT /scale {replicas: target}
     D-->>D: spec.replicas = target
-    Note over K,D: Coordinator never touches ScaledObject/HPA;<br/>followers stay autoscaler-free.
+    Note over K,D: Coordinator never touches ScaledObject/HPA — followers stay autoscaler-free.
 ```
 
 Validation gates the spec at the webhook:
@@ -788,60 +527,29 @@ Validation gates the spec at the webhook:
 
 ### Status surface
 
-`pkg/apis/ome/v1beta1/inference_service_status.go`:
+`ComponentStatusSpec` gains `Autoscaler *ComponentAutoscalerStatus`, `ScaleTargetRef`, `Replicas`, `LabelSelector`:
 
 ```go
-type ComponentStatusSpec struct {
-    // ... existing fields ...
-
-    // +optional
-    Autoscaler *ComponentAutoscalerStatus `json:"autoscaler,omitempty"`
-
-    // +optional
-    ScaleTargetRef *ScaleTargetReference `json:"scaleTargetRef,omitempty"`
-
-    // +optional
-    Replicas         int32 `json:"replicas,omitempty"`
-    // +optional
-    LabelSelector    string `json:"labelSelector,omitempty"`
-}
-
 type ComponentAutoscalerStatus struct {
-    Class             AutoscalerClass `json:"class"`
-    ManagedBy         string          `json:"managedBy"` // "ome" or "external"
-    CurrentReplicas   int32           `json:"currentReplicas,omitempty"`
-    DesiredReplicas   int32           `json:"desiredReplicas,omitempty"`
-    LastScaleTime     *metav1.Time    `json:"lastScaleTime,omitempty"`
-    Conditions        []metav1.Condition `json:"conditions,omitempty"`
-    // SpecSource indicates which layer of resolution drove the autoscaler
-    // config for this component during the current reconcile. "isvc" means
-    // the ISVC's own Autoscaler block won; "runtime" means it inherited
-    // from the bound ServingRuntime; "legacy" means legacy fields drove
-    // the spec; "default" means controller defaults applied; "external"
-    // means class=external (OME hands-off).
+    Class           AutoscalerClass    `json:"class"`
+    ManagedBy       string             `json:"managedBy"` // "ome" or "external"
+    CurrentReplicas int32              `json:"currentReplicas,omitempty"`
+    DesiredReplicas int32              `json:"desiredReplicas,omitempty"`
+    LastScaleTime   *metav1.Time       `json:"lastScaleTime,omitempty"`
+    Conditions      []metav1.Condition `json:"conditions,omitempty"`
     // +kubebuilder:validation:Enum=isvc;runtime;legacy;default;external
-    SpecSource string `json:"specSource"`
-}
-
-type ScaleTargetReference struct {
-    Group string `json:"group,omitempty"`
-    Kind  string `json:"kind"`
-    Name  string `json:"name"`
+    SpecSource      string             `json:"specSource"`
 }
 ```
 
-Populated on each reconcile from:
-- `ScaleTargetRef`: the engine/decoder/router Deployment's GVK + name.
-- `Autoscaler.{Current,Desired}Replicas`, `LastScaleTime`, `Conditions`: copied from the live HPA's `status` (or ScaledObject's underlying HPA — KEDA generates and manages one internally; we read it).
-- `Autoscaler.ManagedBy`: `"ome"` for `hpa`/`keda` classes, `"external"` for `external`, `"none"` for `none`.
-- `Autoscaler.SpecSource`: which layer of resolution won — `"isvc"` (ISVC's own `Autoscaler` block), `"runtime"` (inherited from bound ServingRuntime), `"legacy"` (legacy fields on the ISVC), `"default"` (controller defaults — e.g., HPA CPU=80%), or `"external"` (class=external).
+Populated each reconcile from the live HPA (or ScaledObject's internal HPA for KEDA). `SpecSource` records which layer of resolution won: `isvc` block / `runtime` defaults / `legacy` fields / controller `default` / `external`.
 
 ### Webhook validation
 
 In `pkg/webhook/admission/isvc/`:
 
 - **Class consistency**: `Autoscaler.Class == keda` requires `Autoscaler.Keda.Triggers` to be set; `Autoscaler.Class == hpa` falls back to default CPU=80% if `Autoscaler.HPA.Metrics` is empty.
-- **Annotation-only `keda`**: `ome.io/autoscalerClass: keda` without an `Autoscaler.Keda` block on a component is rejected. There is no longer a default KEDA trigger — the hardcoded vLLM query was removed with `KedaConfig`.
+- **Annotation-only `keda`**: `ome.io/autoscalerClass: keda` without an `Autoscaler.Keda` block on a component is rejected. There is no longer a default KEDA trigger — the hardcoded SGLang query was removed with `KedaConfig`.
 - **`scalingPolicy.proportional` rules**: anchor must be one of the components present in the spec; followers in `Ratios` must not have `Autoscaler.Class ∈ {hpa, keda}`.
 - **Bounds sanity**: `MinReplicas <= MaxReplicas` (existing); `IdleReplicaCount < MinReplicaCount` per KEDA's own rules.
 - **MinItems on KEDA triggers**: empty triggers list rejected with a clear message.
@@ -856,7 +564,7 @@ Two legacy shapes continue to work; one is removed:
 |---|---|
 | `ome.io/autoscalerClass: hpa` (or unset) + no other fields | Default HPA on CPU=80%. Identical to today. |
 | `ome.io/autoscalerClass: external` | OME does not generate HPA or ScaledObject. Same as today, plus `status.scaleTargetRef` populated. |
-| ~~`ome.io/autoscalerClass: keda` + `spec.<comp>.kedaConfig`~~ | **Removed in this OEP.** Migrate to `spec.<comp>.autoscaler.keda.triggers`. The `KedaConfig` Go type, the field, and the hardcoded vLLM default query are deleted. |
+| ~~`ome.io/autoscalerClass: keda` + `spec.<comp>.kedaConfig`~~ | **Removed in this OEP.** Migrate to `spec.<comp>.autoscaler.keda.triggers`. The `KedaConfig` Go type, the field, and the hardcoded SGLang default query are deleted. |
 
 **Migration from `kedaConfig` → `autoscaler.keda`:**
 
@@ -866,7 +574,7 @@ spec:
   engine:
     kedaConfig:
       scalingMetric: PromMetric
-      customPromQuery: "avg(vllm:request_queue_size_total)"
+      customPromQuery: "avg(sglang:num_requests_waiting)"
       scalingThreshold: "20"
       promServerAddress: http://prometheus.monitoring:9090
 
@@ -879,7 +587,7 @@ spec:
         triggers:
           - type: prometheus
             metadata:
-              query: "avg(vllm:request_queue_size_total)"
+              query: "avg(sglang:num_requests_waiting)"
               threshold: "20"
               serverAddress: http://prometheus.monitoring:9090
 ```
@@ -900,41 +608,13 @@ Remaining legacy fields (`ScaleMetric`, `ScaleTarget`, annotation) stay through 
 
 ### Test Plan
 
-#### Prerequisite testing updates
+**Prerequisite refactor**: drop the synthetic Engine-wrapped `ComponentExtensionSpec` in `common/deployment_reconciler.go` so the autoscaler reconciler reads the actual component spec.
 
-- Refactor the per-component `ComponentExtensionSpec` indirection in `common/deployment_reconciler.go:38-46` so the autoscaler reconciler reads the actual component's spec, not a synthetic Engine-wrapped one. Tests that depended on the synthetic shape get updated.
+**Unit**: deepcopy for the new API types; `ResolveComponentAutoscaler` table tests covering every (runtime, isvc, legacy) combination; KEDA + HPA reconcilers verify verbatim pass-through; scaling_policy reconciler covers ratio math (floor / ceil / parity / sub-1) + anchor-missing no-op; webhook covers every rejection rule.
 
-#### Unit Tests
+**Integration** (`tests/integration/singlecluster/controller/inferenceservice/`): KEDA multi-trigger pass-through (prometheus + cron) survives a round-trip through the apiserver; HPA external-metric likewise; per-component dispatch (engine on KEDA, decoder on HPA, router on external) coexist; `external` class publishes `scaleTargetRef` and emits no scaler object; proportional policy with ratio 1.0 and 0.25; `kubectl scale isvc/foo` writes `spec.engine.minReplicas`; runtime-inherited and ISVC-overridden autoscalers each surface the right `specSource`.
 
-- `pkg/apis/ome/v1beta1/autoscaler_test.go` — deepcopy for `ComponentAutoscaler`, `KedaAutoscaler`, `HPAAutoscaler`, `ScalingPolicy`.
-- `pkg/controller/v1beta1/inferenceservice/reconcilers/keda/` — verbatim pass-through of triggers, advanced, polling/cooldown; ISVC with `class: keda` and no Triggers rejected at admission.
-- `pkg/controller/v1beta1/inferenceservice/reconcilers/hpa/` — verbatim pass-through of metrics + behavior; legacy fallback still produces the pre-OEP HPA.
-- `pkg/controller/v1beta1/inferenceservice/reconcilers/scaling_policy/` — proportional ratio math (floor, ceil, parity, sub-1 ratios), anchor-deployment-missing no-op, follower with autoscaler class=keda rejected pre-reconcile.
-- `pkg/webhook/admission/isvc/` — every rejection path in the validation list.
-- `/scale` subresource — GET returns `status.components.engine.replicas`; PUT writes `spec.engine.minReplicas`; selector reflects engine Deployment's selector.
-- `ResolveComponentAutoscaler` table tests — every (runtime present/absent, isvc present/absent, legacy present/absent) combination produces the expected `*ComponentAutoscaler` and `SpecSource`.
-
-#### Integration Tests
-
-Under `tests/integration/singlecluster/controller/inferenceservice/`:
-
-- `autoscaler_keda_triggers_test.go` — ISVC with `autoscaler.class=keda` and 3 triggers (prometheus + prometheus + cron) → ScaledObject contains all three verbatim; `MinReplicaCount/MaxReplicaCount` match spec.
-- `autoscaler_hpa_metrics_test.go` — ISVC with `autoscaler.class=hpa` and an external-metric MetricSpec → HPA carries the external metric verbatim; legacy CPU default doesn't override.
-- `autoscaler_per_component_test.go` — engine on KEDA, decoder on HPA, router on external → each component gets the right resource (or none), all coexist.
-- `autoscaler_external_target_test.go` — `class=external` ISVC → `status.components.engine.scaleTargetRef` populated with `{Kind: Deployment, Name: <isvc>-engine}`; OME does not create any HPA/ScaledObject for that component.
-- `scaling_policy_proportional_test.go` — PD ISVC with `proportional` policy, ratio 1.0 → updating engine replicas leads to matching decoder replicas via /scale.
-- `scaling_policy_proportional_ratio_test.go` — ratio 0.25 with various engine sizes → correct ceiling math.
-- `scale_subresource_test.go` — `kubectl scale isvc/foo --replicas=N` (via raw client) → `spec.engine.minReplicas` updated to N; status reflects new desired count.
-- `autoscaler_runtime_inheritance_test.go` — ServingRuntime carries `autoscaler` + `scalingPolicy`; ISVC binds without overriding → ScaledObject/HPA emitted with the runtime's config; `status.components.engine.autoscaler.specSource == "runtime"`.
-- `autoscaler_isvc_override_test.go` — ServingRuntime carries `autoscaler` defaults; ISVC sets its own `engine.autoscaler` block → ISVC's block fully replaces the runtime's (no array merging); `specSource == "isvc"`.
-
-Under `tests/integration/singlecluster/webhook/inferenceservice/`:
-
-- Each webhook rejection path: empty KEDA triggers, both `Autoscaler.Keda` and `KedaConfig` set, proportional follower with class=keda, missing anchor.
-
-Under `tests/integration/singlecluster/webhook/servingruntime/`:
-
-- Mirror of the ISVC `Autoscaler` rejection paths against ServingRuntime / ClusterServingRuntime admission — same helper, same rejections.
+**Webhook integration**: every rejection path on both ISVC and ServingRuntime admission, against the same shared validation helper.
 
 ### Graduation Criteria
 
@@ -963,7 +643,7 @@ Under `tests/integration/singlecluster/webhook/servingruntime/`:
 ## Implementation History
 
 - 2026-05-19: OEP drafted.
-- TBD: API types added; `KedaConfig` field, type, and hardcoded vLLM query removed.
+- TBD: API types added; `KedaConfig` field, type, and hardcoded SGLang query removed.
 - TBD: KEDA + HPA pass-through reconcilers.
 - TBD: ServingRuntime inheritance + `ResolveComponentAutoscaler` helper.
 - TBD: `/scale` subresource + status fields.
@@ -992,14 +672,6 @@ OME generates a default ScaledObject; user can take ownership by setting an anno
 ### `kubectl scale` writes the Deployment directly
 
 Skip the `/scale` subresource on InferenceService; tell users to scale the underlying Deployment. Works today. Rejected because (a) users expect the top-level CR to be the scale-of-record, (b) it leaks implementation detail (the `<isvc>-engine` Deployment naming convention is public API anyway, but it shouldn't be the *only* way to scale), (c) it precludes the proportional coordinator from being driven by an external HPA pointing at the ISVC.
-
-### Build a predictive controller into OME core
-
-OEP-0013 explicitly defers prediction. The alternative is to ship an OME-native predictor that watches metrics and writes `spec.scalingSchedule`. Rejected as scope creep — prediction is its own discipline with no consensus on the right signals or models. KEDA's cron triggers + an external prediction service writing to Prometheus is the right composition.
-
-### Drop `external` mode entirely; always have OME generate the scaler
-
-Forces every operator into OME's reconciler. Operators with their own platform standards lose the ability to apply them. Rejected — `external` is the right escape valve, the current limitation is that it lacks an integration contract; this OEP fixes that.
 
 ### Single ISVC-level autoscaler that applies to all components
 
