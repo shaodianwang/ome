@@ -147,6 +147,13 @@ var (
 	RuntimeRevisionCreatedByKey      = OMEAPIGroupName + "/created-by"
 	RuntimeRevisionCreatedByOMEValue = "ome-controller"
 
+	// Annotation the GC controller sets on a revision the first time
+	// it observes it as unreferenced + over the retention count.
+	// Holds an RFC3339 timestamp; the GC controller deletes the
+	// revision when (now - value) exceeds the configured grace period.
+	// Cleared if the revision becomes referenced again before then.
+	RuntimeRevisionGCEligibleSinceKey = OMEAPIGroupName + "/gc-eligible-since"
+
 	DefaultPrometheusPath                    = "/metrics"
 	QueueProxyAggregatePrometheusMetricsPort = 9088
 	DefaultPodPrometheusPort                 = "9091"

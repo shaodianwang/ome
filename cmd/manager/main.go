@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -43,6 +44,7 @@ import (
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	trafficfactory "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/factory"
+	v1beta1runtimerevisioncontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/runtimerevision"
 	v1beta1servingruntimecontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/servingruntime"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
@@ -90,28 +92,32 @@ func init() {
 
 // Options defines the program-configurable options that may be passed on the command line.
 type Options struct {
-	metricsAddr             string
-	secureMetrics           bool
-	enableHTTP2             bool
-	webhookPort             int
-	enableLeaderElection    bool
-	enableWebhook           bool
-	probeAddr               string
-	leaderElectionNamespace string
-	zapOpts                 zap.Options
+	metricsAddr                string
+	secureMetrics              bool
+	enableHTTP2                bool
+	webhookPort                int
+	enableLeaderElection       bool
+	enableWebhook              bool
+	probeAddr                  string
+	leaderElectionNamespace    string
+	runtimeRevisionRetention   int
+	runtimeRevisionGracePeriod time.Duration
+	zapOpts                    zap.Options
 }
 
 // DefaultOptions returns the default values for the program options.
 func DefaultOptions() Options {
 	return Options{
-		metricsAddr:             ":8080",
-		webhookPort:             9443,
-		enableLeaderElection:    false,
-		enableWebhook:           false,
-		enableHTTP2:             false,
-		secureMetrics:           false,
-		probeAddr:               ":8081",
-		leaderElectionNamespace: LeaderElectionNamespace,
+		metricsAddr:                ":8080",
+		webhookPort:                9443,
+		enableLeaderElection:       false,
+		enableWebhook:              false,
+		enableHTTP2:                false,
+		secureMetrics:              false,
+		probeAddr:                  ":8081",
+		leaderElectionNamespace:    LeaderElectionNamespace,
+		runtimeRevisionRetention:   10,
+		runtimeRevisionGracePeriod: 24 * time.Hour,
 		zapOpts: zap.Options{
 			TimeEncoder: zapcore.RFC3339TimeEncoder,
 			ZapOpts:     []zaplog.Option{zaplog.AddCaller()},
@@ -135,6 +141,10 @@ func GetOptions() Options {
 	flag.StringVar(&opts.leaderElectionNamespace, "leader-election-namespace", opts.leaderElectionNamespace, "The namespace in which the leader election configmap will be created.")
 	flag.BoolVar(&opts.enableWebhook, "webhook", opts.enableWebhook, "Enable the webhook server.")
 	flag.StringVar(&opts.probeAddr, "health-probe-addr", opts.probeAddr, "The address the probe endpoint binds to.")
+	flag.IntVar(&opts.runtimeRevisionRetention, "runtime-revision-retention", opts.runtimeRevisionRetention,
+		"Max OME-owned ControllerRevisions to keep per source runtime (older ones GC after the grace period if unreferenced).")
+	flag.DurationVar(&opts.runtimeRevisionGracePeriod, "runtime-revision-grace-period", opts.runtimeRevisionGracePeriod,
+		"How long an OME-owned ControllerRevision stays after first being observed unreferenced + over retention.")
 	opts.zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	return opts
@@ -324,6 +334,21 @@ func main() {
 		Recorder: servingRuntimeEventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create ServingRuntime inheritance controller")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Setting up runtime-revision GC controller",
+		"retention", options.runtimeRevisionRetention,
+		"gracePeriod", options.runtimeRevisionGracePeriod)
+	if err = (&v1beta1runtimerevisioncontroller.GCReconciler{
+		Client:              mgr.GetClient(),
+		Log:                 ctrl.Log.WithName("RuntimeRevisionGC"),
+		Scheme:              mgr.GetScheme(),
+		OMENamespace:        constants.OMENamespace,
+		RetentionPerRuntime: options.runtimeRevisionRetention,
+		GracePeriod:         options.runtimeRevisionGracePeriod,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create runtime-revision GC controller")
 		os.Exit(1)
 	}
 
