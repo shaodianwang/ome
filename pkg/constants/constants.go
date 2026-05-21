@@ -120,7 +120,33 @@ var (
 	// OEP-0012 Part C: engine-preset annotation. Value selects an
 	// OME-shipped preset (e.g. "sglang-pd") whose engine defaults a
 	// mutating webhook injects into the runtime spec at admission.
-	RuntimeEngineAnnotationKey               = OMEAPIGroupName + "/engine"
+	RuntimeEngineAnnotationKey = OMEAPIGroupName + "/engine"
+
+	// Bumping this annotation on an ISVC tells the controller to
+	// advance the pinned ControllerRevision to a fresh snapshot of
+	// the current runtime spec.
+	RuntimeSyncAnnotationKey = OMEAPIGroupName + "/runtime-sync"
+
+	// RuntimeDrifted is True when a pinned ISVC's live runtime hash
+	// differs from the pinned revision's hash. Reasons:
+	//   RevisionMismatch — live spec drifted from pin
+	//   RevisionMissing  — pinned revision GC'd or deleted
+	//   PinAdvanced      — transient, set during ack
+	RuntimeDriftedConditionType = "RuntimeDrifted"
+
+	// Labels on ControllerRevisions the OME controller creates for
+	// pinning. The writer uses them to find-or-create by content
+	// hash; the GC loop uses them to list per-source-runtime.
+	RuntimeRevisionOfLabelKey          = OMEAPIGroupName + "/runtime-of"
+	RuntimeRevisionOfKindLabelKey      = OMEAPIGroupName + "/runtime-of-kind"
+	RuntimeRevisionOfNamespaceLabelKey = OMEAPIGroupName + "/runtime-of-namespace"
+	RuntimeRevisionHashLabelKey        = OMEAPIGroupName + "/revision-hash"
+
+	// Gates the immutability webhook so StatefulSet/DaemonSet-owned
+	// ControllerRevisions (no annotation) pass through unchanged.
+	RuntimeRevisionCreatedByKey      = OMEAPIGroupName + "/created-by"
+	RuntimeRevisionCreatedByOMEValue = "ome-controller"
+
 	DefaultPrometheusPath                    = "/metrics"
 	QueueProxyAggregatePrometheusMetricsPort = 9088
 	DefaultPodPrometheusPort                 = "9091"

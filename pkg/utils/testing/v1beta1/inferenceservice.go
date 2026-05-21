@@ -105,6 +105,34 @@ func (w *InferenceServiceWrapper) Runtime(name string) *InferenceServiceWrapper 
 	return w
 }
 
+// AutoSync sets spec.Runtime.AutoSync. Requires Runtime() to have
+// been called first.
+func (w *InferenceServiceWrapper) AutoSync(v bool) *InferenceServiceWrapper {
+	w.Spec.Runtime.AutoSync = &v
+	return w
+}
+
+// RuntimeRevision sets spec.Runtime.Revision (explicit pin).
+// Requires Runtime() to have been called first.
+func (w *InferenceServiceWrapper) RuntimeRevision(name string) *InferenceServiceWrapper {
+	w.Spec.Runtime.Revision = &name
+	return w
+}
+
+// NamespacedRuntime sets spec.Runtime.{Name,Kind} where Kind is
+// ServingRuntime. Used by pinning tests to exercise the
+// r-<ns>-<runtime>-<hash> naming branch.
+func (w *InferenceServiceWrapper) NamespacedRuntime(name string) *InferenceServiceWrapper {
+	kind := "ServingRuntime"
+	apiGroup := "ome.io"
+	w.Spec.Runtime = &v1beta1.ServingRuntimeRef{
+		Name:     name,
+		Kind:     &kind,
+		APIGroup: &apiGroup,
+	}
+	return w
+}
+
 // Engine sets spec.Engine.
 func (w *InferenceServiceWrapper) Engine(spec *v1beta1.EngineSpec) *InferenceServiceWrapper {
 	w.Spec.Engine = spec

@@ -51,6 +51,7 @@ import (
 	"github.com/ome-projects/ome/pkg/webhook/admission/isvc"
 	"github.com/ome-projects/ome/pkg/webhook/admission/pod"
 	"github.com/ome-projects/ome/pkg/webhook/admission/runtimepreset"
+	runtimerevisionwebhook "github.com/ome-projects/ome/pkg/webhook/admission/runtimerevision"
 	"github.com/ome-projects/ome/pkg/webhook/admission/servingruntime"
 )
 
@@ -351,6 +352,11 @@ func main() {
 		})
 		hookServer.Register("/mutate-ome-io-v1beta1-clusterservingruntime-preset", &webhook.Admission{
 			Handler: &runtimepreset.ClusterServingRuntimeMutator{Decoder: admission.NewDecoder(mgr.GetScheme())},
+		})
+
+		setupLog.Info("Registering ControllerRevision immutability validator webhook to the webhook server")
+		hookServer.Register("/validate-apps-v1-controllerrevision", &webhook.Admission{
+			Handler: &runtimerevisionwebhook.ImmutabilityValidator{Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
 		setupLog.Info("Registering BaseModel validator webhook to the webhook server")

@@ -332,3 +332,37 @@ webhooks:
           - UPDATE
         resources:
           - clusterservingruntimes
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  creationTimestamp: null
+  name: controllerrevision-immutability.ome.io
+webhooks:
+  # Scoped to the OME namespace so StatefulSet/DaemonSet-owned
+  # ControllerRevisions in other namespaces are not gated by this
+  # webhook. Inside the OME ns, the handler additionally checks the
+  # ome.io/created-by annotation before rejecting Update.
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: $(webhookServiceName)
+        namespace: $(omeNamespace)
+        path: /validate-apps-v1-controllerrevision
+    failurePolicy: Fail
+    name: controllerrevision-immutability.ome-webhook-server.validator
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: $(omeNamespace)
+    rules:
+      - apiGroups:
+          - "apps"
+        apiVersions:
+          - v1
+        operations:
+          - UPDATE
+        resources:
+          - controllerrevisions

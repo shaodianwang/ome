@@ -250,6 +250,26 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	case isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != "":
 		rtName = isvc.Spec.Runtime.Name
 		userSpecifiedRuntime = true
+
+		// When the user opts into pinning (autoSync=false), fetch the
+		// pinned ControllerRevision rather than the live runtime. The
+		// pin helper handles first-reconcile create, drift detection,
+		// and ome.io/runtime-sync ack — and persists status itself when
+		// children must be skipped.
+		if isvc.Spec.Runtime.AutoSync != nil && !*isvc.Spec.Runtime.AutoSync {
+			pin, perr := r.resolvePinnedRuntime(ctx, isvc)
+			if perr != nil {
+				r.Log.Error(perr, "Pin resolution failed", "runtime", rtName)
+				r.Recorder.Eventf(isvc, v1.EventTypeWarning, "RuntimePinError", perr.Error())
+				return reconcile.Result{}, perr
+			}
+			if pin.skipChildren {
+				return reconcile.Result{}, nil
+			}
+			rt = pin.spec
+			break
+		}
+
 		if baseModel != nil {
 			if err := r.RuntimeSelector.ValidateRuntime(ctx, rtName, baseModel, isvc); err != nil {
 				r.Log.Error(err, "Runtime validation failed", "runtime", rtName, "model", isvc.Spec.Model.Name)
@@ -657,18 +677,54 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		}
 	}
 
-	// Add watches for ServingRuntime and ClusterServingRuntime to populate cache
+	// Add watches for ServingRuntime and ClusterServingRuntime. Beyond
+	// populating the cache, runtime events fan out to any ISVC that has
+	// opted into pinning (spec.runtime.autoSync=false) — without this,
+	// drift detection would only fire on the next unrelated ISVC
+	// reconcile, leaving operators unaware their edit was rejected.
 	ctrlBuilder = ctrlBuilder.
 		Watches(&v1beta1.ServingRuntime{},
-			handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
-				return nil // Just populate cache
-			})).
+			handler.EnqueueRequestsFromMapFunc(r.pinnedISVCsReferencingRuntime)).
 		Watches(&v1beta1.ClusterServingRuntime{},
-			handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
-				return nil // Just populate cache
-			}))
+			handler.EnqueueRequestsFromMapFunc(r.pinnedISVCsReferencingRuntime))
 
 	return ctrlBuilder.Complete(r)
+}
+
+// pinnedISVCsReferencingRuntime returns reconcile requests for ISVCs
+// that pin to the runtime named by obj (spec.runtime.name match +
+// autoSync=false). Empty when nothing pins to it — autoSync=true
+// consumers don't need to be re-reconciled on runtime change because
+// they always read the live spec.
+func (r *InferenceServiceReconciler) pinnedISVCsReferencingRuntime(ctx context.Context, obj client.Object) []reconcile.Request {
+	runtimeName := obj.GetName()
+	runtimeNamespace := obj.GetNamespace() // empty for cluster-scoped
+
+	var isvcs v1beta1.InferenceServiceList
+	if err := r.List(ctx, &isvcs); err != nil {
+		r.Log.Error(err, "fan-out runtime event: list InferenceServices failed")
+		return nil
+	}
+
+	var reqs []reconcile.Request
+	for i := range isvcs.Items {
+		isvc := &isvcs.Items[i]
+		if isvc.Spec.Runtime == nil || isvc.Spec.Runtime.Name != runtimeName {
+			continue
+		}
+		// autoSync=true (default) ignores runtime mid-stream changes.
+		if isvc.Spec.Runtime.AutoSync == nil || *isvc.Spec.Runtime.AutoSync {
+			continue
+		}
+		// Namespaced SR only matches same-namespace ISVCs.
+		if runtimeNamespace != "" && isvc.Namespace != runtimeNamespace {
+			continue
+		}
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: isvc.Namespace, Name: isvc.Name,
+		}})
+	}
+	return reqs
 }
 
 func (r *InferenceServiceReconciler) setExternalServiceURL(ctx context.Context, isvc *v1beta1.InferenceService, ingressConfig *controllerconfig.IngressConfig) error {

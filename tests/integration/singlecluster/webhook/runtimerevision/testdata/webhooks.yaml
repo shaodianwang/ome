@@ -1,0 +1,26 @@
+# Test-only fixture: ValidatingWebhookConfiguration for the
+# ControllerRevision immutability webhook. envtest patches the caBundle
+# and clientConfig.service → clientConfig.url at install.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: controllerrevision-immutability.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /validate-apps-v1-controllerrevision
+    failurePolicy: Fail
+    name: controllerrevision-immutability.ome-webhook-server.validator
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    # Namespace selector deliberately omitted here so the test suite
+    # can exercise the handler's annotation-based filter against
+    # arbitrary namespaces — the real chart scopes by OME namespace.
+    rules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["controllerrevisions"]
