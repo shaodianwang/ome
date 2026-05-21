@@ -49,6 +49,13 @@ type InstancePlan struct {
 	// migration in a follow-up PR; single-pod plans always start dense.
 	Index int32
 
+	// Incarnation is the monotonic lifecycle token for this (Component,
+	// Index) pair. Initial create stamps 1; full recreate / restart-on-loss
+	// bumps it; in-place update does not. It distinguishes old pod
+	// materializations from current ones when stable names get reused
+	// after a recreate.
+	Incarnation int64
+
 	// Runners enumerates the Runners that constitute this Instance.
 	// Single-pod Instances have one Runner named "default" of size 1.
 	// Multi-pod Instances (leader + worker) are introduced in a follow-up.

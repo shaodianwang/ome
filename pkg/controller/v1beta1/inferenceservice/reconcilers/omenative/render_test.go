@@ -15,7 +15,7 @@ import (
 
 func singlePodPlan() (ComponentPlan, InstancePlan, RunnerPlan) {
 	runner := RunnerPlan{Name: "default", Size: 1}
-	inst := InstancePlan{Index: 0, Runners: []RunnerPlan{runner}}
+	inst := InstancePlan{Index: 0, Incarnation: 1, Runners: []RunnerPlan{runner}}
 	plan := ComponentPlan{
 		Component: v1beta1.EngineComponent,
 		Replicas:  2,
@@ -82,11 +82,24 @@ func TestRender_Labels(t *testing.T) {
 		constants.InferenceServicePodLabelKey: "llama-70b",
 		constants.OMEComponentLabel:           "engine",
 		labelInstanceIdx:                      "0",
+		labelInstanceIncarnation:              "1",
 		labelRunner:                           "default",
 		labelManagedBy:                        managedByOMENative,
 	}
 	if diff := cmp.Diff(want, pod.Labels); diff != "" {
 		t.Fatalf("labels mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestRender_IncarnationStampedOnLabel(t *testing.T) {
+	plan, inst, runner := singlePodPlan()
+	inst.Incarnation = 7
+	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := pod.Labels[labelInstanceIncarnation]; got != "7" {
+		t.Errorf("%s: got %q want 7", labelInstanceIncarnation, got)
 	}
 }
 

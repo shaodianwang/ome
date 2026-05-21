@@ -127,7 +127,7 @@ func TestBuildHeadlessService_SelectorMatchesRenderedPodLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	podLabelSet := podLabels(isvc.Name, v1beta1.EngineComponent, 0, "default")
+	podLabelSet := podLabels(isvc.Name, v1beta1.EngineComponent, 0, "default", 1)
 	for k, v := range svc.Spec.Selector {
 		if got, ok := podLabelSet[k]; !ok || got != v {
 			t.Errorf("selector %s=%q not present in pod labels (got %q, ok=%v)", k, v, got, ok)

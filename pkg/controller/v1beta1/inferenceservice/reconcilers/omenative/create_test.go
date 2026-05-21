@@ -118,6 +118,10 @@ func TestCreate_EmptyClusterCreatesPodsAndRequeues(t *testing.T) {
 			t.Errorf("unexpected pod: %s", pod.Name)
 		}
 		delete(want, pod.Name)
+		// Initial create stamps Incarnation=1 on every pod.
+		if got := pod.Labels[labelInstanceIncarnation]; got != "1" {
+			t.Errorf("pod %s %s label: got %q want 1", pod.Name, labelInstanceIncarnation, got)
+		}
 	}
 	if len(want) > 0 {
 		t.Errorf("missing pods: %v", want)
@@ -138,6 +142,9 @@ func TestCreate_EmptyClusterCreatesPodsAndRequeues(t *testing.T) {
 	for _, s := range cs.OMENative.InstanceStatuses {
 		if s.Phase != v1beta1.OMENativeInstanceCreating {
 			t.Errorf("instance %d Phase: got %q want Creating", s.Index, s.Phase)
+		}
+		if s.Incarnation != 1 {
+			t.Errorf("instance %d Incarnation: got %d want 1", s.Index, s.Incarnation)
 		}
 		if s.Operation == nil || s.Operation.Type != v1beta1.InstanceOperationCreate {
 			t.Errorf("instance %d Operation: %+v", s.Index, s.Operation)
@@ -273,7 +280,7 @@ func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, se
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 0),
 			Namespace: isvc.Namespace,
-			Labels:    podLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default"),
+			Labels:    podLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1),
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "main", Image: "test:v1"}},

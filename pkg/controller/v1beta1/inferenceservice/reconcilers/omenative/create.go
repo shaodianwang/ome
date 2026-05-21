@@ -83,7 +83,7 @@ func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPla
 	// oscillate the status back to Creating after we already observed
 	// Ready pods.
 	if len(missing) > 0 {
-		if err := patchInstanceStatusCreating(ctx, p, plan.Component, inst.Index, plan.InstanceReadyTimeout); err != nil {
+		if err := patchInstanceStatusCreating(ctx, p, plan.Component, inst.Index, inst.Incarnation, plan.InstanceReadyTimeout); err != nil {
 			return false, fmt.Errorf("patch status Creating (instance=%d): %w", inst.Index, err)
 		}
 
@@ -247,14 +247,21 @@ func allPodsRuntimeReady(pods []*corev1.Pod) bool {
 // has an InstanceStatus entry for the given index in Phase=Creating with an
 // Operation recording the in-flight Create. timeout is the wall-clock budget
 // the operation gets before downstream consumers treat it as stuck; the
-// computed Deadline is StartedAt+timeout.
-func patchInstanceStatusCreating(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32, timeout time.Duration) error {
+// computed Deadline is StartedAt+timeout. incarnation is stamped onto the
+// InstanceStatus on first-touch (when no Incarnation has been recorded yet);
+// existing nonzero incarnations are preserved so an in-flight reconcile
+// after a controller restart doesn't downgrade the lifecycle token.
+func patchInstanceStatusCreating(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32, incarnation int64, timeout time.Duration) error {
 	now := metav1.NewTime(time.Now())
 	return mutateInstanceStatus(ctx, p, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
 		// Skip the write if status is already in the desired state.
 		if s.Phase == v1beta1.OMENativeInstanceCreating &&
-			s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationCreate {
+			s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationCreate &&
+			s.Incarnation > 0 {
 			return false
+		}
+		if s.Incarnation == 0 {
+			s.Incarnation = incarnation
 		}
 		s.Phase = v1beta1.OMENativeInstanceCreating
 		s.Operation = &v1beta1.InstanceOperation{

@@ -16,10 +16,11 @@ import (
 // The omenative-specific keys are private to this package until a second
 // consumer needs them.
 const (
-	labelManagedBy     = "ome.io/managed-by"
-	labelInstanceIdx   = "ome.io/instance-index"
-	labelRunner        = "ome.io/runner"
-	managedByOMENative = "OMENative"
+	labelManagedBy           = "ome.io/managed-by"
+	labelInstanceIdx         = "ome.io/instance-index"
+	labelInstanceIncarnation = "ome.io/instance-incarnation"
+	labelRunner              = "ome.io/runner"
+	managedByOMENative       = "OMENative"
 )
 
 // servingConditionType is the controller-owned readiness gate that
@@ -66,7 +67,7 @@ func Render(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: isvc.Namespace,
-			Labels:    podLabels(isvc.Name, plan.Component, inst.Index, runner.Name),
+			Labels:    podLabels(isvc.Name, plan.Component, inst.Index, runner.Name, inst.Incarnation),
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(isvc, isvcGroupVersionKind),
 			},
@@ -101,11 +102,12 @@ func instanceSubdomain(isvc string, component v1beta1.ComponentType, instanceIdx
 	return fmt.Sprintf("%s-%s-%d", isvc, component, instanceIdx)
 }
 
-func podLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string) map[string]string {
+func podLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, incarnation int64) map[string]string {
 	return map[string]string{
 		constants.InferenceServicePodLabelKey: isvc,
 		constants.OMEComponentLabel:           string(component),
 		labelInstanceIdx:                      fmt.Sprintf("%d", instanceIdx),
+		labelInstanceIncarnation:              fmt.Sprintf("%d", incarnation),
 		labelRunner:                           runner,
 		labelManagedBy:                        managedByOMENative,
 	}

@@ -69,8 +69,8 @@ func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
 		Component: v1beta1.EngineComponent,
 		Replicas:  2,
 		Instances: []InstancePlan{
-			{Index: 0, Runners: []RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Runners: []RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 0, Incarnation: 1, Runners: []RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []RunnerPlan{{Name: "default", Size: 1}}},
 		},
 		RestartPolicy: v1beta1.OMENativeRestartPolicyNone,
 		UpdateStrategy: v1beta1.OMENativeUpdateStrategy{
@@ -163,6 +163,87 @@ func TestBuildPlan_ReplicaCount(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildPlan_IncarnationDefaultsToOneOnFirstReconcile(t *testing.T) {
+	// No Status.Components yet — every Instance gets Incarnation=1.
+	plan, err := BuildPlan(ReconcileParams{
+		Component: v1beta1.EngineComponent,
+		ISVC:      &v1beta1.InferenceService{},
+		ComponentExt: &v1beta1.ComponentExtensionSpec{
+			MinReplicas: intPtr(3),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, inst := range plan.Instances {
+		if inst.Incarnation != 1 {
+			t.Errorf("Instances[%d].Incarnation: got %d want 1", inst.Index, inst.Incarnation)
+		}
+	}
+}
+
+func TestBuildPlan_IncarnationPreservedFromStatus(t *testing.T) {
+	// ISVC carries InstanceStatuses with explicit Incarnations — BuildPlan
+	// reads them back instead of resetting to 1.
+	isvc := &v1beta1.InferenceService{
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{
+						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+							{Index: 0, Incarnation: 4},
+							{Index: 1, Incarnation: 2},
+						},
+					},
+				},
+			},
+		},
+	}
+	plan, err := BuildPlan(ReconcileParams{
+		Component:    v1beta1.EngineComponent,
+		ISVC:         isvc,
+		ComponentExt: &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(2)},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := map[int32]int64{0: 4, 1: 2}
+	for _, inst := range plan.Instances {
+		if got := inst.Incarnation; got != want[inst.Index] {
+			t.Errorf("Instances[%d].Incarnation: got %d want %d", inst.Index, got, want[inst.Index])
+		}
+	}
+}
+
+func TestBuildPlan_IncarnationScopedToComponent(t *testing.T) {
+	// Status entry for Decoder must not influence Engine plan.
+	isvc := &v1beta1.InferenceService{
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.DecoderComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{
+						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+							{Index: 0, Incarnation: 9},
+						},
+					},
+				},
+			},
+		},
+	}
+	plan, err := BuildPlan(ReconcileParams{
+		Component:    v1beta1.EngineComponent,
+		ISVC:         isvc,
+		ComponentExt: &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(1)},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.Instances[0].Incarnation != 1 {
+		t.Errorf("Engine[0].Incarnation: got %d want 1 (decoder status must not leak)",
+			plan.Instances[0].Incarnation)
 	}
 }
 

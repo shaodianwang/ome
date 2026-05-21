@@ -45,8 +45,10 @@ func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
 
 	instances := make([]InstancePlan, replicas)
 	for i := range instances {
+		idx := int32(i)
 		instances[i] = InstancePlan{
-			Index: int32(i),
+			Index:       idx,
+			Incarnation: incarnationForIndex(p.ISVC, p.Component, idx),
 			Runners: []RunnerPlan{
 				{Name: "default", Size: 1},
 			},
@@ -124,4 +126,25 @@ func migrationModeOrDefault(p *v1beta1.OMENativeMigrationPolicy) v1beta1.OMENati
 		return v1beta1.OMENativeMigrationPolicyModeAuto
 	}
 	return p.Mode
+}
+
+// incarnationForIndex returns the current Incarnation for the (component, idx)
+// pair. If the ISVC has no InstanceStatus for that pair yet — first reconcile,
+// or after a delete — incarnation starts at 1. Recreate-update and
+// restart-on-loss increment Incarnation in later PRs; this function only
+// reads, never writes.
+func incarnationForIndex(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) int64 {
+	if isvc == nil {
+		return 1
+	}
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.OMENative == nil {
+		return 1
+	}
+	for _, s := range cs.OMENative.InstanceStatuses {
+		if s.Index == idx && s.Incarnation > 0 {
+			return s.Incarnation
+		}
+	}
+	return 1
 }
