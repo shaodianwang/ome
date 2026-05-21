@@ -63,7 +63,7 @@ func TestPropagateRawStatus(t *testing.T) {
 			},
 			url: &apis.URL{Scheme: "http", Host: "test-service.default.svc.cluster.local"},
 			expectedStatus: v1beta1.ComponentStatusSpec{
-				URL:                   &apis.URL{Scheme: "http", Host: "test-service.default.svc.cluster.local"},
+				URL: &apis.URL{Scheme: "http", Host: "test-service.default.svc.cluster.local"},
 			},
 		},
 		{
@@ -100,7 +100,7 @@ func TestPropagateRawStatus(t *testing.T) {
 			},
 			url: &apis.URL{Scheme: "http", Host: "test-engine-service.default.svc.cluster.local"},
 			expectedStatus: v1beta1.ComponentStatusSpec{
-				URL:                   &apis.URL{Scheme: "http", Host: "test-engine-service.default.svc.cluster.local"},
+				URL: &apis.URL{Scheme: "http", Host: "test-engine-service.default.svc.cluster.local"},
 			},
 		},
 		{
@@ -137,7 +137,7 @@ func TestPropagateRawStatus(t *testing.T) {
 			},
 			url: nil,
 			expectedStatus: v1beta1.ComponentStatusSpec{
-				URL:                   nil,
+				URL: nil,
 			},
 		},
 		{
@@ -174,7 +174,7 @@ func TestPropagateRawStatus(t *testing.T) {
 			},
 			url: nil,
 			expectedStatus: v1beta1.ComponentStatusSpec{
-				URL:                   nil,
+				URL: nil,
 			},
 		},
 		{
@@ -207,7 +207,7 @@ func TestPropagateRawStatus(t *testing.T) {
 			},
 			url: nil,
 			expectedStatus: v1beta1.ComponentStatusSpec{
-				URL:                   nil,
+				URL: nil,
 			},
 		},
 	}
@@ -290,7 +290,7 @@ func TestPropagateMultiNodeStatus(t *testing.T) {
 			},
 			url: &apis.URL{Scheme: "http", Host: "test-lws-service.default.svc.cluster.local"},
 			expectedStatus: v1beta1.ComponentStatusSpec{
-				URL:                   &apis.URL{Scheme: "http", Host: "test-lws-service.default.svc.cluster.local"},
+				URL: &apis.URL{Scheme: "http", Host: "test-lws-service.default.svc.cluster.local"},
 			},
 		},
 		{
@@ -326,7 +326,7 @@ func TestPropagateMultiNodeStatus(t *testing.T) {
 			},
 			url: &apis.URL{Scheme: "http", Host: "test-engine-lws-service.default.svc.cluster.local"},
 			expectedStatus: v1beta1.ComponentStatusSpec{
-				URL:                   &apis.URL{Scheme: "http", Host: "test-engine-lws-service.default.svc.cluster.local"},
+				URL: &apis.URL{Scheme: "http", Host: "test-engine-lws-service.default.svc.cluster.local"},
 			},
 		},
 		{
@@ -362,7 +362,7 @@ func TestPropagateMultiNodeStatus(t *testing.T) {
 			},
 			url: nil,
 			expectedStatus: v1beta1.ComponentStatusSpec{
-				URL:                   nil,
+				URL: nil,
 			},
 		},
 		{
@@ -398,7 +398,7 @@ func TestPropagateMultiNodeStatus(t *testing.T) {
 			},
 			url: nil,
 			expectedStatus: v1beta1.ComponentStatusSpec{
-				URL:                   nil,
+				URL: nil,
 			},
 		},
 	}
@@ -449,10 +449,9 @@ func TestPropagateModelStatus(t *testing.T) {
 		expectedState v1beta1.ModelState
 	}{
 		{
-			name:   "no pods available",
-			status: &v1beta1.InferenceServiceStatus{ModelStatus: v1beta1.ModelStatus{}},
-			statusSpec: v1beta1.ComponentStatusSpec{
-			},
+			name:          "no pods available",
+			status:        &v1beta1.InferenceServiceStatus{ModelStatus: v1beta1.ModelStatus{}},
+			statusSpec:    v1beta1.ComponentStatusSpec{},
 			podList:       &corev1.PodList{Items: []corev1.Pod{}},
 			rawDeployment: false,
 			expectedState: v1beta1.Pending,
@@ -467,8 +466,7 @@ func TestPropagateModelStatus(t *testing.T) {
 				},
 				ModelStatus: v1beta1.ModelStatus{},
 			},
-			statusSpec: v1beta1.ComponentStatusSpec{
-			},
+			statusSpec: v1beta1.ComponentStatusSpec{},
 			podList: &corev1.PodList{
 				Items: []corev1.Pod{
 					{
@@ -501,8 +499,7 @@ func TestPropagateModelStatus(t *testing.T) {
 				},
 				ModelStatus: v1beta1.ModelStatus{},
 			},
-			statusSpec: v1beta1.ComponentStatusSpec{
-			},
+			statusSpec: v1beta1.ComponentStatusSpec{},
 			podList: &corev1.PodList{
 				Items: []corev1.Pod{
 					{

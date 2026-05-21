@@ -66,14 +66,16 @@ type ReconcileParams struct {
 // `case constants.OMENative` branch of each Component's
 // reconcileDeployment switch.
 //
-// Today's loop:
+// Loop:
 //  1. Build the desired ComponentPlan from ReconcileParams.
-//  2. Drive the Create / Scale Up operation toward each desired Instance.
-//     The operation is multi-pass: pods are created on the first
-//     invocation, ome.io/serving is flipped once all pods are runtime-
-//     ready, and Phase=Ready is recorded on the InstanceStatus.
+//  2. Scale down: drive Delete for any InstanceStatus index that the
+//     plan no longer asks for. Scale-down completes before scale-up
+//     to avoid running excess pods alongside in-flight drains.
+//  3. Scale up: drive Create toward every desired Instance. The
+//     operation is multi-pass — pods are created, ome.io/serving is
+//     flipped once runtime-ready, and Phase=Ready is recorded.
 //
-// Update / Restart / Delete / Migrate land in follow-up PRs.
+// Update / Restart / Migrate land in follow-up PRs.
 func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, error) {
 	if p.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: nil client (component=%s)", p.Component)
@@ -82,5 +84,26 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, er
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: build plan (component=%s): %w", p.Component, err)
 	}
+
+	// Scale-down first. An ISVC that drops MinReplicas leaves
+	// InstanceStatus entries above the new replica count; Delete drives
+	// each to gone.
+	extras := extraInstanceIndices(p.ISVC, plan.Component, plan.Replicas)
+	allDeleted := true
+	for _, idx := range extras {
+		done, derr := Delete(ctx, p, plan, idx)
+		if derr != nil {
+			return ctrl.Result{}, fmt.Errorf("OMENative reconciler: delete instance %d: %w", idx, derr)
+		}
+		if !done {
+			allDeleted = false
+		}
+	}
+	if !allDeleted {
+		// Hold off on Create until scale-down completes — running both
+		// at once would create churn against in-flight drains.
+		return ctrl.Result{RequeueAfter: deleteRequeueInterval}, nil
+	}
+
 	return Create(ctx, p, plan)
 }

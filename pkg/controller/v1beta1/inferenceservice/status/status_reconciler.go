@@ -161,4 +161,3 @@ func (sr *StatusReconciler) SetModelFailureInfo(status *v1beta1.InferenceService
 	status.ModelStatus.LastFailureInfo = info
 	return true
 }
-

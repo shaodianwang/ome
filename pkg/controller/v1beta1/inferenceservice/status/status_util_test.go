@@ -31,13 +31,11 @@ func TestInitializeComponentStatus(t *testing.T) {
 			name: "initialize with existing components",
 			status: &v1beta1.InferenceServiceStatus{
 				Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-					v1beta1.EngineComponent: {
-					},
+					v1beta1.EngineComponent: {},
 				},
 			},
 			component: v1beta1.EngineComponent,
-			expected: v1beta1.ComponentStatusSpec{
-			},
+			expected:  v1beta1.ComponentStatusSpec{},
 		},
 		{
 			name:      "initialize engine component",
@@ -56,13 +54,13 @@ func TestInitializeComponentStatus(t *testing.T) {
 			status: &v1beta1.InferenceServiceStatus{
 				Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 					v1beta1.EngineComponent: {
-						URL:                   &apis.URL{Scheme: "http", Host: "engine.example.com"},
+						URL: &apis.URL{Scheme: "http", Host: "engine.example.com"},
 					},
 				},
 			},
 			component: v1beta1.EngineComponent,
 			expected: v1beta1.ComponentStatusSpec{
-				URL:                   &apis.URL{Scheme: "http", Host: "engine.example.com"},
+				URL: &apis.URL{Scheme: "http", Host: "engine.example.com"},
 			},
 		},
 	}
