@@ -497,6 +497,45 @@ var _ = ginkgo.Describe("InferenceService pinning (OEP-0014 Phase 1)", ginkgo.Or
 				return hasRuntimeDriftedCondition(getISVC(ns.Name, isvc.Name), corev1.ConditionTrue, "RevisionMissing")
 			}, util.MediumTimeout, util.PollInterval).Should(BeTrue())
 		})
+
+		ginkgo.It("surfaces RuntimeDrifted=True / Reason=RuntimeMismatch when the revision's runtime-of label points at a different runtime", func() {
+			// Pin against runtime-A normally to create a revision, then
+			// relabel the revision to point at runtime-B out of band, then
+			// create an ISVC that explicitly pins to that (now-wrong) name.
+			// Controller cross-check should surface RuntimeMismatch instead
+			// of silently using runtime-B's spec under a runtime-A ISVC.
+			csrName, cbmName := mkRuntimePair("mismatch", "ghcr.io/test/runtime:original")
+			seed := v1beta1testing.MakeInferenceService("pin-seed", ns.Name).
+				Model(cbmName).Runtime(csrName).AutoSync(false).
+				DeploymentMode(constants.RawDeployment).
+				Engine(&v1beta1.EngineSpec{}).Obj()
+			Expect(k8sClient.Create(suiteCtx, seed)).To(Succeed())
+
+			var revName string
+			Eventually(func(g Gomega) {
+				got := getISVC(ns.Name, seed.Name)
+				g.Expect(got.Status.PinnedRevisionName).NotTo(BeEmpty())
+				revName = got.Status.PinnedRevisionName
+			}, util.MediumTimeout, util.PollInterval).Should(Succeed())
+
+			ginkgo.By("relabeling the revision to claim a different runtime")
+			rev := &appsv1.ControllerRevision{}
+			Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Namespace: constants.OMENamespace, Name: revName}, rev)).To(Succeed())
+			rev.Labels[constants.RuntimeRevisionOfLabelKey] = "pretender-runtime"
+			Expect(k8sClient.Update(suiteCtx, rev)).To(Succeed())
+
+			ginkgo.By("ISVC explicitly pinning to that (now-mislabeled) revision under the original runtime name")
+			isvc := v1beta1testing.MakeInferenceService("pin-mismatch", ns.Name).
+				Model(cbmName).
+				Runtime(csrName).AutoSync(false).RuntimeRevision(revName).
+				DeploymentMode(constants.RawDeployment).
+				Engine(&v1beta1.EngineSpec{}).Obj()
+			Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+
+			Eventually(func() bool {
+				return hasRuntimeDriftedCondition(getISVC(ns.Name, isvc.Name), corev1.ConditionTrue, "RuntimeMismatch")
+			}, util.MediumTimeout, util.PollInterval).Should(BeTrue())
+		})
 	})
 
 	// =========================================================================

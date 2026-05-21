@@ -60,12 +60,24 @@ func (r *InferenceServiceReconciler) resolvePinnedRuntime(
 	// Explicit revision pin overrides everything else.
 	if isvc.Spec.Runtime.Revision != nil && *isvc.Spec.Runtime.Revision != "" {
 		pinName := *isvc.Spec.Runtime.Revision
-		pinned, err := runtimerevision.Fetch(ctx, r.Client, omeNS, pinName)
+		rev, err := runtimerevision.FetchRevision(ctx, r.Client, omeNS, pinName)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return r.driftAndSkip(ctx, isvc, "RevisionMissing",
 					fmt.Sprintf("explicit pin %s not found in namespace %s", pinName, omeNS))
 			}
+			return pinResult{}, err
+		}
+		// Defense in depth: the webhook should have caught a wrong-runtime
+		// pin at admission, but if a revision was renamed or relabeled,
+		// surface it here instead of silently using another runtime's spec.
+		if got := rev.Labels[constants.RuntimeRevisionOfLabelKey]; got != runtimeName {
+			return r.driftAndSkip(ctx, isvc, "RuntimeMismatch",
+				fmt.Sprintf("revision %s belongs to runtime %q but ISVC references %q",
+					pinName, got, runtimeName))
+		}
+		pinned, err := runtimerevision.DecodeSpec(rev)
+		if err != nil {
 			return pinResult{}, err
 		}
 		isvc.Status.PinnedRevisionName = pinName

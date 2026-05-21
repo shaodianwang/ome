@@ -600,4 +600,62 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 			ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 		}
 	})
+
+	// OEP-0014 Phase 2: explicit-pin admission validation. Three rejections
+	// happen at the webhook so misconfigured pins never reach the controller:
+	// AutoSync conflict, wrong runtime in the name, wrong scope prefix.
+	ginkgo.It("rejects spec.runtime.revision when autoSync is true (silently-ignored pin)", func() {
+		isvc := v1beta1testing.MakeInferenceService("pin-conflict", "isvc-webhook").
+			Runtime("some-runtime").AutoSync(true).RuntimeRevision("cr-some-runtime-abc12345").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+			}).Obj()
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("AutoSync=true would silently ignore the pin"))
+	})
+
+	ginkgo.It("rejects spec.runtime.revision without explicit autoSync (default true is still wrong)", func() {
+		isvc := v1beta1testing.MakeInferenceService("pin-default-sync", "isvc-webhook").
+			Runtime("some-runtime").RuntimeRevision("cr-some-runtime-abc12345").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+			}).Obj()
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("AutoSync=true would silently ignore the pin"))
+	})
+
+	ginkgo.It("rejects spec.runtime.revision naming a DIFFERENT runtime", func() {
+		isvc := v1beta1testing.MakeInferenceService("pin-wrong-runtime", "isvc-webhook").
+			Runtime("runtime-a").AutoSync(false).RuntimeRevision("cr-runtime-b-abc12345").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+			}).Obj()
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("does not match the expected naming convention"))
+	})
+
+	ginkgo.It("rejects spec.runtime.revision with wrong scope prefix (cluster ref but r- name)", func() {
+		isvc := v1beta1testing.MakeInferenceService("pin-wrong-scope", "isvc-webhook").
+			Runtime("some-runtime").AutoSync(false).
+			RuntimeRevision("r-isvc-webhook-some-runtime-abc12345"). // namespaced shape; ref is cluster
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+			}).Obj()
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("does not match the expected naming convention"))
+	})
+
+	ginkgo.It("accepts a correctly-formed explicit pin (autoSync=false + matching name)", func() {
+		isvc := v1beta1testing.MakeInferenceService("pin-ok", "isvc-webhook").
+			Runtime("some-runtime").AutoSync(false).RuntimeRevision("cr-some-runtime-abc12345").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+			}).Obj()
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+	})
 })

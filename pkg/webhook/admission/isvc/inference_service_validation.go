@@ -13,6 +13,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/runtimerevision"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils/storage"
 	"github.com/ome-projects/ome/pkg/validation"
@@ -160,6 +161,10 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	runtimeSet := isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != ""
 	if !modelSet && !runtimeSet {
 		return allWarnings, fmt.Errorf("at least one of spec.model or spec.runtime must be set")
+	}
+
+	if err := validateRuntimePin(isvc); err != nil {
+		return allWarnings, err
 	}
 
 	// Validate that referenced model exists (for new Engine architecture using isvc.Spec.Model)
@@ -348,6 +353,53 @@ func (v *InferenceServiceValidator) resolveModelAndRuntime(ctx context.Context, 
 			selection.Name, isvc.Spec.Model.Name))
 	}
 	return warnings, nil
+}
+
+// validateRuntimePin rejects malformed explicit ControllerRevision pins
+// at admission. The full existence check is left to reconcile (the
+// webhook can't reliably reach across cluster scope), but the cheap
+// shape checks happen here:
+//
+//   - spec.runtime.revision is meaningful only when autoSync is false;
+//     setting it with autoSync=true (default) is a confused-user
+//     signal worth surfacing immediately.
+//   - The revision name must conform to the convention for the named
+//     runtime's kind + scope; an obviously-wrong name (e.g., pinning
+//     to runtime A but naming a revision of runtime B) is rejected
+//     before the controller ever sees it.
+func validateRuntimePin(isvc *v1beta1.InferenceService) error {
+	if isvc.Spec.Runtime == nil || isvc.Spec.Runtime.Revision == nil || *isvc.Spec.Runtime.Revision == "" {
+		return nil
+	}
+	if isvc.Spec.Runtime.AutoSync == nil || *isvc.Spec.Runtime.AutoSync {
+		return fmt.Errorf(
+			"spec.runtime.revision requires spec.runtime.autoSync=false; AutoSync=true would silently ignore the pin")
+	}
+	kind := runtimerevision.KindClusterServingRuntime
+	sourceNS := ""
+	if isvc.Spec.Runtime.Kind != nil && *isvc.Spec.Runtime.Kind == string(runtimerevision.KindServingRuntime) {
+		kind = runtimerevision.KindServingRuntime
+		sourceNS = isvc.Namespace
+	}
+	revName := *isvc.Spec.Runtime.Revision
+	if !runtimerevision.MatchesRuntime(revName, kind, sourceNS, isvc.Spec.Runtime.Name) {
+		return fmt.Errorf(
+			"spec.runtime.revision %q does not match the expected naming convention for runtime %q (%s); "+
+				"expected the form %s",
+			revName, isvc.Spec.Runtime.Name, kind, expectedPinPattern(kind, sourceNS, isvc.Spec.Runtime.Name))
+	}
+	return nil
+}
+
+func expectedPinPattern(kind runtimerevision.SourceKind, sourceNS, runtimeName string) string {
+	switch kind {
+	case runtimerevision.KindClusterServingRuntime:
+		return fmt.Sprintf("cr-%s-<8 lowercase hex chars>", runtimeName)
+	case runtimerevision.KindServingRuntime:
+		return fmt.Sprintf("r-%s-%s-<8 lowercase hex chars>", sourceNS, runtimeName)
+	default:
+		return "<unknown kind>"
+	}
 }
 
 // hasFullRunnerConfig checks if the engine has complete runner configuration

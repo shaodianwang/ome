@@ -72,24 +72,47 @@ func FindOrCreate(
 	return name, nil
 }
 
-// Fetch reads a ControllerRevision by name from omeNamespace and
-// decodes its Data field back to a *ServingRuntimeSpec. Returns
-// IsNotFound when the revision has been deleted or GC'd; callers
-// surface that as RuntimeDrifted=True / Reason=RevisionMissing.
+// FetchRevision reads a ControllerRevision by name from omeNamespace.
+// Returns IsNotFound when the revision has been deleted or GC'd; the
+// caller surfaces that as RuntimeDrifted=True / Reason=RevisionMissing.
+// Use this when you need to inspect labels/annotations
+// (e.g., cross-check ome.io/runtime-of); Fetch is the convenience
+// wrapper when only the decoded spec is needed.
+func FetchRevision(
+	ctx context.Context,
+	c client.Client,
+	omeNamespace, name string,
+) (*appsv1.ControllerRevision, error) {
+	rev := &appsv1.ControllerRevision{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: omeNamespace, Name: name}, rev); err != nil {
+		return nil, err
+	}
+	return rev, nil
+}
+
+// DecodeSpec unmarshals a revision's Data field into a *ServingRuntimeSpec.
+func DecodeSpec(rev *appsv1.ControllerRevision) (*v1beta1.ServingRuntimeSpec, error) {
+	if rev == nil {
+		return nil, fmt.Errorf("DecodeSpec: nil revision")
+	}
+	spec := &v1beta1.ServingRuntimeSpec{}
+	if err := json.Unmarshal(rev.Data.Raw, spec); err != nil {
+		return nil, fmt.Errorf("decode revision %s/%s Data: %w", rev.Namespace, rev.Name, err)
+	}
+	return spec, nil
+}
+
+// Fetch is the convenience wrapper: FetchRevision + DecodeSpec.
 func Fetch(
 	ctx context.Context,
 	c client.Client,
 	omeNamespace, name string,
 ) (*v1beta1.ServingRuntimeSpec, error) {
-	rev := &appsv1.ControllerRevision{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: omeNamespace, Name: name}, rev); err != nil {
+	rev, err := FetchRevision(ctx, c, omeNamespace, name)
+	if err != nil {
 		return nil, err
 	}
-	spec := &v1beta1.ServingRuntimeSpec{}
-	if err := json.Unmarshal(rev.Data.Raw, spec); err != nil {
-		return nil, fmt.Errorf("decode revision %s/%s Data: %w", omeNamespace, name, err)
-	}
-	return spec, nil
+	return DecodeSpec(rev)
 }
 
 // findByHash returns the name of an existing revision matching the

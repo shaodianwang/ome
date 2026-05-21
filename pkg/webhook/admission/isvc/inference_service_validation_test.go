@@ -1289,6 +1289,126 @@ func TestValidateInferenceService_ComprehensiveErrorPaths(t *testing.T) {
 			wantErr: true,
 			errMsg:  "at least one of spec.model or spec.runtime must be set",
 		},
+		// OEP-0014 Phase 2: explicit-pin admission validation.
+		{
+			name: "explicit revision pin with autoSync=false (cluster) passes",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "pin-ok", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{
+						Name:     "srt-llama-pd",
+						AutoSync: boolPtr(false),
+						Revision: stringPtr("cr-srt-llama-pd-abc12345"),
+					},
+					Engine: &v1beta1.EngineSpec{},
+				},
+			},
+		},
+		{
+			name: "explicit revision pin with autoSync=true rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "pin-conflict", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{
+						Name:     "srt-llama-pd",
+						AutoSync: boolPtr(true),
+						Revision: stringPtr("cr-srt-llama-pd-abc12345"),
+					},
+					Engine: &v1beta1.EngineSpec{},
+				},
+			},
+			wantErr: true,
+			errMsg:  "AutoSync=true would silently ignore the pin",
+		},
+		{
+			name: "explicit revision pin with autoSync omitted (defaults true) rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "pin-defaultsync", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{
+						Name:     "srt-llama-pd",
+						Revision: stringPtr("cr-srt-llama-pd-abc12345"),
+					},
+					Engine: &v1beta1.EngineSpec{},
+				},
+			},
+			wantErr: true,
+			errMsg:  "AutoSync=true would silently ignore the pin",
+		},
+		{
+			name: "explicit revision pin naming a DIFFERENT runtime rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "pin-wrong-runtime", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{
+						Name:     "srt-llama-pd",
+						AutoSync: boolPtr(false),
+						Revision: stringPtr("cr-srt-other-abc12345"),
+					},
+					Engine: &v1beta1.EngineSpec{},
+				},
+			},
+			wantErr: true,
+			errMsg:  "does not match the expected naming convention",
+		},
+		{
+			name: "explicit revision pin with malformed hash rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "pin-bad-hash", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{
+						Name:     "srt-llama-pd",
+						AutoSync: boolPtr(false),
+						Revision: stringPtr("cr-srt-llama-pd-XYZ"),
+					},
+					Engine: &v1beta1.EngineSpec{},
+				},
+			},
+			wantErr: true,
+			errMsg:  "does not match the expected naming convention",
+		},
+		{
+			name: "explicit revision pin for namespaced runtime (correct scope) passes",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "pin-ns-ok", Namespace: "team-a"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{
+						Name:     "srt-foo",
+						Kind:     stringPtr("ServingRuntime"),
+						AutoSync: boolPtr(false),
+						Revision: stringPtr("r-team-a-srt-foo-abc12345"),
+					},
+					Engine: &v1beta1.EngineSpec{},
+				},
+			},
+		},
+		{
+			name: "explicit revision pin for namespaced runtime, wrong namespace prefix rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "pin-ns-bad", Namespace: "team-a"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{
+						Name:     "srt-foo",
+						Kind:     stringPtr("ServingRuntime"),
+						AutoSync: boolPtr(false),
+						Revision: stringPtr("r-team-b-srt-foo-abc12345"),
+					},
+					Engine: &v1beta1.EngineSpec{},
+				},
+			},
+			wantErr: true,
+			errMsg:  "does not match the expected naming convention",
+		},
+		{
+			name: "no explicit revision pin → validator no-op",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "no-pin", Namespace: "default"},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "srt-llama-pd", AutoSync: boolPtr(false)},
+					Engine:  &v1beta1.EngineSpec{},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
