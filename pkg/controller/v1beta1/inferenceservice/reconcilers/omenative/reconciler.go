@@ -71,11 +71,14 @@ type ReconcileParams struct {
 //  2. Scale down: drive Delete for any InstanceStatus index that the
 //     plan no longer asks for. Scale-down completes before scale-up
 //     to avoid running excess pods alongside in-flight drains.
-//  3. Scale up: drive Create toward every desired Instance. The
+//  3. Per-Instance restart: detect pod loss / pod-Failed triggers and
+//     dispatch Restart when the Component's restart policy allows it.
+//     Held to one pass per reconcile to keep the state machine simple.
+//  4. Scale up: drive Create toward every desired Instance. The
 //     operation is multi-pass — pods are created, ome.io/serving is
 //     flipped once runtime-ready, and Phase=Ready is recorded.
 //
-// Update / Restart / Migrate land in follow-up PRs.
+// Update / Migrate land in follow-up PRs.
 func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, error) {
 	if p.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: nil client (component=%s)", p.Component)
@@ -103,6 +106,34 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, er
 		// Hold off on Create until scale-down completes — running both
 		// at once would create churn against in-flight drains.
 		return ctrl.Result{RequeueAfter: deleteRequeueInterval}, nil
+	}
+
+	// Per-Instance restart pass. Trigger detection works on the cached
+	// pod list; the actual drain+recreate sequence runs inside Restart.
+	// Only RecreateInstanceOnPodRestart routes here today — None falls
+	// through to Create (which will recreate any missing-by-name pods),
+	// and RecreateISVCOnPodRestart is a future cross-Component slice.
+	anyRestarting := false
+	if plan.RestartPolicy == v1beta1.OMENativeRestartPolicyRecreateInstance {
+		for _, inst := range plan.Instances {
+			needsRestart, reason, derr := detectRestartTrigger(ctx, p, plan, inst)
+			if derr != nil {
+				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: detect restart trigger (instance=%d): %w", inst.Index, derr)
+			}
+			if !needsRestart {
+				continue
+			}
+			done, rerr := Restart(ctx, p, plan, inst, reason)
+			if rerr != nil {
+				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: restart instance %d: %w", inst.Index, rerr)
+			}
+			if !done {
+				anyRestarting = true
+			}
+		}
+	}
+	if anyRestarting {
+		return ctrl.Result{RequeueAfter: restartRequeueInterval}, nil
 	}
 
 	return Create(ctx, p, plan)

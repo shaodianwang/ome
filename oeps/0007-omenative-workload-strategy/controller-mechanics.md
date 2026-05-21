@@ -20,7 +20,7 @@ This mechanics design makes the following choices explicit:
    pod:** `ome.io/serving`.
    This is used for traffic drain before update, restart, migration,
    and scale-down.
-4. **OMENative does not use Pod finalizers for correctness.**lets
+4. **OMENative does not use Pod finalizers for correctness.**
    Recovery must work even if a Pod disappears before the controller
    sees `DeletionTimestamp`.
 5. **Migration in v1 is surge-only.**
