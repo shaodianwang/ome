@@ -21,14 +21,54 @@ make test                 # Run all unit tests (builds xet first)
 make test-no-xet          # Run tests excluding ome-agent (no Rust dependency needed)
 make integration-test     # Run Ginkgo integration tests from tests/ directory
 make coverage             # Show coverage summary (48% threshold enforced)
-
-# Run a single test package:
-KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)" go test ./pkg/runtimeselector/... -v
-# Run a specific test by name:
-KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)" go test ./pkg/controller/v1beta1/inferenceservice/... -run TestReconcile -v
 ```
 
-Controller tests require envtest (KUBEBUILDER_ASSETS). Tests involving HuggingFace downloads need `LD_LIBRARY_PATH` pointing to `pkg/xet/target/release`.
+**Required env for direct `go test` calls** (save these as shell aliases — you will retype them constantly):
+
+```sh
+# Controller tests + anything under tests/integration/ — needs envtest assets:
+export KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)"
+
+# Anything that links the xet Rust staticlib (ome-agent, hf-download, etc.):
+export LD_LIBRARY_PATH=$(pwd)/pkg/xet/target/release
+```
+
+With those exported, you can drop the inline prefix:
+
+```sh
+# Run a single test package:
+go test ./pkg/runtimeselector/... -v
+# Run a specific test by name:
+go test ./pkg/controller/v1beta1/inferenceservice/... -run TestReconcile -v
+```
+
+Without the exports, prefix each invocation manually:
+`KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)" go test ./pkg/runtimeselector/... -v`
+
+#### Integration Tests (detailed)
+
+Integration suites live under `tests/integration/`. Each leaf directory is its own Ginkgo suite with a single `TestXxx(t)` entry that calls `util.RunSuite`. Current layout:
+
+```
+tests/integration/
+├── dep-crds/                              # vendored optional-CRD YAMLs (LWS, KEDA, Gateway API, Envoy Gateway, Prometheus)
+├── framework/                             # shared test scaffolding
+├── components/, util/                     # helpers
+└── singlecluster/
+    ├── webhook/{inferenceservice,inferenceservice_defaulter,basemodel,servingruntime,pod,runtimepreset,runtimerevision}
+    ├── controller/{inferenceservice,basemodel,servingruntime}
+    ├── clustercache/
+    └── agents/metadata/
+```
+
+`make integration-test` runs the full set (it depends on `manifests`, `envtest`, and `dep-crds`). To iterate on one suite:
+
+```sh
+KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)" \
+  go test ./tests/integration/singlecluster/webhook/inferenceservice/... -v
+```
+
+Set `KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true` to forward the envtest kube-apiserver/etcd stdout+stderr into the test log when debugging control-plane startup failures.
 
 ### Lint & Format
 ```bash
@@ -74,6 +114,7 @@ Always prefer `make` targets over raw `go`/`kubectl`/etc. commands — they wire
 | Touching kustomize patches in `config/` | `make manifests` |
 | Touching `charts/*/templates/` directly (rare; usually generated) | `make helm-lint` |
 | Touching `go.mod` / `go.sum` | `make tidy` |
+| Bumping `sigs.k8s.io/lws`, `github.com/kedacore/keda/v2`, or `sigs.k8s.io/gateway-api` in `go.mod` | `make dep-crds` (re-vendors CRD YAMLs into `tests/integration/dep-crds/`; CI does not run this — maintainers commit the result) |
 
 **Required before every commit / hand-off:**
 
@@ -135,6 +176,41 @@ The `model-agent` DaemonSet deployed by `charts/ome-resources/` runs an image bu
 
 Runtime/model catalog YAMLs (vendor-specific ClusterServingRuntime / ClusterBaseModel) live in operators' own GitOps repos, not in-tree.
 
+## Code Agent / Sandbox Notes
+
+OME builds work out-of-the-box on a fully-provisioned developer Mac, but several steps fail subtly in stripped-down code-agent containers. Workarounds:
+
+- **System packages** (Debian/Ubuntu base images): `apt-get install -y jq libssl-dev pkg-config build-essential curl ca-certificates`.
+  - `jq` is consumed by `make manifests` (CRD post-processing in `hack/` scripts).
+  - `libssl-dev pkg-config build-essential` are required to build `pkg/xet` (Rust → static C lib).
+- **Rust toolchain** for `pkg/xet`:
+  ```sh
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal
+  ```
+- **`make generate` writes to the Go env file** (`~/.config/go/env`) if you run it on a Makefile from before commit `[Misc] Makefile: avoid go env -w in make generate`. Update or rebase before reporting failures.
+- **IPv6 / mks-cpu sandboxes**: envtest's `kube-apiserver` auto-detects the pod's IPv6 external address, then refuses to start because it doesn't match the IPv4 service-cluster range. Wrap the binary with a shim pinning `--advertise-address=127.0.0.1`; see `.buildkite/run_tests.sh:42-58` for the canonical pattern.
+- **envtest debugging**: `export KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true` to forward kube-apiserver/etcd output into test logs.
+- **xet-linked binaries / tests**: `export LD_LIBRARY_PATH=$(pwd)/pkg/xet/target/release` so the dynamic linker finds `libxet.{so,dylib}` (needed for `ome-agent` tests and any binary that links the Rust staticlib path).
+- **KUBEBUILDER_ASSETS one-liner**: rather than retyping the full `bin/setup-envtest` invocation for every `go test` call, save this as a shell alias / persistent env:
+  ```sh
+  export KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)"
+  ```
+
+## OEP Convention
+
+Substantial architectural changes require an OEP (OME Enhancement Proposal) before implementation. OEPs live under `oeps/<number>-<slug>/`:
+
+```
+oeps/<number>-<slug>/
+├── oep.yaml      # metadata: oep-number, title, authors, status, dates, reviewers, approvers
+└── README.md     # full proposal text
+```
+
+`oep-number` is a quoted string: `"NNNN"` for new proposals (`"0010"`, `"0011"`) and `"NNNN.M"` for follow-ups to an existing OEP (e.g., `"0007.1"` is a follow-up to OEP 0007). Branch the work off the slug, e.g., `feat/oep-0014-phase3-revision-gc`.
+
+Use `git fetch origin && git checkout -b <branch> origin/main` to ensure you branch off the latest `main`, never a stale local copy. Branch names follow `<type>/<desc>` or `<username>/<desc>` (enforced by the pre-commit hook).
+
 ## PR Conventions
 
-Prefix PR titles with: `[Bugfix]`, `[Core]`, `[API]`, `[Helm]`, `[Docs]`, `[CI/Tests]`, `[Misc]`, or `[OEP]`. Keep title under 52 characters. Substantial architectural changes require an OEP (OME Enhancement Proposal) in `oeps/`.
+Prefix PR titles with: `[Bugfix]`, `[Core]`, `[API]`, `[Helm]`, `[Docs]`, `[CI/Tests]`, `[Misc]`, or `[OEP]`. Keep title under 52 characters. Substantial architectural changes require an OEP (OME Enhancement Proposal) in `oeps/` — see the OEP Convention section above.
