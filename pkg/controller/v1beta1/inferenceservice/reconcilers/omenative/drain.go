@@ -57,6 +57,38 @@ func IsPodDrained(ctx context.Context, reader client.Reader, namespace, serviceN
 	return true, nil
 }
 
+// IsPodInRotation is the inverse of IsPodDrained: it reports whether
+// pod's endpoint exists in serviceName's EndpointSlices with
+// Conditions.Ready != false. Used by Migrate to confirm the surge is
+// receiving traffic before initiating the source-drain, so there is
+// no zero-routable-endpoint window during the swap.
+//
+// Returns false when no EndpointSlice for serviceName lists the pod
+// at all — kube-proxy can't possibly be routing to it yet.
+func IsPodInRotation(ctx context.Context, reader client.Reader, namespace, serviceName string, pod *corev1.Pod) (bool, error) {
+	if pod == nil {
+		return false, fmt.Errorf("IsPodInRotation: nil pod")
+	}
+	if serviceName == "" {
+		return false, fmt.Errorf("IsPodInRotation: empty serviceName")
+	}
+	slices, err := endpointSlicesForService(ctx, reader, namespace, serviceName)
+	if err != nil {
+		return false, err
+	}
+	for _, slice := range slices {
+		for _, ep := range slice.Endpoints {
+			if !endpointTargetsPod(ep, pod) {
+				continue
+			}
+			if endpointIsReady(ep) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // endpointSlicesForService lists EndpointSlices in namespace owned by
 // serviceName via the standard kubernetes.io/service-name label that the
 // in-tree endpointslice controller stamps on every slice it manages.

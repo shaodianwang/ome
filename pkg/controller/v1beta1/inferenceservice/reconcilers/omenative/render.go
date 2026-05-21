@@ -82,8 +82,73 @@ func Render(
 	})
 
 	injectOMENativeEnv(pod, plan, inst, runner, ordinal, isvc.Name)
+	applyMigrationOverlay(pod, inst.MigrationOverlay)
 
 	return pod, nil
+}
+
+// applyMigrationOverlay layers per-Instance placement hints from an
+// in-flight migration onto the rendered pod's affinity. Hard
+// anti-affinity moves the surge off the source node (the whole reason
+// for migrating); preferred affinity nudges it toward the operator-
+// supplied target list without making the placement hard-fail. No-op
+// when overlay is nil.
+func applyMigrationOverlay(pod *corev1.Pod, overlay *MigrationOverlay) {
+	if overlay == nil {
+		return
+	}
+	if pod.Spec.Affinity == nil {
+		pod.Spec.Affinity = &corev1.Affinity{}
+	}
+	if pod.Spec.Affinity.NodeAffinity == nil {
+		pod.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
+	}
+	na := pod.Spec.Affinity.NodeAffinity
+
+	if overlay.FromNode != "" {
+		// RequiredDuringSchedulingIgnoredDuringExecution: the surge
+		// pod MUST schedule somewhere other than FromNode. NodeSelector
+		// terms are OR'd; each term's MatchExpressions are AND'd. We
+		// append to each existing term and add a default term when
+		// none exist so the require-not-FromNode condition combines
+		// with any caller-supplied required selectors.
+		req := corev1.NodeSelectorRequirement{
+			Key:      "kubernetes.io/hostname",
+			Operator: corev1.NodeSelectorOpNotIn,
+			Values:   []string{overlay.FromNode},
+		}
+		if na.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+			na.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{req}}},
+			}
+		} else {
+			for i := range na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
+				na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[i].MatchExpressions = append(
+					na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[i].MatchExpressions,
+					req,
+				)
+			}
+		}
+	}
+
+	if len(overlay.HintTargetNodes) > 0 {
+		// PreferredDuringSchedulingIgnoredDuringExecution: nudge the
+		// scheduler toward HintTargetNodes but don't block scheduling
+		// when none are available.
+		na.PreferredDuringSchedulingIgnoredDuringExecution = append(
+			na.PreferredDuringSchedulingIgnoredDuringExecution,
+			corev1.PreferredSchedulingTerm{
+				Weight: 100,
+				Preference: corev1.NodeSelectorTerm{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{
+						Key:      "kubernetes.io/hostname",
+						Operator: corev1.NodeSelectorOpIn,
+						Values:   overlay.HintTargetNodes,
+					}},
+				},
+			},
+		)
+	}
 }
 
 // isvcGroupVersionKind identifies the InferenceService owner reference

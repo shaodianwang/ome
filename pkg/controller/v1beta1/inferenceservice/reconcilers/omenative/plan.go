@@ -3,6 +3,7 @@ package omenative
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,9 +44,15 @@ func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
 		replicas = int32(*p.ComponentExt.MinReplicas)
 	}
 
-	instances := make([]InstancePlan, replicas)
-	for i := range instances {
-		idx := int32(i)
+	// Compute the plan's Instance index set. Existing InstanceStatus
+	// entries — including any migration-surge index above the replica
+	// count — are preserved so the rest of Loop A keeps driving them.
+	// The plan grows beyond replicas during the surge phase of a
+	// migration; scale-down logic (extraInstanceIndices) is responsible
+	// for picking the right deletion target after that surge resolves.
+	indices := instancePlanIndices(p.ISVC, p.Component, replicas)
+	instances := make([]InstancePlan, len(indices))
+	for i, idx := range indices {
 		instances[i] = InstancePlan{
 			Index:       idx,
 			Incarnation: incarnationForIndex(p.ISVC, p.Component, idx),
@@ -126,6 +133,129 @@ func migrationModeOrDefault(p *v1beta1.OMENativeMigrationPolicy) v1beta1.OMENati
 		return v1beta1.OMENativeMigrationPolicyModeAuto
 	}
 	return p.Mode
+}
+
+// instancePlanIndices computes the per-Instance index set the plan
+// should drive: all migration-in-flight indices (unbounded by replicas;
+// they're the transient surge pair), then the oldest existing
+// non-migration indices up to the replica cap, then newly allocated
+// indices at the lowest unused position to round out scale-up.
+//
+// The replica cap counts only non-migration indices. Counting the
+// surge against it would drop a healthy non-migrating sibling out of
+// the plan and into scale-down.
+func instancePlanIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, replicas int32) []int32 {
+	used := existingInstanceIndices(isvc, component)
+	migrationProtected := migrationInFlightIndices(isvc, component)
+
+	sorted := make([]int32, 0, len(used))
+	for idx := range used {
+		sorted = append(sorted, idx)
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	indices := make([]int32, 0, len(sorted))
+	picked := map[int32]struct{}{}
+
+	// Pass 1: pin migration-in-flight indices (no cap).
+	for _, idx := range sorted {
+		if _, protected := migrationProtected[idx]; !protected {
+			continue
+		}
+		indices = append(indices, idx)
+		picked[idx] = struct{}{}
+	}
+
+	// Pass 2: fill the steady replica budget, oldest first.
+	steadyCount := int32(0)
+	for _, idx := range sorted {
+		if _, already := picked[idx]; already {
+			continue
+		}
+		if steadyCount >= replicas {
+			break
+		}
+		indices = append(indices, idx)
+		picked[idx] = struct{}{}
+		steadyCount++
+	}
+
+	// Pass 3: allocate new slots for scale-up.
+	taken := make(map[int32]struct{}, len(used)+len(indices))
+	for k, v := range used {
+		taken[k] = v
+	}
+	for _, idx := range indices {
+		taken[idx] = struct{}{}
+	}
+	for steadyCount < replicas {
+		next := lowestUnusedIndex(taken)
+		indices = append(indices, next)
+		taken[next] = struct{}{}
+		steadyCount++
+	}
+
+	sort.Slice(indices, func(i, j int) bool { return indices[i] < indices[j] })
+	return indices
+}
+
+// migrationInFlightIndices returns the indices of InstanceStatuses
+// currently participating in a migration — either Phase=Migrating
+// (the source) or Operation.Type=Migrate (the surge). These indices
+// stay in the plan past scale-down boundaries because deleting them
+// mid-migration would abandon a partially-rolled-out surge.
+func migrationInFlightIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[int32]struct{} {
+	out := map[int32]struct{}{}
+	if isvc == nil {
+		return out
+	}
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.OMENative == nil {
+		return out
+	}
+	for _, s := range cs.OMENative.InstanceStatuses {
+		if s.Phase == v1beta1.OMENativeInstanceMigrating {
+			out[s.Index] = struct{}{}
+			continue
+		}
+		if s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationMigrate {
+			out[s.Index] = struct{}{}
+		}
+	}
+	return out
+}
+
+// existingInstanceIndices returns the set of indices the Component's
+// InstanceStatus currently records.
+func existingInstanceIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[int32]struct{} {
+	out := map[int32]struct{}{}
+	if isvc == nil {
+		return out
+	}
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.OMENative == nil {
+		return out
+	}
+	for _, s := range cs.OMENative.InstanceStatuses {
+		out[s.Index] = struct{}{}
+	}
+	return out
+}
+
+// lowestUnusedIndex returns the smallest non-negative int32 not
+// present in used. The loop is bounded by len(used)+1 — for any set
+// of size N, at least one of {0,1,...,N} must be unused, so we never
+// scan past that. The bound prevents a pathological infinite loop if
+// `used` were ever to contain every int32 value.
+func lowestUnusedIndex(used map[int32]struct{}) int32 {
+	for i := int32(0); i <= int32(len(used)); i++ {
+		if _, taken := used[i]; !taken {
+			return i
+		}
+	}
+	// Unreachable given the pigeonhole argument above; the explicit
+	// fallback keeps the function total.
+	return int32(len(used))
 }
 
 // incarnationForIndex returns the current Incarnation for the (component, idx)

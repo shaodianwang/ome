@@ -115,7 +115,7 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, er
 	// Scale-down first. An ISVC that drops MinReplicas leaves
 	// InstanceStatus entries above the new replica count; Delete drives
 	// each to gone.
-	extras := extraInstanceIndices(p.ISVC, plan.Component, plan.Replicas)
+	extras := extraInstanceIndices(p.ISVC, plan.Component, plan)
 	allDeleted := true
 	for _, idx := range extras {
 		done, derr := Delete(ctx, p, plan, idx)
@@ -158,6 +158,27 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (ctrl.Result, er
 	}
 	if anyRestarting {
 		return ctrl.Result{RequeueAfter: restartRequeueInterval}, nil
+	}
+
+	// Per-Component migration pass. Detect any pending migration
+	// request annotation, dispatch Migrate. Migrate operates on its
+	// own (source, surge) pair and stamps the relevant statuses; the
+	// subsequent Create / Update passes will skip migration-in-flight
+	// indices via the Phase=Migrating guard in their trigger detectors.
+	if plan.MigrationMode != v1beta1.OMENativeMigrationPolicyModeNever {
+		uuid, req, sourceIdx, found, mderr := detectMigrationRequest(ctx, p, plan.Component)
+		if mderr != nil {
+			return ctrl.Result{}, fmt.Errorf("OMENative reconciler: detect migration request (component=%s): %w", plan.Component, mderr)
+		}
+		if found {
+			done, merr := Migrate(ctx, p, plan, sourceIdx, uuid, req)
+			if merr != nil {
+				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: migrate instance %d: %w", sourceIdx, merr)
+			}
+			if !done {
+				return ctrl.Result{RequeueAfter: migrateRequeueInterval}, nil
+			}
+		}
 	}
 
 	// Per-Instance update pass. Compute the target ControllerRevision

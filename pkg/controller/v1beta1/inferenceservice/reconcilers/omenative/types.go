@@ -45,8 +45,9 @@ type ComponentPlan struct {
 // InstancePlan is the desired state for one Instance — the atomic unit of
 // gang scheduling, restart, and migration.
 type InstancePlan struct {
-	// Index is the stable Instance ordinal. May become sparse after surge
-	// migration in a follow-up PR; single-pod plans always start dense.
+	// Index is the stable Instance ordinal. Sparse after surge migration:
+	// when migrating index 0 with a surge at index 2, the post-migration
+	// plan can hold a single Instance at index 2.
 	Index int32
 
 	// Incarnation is the monotonic lifecycle token for this (Component,
@@ -60,6 +61,30 @@ type InstancePlan struct {
 	// Single-pod Instances have one Runner named "default" of size 1.
 	// Multi-pod Instances (leader + worker) are introduced in a follow-up.
 	Runners []RunnerPlan
+
+	// MigrationOverlay carries placement hints from an in-flight surge
+	// migration. Render reads it to inject hard anti-affinity from the
+	// source node and preferred affinity to hint target nodes. Nil for
+	// non-migration paths (steady-state, restart, in-place / recreate
+	// update).
+	MigrationOverlay *MigrationOverlay
+}
+
+// MigrationOverlay records the per-Instance placement constraints a
+// surge migration carries onto the rendered pod. Materialized as
+// pod affinity in Render and intentionally absent from the canonical
+// revision payload — these are transient operation overlays, not
+// steady-state template fields.
+type MigrationOverlay struct {
+	// FromNode is the node the migration is moving the Instance away
+	// from. Surfaces as RequiredDuringScheduling anti-affinity on
+	// kubernetes.io/hostname.
+	FromNode string
+
+	// HintTargetNodes are the caller-supplied preferred destinations.
+	// Surface as PreferredDuringScheduling affinity; the scheduler is
+	// free to pick another node when these are unavailable.
+	HintTargetNodes []string
 }
 
 // RunnerPlan is the desired state for one Runner within an Instance.

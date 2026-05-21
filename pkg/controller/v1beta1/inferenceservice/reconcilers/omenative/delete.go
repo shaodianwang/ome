@@ -116,12 +116,18 @@ func Delete(ctx context.Context, p ReconcileParams, plan ComponentPlan, idx int3
 	return false, nil
 }
 
-// extraInstanceIndices returns the InstanceStatus indices that are not
-// covered by plan — i.e., status indices >= plan.Replicas. These are the
-// Instances to delete on a scale-down. Sparse indices from a future
-// surge-migration PR will require this to compare against
-// plan.Instances directly rather than the replica count.
-func extraInstanceIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, replicas int32) []int32 {
+// extraInstanceIndices returns the InstanceStatus indices that the plan
+// is no longer driving — set-difference of status indices minus
+// plan.Instances[*].Index. These are the targets for scale-down. The
+// set-difference framing handles sparse indices introduced by surge
+// migration correctly: an InstanceStatus at index 7 is "extra" only
+// when no InstancePlan covers index 7, regardless of replica count.
+//
+// Instances currently mid-migration are excluded from the extras set
+// even when the plan doesn't cover them, so the in-flight surge
+// pair (source + surge) is never scale-down-deleted out from under
+// Migrate.
+func extraInstanceIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, plan ComponentPlan) []int32 {
 	if isvc == nil {
 		return nil
 	}
@@ -129,11 +135,22 @@ func extraInstanceIndices(isvc *v1beta1.InferenceService, component v1beta1.Comp
 	if !ok || cs.OMENative == nil {
 		return nil
 	}
+	planned := make(map[int32]struct{}, len(plan.Instances))
+	for _, inst := range plan.Instances {
+		planned[inst.Index] = struct{}{}
+	}
 	var extras []int32
 	for _, s := range cs.OMENative.InstanceStatuses {
-		if s.Index >= replicas {
-			extras = append(extras, s.Index)
+		if _, inPlan := planned[s.Index]; inPlan {
+			continue
 		}
+		if s.Phase == v1beta1.OMENativeInstanceMigrating {
+			continue
+		}
+		if s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationMigrate {
+			continue
+		}
+		extras = append(extras, s.Index)
 	}
 	return extras
 }
