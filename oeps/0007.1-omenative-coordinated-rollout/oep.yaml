@@ -1,0 +1,39 @@
+title: OMENative Coordinated Rollout
+oep-number: "0007.1"
+authors:
+  - "@slin1237"
+status: provisional
+creation-date: 2026-05-20
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "/oeps/0007-omenative-workload-strategy"
+  - "/oeps/0011-inference-traffic-policy"
+
+# Addendum to OEP-0007. Adds cross-Component coordination, per-revision
+# Services, generation-scoped peer discovery, and the OEP-0011
+# Status.Components.*.Traffic[] producer that closes Part 2 alpha.
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# No Kubernetes feature gate (matches OEP-0007 / OEP-0011 precedent).
+# Opt-in is per-ISVC by declaring spec.rolloutCoordination.groups[].
+feature-gates: []
+disable-supported: true
+
+metrics:
+  - ome_omenative_rollout_group_phase_total       # labels: isvc, group, phase (Idle, Surging, Waiting, Shifting, Draining, ScalingDown, Paused, Failed, RollingBack)
+  - ome_omenative_rollout_group_transition_total  # labels: isvc, group, from, to
+  - ome_omenative_rollout_group_failure_total     # labels: isvc, group, reason
+  - ome_omenative_ratio_skew_total                # labels: isvc, group — count of reconciles that rejected a surge to avoid ratio skew
+  - ome_omenative_per_revision_service_total      # labels: isvc, component — gauge of live per-revision Services
+  - ome_omenative_mixed_pairing_total             # labels: isvc, group — count of distinct revision-pair combinations observed in flight (PairedMixable diagnostic)
