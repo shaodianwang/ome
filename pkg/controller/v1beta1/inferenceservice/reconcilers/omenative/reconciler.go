@@ -289,7 +289,7 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	if cs, ok := p.ISVC.Status.Components[component]; ok && cs.OMENative != nil {
 		collisionCount = cs.OMENative.CollisionCount
 	}
-	target, collision, err := EnsureControllerRevision(ctx, p.Client, p.reader(), p.ISVC, component, p.PodSpec, collisionCount)
+	target, collision, err := EnsureControllerRevision(ctx, p.Client, p.reader(), p.ISVC, component, p.PodSpec, &p.ObjectMeta, collisionCount)
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +301,7 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	if err != nil {
 		return nil, fmt.Errorf("bump CollisionCount after revision collision: %w", err)
 	}
-	target, collision, err = EnsureControllerRevision(ctx, p.Client, p.reader(), p.ISVC, component, p.PodSpec, bumped)
+	target, collision, err = EnsureControllerRevision(ctx, p.Client, p.reader(), p.ISVC, component, p.PodSpec, &p.ObjectMeta, bumped)
 	if err != nil {
 		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)
 	}

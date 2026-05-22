@@ -52,7 +52,11 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 	// are recomputed against the freshly-read ISVC's InstanceStatuses
 	// on every attempt so a parallel op that added/removed an Instance
 	// doesn't get its bookkeeping clobbered.
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	//
+	// Captured outside the retry closure so the post-commit retention
+	// sweep sees the names that actually committed.
+	var liveRevisionNames []string
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}
 		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
 			return fmt.Errorf("status: re-read ISVC: %w", err)
@@ -97,8 +101,79 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {
 			return fmt.Errorf("status: update: %w", err)
 		}
+		// Captured after the successful Update so a retry that loses
+		// to a concurrent write reproduces the names from the
+		// post-conflict re-read on the next attempt.
+		liveRevisionNames = collectLiveRevisionNames(cs.OMENative)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	// Post-commit revision retention. Best-effort: a transient API
+	// error on retention shouldn't tear down the whole reconcile
+	// because the next pass tries again. But propagate the error so
+	// operators see persistent failures via the reconcile event log.
+	//
+	// liveNames union ensures in-flight migrations whose
+	// RunningRevision points to an older CR aren't retention-deleted
+	// out from under them (A5/REV-5 from the merged review).
+	if rerr := RetainControllerRevisions(
+		ctx,
+		p.Client,
+		p.reader(),
+		p.ISVC,
+		plan.Component,
+		defaultRevisionRetention,
+		liveRevisionNames...,
+	); rerr != nil {
+		return fmt.Errorf("status: retain revisions: %w", rerr)
+	}
+	return nil
+}
+
+// defaultRevisionRetention is the maximum number of non-live
+// ControllerRevisions kept per Component (OEP §2.2). 10 matches the
+// StatefulSet default and gives operators headroom for rollback
+// inspection without unbounded etcd growth.
+const defaultRevisionRetention = 10
+
+// collectLiveRevisionNames builds the union of revision names that
+// retention must protect: the Component's CurrentRevision and
+// UpdateRevision PLUS every InstanceStatus.RunningRevision /
+// TargetRevision. Without the InstanceStatus union, an in-flight
+// migration whose source RunningRevision points to an older CR
+// could have that CR retention-deleted mid-flight; the next
+// surgeRevisionAndSpec lookup would return nil and the migration
+// would bail forever (review item A5/REV-5).
+func collectLiveRevisionNames(cs *v1beta1.OMENativeComponentStatus) []string {
+	if cs == nil {
+		return nil
+	}
+	// Dedup via a small map; the union is at most O(replicas+2)
+	// entries so direct allocation is fine.
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		seen[name] = struct{}{}
+	}
+	add(cs.CurrentRevision)
+	add(cs.UpdateRevision)
+	for _, inst := range cs.InstanceStatuses {
+		add(inst.RunningRevision)
+		add(inst.TargetRevision)
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	return out
 }
 
 // availablePodSet returns the set of pod names whose endpoint is Ready

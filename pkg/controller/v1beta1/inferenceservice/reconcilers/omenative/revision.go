@@ -49,11 +49,21 @@ type revisionDataPayload struct {
 // ptr.To(int32(0)) for "no salt yet"; both must produce the same hash
 // or a defaulter that normalizes the pointer would flip every CR hash
 // on the next reconcile.
-func revisionHash(template *corev1.PodSpec, collisionCount *int32) (string, []byte, error) {
+//
+// templateMeta carries user-intent labels and annotations from the
+// rendered Component metadata. Captured so changes to pod-template
+// labels/annotations on the InferenceService spec trigger a new
+// revision and a rollout (REV-8). nil is treated as "no metadata"
+// and produces the same hash as an empty ObjectMeta — both serialize
+// to the same `podMeta` JSON shape.
+func revisionHash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCount *int32) (string, []byte, error) {
 	if template == nil {
 		return "", nil, fmt.Errorf("nil pod template")
 	}
-	raw, err := json.Marshal(revisionDataPayload{PodSpec: template})
+	raw, err := json.Marshal(revisionDataPayload{
+		PodSpec: template,
+		PodMeta: revisionTemplateMeta(templateMeta),
+	})
 	if err != nil {
 		return "", nil, fmt.Errorf("marshal revision payload: %w", err)
 	}
@@ -65,6 +75,31 @@ func revisionHash(template *corev1.PodSpec, collisionCount *int32) (string, []by
 	}
 	_, _ = fmt.Fprintf(h, "%d", cc)
 	return fmt.Sprintf("%08x", h.Sum32()), raw, nil
+}
+
+// revisionTemplateMeta strips the rendered ObjectMeta down to the
+// fields that represent user intent — labels and annotations.
+// Operational fields (UID, ResourceVersion, CreationTimestamp,
+// managed-by-style controller fields) are excluded so the hash
+// stays stable across reconciles when only those change.
+//
+// Returns nil when the source carries no labels AND no annotations
+// so the JSON serializes as `"podMeta":null`, preserving the
+// legacy hash shape for ISVCs that don't yet carry template metadata.
+// This avoids a one-time phantom rollout when this code first
+// deploys against existing alpha workloads. ISVCs that DO have
+// template labels/annotations will see a single forced revision
+// bump on the first reconcile after this lands — those workloads
+// have been silently rolling without a real revision history per
+// REV-8, so the bump materializes the deferred capture.
+func revisionTemplateMeta(src *metav1.ObjectMeta) *metav1.ObjectMeta {
+	if src == nil || (len(src.Labels) == 0 && len(src.Annotations) == 0) {
+		return nil
+	}
+	return &metav1.ObjectMeta{
+		Labels:      src.Labels,
+		Annotations: src.Annotations,
+	}
 }
 
 // revisionName composes the ControllerRevision object name from the parent
@@ -98,6 +133,7 @@ func EnsureControllerRevision(
 	isvc *v1beta1.InferenceService,
 	component v1beta1.ComponentType,
 	template *corev1.PodSpec,
+	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
 ) (cr *appsv1.ControllerRevision, collision bool, err error) {
 	if isvc == nil {
@@ -110,7 +146,7 @@ func EnsureControllerRevision(
 		return nil, false, fmt.Errorf("EnsureControllerRevision: nil reader")
 	}
 
-	hash, raw, err := revisionHash(template, collisionCount)
+	hash, raw, err := revisionHash(template, templateMeta, collisionCount)
 	if err != nil {
 		return nil, false, err
 	}

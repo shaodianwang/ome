@@ -38,7 +38,7 @@ func runningPodAtRevision(isvc *v1beta1.InferenceService, instIdx int32, incarna
 // dispatch against.
 func ensureTargetCR(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, spec *corev1.PodSpec) *appsv1.ControllerRevision {
 	t.Helper()
-	cr, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, nil)
+	cr, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, nil, nil)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
@@ -51,7 +51,7 @@ func ensureTargetCR(t *testing.T, c client.Client, isvc *v1beta1.InferenceServic
 // (not the live pod) to decide if a target diff is image-only.
 func seedRunningRevision(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, spec *corev1.PodSpec) {
 	t.Helper()
-	cr, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, nil)
+	cr, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, nil, nil)
 	if err != nil {
 		t.Fatalf("seedRunningRevision: %v", err)
 	}
@@ -736,7 +736,7 @@ func TestReconcileComponent_RevisionCollisionBumpsAndRetries(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	targetSpec := targetSpecImage("llama:v2")
-	hash, _, _ := revisionHash(targetSpec, nil)
+	hash, _, _ := revisionHash(targetSpec, nil, nil)
 	conflictingName := revisionName(isvc.Name, v1beta1.EngineComponent, hash)
 	conflicting := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
@@ -772,7 +772,7 @@ func TestReconcileComponent_RevisionCollisionBumpsAndRetries(t *testing.T) {
 	if len(list.Items) != 2 {
 		t.Errorf("CR count after retry: got %d want 2 (conflicting + salt-shifted)", len(list.Items))
 	}
-	saltedHash, _, _ := revisionHash(targetSpec, cs.OMENative.CollisionCount)
+	saltedHash, _, _ := revisionHash(targetSpec, nil, cs.OMENative.CollisionCount)
 	saltedName := revisionName(isvc.Name, v1beta1.EngineComponent, saltedHash)
 	found := false
 	for _, cr := range list.Items {
