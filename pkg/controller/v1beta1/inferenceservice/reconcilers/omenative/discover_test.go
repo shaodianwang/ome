@@ -135,14 +135,11 @@ func TestLiveOldPodsClearedForRecreate_OldTerminatingTolerated(t *testing.T) {
 }
 
 func TestLiveOldPodsClearedForRecreate_MissingLabelDoesNotBlockPhaseB(t *testing.T) {
-	// OPS-3: label-missing pods are now classified as `unknown`, not
-	// `old`. liveOldPodsClearedForRecreate gates only on OLD pods, so
-	// an unknown pod doesn't block Phase B from this helper's
-	// perspective. The caller (Restart) routes orphan pods through
-	// the FoundOrphan event path BEFORE reaching this helper, so in
-	// production an unknown pod would short-circuit Restart entirely
-	// before liveOldPodsClearedForRecreate runs. This test pins the
-	// helper's narrower contract: "old pods, are they all terminating?"
+	// Unknown (label-missing) pods are not OLD —
+	// liveOldPodsClearedForRecreate only gates on OLD. In production an
+	// orphan short-circuits Restart via FoundOrphan before this helper
+	// runs; this test pins the helper's narrower contract: "old pods,
+	// are they all terminating?".
 	pod := newDiscoverPod("p-orphan", 0, 0, false)
 	delete(pod.Labels, labelInstanceIncarnation)
 	p := newDiscoverParams(t, pod)

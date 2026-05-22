@@ -98,21 +98,16 @@ func TestUpdate_NilClient(t *testing.T) {
 }
 
 func TestUpdate_InPlace_RechecksServingBeforePatch(t *testing.T) {
-	// OPS-4: between the drain wait passing and the image patch firing,
-	// a concurrent writer (another controller, a pod-mutating webhook
-	// re-injection) could have flipped ome.io/serving back to True.
-	// Patching images on a serving pod violates the always-drain-before-
-	// image-patch invariant. The fix re-reads the pod immediately before
-	// each patch and, on detecting serving=True, re-flips NotServing
-	// and requeues without patching.
+	// A concurrent writer could re-flip serving=True between the drain
+	// check passing and the image patch firing. The fix re-reads each
+	// pod immediately before patching and, on serving=True, re-marks
+	// NotServing and requeues without patching.
 	//
-	// To simulate the race in a unit test: a Get interceptor flips
-	// serving=True on the pod ONLY during the Step 4 re-read. The
-	// earlier Step 2 (list pods, drain those that are serving) sees
-	// the original pod-set passed in by listPodsForInstance — not
-	// affected by the interceptor — and the Step 3 drain check looks
-	// at EndpointSlices, not the pod. So the interceptor's flip is
-	// observed exclusively by Step 4's re-read.
+	// Race simulation: a Get interceptor flips serving=True on the pod
+	// ONLY during the pre-patch re-read; the listPodsForInstance call
+	// uses the original snapshot, and the drain check reads
+	// EndpointSlices, not the pod — so the flip is observed exclusively
+	// by the pre-patch Get.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{

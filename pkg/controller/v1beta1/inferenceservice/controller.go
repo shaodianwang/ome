@@ -590,26 +590,23 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 		return nil
 	}
 
-	// STATUS-5: wrap Status().Update in retry.RetryOnConflict. Without
-	// this wrapper, OMENative-driven status churn (drain / Mark / op
-	// transitions) reliably 409s the outer reconciler's final flush
-	// and wedges the entire ISVC reconcile in a re-loop that never
-	// converges. Mirrors the pattern OMENative's per-Instance writes
-	// got in PR C2 (STATUS-1) — same root cause, different code path.
-	//
-	// On conflict: re-Get the live ISVC, copy our desired Status onto
-	// the fresh ResourceVersion, and retry. We deliberately don't
-	// re-compute desired.Status — the caller's view of "what the
-	// status should look like" is authoritative for this reconcile pass;
-	// conflicting concurrent writes are expected to be a different
-	// reconcile's view that we're overwriting (post-#209 STATUS-4 most
-	// of those have settled before we get here).
+	// Status().Update wrapped in retry.RetryOnConflict because
+	// OMENative-driven status churn (drain / Mark / op transitions)
+	// reliably 409s the outer flush and would wedge the reconcile in a
+	// re-loop. On conflict: re-Get the live ISVC, copy desiredService
+	// status onto the fresh ResourceVersion, then re-merge
+	// ComponentStatus.OMENative from latest so any OMENative writes that
+	// landed between our snapshot and the re-Get (Incarnation bumps,
+	// Phase transitions, RunningRevision promotes) are preserved. The
+	// outer reconciler doesn't own that subtree.
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &v1beta1.InferenceService{}
 		if err := r.Get(context.TODO(), namespacedName, latest); err != nil {
 			return err
 		}
+		preserved := preserveOMENativeComponentStatus(latest.Status.Components)
 		latest.Status = desiredService.Status
+		mergeOMENativeComponentStatus(&latest.Status, preserved)
 		return r.Status().Update(context.TODO(), latest)
 	}); err != nil {
 		r.Log.Error(err, "Failed to update InferenceService status", "InferenceService", desiredService.Name)
@@ -639,6 +636,40 @@ func inferenceServiceReadiness(status v1beta1.InferenceServiceStatus) bool {
 
 func inferenceServiceStatusEqual(s1, s2 v1beta1.InferenceServiceStatus) bool {
 	return equality.Semantic.DeepEqual(s1, s2)
+}
+
+// preserveOMENativeComponentStatus snapshots the OMENative ComponentStatus
+// subtree per Component, so the caller can re-merge it after overwriting
+// latest.Status with the reconcile-pass desired status. The OMENative
+// reconciler owns Status.Components[*].OMENative; the outer reconciler
+// only touches URL / RestURL / Address / RolloutPhase / Conditions.
+// Without re-merging, OMENative writes that landed between our snapshot
+// and the conflict re-Get get clobbered.
+func preserveOMENativeComponentStatus(comps map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec) map[v1beta1.ComponentType]*v1beta1.OMENativeComponentStatus {
+	if len(comps) == 0 {
+		return nil
+	}
+	out := make(map[v1beta1.ComponentType]*v1beta1.OMENativeComponentStatus, len(comps))
+	for c, cs := range comps {
+		if cs.OMENative != nil {
+			out[c] = cs.OMENative.DeepCopy()
+		}
+	}
+	return out
+}
+
+func mergeOMENativeComponentStatus(s *v1beta1.InferenceServiceStatus, preserved map[v1beta1.ComponentType]*v1beta1.OMENativeComponentStatus) {
+	if len(preserved) == 0 {
+		return
+	}
+	if s.Components == nil {
+		s.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+	}
+	for c, om := range preserved {
+		cs := s.Components[c]
+		cs.OMENative = om
+		s.Components[c] = cs
+	}
 }
 
 // ensureIngressDisableAnnotation adds the ome.io/ingress-disable-creation annotation to the InferenceService

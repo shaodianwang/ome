@@ -216,10 +216,9 @@ func TestIsServing(t *testing.T) {
 }
 
 func TestAddRemove_PreservesKubeletConditions(t *testing.T) {
-	// Critical STATUS-2 property: our patches must not clobber
-	// kubelet-managed conditions like ContainersReady. The strategic-
-	// merge patch with patch-merge-key=type leaves other condition
-	// slots alone.
+	// Patches must NOT clobber kubelet-managed conditions like
+	// ContainersReady — the strategic-merge patch keyed by `type` leaves
+	// other condition slots alone.
 	pod := newReadinessTestPod("p")
 	pod.Status.Conditions = []corev1.PodCondition{
 		{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},

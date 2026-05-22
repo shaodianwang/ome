@@ -15,19 +15,13 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
-// AggregateAndWriteStatus computes Component-level counters and per-
-// Instance counters from the live pod set plus the Component Service's
-// EndpointSlices, stamps the desired revision and (when fully converged)
-// promotes it from UpdateRevision to CurrentRevision, and persists the
-// merged shape in a single Status().Update.
-//
-// The function never overwrites lifecycle fields written by the ops —
-// Phase, Operation, Incarnation, RunningRevision, TargetRevision are
-// preserved on each InstanceStatus.
-//
-// target may be nil when the Component has no rendered PodSpec for this
-// reconcile (e.g., MinReplicas=0); revision fields are left untouched
-// in that case but counters still run.
+// AggregateAndWriteStatus computes Component + per-Instance counters from
+// the live pod set and EndpointSlices, stamps the desired revision, and
+// (on full convergence) promotes UpdateRevision → CurrentRevision. Never
+// overwrites lifecycle fields (Phase, Operation, Incarnation,
+// RunningRevision, TargetRevision) — those belong to the per-op writers.
+// target=nil (no rendered PodSpec; e.g. MinReplicas=0) leaves revision
+// fields untouched; counters still run.
 func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan ComponentPlan, target *appsv1.ControllerRevision) error {
 	if p.Client == nil {
 		return fmt.Errorf("AggregateAndWriteStatus: nil client")
@@ -45,16 +39,10 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		return fmt.Errorf("status: compute availability: %w", err)
 	}
 
-	// Re-read ISVC + recompute counters + Update wrapped in
-	// RetryOnConflict so concurrent component reconciles (engine +
-	// decoder + router all ending with their own AggregateAndWriteStatus)
-	// don't race-fail on the status subresource. Per-Instance counters
-	// are recomputed against the freshly-read ISVC's InstanceStatuses
-	// on every attempt so a parallel op that added/removed an Instance
-	// doesn't get its bookkeeping clobbered.
-	//
-	// Captured outside the retry closure so the post-commit retention
-	// sweep sees the names that actually committed.
+	// Re-read + recompute on each retry so a parallel reconciler that
+	// added/removed an Instance doesn't get its bookkeeping clobbered.
+	// Captured outside the closure so the post-commit retention sweep
+	// sees the names that actually committed.
 	var liveRevisionNames []string
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}
@@ -106,9 +94,8 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {
 			return fmt.Errorf("status: update: %w", err)
 		}
-		// Captured after the successful Update so a retry that loses
-		// to a concurrent write reproduces the names from the
-		// post-conflict re-read on the next attempt.
+		// Capture after a successful Update so a retry replays the names
+		// off the post-conflict re-read.
 		liveRevisionNames = collectLiveRevisionNames(cs.OMENative)
 		return nil
 	})
@@ -116,14 +103,9 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		return err
 	}
 
-	// Post-commit revision retention. Best-effort: a transient API
-	// error on retention shouldn't tear down the whole reconcile
-	// because the next pass tries again. But propagate the error so
-	// operators see persistent failures via the reconcile event log.
-	//
-	// liveNames union ensures in-flight migrations whose
-	// RunningRevision points to an older CR aren't retention-deleted
-	// out from under them (A5/REV-5 from the merged review).
+	// Retention runs post-commit. The liveNames union ensures in-flight
+	// migrations whose RunningRevision points to an older CR aren't
+	// retention-deleted out from under them.
 	if rerr := RetainControllerRevisions(
 		ctx,
 		p.Client,
@@ -138,26 +120,21 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 	return nil
 }
 
-// defaultRevisionRetention is the maximum number of non-live
-// ControllerRevisions kept per Component (OEP §2.2). 10 matches the
-// StatefulSet default and gives operators headroom for rollback
-// inspection without unbounded etcd growth.
+// defaultRevisionRetention caps non-live ControllerRevisions per
+// Component (StatefulSet default; rollback headroom without unbounded
+// etcd growth).
 const defaultRevisionRetention = 10
 
-// collectLiveRevisionNames builds the union of revision names that
-// retention must protect: the Component's CurrentRevision and
-// UpdateRevision PLUS every InstanceStatus.RunningRevision /
-// TargetRevision. Without the InstanceStatus union, an in-flight
-// migration whose source RunningRevision points to an older CR
-// could have that CR retention-deleted mid-flight; the next
-// surgeRevisionAndSpec lookup would return nil and the migration
-// would bail forever (review item A5/REV-5).
+// collectLiveRevisionNames is the union retention must protect: the
+// Component's Current/UpdateRevision plus every
+// InstanceStatus.RunningRevision/TargetRevision. Without the per-instance
+// union, an in-flight migration whose source RunningRevision points to
+// an older CR could have that CR swept mid-flight, then
+// surgeRevisionAndSpec returns nil and the migration bails forever.
 func collectLiveRevisionNames(cs *v1beta1.OMENativeComponentStatus) []string {
 	if cs == nil {
 		return nil
 	}
-	// Dedup via a small map; the union is at most O(replicas+2)
-	// entries so direct allocation is fine.
 	seen := map[string]struct{}{}
 	add := func(name string) {
 		if name == "" {
@@ -181,13 +158,10 @@ func collectLiveRevisionNames(cs *v1beta1.OMENativeComponentStatus) []string {
 	return out
 }
 
-// availablePodSet returns the set of pod names whose endpoint is Ready
-// in any EndpointSlice for serviceName. Uses endpointAvailable (DRAIN-1)
-// so terminating-but-still-Ready endpoints are excluded — a pod in
-// graceful termination shouldn't count toward AvailableReplicas because
-// kube-proxy won't route new requests to it. Equivalent to
-// "IsPodInRotation for every pod at once" but with a single slice list
-// to avoid the N+1 reads AggregateAndWriteStatus would otherwise do.
+// availablePodSet returns pod names that are Ready and non-terminating
+// in any EndpointSlice for serviceName. endpointAvailable excludes
+// terminating-but-Ready endpoints — they're not getting new traffic.
+// Single slice list (vs. IsPodInRotation per pod) avoids N+1 reads.
 func availablePodSet(ctx context.Context, reads client.Reader, namespace, serviceName string) (map[string]struct{}, error) {
 	out := map[string]struct{}{}
 	slices, err := endpointSlicesForService(ctx, reads, namespace, serviceName)
@@ -260,8 +234,8 @@ func uniqueNodes(pods []*corev1.Pod) []string {
 	return out
 }
 
-// countReadyInstances returns the number of Instances whose every pod
-// reports ContainersReady=True and whose PodCount is at least 1.
+// countReadyInstances counts Instances whose every pod is
+// ContainersReady=True (PodCount > 0).
 func countReadyInstances(insts []v1beta1.OMENativeInstanceStatus) int32 {
 	var n int32
 	for _, s := range insts {
@@ -272,9 +246,9 @@ func countReadyInstances(insts []v1beta1.OMENativeInstanceStatus) int32 {
 	return n
 }
 
-// countAvailableInstances returns the number of Instances whose every
-// pod is in EndpointSlice rotation. Sub-condition of Ready: a pod must
-// be Ready for kube-proxy to publish its endpoint as Ready=true.
+// countAvailableInstances counts Instances whose every pod is in
+// EndpointSlice rotation. Strict sub-condition of Ready — kube-proxy
+// only publishes Ready pods.
 func countAvailableInstances(insts []v1beta1.OMENativeInstanceStatus) int32 {
 	var n int32
 	for _, s := range insts {
@@ -286,9 +260,8 @@ func countAvailableInstances(insts []v1beta1.OMENativeInstanceStatus) int32 {
 }
 
 // countUpdatedInstances returns (UpdatedReplicas, UpdatedReadyReplicas)
-// counting Instances on targetRevName. UpdatedReadyReplicas additionally
-// requires every pod of the Instance to be Ready — what HPA's
-// scale-aware rollout pacing depends on.
+// for Instances on targetRevName. UpdatedReadyReplicas adds the Ready
+// gate — what HPA's scale-aware rollout pacing reads.
 func countUpdatedInstances(insts []v1beta1.OMENativeInstanceStatus, targetRevName string) (updated, updatedReady int32) {
 	for _, s := range insts {
 		if s.RunningRevision != targetRevName {
@@ -302,9 +275,8 @@ func countUpdatedInstances(insts []v1beta1.OMENativeInstanceStatus, targetRevNam
 	return updated, updatedReady
 }
 
-// rolloutComplete reports whether every Instance has converged onto
-// targetRevName AND is in steady Ready state. Triggers CurrentRevision
-// promotion.
+// rolloutComplete is the CurrentRevision promotion gate: every Instance
+// on targetRevName AND Phase=Ready.
 func rolloutComplete(insts []v1beta1.OMENativeInstanceStatus, targetRevName string) bool {
 	if len(insts) == 0 {
 		return false
@@ -320,9 +292,8 @@ func rolloutComplete(insts []v1beta1.OMENativeInstanceStatus, targetRevName stri
 	return true
 }
 
-// componentLabelSelectorString renders the pod label set as a
-// canonical "k=v,k=v" selector string. Consumed by HPA via the
-// Component's status.labelSelector subresource.
+// componentLabelSelectorString is the canonical "k=v,k=v" selector
+// string consumed by HPA via the Component's status.labelSelector.
 func componentLabelSelectorString(isvc string, component v1beta1.ComponentType) string {
 	return labels.SelectorFromSet(labels.Set{
 		constants.InferenceServicePodLabelKey: isvc,

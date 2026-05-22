@@ -52,6 +52,24 @@ repos:
         types: [go]
         pass_filenames: false
 
+      # ci-lint runs the same golangci-lint invocation CI uses. Catches
+      # `unused` symbols (unexported helpers, struct fields, vars) that
+      # go vet doesn't flag — golangci-lint runs the `unused` checker
+      # which understands Go's package-scope reachability, including
+      # test files. Stops "I'll add a helper now and use it in the next
+      # commit" from sneaking past local pre-commit only to fail in CI.
+      # Runs `manual` only so a fast pre-commit can skip; pre-push and
+      # CI invoke it. Disable per-invocation with --hook-stage=pre-commit
+      # if iterating quickly.
+      - id: ci-lint
+        name: golangci-lint (make ci-lint)
+        description: Run the same golangci-lint invocation CI uses
+        entry: make ci-lint
+        language: system
+        types: [go]
+        pass_filenames: false
+        stages: [pre-push, manual]
+
       - id: helm-lint
         name: helm lint
         description: Lint Helm charts

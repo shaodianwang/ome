@@ -154,11 +154,10 @@ func TestRestart_DeletesOldPodOnceDrained(t *testing.T) {
 }
 
 func TestRestart_RefusesToDeleteOrphanPod(t *testing.T) {
-	// OPS-3: a pod selected by labels=managed-by=OMENative but missing
-	// ome.io/instance-incarnation is treated as `unknown` (third bucket).
-	// Restart must NOT delete it; instead emit a FoundOrphan warning and
-	// short-circuit. Operator triage decides whether to re-label or delete
-	// the orphan manually.
+	// A pod under the OMENative selector but missing
+	// ome.io/instance-incarnation is an orphan. Restart must emit
+	// FoundOrphan and short-circuit rather than deleting it — the operator
+	// re-labels or removes it manually.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	orphan := podAtIncarnation(isvc, 0, 1, true, false)
@@ -471,8 +470,8 @@ func TestReconcileComponent_RestartTriggerDispatches(t *testing.T) {
 }
 
 func TestPartitionPodsByIncarnation(t *testing.T) {
-	// OPS-3: label-missing pods land in the unknown bucket rather
-	// than silently being deleted alongside old-incarnation pods.
+	// Label-missing pods land in the unknown bucket rather than getting
+	// silently deleted alongside old-incarnation pods.
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	p1 := podAtIncarnation(isvc, 0, 1, false, false)

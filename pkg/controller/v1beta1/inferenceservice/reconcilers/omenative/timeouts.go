@@ -14,34 +14,23 @@ import (
 )
 
 // timeoutReasonExceeded is stamped on Operation.Reason when a deadline
-// elapses without a recovery transition. External observers
-// (events.go later) lift it into an OperationStuck condition; for now
-// it's a flag visible via kubectl.
+// elapses without recovery. The condition layer lifts it into
+// OperationStuck.
 const timeoutReasonExceeded = "DeadlineExceeded"
 
-// The InPlaceTimeoutFallback breadcrumb the original PR #193 deferred
-// to events.go lives in conditions.go as ReasonInPlaceTimeoutFallback
-// now (lifted into the InPlaceUpdateFallback Condition by PR C4); no
-// local const needed here.
-
-// ExpireOperationsIfDeadlinePassed walks every InstanceStatus and, for
-// any whose Operation.Deadline has elapsed without a terminal
-// transition, takes recovery action.
+// ExpireOperationsIfDeadlinePassed walks every InstanceStatus and takes
+// recovery action on any whose Operation.Deadline has elapsed:
 //
-// Current recovery matrix (broader cases land alongside events.go):
+//	in-place Update -> clear Operation, restore Phase=Ready (next reconcile's
+//	                   detectUpdateTrigger refires and recreate takes over).
+//	Migrate         -> live surge re-check; abandon surge if not ready,
+//	                   else stamp DeadlineExceeded.
+//	any other       -> stamp Reason=DeadlineExceeded. The controller refuses
+//	                   to force-progress ops whose drain/surge steps have
+//	                   committed traffic side effects.
 //
-//	in-place Update timeout -> clear Operation, restore Phase=Ready.
-//	                           detectUpdateTrigger refires on the next
-//	                           reconcile and recreate handles the
-//	                           rollout. Reason=InPlaceTimeoutFallback.
-//	any other timeout        -> stamp Reason=DeadlineExceeded so the
-//	                           condition surface picks it up. The
-//	                           controller does not force-progress
-//	                           operations whose drain or surge steps
-//	                           may have committed traffic side-effects.
-//
-// Called near the top of ReconcileComponent so timed-out ops are
-// reset before the per-op detectors run.
+// Called near the top of ReconcileComponent so timed-out ops reset before
+// the per-op detectors run.
 func ExpireOperationsIfDeadlinePassed(ctx context.Context, p ReconcileParams, plan ComponentPlan) error {
 	if p.Client == nil {
 		return fmt.Errorf("ExpireOperationsIfDeadlinePassed: nil client")
@@ -68,13 +57,11 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p ReconcileParams, pl
 				instanceKey(plan.Component, s.Index))
 			continue
 		}
-		// MIGRATE-1: Migrate timeouts get a live surge re-check
-		// rather than the blanket DeadlineExceeded stamp. If surge
-		// pods are all runtime-ready the stamp stays (issue is
-		// downstream of surge — drain step or kube-proxy lag);
-		// operator investigates. If surge isn't ready, abandon
-		// surge ("preserve old, abandon surge" per OEP §B.4) so the
-		// Component doesn't sit forever in a half-finished state.
+		// Migrate timeouts get a live surge re-check rather than the
+		// blanket stamp: if surge is runtime-ready the wedge is
+		// downstream (drain / kube-proxy lag) and operator must
+		// investigate; if not, abandon surge so the Component doesn't
+		// sit forever in a half-finished state.
 		if isMigrate(s.Operation) {
 			abandoned, err := tryAbandonStuckMigration(ctx, p, plan.Component, s)
 			if err != nil {
@@ -102,36 +89,25 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p ReconcileParams, pl
 	return nil
 }
 
-// isMigrate identifies a Type=Migrate operation on the source side
-// of a surge pair. Only source-side stamps carry a SurgeIndex
-// pointer; the surge-side stamp has SurgeIndex pointing back at the
-// source but its own Type=Migrate too. We treat both as
-// migration ops for timeout-handling purposes — the abandon helper
-// figures out which side it's looking at by inspecting SurgeIndex.
+// isMigrate identifies any Type=Migrate operation. Both source and surge
+// stamps use the same Type; tryAbandonStuckMigration disambiguates by
+// inspecting SurgeIndex.
 func isMigrate(op *v1beta1.InstanceOperation) bool {
 	return op != nil && op.Type == v1beta1.InstanceOperationMigrate
 }
 
-// tryAbandonStuckMigration is the MIGRATE-1 surge re-check. Returns
-// abandoned=true when the surge was found not-ready and the
-// migration was rolled back. abandoned=false means surge is healthy
-// and the caller should fall through to the generic stuck stamp
-// (operator must investigate the downstream-of-surge wedge).
+// tryAbandonStuckMigration runs the surge re-check on a Migrate timeout.
+// Returns abandoned=true when the surge was found not-ready and the
+// migration was rolled back. abandoned=false means surge is healthy and
+// the caller falls through to the generic stuck stamp.
 //
-// The abandon path:
-//
-//  1. Issue best-effort Deletes on every surge pod (NotFound is OK
-//     for re-runs).
-//  2. RemoveNotReadyKey on source pods so the drain key set during
-//     step 8 of Migrate is reversed and source pods return to
-//     serving rotation.
-//  3. Restore source InstanceStatus: clear Operation, Phase=Ready.
-//  4. Remove the surge InstanceStatus.
-//  5. Write Failed audit row + clear request annotation.
+// Rollback steps (all idempotent so a mid-crash resumes):
+//  1. Delete surge pods.
+//  2. RemoveNotReadyKey on source pods (reverses the source-drain key).
+//  3. Restore source InstanceStatus to Phase=Ready, Operation=nil.
+//  4. Remove surge InstanceStatus.
+//  5. Write Failed audit row + clear the request annotation.
 //  6. Emit MigrationSurgeAbandoned event.
-//
-// Re-entrant: every step uses idempotent helpers so a crash mid-
-// rollback completes on the next reconcile.
 func tryAbandonStuckMigration(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, source v1beta1.OMENativeInstanceStatus) (bool, error) {
 	if source.Operation == nil || source.Operation.SurgeIndex == nil {
 		// Source-side stamp without SurgeIndex is malformed (or
@@ -272,16 +248,11 @@ func fallbackInPlaceToRecreate(ctx context.Context, p ReconcileParams, component
 		}
 		s.Phase = v1beta1.OMENativeInstanceReady
 		s.Operation = nil
-		// TargetRevision is preserved on the InstanceStatus so the
-		// next reconcile can still see "this Instance is heading
-		// toward X" while detectUpdateTrigger refires. The recreate
-		// path will overwrite Operation with Step=Drain on its next
-		// pass.
-		//
-		// Lift the in-place timeout breadcrumb (originally deferred
-		// from PR #193) into the InstanceStatus.Conditions surface so
-		// operators see why this Instance suddenly looks Ready but is
-		// about to recreate.
+		// TargetRevision stays so the next reconcile still knows where
+		// this Instance is heading; recreate's first pass overwrites
+		// Operation with Step=Drain. The InPlaceUpdateFallback condition
+		// surfaces WHY the Instance suddenly looks Ready but is about to
+		// recreate.
 		apimeta.SetStatusCondition(&s.Conditions, metav1.Condition{
 			Type:               ConditionInPlaceUpdateFallback,
 			Status:             metav1.ConditionTrue,

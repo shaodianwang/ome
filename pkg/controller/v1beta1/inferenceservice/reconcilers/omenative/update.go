@@ -28,18 +28,15 @@ func updateDrainKey(idx int32, incarnation int64) string {
 // in flight.
 const updateRequeueInterval = 5 * time.Second
 
-// Update drives one Instance toward the target ControllerRevision. The
-// rollout mode is chosen per Instance:
+// Update drives one Instance toward the target ControllerRevision. Mode
+// is chosen per Instance:
 //
-//   - RecreatePod: always drain + delete + create at the bumped Incarnation.
-//   - InPlaceIfPossible: try image-patch first when every pod's diff to
-//     the target is restricted to container images; otherwise recreate.
-//   - InPlaceOnly: image-patch when eligible; refuse with an error
-//     otherwise (operator must pick a different strategy or fix the
-//     spec to keep the diff image-only).
+//   - RecreatePod: always drain + delete + recreate at bumped Incarnation.
+//   - InPlaceIfPossible: image-patch when the diff is container images
+//     only; otherwise fall through to recreate.
+//   - InPlaceOnly: image-patch when eligible; error otherwise.
 //
-// done=true means the Instance is back at Phase=Ready with
-// RunningRevision pointing at the target.
+// done=true once Phase=Ready with RunningRevision=target.Name.
 func Update(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec) (bool, error) {
 	if p.Client == nil {
 		return false, fmt.Errorf("Update: nil client")
@@ -53,15 +50,12 @@ func Update(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst Ins
 		return false, fmt.Errorf("Update: list pods (instance=%d): %w", inst.Index, err)
 	}
 
-	// Eligibility is decided against the recorded running revision, not
-	// the live pod. Live pods carry API-server-defaulted fields
-	// (restartPolicy, dnsPolicy, imagePullPolicy, terminationMessagePath,
-	// schedulerName, defaulted securityContext, ...) plus OMENative's own
-	// Render overlays (hostname/subdomain/serving gate). Byte-comparing
-	// against the freshly-rendered target would always declare every
-	// rollout ineligible. The recorded running revision's PodSpec is the
-	// pre-defaulted, pre-overlay canonical form, the same shape the
-	// target hashes against.
+	// Eligibility compares against the recorded running revision, NOT the
+	// live pod. Live pods carry apiserver-defaulted fields and Render
+	// overlays (hostname/subdomain/serving gate); byte-comparing those
+	// against the freshly-rendered target would always declare ineligible.
+	// The recorded revision's PodSpec is the pre-defaulted canonical form
+	// the target hashes against.
 	runningSpec, err := loadRunningRevisionPodSpec(ctx, p.reader(), p.ISVC, plan.Component, inst.Index)
 	if err != nil {
 		return false, fmt.Errorf("Update: load running revision (instance=%d): %w", inst.Index, err)
@@ -69,20 +63,17 @@ func Update(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst Ins
 
 	mode, err := chooseUpdateMode(plan.UpdateStrategy.Type, runningSpec, targetSpec)
 	if err != nil {
-		// InPlaceOnly with ineligible diff is the only path that
-		// errors here. Surface it as an operator-visible event so
-		// the rejection has a kubectl describe trail.
+		// InPlaceOnly + ineligible diff is the only error path here.
 		recordWarning(p, EventReasonInPlaceUpdateNotPossible,
 			"OMENative %s rejected update: %v",
 			instanceKey(plan.Component, inst.Index), err)
 		return false, fmt.Errorf("choose update mode (instance=%d): %w", inst.Index, err)
 	}
 
-	// Status stamping is per-mode because recreate needs to bump
-	// Incarnation atomically with the Updating-transition write while
-	// in-place must NOT bump (the spec says in-place is the same
-	// materialization). Doing a generic Updating write here first would
-	// let recreate's bump branch idempotency-skip on the second pass.
+	// Status stamping is per-mode: recreate bumps Incarnation atomically
+	// with the Updating transition; in-place must NOT bump (same
+	// materialization). A generic Updating write here would let recreate's
+	// bump branch idempotency-skip on the second pass.
 	switch mode {
 	case updateModeInPlace:
 		return inPlaceUpdate(ctx, p, plan, inst, target, targetSpec, pods)
@@ -100,12 +91,9 @@ const (
 	updateModeInPlace
 )
 
-// chooseUpdateMode resolves the strategy enum + eligibility check to a
-// concrete mode. InPlaceOnly with an ineligible diff is rejected — the
-// operator wrote a strategy the spec change can't satisfy. running is
-// the PodSpec recorded on the Instance's current RunningRevision CR;
-// passing nil (no recorded revision yet) is treated as ineligible and
-// forces recreate so the rollout starts from a known baseline.
+// chooseUpdateMode resolves strategy + eligibility into a mode. nil
+// running spec is treated as ineligible, forcing recreate from a known
+// baseline. InPlaceOnly + ineligible returns an error.
 func chooseUpdateMode(strategy v1beta1.OMENativeUpdateStrategyType, running, target *corev1.PodSpec) (updateMode, error) {
 	eligible := inPlaceEligible(running, target)
 	switch strategy {
@@ -126,16 +114,11 @@ func chooseUpdateMode(strategy v1beta1.OMENativeUpdateStrategyType, running, tar
 	}
 }
 
-// inPlaceEligible reports whether the diff between the running and
-// target PodSpecs is restricted to regular-container images. Both
-// sides are stripped of regular-container images (init images are
-// preserved so an init-image-only diff falls through to recreate)
-// then byte-compared; equality means images are the only field that
-// differs.
-//
-// Returns false when either side is nil — a missing running spec
-// (no recorded revision yet) is treated as "cannot prove image-only,"
-// forcing recreate.
+// inPlaceEligible reports whether the diff is regular-container images
+// only. Both sides are stripped of regular-container images then
+// byte-compared; init images are preserved so an init-image diff routes
+// to recreate (kubelet can't re-run init containers after an image patch).
+// nil on either side returns false — can't prove image-only.
 func inPlaceEligible(running, target *corev1.PodSpec) bool {
 	if running == nil || target == nil {
 		return false
@@ -151,18 +134,10 @@ func inPlaceEligible(running, target *corev1.PodSpec) bool {
 	return string(runningStripped) == string(targetStripped)
 }
 
-// loadRunningRevisionPodSpec returns the PodSpec recorded on the
-// ControllerRevision named by the Instance's RunningRevision status
-// field. Returns (nil, nil) when:
-//
-//   - the Instance has no InstanceStatus yet (first reconcile),
-//   - the Instance has no RunningRevision recorded (legacy pod created
-//     before status started tracking it), or
-//   - the named CR no longer exists (operator force-deleted, or
-//     retention swept too aggressively).
-//
-// Caller treats a nil return as "no baseline" — eligibility falls
-// through to recreate so the rollout starts from a known revision.
+// loadRunningRevisionPodSpec returns the PodSpec from the CR named by
+// InstanceStatus.RunningRevision. Returns (nil, nil) when no status
+// exists, no RunningRevision is recorded, or the CR is gone — callers
+// treat that as no baseline and route to recreate.
 func loadRunningRevisionPodSpec(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) (*corev1.PodSpec, error) {
 	s := findInstanceStatus(isvc, component, idx)
 	if s == nil || s.RunningRevision == "" {
@@ -183,13 +158,9 @@ func loadRunningRevisionPodSpec(ctx context.Context, reads client.Reader, isvc *
 	return payload.PodSpec, nil
 }
 
-// podSpecWithoutImages returns the JSON form of spec with regular-
-// container images stripped. Init-container images are intentionally
-// preserved — init containers run once at pod creation, and kubelet
-// has no machinery to re-run them after an image patch, so an
-// init-image diff cannot be applied in place. Leaving InitContainer
-// images in the canonical form forces an init-image-only diff to fail
-// the inPlaceEligible byte-compare and route to recreate.
+// podSpecWithoutImages returns the JSON form with regular-container
+// images stripped; init-container images stay so an init-image-only diff
+// fails inPlaceEligible and routes to recreate.
 func podSpecWithoutImages(spec *corev1.PodSpec) ([]byte, error) {
 	clone := spec.DeepCopy()
 	for i := range clone.Containers {
@@ -198,17 +169,11 @@ func podSpecWithoutImages(spec *corev1.PodSpec) ([]byte, error) {
 	return json.Marshal(clone)
 }
 
-// inPlaceUpdate executes the in-place rollout sequence: drain, patch
-// container images on every live pod, wait for runtime ready on the
-// target image, flip serving=True, mark Phase=Ready with
-// RunningRevision=target.Name.
-//
-// Multi-pass; idempotent at every step.
+// inPlaceUpdate runs the in-place rollout: drain (optional), patch
+// container images, wait for runtime ready on the target image, flip
+// serving back, promote Ready. Multi-pass; idempotent.
 func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, pods []*corev1.Pod) (bool, error) {
-	// Step 1: stamp Phase=Updating without bumping Incarnation —
-	// in-place keeps the same materialization, just rewrites the image.
-	// Capture whether this is the first pass into the in-place flow
-	// (not yet in Updating) so we only emit InPlaceUpdateStarted once.
+	// In-place keeps the same Incarnation — only the container image rolls.
 	wasNotUpdating := true
 	if s := findInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil && s.Phase == v1beta1.OMENativeInstanceUpdating {
 		wasNotUpdating = false
@@ -228,7 +193,7 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 		markNotReady = *plan.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle
 	}
 
-	// Step 2: flip serving=False if the strategy requires draining first.
+	// Drain first when the strategy requires it.
 	if markNotReady {
 		for _, pod := range pods {
 			if !IsServing(pod) {
@@ -238,9 +203,7 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
-		// Step 3: wait for EndpointSlice drain before mutating the pod.
-		// Live reader so stale cache doesn't declare drain done while
-		// kube-proxy still routes to the pod.
+		// Live reader on drain check so kube-proxy isn't still routing.
 		serviceName := headlessServiceName(p.ISVC.Name, plan.Component)
 		for _, pod := range pods {
 			drained, err := IsPodDrained(ctx, p.reader(), p.ISVC.Namespace, serviceName, pod)
@@ -253,18 +216,13 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 		}
 	}
 
-	// Step 4: patch container images on every pod.
-	//
-	// OPS-4: when the strategy drains first (markNotReady=true), re-read
-	// the pod and re-check IsServing immediately before each patch. A
-	// concurrent writer (another controller, a pod-mutating webhook re-
-	// injecting a sidecar) could flip serving back to True after the
-	// drain check passed; patching images on a serving pod violates the
-	// always-drain-before-image-patch invariant. On detection, re-flip
-	// NotServing and requeue; the next pass re-runs the drain wait.
-	//
-	// Live reader on the re-read so a stale cache view of serving=False
-	// doesn't fail the recheck open.
+	// Image patch. When markNotReady=true, re-read each pod and re-check
+	// IsServing immediately before patching — a concurrent writer (another
+	// controller, a pod-mutating webhook re-injecting a sidecar) could flip
+	// serving back to True after the drain check passed, and patching a
+	// serving pod violates the always-drain-first invariant. On detection,
+	// re-mark NotServing and requeue. Live reader so a stale serving=False
+	// view doesn't fail the recheck open.
 	patched := false
 	for _, pod := range pods {
 		if podImagesMatch(pod, targetSpec) {
@@ -282,7 +240,6 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 				if err := MarkPodNotServing(ctx, p.Client, fresh, WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
 					return false, fmt.Errorf("re-mark not serving (instance=%d, pod=%s): %w", inst.Index, fresh.Name, err)
 				}
-				// Bail and requeue — next pass re-runs the drain wait.
 				return false, nil
 			}
 			pod = fresh
@@ -293,17 +250,14 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 		patched = true
 	}
 	if patched {
-		// Just patched — kubelet needs another pass to roll the
-		// containers; readiness can't possibly be re-converged yet.
+		// Kubelet needs another pass to roll the containers.
 		return false, nil
 	}
 
-	// Step 5: every pod must report runtime ready on the target image
-	// before we proceed. ContainersReady=True alone is not enough — the
-	// cache can still show the old condition while spec.image has just
-	// been updated. Also require Status.ContainerStatuses[*].Image to
-	// match the target so we only declare convergence after kubelet has
-	// actually rolled the container.
+	// Convergence: ContainersReady alone isn't enough — the cache can
+	// still show the old condition immediately after a spec.image flip.
+	// Also require Status.ContainerStatuses[*].Image to match so we
+	// declare done only after kubelet actually rolled the container.
 	if !allPodsRuntimeReady(pods) {
 		return false, nil
 	}
@@ -316,7 +270,6 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 		}
 	}
 
-	// Step 6: flip serving=True on every pod.
 	for _, pod := range pods {
 		if IsServing(pod) {
 			continue
@@ -326,7 +279,6 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 		}
 	}
 
-	// Step 7: status to Ready, RunningRevision=target.
 	if err := patchInstanceStatusReadyOnRevision(ctx, p, plan.Component, inst.Index, target.Name); err != nil {
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
 	}
@@ -336,20 +288,13 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 	return true, nil
 }
 
-// recreateUpdate executes the recreate rollout sequence: drain + delete
-// every current pod, then create the new pod set at the bumped
-// Incarnation. Multi-pass and idempotent.
-//
-// Shares the drain/delete/recreate skeleton with Restart but pivots on
-// template-change rather than pod-loss. pods is the full observed
-// instance pod set; partitionPodsByIncarnation splits it into the
-// old-incarnation pods that need draining and the new-incarnation
-// pods that should be left alone (or created if missing).
+// recreateUpdate runs the recreate rollout: drain + delete every
+// current-incarnation pod, recreate at the bumped Incarnation. Shares
+// the drain/delete/recreate skeleton with Restart but pivots on
+// template-change rather than pod-loss. Multi-pass; idempotent.
 func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, target *appsv1.ControllerRevision, pods []*corev1.Pod) (bool, error) {
-	// Bump Incarnation if we haven't already on this rollout. The
-	// per-rollout edge for the RecreateUpdateStarted event is "no
-	// Operation, or Operation.Step != Drain" — recreate's first
-	// stamp sets Step=Drain.
+	// "First pass of recreate" = no in-flight Update or Step != Drain;
+	// the recreate stamp sets Step=Drain.
 	wasNotRecreating := true
 	if s := findInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil &&
 		s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationUpdate &&
@@ -368,10 +313,9 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 
 	oldPods, newPods, unknownPods := partitionPodsByIncarnation(pods, newInc)
 
-	// OPS-3: surface orphan pods (label-missing) as warning events and
-	// refuse to proceed. Same rationale as Restart: a label strip or a
-	// third-party operator stamping the OMENative managed-by label
-	// would otherwise be silently torn down by Phase A.
+	// Refuse to proceed on orphan pods (label-missing). Without this guard
+	// a stripped label or third-party reuse of managed-by would get torn
+	// down by Phase A. Same rationale as Restart.
 	if len(unknownPods) > 0 {
 		for _, pod := range unknownPods {
 			recordWarning(p, EventReasonFoundOrphan,
@@ -381,7 +325,7 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 		return false, nil
 	}
 
-	// Phase A: drain + delete old pods (same as Restart's old-pod phase).
+	// Phase A: drain + delete old pods.
 	if len(oldPods) > 0 {
 		for _, pod := range oldPods {
 			if !IsServing(pod) {
@@ -391,8 +335,7 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
-		// Live reader on the drain check — see comment in inPlaceUpdate
-		// for the same rationale.
+		// Live reader on drain check so kube-proxy isn't still routing.
 		serviceName := headlessServiceName(p.ISVC.Name, plan.Component)
 		for _, pod := range oldPods {
 			drained, err := IsPodDrained(ctx, p.reader(), p.ISVC.Namespace, serviceName, pod)
@@ -406,32 +349,28 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
-		deleted := 0
+		// EXPECT-ORDER: per-pod ExpectDeletes BEFORE Delete, rollback via
+		// ObservedDelete on error — a failed RPC fires no event to decrement.
 		for _, pod := range oldPods {
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
+			p.expectations().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, 1)
 			if err := p.Client.Delete(ctx, pod); err != nil {
+				p.expectations().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index)
 				if apierrors.IsNotFound(err) {
 					continue
 				}
 				return false, fmt.Errorf("delete pod %s/%s: %w", pod.Namespace, pod.Name, err)
 			}
-			deleted++
-		}
-		if deleted > 0 {
-			p.expectations().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, deleted)
 		}
 		return false, nil
 	}
 
-	// Phase B: create the new pod set at the bumped Incarnation.
-	// OPS-2: live-read the OLD pod set first. Same rationale as
-	// Restart Phase B — stable-name Create here would
-	// AlreadyExists-conflict if the cache says "old gone" while the
-	// API server still holds the still-terminating previous
-	// incarnation. Tolerating terminating-but-not-yet-gone matches
-	// K8s foreground propagation.
+	// Phase B: recreate at the bumped Incarnation.
+	// Live-read the OLD set first — a stable-name Create with the cache
+	// stale would AlreadyExists against a still-terminating previous
+	// incarnation. Matches K8s foreground-deletion propagation.
 	clear, err := liveOldPodsClearedForRecreate(ctx, p, plan.Component, inst.Index, newInc)
 	if err != nil {
 		return false, fmt.Errorf("recreateUpdate: live-check Phase A done (instance=%d): %w", inst.Index, err)
@@ -455,17 +394,13 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
-		created, err := createMissingPods(ctx, p, plan, newInst, missing)
-		if err != nil {
+		if _, err := createMissingPods(ctx, p, plan, newInst, inst.Index, missing); err != nil {
 			return false, err
-		}
-		if created > 0 {
-			p.expectations().ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, created)
 		}
 		return false, nil
 	}
 
-	// Phase C: wait runtime-ready, flip serving, mark Ready+RunningRevision.
+	// Phase C: flip serving, promote Ready+RunningRevision.
 	if !allPodsRuntimeReady(newPods) {
 		return false, nil
 	}
@@ -473,9 +408,8 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 		if IsServing(pod) {
 			continue
 		}
-		// NEW pods are fresh — go through Lifecycle, not the old
-		// Update-recreate-drain key (which was on the now-deleted
-		// old pods).
+		// Lifecycle key on fresh pods; the Update-recreate-drain key only
+		// lived on the now-deleted old pods.
 		if err := MarkPodServing(ctx, p.Client, pod, WriterLifecycle, KeyLifecycleInstanceReady); err != nil {
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
@@ -489,18 +423,9 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 	return true, nil
 }
 
-// detectUpdateTrigger reports whether the Instance needs to start (or
-// continue) an Update. Returns (true, currentTarget) when:
-//
-//   - the Instance is already mid-update (Phase=Updating), or
-//   - the Instance is Phase=Ready but at least one of its pods carries
-//     a PodSpec that hashes to a revision other than the target.
-//
-// Phase=Creating / Phase=Deleting / Phase=Restarting / Phase=Migrating
-// are not interruptible by Update; those operations finish first.
-//
-// target is the ControllerRevision the Component currently desires
-// (caller computes via EnsureControllerRevision).
+// detectUpdateTrigger fires when the Instance is mid-update, or when
+// Phase=Ready and a pod's PodSpec hashes to a non-target revision.
+// Creating / Deleting / Restarting / Migrating are not interruptible.
 func detectUpdateTrigger(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec) (bool, error) {
 	s := findInstanceStatus(p.ISVC, plan.Component, inst.Index)
 	if s == nil {
@@ -513,19 +438,14 @@ func detectUpdateTrigger(ctx context.Context, p ReconcileParams, plan ComponentP
 		return false, nil
 	}
 
-	// Ready Instance: check whether the live pods match the target.
-	// If any pod's PodSpec hashes differently from the target's, we need
-	// to update. RunningRevision is the cheap fast-path: matches target =
-	// done, mismatch = update needed.
+	// RunningRevision is the cheap fast-path comparison.
 	if s.RunningRevision != "" && s.RunningRevision != target.Name {
 		return true, nil
 	}
 	if s.RunningRevision == target.Name {
 		return false, nil
 	}
-	// No RunningRevision recorded (first reconcile after the feature
-	// landed, or an instance created before status started tracking it).
-	// Compare observed pods to target. Any mismatch triggers update.
+	// Empty RunningRevision — fall back to per-pod diff and backfill.
 	pods, err := listPodsForInstance(ctx, p.Client, p.ISVC, plan.Component, inst.Index)
 	if err != nil {
 		return false, err
@@ -535,18 +455,16 @@ func detectUpdateTrigger(ctx context.Context, p ReconcileParams, plan ComponentP
 			return true, nil
 		}
 	}
-	// All pods already match the target — backfill RunningRevision so
-	// subsequent reconciles take the cheap fast-path comparison instead
-	// of re-running the full per-pod diff every cycle.
+	// Backfill so future reconciles take the fast-path.
 	if err := patchInstanceStatusReadyOnRevision(ctx, p, plan.Component, inst.Index, target.Name); err != nil {
 		return false, fmt.Errorf("backfill RunningRevision (instance=%d): %w", inst.Index, err)
 	}
 	return false, nil
 }
 
-// podMatchesTarget returns true when pod's runtime PodSpec is equivalent
-// to target — same image-stripped JSON AND matching container images.
-// Used by detectUpdateTrigger when RunningRevision is missing.
+// podMatchesTarget compares pod's runtime PodSpec to target — same
+// image-stripped JSON AND matching container images. Used when
+// RunningRevision is missing.
 func podMatchesTarget(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	if pod == nil || target == nil {
 		return false
@@ -565,14 +483,11 @@ func podMatchesTarget(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	return podImagesMatch(pod, target)
 }
 
-// podRuntimeImagesMatch returns true when kubelet has confirmed the
-// pod is running the target image — every Status.ContainerStatuses
-// entry's .Image matches the target's same-named container. This is
-// the runtime-truth signal that complements podImagesMatch's spec
-// check: after a patchPodImages call, spec.image flips immediately
-// but kubelet may not have rolled the container yet, leaving stale
-// ContainersReady=True and an old runtime image. Only after both
-// match do we know the in-place update has actually taken effect.
+// podRuntimeImagesMatch is the runtime-truth signal complementing
+// podImagesMatch's spec check: spec.image flips immediately on patch but
+// kubelet may not have rolled the container yet, leaving the old image
+// in Status.ContainerStatuses[*].Image. Only after both match has the
+// in-place update actually taken effect.
 func podRuntimeImagesMatch(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	if pod == nil || target == nil {
 		return false
@@ -586,15 +501,13 @@ func podRuntimeImagesMatch(pod *corev1.Pod, target *corev1.PodSpec) bool {
 			return false
 		}
 	}
-	// All container statuses must be present; if kubelet hasn't yet
-	// emitted a status for one of the target containers we cannot
-	// confirm convergence.
+	// Need a status for every target container before declaring done.
 	return len(pod.Status.ContainerStatuses) >= len(target.Containers)
 }
 
-// podImagesMatch returns true when every container in pod matches the
-// container of the same name in target by .Image. Containers with no
-// counterpart in target fail the match.
+// podImagesMatch returns true when every container in pod has the same
+// .Image as the same-named container in target. Pod containers absent
+// from target fail the match.
 func podImagesMatch(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	if pod == nil || target == nil {
 		return false
@@ -611,18 +524,10 @@ func podImagesMatch(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	return true
 }
 
-// patchPodImages updates each container's image field to match the
-// corresponding container in target via a strategic-merge patch. Only
-// the changed images go over the wire; unrelated fields (Volumes,
-// EnvVars, etc.) the API server may have defaulted are not touched.
-// Kubelet observes the change and performs a rolling container
-// restart inside the pod.
-//
-// Strategic-merge is the correct vehicle for "only changing N
-// fields by name" — it merges by patch-merge-key, which for
-// PodSpec.Containers is the container name. A plain client.Update
-// would write the entire pod object and conflict with any other
-// controller that touched the same RV in between.
+// patchPodImages strategic-merge-patches each changed container image.
+// Strategic-merge keys by container name so the patch leaves other
+// containers and apiserver-defaulted fields untouched; a plain Update
+// would conflict with any other controller writing to the same RV.
 func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, target *corev1.PodSpec) error {
 	if pod == nil || target == nil {
 		return fmt.Errorf("patchPodImages: nil pod or target")
@@ -647,12 +552,9 @@ func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, targe
 	if len(containersPatch) == 0 {
 		return nil
 	}
-	patch := map[string]any{
-		"spec": map[string]any{
-			"containers": containersPatch,
-		},
-	}
-	raw, err := json.Marshal(patch)
+	raw, err := json.Marshal(map[string]any{
+		"spec": map[string]any{"containers": containersPatch},
+	})
 	if err != nil {
 		return fmt.Errorf("marshal image patch for pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
@@ -662,22 +564,18 @@ func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, targe
 	return nil
 }
 
-// updateStepInPlace and updateStepDrain distinguish which mode wrote
-// the current Operation. Without this discriminator, a strategy
-// change mid-rollout (e.g., InPlaceIfPossible -> RecreatePod) would
-// let patchInstanceStatusRecreatingForUpdate's idempotency check
-// match the existing in-place state and skip the Incarnation bump —
-// recreate would then classify every pod as fresh, jump straight to
-// Phase=Ready, and never actually recreate anything.
+// updateStep distinguishes which mode wrote the current Operation. Without
+// it, a strategy change mid-rollout (InPlaceIfPossible → RecreatePod)
+// would let recreate's idempotency check match the in-place state, skip
+// the Incarnation bump, classify every pod as fresh, and never recreate.
 const (
 	updateStepInPlace = "InPlace"
 	updateStepDrain   = "Drain"
 )
 
-// patchInstanceStatusUpdating sets Phase=Updating, Operation=Update with
-// Step=InPlace, TargetRevision=target. Idempotent — skip-write requires
-// Step==InPlace, so a previous recreate-step write does NOT short-
-// circuit the in-place transition.
+// patchInstanceStatusUpdating idempotently stamps Phase=Updating with the
+// Update operation in Step=InPlace at targetRev. Skip-write requires
+// Step==InPlace so a previous recreate-step write doesn't short-circuit.
 func patchInstanceStatusUpdating(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32, targetRev string, timeout time.Duration) error {
 	now := metav1.NewTime(time.Now())
 	return mutateInstanceStatus(ctx, p, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
@@ -702,19 +600,14 @@ func patchInstanceStatusUpdating(ctx context.Context, p ReconcileParams, compone
 	})
 }
 
-// patchInstanceStatusRecreatingForUpdate is the recreate-mode entry
-// point: it bumps Incarnation (like Restart) and ensures Phase=Updating
-// with Operation.Step=Drain and the target revision recorded. Returns
-// the post-write Incarnation.
-//
-// The idempotency guard requires Step==Drain in addition to the
-// Phase/Type/TargetRevision match — otherwise a prior in-place pass
-// that wrote Step==InPlace at the same target would prevent the bump,
-// even though recreate has not yet drained or deleted anything.
+// patchInstanceStatusRecreatingForUpdate is the recreate entry point.
+// Bumps Incarnation (like Restart) and stamps Phase=Updating with
+// Step=Drain. Returns the post-write Incarnation. The idempotency guard
+// requires Step==Drain so a prior in-place pass at the same target
+// doesn't block the bump.
 func patchInstanceStatusRecreatingForUpdate(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32, targetRev string, timeout time.Duration) (int64, error) {
 	var observedIncarnation int64
 	err := mutateInstanceStatus(ctx, p, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
-		// Already in recreate-shape with a bumped incarnation? Reuse.
 		if s.Phase == v1beta1.OMENativeInstanceUpdating &&
 			s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationUpdate &&
 			s.Operation.Step == updateStepDrain &&
@@ -744,8 +637,8 @@ func patchInstanceStatusRecreatingForUpdate(ctx context.Context, p ReconcilePara
 	return observedIncarnation, err
 }
 
-// patchInstanceStatusReadyOnRevision sets Phase=Ready, RunningRevision=rev,
-// clears Operation and TargetRevision. Idempotent.
+// patchInstanceStatusReadyOnRevision idempotently moves to Phase=Ready
+// with RunningRevision=rev; clears Operation + TargetRevision.
 func patchInstanceStatusReadyOnRevision(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32, rev string) error {
 	return mutateInstanceStatus(ctx, p, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
 		if s.Phase == v1beta1.OMENativeInstanceReady &&

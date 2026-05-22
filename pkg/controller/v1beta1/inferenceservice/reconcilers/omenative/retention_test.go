@@ -63,9 +63,8 @@ func TestRevisionTemplateMeta_CapturesLabelsAndAnnotations(t *testing.T) {
 }
 
 func TestRevisionHash_LabelChangeProducesDifferentHash(t *testing.T) {
-	// REV-8: an edit to user template labels must produce a new
-	// revision hash so AggregateAndWriteStatus's diff detection
-	// fires a rollout.
+	// A user-template label edit must produce a new revision hash so
+	// AggregateAndWriteStatus's diff detection fires a rollout.
 	ps := &corev1.PodSpec{
 		Containers: []corev1.Container{{Name: "main", Image: "llama:v1"}},
 	}
@@ -100,10 +99,8 @@ func TestRevisionHash_AnnotationChangeProducesDifferentHash(t *testing.T) {
 }
 
 func TestRevisionHash_NoMetaAndEmptyMetaProduceSameHash(t *testing.T) {
-	// nil and empty input MUST hash identically so pre-PR-D
-	// revisions (computed with no PodMeta) reuse the same hash
-	// after this PR lands for ISVCs that don't have template
-	// labels/annotations.
+	// nil and empty meta MUST hash identically so the legacy "no PodMeta"
+	// hash shape stays stable for ISVCs without template labels/annotations.
 	ps := &corev1.PodSpec{
 		Containers: []corev1.Container{{Name: "main", Image: "llama:v1"}},
 	}
@@ -115,9 +112,9 @@ func TestRevisionHash_NoMetaAndEmptyMetaProduceSameHash(t *testing.T) {
 }
 
 func TestCollectLiveRevisionNames_UnionAcrossInstanceStatuses(t *testing.T) {
-	// A5/REV-5: retention must protect revisions referenced by
-	// in-flight migrations whose source RunningRevision points to
-	// older CRs.
+	// Retention must protect every InstanceStatus.RunningRevision /
+	// TargetRevision — an in-flight migration whose source points at an
+	// older CR would otherwise have that CR swept mid-flight.
 	cs := &v1beta1.OMENativeComponentStatus{
 		CurrentRevision: "rev-current",
 		UpdateRevision:  "rev-update",

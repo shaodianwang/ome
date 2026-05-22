@@ -143,10 +143,10 @@ func TestRender_AppendsServingReadinessGateWithoutClobberingExisting(t *testing.
 }
 
 func TestRender_DoesNotDuplicateExistingServingGate(t *testing.T) {
-	// REV-1 fix: if the user template already declares ome.io/serving,
-	// Render must not append a duplicate. Two copies of the same gate
-	// would keep PodReady=False forever — kubelet AND's all gates,
-	// the controller only writes one condition.
+	// If the user template already declares ome.io/serving, Render must
+	// not append a duplicate — kubelet ANDs all gates and the controller
+	// writes only one condition, so a duplicate keeps PodReady=False
+	// forever.
 	plan, inst, runner := singlePodPlan()
 	ps := basicPodSpec()
 	ps.ReadinessGates = []corev1.PodReadinessGate{
@@ -291,7 +291,7 @@ func envKeys(env []corev1.EnvVar) []string {
 	return keys
 }
 
-// --- REV-10: applyMigrationOverlay idempotency ---
+// --- applyMigrationOverlay idempotency ---
 
 func TestApplyMigrationOverlay_IdempotentDoesNotDuplicateRequirements(t *testing.T) {
 	pod := &corev1.Pod{Spec: corev1.PodSpec{}}
@@ -323,9 +323,8 @@ func TestApplyMigrationOverlay_IdempotentDoesNotDuplicateRequirements(t *testing
 }
 
 func TestApplyMigrationOverlay_PreferredWeightIsSentinel(t *testing.T) {
-	// REV-11 reservation: weight is a documented sentinel rather than
-	// the previously-hardcoded 100 that collided with common user
-	// weights. Pinned here so future changes are deliberate.
+	// Weight is a documented sentinel — pinned so future changes are
+	// deliberate and don't silently collide with operator preferences.
 	pod := &corev1.Pod{Spec: corev1.PodSpec{}}
 	applyMigrationOverlay(pod, &MigrationOverlay{HintTargetNodes: []string{"node3"}})
 	pref := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
@@ -334,7 +333,7 @@ func TestApplyMigrationOverlay_PreferredWeightIsSentinel(t *testing.T) {
 	}
 }
 
-// --- REV-6: wouldOverlayConflictWithNodeAffinity ---
+// --- wouldOverlayConflictWithNodeAffinity ---
 
 func TestWouldOverlayConflictWithNodeAffinity_DetectsUnsatisfiablePin(t *testing.T) {
 	// Source PodSpec required hostname=node5; overlay's NotIn[node5]

@@ -112,10 +112,9 @@ func TestIsPodDrained_NoSlicesAtAll_ReturnsTrue(t *testing.T) {
 }
 
 func TestIsPodDrained_ServiceExistsNoSlices_ReturnsNotDrained(t *testing.T) {
-	// PR B (DRAIN-2 fix): the previous behavior fail-opened when the
-	// slice list was empty, but with the Service present this is a
-	// transient state — informer cold-start, no matching pods yet,
-	// kube-controller-manager lag. Conservative: not drained.
+	// Conservative: an empty slice list against an existing Service is
+	// transient (informer cold-start, no matching pods yet, KCM lag) and
+	// must NOT report drained.
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "ns"},
 	}
@@ -380,7 +379,7 @@ func TestIsPodDrained_TargetRefKindNotPod_Rejected(t *testing.T) {
 	}
 }
 
-// --- DRAIN-1: endpointAvailable tri-state ---
+// --- endpointAvailable tri-state ---
 
 func TestEndpointAvailable_ReadyTrueTerminatingFalseIsAvailable(t *testing.T) {
 	ep := discoveryv1.Endpoint{
@@ -405,9 +404,9 @@ func TestEndpointAvailable_ReadyTrueTerminatingNilIsAvailable(t *testing.T) {
 }
 
 func TestEndpointAvailable_ReadyTrueTerminatingTrueIsNotAvailable(t *testing.T) {
-	// DRAIN-1 core case: kube-proxy keeps a terminating-but-still-Ready
-	// endpoint in rotation for in-flight requests; it shouldn't count
-	// as Available for status or surge-rotation checks.
+	// kube-proxy keeps a terminating-but-still-Ready endpoint in rotation
+	// for in-flight requests; it shouldn't count as Available for status
+	// or surge-rotation checks.
 	ep := discoveryv1.Endpoint{
 		Conditions: discoveryv1.EndpointConditions{
 			Ready:       ptr.To(true),
@@ -428,7 +427,7 @@ func TestEndpointAvailable_ReadyFalseIsNotAvailable(t *testing.T) {
 	}
 }
 
-// --- DRAIN-1: IsPodInRotation excludes terminating endpoints ---
+// --- IsPodInRotation excludes terminating endpoints ---
 
 func TestIsPodInRotation_TerminatingEndpointReportedNotInRotation(t *testing.T) {
 	// Even with Ready=true, a terminating endpoint must not be

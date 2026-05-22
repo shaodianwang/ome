@@ -23,33 +23,20 @@ import (
 // readiness when an Instance is still coming up.
 const createRequeueInterval = 5 * time.Second
 
-// Create drives the Create / Scale Up operation toward each desired
-// Instance in plan.Instances. The operation is multi-pass:
+// Create drives Create / Scale-Up toward each desired Instance. Multi-pass:
 //
-//  1. First pass: pods missing for an Instance are created with the
-//     ome.io/serving readiness gate set to False (via Render()).
-//     InstanceStatus is patched to {Phase: Creating, Operation: {Create}}.
-//  2. Subsequent passes: pods are observed and waited for runtime Ready.
-//     Once all pods are runtime-ready, the ome.io/serving gate is flipped
-//     to True on each pod and InstanceStatus moves to Phase=Ready, Operation=nil.
+//  1. Render missing pods with ome.io/serving=False; patch InstanceStatus
+//     to Phase=Creating with the Create operation stamped.
+//  2. Wait for runtime Ready on every pod, flip ome.io/serving=True,
+//     promote InstanceStatus to Phase=Ready (Operation=nil).
 //
-// Scope: single-pod Instances. Caller (ReconcileComponent) rejects
-// multi-pod via BuildPlan before this runs.
+// Caller restricts to single-pod Instances via BuildPlan; EndpointSlice
+// convergence is owned by drain.go.
 //
-// EndpointSlice convergence is handled by drain.go, not here.
-// MinReadySeconds defaults to 0, so runtime-Ready is treated as Available.
-//
-// target is the ControllerRevision the Component currently desires
-// (caller computes via ensureRevisionWithCollisionRetry). May be nil
-// when p.PodSpec is nil — Create then promotes without writing
-// RunningRevision (legacy callers / scale-down-only paths). When
-// non-nil, the Ready promote records RunningRevision=target.Name so
-// detectUpdateTrigger's cheap fast-path can short-circuit on the very
-// next reconcile pass; without this, the slow per-pod podMatchesTarget
-// comparison fires and reports a false-positive mismatch against the
-// rendered (post-Render-mutation) pod, triggering a spurious recreate
-// Update on every freshly-Created Instance. STATUS-4 in the OEP-0007
-// review backlog.
+// When target != nil the Ready promote records RunningRevision=target.Name
+// so detectUpdateTrigger's fast-path (s.RunningRevision == target.Name) can
+// short-circuit. Without it, per-pod podMatchesTarget runs and false-positives
+// against the post-Render pod mutations, triggering a spurious recreate.
 func Create(ctx context.Context, p ReconcileParams, plan ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
 	if p.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("Create: nil client")
@@ -79,13 +66,8 @@ func Create(ctx context.Context, p ReconcileParams, plan ComponentPlan, target *
 }
 
 // reconcileInstance drives one Instance toward Ready. Returns ready=true
-// only when every pod in the Instance is runtime-ready and has been
-// flipped to ome.io/serving=True.
-//
-// target carries the same nil-OK semantics as Create's docstring —
-// when non-nil, the Ready promote also records RunningRevision so the
-// next reconcile's detectUpdateTrigger can short-circuit on the cheap
-// hash-equality fast path.
+// only when every pod is runtime-ready and ome.io/serving=True. target has
+// the same nil-OK semantics as Create.
 func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, existing []*corev1.Pod, target *appsv1.ControllerRevision) (bool, error) {
 	desired := expectedPodNamesForInstance(p.ISVC.Name, plan.Component, inst)
 	existingByName := indexPodsByName(existing)
@@ -97,38 +79,28 @@ func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPla
 		}
 	}
 
-	// Mark Creating before the first pod write, but only when we're
-	// actually about to create something — otherwise the next pass would
-	// oscillate the status back to Creating after we already observed
-	// Ready pods.
+	// Only patch Creating when there's something to create — otherwise the
+	// next pass would oscillate status back to Creating after Ready.
 	if len(missing) > 0 {
+		// Capture before patch — findInstanceStatus uses the cached ISVC,
+		// so the patch below doesn't backfill this view.
 		isFirstCreate := findInstanceStatus(p.ISVC, plan.Component, inst.Index) == nil
 		if err := patchInstanceStatusCreating(ctx, p, plan.Component, inst.Index, inst.Incarnation, plan.InstanceReadyTimeout); err != nil {
 			return false, fmt.Errorf("patch status Creating (instance=%d): %w", inst.Index, err)
 		}
-		// Fire InstanceCreated only on first transition; subsequent
-		// passes (which add the remaining pods of a multi-pod Instance)
-		// don't re-emit. The findInstanceStatus check uses the cached
-		// ISVC, so a fresh status that gets created by the patch above
-		// shows up via isFirstCreate captured before.
 		if isFirstCreate {
 			recordNormal(p, EventReasonInstanceCreated,
 				"OMENative %s materialized; %d pod(s) requested",
 				instanceKey(plan.Component, inst.Index), len(missing))
 		}
 
-		// Skip the create batch if the expectations cache says a previous
-		// reconcile's writes haven't been observed yet.
 		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
 
-		created, err := createMissingPods(ctx, p, plan, inst, missing)
-		if err != nil {
+		if _, err := createMissingPods(ctx, p, plan, inst, inst.Index, missing); err != nil {
 			return false, err
 		}
-		p.expectations().ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, created)
-		// Pods just created — runtime can't possibly be Ready yet. Requeue.
 		return false, nil
 	}
 
@@ -137,11 +109,8 @@ func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPla
 		return false, nil
 	}
 
-	// Flip ome.io/serving=True on each pod. For freshly-created pods
-	// the condition doesn't exist yet; the Lifecycle writer's
-	// "remove key" on a non-existent condition creates it with
-	// Status=True. Subsequent reconciles see IsServing=true and
-	// skip the (idempotent) re-flip.
+	// Flip ome.io/serving=True. For freshly-created pods the condition
+	// doesn't exist yet; the Lifecycle writer creates it on first flip.
 	for _, pod := range existing {
 		if IsServing(pod) {
 			continue
@@ -151,21 +120,7 @@ func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPla
 		}
 	}
 
-	// Record Phase=Ready, Operation=nil. Only fire InstanceReady on
-	// the transition from a non-Ready phase, not on every reconcile
-	// while the Instance is already Ready.
-	//
-	// STATUS-4: when target is non-nil, write RunningRevision=target.Name
-	// alongside Phase=Ready. Without this, every freshly-Created
-	// Instance shows RunningRevision="" on its next reconcile, and
-	// detectUpdateTrigger falls into the slow per-pod podMatchesTarget
-	// comparison. That comparison currently returns false-positive
-	// mismatches because the pod has post-Render mutations (Hostname,
-	// Subdomain, controller-owned ReadinessGate, OME_* env) that the
-	// pre-Render targetSpec doesn't — triggering a spurious recreate
-	// Update on every fresh Create. Recording RunningRevision here
-	// hits the cheap fast path (s.RunningRevision == target.Name) and
-	// avoids the comparison entirely.
+	// Promote to Ready. Fire InstanceReady only on transition.
 	wasReady := false
 	if s := findInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil && s.Phase == v1beta1.OMENativeInstanceReady {
 		wasReady = true
@@ -210,13 +165,13 @@ func expectedPodNamesForInstance(isvc string, component v1beta1.ComponentType, i
 	return targets
 }
 
-func createMissingPods(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, targets []podTarget) (int, error) {
+// createMissingPods renders and creates targets, owning the per-pod
+// ExpectCreates bookkeeping. idx is the expectations bucket — pass
+// inst.Index for steady-state Create / Restart Phase B; surgeIdx for
+// Migrate's surge create. Callers must NOT call ExpectCreates themselves.
+func createMissingPods(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, idx int32, targets []podTarget) (int, error) {
 	created := 0
 	for _, t := range targets {
-		// PodSpec source: leader uses p.PodSpec; worker uses p.WorkerPodSpec.
-		// Single-pod (only Runner "default") always uses p.PodSpec.
-		// This branch is here so a future multi-pod Render() can route
-		// without changing call sites.
 		template := p.PodSpec
 		if t.Runner.Name == "worker" && p.WorkerPodSpec != nil {
 			template = p.WorkerPodSpec
@@ -227,12 +182,13 @@ func createMissingPods(ctx context.Context, p ReconcileParams, plan ComponentPla
 			return created, fmt.Errorf("render pod %s: %w", t.Name, err)
 		}
 
+		// EXPECT-ORDER: expectation before RPC, rollback via ObservedCreate
+		// on error — a failed Create fires no watch event to decrement it.
+		p.expectations().ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx, 1)
 		if err := p.Client.Create(ctx, pod); err != nil {
+			p.expectations().ObservedCreate(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx)
 			if apierrors.IsAlreadyExists(err) {
-				// A previous reconcile created this pod but the watch
-				// hasn't propagated it to our cache yet. Treat as a
-				// successful create — the next pass will observe it
-				// through the listed pods.
+				// Prior reconcile created it; cache hasn't caught up yet.
 				continue
 			}
 			return created, fmt.Errorf("create pod %s: %w", t.Name, err)
@@ -242,12 +198,10 @@ func createMissingPods(ctx context.Context, p ReconcileParams, plan ComponentPla
 	return created, nil
 }
 
-// listOMENativePods returns every Pod the OMENative selector matches
-// for the given (isvc, component). Takes a client.Reader rather than
-// client.Client so callers can pass either the cached client (cheap,
-// status-aggregation safe) or the live API reader (correctness-
-// critical destructive paths — see liveListPodsForInstance in
-// discover.go).
+// listOMENativePods returns every pod the OMENative selector matches for
+// (isvc, component). Takes a Reader so callers can use either the cached
+// client or the live reader (destructive paths need live — see
+// liveListPodsForInstance in discover.go).
 func listOMENativePods(ctx context.Context, c client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) ([]*corev1.Pod, error) {
 	pods := &corev1.PodList{}
 	sel := labels.SelectorFromSet(labels.Set{
@@ -312,18 +266,13 @@ func allPodsRuntimeReady(pods []*corev1.Pod) bool {
 	return true
 }
 
-// patchInstanceStatusCreating ensures Status.Components[component].OMENative
-// has an InstanceStatus entry for the given index in Phase=Creating with an
-// Operation recording the in-flight Create. timeout is the wall-clock budget
-// the operation gets before downstream consumers treat it as stuck; the
-// computed Deadline is StartedAt+timeout. incarnation is stamped onto the
-// InstanceStatus on first-touch (when no Incarnation has been recorded yet);
-// existing nonzero incarnations are preserved so an in-flight reconcile
-// after a controller restart doesn't downgrade the lifecycle token.
+// patchInstanceStatusCreating idempotently stamps Phase=Creating with the
+// Create operation and a Deadline of StartedAt+timeout. incarnation is
+// written on first-touch; existing nonzero values are preserved so a
+// post-restart reconcile doesn't downgrade the lifecycle token.
 func patchInstanceStatusCreating(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32, incarnation int64, timeout time.Duration) error {
 	now := metav1.NewTime(time.Now())
 	return mutateInstanceStatus(ctx, p, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
-		// Skip the write if status is already in the desired state.
 		if s.Phase == v1beta1.OMENativeInstanceCreating &&
 			s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationCreate &&
 			s.Incarnation > 0 {
@@ -345,8 +294,7 @@ func patchInstanceStatusCreating(ctx context.Context, p ReconcileParams, compone
 	})
 }
 
-// patchInstanceStatusReady moves the InstanceStatus to Phase=Ready and
-// clears the Operation. Idempotent.
+// patchInstanceStatusReady idempotently moves to Phase=Ready, clears Operation.
 func patchInstanceStatusReady(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32) error {
 	return mutateInstanceStatus(ctx, p, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
 		if s.Phase == v1beta1.OMENativeInstanceReady && s.Operation == nil {
@@ -358,17 +306,11 @@ func patchInstanceStatusReady(ctx context.Context, p ReconcileParams, component 
 	})
 }
 
-// mutateInstanceStatus reads the ISVC, applies mutate to the
-// InstanceStatus entry for the given (component, idx) pair (creating it
-// if missing), and writes back via Status().Update(). The mutate function
-// returns true when an actual change was made; if false, no write is
-// issued.
-//
-// Wrapped in retry.RetryOnConflict so concurrent component reconciles
-// writing sibling Component slots don't race-fail. The mutate callback
-// runs once per retry attempt against the freshly-read InstanceStatus,
-// so a callback that diffs `s.Phase` etc. against the live state stays
-// correct across retries.
+// mutateInstanceStatus applies mutate to the (component, idx) entry,
+// creating it if missing, and writes via Status().Update(). mutate returns
+// true when a real change happened; false skips the write. Wrapped in
+// retry.RetryOnConflict; mutate runs against fresh state on each attempt
+// so phase-diff callbacks stay correct.
 func mutateInstanceStatus(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32, mutate func(*v1beta1.OMENativeInstanceStatus) bool) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}
@@ -400,7 +342,6 @@ func mutateInstanceStatus(ctx context.Context, p ReconcileParams, component v1be
 		} else {
 			slot = &insts[pos]
 		}
-
 		if !mutate(slot) {
 			return nil
 		}

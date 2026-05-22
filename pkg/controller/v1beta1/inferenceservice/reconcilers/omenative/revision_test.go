@@ -483,17 +483,13 @@ func TestNextRevisionNumber_NoExisting(t *testing.T) {
 	}
 }
 
-// --- REV-3: CollisionCount framing ---
+// --- CollisionCount framing ---
 
 func TestRevisionHash_CollisionCountFramingDistinguishesAmbiguousConcat(t *testing.T) {
-	// Before REV-3, hash inputs were raw_bytes + fmt.Sprintf("%d", cc).
-	// A PodSpec whose JSON ends in `1` with cc=0 produces the same input
-	// stream as one ending in `10` with cc=0. Use cc=10 vs cc=0 on the
-	// same spec to make the trailing-digit ambiguity concrete: the spec's
-	// JSON necessarily ends in `}` so the actual exploit shape can't be
-	// reproduced here, but the framing change must still yield distinct
-	// hashes for any (spec, cc) pair where the raw|cc concatenation
-	// differs by framing.
+	// Without delimiters, raw_bytes + fmt.Sprintf("%d", cc) is ambiguous:
+	// a JSON ending in `1` with cc=0 hashes the same stream as one ending
+	// in `10` with cc=0. The framing must yield distinct hashes for any
+	// (spec, cc) pair where the unframed concatenation would collide.
 	spec := basicPodSpecForRevision()
 	cc0 := int32(0)
 	cc10 := int32(10)
@@ -518,14 +514,13 @@ func TestRevisionHash_CollisionCountFramingDistinguishesAmbiguousConcat(t *testi
 	}
 }
 
-// --- REV-4: ownership validation on CR reuse ---
+// --- ownership validation on CR reuse ---
 
 func TestEnsureControllerRevision_RejectsForeignOwnerAsCollision(t *testing.T) {
-	// A leftover CR from a previously-deleted-and-recreated ISVC with
-	// the same name carries an OwnerReference whose UID belongs to the
-	// dead ISVC, NOT the current one. Reusing it would silently mix
-	// histories. REV-4 treats this as a collision so the caller bumps
-	// CollisionCount and writes a fresh-named CR.
+	// A leftover CR from a previously-deleted-and-recreated ISVC of the
+	// same name carries an OwnerReference whose UID belongs to the dead
+	// ISVC. Reusing it would silently mix histories — treat as collision
+	// so the caller bumps CollisionCount and writes a fresh-named CR.
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	// Same PodSpec the new EnsureControllerRevision call will hash —
 	// so the name matches and Data matches; ONLY the owner UID differs.

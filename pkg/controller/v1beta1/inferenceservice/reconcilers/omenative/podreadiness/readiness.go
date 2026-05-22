@@ -48,13 +48,10 @@ type Message struct {
 	Key       string `json:"key"`
 }
 
-// AddNotReadyKey appends msg to the readiness condition's message
-// list. Sets condition Status=False (because the list is non-empty).
-// No-op if msg is already in the list.
-//
-// Wrapped in retry.RetryOnConflict; patches only the single
-// condition slot so kubelet's concurrent status writes are
-// preserved (STATUS-2 fix from the OEP-0007 review).
+// AddNotReadyKey appends msg to the readiness condition's message list
+// and sets Status=False. No-op if msg is already present. Patches only
+// the single condition slot so kubelet's concurrent status writes are
+// preserved; wrapped in retry.RetryOnConflict.
 func AddNotReadyKey(ctx context.Context, c client.Client, pod *corev1.Pod, msg Message) error {
 	if pod == nil {
 		return fmt.Errorf("AddNotReadyKey: nil pod")

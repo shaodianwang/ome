@@ -77,12 +77,10 @@ func Render(
 
 	pod.Spec.Hostname = name
 	pod.Spec.Subdomain = subdomain
-	// REV-1: if the user template (or the ServingRuntime) already
-	// declares the ome.io/serving gate, reuse it instead of
-	// appending a duplicate. Kubelet AND's all gates into PodReady,
-	// so two copies of the same gate keep PodReady=False forever
-	// (the controller only writes one condition status). OEP §4.1.1
-	// requires this dedup.
+	// Dedup the ome.io/serving gate when the user template / ServingRuntime
+	// already declared it. Kubelet ANDs all gates into PodReady, so two
+	// copies would keep PodReady=False forever (controller only writes one
+	// status).
 	if !hasServingReadinessGate(pod.Spec.ReadinessGates) {
 		pod.Spec.ReadinessGates = append(pod.Spec.ReadinessGates, corev1.PodReadinessGate{
 			ConditionType: servingConditionType,
@@ -95,17 +93,11 @@ func Render(
 	return pod, nil
 }
 
-// applyMigrationOverlay layers per-Instance placement hints from an
-// in-flight migration onto the rendered pod's affinity. Hard
-// anti-affinity moves the surge off the source node (the whole reason
-// for migrating); preferred affinity nudges it toward the operator-
-// supplied target list without making the placement hard-fail. No-op
-// when overlay is nil.
-//
-// Idempotent (REV-10): if the same NotIn[FromNode] requirement or
-// the same HintTargetNodes preferred term is already present (e.g.,
-// Render ran twice on the same pod after a cache-lag retry), don't
-// double-stamp.
+// applyMigrationOverlay layers migration placement onto the rendered pod.
+// Hard anti-affinity moves the surge off FromNode; preferred affinity
+// nudges toward HintTargetNodes without making placement hard-fail.
+// Idempotent: a second Render after a cache-lag retry doesn't
+// double-stamp the same NotIn / hint term.
 func applyMigrationOverlay(pod *corev1.Pod, overlay *MigrationOverlay) {
 	if overlay == nil {
 		return
@@ -164,27 +156,19 @@ func applyMigrationOverlay(pod *corev1.Pod, overlay *MigrationOverlay) {
 	}
 }
 
-// overlayPreferredHintWeight is the scheduler weight stamped on the
-// migration-hint preferred affinity term. Picked deliberately distinct
-// from common user weights (typically 1–100 with 100 the most
-// emphatic) so the migration nudge stacks with rather than competes
-// against operator-supplied preferences. REV-11 reserves a tighter
-// fix; the lower value at least documents the intent.
+// overlayPreferredHintWeight is the scheduler weight on the migration-hint
+// preferred affinity. Set mid-range so the nudge stacks with — rather
+// than competes against — operator-supplied preferences.
 const overlayPreferredHintWeight int32 = 50
 
-// wouldOverlayConflictWithNodeAffinity reports whether applying
-// overlay's NotIn[FromNode] to spec's NodeAffinity would yield an
-// unsatisfiable scheduler constraint — i.e., every existing required
-// term pins kubernetes.io/hostname to FromNode (and nothing else), so
-// the appended NotIn produces a contradiction.
-//
-// Used by Migrate (REV-6) BEFORE rendering surge pods to reject the
-// migration up front rather than letting the pod sit Pending until
-// instanceReadyTimeout. NodeSelectorTerms are OR'd; a term is
-// satisfiable post-overlay if its hostname In-set has at least one
-// value other than FromNode, OR if it has no hostname requirement at
-// all. The overlay only conflicts when EVERY term collapses to
-// "hostname must equal FromNode and must not equal FromNode."
+// wouldOverlayConflictWithNodeAffinity returns true when the surge's
+// NodeAffinity would collapse to "hostname=FromNode AND hostname!=FromNode"
+// after applying the overlay. Migrate calls this before rendering the
+// surge so the migration fails fast rather than leaving the pod Pending
+// until instanceReadyTimeout. NodeSelectorTerms are OR'd; a term is
+// satisfiable if its hostname In-set has anything other than FromNode
+// (or doesn't pin hostname at all). The whole spec only conflicts when
+// every term pins hostname to exactly FromNode.
 func wouldOverlayConflictWithNodeAffinity(spec *corev1.PodSpec, overlay *MigrationOverlay) bool {
 	if overlay == nil || overlay.FromNode == "" || spec == nil {
 		return false
@@ -204,10 +188,9 @@ func wouldOverlayConflictWithNodeAffinity(spec *corev1.PodSpec, overlay *Migrati
 	return true
 }
 
-// termPinsHostnameTo reports whether term's hostname In-requirement
-// permits ONLY hostname (no other values). A term without any hostname
-// In-requirement returns false — it doesn't pin hostname at all and so
-// can't conflict with NotIn[hostname].
+// termPinsHostnameTo returns true when term's hostname In-requirement
+// permits ONLY hostname. A term without any hostname In-requirement
+// returns false — it doesn't pin hostname at all.
 func termPinsHostnameTo(term corev1.NodeSelectorTerm, hostname string) bool {
 	for _, expr := range term.MatchExpressions {
 		if expr.Key != "kubernetes.io/hostname" || expr.Operator != corev1.NodeSelectorOpIn {
@@ -216,16 +199,14 @@ func termPinsHostnameTo(term corev1.NodeSelectorTerm, hostname string) bool {
 		if len(expr.Values) == 1 && expr.Values[0] == hostname {
 			return true
 		}
-		// Hostname In-requirement with other values too — surge can
-		// still land on one of those.
+		// Other values available — surge can still land on one.
 		return false
 	}
 	return false
 }
 
-// hasHostnameNotIn reports whether exprs already includes a
-// NotIn[hostname] requirement on kubernetes.io/hostname. Drives the
-// REV-10 idempotency check.
+// hasHostnameNotIn is the idempotency check for the NotIn[hostname]
+// stamp; second-Render after a cache-lag retry won't duplicate.
 func hasHostnameNotIn(exprs []corev1.NodeSelectorRequirement, hostname string) bool {
 	for _, expr := range exprs {
 		if expr.Key != "kubernetes.io/hostname" || expr.Operator != corev1.NodeSelectorOpNotIn {
@@ -275,9 +256,8 @@ func hasPreferredHintTerm(existing []corev1.PreferredSchedulingTerm, hints []str
 // used when stamping child pods.
 var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
-// hasServingReadinessGate reports whether gates already includes the
-// controller-owned ome.io/serving gate. Used by Render to skip
-// duplicate-appending when the user template declared it.
+// hasServingReadinessGate is the dedup check before Render appends the
+// ome.io/serving gate.
 func hasServingReadinessGate(gates []corev1.PodReadinessGate) bool {
 	for _, g := range gates {
 		if g.ConditionType == servingConditionType {

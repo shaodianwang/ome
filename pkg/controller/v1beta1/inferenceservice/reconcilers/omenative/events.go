@@ -41,18 +41,17 @@ const (
 	EventReasonMigrationCompleted       = "MigrationCompleted"
 	EventReasonUnsupportedSchemaVersion = "UnsupportedSchemaVersion"
 
-	// Migration capacity / validation rejections (PR F).
+	// Migration capacity / validation rejections.
 	EventReasonRateLimited               = "RateLimited"
 	EventReasonMigrationFromNodeMismatch = "MigrationFromNodeMismatch"
 	EventReasonMigrationSurgeAbandoned   = "MigrationSurgeAbandoned"
 
-	// Migration overlay validation rejection (PR G, REV-6).
+	// Surge NodeAffinity would collapse to "hostname=FromNode AND
+	// hostname!=FromNode" — rejected before rendering.
 	EventReasonMigrationNodeAffinityConflict = "MigrationNodeAffinityConflict"
 
-	// Orphan pod classification (PR I, OPS-3). Fired when a pod under
-	// the OMENative selector lacks ome.io/instance-incarnation; the
-	// controller refuses to delete it and surfaces the orphan for
-	// operator triage.
+	// Fired when a pod under the OMENative selector lacks
+	// ome.io/instance-incarnation. The controller refuses to delete it.
 	EventReasonFoundOrphan = "FoundOrphan"
 
 	// Revision-collision (rare; salted retry succeeded).

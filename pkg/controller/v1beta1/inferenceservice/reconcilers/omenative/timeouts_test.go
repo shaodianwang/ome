@@ -242,7 +242,7 @@ func TestExpireOperationsIfDeadlinePassed_PerInstanceIndependent(t *testing.T) {
 	}
 }
 
-// --- MIGRATE-1: tryAbandonStuckMigration / surgeReady ---
+// --- tryAbandonStuckMigration / surgeReady ---
 
 func TestSurgeReady_EmptyReturnsFalse(t *testing.T) {
 	if surgeReady(nil) {

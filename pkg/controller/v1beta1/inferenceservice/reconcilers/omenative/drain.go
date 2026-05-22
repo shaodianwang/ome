@@ -88,18 +88,13 @@ func drainedWhenSliceListEmpty(ctx context.Context, reader client.Reader, namesp
 	return false, nil
 }
 
-// IsPodInRotation reports whether pod has at least one endpoint that
-// is currently AVAILABLE for new Service traffic — Ready=true AND
-// Terminating!=true (DRAIN-1). Used by Migrate to confirm the surge
-// is receiving traffic before initiating the source-drain, so there
-// is no zero-routable-endpoint window during the swap.
-//
-// Returns false when no EndpointSlice for serviceName lists the pod
-// at all — kube-proxy can't possibly be routing to it yet — and also
-// when the only matching endpoints are terminating (which kube-proxy
-// keeps in rotation for in-flight requests but won't route new ones
-// to). Treating a terminating surge as "in rotation" would let
-// Migrate swap onto a pod that's about to disappear.
+// IsPodInRotation reports whether pod has at least one endpoint Ready
+// AND non-terminating — eligible for NEW traffic. Migrate uses this to
+// confirm the surge is receiving traffic before draining the source so
+// the swap has no zero-routable-endpoint window. Terminating endpoints
+// don't count: kube-proxy keeps them for in-flight requests but won't
+// send new traffic, and swapping onto a terminating surge would be
+// pointless.
 func IsPodInRotation(ctx context.Context, reader client.Reader, namespace, serviceName string, pod *corev1.Pod) (bool, error) {
 	if pod == nil {
 		return false, fmt.Errorf("IsPodInRotation: nil pod")
@@ -173,10 +168,9 @@ func endpointIsReady(ep discoveryv1.Endpoint) bool {
 	return *ep.Conditions.Ready
 }
 
-// endpointAvailable reports whether the endpoint is eligible for
-// NEW traffic — Ready=true AND Terminating!=true (DRAIN-1). Drives
-// the status `AvailablePodCount` counter and `IsPodInRotation`'s
-// surge-readiness check.
+// endpointAvailable reports whether the endpoint is eligible for NEW
+// traffic — Ready=true AND Terminating!=true. Drives the status
+// `AvailablePodCount` counter and `IsPodInRotation`'s surge check.
 //
 // Distinct from endpointIsReady because of the EndpointSlice
 // tri-state contract: a terminating pod whose probes still pass

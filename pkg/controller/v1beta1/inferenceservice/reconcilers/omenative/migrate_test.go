@@ -353,7 +353,7 @@ func TestMigrate_FirstPassAllocatesSurgeAndStampsBothStatuses(t *testing.T) {
 	// Source pod is on the running revision; surge needs a CR to point at.
 	sourceSpec := targetSpecImage("llama:v1")
 	sourcePod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
-	sourcePod.Spec.NodeName = "node5" // matches req.FromNode for MIGRATE-5 gate
+	sourcePod.Spec.NodeName = "node5" // matches req.FromNode (validateFromNode gate)
 	c := newFakeClientWithDiscovery(t, isvc, sourcePod)
 	seedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, sourceSpec)
 	p := minimalParams(t, isvc, c)
@@ -433,7 +433,7 @@ func TestMigrate_WaitsForSurgeRotationBeforeDrainingSource(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	sourceSpec := targetSpecImage("llama:v1")
 	sourcePod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
-	sourcePod.Spec.NodeName = "node5" // matches req.FromNode for MIGRATE-5 gate
+	sourcePod.Spec.NodeName = "node5" // matches req.FromNode (validateFromNode gate)
 	c := newFakeClientWithDiscovery(t, isvc, sourcePod)
 	seedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, sourceSpec)
 	req := &MigrationRequest{SchemaVersion: migrationRequestSchemaV1, Component: "engine", Instance: 0, FromNode: "node5"}
@@ -553,7 +553,7 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	sourceSpec := targetSpecImage("llama:v1")
 	sourcePod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
-	sourcePod.Spec.NodeName = "node5" // matches req.FromNode for MIGRATE-5 gate
+	sourcePod.Spec.NodeName = "node5" // matches req.FromNode (validateFromNode gate)
 	c := newFakeClientWithDiscovery(t, isvc, sourcePod)
 	seedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, sourceSpec)
 	p := minimalParams(t, isvc, c)
@@ -599,7 +599,7 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 		}
 		// Mimic the reconciler's deferred AggregateAndWriteStatus so per-
 		// Instance PodCount / ReadyPodCount / AvailablePodCount counters
-		// refresh between passes — required for MIGRATE-6's gate on
+		// refresh between passes — Migrate's surge-Available gate reads
 		// surgeStatus.AvailablePodCount.
 		if serr := AggregateAndWriteStatus(context.Background(), pPass, planPass, nil); serr != nil {
 			t.Fatalf("pass %d: AggregateAndWriteStatus: %v", pass, serr)
@@ -783,7 +783,7 @@ func podListNames(pods []corev1.Pod) []string {
 var _ = appsv1.ControllerRevision{}
 var _ = metav1.Now
 
-// --- REV-6: Migrate rejects unsatisfiable NodeAffinity ---
+// --- Migrate rejects unsatisfiable NodeAffinity ---
 
 func TestMigrate_RejectsNodeAffinityConflict(t *testing.T) {
 	// Source PodSpec has a required NodeAffinity that pins
@@ -852,7 +852,7 @@ func TestMigrate_RejectsNodeAffinityConflict(t *testing.T) {
 	}
 }
 
-// --- MIGRATE-5: validateFromNode ---
+// --- validateFromNode ---
 
 func TestValidateFromNode_MatchOK(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
@@ -928,7 +928,7 @@ func TestValidateFromNode_NoLivePodsRejects(t *testing.T) {
 	}
 }
 
-// --- MIGRATE-3: clearMigrationRequestAnnotation ---
+// --- clearMigrationRequestAnnotation ---
 
 func TestClearMigrationRequestAnnotation_RemovesKey(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)

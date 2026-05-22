@@ -23,34 +23,20 @@ import (
 // surge migration is in flight.
 const migrateRequeueInterval = 5 * time.Second
 
-// Migrate drives one surge migration toward completion. Triggered by a
-// MigrationRequest written into an ISVC annotation; orchestrated as a
-// multi-pass state machine that survives controller restarts via the
-// audit ConfigMap.
+// Migrate drives one surge migration toward completion. Triggered by an
+// ISVC annotation; multi-pass and crash-safe via the audit ConfigMap.
 //
-// Sequence (per the design — surge-only in v1):
+// Sequence (surge-only):
 //
-//  1. Audit-ledger dedup: if this UUID already terminally completed,
-//     no-op.
-//  2. Validate request; reject UnsupportedSchemaVersion.
-//  3. Allocate surge Instance index = lowest unused (sparse-safe).
-//  4. Patch status: source -> Migrating, surge -> Creating, both with
-//     Operation=Migrate carrying RequestUUID / FromNode / SurgeIndex.
-//  5. Persist a Started audit-ledger row.
-//  6. Reuse the running CR as the surge revision; create the surge
-//     pod set at that revision with the migration anti-affinity
-//     overlay.
-//  7. Wait until surge pods are ContainersReady; flip serving on the
-//     surge.
-//  8. Drain the source: serving=False, wait IsPodDrained against the
-//     headless Service.
-//  9. Delete source pods; wait until the live list is empty.
-//  10. Remove source InstanceStatus; promote surge to Ready with
-//     RunningRevision pointing at the source's revision.
-//  11. Persist a Completed audit-ledger row.
-//
-// done=true means the migration has finished (step 10+11). done=false
-// means the caller should requeue.
+//  1. Audit-ledger dedup; reject schema-invalid / capacity-exceeded.
+//  2. Allocate surge index = lowest unused (sparse-safe). Stamp source
+//     Phase=Migrating, surge Phase=Creating; persist Started entry.
+//  3. Reuse source's RunningRevision as the surge template; create surge
+//     pods with the migration anti-affinity overlay.
+//  4. Wait surge ContainersReady + in-rotation + Available; flip serving.
+//  5. Drain source (serving=False, wait IsPodDrained), then delete.
+//  6. Promote surge Ready+RunningRevision, drop source InstanceStatus,
+//     persist Completed entry — in that order (crash window if reversed).
 func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceIdx int32, requestUUID string, req *MigrationRequest) (bool, error) {
 	if p.Client == nil {
 		return false, fmt.Errorf("Migrate: nil client")
@@ -59,7 +45,6 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		return false, fmt.Errorf("Migrate: nil request (instance=%d)", sourceIdx)
 	}
 
-	// Step 1: dedup against the audit ledger.
 	ledger, err := loadAuditLedger(ctx, p.reader(), p.ISVC)
 	if err != nil {
 		return false, fmt.Errorf("Migrate: load audit ledger: %w", err)
@@ -68,10 +53,8 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		return true, nil
 	}
 
-	// Step 3 / 4 / 5 — only when this is the first reconcile of this
-	// request (no Started entry yet). The Operation on the source
-	// InstanceStatus carries the SurgeIndex once allocated, so later
-	// passes can re-read it without re-allocating.
+	// Recover surge index from source status (post-stamp) or ledger
+	// (post-Started, pre-stamp crash); allocate on a fresh request.
 	source := findInstanceStatus(p.ISVC, plan.Component, sourceIdx)
 	inFlight := ledger.inFlightEntry(requestUUID)
 	var surgeIdx int32
@@ -79,14 +62,12 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 	case source != nil && source.Operation != nil && source.Operation.Type == v1beta1.InstanceOperationMigrate && source.Operation.SurgeIndex != nil:
 		surgeIdx = *source.Operation.SurgeIndex
 	case inFlight != nil:
-		// Ledger remembers the surge index across a crash mid-stamp.
 		surgeIdx = inFlight.SurgeInstance
 	default:
-		// Fresh request: refuse to stamp Migrating until the source
-		// is a steady Ready Instance with a recorded revision. Without
-		// these guards a request mid-Create overwrites Create's
-		// Operation and deadlocks, and a request mid-Update / Restart
-		// silently steamrolls the in-flight op.
+		// Fresh request: refuse to stamp Migrating unless source is a
+		// steady Ready with a recorded revision. Without these guards a
+		// mid-Create stamp deadlocks Create and a mid-Update / Restart
+		// stamp silently steamrolls the in-flight op.
 		if source == nil {
 			return failMigration(ctx, p, ledger, req, requestUUID, "source InstanceStatus missing")
 		}
@@ -94,12 +75,10 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 			return false, nil
 		}
 
-		// MIGRATE-5: validate the request's FromNode matches the
-		// node the source pods actually run on. Alfred may have read
-		// stale data; if the source has since moved (e.g., a prior
-		// eviction relocated it), surge anti-affinity NotIn[FromNode]
-		// could place the surge on the SAME node as the post-move
-		// source — silently turning the migration into a no-op.
+		// Validate FromNode against where source pods actually run. The
+		// requester's view may be stale; if source has since moved, the
+		// surge's NotIn[FromNode] could land on the SAME node as the
+		// post-move source — silently no-op'ing the migration.
 		switch mismatch, defer_, err := validateFromNode(ctx, p, plan.Component, sourceIdx, req.FromNode); {
 		case err != nil:
 			return false, fmt.Errorf("Migrate: validate from-node (instance=%d): %w", sourceIdx, err)
@@ -111,10 +90,8 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 			return failMigration(ctx, p, ledger, req, requestUUID, mismatch)
 		}
 
-		// MIGRATE-4: cluster-wide capacity / rate-limit check. Counts
-		// in-flight Started entries and last-hour Started entries
-		// across the audit ledger; rejects with RateLimited if
-		// either cap is exceeded.
+		// Cluster-wide capacity / rate-limit gate (in-flight + last-hour
+		// counts across the audit ledger).
 		if ok, reason := validateMigrationCapacity(ledger, time.Now()); !ok {
 			recordWarning(p, EventReasonRateLimited,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
@@ -133,12 +110,8 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
 			return false, fmt.Errorf("Migrate: persist Started ledger: %w", err)
 		}
-		// MIGRATE-3: clear the annotation now that we've stamped
-		// Started. Alfred observes acceptance via either annotation
-		// removal or the status update; clearing here means a
-		// re-delivered request within Alfred's retry window finds the
-		// audit ledger and dedups via hasCompletedOrFailedRequest /
-		// inFlightEntry.
+		// Clear the annotation after stamping Started so a re-delivery
+		// within the requester's retry window dedups via the ledger.
 		if err := clearMigrationRequestAnnotation(ctx, p, requestUUID); err != nil {
 			return false, fmt.Errorf("Migrate: clear request annotation: %w", err)
 		}
@@ -147,7 +120,6 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 			instanceKey(plan.Component, sourceIdx), requestUUID, req.FromNode, surgeIdx)
 	}
 
-	// Step 6: create the surge pod set.
 	sourcePods, err := listPodsForInstance(ctx, p.Client, p.ISVC, plan.Component, sourceIdx)
 	if err != nil {
 		return false, fmt.Errorf("Migrate: list source pods: %w", err)
@@ -157,23 +129,18 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		return false, fmt.Errorf("Migrate: list surge pods: %w", err)
 	}
 
-	// Determine the revision the surge should run at. Same as the
-	// source's RunningRevision — migration moves placement, not
-	// template.
+	// Migration moves placement, not template — surge runs at the source's
+	// RunningRevision.
 	surgeRev, surgeRevSpec, err := surgeRevisionAndSpec(ctx, p, plan.Component, sourceIdx, sourcePods)
 	if err != nil {
 		return false, fmt.Errorf("Migrate: resolve surge revision: %w", err)
 	}
 	if surgeRev == nil || surgeRevSpec == nil {
-		// Source has no recorded RunningRevision yet — happens on the
-		// very first reconcile after Create lands but before the
-		// status promote step writes RunningRevision. Bail back and
-		// retry; Update / Create will fill it in.
+		// Source not yet promoted with a RunningRevision — retry.
 		return false, nil
 	}
 
-	// Build the surge InstancePlan with the migration overlay so Render
-	// stamps the anti-affinity.
+	// Migration overlay tells Render to stamp anti-affinity vs FromNode.
 	surgeInst := InstancePlan{
 		Index:       surgeIdx,
 		Incarnation: 1,
@@ -184,11 +151,9 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		},
 	}
 
-	// REV-6: refuse to render a surge whose hard NodeAffinity would
-	// collapse to "hostname=FromNode AND hostname!=FromNode" once the
-	// overlay is applied. Without this gate the surge pod sits Pending
-	// until instanceReadyTimeout and the migration eventually times out
-	// — a silent rejection that an early Failed entry surfaces clearly.
+	// Refuse a surge whose hard NodeAffinity would collapse to
+	// "hostname=FromNode AND hostname!=FromNode". Without this gate the
+	// surge sits Pending until timeout — silent rejection vs. early fail.
 	if wouldOverlayConflictWithNodeAffinity(surgeRevSpec, surgeInst.MigrationOverlay) {
 		reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
 		recordWarning(p, EventReasonMigrationNodeAffinityConflict,
@@ -208,21 +173,17 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, surgeIdx) {
 			return false, nil
 		}
-		// Use the surge revision's PodSpec as the create template, not
-		// the rendered p.PodSpec — migration keeps the running shape.
+		// Render against the surge revision's PodSpec, not p.PodSpec.
+		// Expectations bucket on surgeIdx (not sourceIdx) so surge
+		// creates track separately from source-side deletes.
 		surgeP := p
 		surgeP.PodSpec = surgeRevSpec
-		created, cerr := createMissingPods(ctx, surgeP, plan, surgeInst, missing)
-		if cerr != nil {
+		if _, cerr := createMissingPods(ctx, surgeP, plan, surgeInst, surgeIdx, missing); cerr != nil {
 			return false, fmt.Errorf("Migrate: create surge pod set: %w", cerr)
-		}
-		if created > 0 {
-			p.expectations().ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, surgeIdx, created)
 		}
 		return false, nil
 	}
 
-	// Step 7: wait surge ContainersReady, then flip serving.
 	if !allPodsRuntimeReady(surgePods) {
 		return false, nil
 	}
@@ -230,18 +191,14 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		if IsServing(pod) {
 			continue
 		}
-		// Surge pods are fresh — use the Lifecycle key.
 		if err := MarkPodServing(ctx, p.Client, pod, WriterLifecycle, KeyLifecycleInstanceReady); err != nil {
 			return false, fmt.Errorf("Migrate: serving=True on surge pod %s: %w", pod.Name, err)
 		}
 	}
 
-	// Step 7b: wait for kube-proxy to publish surge endpoints as Ready
-	// before initiating the source drain. Without this gate the swap
-	// can land in a zero-routable-endpoint window: serving flips on
-	// surge, drain flips on source, but neither has propagated to the
-	// dataplane yet. Live reader so a cold informer doesn't falsely
-	// report zero slices.
+	// Wait for surge endpoints in rotation before draining source — without
+	// this gate the swap can hit a zero-routable-endpoint window. Live
+	// reader so a cold informer doesn't falsely report zero slices.
 	serviceName := headlessServiceName(p.ISVC.Name, plan.Component)
 	for _, pod := range surgePods {
 		inRotation, rerr := IsPodInRotation(ctx, p.reader(), p.ISVC.Namespace, serviceName, pod)
@@ -253,27 +210,20 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		}
 	}
 
-	// MIGRATE-6: per OEP §7.5.2 step 8, wait until the surge is fully
-	// Available (Ready for >= minReadySeconds) before draining the
-	// source. At v1 alpha minReadySeconds defaults to 0 so this
-	// collapses onto Ready, but the gate stays so the addition of a
-	// non-zero minReadySeconds doesn't reopen the regression. A
-	// flapping-ready surge would otherwise trigger source drain
-	// against a surge that isn't stable.
+	// Wait for surge to be Available (Ready ≥ minReadySeconds) before
+	// draining. At alpha minReadySeconds defaults to 0 so this collapses
+	// onto Ready, but the gate stays for when a non-zero value is added.
 	surgeStatus := findInstanceStatus(p.ISVC, plan.Component, surgeIdx)
 	if surgeStatus == nil || surgeStatus.PodCount == 0 ||
 		surgeStatus.AvailablePodCount < surgeStatus.PodCount {
 		return false, nil
 	}
 
-	// Step 8: drain the source — serving=False, then wait IsPodDrained.
 	for _, pod := range sourcePods {
 		if !IsServing(pod) {
 			continue
 		}
-		// Source pods get the Migrate-source-drain key. The key is
-		// removed by virtue of source pod deletion at the end of
-		// the migration; no explicit RemoveNotReadyKey needed.
+		// Migrate-source-drain key; cleared by pod deletion at the end.
 		if err := MarkPodNotServing(ctx, p.Client, pod, WriterMigrateSourceDrain, requestUUID); err != nil {
 			return false, fmt.Errorf("Migrate: serving=False on source pod %s: %w", pod.Name, err)
 		}
@@ -288,56 +238,41 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		}
 	}
 
-	// OPS-1: refresh source pods via live read before issuing
-	// deletes. The earlier sourcePods read at the top of Migrate
-	// was cached; a stale-empty view here would skip the delete
-	// loop and proceed to source-status removal while the API
-	// server still holds the pods (Merged review MIGRATE-2 / OPS-1
-	// orphan scenario).
+	// Live read before deletes — a stale-empty cache view would skip the
+	// delete loop and orphan source pods at source-status removal.
 	sourcePods, err = liveListPodsForInstance(ctx, p, plan.Component, sourceIdx)
 	if err != nil {
 		return false, fmt.Errorf("Migrate: live-list source pods: %w", err)
 	}
 
-	// Step 9: delete source pods (expectations-gated, same pattern as Delete).
 	if len(sourcePods) > 0 {
 		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx) {
 			return false, nil
 		}
-		deleted := 0
+		// EXPECT-ORDER: per-pod ExpectDeletes BEFORE Delete, rollback via
+		// ObservedDelete on error — a failed RPC fires no event to decrement.
 		for _, pod := range sourcePods {
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
+			p.expectations().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx, 1)
 			if err := p.Client.Delete(ctx, pod); err != nil {
+				p.expectations().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx)
 				if apierrors.IsNotFound(err) {
 					continue
 				}
 				return false, fmt.Errorf("Migrate: delete source pod %s/%s: %w", pod.Namespace, pod.Name, err)
 			}
-			deleted++
-		}
-		if deleted > 0 {
-			p.expectations().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx, deleted)
 		}
 		return false, nil
 	}
 
-	// MIGRATE-2: persist Completed AFTER the surge promote +
-	// source-status removal succeed (was: write Completed first,
-	// then mutate). The prior order created a crash window where a
-	// crash between ledger-write and surge-promote left the ledger
-	// saying Completed while source still had Phase=Migrating and
-	// surge still Phase=Creating — the next reconcile would dedup-
-	// short-circuit and never finish the cleanup. Now the dedup
-	// short-circuit only fires after the cluster state actually
-	// matches "migration done."
-	//
-	// Re-delivery during these two steps is safe — both operations
-	// are idempotent (surge index already allocated, surge promote
-	// is patchInstanceStatusReadyOnRevision which is skip-write
-	// when already in the target shape, source removal is no-op if
-	// already removed).
+	// Persist Completed AFTER the surge promote + source-status removal
+	// succeed. The inverse order opens a crash window where the ledger
+	// says Completed but source is still Migrating and surge still
+	// Creating; the next reconcile dedups via hasCompletedOrFailedRequest
+	// and never finishes cleanup. Both operations below are idempotent so
+	// re-delivery between them is safe.
 	if err := patchInstanceStatusReadyOnRevision(ctx, p, plan.Component, surgeIdx, surgeRev.Name); err != nil {
 		return false, fmt.Errorf("Migrate: promote surge to Ready: %w", err)
 	}
@@ -348,11 +283,8 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 	if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
 		return false, fmt.Errorf("Migrate: persist Completed ledger: %w", err)
 	}
-	// MIGRATE-3: ensure the annotation is gone on completion too —
-	// the accept-time clear at the top of this function may have
-	// missed a re-delivery that arrived after acceptance but before
-	// completion. Idempotent: no-op when the annotation is already
-	// absent.
+	// Re-clear in case a re-delivery slipped in between the accept-time
+	// clear and now. Idempotent.
 	if err := clearMigrationRequestAnnotation(ctx, p, requestUUID); err != nil {
 		return false, fmt.Errorf("Migrate: clear request annotation on completion: %w", err)
 	}
@@ -362,18 +294,14 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 	return true, nil
 }
 
-// validateFromNode live-reads the source pods and reports whether
-// req.FromNode matches the node they actually run on. Three-state
-// return: (rejectionReason, defer_, err).
+// validateFromNode live-reads source pods, returning three states:
 //
-//   - rejectionReason="" defer_=false err=nil — valid, caller proceeds
-//   - defer_=true — transient state (pod not yet scheduled); caller
-//     returns (false, nil) and re-polls
-//   - rejectionReason != "" — permanent mismatch; caller fails the
-//     migration with the human-readable reason
+//   - rejectionReason="" defer_=false err=nil — valid, proceed
+//   - defer_=true — transient (pod not scheduled yet); caller requeues
+//   - rejectionReason != "" — permanent mismatch; caller fails
 //
-// Treats source pods on multiple distinct nodes as a rejection —
-// single-pod alpha can't represent that legitimately.
+// Source pods on multiple nodes is a rejection — alpha single-pod can't
+// legitimately span nodes.
 func validateFromNode(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, sourceIdx int32, fromNode string) (string, bool, error) {
 	pods, err := liveListPodsForInstance(ctx, p, component, sourceIdx)
 	if err != nil {
@@ -386,9 +314,7 @@ func validateFromNode(ctx context.Context, p ReconcileParams, component v1beta1.
 	for _, pod := range pods {
 		node := pod.Spec.NodeName
 		if node == "" {
-			// Pod not yet scheduled — defer rather than reject. A
-			// transient unscheduled window shouldn't fail an otherwise
-			// valid request; the next reconcile re-validates.
+			// Unscheduled — defer; next reconcile re-validates.
 			return "", true, nil
 		}
 		if observed == "" {
@@ -405,9 +331,8 @@ func validateFromNode(ctx context.Context, p ReconcileParams, component v1beta1.
 	return "", false, nil
 }
 
-// failMigration writes a terminal Failed audit row and returns done=true
-// so the reconciler stops re-dispatching the UUID. The annotation stays
-// on the ISVC; the ledger blocks re-attempts.
+// failMigration writes a terminal Failed audit row; the ledger blocks
+// re-attempts on this UUID. Returns done=true so the reconciler stops.
 func failMigration(ctx context.Context, p ReconcileParams, ledger *auditLedger, req *MigrationRequest, uuid, reason string) (bool, error) {
 	now := metav1.Now().UTC().Format(time.RFC3339)
 	entry := AuditEntry{
@@ -423,10 +348,8 @@ func failMigration(ctx context.Context, p ReconcileParams, ledger *auditLedger, 
 	if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
 		return false, fmt.Errorf("Migrate: persist Failed ledger (%s): %w", reason, err)
 	}
-	// MIGRATE-3: clear the annotation on the rejection path too —
-	// Alfred contract says the controller responds within 30s by
-	// either accepting or rejecting; rejection without clearing
-	// would have Alfred retry every 5m against the same UUID.
+	// Clear on rejection too — the requester retries against the same
+	// UUID forever if the annotation lingers.
 	if err := clearMigrationRequestAnnotation(ctx, p, uuid); err != nil {
 		return false, fmt.Errorf("Migrate: clear request annotation on rejection: %w", err)
 	}
@@ -436,15 +359,10 @@ func failMigration(ctx context.Context, p ReconcileParams, ledger *auditLedger, 
 }
 
 // clearMigrationRequestAnnotation removes the
-// ome.io/migration-request-v1-<uuid> annotation from the parent
-// ISVC, implementing MIGRATE-3 from the OEP-0007 review. Per OEP
-// §"Migration API and Mechanics" the controller must clear the
-// annotation within 30s of accepting or rejecting a request — Alfred's
-// retry contract assumes the annotation disappears once observed.
-//
-// Wrapped in retry.RetryOnConflict to ride concurrent ISVC writes
-// (per-op status mutations from the same reconcile pass). No-op when
-// the annotation is already absent.
+// ome.io/migration-request-v1-<uuid> annotation. The requester contract
+// requires accept/reject within 30s by annotation removal; without this
+// they re-deliver the same UUID indefinitely. retry.RetryOnConflict so
+// concurrent reconcile-pass writes don't lose the removal.
 func clearMigrationRequestAnnotation(ctx context.Context, p ReconcileParams, uuid string) error {
 	if p.Client == nil || p.ISVC == nil || uuid == "" {
 		return nil
@@ -469,10 +387,9 @@ func clearMigrationRequestAnnotation(ctx context.Context, p ReconcileParams, uui
 	})
 }
 
-// inFlightEntryOrSeed returns the existing Started entry for uuid if
-// present, otherwise synthesizes a Started entry (used when the
-// audit ledger was lost between writes). Keeps the terminal append in
-// Migrate's tail simple.
+// inFlightEntryOrSeed returns the in-flight Started entry, synthesizing
+// one if missing — covers the case where the ledger was lost between
+// writes. Keeps the terminal append in Migrate's tail simple.
 func (l *auditLedger) inFlightEntryOrSeed(uuid string, req *MigrationRequest, surgeIdx int32) *AuditEntry {
 	if e := l.inFlightEntry(uuid); e != nil {
 		return e
@@ -481,17 +398,14 @@ func (l *auditLedger) inFlightEntryOrSeed(uuid string, req *MigrationRequest, su
 	return &e
 }
 
-// detectMigrationRequest scans the ISVC's annotations for the first
-// migration request whose UUID hasn't already completed terminally.
-// Returns (uuid, request, true) when one is found. Schema-violating
-// or component-mismatched requests are rejected via a Failed ledger
-// entry but do not surface as Go errors.
+// detectMigrationRequest scans annotations for the first non-terminal
+// migration request. Schema-violating / wrong-component requests get a
+// Failed ledger entry but don't surface as Go errors.
 func detectMigrationRequest(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType) (string, *MigrationRequest, int32, bool, error) {
 	if p.ISVC == nil || p.ISVC.Annotations == nil {
 		return "", nil, 0, false, nil
 	}
-	// Sort keys for deterministic dispatch when multiple migration
-	// requests are pending. Go map iteration is randomized.
+	// Deterministic order when multiple requests are pending.
 	keys := make([]string, 0, len(p.ISVC.Annotations))
 	for k := range p.ISVC.Annotations {
 		if strings.HasPrefix(k, migrationRequestAnnotationPrefix) {
@@ -519,8 +433,7 @@ func detectMigrationRequest(ctx context.Context, p ReconcileParams, component v1
 		raw := p.ISVC.Annotations[k]
 		req, perr := parseMigrationRequest(raw)
 		if perr != nil {
-			// Schema violation: record a terminal Failed row so we
-			// don't re-attempt every reconcile.
+			// Terminal Failed so we don't re-parse every reconcile.
 			ledger.upsertEntry(AuditEntry{
 				RequestUUID: uuid,
 				Phase:       auditPhaseFailed,
@@ -541,7 +454,6 @@ func detectMigrationRequest(ctx context.Context, p ReconcileParams, component v1
 			continue
 		}
 		if req.Component != string(component) {
-			// Skip — request targets a different Component.
 			continue
 		}
 		return uuid, req, req.Instance, true, nil
@@ -549,11 +461,9 @@ func detectMigrationRequest(ctx context.Context, p ReconcileParams, component v1
 	return "", nil, 0, false, nil
 }
 
-// surgeRevisionAndSpec returns the CR and its embedded PodSpec that
-// the surge Instance should run at — the source's RunningRevision.
-// Returns (nil, nil, nil) when no RunningRevision is recorded yet OR
-// the named CR has been deleted (retention race, operator cleanup);
-// the caller bails and retries on a later reconcile.
+// surgeRevisionAndSpec returns the source's RunningRevision CR + PodSpec.
+// (nil, nil, nil) means no recorded RunningRevision yet OR the CR was
+// deleted — caller retries.
 func surgeRevisionAndSpec(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, sourceIdx int32, sourcePods []*corev1.Pod) (*appsv1.ControllerRevision, *corev1.PodSpec, error) {
 	source := findInstanceStatus(p.ISVC, component, sourceIdx)
 	if source == nil || source.RunningRevision == "" {
@@ -576,11 +486,9 @@ func surgeRevisionAndSpec(ctx context.Context, p ReconcileParams, component v1be
 	return cr, payload.PodSpec, nil
 }
 
-// patchInstanceStatusMigrating moves the source InstanceStatus to
-// migrationRole tells stampMigrationStatus which side of the pair it's
-// writing. Source -> Phase=Migrating, sibling pointer is the surge;
-// surge -> Phase=Creating, sibling pointer is the source and
-// Incarnation is initialized.
+// migrationRole picks which side of the pair stampMigrationStatus is
+// writing — source goes to Phase=Migrating with sibling=surge; surge
+// goes to Phase=Creating with sibling=source and Incarnation seeded.
 type migrationRole int
 
 const (
@@ -588,8 +496,8 @@ const (
 	migrationRoleSurge
 )
 
-// stampMigrationStatus is the shared write for both sides of a
-// migration pair. Idempotent on (Phase, Operation.Type, RequestUUID).
+// stampMigrationStatus writes one side of the migration pair. Idempotent
+// on (Phase, Operation.Type, RequestUUID).
 func stampMigrationStatus(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx, siblingIdx int32, role migrationRole, uuid string, req *MigrationRequest, timeout time.Duration) error {
 	now := metav1.NewTime(time.Now())
 	siblingPtr := siblingIdx
@@ -626,17 +534,15 @@ func stampMigrationStatus(ctx context.Context, p ReconcileParams, component v1be
 	})
 }
 
-// patchInstanceStatusMigrating moves the source InstanceStatus to
-// Phase=Migrating. SurgeIndex on the source's Operation points
-// FORWARD at the surge.
+// patchInstanceStatusMigrating stamps source Phase=Migrating; SurgeIndex
+// on Operation points forward at the surge.
 func patchInstanceStatusMigrating(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx, surgeIdx int32, uuid string, req *MigrationRequest, timeout time.Duration) error {
 	return stampMigrationStatus(ctx, p, component, idx, surgeIdx, migrationRoleSource, uuid, req, timeout)
 }
 
-// patchInstanceStatusMigrationSurge stamps the surge InstanceStatus at
-// Phase=Creating. SurgeIndex on the surge's Operation points BACK at
-// the source (the field is reused as a generic sibling pointer so an
-// external observer can correlate the two entries by either side).
+// patchInstanceStatusMigrationSurge stamps surge Phase=Creating; SurgeIndex
+// points back at source (field reused as a sibling pointer so observers
+// can correlate the pair from either side).
 func patchInstanceStatusMigrationSurge(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, surgeIdx, sourceIdx int32, uuid string, req *MigrationRequest, timeout time.Duration) error {
 	return stampMigrationStatus(ctx, p, component, surgeIdx, sourceIdx, migrationRoleSurge, uuid, req, timeout)
 }

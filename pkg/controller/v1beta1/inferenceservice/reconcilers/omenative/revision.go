@@ -52,11 +52,9 @@ type revisionDataPayload struct {
 // on the next reconcile.
 //
 // templateMeta carries user-intent labels and annotations from the
-// rendered Component metadata. Captured so changes to pod-template
-// labels/annotations on the InferenceService spec trigger a new
-// revision and a rollout (REV-8). nil is treated as "no metadata"
-// and produces the same hash as an empty ObjectMeta — both serialize
-// to the same `podMeta` JSON shape.
+// rendered Component metadata so template-meta changes trigger a new
+// revision and a rollout. nil hashes the same as empty ObjectMeta — both
+// serialize to the same `podMeta` JSON shape.
 func revisionHash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCount *int32) (string, []byte, error) {
 	if template == nil {
 		return "", nil, fmt.Errorf("nil pod template")
@@ -74,35 +72,19 @@ func revisionHash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, col
 	if collisionCount != nil {
 		cc = *collisionCount
 	}
-	// REV-3: frame the CollisionCount with delimiters so it can't
-	// concatenate ambiguously with the trailing bytes of `raw`. Without
-	// framing, raw bytes ending in "1" plus cc=0 hash the same input as
-	// raw bytes ending in "10" plus a different cc — silent collision.
-	//
-	// Side effect: every existing CR's hash changes once when this
-	// lands. Each existing alpha ISVC will see one forced recreate
-	// rollout on the next reconcile (RunningRevision points at the old
-	// hash, UpdateRevision computes the new one). Same shape as the
-	// REV-8 PodMeta-capture one-time bump.
+	// Delimit the CollisionCount so it can't concatenate ambiguously with
+	// the trailing bytes of `raw` — raw ending in "1" plus cc=0 must not
+	// hash the same as raw ending in "10" plus a different cc.
 	_, _ = fmt.Fprintf(h, "|cc=%d|", cc)
 	return fmt.Sprintf("%08x", h.Sum32()), raw, nil
 }
 
-// revisionTemplateMeta strips the rendered ObjectMeta down to the
-// fields that represent user intent — labels and annotations.
-// Operational fields (UID, ResourceVersion, CreationTimestamp,
-// managed-by-style controller fields) are excluded so the hash
-// stays stable across reconciles when only those change.
-//
-// Returns nil when the source carries no labels AND no annotations
-// so the JSON serializes as `"podMeta":null`, preserving the
-// legacy hash shape for ISVCs that don't yet carry template metadata.
-// This avoids a one-time phantom rollout when this code first
-// deploys against existing alpha workloads. ISVCs that DO have
-// template labels/annotations will see a single forced revision
-// bump on the first reconcile after this lands — those workloads
-// have been silently rolling without a real revision history per
-// REV-8, so the bump materializes the deferred capture.
+// revisionTemplateMeta strips ObjectMeta to user-intent fields (labels +
+// annotations) only. Operational fields (UID, ResourceVersion, etc.) are
+// excluded so the hash stays stable when only those change. Returns nil
+// when neither labels nor annotations are set — preserves the legacy
+// `"podMeta":null` shape so ISVCs that don't yet carry template metadata
+// don't see a phantom rollout when this code first deploys.
 func revisionTemplateMeta(src *metav1.ObjectMeta) *metav1.ObjectMeta {
 	if src == nil || (len(src.Labels) == 0 && len(src.Annotations) == 0) {
 		return nil
@@ -120,23 +102,14 @@ func revisionName(isvcName string, component v1beta1.ComponentType, hash string)
 	return fmt.Sprintf("%s-%s-%s", isvcName, component, hash)
 }
 
-// EnsureControllerRevision creates or reuses a ControllerRevision matching
-// the given Component's steady-state pod template.
+// EnsureControllerRevision creates or reuses a CR matching the Component's
+// pod template. `reads` must be the live API reader: a stale cache could
+// return NotFound for an object the apiserver already holds, causing
+// re-Create over a concurrent writer.
 //
-// reads is the live API reader (typically mgr.GetAPIReader()) used for
-// the two correctness-critical reads: the initial existence check and
-// the re-Get after a Create→AlreadyExists race. Using the cached
-// client.Client for these reads would let a stale cache return
-// NotFound for an object the API server already holds, causing the
-// function to either re-Create over a concurrent writer or treat a
-// real conflict as a fresh-create failure. The cached client c is
-// still used for the Create itself and for retention bookkeeping.
-//
-// Return value `collision` reports a hash collision — a CR with the same
-// computed name already exists, but its Data payload differs from what we
-// would have written. The caller (Update) is expected to bump
-// CollisionCount in OMENativeComponentStatus and invoke this function
-// again with the new salt; the retry yields a different name and lands.
+// collision=true signals a hash collision (same name, different Data, or
+// foreign ownership). Caller bumps CollisionCount and retries with a
+// different salt so the next name lands.
 func EnsureControllerRevision(
 	ctx context.Context,
 	c client.Client,
@@ -166,17 +139,12 @@ func EnsureControllerRevision(
 
 	existing := &appsv1.ControllerRevision{}
 	if getErr := reads.Get(ctx, key, existing); getErr == nil {
-		// Same name already exists. REV-4: validate the controller
-		// OwnerReference UID matches the current ISVC before reusing —
-		// a CR left over from a previously-deleted-and-recreated ISVC
-		// of the same name would otherwise be silently adopted, mixing
-		// histories. Treat foreign ownership as a collision so the
-		// caller bumps CollisionCount and writes a fresh-named CR.
+		// Foreign ownership = collision: a CR left over from a
+		// previously-deleted-and-recreated ISVC of the same name would
+		// otherwise be silently adopted, mixing histories.
 		if !controllerOwnedBy(existing.OwnerReferences, isvc.UID) {
 			return existing, true, nil
 		}
-		// If the Data matches, we reuse; if not, the caller must bump
-		// CollisionCount and retry.
 		if !bytes.Equal(existing.Data.Raw, raw) {
 			return existing, true, nil
 		}
@@ -206,10 +174,9 @@ func EnsureControllerRevision(
 		if !apierrors.IsAlreadyExists(cerr) {
 			return nil, false, fmt.Errorf("create ControllerRevision %s: %w", name, cerr)
 		}
-		// Lost a race against another reconcile. Re-read via the live
-		// reader (the cached client may still show NotFound) and apply
-		// the same ownership + match-or-collision logic the existing-
-		// on-Get branch uses.
+		// Lost the race; re-read via live reader (cache may still show
+		// NotFound) and apply the same ownership / match-or-collision
+		// gating as the existing-on-Get branch.
 		if getErr := reads.Get(ctx, key, cr); getErr != nil {
 			return nil, false, fmt.Errorf("re-get after AlreadyExists: %w", getErr)
 		}
@@ -223,12 +190,9 @@ func EnsureControllerRevision(
 	return cr, false, nil
 }
 
-// controllerOwnedBy reports whether refs contains a controller
-// OwnerReference pointing at uid. Used by EnsureControllerRevision
-// (REV-4) to refuse to reuse a CR that belonged to a previously-
-// deleted ISVC of the same name. Treats nil-Controller and
-// Controller=false the same — only a true controller reference
-// asserts the parent claim we care about.
+// controllerOwnedBy reports whether refs contains a Controller=true
+// OwnerReference pointing at uid. Only a true controller ref asserts
+// the parent claim we care about.
 func controllerOwnedBy(refs []metav1.OwnerReference, uid types.UID) bool {
 	for _, ref := range refs {
 		if ref.Controller != nil && *ref.Controller && ref.UID == uid {

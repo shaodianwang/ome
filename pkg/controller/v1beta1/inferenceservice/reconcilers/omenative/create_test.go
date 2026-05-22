@@ -313,12 +313,10 @@ func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, se
 	return pod
 }
 
-// STATUS-4: when Create promotes an Instance to Ready, the RunningRevision
-// field must reflect the target ControllerRevision so detectUpdateTrigger's
-// cheap fast path can short-circuit on the next reconcile. Without this,
-// every fresh Instance triggers a spurious recreate Update on its second
-// reconcile (the slow podMatchesTarget comparison returns a false-positive
-// mismatch against post-Render-mutation pod fields).
+// Promote to Ready must record RunningRevision so detectUpdateTrigger's
+// fast path short-circuits on the next reconcile. Without it, every
+// fresh Instance triggers a spurious recreate on its second pass (the
+// per-pod diff false-positives against post-Render mutations).
 func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
@@ -348,7 +346,7 @@ func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 		t.Errorf("Phase: got %q want Ready", s.Phase)
 	}
 	if s.RunningRevision != target.Name {
-		t.Errorf("RunningRevision: got %q want %q (STATUS-4: Create promote must record target hash)",
+		t.Errorf("RunningRevision: got %q want %q (Create promote must record target hash)",
 			s.RunningRevision, target.Name)
 	}
 }

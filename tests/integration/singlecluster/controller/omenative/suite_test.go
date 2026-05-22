@@ -18,6 +18,7 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -39,10 +40,19 @@ var (
 	suiteCancel context.CancelFunc
 	suiteFwk    *framework.Framework
 	k8sClient   client.Client
-	// kubeletSim ticks ContainersReady + PodScheduled onto OMENative-
-	// owned pods so the gate pipeline can converge against envtest's
-	// no-kubelet world. Started in BeforeSuite, stopped in AfterSuite.
+	// kubeletSim ticks NodeName (via binder) + ContainersReady onto
+	// OMENative-owned pods so the gate pipeline can converge against
+	// envtest's no-kubelet world. Started in BeforeSuite, stopped in
+	// AfterSuite.
 	kubeletSim *podKubeletSimulator
+	// sliceSim mirrors pod state into EndpointSlices so drain waits +
+	// IsPodInRotation converge against envtest's missing
+	// endpointslice-controller.
+	sliceSim *endpointSliceSimulator
+	// suiteBinder is the clientset-backed binding helper. Exported to
+	// specs that need to pin a pod to a specific node (e.g. Migrate's
+	// FromNode validation) rather than letting the kubelet sim pick.
+	suiteBinder *podBinder
 )
 
 var _ = ginkgo.BeforeSuite(func() {
@@ -104,11 +114,25 @@ var _ = ginkgo.BeforeSuite(func() {
 	gomega.Expect(suiteFwk.StartManager(suiteCtx, s.Cfg, mgrSetup)).To(gomega.Succeed())
 
 	ginkgo.By("starting the kubelet simulator for OMENative-owned pods")
-	kubeletSim = newPodKubeletSimulator(k8sClient)
+	// Build a clientset for the binding subresource — controller-
+	// runtime's typed client doesn't expose it. Used by the kubelet
+	// simulator to assign Spec.NodeName via Bind on otherwise-
+	// unscheduled pods.
+	cs, err := kubernetes.NewForConfig(s.Cfg)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "kubernetes.NewForConfig")
+	suiteBinder = newPodBinder(cs)
+	kubeletSim = newPodKubeletSimulator(k8sClient, suiteBinder)
 	kubeletSim.Start(suiteCtx)
+
+	ginkgo.By("starting the EndpointSlice simulator to mirror pod state")
+	sliceSim = newEndpointSliceSimulator(k8sClient)
+	sliceSim.Start(suiteCtx)
 })
 
 var _ = ginkgo.AfterSuite(func() {
+	if sliceSim != nil {
+		sliceSim.Stop()
+	}
 	if kubeletSim != nil {
 		kubeletSim.Stop()
 	}
