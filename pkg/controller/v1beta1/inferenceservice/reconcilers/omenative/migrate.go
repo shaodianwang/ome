@@ -184,6 +184,18 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		},
 	}
 
+	// REV-6: refuse to render a surge whose hard NodeAffinity would
+	// collapse to "hostname=FromNode AND hostname!=FromNode" once the
+	// overlay is applied. Without this gate the surge pod sits Pending
+	// until instanceReadyTimeout and the migration eventually times out
+	// — a silent rejection that an early Failed entry surfaces clearly.
+	if wouldOverlayConflictWithNodeAffinity(surgeRevSpec, surgeInst.MigrationOverlay) {
+		reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
+		recordWarning(p, EventReasonMigrationNodeAffinityConflict,
+			"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
+		return failMigration(ctx, p, ledger, req, requestUUID, reason)
+	}
+
 	desired := expectedPodNamesForInstance(p.ISVC.Name, plan.Component, surgeInst)
 	existingByName := indexPodsByName(surgePods)
 	missing := make([]podTarget, 0, len(desired))

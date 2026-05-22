@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -73,7 +74,17 @@ func revisionHash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, col
 	if collisionCount != nil {
 		cc = *collisionCount
 	}
-	_, _ = fmt.Fprintf(h, "%d", cc)
+	// REV-3: frame the CollisionCount with delimiters so it can't
+	// concatenate ambiguously with the trailing bytes of `raw`. Without
+	// framing, raw bytes ending in "1" plus cc=0 hash the same input as
+	// raw bytes ending in "10" plus a different cc — silent collision.
+	//
+	// Side effect: every existing CR's hash changes once when this
+	// lands. Each existing alpha ISVC will see one forced recreate
+	// rollout on the next reconcile (RunningRevision points at the old
+	// hash, UpdateRevision computes the new one). Same shape as the
+	// REV-8 PodMeta-capture one-time bump.
+	_, _ = fmt.Fprintf(h, "|cc=%d|", cc)
 	return fmt.Sprintf("%08x", h.Sum32()), raw, nil
 }
 
@@ -155,8 +166,17 @@ func EnsureControllerRevision(
 
 	existing := &appsv1.ControllerRevision{}
 	if getErr := reads.Get(ctx, key, existing); getErr == nil {
-		// Same name already exists. If the Data matches, we reuse; if
-		// not, the caller must bump CollisionCount and retry.
+		// Same name already exists. REV-4: validate the controller
+		// OwnerReference UID matches the current ISVC before reusing —
+		// a CR left over from a previously-deleted-and-recreated ISVC
+		// of the same name would otherwise be silently adopted, mixing
+		// histories. Treat foreign ownership as a collision so the
+		// caller bumps CollisionCount and writes a fresh-named CR.
+		if !controllerOwnedBy(existing.OwnerReferences, isvc.UID) {
+			return existing, true, nil
+		}
+		// If the Data matches, we reuse; if not, the caller must bump
+		// CollisionCount and retry.
 		if !bytes.Equal(existing.Data.Raw, raw) {
 			return existing, true, nil
 		}
@@ -188,16 +208,34 @@ func EnsureControllerRevision(
 		}
 		// Lost a race against another reconcile. Re-read via the live
 		// reader (the cached client may still show NotFound) and apply
-		// the same match-or-collision logic the existing-on-Get branch
-		// uses.
+		// the same ownership + match-or-collision logic the existing-
+		// on-Get branch uses.
 		if getErr := reads.Get(ctx, key, cr); getErr != nil {
 			return nil, false, fmt.Errorf("re-get after AlreadyExists: %w", getErr)
+		}
+		if !controllerOwnedBy(cr.OwnerReferences, isvc.UID) {
+			return cr, true, nil
 		}
 		if !bytes.Equal(cr.Data.Raw, raw) {
 			return cr, true, nil
 		}
 	}
 	return cr, false, nil
+}
+
+// controllerOwnedBy reports whether refs contains a controller
+// OwnerReference pointing at uid. Used by EnsureControllerRevision
+// (REV-4) to refuse to reuse a CR that belonged to a previously-
+// deleted ISVC of the same name. Treats nil-Controller and
+// Controller=false the same — only a true controller reference
+// asserts the parent claim we care about.
+func controllerOwnedBy(refs []metav1.OwnerReference, uid types.UID) bool {
+	for _, ref := range refs {
+		if ref.Controller != nil && *ref.Controller && ref.UID == uid {
+			return true
+		}
+	}
+	return false
 }
 
 // RetainControllerRevisions sweeps OMENative-owned ControllerRevisions for

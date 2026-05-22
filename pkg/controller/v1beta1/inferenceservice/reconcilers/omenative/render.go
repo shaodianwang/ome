@@ -101,6 +101,11 @@ func Render(
 // for migrating); preferred affinity nudges it toward the operator-
 // supplied target list without making the placement hard-fail. No-op
 // when overlay is nil.
+//
+// Idempotent (REV-10): if the same NotIn[FromNode] requirement or
+// the same HintTargetNodes preferred term is already present (e.g.,
+// Render ran twice on the same pod after a cache-lag retry), don't
+// double-stamp.
 func applyMigrationOverlay(pod *corev1.Pod, overlay *MigrationOverlay) {
 	if overlay == nil {
 		return
@@ -131,22 +136,22 @@ func applyMigrationOverlay(pod *corev1.Pod, overlay *MigrationOverlay) {
 			}
 		} else {
 			for i := range na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
-				na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[i].MatchExpressions = append(
-					na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[i].MatchExpressions,
-					req,
-				)
+				term := &na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[i]
+				if !hasHostnameNotIn(term.MatchExpressions, overlay.FromNode) {
+					term.MatchExpressions = append(term.MatchExpressions, req)
+				}
 			}
 		}
 	}
 
-	if len(overlay.HintTargetNodes) > 0 {
+	if len(overlay.HintTargetNodes) > 0 && !hasPreferredHintTerm(na.PreferredDuringSchedulingIgnoredDuringExecution, overlay.HintTargetNodes) {
 		// PreferredDuringSchedulingIgnoredDuringExecution: nudge the
 		// scheduler toward HintTargetNodes but don't block scheduling
 		// when none are available.
 		na.PreferredDuringSchedulingIgnoredDuringExecution = append(
 			na.PreferredDuringSchedulingIgnoredDuringExecution,
 			corev1.PreferredSchedulingTerm{
-				Weight: 100,
+				Weight: overlayPreferredHintWeight,
 				Preference: corev1.NodeSelectorTerm{
 					MatchExpressions: []corev1.NodeSelectorRequirement{{
 						Key:      "kubernetes.io/hostname",
@@ -157,6 +162,113 @@ func applyMigrationOverlay(pod *corev1.Pod, overlay *MigrationOverlay) {
 			},
 		)
 	}
+}
+
+// overlayPreferredHintWeight is the scheduler weight stamped on the
+// migration-hint preferred affinity term. Picked deliberately distinct
+// from common user weights (typically 1–100 with 100 the most
+// emphatic) so the migration nudge stacks with rather than competes
+// against operator-supplied preferences. REV-11 reserves a tighter
+// fix; the lower value at least documents the intent.
+const overlayPreferredHintWeight int32 = 50
+
+// wouldOverlayConflictWithNodeAffinity reports whether applying
+// overlay's NotIn[FromNode] to spec's NodeAffinity would yield an
+// unsatisfiable scheduler constraint — i.e., every existing required
+// term pins kubernetes.io/hostname to FromNode (and nothing else), so
+// the appended NotIn produces a contradiction.
+//
+// Used by Migrate (REV-6) BEFORE rendering surge pods to reject the
+// migration up front rather than letting the pod sit Pending until
+// instanceReadyTimeout. NodeSelectorTerms are OR'd; a term is
+// satisfiable post-overlay if its hostname In-set has at least one
+// value other than FromNode, OR if it has no hostname requirement at
+// all. The overlay only conflicts when EVERY term collapses to
+// "hostname must equal FromNode and must not equal FromNode."
+func wouldOverlayConflictWithNodeAffinity(spec *corev1.PodSpec, overlay *MigrationOverlay) bool {
+	if overlay == nil || overlay.FromNode == "" || spec == nil {
+		return false
+	}
+	if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil {
+		return false
+	}
+	req := spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if req == nil || len(req.NodeSelectorTerms) == 0 {
+		return false
+	}
+	for _, term := range req.NodeSelectorTerms {
+		if !termPinsHostnameTo(term, overlay.FromNode) {
+			return false
+		}
+	}
+	return true
+}
+
+// termPinsHostnameTo reports whether term's hostname In-requirement
+// permits ONLY hostname (no other values). A term without any hostname
+// In-requirement returns false — it doesn't pin hostname at all and so
+// can't conflict with NotIn[hostname].
+func termPinsHostnameTo(term corev1.NodeSelectorTerm, hostname string) bool {
+	for _, expr := range term.MatchExpressions {
+		if expr.Key != "kubernetes.io/hostname" || expr.Operator != corev1.NodeSelectorOpIn {
+			continue
+		}
+		if len(expr.Values) == 1 && expr.Values[0] == hostname {
+			return true
+		}
+		// Hostname In-requirement with other values too — surge can
+		// still land on one of those.
+		return false
+	}
+	return false
+}
+
+// hasHostnameNotIn reports whether exprs already includes a
+// NotIn[hostname] requirement on kubernetes.io/hostname. Drives the
+// REV-10 idempotency check.
+func hasHostnameNotIn(exprs []corev1.NodeSelectorRequirement, hostname string) bool {
+	for _, expr := range exprs {
+		if expr.Key != "kubernetes.io/hostname" || expr.Operator != corev1.NodeSelectorOpNotIn {
+			continue
+		}
+		for _, v := range expr.Values {
+			if v == hostname {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasPreferredHintTerm reports whether existing terms already include
+// a preferred affinity for the same hostname In-set the overlay would
+// add. Order-insensitive: {A,B,C} matches {C,B,A}.
+func hasPreferredHintTerm(existing []corev1.PreferredSchedulingTerm, hints []string) bool {
+	want := make(map[string]struct{}, len(hints))
+	for _, h := range hints {
+		want[h] = struct{}{}
+	}
+	for _, term := range existing {
+		for _, expr := range term.Preference.MatchExpressions {
+			if expr.Key != "kubernetes.io/hostname" || expr.Operator != corev1.NodeSelectorOpIn {
+				continue
+			}
+			if len(expr.Values) != len(want) {
+				continue
+			}
+			match := true
+			for _, v := range expr.Values {
+				if _, ok := want[v]; !ok {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isvcGroupVersionKind identifies the InferenceService owner reference

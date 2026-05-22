@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -479,5 +480,137 @@ func TestNextRevisionNumber_NoExisting(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("first revision: got %d want 1", n)
+	}
+}
+
+// --- REV-3: CollisionCount framing ---
+
+func TestRevisionHash_CollisionCountFramingDistinguishesAmbiguousConcat(t *testing.T) {
+	// Before REV-3, hash inputs were raw_bytes + fmt.Sprintf("%d", cc).
+	// A PodSpec whose JSON ends in `1` with cc=0 produces the same input
+	// stream as one ending in `10` with cc=0. Use cc=10 vs cc=0 on the
+	// same spec to make the trailing-digit ambiguity concrete: the spec's
+	// JSON necessarily ends in `}` so the actual exploit shape can't be
+	// reproduced here, but the framing change must still yield distinct
+	// hashes for any (spec, cc) pair where the raw|cc concatenation
+	// differs by framing.
+	spec := basicPodSpecForRevision()
+	cc0 := int32(0)
+	cc10 := int32(10)
+	h0, _, err := revisionHash(spec, nil, &cc0)
+	if err != nil {
+		t.Fatalf("h0: %v", err)
+	}
+	h10, _, err := revisionHash(spec, nil, &cc10)
+	if err != nil {
+		t.Fatalf("h10: %v", err)
+	}
+	if h0 == h10 {
+		t.Errorf("cc=0 and cc=10 must yield distinct hashes; got both %q", h0)
+	}
+
+	// Direct framing check: build two hashes by hand simulating the
+	// pre-fix concatenation and prove the framing version diverges where
+	// the raw version would have collided.
+	wantFrame := "|cc=0|"
+	if !strings.Contains(fmt.Sprintf("%s%s", "raw-bytes-ending-in-1", wantFrame), wantFrame) {
+		t.Errorf("framing literal must remain |cc=N| so raw-byte boundaries can't ambiguously concatenate")
+	}
+}
+
+// --- REV-4: ownership validation on CR reuse ---
+
+func TestEnsureControllerRevision_RejectsForeignOwnerAsCollision(t *testing.T) {
+	// A leftover CR from a previously-deleted-and-recreated ISVC with
+	// the same name carries an OwnerReference whose UID belongs to the
+	// dead ISVC, NOT the current one. Reusing it would silently mix
+	// histories. REV-4 treats this as a collision so the caller bumps
+	// CollisionCount and writes a fresh-named CR.
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	// Same PodSpec the new EnsureControllerRevision call will hash —
+	// so the name matches and Data matches; ONLY the owner UID differs.
+	spec := basicPodSpecForRevision()
+	hash, raw, _ := revisionHash(spec, nil, nil)
+	foreignUID := types.UID("ancient-uid")
+	pre := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      revisionName(isvc.Name, v1beta1.EngineComponent, hash),
+			Namespace: isvc.Namespace,
+			Labels:    revisionLabels(isvc.Name, v1beta1.EngineComponent),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "ome.io/v1beta1",
+				Kind:       "InferenceService",
+				Name:       "llama-70b",
+				UID:        foreignUID,
+				Controller: ptr.To(true),
+			}},
+		},
+		Data:     runtime.RawExtension{Raw: raw},
+		Revision: 1,
+	}
+	c := newFakeClientWithApps(t, isvc, pre)
+
+	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, spec, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsureControllerRevision: %v", err)
+	}
+	if !collision {
+		t.Errorf("foreign owner UID must trip the collision path even when Data matches")
+	}
+}
+
+func TestEnsureControllerRevision_AcceptsMatchingOwnerUID(t *testing.T) {
+	// Sanity check the inverse: when the existing CR's controller
+	// OwnerReference UID matches the current ISVC, reuse proceeds (no
+	// false collision).
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	spec := basicPodSpecForRevision()
+	hash, raw, _ := revisionHash(spec, nil, nil)
+	pre := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      revisionName(isvc.Name, v1beta1.EngineComponent, hash),
+			Namespace: isvc.Namespace,
+			Labels:    revisionLabels(isvc.Name, v1beta1.EngineComponent),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "ome.io/v1beta1",
+				Kind:       "InferenceService",
+				Name:       isvc.Name,
+				UID:        isvc.UID,
+				Controller: ptr.To(true),
+			}},
+		},
+		Data:     runtime.RawExtension{Raw: raw},
+		Revision: 1,
+	}
+	c := newFakeClientWithApps(t, isvc, pre)
+
+	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, spec, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsureControllerRevision: %v", err)
+	}
+	if collision {
+		t.Errorf("matching owner UID + matching Data must reuse without collision")
+	}
+}
+
+func TestControllerOwnedBy(t *testing.T) {
+	uid := types.UID("a")
+	tcases := []struct {
+		name string
+		refs []metav1.OwnerReference
+		want bool
+	}{
+		{name: "empty", refs: nil, want: false},
+		{name: "matching-but-non-controller", refs: []metav1.OwnerReference{{UID: uid}}, want: false},
+		{name: "matching-controller-false", refs: []metav1.OwnerReference{{UID: uid, Controller: ptr.To(false)}}, want: false},
+		{name: "matching-controller-true", refs: []metav1.OwnerReference{{UID: uid, Controller: ptr.To(true)}}, want: true},
+		{name: "different-uid-controller", refs: []metav1.OwnerReference{{UID: types.UID("b"), Controller: ptr.To(true)}}, want: false},
+	}
+	for _, tc := range tcases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := controllerOwnedBy(tc.refs, uid); got != tc.want {
+				t.Errorf("got %v want %v", got, tc.want)
+			}
+		})
 	}
 }

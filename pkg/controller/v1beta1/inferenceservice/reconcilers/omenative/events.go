@@ -46,6 +46,9 @@ const (
 	EventReasonMigrationFromNodeMismatch = "MigrationFromNodeMismatch"
 	EventReasonMigrationSurgeAbandoned   = "MigrationSurgeAbandoned"
 
+	// Migration overlay validation rejection (PR G, REV-6).
+	EventReasonMigrationNodeAffinityConflict = "MigrationNodeAffinityConflict"
+
 	// Revision-collision (rare; salted retry succeeded).
 	EventReasonRevisionCollision = "RevisionCollision"
 )

@@ -290,3 +290,153 @@ func envKeys(env []corev1.EnvVar) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// --- REV-10: applyMigrationOverlay idempotency ---
+
+func TestApplyMigrationOverlay_IdempotentDoesNotDuplicateRequirements(t *testing.T) {
+	pod := &corev1.Pod{Spec: corev1.PodSpec{}}
+	overlay := &MigrationOverlay{
+		FromNode:        "node5",
+		HintTargetNodes: []string{"node3", "node7"},
+	}
+	applyMigrationOverlay(pod, overlay)
+	applyMigrationOverlay(pod, overlay)
+
+	req := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if req == nil || len(req.NodeSelectorTerms) != 1 {
+		t.Fatalf("expected exactly one term, got %+v", req)
+	}
+	notInCount := 0
+	for _, expr := range req.NodeSelectorTerms[0].MatchExpressions {
+		if expr.Key == "kubernetes.io/hostname" && expr.Operator == corev1.NodeSelectorOpNotIn {
+			notInCount++
+		}
+	}
+	if notInCount != 1 {
+		t.Errorf("NotIn[hostname] requirement should appear once, got %d", notInCount)
+	}
+
+	pref := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+	if len(pref) != 1 {
+		t.Errorf("preferred terms should appear once, got %d: %+v", len(pref), pref)
+	}
+}
+
+func TestApplyMigrationOverlay_PreferredWeightIsSentinel(t *testing.T) {
+	// REV-11 reservation: weight is a documented sentinel rather than
+	// the previously-hardcoded 100 that collided with common user
+	// weights. Pinned here so future changes are deliberate.
+	pod := &corev1.Pod{Spec: corev1.PodSpec{}}
+	applyMigrationOverlay(pod, &MigrationOverlay{HintTargetNodes: []string{"node3"}})
+	pref := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+	if len(pref) != 1 || pref[0].Weight != overlayPreferredHintWeight {
+		t.Errorf("preferred weight: got %+v want sentinel=%d", pref, overlayPreferredHintWeight)
+	}
+}
+
+// --- REV-6: wouldOverlayConflictWithNodeAffinity ---
+
+func TestWouldOverlayConflictWithNodeAffinity_DetectsUnsatisfiablePin(t *testing.T) {
+	// Source PodSpec required hostname=node5; overlay's NotIn[node5]
+	// would collapse the term to "hostname=node5 AND hostname!=node5".
+	spec := &corev1.PodSpec{
+		Affinity: &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      "kubernetes.io/hostname",
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{"node5"},
+						}},
+					}},
+				},
+			},
+		},
+	}
+	overlay := &MigrationOverlay{FromNode: "node5"}
+	if !wouldOverlayConflictWithNodeAffinity(spec, overlay) {
+		t.Errorf("hostname=FromNode pin should be detected as conflict")
+	}
+}
+
+func TestWouldOverlayConflictWithNodeAffinity_HostnameSetWithOtherNodesIsSatisfiable(t *testing.T) {
+	// Source required hostname IN {node5, node7}. Overlay's NotIn[node5]
+	// excludes node5; node7 remains scheduable. NOT a conflict.
+	spec := &corev1.PodSpec{
+		Affinity: &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      "kubernetes.io/hostname",
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{"node5", "node7"},
+						}},
+					}},
+				},
+			},
+		},
+	}
+	overlay := &MigrationOverlay{FromNode: "node5"}
+	if wouldOverlayConflictWithNodeAffinity(spec, overlay) {
+		t.Errorf("multi-value hostname set must not be flagged as conflict")
+	}
+}
+
+func TestWouldOverlayConflictWithNodeAffinity_OnlyConflictIfEveryTermPins(t *testing.T) {
+	// Terms are OR'd. Term 1 pins to node5 (conflict), Term 2 is unconstrained
+	// (satisfiable). Overall: still satisfiable, so NOT a conflict.
+	spec := &corev1.PodSpec{
+		Affinity: &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{
+						{MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpIn, Values: []string{"node5"},
+						}}},
+						{MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key: "topology.kubernetes.io/zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"us-west-2a"},
+						}}},
+					},
+				},
+			},
+		},
+	}
+	overlay := &MigrationOverlay{FromNode: "node5"}
+	if wouldOverlayConflictWithNodeAffinity(spec, overlay) {
+		t.Errorf("at least one satisfiable term must clear the conflict")
+	}
+}
+
+func TestWouldOverlayConflictWithNodeAffinity_NilSpecOrAffinityNoConflict(t *testing.T) {
+	overlay := &MigrationOverlay{FromNode: "node5"}
+	if wouldOverlayConflictWithNodeAffinity(nil, overlay) {
+		t.Errorf("nil spec should not conflict")
+	}
+	if wouldOverlayConflictWithNodeAffinity(&corev1.PodSpec{}, overlay) {
+		t.Errorf("empty affinity should not conflict")
+	}
+}
+
+func TestWouldOverlayConflictWithNodeAffinity_NilOverlayOrEmptyFromNode(t *testing.T) {
+	spec := &corev1.PodSpec{
+		Affinity: &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpIn, Values: []string{"node5"},
+						}},
+					}},
+				},
+			},
+		},
+	}
+	if wouldOverlayConflictWithNodeAffinity(spec, nil) {
+		t.Errorf("nil overlay must not conflict")
+	}
+	if wouldOverlayConflictWithNodeAffinity(spec, &MigrationOverlay{FromNode: ""}) {
+		t.Errorf("empty FromNode must not conflict")
+	}
+}

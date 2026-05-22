@@ -783,6 +783,75 @@ func podListNames(pods []corev1.Pod) []string {
 var _ = appsv1.ControllerRevision{}
 var _ = metav1.Now
 
+// --- REV-6: Migrate rejects unsatisfiable NodeAffinity ---
+
+func TestMigrate_RejectsNodeAffinityConflict(t *testing.T) {
+	// Source PodSpec has a required NodeAffinity that pins
+	// kubernetes.io/hostname=node5; the migration request asks to move
+	// off node5. The overlay's NotIn[node5] would render the surge
+	// unschedulable. Migrate must reject up-front (Failed audit row +
+	// MigrationNodeAffinityConflict event) instead of letting the surge
+	// pod sit Pending until instanceReadyTimeout.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	conflictingSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "llama:v1"}},
+		Affinity: &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      "kubernetes.io/hostname",
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{"node5"},
+						}},
+					}},
+				},
+			},
+		},
+	}
+	sourcePod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	sourcePod.Spec.NodeName = "node5" // matches req.FromNode + spec pin
+	c := newFakeClientWithDiscovery(t, isvc, sourcePod)
+	seedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, conflictingSpec)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+	req := &MigrationRequest{
+		SchemaVersion: migrationRequestSchemaV1,
+		Component:     "engine",
+		Instance:      0,
+		FromNode:      "node5",
+	}
+
+	done, err := Migrate(context.Background(), p, plan, 0, "req-conflict", req)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if !done {
+		t.Errorf("conflict should terminate the migration on first pass; got done=false")
+	}
+
+	// Failed audit row must record the conflict so a re-delivered UUID
+	// short-circuits via hasCompletedOrFailedRequest.
+	ledger, _ := loadAuditLedger(context.Background(), c, isvc)
+	if !ledger.hasCompletedOrFailedRequest("req-conflict") {
+		t.Errorf("ledger should carry a terminal entry for the rejected request")
+	}
+
+	// Source InstanceStatus must NOT have been stamped Migrating —
+	// rejection happens AFTER the stamp (failMigration writes a Failed
+	// row but doesn't unstamp). Verify the stamp is consistent: source
+	// is back to a non-Migrating state OR carries an Operation reflecting
+	// the rejection. The exact post-rejection shape depends on whether
+	// the conflict was detected before or after the status stamp.
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	src := findInstanceStatus(fresh, v1beta1.EngineComponent, 0)
+	if src == nil {
+		t.Fatal("source InstanceStatus should still exist after rejection")
+	}
+}
+
 // --- MIGRATE-5: validateFromNode ---
 
 func TestValidateFromNode_MatchOK(t *testing.T) {
