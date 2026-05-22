@@ -6,6 +6,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -37,11 +38,15 @@ func IsPodDrained(ctx context.Context, reader client.Reader, namespace, serviceN
 	if err != nil {
 		return false, err
 	}
-	// No slice at all means kube-proxy has nothing to route to — drained
-	// by definition. Also covers the case where the Service hasn't been
-	// created yet, which is benign for callers checking drain completion.
 	if len(slices) == 0 {
-		return true, nil
+		// Distinguish "no Service at all" (drain trivially complete —
+		// nothing routes to anything) from "Service exists but slices
+		// haven't propagated yet" (cache cold-start, kube-controller-
+		// manager lag, no matching pods yet). The latter looks the
+		// same as the former without this disambiguation, and we'd
+		// previously fail-open and report drain done while a serving
+		// pod was about to get an image patch or delete.
+		return drainedWhenSliceListEmpty(ctx, reader, namespace, serviceName)
 	}
 
 	for _, slice := range slices {
@@ -55,6 +60,32 @@ func IsPodDrained(ctx context.Context, reader client.Reader, namespace, serviceN
 		}
 	}
 	return true, nil
+}
+
+// drainedWhenSliceListEmpty resolves the ambiguous "no slices"
+// observation by checking whether the Service itself exists. Service
+// absent → drained (no traffic path). Service present → slices
+// haven't been materialized yet → conservative: NOT drained, caller
+// requeues.
+func drainedWhenSliceListEmpty(ctx context.Context, reader client.Reader, namespace, serviceName string) (bool, error) {
+	svc := &corev1.Service{}
+	err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: serviceName}, svc)
+	if apierrors.IsNotFound(err) {
+		// No Service → no kube-proxy routing → drain is trivially
+		// complete. With PR B (services_reconciler.go) in place this
+		// branch fires only when the Service hasn't been created yet
+		// on this reconcile pass, which is a controller bug — the
+		// service reconciliation runs before any op that needs drain.
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("drainedWhenSliceListEmpty: get service %s/%s: %w", namespace, serviceName, err)
+	}
+	// Service exists, slice list empty. Could mean (a) no pods match
+	// the selector yet, (b) kube-controller-manager hasn't created
+	// slices yet, (c) informer cache cold-start. Any of those is a
+	// transient state where we should not declare drain complete.
+	return false, nil
 }
 
 // IsPodInRotation is the inverse of IsPodDrained: it reports whether

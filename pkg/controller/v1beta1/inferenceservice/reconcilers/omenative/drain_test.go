@@ -96,8 +96,10 @@ func TestIsPodDrained_EmptyServiceNameRejected(t *testing.T) {
 }
 
 func TestIsPodDrained_NoSlicesAtAll_ReturnsTrue(t *testing.T) {
-	// No EndpointSlices in the cluster — drained by definition (kube-proxy
-	// has nothing to route to).
+	// No EndpointSlices AND no Service in the cluster — drained by
+	// definition (kube-proxy has nothing to route to). PR B's
+	// fail-loud branch only fires when the Service exists; absence
+	// of both is the trivial-drain case.
 	c := newDrainTestClient(t)
 	pod := testPod("ns", "p1")
 	drained, err := IsPodDrained(context.Background(), c, "ns", "svc", pod)
@@ -105,7 +107,26 @@ func TestIsPodDrained_NoSlicesAtAll_ReturnsTrue(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !drained {
-		t.Fatalf("expected drained=true with no slices")
+		t.Fatalf("expected drained=true with no slices and no service")
+	}
+}
+
+func TestIsPodDrained_ServiceExistsNoSlices_ReturnsNotDrained(t *testing.T) {
+	// PR B (DRAIN-2 fix): the previous behavior fail-opened when the
+	// slice list was empty, but with the Service present this is a
+	// transient state — informer cold-start, no matching pods yet,
+	// kube-controller-manager lag. Conservative: not drained.
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "ns"},
+	}
+	pod := testPod("ns", "p1")
+	c := newDrainTestClient(t, svc)
+	drained, err := IsPodDrained(context.Background(), c, "ns", "svc", pod)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if drained {
+		t.Fatalf("expected drained=false when Service exists but no slices")
 	}
 }
 

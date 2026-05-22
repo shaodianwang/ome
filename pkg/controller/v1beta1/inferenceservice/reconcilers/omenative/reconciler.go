@@ -135,6 +135,17 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: build plan (component=%s): %w", p.Component, perr)
 	}
 
+	// Reconcile the per-Component headless Service after the plan
+	// validates the Component is supported but before any per-Instance
+	// op runs. Every drain check downstream (IsPodDrained /
+	// IsPodInRotation) reads the EndpointSlices owned by this Service;
+	// without it, drain would fail-loud rather than silently complete.
+	// Done after BuildPlan so multi-pod's ErrMultiPodNotYetSupported
+	// short-circuits without leaving an orphan Service behind.
+	if err := ensureHeadlessService(ctx, p); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// target is computed early so the tail status write can stamp
 	// UpdateRevision / CurrentRevision even if the op chain returned
 	// without reaching the update branch.
