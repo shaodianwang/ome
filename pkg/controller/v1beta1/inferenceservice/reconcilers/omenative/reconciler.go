@@ -146,6 +146,15 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 // out of ReconcileComponent so the deferred status write in the
 // caller runs unconditionally, even on early returns from this path.
 func reconcileComponentOps(ctx context.Context, p ReconcileParams, plan ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
+	// Expire any in-flight Operation whose Deadline has elapsed. The
+	// in-place update path auto-falls-back to recreate; other ops are
+	// flagged with Operation.Reason=DeadlineExceeded so the condition
+	// surface can show OperationStuck. Runs before the per-op
+	// dispatchers so a timed-out op doesn't get re-driven.
+	if err := ExpireOperationsIfDeadlinePassed(ctx, p, plan); err != nil {
+		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: expire timeouts (component=%s): %w", plan.Component, err)
+	}
+
 	// Scale-down first. An ISVC that drops MinReplicas leaves
 	// InstanceStatus entries above the new replica count; Delete drives
 	// each to gone.
