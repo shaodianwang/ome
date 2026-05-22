@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -93,6 +94,33 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 			return false, nil
 		}
 
+		// MIGRATE-5: validate the request's FromNode matches the
+		// node the source pods actually run on. Alfred may have read
+		// stale data; if the source has since moved (e.g., a prior
+		// eviction relocated it), surge anti-affinity NotIn[FromNode]
+		// could place the surge on the SAME node as the post-move
+		// source — silently turning the migration into a no-op.
+		switch mismatch, defer_, err := validateFromNode(ctx, p, plan.Component, sourceIdx, req.FromNode); {
+		case err != nil:
+			return false, fmt.Errorf("Migrate: validate from-node (instance=%d): %w", sourceIdx, err)
+		case defer_:
+			return false, nil
+		case mismatch != "":
+			recordWarning(p, EventReasonMigrationFromNodeMismatch,
+				"OMENative migration uuid=%s rejected: %s", requestUUID, mismatch)
+			return failMigration(ctx, p, ledger, req, requestUUID, mismatch)
+		}
+
+		// MIGRATE-4: cluster-wide capacity / rate-limit check. Counts
+		// in-flight Started entries and last-hour Started entries
+		// across the audit ledger; rejects with RateLimited if
+		// either cap is exceeded.
+		if ok, reason := validateMigrationCapacity(ledger, time.Now()); !ok {
+			recordWarning(p, EventReasonRateLimited,
+				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
+			return failMigration(ctx, p, ledger, req, requestUUID, reason)
+		}
+
 		used := existingInstanceIndices(p.ISVC, plan.Component)
 		surgeIdx = lowestUnusedIndex(used)
 		if err := patchInstanceStatusMigrating(ctx, p, plan.Component, sourceIdx, surgeIdx, requestUUID, req, plan.InstanceReadyTimeout); err != nil {
@@ -104,6 +132,15 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		ledger.upsertEntry(auditStartedEntry(req, requestUUID, surgeIdx))
 		if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
 			return false, fmt.Errorf("Migrate: persist Started ledger: %w", err)
+		}
+		// MIGRATE-3: clear the annotation now that we've stamped
+		// Started. Alfred observes acceptance via either annotation
+		// removal or the status update; clearing here means a
+		// re-delivered request within Alfred's retry window finds the
+		// audit ledger and dedups via hasCompletedOrFailedRequest /
+		// inFlightEntry.
+		if err := clearMigrationRequestAnnotation(ctx, p, requestUUID); err != nil {
+			return false, fmt.Errorf("Migrate: clear request annotation: %w", err)
 		}
 		recordNormal(p, EventReasonMigrationRequestAccepted,
 			"OMENative %s migration accepted (uuid=%s, source-node=%s, surge-index=%d)",
@@ -204,6 +241,19 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		}
 	}
 
+	// MIGRATE-6: per OEP §7.5.2 step 8, wait until the surge is fully
+	// Available (Ready for >= minReadySeconds) before draining the
+	// source. At v1 alpha minReadySeconds defaults to 0 so this
+	// collapses onto Ready, but the gate stays so the addition of a
+	// non-zero minReadySeconds doesn't reopen the regression. A
+	// flapping-ready surge would otherwise trigger source drain
+	// against a surge that isn't stable.
+	surgeStatus := findInstanceStatus(p.ISVC, plan.Component, surgeIdx)
+	if surgeStatus == nil || surgeStatus.PodCount == 0 ||
+		surgeStatus.AvailablePodCount < surgeStatus.PodCount {
+		return false, nil
+	}
+
 	// Step 8: drain the source — serving=False, then wait IsPodDrained.
 	for _, pod := range sourcePods {
 		if !IsServing(pod) {
@@ -261,26 +311,86 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		return false, nil
 	}
 
-	// Steps 10/11: persist Completed BEFORE the destructive step. If
-	// ledger persistence fails AFTER source is gone, the next reconcile
-	// finds source==nil and surgeRevisionAndSpec returns nil — Migrate
-	// would bail forever without dedup. Writing Completed first means
-	// re-delivery is short-circuited by hasCompletedOrFailedRequest even
-	// if the subsequent removeInstanceStatus / promote fails.
-	ledger.upsertEntry(auditTerminalEntry(*ledger.inFlightEntryOrSeed(requestUUID, req, surgeIdx), auditPhaseCompleted, "migrated"))
-	if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
-		return false, fmt.Errorf("Migrate: persist Completed ledger: %w", err)
-	}
+	// MIGRATE-2: persist Completed AFTER the surge promote +
+	// source-status removal succeed (was: write Completed first,
+	// then mutate). The prior order created a crash window where a
+	// crash between ledger-write and surge-promote left the ledger
+	// saying Completed while source still had Phase=Migrating and
+	// surge still Phase=Creating — the next reconcile would dedup-
+	// short-circuit and never finish the cleanup. Now the dedup
+	// short-circuit only fires after the cluster state actually
+	// matches "migration done."
+	//
+	// Re-delivery during these two steps is safe — both operations
+	// are idempotent (surge index already allocated, surge promote
+	// is patchInstanceStatusReadyOnRevision which is skip-write
+	// when already in the target shape, source removal is no-op if
+	// already removed).
 	if err := patchInstanceStatusReadyOnRevision(ctx, p, plan.Component, surgeIdx, surgeRev.Name); err != nil {
 		return false, fmt.Errorf("Migrate: promote surge to Ready: %w", err)
 	}
 	if _, rerr := removeInstanceStatus(ctx, p, plan.Component, sourceIdx); rerr != nil {
 		return false, fmt.Errorf("Migrate: remove source InstanceStatus: %w", rerr)
 	}
+	ledger.upsertEntry(auditTerminalEntry(*ledger.inFlightEntryOrSeed(requestUUID, req, surgeIdx), auditPhaseCompleted, "migrated"))
+	if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
+		return false, fmt.Errorf("Migrate: persist Completed ledger: %w", err)
+	}
+	// MIGRATE-3: ensure the annotation is gone on completion too —
+	// the accept-time clear at the top of this function may have
+	// missed a re-delivery that arrived after acceptance but before
+	// completion. Idempotent: no-op when the annotation is already
+	// absent.
+	if err := clearMigrationRequestAnnotation(ctx, p, requestUUID); err != nil {
+		return false, fmt.Errorf("Migrate: clear request annotation on completion: %w", err)
+	}
 	recordNormal(p, EventReasonMigrationCompleted,
 		"OMENative migration uuid=%s complete: %s -> instance=%d (revision=%s)",
 		requestUUID, instanceKey(plan.Component, sourceIdx), surgeIdx, surgeRev.Name)
 	return true, nil
+}
+
+// validateFromNode live-reads the source pods and reports whether
+// req.FromNode matches the node they actually run on. Three-state
+// return: (rejectionReason, defer_, err).
+//
+//   - rejectionReason="" defer_=false err=nil — valid, caller proceeds
+//   - defer_=true — transient state (pod not yet scheduled); caller
+//     returns (false, nil) and re-polls
+//   - rejectionReason != "" — permanent mismatch; caller fails the
+//     migration with the human-readable reason
+//
+// Treats source pods on multiple distinct nodes as a rejection —
+// single-pod alpha can't represent that legitimately.
+func validateFromNode(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, sourceIdx int32, fromNode string) (string, bool, error) {
+	pods, err := liveListPodsForInstance(ctx, p, component, sourceIdx)
+	if err != nil {
+		return "", false, fmt.Errorf("list source pods: %w", err)
+	}
+	if len(pods) == 0 {
+		return "source instance has no live pods", false, nil
+	}
+	var observed string
+	for _, pod := range pods {
+		node := pod.Spec.NodeName
+		if node == "" {
+			// Pod not yet scheduled — defer rather than reject. A
+			// transient unscheduled window shouldn't fail an otherwise
+			// valid request; the next reconcile re-validates.
+			return "", true, nil
+		}
+		if observed == "" {
+			observed = node
+			continue
+		}
+		if observed != node {
+			return "source pods span multiple nodes (" + observed + ", " + node + ")", false, nil
+		}
+	}
+	if observed != fromNode {
+		return "request.FromNode=" + fromNode + " does not match observed source node=" + observed, false, nil
+	}
+	return "", false, nil
 }
 
 // failMigration writes a terminal Failed audit row and returns done=true
@@ -301,9 +411,50 @@ func failMigration(ctx context.Context, p ReconcileParams, ledger *auditLedger, 
 	if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
 		return false, fmt.Errorf("Migrate: persist Failed ledger (%s): %w", reason, err)
 	}
+	// MIGRATE-3: clear the annotation on the rejection path too —
+	// Alfred contract says the controller responds within 30s by
+	// either accepting or rejecting; rejection without clearing
+	// would have Alfred retry every 5m against the same UUID.
+	if err := clearMigrationRequestAnnotation(ctx, p, uuid); err != nil {
+		return false, fmt.Errorf("Migrate: clear request annotation on rejection: %w", err)
+	}
 	recordWarning(p, EventReasonMigrationRequestRejected,
 		"OMENative migration uuid=%s rejected: %s", uuid, reason)
 	return true, nil
+}
+
+// clearMigrationRequestAnnotation removes the
+// ome.io/migration-request-v1-<uuid> annotation from the parent
+// ISVC, implementing MIGRATE-3 from the OEP-0007 review. Per OEP
+// §"Migration API and Mechanics" the controller must clear the
+// annotation within 30s of accepting or rejecting a request — Alfred's
+// retry contract assumes the annotation disappears once observed.
+//
+// Wrapped in retry.RetryOnConflict to ride concurrent ISVC writes
+// (per-op status mutations from the same reconcile pass). No-op when
+// the annotation is already absent.
+func clearMigrationRequestAnnotation(ctx context.Context, p ReconcileParams, uuid string) error {
+	if p.Client == nil || p.ISVC == nil || uuid == "" {
+		return nil
+	}
+	key := migrationRequestAnnotationPrefix + uuid
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &v1beta1.InferenceService{}
+		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+			return fmt.Errorf("clearMigrationRequestAnnotation: get ISVC: %w", err)
+		}
+		if fresh.Annotations == nil {
+			return nil
+		}
+		if _, present := fresh.Annotations[key]; !present {
+			return nil
+		}
+		delete(fresh.Annotations, key)
+		if err := p.Client.Update(ctx, fresh); err != nil {
+			return fmt.Errorf("clearMigrationRequestAnnotation: update ISVC: %w", err)
+		}
+		return nil
+	})
 }
 
 // inFlightEntryOrSeed returns the existing Started entry for uuid if

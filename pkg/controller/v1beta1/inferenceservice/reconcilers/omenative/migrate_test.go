@@ -352,7 +352,9 @@ func TestMigrate_FirstPassAllocatesSurgeAndStampsBothStatuses(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	// Source pod is on the running revision; surge needs a CR to point at.
 	sourceSpec := targetSpecImage("llama:v1")
-	c := newFakeClientWithDiscovery(t, isvc, runningPodAtRevision(isvc, 0, 1, "llama:v1"))
+	sourcePod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	sourcePod.Spec.NodeName = "node5" // matches req.FromNode for MIGRATE-5 gate
+	c := newFakeClientWithDiscovery(t, isvc, sourcePod)
 	seedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, sourceSpec)
 	p := minimalParams(t, isvc, c)
 	plan, _ := BuildPlan(p)
@@ -431,6 +433,7 @@ func TestMigrate_WaitsForSurgeRotationBeforeDrainingSource(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	sourceSpec := targetSpecImage("llama:v1")
 	sourcePod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	sourcePod.Spec.NodeName = "node5" // matches req.FromNode for MIGRATE-5 gate
 	c := newFakeClientWithDiscovery(t, isvc, sourcePod)
 	seedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, sourceSpec)
 	req := &MigrationRequest{SchemaVersion: migrationRequestSchemaV1, Component: "engine", Instance: 0, FromNode: "node5"}
@@ -550,6 +553,7 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	sourceSpec := targetSpecImage("llama:v1")
 	sourcePod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	sourcePod.Spec.NodeName = "node5" // matches req.FromNode for MIGRATE-5 gate
 	c := newFakeClientWithDiscovery(t, isvc, sourcePod)
 	seedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, sourceSpec)
 	p := minimalParams(t, isvc, c)
@@ -592,6 +596,13 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 		done, err := Migrate(context.Background(), pPass, planPass, 0, "req-end-to-end", req)
 		if err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
+		}
+		// Mimic the reconciler's deferred AggregateAndWriteStatus so per-
+		// Instance PodCount / ReadyPodCount / AvailablePodCount counters
+		// refresh between passes — required for MIGRATE-6's gate on
+		// surgeStatus.AvailablePodCount.
+		if serr := AggregateAndWriteStatus(context.Background(), pPass, planPass, nil); serr != nil {
+			t.Fatalf("pass %d: AggregateAndWriteStatus: %v", pass, serr)
 		}
 		if done {
 			final := &v1beta1.InferenceService{}
@@ -771,3 +782,134 @@ func podListNames(pods []corev1.Pod) []string {
 // Silence "imported and not used" if a referenced test helper becomes unused.
 var _ = appsv1.ControllerRevision{}
 var _ = metav1.Now
+
+// --- MIGRATE-5: validateFromNode ---
+
+func TestValidateFromNode_MatchOK(t *testing.T) {
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	pod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	pod.Spec.NodeName = "node5"
+	c := newFakeClientWithDiscovery(t, isvc, pod)
+	p := minimalParams(t, isvc, c)
+
+	mismatch, defer_, err := validateFromNode(context.Background(), p, v1beta1.EngineComponent, 0, "node5")
+	if err != nil {
+		t.Fatalf("validateFromNode: %v", err)
+	}
+	if defer_ || mismatch != "" {
+		t.Errorf("expected pass; got mismatch=%q defer=%v", mismatch, defer_)
+	}
+}
+
+func TestValidateFromNode_MismatchRejected(t *testing.T) {
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	pod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	pod.Spec.NodeName = "node7" // pod actually on node7
+	c := newFakeClientWithDiscovery(t, isvc, pod)
+	p := minimalParams(t, isvc, c)
+
+	mismatch, defer_, err := validateFromNode(context.Background(), p, v1beta1.EngineComponent, 0, "node5")
+	if err != nil {
+		t.Fatalf("validateFromNode: %v", err)
+	}
+	if defer_ {
+		t.Errorf("scheduled pod on different node must be a rejection, not a defer")
+	}
+	if mismatch == "" {
+		t.Errorf("expected mismatch reason")
+	}
+}
+
+func TestValidateFromNode_UnscheduledDefers(t *testing.T) {
+	// Pod exists but Spec.NodeName is empty. Defer rather than reject —
+	// the next reconcile re-polls.
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	pod := runningPodAtRevision(isvc, 0, 1, "llama:v1") // NodeName left ""
+	c := newFakeClientWithDiscovery(t, isvc, pod)
+	p := minimalParams(t, isvc, c)
+
+	mismatch, defer_, err := validateFromNode(context.Background(), p, v1beta1.EngineComponent, 0, "node5")
+	if err != nil {
+		t.Fatalf("validateFromNode: %v", err)
+	}
+	if !defer_ {
+		t.Errorf("unscheduled pod must defer; got mismatch=%q defer=%v", mismatch, defer_)
+	}
+	if mismatch != "" {
+		t.Errorf("defer must not carry a rejection reason; got %q", mismatch)
+	}
+}
+
+func TestValidateFromNode_NoLivePodsRejects(t *testing.T) {
+	// Source instance has no pods at all — that's a rejection (Alfred
+	// can't legitimately request a migration of a non-existent instance).
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+
+	mismatch, defer_, err := validateFromNode(context.Background(), p, v1beta1.EngineComponent, 0, "node5")
+	if err != nil {
+		t.Fatalf("validateFromNode: %v", err)
+	}
+	if defer_ {
+		t.Errorf("no live pods must reject, not defer")
+	}
+	if mismatch == "" {
+		t.Errorf("expected mismatch reason for no-live-pods")
+	}
+}
+
+// --- MIGRATE-3: clearMigrationRequestAnnotation ---
+
+func TestClearMigrationRequestAnnotation_RemovesKey(t *testing.T) {
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	uuid := "req-clear-1"
+	addMigrationAnnotation(t, isvc, uuid, migrationRequestJSON("engine", 0, "node5"))
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+
+	if err := clearMigrationRequestAnnotation(context.Background(), p, uuid); err != nil {
+		t.Fatalf("clearMigrationRequestAnnotation: %v", err)
+	}
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	if _, present := fresh.Annotations[migrationRequestAnnotationPrefix+uuid]; present {
+		t.Errorf("annotation must be removed; got %v", fresh.Annotations)
+	}
+}
+
+func TestClearMigrationRequestAnnotation_IdempotentWhenAbsent(t *testing.T) {
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+
+	// No annotation set — call should succeed as a no-op.
+	if err := clearMigrationRequestAnnotation(context.Background(), p, "never-present"); err != nil {
+		t.Fatalf("no-op clear must not error: %v", err)
+	}
+}
+
+func TestClearMigrationRequestAnnotation_LeavesOtherAnnotations(t *testing.T) {
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	uuid := "req-target"
+	addMigrationAnnotation(t, isvc, uuid, migrationRequestJSON("engine", 0, "node5"))
+	addMigrationAnnotation(t, isvc, "req-other", migrationRequestJSON("engine", 1, "node6"))
+	isvc.Annotations["unrelated/key"] = "keep-me"
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+
+	if err := clearMigrationRequestAnnotation(context.Background(), p, uuid); err != nil {
+		t.Fatalf("clearMigrationRequestAnnotation: %v", err)
+	}
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	if _, present := fresh.Annotations[migrationRequestAnnotationPrefix+uuid]; present {
+		t.Errorf("target annotation must be removed")
+	}
+	if _, present := fresh.Annotations[migrationRequestAnnotationPrefix+"req-other"]; !present {
+		t.Errorf("unrelated migration annotation must survive")
+	}
+	if fresh.Annotations["unrelated/key"] != "keep-me" {
+		t.Errorf("non-migration annotation must survive")
+	}
+}

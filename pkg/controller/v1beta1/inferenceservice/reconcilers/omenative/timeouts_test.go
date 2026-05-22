@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -238,5 +239,189 @@ func TestExpireOperationsIfDeadlinePassed_PerInstanceIndependent(t *testing.T) {
 				t.Errorf("Instance 1 must not be stamped stuck; got Reason=%q", s.Operation.Reason)
 			}
 		}
+	}
+}
+
+// --- MIGRATE-1: tryAbandonStuckMigration / surgeReady ---
+
+func TestSurgeReady_EmptyReturnsFalse(t *testing.T) {
+	if surgeReady(nil) {
+		t.Errorf("nil pod slice must report not-ready (no observation == no health claim)")
+	}
+}
+
+func TestSurgeReady_AllReadyReturnsTrue(t *testing.T) {
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	pod1 := podAtIncarnation(isvc, 1, 1, true /* ready */, true)
+	pod2 := podAtIncarnation(isvc, 1, 1, true, true)
+	if !surgeReady([]*corev1.Pod{pod1, pod2}) {
+		t.Errorf("two ContainersReady pods should return ready")
+	}
+}
+
+func TestSurgeReady_AnyNotReadyReturnsFalse(t *testing.T) {
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	pod1 := podAtIncarnation(isvc, 1, 1, true, true)
+	pod2 := podAtIncarnation(isvc, 1, 1, false /* not ready */, true)
+	if surgeReady([]*corev1.Pod{pod1, pod2}) {
+		t.Errorf("any not-ContainersReady pod must drop the gate")
+	}
+}
+
+func TestExpireOperationsIfDeadlinePassed_MigrateAbandonsStuckSurge(t *testing.T) {
+	// Migrate source past Deadline + surge pod NOT ContainersReady ->
+	// abandon path runs: surge pod deleted, source restored to Ready,
+	// surge InstanceStatus removed, audit Failed row written, request
+	// annotation cleared.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	surgeIdx := int32(1)
+	uuid := "req-abandon"
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceMigrating,
+			RunningRevision: "rev-source",
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationMigrate, Step: "CreateSurge",
+				RequestUUID: uuid, FromNode: "node5", SurgeIndex: &surgeIdx,
+				Deadline: pastDeadline(),
+			},
+		},
+		{
+			Index: surgeIdx, Incarnation: 1, Phase: v1beta1.OMENativeInstanceCreating,
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationMigrate, Step: "CreateSurge",
+				RequestUUID: uuid, FromNode: "node5",
+				Deadline: pastDeadline(),
+			},
+		},
+	}
+	addMigrationAnnotation(t, isvc, uuid, migrationRequestJSON("engine", 0, "node5"))
+
+	sourcePod := podAtIncarnation(isvc, 0, 1, true /* ready */, true)
+	surgePod := podAtIncarnation(isvc, surgeIdx, 1, false /* NOT ready */, false)
+	c := newFakeClientWithDiscovery(t, isvc, sourcePod, surgePod)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	if err := ExpireOperationsIfDeadlinePassed(context.Background(), p, plan); err != nil {
+		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	cs := fresh.Status.Components[v1beta1.EngineComponent]
+	var src *v1beta1.OMENativeInstanceStatus
+	for i := range cs.OMENative.InstanceStatuses {
+		s := &cs.OMENative.InstanceStatuses[i]
+		if s.Index == 0 {
+			src = s
+		}
+		if s.Index == surgeIdx {
+			t.Errorf("surge InstanceStatus must be removed after abandon; got %+v", s)
+		}
+	}
+	if src == nil {
+		t.Fatal("source InstanceStatus must survive abandon")
+	}
+	if src.Phase != v1beta1.OMENativeInstanceReady {
+		t.Errorf("source Phase: got %q want Ready", src.Phase)
+	}
+	if src.Operation != nil {
+		t.Errorf("source Operation must be cleared; got %+v", src.Operation)
+	}
+
+	// Surge pod should have been deleted (best-effort).
+	got := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(surgePod), got); err == nil && got.DeletionTimestamp == nil {
+		t.Errorf("surge pod should have been deleted; still present without DeletionTimestamp")
+	}
+
+	// Ledger should carry a Failed entry for the UUID.
+	ledger, _ := loadAuditLedger(context.Background(), c, fresh)
+	if !ledger.hasCompletedOrFailedRequest(uuid) {
+		t.Errorf("ledger should record Failed entry for uuid=%s; got %+v", uuid, ledger.Entries)
+	}
+
+	// Migration request annotation should be cleared.
+	if _, present := fresh.Annotations[migrationRequestAnnotationPrefix+uuid]; present {
+		t.Errorf("migration request annotation must be cleared after abandon")
+	}
+}
+
+func TestExpireOperationsIfDeadlinePassed_MigrateLeavesReadySurgeStuck(t *testing.T) {
+	// Migrate past Deadline but surge pod IS ContainersReady -> abandon
+	// does NOT run; falls through to the generic stuck stamp. The wedge
+	// is downstream of surge (drain stalled, kube-proxy lag, etc.).
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	surgeIdx := int32(1)
+	uuid := "req-stuck"
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceMigrating,
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationMigrate, Step: "Drain",
+				RequestUUID: uuid, FromNode: "node5", SurgeIndex: &surgeIdx,
+				Deadline: pastDeadline(),
+			},
+		},
+		{
+			Index: surgeIdx, Incarnation: 1, Phase: v1beta1.OMENativeInstanceCreating,
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationMigrate, Step: "Drain",
+				RequestUUID: uuid, Deadline: pastDeadline(),
+			},
+		},
+	}
+
+	surgePod := podAtIncarnation(isvc, surgeIdx, 1, true /* ContainersReady */, true)
+	c := newFakeClientWithDiscovery(t, isvc, surgePod)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	if err := ExpireOperationsIfDeadlinePassed(context.Background(), p, plan); err != nil {
+		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	cs := fresh.Status.Components[v1beta1.EngineComponent]
+	var src *v1beta1.OMENativeInstanceStatus
+	for i := range cs.OMENative.InstanceStatuses {
+		s := &cs.OMENative.InstanceStatuses[i]
+		if s.Index == 0 {
+			src = s
+		}
+	}
+	if src == nil || src.Operation == nil {
+		t.Fatalf("source Operation must be preserved when surge ready; got %+v", src)
+	}
+	if src.Operation.Reason != timeoutReasonExceeded {
+		t.Errorf("source Operation.Reason: got %q want %q", src.Operation.Reason, timeoutReasonExceeded)
+	}
+}
+
+func TestTryAbandonStuckMigration_SourceWithoutSurgeIndexNoOp(t *testing.T) {
+	// Source-side stamp missing SurgeIndex is malformed (or this is the
+	// surge side, which the abandon helper deliberately skips).
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+
+	source := v1beta1.OMENativeInstanceStatus{
+		Index: 0,
+		Operation: &v1beta1.InstanceOperation{
+			Type: v1beta1.InstanceOperationMigrate,
+			// SurgeIndex deliberately nil
+		},
+	}
+	abandoned, err := tryAbandonStuckMigration(context.Background(), p, v1beta1.EngineComponent, source)
+	if err != nil {
+		t.Fatalf("tryAbandonStuckMigration: %v", err)
+	}
+	if abandoned {
+		t.Errorf("abandon must not run without SurgeIndex pointer")
 	}
 }

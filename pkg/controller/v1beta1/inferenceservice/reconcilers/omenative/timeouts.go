@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -66,6 +68,23 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p ReconcileParams, pl
 				instanceKey(plan.Component, s.Index))
 			continue
 		}
+		// MIGRATE-1: Migrate timeouts get a live surge re-check
+		// rather than the blanket DeadlineExceeded stamp. If surge
+		// pods are all runtime-ready the stamp stays (issue is
+		// downstream of surge — drain step or kube-proxy lag);
+		// operator investigates. If surge isn't ready, abandon
+		// surge ("preserve old, abandon surge" per OEP §B.4) so the
+		// Component doesn't sit forever in a half-finished state.
+		if isMigrate(s.Operation) {
+			abandoned, err := tryAbandonStuckMigration(ctx, p, plan.Component, s)
+			if err != nil {
+				return fmt.Errorf("expire migration (instance=%d): %w", s.Index, err)
+			}
+			if abandoned {
+				continue
+			}
+			// Surge IS ready — fall through to the generic stamp.
+		}
 		// Idempotency check: only emit the event when we actually
 		// stamp the marker (i.e., it wasn't already there). Without
 		// this guard every reconcile pass after the first timeout
@@ -81,6 +100,133 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p ReconcileParams, pl
 		}
 	}
 	return nil
+}
+
+// isMigrate identifies a Type=Migrate operation on the source side
+// of a surge pair. Only source-side stamps carry a SurgeIndex
+// pointer; the surge-side stamp has SurgeIndex pointing back at the
+// source but its own Type=Migrate too. We treat both as
+// migration ops for timeout-handling purposes — the abandon helper
+// figures out which side it's looking at by inspecting SurgeIndex.
+func isMigrate(op *v1beta1.InstanceOperation) bool {
+	return op != nil && op.Type == v1beta1.InstanceOperationMigrate
+}
+
+// tryAbandonStuckMigration is the MIGRATE-1 surge re-check. Returns
+// abandoned=true when the surge was found not-ready and the
+// migration was rolled back. abandoned=false means surge is healthy
+// and the caller should fall through to the generic stuck stamp
+// (operator must investigate the downstream-of-surge wedge).
+//
+// The abandon path:
+//
+//  1. Issue best-effort Deletes on every surge pod (NotFound is OK
+//     for re-runs).
+//  2. RemoveNotReadyKey on source pods so the drain key set during
+//     step 8 of Migrate is reversed and source pods return to
+//     serving rotation.
+//  3. Restore source InstanceStatus: clear Operation, Phase=Ready.
+//  4. Remove the surge InstanceStatus.
+//  5. Write Failed audit row + clear request annotation.
+//  6. Emit MigrationSurgeAbandoned event.
+//
+// Re-entrant: every step uses idempotent helpers so a crash mid-
+// rollback completes on the next reconcile.
+func tryAbandonStuckMigration(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, source v1beta1.OMENativeInstanceStatus) (bool, error) {
+	if source.Operation == nil || source.Operation.SurgeIndex == nil {
+		// Source-side stamp without SurgeIndex is malformed (or
+		// this is the surge side; abandon doesn't run from surge
+		// side because the source side's stamp is the one that
+		// carries the migration intent and times out first).
+		return false, nil
+	}
+	surgeIdx := *source.Operation.SurgeIndex
+	uuid := source.Operation.RequestUUID
+
+	surgePods, err := liveListPodsForInstance(ctx, p, component, surgeIdx)
+	if err != nil {
+		return false, fmt.Errorf("list surge pods: %w", err)
+	}
+	if surgeReady(surgePods) {
+		// Surge IS ready — leave the stamp for the operator.
+		return false, nil
+	}
+
+	// Surge is NOT ready — abandon. Best-effort delete on remaining
+	// surge pods so the next reconcile sees a clean state.
+	for _, pod := range surgePods {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		if err := p.Client.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("delete surge pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+	}
+
+	// Undo the source-drain key (set during Migrate step 8). If the
+	// drain key was never added (timeout fired before step 8) the
+	// remove is a no-op via podreadiness's idempotency.
+	sourcePods, err := liveListPodsForInstance(ctx, p, component, source.Index)
+	if err != nil {
+		return false, fmt.Errorf("list source pods: %w", err)
+	}
+	for _, pod := range sourcePods {
+		if err := MarkPodServing(ctx, p.Client, pod, WriterMigrateSourceDrain, uuid); err != nil {
+			return false, fmt.Errorf("undo source drain on pod %s: %w", pod.Name, err)
+		}
+	}
+
+	// Restore source to Ready, clear Operation.
+	if err := patchInstanceStatusReady(ctx, p, component, source.Index); err != nil {
+		return false, fmt.Errorf("restore source Ready: %w", err)
+	}
+	// Remove surge InstanceStatus.
+	if _, err := removeInstanceStatus(ctx, p, component, surgeIdx); err != nil {
+		return false, fmt.Errorf("remove surge InstanceStatus: %w", err)
+	}
+
+	// Mark Failed in the audit ledger so a re-delivered request
+	// with the same UUID short-circuits.
+	ledger, err := loadAuditLedger(ctx, p.reader(), p.ISVC)
+	if err != nil {
+		return false, fmt.Errorf("load ledger for abandon: %w", err)
+	}
+	now := metav1.Now().UTC().Format(time.RFC3339)
+	ledger.upsertEntry(AuditEntry{
+		RequestUUID: uuid,
+		Phase:       auditPhaseFailed,
+		Component:   string(component),
+		FromNode:    source.Operation.FromNode,
+		StartedAt:   now,
+		CompletedAt: now,
+		Outcome:     "surge abandoned after deadline (surge not Ready)",
+	})
+	if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
+		return false, fmt.Errorf("persist Failed ledger after abandon: %w", err)
+	}
+	if err := clearMigrationRequestAnnotation(ctx, p, uuid); err != nil {
+		return false, fmt.Errorf("clear annotation after abandon: %w", err)
+	}
+
+	recordWarning(p, EventReasonMigrationSurgeAbandoned,
+		"OMENative migration uuid=%s abandoned: surge instance=%d never reached Ready before deadline; source preserved",
+		uuid, surgeIdx)
+	return true, nil
+}
+
+// surgeReady reports whether every surge pod is runtime-ready
+// (ContainersReady=True). An empty slice returns false because we
+// can't claim surge is healthy without observing any pods.
+func surgeReady(pods []*corev1.Pod) bool {
+	if len(pods) == 0 {
+		return false
+	}
+	for _, pod := range pods {
+		if !IsContainersReady(pod) {
+			return false
+		}
+	}
+	return true
 }
 
 // operationDeadlinePassed reports whether s.Operation exists and has a

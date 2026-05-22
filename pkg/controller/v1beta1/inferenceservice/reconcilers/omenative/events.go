@@ -41,6 +41,11 @@ const (
 	EventReasonMigrationCompleted       = "MigrationCompleted"
 	EventReasonUnsupportedSchemaVersion = "UnsupportedSchemaVersion"
 
+	// Migration capacity / validation rejections (PR F).
+	EventReasonRateLimited               = "RateLimited"
+	EventReasonMigrationFromNodeMismatch = "MigrationFromNodeMismatch"
+	EventReasonMigrationSurgeAbandoned   = "MigrationSurgeAbandoned"
+
 	// Revision-collision (rare; salted retry succeeded).
 	EventReasonRevisionCollision = "RevisionCollision"
 )
