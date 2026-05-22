@@ -20,6 +20,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/utils"
@@ -33,7 +34,13 @@ type BaseComponentFields struct {
 	// Use it for reads where cache lag would be a correctness problem —
 	// OMENative passes it through to ReconcileParams.APIReader for revision
 	// bookkeeping, audit ledger dedup, and EndpointSlice drain checks.
-	APIReader                         client.Reader
+	APIReader client.Reader
+	// Expectations is the OMENative per-controller create/delete
+	// bookkeeping cache. Threaded through ReconcileParams so the
+	// per-reconcile dispatch and the SetupWithManager-registered Pod
+	// event handler share the same instance. nil for non-OMENative
+	// modes — they don't consult it.
+	Expectations                      *omenative.Expectations
 	Scheme                            *runtime.Scheme
 	InferenceServiceConfig            *controllerconfig.InferenceServicesConfig
 	DeploymentMode                    constants.DeploymentModeType

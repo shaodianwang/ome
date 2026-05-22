@@ -15,6 +15,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,6 +28,7 @@ import (
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"knative.dev/pkg/network"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -41,6 +43,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/external_service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress"
 	multimodelconfig "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/modelconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	traffic "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
@@ -71,7 +74,10 @@ import (
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods/status,verbs=update;patch
+// +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
@@ -106,7 +112,12 @@ type InferenceServiceReconciler struct {
 	// component builder to OMENative for reads where cache lag would
 	// be a correctness problem (revision bookkeeping, audit ledger,
 	// EndpointSlice drain checks).
-	APIReader       client.Reader
+	APIReader client.Reader
+	// Expectations is the OMENative create/delete bookkeeping cache.
+	// SetupWithManager initializes it (if nil) and registers the Pod
+	// event handler against the same instance the component dispatch
+	// path threads into ReconcileParams.
+	Expectations    *omenative.Expectations
 	Log             logr.Logger
 	Scheme          *runtime.Scheme
 	Recorder        record.EventRecorder
@@ -200,7 +211,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Initialize ComponentBuilderFactory
 	// Note: isvcConfig is created a few lines above inside the Reconcile function
 	// for NewInferenceServicesConfig. We will use that existing isvcConfig.
-	componentBuilderFactory := components.NewComponentBuilderFactory(r.Client, r.Clientset, r.APIReader, r.Scheme, isvcConfig)
+	componentBuilderFactory := components.NewComponentBuilderFactory(r.Client, r.Clientset, r.APIReader, r.Expectations, r.Scheme, isvcConfig)
 
 	// Determine which components to reconcile based on the spec
 	var reconcilers []components.Component
@@ -619,6 +630,9 @@ func (r *InferenceServiceReconciler) ensureIngressDisableAnnotation(isvc *v1beta
 func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployConfig *controllerconfig.DeployConfig, ingressConfig *controllerconfig.IngressConfig) error {
 	r.ClientConfig = mgr.GetConfig()
 	r.APIReader = mgr.GetAPIReader()
+	if r.Expectations == nil {
+		r.Expectations = omenative.NewExpectations()
+	}
 
 	// NEW: Initialize StatusReconciler
 	r.StatusManager = status.NewStatusReconciler()
@@ -651,7 +665,30 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		Owns(&v1.PersistentVolume{}).
 		Owns(&v1.PersistentVolumeClaim{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
-		Owns(&policyv1.PodDisruptionBudget{})
+		Owns(&policyv1.PodDisruptionBudget{}).
+		// OEP-0007 OMENative: revision history is owned by the ISVC
+		// so revision-driven status writes enqueue the parent.
+		Owns(&appsv1.ControllerRevision{}).
+		// OEP-0007 OMENative Loop B: a Pod event handler that updates
+		// the per-controller Expectations cache before enqueueing the
+		// parent ISVC. The predicate restricts the watch to
+		// `ome.io/managed-by=OMENative` pods so non-OMENative
+		// deployment modes don't pay the per-event cost.
+		Watches(
+			&v1.Pod{},
+			omenative.NewPodEventHandler(r.Expectations),
+			builder.WithPredicates(omenative.ManagedByOMENativePredicate()),
+		).
+		// OEP-0007 OMENative Loop B: EndpointSlice events for
+		// OMENative headless Services enqueue the parent ISVC so
+		// drain checks (IsPodDrained / IsPodInRotation) react to
+		// kube-proxy convergence without waiting on the periodic
+		// requeue. The mapper rejects slices that don't target an
+		// OMENative-managed Service.
+		Watches(
+			&discoveryv1.EndpointSlice{},
+			handler.EnqueueRequestsFromMapFunc(omenative.EndpointSliceToISVC),
+		)
 
 	if kedaFound {
 		ctrlBuilder = ctrlBuilder.Owns(&kedav1.ScaledObject{})

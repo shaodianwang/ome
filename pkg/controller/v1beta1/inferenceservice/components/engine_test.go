@@ -510,6 +510,7 @@ func TestEngineReconcile(t *testing.T) {
 				c,
 				clientset,
 				nil, // apiReader
+				nil, // expectations
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				tt.deploymentMode,
@@ -691,6 +692,7 @@ func TestEngineReconcileObjectMeta(t *testing.T) {
 				c,
 				clientset,
 				nil, // apiReader
+				nil, // expectations
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				constants.RawDeployment,
@@ -830,6 +832,7 @@ func TestEngineWorkerPodSpec(t *testing.T) {
 				c,
 				clientset,
 				nil, // apiReader
+				nil, // expectations
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				constants.RawDeployment,

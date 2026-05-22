@@ -40,6 +40,7 @@ func NewRouter(
 	client client.Client,
 	clientset kubernetes.Interface,
 	apiReader client.Reader,
+	expectations *omenative.Expectations,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 	deploymentMode constants.DeploymentModeType,
@@ -54,6 +55,7 @@ func NewRouter(
 		Client:                 client,
 		Clientset:              clientset,
 		APIReader:              apiReader,
+		Expectations:           expectations,
 		Scheme:                 scheme,
 		InferenceServiceConfig: inferenceServiceConfig,
 		DeploymentMode:         deploymentMode,
@@ -145,6 +147,7 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			ComponentExt: &r.routerSpec.ComponentExtensionSpec,
 			Client:       r.Client,
 			APIReader:    r.APIReader,
+			Expectations: r.Expectations,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for router")

@@ -341,6 +341,7 @@ func TestDecoderReconcile(t *testing.T) {
 				c,
 				clientset,
 				nil, // apiReader
+				nil, // expectations
 				scheme,
 				isvcConfig,
 				tt.deploymentMode,
@@ -466,6 +467,7 @@ func TestDecoderReconcileObjectMeta(t *testing.T) {
 				c,
 				clientset,
 				nil, // apiReader
+				nil, // expectations
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				constants.RawDeployment,
@@ -576,6 +578,7 @@ func TestDecoderWorkerPodSpec(t *testing.T) {
 				c,
 				clientset,
 				nil, // apiReader
+				nil, // expectations
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				constants.RawDeployment,
@@ -654,6 +657,7 @@ func TestDecoderComponentConfig(t *testing.T) {
 				c,
 				clientset,
 				nil, // apiReader
+				nil, // expectations
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				constants.RawDeployment,

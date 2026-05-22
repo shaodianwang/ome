@@ -152,7 +152,7 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		}
 	}
 	if len(missing) > 0 {
-		if !DefaultExpectations.Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, surgeIdx) {
+		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, surgeIdx) {
 			return false, nil
 		}
 		// Use the surge revision's PodSpec as the create template, not
@@ -164,7 +164,7 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 			return false, fmt.Errorf("Migrate: create surge pod set: %w", cerr)
 		}
 		if created > 0 {
-			DefaultExpectations.ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, surgeIdx, created)
+			p.expectations().ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, surgeIdx, created)
 		}
 		return false, nil
 	}
@@ -219,7 +219,7 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 
 	// Step 9: delete source pods (expectations-gated, same pattern as Delete).
 	if len(sourcePods) > 0 {
-		if !DefaultExpectations.Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx) {
+		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx) {
 			return false, nil
 		}
 		deleted := 0
@@ -236,7 +236,7 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 			deleted++
 		}
 		if deleted > 0 {
-			DefaultExpectations.ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx, deleted)
+			p.expectations().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx, deleted)
 		}
 		return false, nil
 	}

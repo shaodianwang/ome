@@ -39,6 +39,7 @@ func NewDecoder(
 	client client.Client,
 	clientset kubernetes.Interface,
 	apiReader client.Reader,
+	expectations *omenative.Expectations,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 	deploymentMode constants.DeploymentModeType,
@@ -54,6 +55,7 @@ func NewDecoder(
 		Client:                 client,
 		Clientset:              clientset,
 		APIReader:              apiReader,
+		Expectations:           expectations,
 		Scheme:                 scheme,
 		InferenceServiceConfig: inferenceServiceConfig,
 		DeploymentMode:         deploymentMode,
@@ -170,6 +172,7 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 			MultiPod:      multiPod,
 			Client:        d.Client,
 			APIReader:     d.APIReader,
+			Expectations:  d.Expectations,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for decoder")

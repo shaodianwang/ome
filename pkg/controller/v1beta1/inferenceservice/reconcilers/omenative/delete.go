@@ -62,7 +62,7 @@ func Delete(ctx context.Context, p ReconcileParams, plan ComponentPlan, idx int3
 	// If a previous reconcile's deletes haven't been observed yet, do not
 	// re-issue the delete batch. The drain-and-check steps above are
 	// reads, so running them again is harmless; only step 4 is gated.
-	expectationsSatisfied := DefaultExpectations.Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx)
+	expectationsSatisfied := p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx)
 
 	// Step 2: flip serving=False on each pod.
 	for _, pod := range pods {
@@ -109,7 +109,7 @@ func Delete(ctx context.Context, p ReconcileParams, plan ComponentPlan, idx int3
 		deletedCount++
 	}
 	if deletedCount > 0 {
-		DefaultExpectations.ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx, deletedCount)
+		p.expectations().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx, deletedCount)
 	}
 	// Pods are now gone (or terminating); the next reconcile will read
 	// an empty pod list and clear the InstanceStatus.
@@ -231,6 +231,6 @@ func removeInstanceStatus(ctx context.Context, p ReconcileParams, component v1be
 	}
 	// Forget the expectations entry so the (now-vanished) Instance isn't
 	// stuck in an "expected deletes" state if its index is later reused.
-	DefaultExpectations.Forget(p.ISVC.Namespace, p.ISVC.Name, component, idx)
+	p.expectations().Forget(p.ISVC.Namespace, p.ISVC.Name, component, idx)
 	return true, nil
 }

@@ -86,7 +86,7 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 		// Step 4: delete pods. Gate the batch on expectations so a cache
 		// lag between issuing deletes and observing them via the watch
 		// doesn't cause us to re-delete.
-		if !DefaultExpectations.Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
 		deletedCount := 0
@@ -103,7 +103,7 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 			deletedCount++
 		}
 		if deletedCount > 0 {
-			DefaultExpectations.ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, deletedCount)
+			p.expectations().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, deletedCount)
 		}
 		// Step 5: requeue until the next pass observes the pods gone.
 		return false, nil
@@ -124,7 +124,7 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 		}
 	}
 	if len(missing) > 0 {
-		if !DefaultExpectations.Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
 		created, err := createMissingPods(ctx, p, plan, newInst, missing)
@@ -132,7 +132,7 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 			return false, err
 		}
 		if created > 0 {
-			DefaultExpectations.ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, created)
+			p.expectations().ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, created)
 		}
 		return false, nil
 	}

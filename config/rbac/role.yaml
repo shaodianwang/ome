@@ -21,6 +21,7 @@ rules:
   - events
   - persistentvolumeclaims
   - persistentvolumes
+  - pods
   - serviceaccounts
   - services
   verbs:
@@ -36,11 +37,17 @@ rules:
   resources:
   - namespaces
   - nodes
-  - pods
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/status
+  verbs:
+  - patch
+  - update
 - apiGroups:
   - ""
   resources:
@@ -68,16 +75,6 @@ rules:
   - apps
   resources:
   - controllerrevisions
-  verbs:
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - apps
-  resources:
   - deployments
   verbs:
   - create
@@ -117,6 +114,14 @@ rules:
   - jobs/status
   verbs:
   - get
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - gateway.envoyproxy.io
   resources:

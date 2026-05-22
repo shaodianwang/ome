@@ -89,7 +89,7 @@ func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPla
 
 		// Skip the create batch if the expectations cache says a previous
 		// reconcile's writes haven't been observed yet.
-		if !DefaultExpectations.Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
 
@@ -97,7 +97,7 @@ func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPla
 		if err != nil {
 			return false, err
 		}
-		DefaultExpectations.ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, created)
+		p.expectations().ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, created)
 		// Pods just created — runtime can't possibly be Ready yet. Requeue.
 		return false, nil
 	}

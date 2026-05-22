@@ -69,6 +69,14 @@ type ReconcileParams struct {
 	// this in once the controller manager exposes a live reader; tests
 	// leave it nil since the fake client is a live source.
 	APIReader client.Reader
+
+	// Expectations is the create/delete bookkeeping cache the OMENative
+	// reconciler uses to avoid re-issuing batches before the controller-
+	// runtime watch has confirmed prior writes. Production wires the
+	// same instance into the Pod event handler (watches.go) so observed
+	// create / delete events release expectations immediately. When nil
+	// the package-level DefaultExpectations singleton is used.
+	Expectations *Expectations
 }
 
 // reader returns the live API reader when APIReader is set; otherwise the
@@ -79,6 +87,17 @@ func (p *ReconcileParams) reader() client.Reader {
 		return p.APIReader
 	}
 	return p.Client
+}
+
+// expectations returns the Expectations cache to use this reconcile —
+// the per-reconciler instance threaded through ReconcileParams when
+// set, or the package-level DefaultExpectations singleton as a
+// fallback for tests and pre-wiring callers.
+func (p *ReconcileParams) expectations() *Expectations {
+	if p.Expectations != nil {
+		return p.Expectations
+	}
+	return DefaultExpectations
 }
 
 // ReconcileComponent is the Loop A entry point for OMENative-managed

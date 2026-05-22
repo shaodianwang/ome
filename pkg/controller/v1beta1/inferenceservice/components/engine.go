@@ -35,13 +35,16 @@ type Engine struct {
 }
 
 // NewEngine creates a new Engine component instance. apiReader is the
-// live (uncached) reader threaded through to OMENative dispatch; may
-// be nil, in which case the OMENative backend falls back to the
-// cached client.
+// live (uncached) reader threaded through to OMENative dispatch;
+// expectations is the per-controller Expectations cache shared with
+// the SetupWithManager-registered Pod watch. Either may be nil — the
+// OMENative backend falls back to the cached client and the
+// DefaultExpectations singleton respectively.
 func NewEngine(
 	client client.Client,
 	clientset kubernetes.Interface,
 	apiReader client.Reader,
+	expectations *omenative.Expectations,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 	deploymentMode constants.DeploymentModeType,
@@ -57,6 +60,7 @@ func NewEngine(
 		Client:                 client,
 		Clientset:              clientset,
 		APIReader:              apiReader,
+		Expectations:           expectations,
 		Scheme:                 scheme,
 		InferenceServiceConfig: inferenceServiceConfig,
 		DeploymentMode:         deploymentMode,
@@ -173,6 +177,7 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			MultiPod:      multiPod,
 			Client:        e.Client,
 			APIReader:     e.APIReader,
+			Expectations:  e.Expectations,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for engine")

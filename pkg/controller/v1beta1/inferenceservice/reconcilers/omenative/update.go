@@ -316,7 +316,7 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 				return false, nil
 			}
 		}
-		if !DefaultExpectations.Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
 		deleted := 0
@@ -333,7 +333,7 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 			deleted++
 		}
 		if deleted > 0 {
-			DefaultExpectations.ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, deleted)
+			p.expectations().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, deleted)
 		}
 		return false, nil
 	}
@@ -351,7 +351,7 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 		}
 	}
 	if len(missing) > 0 {
-		if !DefaultExpectations.Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.expectations().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
 		created, err := createMissingPods(ctx, p, plan, newInst, missing)
@@ -359,7 +359,7 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 			return false, err
 		}
 		if created > 0 {
-			DefaultExpectations.ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, created)
+			p.expectations().ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, created)
 		}
 		return false, nil
 	}
