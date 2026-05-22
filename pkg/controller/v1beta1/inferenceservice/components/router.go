@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -41,6 +42,7 @@ func NewRouter(
 	clientset kubernetes.Interface,
 	apiReader client.Reader,
 	expectations *omenative.Expectations,
+	recorder record.EventRecorder,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 	deploymentMode constants.DeploymentModeType,
@@ -56,6 +58,7 @@ func NewRouter(
 		Clientset:              clientset,
 		APIReader:              apiReader,
 		Expectations:           expectations,
+		Recorder:               recorder,
 		Scheme:                 scheme,
 		InferenceServiceConfig: inferenceServiceConfig,
 		DeploymentMode:         deploymentMode,
@@ -148,6 +151,7 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			Client:       r.Client,
 			APIReader:    r.APIReader,
 			Expectations: r.Expectations,
+			Recorder:     r.Recorder,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for router")

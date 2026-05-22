@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -37,14 +38,16 @@ type Engine struct {
 // NewEngine creates a new Engine component instance. apiReader is the
 // live (uncached) reader threaded through to OMENative dispatch;
 // expectations is the per-controller Expectations cache shared with
-// the SetupWithManager-registered Pod watch. Either may be nil — the
-// OMENative backend falls back to the cached client and the
-// DefaultExpectations singleton respectively.
+// the SetupWithManager-registered Pod watch; recorder emits
+// ISVC-scoped lifecycle events. Any may be nil — the OMENative
+// backend falls back to the cached client, the DefaultExpectations
+// singleton, and a no-op event recorder respectively.
 func NewEngine(
 	client client.Client,
 	clientset kubernetes.Interface,
 	apiReader client.Reader,
 	expectations *omenative.Expectations,
+	recorder record.EventRecorder,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 	deploymentMode constants.DeploymentModeType,
@@ -61,6 +64,7 @@ func NewEngine(
 		Clientset:              clientset,
 		APIReader:              apiReader,
 		Expectations:           expectations,
+		Recorder:               recorder,
 		Scheme:                 scheme,
 		InferenceServiceConfig: inferenceServiceConfig,
 		DeploymentMode:         deploymentMode,
@@ -178,6 +182,7 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			Client:        e.Client,
 			APIReader:     e.APIReader,
 			Expectations:  e.Expectations,
+			Recorder:      e.Recorder,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for engine")

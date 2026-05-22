@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -78,6 +79,13 @@ type ReconcileParams struct {
 	// create / delete events release expectations immediately. When nil
 	// the package-level DefaultExpectations singleton is used.
 	Expectations *Expectations
+
+	// Recorder emits K8s Events against the parent InferenceService at
+	// lifecycle transitions (InstanceCreated, InPlaceUpdateStarted,
+	// MigrationCompleted, etc. — see events.go for the full reason
+	// set). nil-safe: when unset, recordEventf is a no-op so tests
+	// don't need to plumb a recorder.
+	Recorder record.EventRecorder
 }
 
 // reader returns the live API reader when APIReader is set; otherwise the
@@ -88,6 +96,15 @@ func (p *ReconcileParams) reader() client.Reader {
 		return p.APIReader
 	}
 	return p.Client
+}
+
+// derefInt32 is a small helper for event messages where we want to
+// print the value of an *int32 without an "<nil>" surprise.
+func derefInt32(p *int32) int32 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // expectations returns the Expectations cache to use this reconcile —
@@ -301,6 +318,9 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	if err != nil {
 		return nil, fmt.Errorf("bump CollisionCount after revision collision: %w", err)
 	}
+	recordWarning(p, EventReasonRevisionCollision,
+		"OMENative component=%s ControllerRevision hash collision; CollisionCount bumped to %d",
+		component, derefInt32(bumped))
 	target, collision, err = EnsureControllerRevision(ctx, p.Client, p.reader(), p.ISVC, component, p.PodSpec, &p.ObjectMeta, bumped)
 	if err != nil {
 		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)

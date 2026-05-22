@@ -69,6 +69,12 @@ func Update(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst Ins
 
 	mode, err := chooseUpdateMode(plan.UpdateStrategy.Type, runningSpec, targetSpec)
 	if err != nil {
+		// InPlaceOnly with ineligible diff is the only path that
+		// errors here. Surface it as an operator-visible event so
+		// the rejection has a kubectl describe trail.
+		recordWarning(p, EventReasonInPlaceUpdateNotPossible,
+			"OMENative %s rejected update: %v",
+			instanceKey(plan.Component, inst.Index), err)
 		return false, fmt.Errorf("choose update mode (instance=%d): %w", inst.Index, err)
 	}
 
@@ -201,8 +207,19 @@ func podSpecWithoutImages(spec *corev1.PodSpec) ([]byte, error) {
 func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, pods []*corev1.Pod) (bool, error) {
 	// Step 1: stamp Phase=Updating without bumping Incarnation —
 	// in-place keeps the same materialization, just rewrites the image.
+	// Capture whether this is the first pass into the in-place flow
+	// (not yet in Updating) so we only emit InPlaceUpdateStarted once.
+	wasNotUpdating := true
+	if s := findInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil && s.Phase == v1beta1.OMENativeInstanceUpdating {
+		wasNotUpdating = false
+	}
 	if err := patchInstanceStatusUpdating(ctx, p, plan.Component, inst.Index, target.Name, plan.InstanceReadyTimeout); err != nil {
 		return false, fmt.Errorf("patch status Updating (instance=%d): %w", inst.Index, err)
+	}
+	if wasNotUpdating {
+		recordNormal(p, EventReasonInPlaceUpdateStarted,
+			"OMENative %s in-place update to revision %s",
+			instanceKey(plan.Component, inst.Index), target.Name)
 	}
 
 	markNotReady := true
@@ -283,6 +300,9 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 	if err := patchInstanceStatusReadyOnRevision(ctx, p, plan.Component, inst.Index, target.Name); err != nil {
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
 	}
+	recordNormal(p, EventReasonInPlaceUpdateCompleted,
+		"OMENative %s in-place update to revision %s complete",
+		instanceKey(plan.Component, inst.Index), target.Name)
 	return true, nil
 }
 
@@ -296,10 +316,24 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 // old-incarnation pods that need draining and the new-incarnation
 // pods that should be left alone (or created if missing).
 func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, target *appsv1.ControllerRevision, pods []*corev1.Pod) (bool, error) {
-	// Bump Incarnation if we haven't already on this rollout.
+	// Bump Incarnation if we haven't already on this rollout. The
+	// per-rollout edge for the RecreateUpdateStarted event is "no
+	// Operation, or Operation.Step != Drain" — recreate's first
+	// stamp sets Step=Drain.
+	wasNotRecreating := true
+	if s := findInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil &&
+		s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationUpdate &&
+		s.Operation.Step == updateStepDrain {
+		wasNotRecreating = false
+	}
 	newInc, err := patchInstanceStatusRecreatingForUpdate(ctx, p, plan.Component, inst.Index, target.Name, plan.InstanceReadyTimeout)
 	if err != nil {
 		return false, fmt.Errorf("bump Incarnation (instance=%d): %w", inst.Index, err)
+	}
+	if wasNotRecreating {
+		recordNormal(p, EventReasonRecreateUpdateStarted,
+			"OMENative %s recreate to revision %s (incarnation=%d)",
+			instanceKey(plan.Component, inst.Index), target.Name, newInc)
 	}
 
 	oldPods, newPods := partitionPodsByIncarnation(pods, newInc)
@@ -390,6 +424,9 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 	if err := patchInstanceStatusReadyOnRevision(ctx, p, plan.Component, inst.Index, target.Name); err != nil {
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
 	}
+	recordNormal(p, EventReasonRecreateUpdateCompleted,
+		"OMENative %s recreate to revision %s complete",
+		instanceKey(plan.Component, inst.Index), target.Name)
 	return true, nil
 }
 

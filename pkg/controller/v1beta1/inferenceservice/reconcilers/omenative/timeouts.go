@@ -60,10 +60,23 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p ReconcileParams, pl
 			if err := fallbackInPlaceToRecreate(ctx, p, plan.Component, s.Index); err != nil {
 				return fmt.Errorf("expire in-place update (instance=%d): %w", s.Index, err)
 			}
+			recordWarning(p, EventReasonInPlaceTimeoutFallback,
+				"OMENative %s in-place update timed out; falling back to recreate",
+				instanceKey(plan.Component, s.Index))
 			continue
 		}
+		// Idempotency check: only emit the event when we actually
+		// stamp the marker (i.e., it wasn't already there). Without
+		// this guard every reconcile pass after the first timeout
+		// would re-emit the event.
+		alreadyStuck := s.Operation != nil && s.Operation.Reason == timeoutReasonExceeded
 		if err := stampOperationStuck(ctx, p, plan.Component, s.Index); err != nil {
 			return fmt.Errorf("stamp stuck (instance=%d): %w", s.Index, err)
+		}
+		if !alreadyStuck && s.Operation != nil {
+			recordWarning(p, EventReasonOperationDeadlineExceeded,
+				"OMENative %s operation %s/%s exceeded deadline; operator intervention required",
+				instanceKey(plan.Component, s.Index), s.Operation.Type, s.Operation.Step)
 		}
 	}
 	return nil

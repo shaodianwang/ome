@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -40,6 +41,7 @@ func NewDecoder(
 	clientset kubernetes.Interface,
 	apiReader client.Reader,
 	expectations *omenative.Expectations,
+	recorder record.EventRecorder,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 	deploymentMode constants.DeploymentModeType,
@@ -56,6 +58,7 @@ func NewDecoder(
 		Clientset:              clientset,
 		APIReader:              apiReader,
 		Expectations:           expectations,
+		Recorder:               recorder,
 		Scheme:                 scheme,
 		InferenceServiceConfig: inferenceServiceConfig,
 		DeploymentMode:         deploymentMode,
@@ -173,6 +176,7 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 			Client:        d.Client,
 			APIReader:     d.APIReader,
 			Expectations:  d.Expectations,
+			Recorder:      d.Recorder,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for decoder")

@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -40,7 +41,11 @@ type BaseComponentFields struct {
 	// per-reconcile dispatch and the SetupWithManager-registered Pod
 	// event handler share the same instance. nil for non-OMENative
 	// modes — they don't consult it.
-	Expectations                      *omenative.Expectations
+	Expectations *omenative.Expectations
+	// Recorder is the parent controller's event recorder. Threaded
+	// through ReconcileParams so OMENative ops emit K8s Events against
+	// the parent ISVC at lifecycle transitions.
+	Recorder                          record.EventRecorder
 	Scheme                            *runtime.Scheme
 	InferenceServiceConfig            *controllerconfig.InferenceServicesConfig
 	DeploymentMode                    constants.DeploymentModeType

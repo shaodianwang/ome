@@ -3,6 +3,7 @@ package omenative
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -104,6 +105,9 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
 			return false, fmt.Errorf("Migrate: persist Started ledger: %w", err)
 		}
+		recordNormal(p, EventReasonMigrationRequestAccepted,
+			"OMENative %s migration accepted (uuid=%s, source-node=%s, surge-index=%d)",
+			instanceKey(plan.Component, sourceIdx), requestUUID, req.FromNode, surgeIdx)
 	}
 
 	// Step 6: create the surge pod set.
@@ -261,6 +265,9 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 	if _, rerr := removeInstanceStatus(ctx, p, plan.Component, sourceIdx); rerr != nil {
 		return false, fmt.Errorf("Migrate: remove source InstanceStatus: %w", rerr)
 	}
+	recordNormal(p, EventReasonMigrationCompleted,
+		"OMENative migration uuid=%s complete: %s -> instance=%d (revision=%s)",
+		requestUUID, instanceKey(plan.Component, sourceIdx), surgeIdx, surgeRev.Name)
 	return true, nil
 }
 
@@ -282,6 +289,8 @@ func failMigration(ctx context.Context, p ReconcileParams, ledger *auditLedger, 
 	if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
 		return false, fmt.Errorf("Migrate: persist Failed ledger (%s): %w", reason, err)
 	}
+	recordWarning(p, EventReasonMigrationRequestRejected,
+		"OMENative migration uuid=%s rejected: %s", uuid, reason)
 	return true, nil
 }
 
@@ -346,6 +355,13 @@ func detectMigrationRequest(ctx context.Context, p ReconcileParams, component v1
 			})
 			if err := persistAuditLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
 				return "", nil, 0, false, fmt.Errorf("persist Failed ledger after parse error: %w", err)
+			}
+			if errors.Is(perr, errUnsupportedSchemaVersion) {
+				recordWarning(p, EventReasonUnsupportedSchemaVersion,
+					"OMENative migration uuid=%s rejected: %v", uuid, perr)
+			} else {
+				recordWarning(p, EventReasonMigrationRequestRejected,
+					"OMENative migration uuid=%s rejected: %v", uuid, perr)
 			}
 			continue
 		}

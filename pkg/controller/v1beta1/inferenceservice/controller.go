@@ -211,7 +211,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Initialize ComponentBuilderFactory
 	// Note: isvcConfig is created a few lines above inside the Reconcile function
 	// for NewInferenceServicesConfig. We will use that existing isvcConfig.
-	componentBuilderFactory := components.NewComponentBuilderFactory(r.Client, r.Clientset, r.APIReader, r.Expectations, r.Scheme, isvcConfig)
+	componentBuilderFactory := components.NewComponentBuilderFactory(r.Client, r.Clientset, r.APIReader, r.Expectations, r.Recorder, r.Scheme, isvcConfig)
 
 	// Determine which components to reconcile based on the spec
 	var reconcilers []components.Component

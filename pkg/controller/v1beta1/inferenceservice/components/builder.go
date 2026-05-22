@@ -5,6 +5,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -22,6 +23,7 @@ type ComponentBuilder struct {
 	clientset              kubernetes.Interface
 	apiReader              client.Reader
 	expectations           *omenative.Expectations
+	recorder               record.EventRecorder
 	scheme                 *runtime.Scheme
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig
 	deploymentMode         constants.DeploymentModeType
@@ -38,13 +40,16 @@ type ComponentBuilder struct {
 // live (uncached) reader (typically mgr.GetAPIReader()); the OMENative
 // backend uses it for reads where cache lag would be a correctness
 // problem. expectations is the per-controller Expectations cache;
-// both threaded through to ReconcileParams. Either may be nil —
-// backends fall back to the cached client / DefaultExpectations.
+// recorder is the event recorder for ISVC-scoped lifecycle events;
+// all three are threaded through to ReconcileParams. Any may be nil —
+// backends fall back to the cached client / DefaultExpectations /
+// no-op event emission.
 func NewComponentBuilder(
 	client client.Client,
 	clientset kubernetes.Interface,
 	apiReader client.Reader,
 	expectations *omenative.Expectations,
+	recorder record.EventRecorder,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 ) *ComponentBuilder {
@@ -53,6 +58,7 @@ func NewComponentBuilder(
 		clientset:              clientset,
 		apiReader:              apiReader,
 		expectations:           expectations,
+		recorder:               recorder,
 		scheme:                 scheme,
 		inferenceServiceConfig: inferenceServiceConfig,
 		logger:                 ctrl.Log.WithName("ComponentBuilder"),
@@ -105,6 +111,7 @@ func (b *ComponentBuilder) buildBaseFields() BaseComponentFields {
 		Clientset:              b.clientset,
 		APIReader:              b.apiReader,
 		Expectations:           b.expectations,
+		Recorder:               b.recorder,
 		Scheme:                 b.scheme,
 		InferenceServiceConfig: b.inferenceServiceConfig,
 		DeploymentMode:         b.deploymentMode,
@@ -125,6 +132,7 @@ func (b *ComponentBuilder) BuildEngine(spec *v1beta1.EngineSpec) Component {
 		b.clientset,
 		b.apiReader,
 		b.expectations,
+		b.recorder,
 		b.scheme,
 		b.inferenceServiceConfig,
 		b.deploymentMode,
@@ -145,6 +153,7 @@ func (b *ComponentBuilder) BuildDecoder(spec *v1beta1.DecoderSpec) Component {
 		b.clientset,
 		b.apiReader,
 		b.expectations,
+		b.recorder,
 		b.scheme,
 		b.inferenceServiceConfig,
 		b.deploymentMode,
@@ -165,6 +174,7 @@ func (b *ComponentBuilder) BuildRouter(spec *v1beta1.RouterSpec) Component {
 		b.clientset,
 		b.apiReader,
 		b.expectations,
+		b.recorder,
 		b.scheme,
 		b.inferenceServiceConfig,
 		b.deploymentMode,
@@ -193,6 +203,7 @@ type ComponentBuilderFactory struct {
 	clientset              kubernetes.Interface
 	apiReader              client.Reader
 	expectations           *omenative.Expectations
+	recorder               record.EventRecorder
 	scheme                 *runtime.Scheme
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig
 }
@@ -200,13 +211,15 @@ type ComponentBuilderFactory struct {
 // NewComponentBuilderFactory creates a new factory. apiReader is the
 // live API reader (typically mgr.GetAPIReader()); expectations is
 // the per-controller Expectations cache shared with the
-// SetupWithManager-registered Pod watch. Both plumbed through to the
-// OMENative backend; either may be nil.
+// SetupWithManager-registered Pod watch; recorder emits ISVC-scoped
+// lifecycle events. All plumbed through to the OMENative backend;
+// any may be nil.
 func NewComponentBuilderFactory(
 	client client.Client,
 	clientset kubernetes.Interface,
 	apiReader client.Reader,
 	expectations *omenative.Expectations,
+	recorder record.EventRecorder,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 ) *ComponentBuilderFactory {
@@ -215,6 +228,7 @@ func NewComponentBuilderFactory(
 		clientset:              clientset,
 		apiReader:              apiReader,
 		expectations:           expectations,
+		recorder:               recorder,
 		scheme:                 scheme,
 		inferenceServiceConfig: inferenceServiceConfig,
 	}
@@ -222,7 +236,7 @@ func NewComponentBuilderFactory(
 
 // NewBuilder creates a new component builder
 func (f *ComponentBuilderFactory) NewBuilder() *ComponentBuilder {
-	return NewComponentBuilder(f.client, f.clientset, f.apiReader, f.expectations, f.scheme, f.inferenceServiceConfig)
+	return NewComponentBuilder(f.client, f.clientset, f.apiReader, f.expectations, f.recorder, f.scheme, f.inferenceServiceConfig)
 }
 
 // CreateEngineComponent is a convenience method to create an engine component

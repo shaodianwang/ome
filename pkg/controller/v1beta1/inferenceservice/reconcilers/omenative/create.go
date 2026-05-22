@@ -84,8 +84,19 @@ func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPla
 	// oscillate the status back to Creating after we already observed
 	// Ready pods.
 	if len(missing) > 0 {
+		isFirstCreate := findInstanceStatus(p.ISVC, plan.Component, inst.Index) == nil
 		if err := patchInstanceStatusCreating(ctx, p, plan.Component, inst.Index, inst.Incarnation, plan.InstanceReadyTimeout); err != nil {
 			return false, fmt.Errorf("patch status Creating (instance=%d): %w", inst.Index, err)
+		}
+		// Fire InstanceCreated only on first transition; subsequent
+		// passes (which add the remaining pods of a multi-pod Instance)
+		// don't re-emit. The findInstanceStatus check uses the cached
+		// ISVC, so a fresh status that gets created by the patch above
+		// shows up via isFirstCreate captured before.
+		if isFirstCreate {
+			recordNormal(p, EventReasonInstanceCreated,
+				"OMENative %s materialized; %d pod(s) requested",
+				instanceKey(plan.Component, inst.Index), len(missing))
 		}
 
 		// Skip the create batch if the expectations cache says a previous
@@ -122,9 +133,20 @@ func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPla
 		}
 	}
 
-	// Record Phase=Ready, Operation=nil.
+	// Record Phase=Ready, Operation=nil. Only fire InstanceReady on
+	// the transition from a non-Ready phase, not on every reconcile
+	// while the Instance is already Ready.
+	wasReady := false
+	if s := findInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil && s.Phase == v1beta1.OMENativeInstanceReady {
+		wasReady = true
+	}
 	if err := patchInstanceStatusReady(ctx, p, plan.Component, inst.Index); err != nil {
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
+	}
+	if !wasReady {
+		recordNormal(p, EventReasonInstanceReady,
+			"OMENative %s is Ready (%d pod(s) serving)",
+			instanceKey(plan.Component, inst.Index), len(existing))
 	}
 	return true, nil
 }

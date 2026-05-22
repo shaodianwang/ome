@@ -56,9 +56,18 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 	// reconcile already bumped). Use that value — not inst.Incarnation
 	// from the plan — when classifying pods, because BuildPlan ran
 	// against an earlier read.
+	wasNotRestarting := true
+	if s := findInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil && s.Phase == v1beta1.OMENativeInstanceRestarting {
+		wasNotRestarting = false
+	}
 	newInc, err := patchInstanceStatusRestarting(ctx, p, plan.Component, inst.Index, reason, plan.InstanceReadyTimeout)
 	if err != nil {
 		return false, fmt.Errorf("patch status Restarting (instance=%d): %w", inst.Index, err)
+	}
+	if wasNotRestarting {
+		recordWarning(p, EventReasonRestartTriggered,
+			"OMENative %s restart triggered: %s (incarnation=%d)",
+			instanceKey(plan.Component, inst.Index), reason, newInc)
 	}
 
 	pods, err := listPodsForInstance(ctx, p.Client, p.ISVC, plan.Component, inst.Index)
@@ -166,6 +175,9 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 	if err := patchInstanceStatusReady(ctx, p, plan.Component, inst.Index); err != nil {
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
 	}
+	recordNormal(p, EventReasonRestartCompleted,
+		"OMENative %s restart complete (incarnation=%d)",
+		instanceKey(plan.Component, inst.Index), newInc)
 	return true, nil
 }
 
