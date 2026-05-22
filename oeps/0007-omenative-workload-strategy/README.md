@@ -98,16 +98,18 @@ independently.
 
 OME defines eight CRDs in the `ome.io/v1beta1` API group and runs
 four controllers. The workload-facing CRD is `InferenceService`, which
-today supports five deployment modes defined in
-`pkg/constants/constants.go:445-453`:
+today supports four deployment modes defined in
+`pkg/constants/constants.go:453-459`:
 
 | Mode | Primary resource | Multi-pod Instance | Multi-Component | Uses LWS? |
 |------|------------------|--------------------|-----------------|-----------|
 | `RawDeployment` | `Deployment` | No | Router+Engine via separate Deployments | No |
 | `MultiNode` | `LeaderWorkerSet` | Yes (leader + workers) | No | **Yes** |
-| `Serverless` | `Knative Service` | No | Per-component | No |
 | `PDDisaggregated` | `LeaderWorkerSet` × 2 + Deployment | Yes per component | Yes (router + engine + decoder) | **Yes** |
 | `VirtualDeployment` | (none) | N/A | N/A | No |
+
+`Serverless` (Knative Service) was removed in PR #174; this OEP no
+longer enumerates it.
 
 LWS is therefore the backbone for OME's multi-node tensor-parallel
 engines and for prefill-decode disaggregated serving. An audit of OME
@@ -272,25 +274,24 @@ controllers don't prioritize:
 
 ### Non-Goals
 
-1. **Not replacing the Knative path.** `Serverless` mode remains unchanged.
-2. **Not becoming a general-purpose workload controller.** OMENative
+1. **Not becoming a general-purpose workload controller.** OMENative
    is specialized for LLM inference.
-3. **Not implementing a scheduler.** OMENative relies on the K8s
+2. **Not implementing a scheduler.** OMENative relies on the K8s
    scheduler. It supplies scheduling hints and gates; it does not
    replace scheduler logic.
-4. **Not shipping OMENative-managed HPA in v1.** Existing modes keep
+3. **Not shipping OMENative-managed HPA in v1.** Existing modes keep
    their current scaling paths; OMENative v1 reconciles replica count
    from `InferenceService` spec and does not emit an HPA.
-5. **Not owning cluster-wide defragmentation decisions.** That is
+4. **Not owning cluster-wide defragmentation decisions.** That is
    Alfred's job (OEP-0008). OMENative provides the migration verb;
    Alfred decides when and why to call it.
-6. **Not solving GPU health observation.** Standard K8s node
+5. **Not solving GPU health observation.** Standard K8s node
    conditions and AcceleratorClass status are consumed; OMENative
    adds no new telemetry collection.
-7. **Not exposing any new CRDs.** Hard constraint.
-8. **Not supporting cross-cluster InferenceService.** Explicit
+6. **Not exposing any new CRDs.** Hard constraint.
+7. **Not supporting cross-cluster InferenceService.** Explicit
    non-goal; if needed later, a separate OEP.
-9. **Not shipping a user-facing rollback verb in v1.** Internal
+8. **Not shipping a user-facing rollback verb in v1.** Internal
    `ControllerRevision` is emitted for in-place update decisioning,
    but the user-facing rollback mechanism (replay revision N) is
    deferred to a follow-up.
@@ -303,7 +304,7 @@ OMENative is a new `WorkloadStrategy` for OME's InferenceService
 controller. Operators select the strategy per-Component via the
 existing `ome.io/deploymentMode` annotation on each Component's
 metadata — the same annotation OME already uses today
-(`pkg/constants/constants.go:90`,
+(the `DeploymentMode` key in `pkg/constants/constants.go`,
 `pkg/controller/v1beta1/inferenceservice/utils/deployment.go:18`):
 
 ```yaml
@@ -311,7 +312,7 @@ spec:
   router:
     metadata:
       annotations:
-        ome.io/deploymentMode: Serverless    # router is free to pick any mode
+        ome.io/deploymentMode: RawDeployment # router is free to pick any mode
   engine:
     metadata:
       annotations:
@@ -936,12 +937,38 @@ gate to every managed pod at pod creation time:
 ome.io/serving
 ```
 
-OMENative flips that condition during update, restart, migration, and
-scale-down to drain Service traffic before mutating the pod set.
+The gate is per-pod and uses a **multi-writer protocol** ported from
+RBG (`sigs.k8s.io/rbgs/pkg/inplace/pod/readiness`). The condition's
+`Message` field carries a JSON list of `{userAgent, key}` entries,
+one per writer that wants the pod NotReady. The condition `Status`
+is `True` only when the list is empty AND `ContainersReady=True`.
+
+Writers and their keys:
+
+- `Migrate-source-drain` / key=migration UUID
+- `Update-in-place` / key=`<instance-idx>-<incarnation>`
+- `Update-recreate-drain` / key=`<instance-idx>-<incarnation>`
+- `Restart-drain` / key=restart operation ID
+- `Delete-drain` / key=instance index
+- `Lifecycle-instance-gang` / key=`<instance-idx>` — added on each
+  pod that is `ContainersReady` but whose Instance siblings are
+  not; removed once every sibling reaches `ContainersReady`. This
+  is what enforces Instance-level gang readiness (§7.1) without
+  making the gate itself Instance-scoped.
+
+Each writer adds or removes only its own key; multiple writers can
+overlap (e.g., a migration drain and an in-place update drain can
+both be active on the same pod) without overwriting each other.
+
+Every write to the pod status uses `retry.RetryOnConflict` and
+patches only the single condition so it does not clobber kubelet's
+concurrent writes to `PodScheduled`, `ContainersReady`, etc.
 
 **Custom readiness gates**: PodSpec-level `readinessGates` from the
-runtime or user spec are still respected. OMENative appends its gate;
-it does not replace or remove existing readiness gates.
+runtime or user spec are still respected. OMENative appends its
+gate; it does not replace or remove existing readiness gates. If a
+user template already declares `ome.io/serving`, OMENative reuses it
+rather than duplicating.
 
 **Relation to migration**: migration surge pods must reach `Ready`
 before OMENative proceeds to terminate the old pods. Bounded by
@@ -1221,7 +1248,7 @@ Operator guidance:
 
 OME's existing mechanism is reused unchanged:
 
-- `pkg/constants/constants.go:801-817` defines label constructors
+- `pkg/constants/constants.go` defines label constructors
   `GetBaseModelLabel()` and `GetClusterBaseModelLabel()` producing
   labels like `models.ome.io/{ns}.basemodel.{name}` or
   `models.ome.io/clusterbasemodel.{name}` with value `Ready`.
@@ -1265,22 +1292,47 @@ Volcano and Yunikorn are explicit deferrals.
 
 ### Webhook Interaction
 
-OME's existing pod admission webhook at
-`pkg/webhook/admission/pod/` (RDMA config injection, sidecar
-containers, model-init container, annotation translation) works
-**unchanged** for OMENative-emitted pods:
+OME's pod admission webhook at `pkg/webhook/admission/pod/` runs
+seven injectors (metrics aggregator, fine-tuned adapter, serving
+sidecar, RDMA, shared memory, probe, observability). OMENative pods
+do **not** go through that webhook — they are exempted via the
+`ome.io/managed-by=OMENative` label that OMENative's render stamps
+on every pod.
 
-- Webhook is additive — only adds env/volumes/containers/labels;
-  never removes pod-identity fields (hostname, subdomain) set by
-  OMENative at pod creation.
-- OMENative's `OME_*` env-var prefix (see [Service
-  Discovery](#service-discovery)) avoids collision with
-  webhook-injected env.
+Instead, OMENative calls the same injector functions directly during
+rendering. The injector logic lives in a shared package
+(`pkg/podinjection/`) that both the webhook (for non-OMENative
+deployment modes) and OMENative's render path invoke. Per-injector
+behavior is identical regardless of caller.
+
+Rationale: capturing the post-injection PodSpec in OMENative's
+revision hash is necessary for accurate in-place eligibility checks
+and for OEP-0014 (pinned ServingRuntime revisions) consistency. With
+the webhook running after `client.Create(pod)`, the controller would
+have no way to hash what kubelet actually sees. Routing through
+direct calls eliminates the divergence.
+
+This pattern matches RBG (`sigs.k8s.io/rbgs`), which has no pod
+admission webhook at all and renders pods entirely from the
+controller. OMENative cannot remove OME's webhook entirely because
+non-OMENative modes (`RawDeployment`, `MultiNode`,
+`PDDisaggregated`) still depend on it, but the shared injector
+package lets both call sites stay in sync.
+
+**External admission webhooks (out of scope)**. Cluster operators
+may install other mutating admission webhooks (Istio, Linkerd, Vault
+Agent, Cilium, custom org webhooks) that mutate pods at Create time.
+Their mutations are not part of OMENative's revision payload.
+Changes to those webhooks' configuration do not trigger OMENative
+rollouts. Operators wanting to pick up such changes must trigger a
+rollout via spec edit on the InferenceService. This is the same
+limitation RBG and every other controller has, and the same workaround.
 
 Integration tests cover: for a Component annotated with
 `ome.io/deploymentMode: OMENative`, emitted pods have correct RDMA
 injection, sidecar containers, model-init container, OMENative's env
-vars, and controller-assigned hostname/subdomain.
+vars, controller-assigned hostname/subdomain, and a revision hash
+that matches the post-injection PodSpec.
 
 ### Status Propagation
 
@@ -1422,8 +1474,8 @@ OMENative is selected per-Component by setting the
 metadata. Other Components can use any other strategy by setting (or
 not setting) the same annotation.
 
-**Router**: free. Typically `Serverless` (Knative), `RawDeployment`,
-or `OMENative`. Decoupled from engine/decoder via Service discovery.
+**Router**: free. Typically `RawDeployment` or `OMENative`.
+Decoupled from engine/decoder via Service discovery.
 
 **Engine and Decoder**: when both are present (PD mode), they **must
 share the same `ome.io/deploymentMode` annotation value**. Enforced at
@@ -1481,7 +1533,8 @@ Supplementary signals:
 
 OMENative does **not** ship behind a Kubernetes feature gate. Selection
 is per-Component via the existing `ome.io/deploymentMode` annotation
-(`pkg/constants/constants.go:90`). Operators opt in by adding
+(the `DeploymentMode` key in `pkg/constants/constants.go`).
+Operators opt in by adding
 `ome.io/deploymentMode: OMENative` to a Component's metadata
 annotations; absence (or any other supported value) means the existing
 mode for that Component continues to apply.
@@ -1645,6 +1698,21 @@ gang scheduling. Fake GPU device plugin for resource accounting.
 - 2026-04-16: Design questions consolidated; 37 decisions locked.
 - 2026-04-16: OEP-0007 updated to reflect locked decisions (this
   document).
+- 2026-05-15 through 2026-05-21: PRs #107 → #193 land the
+  single-pod alpha core (status surface,
+  {create,update,restart,delete,migrate}.go, revision.go, drain.go,
+  services.go builder, timeouts.go).
+- 2026-05-20: PR #174 removed `Serverless` deployment mode from
+  OME; OEP references updated accordingly.
+- 2026-05-21: Pre-alpha design lock based on combined review:
+  - **D1**: adopt RBG multi-writer readiness gate pattern for
+    `ome.io/serving` (Appendix B.3 resolved).
+  - **D2**: Loop A fan-out deferred post-alpha; serial reconcile is
+    not a PD correctness blocker (Appendix B.1 deferred).
+  - **D3**: extract OME pod webhook injectors into shared
+    `pkg/podinjection/` package; OMENative pods bypass the webhook
+    and call extracted injectors directly via render. Third-party
+    admission webhooks remain out of scope, matching RBG's stance.
 - TBD: PR #506 merged.
 - TBD: OMENative Alpha implementation.
 - TBD: Alpha release.

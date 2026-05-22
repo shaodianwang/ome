@@ -609,13 +609,46 @@ spec:
     - conditionType: ome.io/serving
 ```
 
-The controller writes the corresponding Pod status condition:
+The controller writes the corresponding Pod status condition.
 
-- `True`  => pod may receive Service traffic
-- `False` => pod is draining / not eligible for traffic
+The gate is **per-pod** and uses a **multi-writer protocol** ported
+from RBG (`sigs.k8s.io/rbgs/pkg/inplace/pod/readiness`). The
+condition's `Message` field is a JSON list of `{userAgent, key}`
+entries — one per writer that wants the pod NotReady right now.
+`Status=True` is computed as: message list empty AND
+`ContainersReady=True`. Multi-writer is necessary because OMENative
+has at least four overlapping reasons to want a pod NotReady
+(migration source drain, update drain, restart drain, scale-down
+drain) that may be in flight against the same pod simultaneously.
 
-This gate exists on every pod from creation time. The controller never
-tries to add a new readiness gate to a live pod.
+Writer protocol API (see `pkg/.../omenative/podreadiness/`):
+
+```go
+AddNotReadyKey(pod, Message{UserAgent, Key}) → adds entry, sets Status=False
+RemoveNotReadyKey(pod, Message{UserAgent, Key}) → removes entry; if list empty, Status=True
+ContainsNotReadyKey(pod, Message) → read-side check
+```
+
+Defined writers and their keys:
+
+- `Migrate-source-drain` / key=migration UUID
+- `Update-in-place` / key=`<instance-idx>-<incarnation>`
+- `Update-recreate-drain` / key=`<instance-idx>-<incarnation>`
+- `Restart-drain` / key=restart operation ID
+- `Delete-drain` / key=instance index
+- `Lifecycle-instance-gang` / key=`<instance-idx>` — added on each
+  pod that is `ContainersReady` but whose Instance siblings are
+  not; removed once every sibling reaches `ContainersReady`. **This
+  is what enforces §7.1's Instance gang semantics without making
+  the gate itself Instance-scoped.**
+
+This gate exists on every pod from creation time. The controller
+never tries to add a new readiness gate to a live pod.
+
+Every condition write uses `retry.RetryOnConflict` and patches only
+the single condition (not the full pod status), so it does not
+clobber kubelet's concurrent writes to `PodScheduled`,
+`ContainersReady`, `PodIP`, `ContainerStatuses`, etc.
 
 ### 4.1.1 Readiness Gate Merge Rules
 
@@ -636,7 +669,8 @@ Rules:
 - pod readiness remains the conjunction of:
   - containers ready
   - all user/runtime readiness gates
-  - `ome.io/serving=True`
+  - `ome.io/serving=True` (which itself is the AND of `ContainersReady`
+    and "no writer holds a NotReady key on this pod")
 
 That keeps OMENative compatible with OME's existing PodSpec surface while
 still giving the controller one explicit traffic-drain lever.
@@ -1507,10 +1541,11 @@ Mode impact in v1:
   - remains temporarily supported when backed by LWS
   - engine and decoder are the primary multi-Component deprecation target
     for OMENative
-- `Serverless`
-  - unchanged
 - `VirtualDeployment`
   - unchanged
+
+`Serverless` (Knative Service) was removed from OME in PR #174 and is
+not enumerated here.
 
 Selection rule:
 
@@ -1568,14 +1603,14 @@ Coupling rule:
 - The router's `ome.io/deploymentMode` annotation is independent.
 
 Operators set the annotation directly on each Component's metadata,
-matching the existing OME pattern (`pkg/constants/constants.go:90`):
+matching the existing OME pattern (the `DeploymentMode` key in `pkg/constants/constants.go`):
 
 ```yaml
 spec:
   router:
     metadata:
       annotations:
-        ome.io/deploymentMode: Serverless
+        ome.io/deploymentMode: RawDeployment
   engine:
     metadata:
       annotations:
@@ -1623,7 +1658,7 @@ Concrete mapping from today's modes:
 - Current `PDDisaggregated` (router + engine + decoder, engine and
   decoder LWS-backed) → migrate engine and decoder to `OMENative`
   together; router stays on whatever mode already served it
-- Current `Serverless`, `VirtualDeployment` → unchanged
+- Current `VirtualDeployment` → unchanged
 
 "Is this ISVC a PD serving workload?" is not the selection question.
 "Is engine or decoder multi-pod per replica?" is.
@@ -1668,10 +1703,11 @@ controller.
     fields
 
 The current generic status helper in
-`pkg/controller/v1beta1/inferenceservice/status/` is deployment, LWS,
-and Knative oriented. It should continue to own top-level readiness
-aggregation, but OMENative-specific per-Instance status derivation should
-live in the OMENative package itself.
+`pkg/controller/v1beta1/inferenceservice/status/` is Deployment- and
+LWS-oriented (Knative status paths were removed alongside the
+`Serverless` mode in PR #174). It should continue to own top-level
+readiness aggregation, but OMENative-specific per-Instance status
+derivation lives in the OMENative package itself.
 
 ### 12.3 Watches And Loop Mapping
 
@@ -1700,8 +1736,9 @@ That gives the exact Loop A / Loop B split from this design:
 ### 12.4 Reconciler Boundary Inside OME
 
 Do **not** keep extending the current
-`reconcilers/common/deployment_reconciler.go` to support OMENative. That
-file is Deployment/LWS/Knative shaped.
+`reconcilers/common/deployment_reconciler.go` to support OMENative.
+That file is Deployment/LWS shaped (Knative paths were removed in
+PR #174).
 
 Instead:
 
@@ -1737,12 +1774,9 @@ duplicate them.
 That keeps OMENative focused on pod-set lifecycle, not north-south
 traffic policy.
 
-For ingress strategy selection, OMENative should be treated like the
-other service-backed non-Knative modes:
-
-- `Serverless` keeps the Knative ingress path
-- `RawDeployment`, `MultiNode`, and `OMENative` all use the existing
-  Kubernetes Ingress or Gateway API strategies
+For ingress strategy selection, OMENative is treated like the other
+service-backed modes — `RawDeployment`, `MultiNode`, and `OMENative`
+all use the existing Kubernetes Ingress or Gateway API strategies.
 
 OMENative should therefore extend, not fork, the current ingress mode
 selection logic.
@@ -1782,8 +1816,10 @@ with:
 - conditions
 - per-Instance status list
 
-That avoids polluting the existing Knative-style fields with unrelated
-instance-state machinery.
+That avoids polluting the existing `ComponentStatusSpec` fields
+(historically shaped for the Knative path that was removed in
+PR #174 and now mainly used by `RawDeployment`/`MultiNode`) with
+unrelated instance-state machinery.
 
 ## 13. Proposed Package / File Layout
 
@@ -1928,15 +1964,14 @@ fencing more explicit.
 
 ### A.4 Two-Tier Controller Readiness Gates
 
-Split controller readiness into:
-
-- `ome.io/serving` for Service eligibility
-- `ome.io/instance-member` for "this pod belongs to a coherent
-  ready Instance"
-
-That would provide better observability for multi-pod inference groups
-than a single serving gate, but it adds another condition surface and
-should be justified by concrete runtime needs before adoption.
+**Status: Deferred indefinitely (2026-05-21).** Subsumed by the
+multi-writer Message protocol on the single `ome.io/serving` gate
+adopted under §4.1 (see also Appendix B.3). Splitting into a second
+condition surface is no longer necessary — operator visibility into
+"which writer holds this pod NotReady" comes from inspecting the
+gate's Message payload via `kubectl describe pod`. Revisit only if
+concrete runtime needs emerge that the multi-writer protocol cannot
+express.
 
 ---
 
@@ -1952,9 +1987,25 @@ machine.
 
 ### B.1 Serial Reconcile Is a Real Bottleneck
 
-**Evidence.** §5.1.1 locks `InferenceService` reconcile to one Loop-A
-execution per key. RBG splits this across three controllers with
-independent worker pools:
+**Status: Deferred post-alpha (2026-05-21).** Not a PD-alpha
+correctness blocker. PD InferenceServices work correctly under serial
+Loop A — long ops (migration, large creates) extend reconcile
+latency but the next reconcile resumes mid-operation work from
+status. Different ISVCs reconcile in parallel via controller-runtime's
+worker pool; serialization is per-ISVC-key only. Serial status writes
+within one reconcile are *less* conflict-prone than fan-out would be.
+
+Revisit when:
+- Operators report rollout latency on PD ISVCs in production
+- Per-Component reconcile times grow past acceptable user-visible
+  latency
+- Cross-Component coordinated rollout (already deferred from v1)
+  lands and reintroduces per-Component synchronization questions
+
+**Original concern (still accurate for the post-alpha discussion)**.
+§5.1.1 locks `InferenceService` reconcile to one Loop-A execution
+per key. RBG splits this across three controllers with independent
+worker pools:
 
 - `rolebasedgroup_controller.go` — top-level group controller
 - `pkg/reconciler/roleinstanceset/statefulmode/stateful_instance_set_controller.go:51`
@@ -1962,15 +2013,15 @@ independent worker pools:
 - `pkg/reconciler/roleinstance/instance_reconciler.go` — per-instance
   controller, also independent workers
 
-**Concern.** A PD `InferenceService` in production is
+A PD `InferenceService` in production is
 `router (1-2 instances) + engine (N instances × M pods) + decoder (N
 instances × M pods)`. Under Loop-A's single-key serialization, a
 router rollout waits behind an engine migration that waits behind a
 decoder restart. RBG specifically avoided this by layering the
 controllers.
 
-**Proposed resolution for v1.** Keep the single-key write lock on
-`InferenceService.Status`, but factor Loop A into per-Component
+**Proposed resolution when revisited.** Keep the single-key write lock
+on `InferenceService.Status`, but factor Loop A into per-Component
 fan-out inside the reconcile:
 
 - Plan computation stays per-ISVC
@@ -1984,7 +2035,7 @@ unrelated Components from blocking each other.
 
 ### B.2 Reserve a Rollback Anchor in v1 Spec
 
-**Evidence.** `README.md:296-299` defers user-facing rollback. RBG
+**Evidence.** `README.md` §Non-Goals item 8 defers user-facing rollback. RBG
 already exposes canary/rollback via
 `RoleInstanceSetUpdateStrategy.Partition`
 (`api/workloads/v1alpha2/roleinstanceset_types.go:129`): holding `N`
@@ -2002,6 +2053,21 @@ may reject non-zero values with `PartitionNotSupportedInV1`; later
 versions activate it without an API break.
 
 ### B.3 Clarify `ome.io/serving` Semantics Before v1 Ships
+
+**Status: Resolved (2026-05-21).** Adopted RBG's multi-writer
+readiness gate pattern. `ome.io/serving` is **per-pod** (matching
+§4.1.1's merge rules), and Instance gang semantics (the §7.1 Create
+behavior) are enforced by the `Lifecycle-instance-gang` writer
+adding/removing its key as siblings reach `ContainersReady`. See
+§4.1 for the full writer list and protocol.
+
+This eliminates the §4.1.1-vs-§7.1 ambiguity without splitting into
+a second gate (Appendix A.4 is now deferred indefinitely). Multiple
+overlapping reasons for NotReady — migration drain, in-place update,
+restart, scale-down — coexist as independent message-list entries
+rather than racing to overwrite a single binary True/False.
+
+Original concern preserved below for historical context.
 
 **Evidence.** §4.1 defines one controller-owned gate,
 `ome.io/serving`. RBG's production pods carry two gates
@@ -2023,19 +2089,6 @@ those two levels:
 Writing Instance-level behavior into a condition named and documented
 as per-pod behavior locks in a semantic that a future second gate
 (Appendix A.4) cannot resolve without editing every live pod.
-
-**Proposed resolution for v1.** Either:
-
-- Explicitly document `ome.io/serving` as Instance-scoped (controller
-  writes `True` only when the Instance as a whole is serving), and
-  rename references in §4.1.1 accordingly; or
-- Keep `ome.io/serving` as per-pod, and introduce a minimal second
-  gate now (even if its flip rule is trivially tied to Instance
-  readiness) so the future two-tier split from A.4 is non-disruptive.
-
-Pick one before shipping; adding the second gate later requires
-mutating readiness-gate lists on running pods, which §4.1 explicitly
-rules out.
 
 ### B.4 Migration Timeout Needs a Surge Re-Check
 
@@ -2145,7 +2198,7 @@ the aliases in the `Observability` section as an explicit metric
 
 ### B.8 Deprecation Timeline Needs a Calendar, Not a Count
 
-**Evidence.** `README.md:74` commits to "a six-release deprecation
+**Evidence.** `README.md` §Summary commits to "a six-release deprecation
 window". RBG's own LWS fallback in
 `pkg/reconciler/workload_reconciler.go:63` is still present despite
 RoleInstanceSet being the stated default — a long tail is the norm,
