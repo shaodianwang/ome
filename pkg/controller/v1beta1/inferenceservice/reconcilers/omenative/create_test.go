@@ -86,7 +86,7 @@ func resetExpectations(t *testing.T) {
 func TestCreate_NilClient(t *testing.T) {
 	resetExpectations(t)
 	plan := ComponentPlan{Component: v1beta1.EngineComponent}
-	_, err := Create(context.Background(), ReconcileParams{}, plan)
+	_, err := Create(context.Background(), ReconcileParams{}, plan, nil)
 	if err == nil {
 		t.Fatal("expected error for nil client")
 	}
@@ -102,7 +102,7 @@ func TestCreate_EmptyClusterCreatesPodsAndRequeues(t *testing.T) {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 
-	result, err := Create(context.Background(), p, plan)
+	result, err := Create(context.Background(), p, plan, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestCreate_AllPodsExistButNotReady_HoldsCreating(t *testing.T) {
 	p := minimalParams(t, isvc, c)
 	plan, _ := BuildPlan(p)
 
-	result, err := Create(context.Background(), p, plan)
+	result, err := Create(context.Background(), p, plan, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestCreate_AllPodsReady_FlipsServingAndMarksReady(t *testing.T) {
 	p := minimalParams(t, isvc, c)
 	plan, _ := BuildPlan(p)
 
-	result, err := Create(context.Background(), p, plan)
+	result, err := Create(context.Background(), p, plan, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestCreate_PartialPods_CreatesOnlyMissing(t *testing.T) {
 	p := minimalParams(t, isvc, c)
 	plan, _ := BuildPlan(p)
 
-	_, err := Create(context.Background(), p, plan)
+	_, err := Create(context.Background(), p, plan, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -264,13 +264,13 @@ func TestCreate_IdempotentOnAlreadyExists(t *testing.T) {
 	plan, _ := BuildPlan(p)
 
 	// First call creates the pod.
-	if _, err := Create(context.Background(), p, plan); err != nil {
+	if _, err := Create(context.Background(), p, plan, nil); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
 	// Reset expectations so the second call attempts to re-create.
 	DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
 	// Second call should not error even though the pod already exists.
-	if _, err := Create(context.Background(), p, plan); err != nil {
+	if _, err := Create(context.Background(), p, plan, nil); err != nil {
 		t.Fatalf("second Create: %v", err)
 	}
 }
@@ -311,4 +311,72 @@ func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, se
 		})
 	}
 	return pod
+}
+
+// STATUS-4: when Create promotes an Instance to Ready, the RunningRevision
+// field must reflect the target ControllerRevision so detectUpdateTrigger's
+// cheap fast path can short-circuit on the next reconcile. Without this,
+// every fresh Instance triggers a spurious recreate Update on its second
+// reconcile (the slow podMatchesTarget comparison returns a false-positive
+// mismatch against post-Render-mutation pod fields).
+func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	// Pre-seed a runtime-ready, serving pod so reconcileInstance jumps
+	// straight to the promote step.
+	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	c := newFakeClient(t, isvc, pod)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-deadbeef", Namespace: "prod"},
+	}
+
+	if _, err := Create(context.Background(), p, plan, target); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("get isvc: %v", err)
+	}
+	s := findInstanceStatus(fresh, v1beta1.EngineComponent, 0)
+	if s == nil {
+		t.Fatal("InstanceStatus[0] must exist after promote")
+	}
+	if s.Phase != v1beta1.OMENativeInstanceReady {
+		t.Errorf("Phase: got %q want Ready", s.Phase)
+	}
+	if s.RunningRevision != target.Name {
+		t.Errorf("RunningRevision: got %q want %q (STATUS-4: Create promote must record target hash)",
+			s.RunningRevision, target.Name)
+	}
+}
+
+// Inverse: when target is nil (legacy callers, scale-down-only reconciles),
+// Create promotes without writing RunningRevision. Preserves the pre-fix
+// behavior for callers that don't yet plumb target through.
+func TestCreate_PromoteWithNilTargetSkipsRunningRevision(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	pod := podForInstance(isvc, 0, true, true)
+	c := newFakeClient(t, isvc, pod)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	if _, err := Create(context.Background(), p, plan, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("get isvc: %v", err)
+	}
+	s := findInstanceStatus(fresh, v1beta1.EngineComponent, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceReady {
+		t.Fatalf("expected Phase=Ready; got %+v", s)
+	}
+	if s.RunningRevision != "" {
+		t.Errorf("RunningRevision: got %q want empty (nil target)", s.RunningRevision)
+	}
 }

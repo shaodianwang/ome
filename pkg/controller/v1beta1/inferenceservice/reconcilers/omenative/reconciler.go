@@ -286,7 +286,7 @@ func reconcileComponentOps(ctx context.Context, p ReconcileParams, plan Componen
 		}
 	}
 
-	return Create(ctx, p, plan)
+	return Create(ctx, p, plan, target)
 }
 
 // ensureRevisionWithCollisionRetry computes the target ControllerRevision

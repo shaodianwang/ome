@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,7 +38,19 @@ const createRequeueInterval = 5 * time.Second
 //
 // EndpointSlice convergence is handled by drain.go, not here.
 // MinReadySeconds defaults to 0, so runtime-Ready is treated as Available.
-func Create(ctx context.Context, p ReconcileParams, plan ComponentPlan) (ctrl.Result, error) {
+//
+// target is the ControllerRevision the Component currently desires
+// (caller computes via ensureRevisionWithCollisionRetry). May be nil
+// when p.PodSpec is nil — Create then promotes without writing
+// RunningRevision (legacy callers / scale-down-only paths). When
+// non-nil, the Ready promote records RunningRevision=target.Name so
+// detectUpdateTrigger's cheap fast-path can short-circuit on the very
+// next reconcile pass; without this, the slow per-pod podMatchesTarget
+// comparison fires and reports a false-positive mismatch against the
+// rendered (post-Render-mutation) pod, triggering a spurious recreate
+// Update on every freshly-Created Instance. STATUS-4 in the OEP-0007
+// review backlog.
+func Create(ctx context.Context, p ReconcileParams, plan ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
 	if p.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("Create: nil client")
 	}
@@ -50,7 +63,7 @@ func Create(ctx context.Context, p ReconcileParams, plan ComponentPlan) (ctrl.Re
 
 	allReady := true
 	for _, inst := range plan.Instances {
-		ready, err := reconcileInstance(ctx, p, plan, inst, byInstance[inst.Index])
+		ready, err := reconcileInstance(ctx, p, plan, inst, byInstance[inst.Index], target)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -68,7 +81,12 @@ func Create(ctx context.Context, p ReconcileParams, plan ComponentPlan) (ctrl.Re
 // reconcileInstance drives one Instance toward Ready. Returns ready=true
 // only when every pod in the Instance is runtime-ready and has been
 // flipped to ome.io/serving=True.
-func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, existing []*corev1.Pod) (bool, error) {
+//
+// target carries the same nil-OK semantics as Create's docstring —
+// when non-nil, the Ready promote also records RunningRevision so the
+// next reconcile's detectUpdateTrigger can short-circuit on the cheap
+// hash-equality fast path.
+func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst InstancePlan, existing []*corev1.Pod, target *appsv1.ControllerRevision) (bool, error) {
 	desired := expectedPodNamesForInstance(p.ISVC.Name, plan.Component, inst)
 	existingByName := indexPodsByName(existing)
 
@@ -136,12 +154,30 @@ func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPla
 	// Record Phase=Ready, Operation=nil. Only fire InstanceReady on
 	// the transition from a non-Ready phase, not on every reconcile
 	// while the Instance is already Ready.
+	//
+	// STATUS-4: when target is non-nil, write RunningRevision=target.Name
+	// alongside Phase=Ready. Without this, every freshly-Created
+	// Instance shows RunningRevision="" on its next reconcile, and
+	// detectUpdateTrigger falls into the slow per-pod podMatchesTarget
+	// comparison. That comparison currently returns false-positive
+	// mismatches because the pod has post-Render mutations (Hostname,
+	// Subdomain, controller-owned ReadinessGate, OME_* env) that the
+	// pre-Render targetSpec doesn't — triggering a spurious recreate
+	// Update on every fresh Create. Recording RunningRevision here
+	// hits the cheap fast path (s.RunningRevision == target.Name) and
+	// avoids the comparison entirely.
 	wasReady := false
 	if s := findInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil && s.Phase == v1beta1.OMENativeInstanceReady {
 		wasReady = true
 	}
-	if err := patchInstanceStatusReady(ctx, p, plan.Component, inst.Index); err != nil {
-		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
+	var promoteErr error
+	if target != nil {
+		promoteErr = patchInstanceStatusReadyOnRevision(ctx, p, plan.Component, inst.Index, target.Name)
+	} else {
+		promoteErr = patchInstanceStatusReady(ctx, p, plan.Component, inst.Index)
+	}
+	if promoteErr != nil {
+		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, promoteErr)
 	}
 	if !wasReady {
 		recordNormal(p, EventReasonInstanceReady,
