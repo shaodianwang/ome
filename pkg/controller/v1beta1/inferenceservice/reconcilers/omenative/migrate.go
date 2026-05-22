@@ -191,10 +191,11 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 	// before initiating the source drain. Without this gate the swap
 	// can land in a zero-routable-endpoint window: serving flips on
 	// surge, drain flips on source, but neither has propagated to the
-	// dataplane yet.
+	// dataplane yet. Live reader so a cold informer doesn't falsely
+	// report zero slices.
 	serviceName := headlessServiceName(p.ISVC.Name, plan.Component)
 	for _, pod := range surgePods {
-		inRotation, rerr := IsPodInRotation(ctx, p.Client, p.ISVC.Namespace, serviceName, pod)
+		inRotation, rerr := IsPodInRotation(ctx, p.reader(), p.ISVC.Namespace, serviceName, pod)
 		if rerr != nil {
 			return false, fmt.Errorf("Migrate: check rotation on surge pod %s: %w", pod.Name, rerr)
 		}
@@ -216,13 +217,24 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		}
 	}
 	for _, pod := range sourcePods {
-		drained, derr := IsPodDrained(ctx, p.Client, p.ISVC.Namespace, serviceName, pod)
+		drained, derr := IsPodDrained(ctx, p.reader(), p.ISVC.Namespace, serviceName, pod)
 		if derr != nil {
 			return false, fmt.Errorf("Migrate: check drain on source pod %s: %w", pod.Name, derr)
 		}
 		if !drained {
 			return false, nil
 		}
+	}
+
+	// OPS-1: refresh source pods via live read before issuing
+	// deletes. The earlier sourcePods read at the top of Migrate
+	// was cached; a stale-empty view here would skip the delete
+	// loop and proceed to source-status removal while the API
+	// server still holds the pods (Merged review MIGRATE-2 / OPS-1
+	// orphan scenario).
+	sourcePods, err = liveListPodsForInstance(ctx, p, plan.Component, sourceIdx)
+	if err != nil {
+		return false, fmt.Errorf("Migrate: live-list source pods: %w", err)
 	}
 
 	// Step 9: delete source pods (expectations-gated, same pattern as Delete).

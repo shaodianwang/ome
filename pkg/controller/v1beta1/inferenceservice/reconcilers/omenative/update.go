@@ -239,9 +239,11 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 			}
 		}
 		// Step 3: wait for EndpointSlice drain before mutating the pod.
+		// Live reader so stale cache doesn't declare drain done while
+		// kube-proxy still routes to the pod.
 		serviceName := headlessServiceName(p.ISVC.Name, plan.Component)
 		for _, pod := range pods {
-			drained, err := IsPodDrained(ctx, p.Client, p.ISVC.Namespace, serviceName, pod)
+			drained, err := IsPodDrained(ctx, p.reader(), p.ISVC.Namespace, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
@@ -348,9 +350,11 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
+		// Live reader on the drain check — see comment in inPlaceUpdate
+		// for the same rationale.
 		serviceName := headlessServiceName(p.ISVC.Name, plan.Component)
 		for _, pod := range oldPods {
-			drained, err := IsPodDrained(ctx, p.Client, p.ISVC.Namespace, serviceName, pod)
+			drained, err := IsPodDrained(ctx, p.reader(), p.ISVC.Namespace, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
@@ -381,6 +385,20 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 	}
 
 	// Phase B: create the new pod set at the bumped Incarnation.
+	// OPS-2: live-read the OLD pod set first. Same rationale as
+	// Restart Phase B — stable-name Create here would
+	// AlreadyExists-conflict if the cache says "old gone" while the
+	// API server still holds the still-terminating previous
+	// incarnation. Tolerating terminating-but-not-yet-gone matches
+	// K8s foreground propagation.
+	clear, err := liveOldPodsClearedForRecreate(ctx, p, plan.Component, inst.Index, newInc)
+	if err != nil {
+		return false, fmt.Errorf("recreateUpdate: live-check Phase A done (instance=%d): %w", inst.Index, err)
+	}
+	if !clear {
+		return false, nil
+	}
+
 	newInst := inst
 	newInst.Incarnation = newInc
 

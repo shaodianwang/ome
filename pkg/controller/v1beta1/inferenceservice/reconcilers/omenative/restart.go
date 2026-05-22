@@ -91,9 +91,11 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 		}
 
 		// Step 3: wait for EndpointSlice drain on every old pod.
+		// Drain check uses the live reader so stale cache doesn't
+		// declare drain done while kube-proxy still routes to the pod.
 		serviceName := headlessServiceName(p.ISVC.Name, plan.Component)
 		for _, pod := range oldPods {
-			drained, err := IsPodDrained(ctx, p.Client, p.ISVC.Namespace, serviceName, pod)
+			drained, err := IsPodDrained(ctx, p.reader(), p.ISVC.Namespace, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
@@ -129,6 +131,19 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 	}
 
 	// Phase B — recreate the new pod set at the bumped Incarnation.
+	// OPS-2: live-read the OLD pod set first. If the cache says
+	// "zero old pods" but the API server still holds them, a
+	// stable-name Create here would AlreadyExists-conflict against
+	// the still-terminating previous incarnation. Tolerating
+	// terminating-but-not-yet-gone matches K8s foreground propagation.
+	clear, err := liveOldPodsClearedForRecreate(ctx, p, plan.Component, inst.Index, newInc)
+	if err != nil {
+		return false, fmt.Errorf("Restart: live-check Phase A done (instance=%d): %w", inst.Index, err)
+	}
+	if !clear {
+		return false, nil
+	}
+
 	// Build an ad-hoc InstancePlan that carries newInc so Render() stamps
 	// the right label.
 	newInst := inst

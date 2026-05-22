@@ -46,7 +46,12 @@ func Delete(ctx context.Context, p ReconcileParams, plan ComponentPlan, idx int3
 		return false, fmt.Errorf("Delete: nil client")
 	}
 
-	pods, err := listPodsForInstance(ctx, p.Client, p.ISVC, plan.Component, idx)
+	// OPS-1: destructive op — live read so a cached "pods gone" view
+	// doesn't trick us into removing the InstanceStatus while the API
+	// server still holds the pods (which would orphan them per the
+	// merged review's Migrate-leak scenario, but symmetrically
+	// applicable here).
+	pods, err := liveListPodsForInstance(ctx, p, plan.Component, idx)
 	if err != nil {
 		return false, fmt.Errorf("Delete: list pods (instance=%d): %w", idx, err)
 	}
@@ -86,10 +91,11 @@ func Delete(ctx context.Context, p ReconcileParams, plan ComponentPlan, idx int3
 	}
 
 	// Step 3: every pod must be drained from the Component Service's
-	// EndpointSlices before we can delete it.
+	// EndpointSlices before we can delete it. Drain check uses the
+	// live reader so we don't proceed on stale "no slices" cache.
 	serviceName := headlessServiceName(p.ISVC.Name, plan.Component)
 	for _, pod := range pods {
-		drained, err := IsPodDrained(ctx, p.Client, p.ISVC.Namespace, serviceName, pod)
+		drained, err := IsPodDrained(ctx, p.reader(), p.ISVC.Namespace, serviceName, pod)
 		if err != nil {
 			return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", idx, pod.Name, err)
 		}
@@ -170,7 +176,10 @@ func extraInstanceIndices(isvc *v1beta1.InferenceService, component v1beta1.Comp
 // It applies the same selector listOMENativePods uses, plus a filter on
 // ome.io/instance-index. Callers operating on a single Instance should
 // prefer this over bucketing a full list.
-func listPodsForInstance(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) ([]*corev1.Pod, error) {
+//
+// Takes a client.Reader so callers can pass the cached client (cheap)
+// or the live API reader (correctness-critical destructive paths).
+func listPodsForInstance(ctx context.Context, c client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) ([]*corev1.Pod, error) {
 	pods, err := listOMENativePods(ctx, c, isvc, component)
 	if err != nil {
 		return nil, err

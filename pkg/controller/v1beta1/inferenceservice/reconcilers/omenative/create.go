@@ -206,7 +206,13 @@ func createMissingPods(ctx context.Context, p ReconcileParams, plan ComponentPla
 	return created, nil
 }
 
-func listOMENativePods(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) ([]*corev1.Pod, error) {
+// listOMENativePods returns every Pod the OMENative selector matches
+// for the given (isvc, component). Takes a client.Reader rather than
+// client.Client so callers can pass either the cached client (cheap,
+// status-aggregation safe) or the live API reader (correctness-
+// critical destructive paths — see liveListPodsForInstance in
+// discover.go).
+func listOMENativePods(ctx context.Context, c client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) ([]*corev1.Pod, error) {
 	pods := &corev1.PodList{}
 	sel := labels.SelectorFromSet(labels.Set{
 		constants.InferenceServicePodLabelKey: isvc.Name,
