@@ -70,7 +70,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
 		}
 
-		// Per-Instance counters.
+		// Per-Instance counters and Conditions.
 		for i := range cs.OMENative.InstanceStatuses {
 			s := &cs.OMENative.InstanceStatuses[i]
 			instPods := byIndex[s.Index]
@@ -79,6 +79,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 			s.ScheduledPodCount = countScheduledPods(instPods)
 			s.AvailablePodCount = countAvailablePods(instPods, availableByPod)
 			s.NodesOccupied = uniqueNodes(instPods)
+			applyInstanceConditions(s, computeInstanceConditions(s, fresh.Generation))
 		}
 
 		// Component-level counters.
@@ -96,6 +97,10 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 
 		cs.OMENative.ObservedGeneration = fresh.Generation
 		cs.OMENative.LabelSelector = componentLabelSelectorString(p.ISVC.Name, plan.Component)
+
+		// Component-level Conditions. Derived after counters so
+		// AvailableReplicas, UpdateRevision, etc. are current.
+		applyComponentConditions(cs.OMENative, computeComponentConditions(cs.OMENative, fresh.Generation))
 
 		fresh.Status.Components[plan.Component] = cs
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {

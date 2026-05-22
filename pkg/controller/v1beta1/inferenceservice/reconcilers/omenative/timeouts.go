@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
@@ -14,12 +17,10 @@ import (
 // it's a flag visible via kubectl.
 const timeoutReasonExceeded = "DeadlineExceeded"
 
-// timeoutReasonInPlaceFallback marks the InstanceStatus that just
-// timed out of an in-place rollout and is about to be recreated. The
-// next reconcile's detectUpdateTrigger picks the Instance up again;
-// chooseUpdateMode will route it through the recreate branch since
-// the recorded running revision no longer matches target.
-const timeoutReasonInPlaceFallback = "InPlaceTimeoutFallback"
+// The InPlaceTimeoutFallback breadcrumb the original PR #193 deferred
+// to events.go lives in conditions.go as ReasonInPlaceTimeoutFallback
+// now (lifted into the InPlaceUpdateFallback Condition by PR C4); no
+// local const needed here.
 
 // ExpireOperationsIfDeadlinePassed walks every InstanceStatus and, for
 // any whose Operation.Deadline has elapsed without a terminal
@@ -118,21 +119,30 @@ func isInPlaceUpdate(op *v1beta1.InstanceOperation) bool {
 // Reason=InPlaceTimeoutFallback is left as a breadcrumb on the next
 // Operation that recreate stamps.
 func fallbackInPlaceToRecreate(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32) error {
+	now := metav1.Now()
 	return mutateInstanceStatus(ctx, p, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
 		if s.Operation == nil {
 			return false
 		}
 		s.Phase = v1beta1.OMENativeInstanceReady
 		s.Operation = nil
-		// TargetRevision is preserved on the InstanceStatus so the next
-		// reconcile can still see "this Instance is heading toward X"
-		// while detectUpdateTrigger refires. The recreate path will
-		// overwrite Operation with Step=Drain on its next pass.
-		// Tests use the InstanceStatus.Conditions surface (added with
-		// events.go) to inspect the fallback breadcrumb; for now it's
-		// recorded only via the absence of an Operation on a status
-		// that still carries a TargetRevision != RunningRevision.
-		_ = timeoutReasonInPlaceFallback
+		// TargetRevision is preserved on the InstanceStatus so the
+		// next reconcile can still see "this Instance is heading
+		// toward X" while detectUpdateTrigger refires. The recreate
+		// path will overwrite Operation with Step=Drain on its next
+		// pass.
+		//
+		// Lift the in-place timeout breadcrumb (originally deferred
+		// from PR #193) into the InstanceStatus.Conditions surface so
+		// operators see why this Instance suddenly looks Ready but is
+		// about to recreate.
+		apimeta.SetStatusCondition(&s.Conditions, metav1.Condition{
+			Type:               ConditionInPlaceUpdateFallback,
+			Status:             metav1.ConditionTrue,
+			Reason:             ReasonInPlaceTimeoutFallback,
+			Message:            "In-place update exceeded its deadline; the next reconcile will route through recreate",
+			LastTransitionTime: now,
+		})
 		return true
 	})
 }
