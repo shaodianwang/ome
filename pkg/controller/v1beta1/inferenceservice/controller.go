@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	knapis "knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"knative.dev/pkg/network"
@@ -568,8 +569,15 @@ func (r *InferenceServiceReconciler) handleVirtualDeployment(isvc *v1beta1.Infer
 }
 
 func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.InferenceService, deploymentMode constants.DeploymentModeType) error {
-	existingService := &v1beta1.InferenceService{}
 	namespacedName := types.NamespacedName{Name: desiredService.Name, Namespace: desiredService.Namespace}
+
+	// Mirror the existing-status snapshot OUTSIDE the retry loop —
+	// "wasReady" is computed against what the caller observed at the
+	// top of reconcile, which is the right baseline for the Ready /
+	// NotReady transition event emission below. The retry loop only
+	// needs to win the optimistic-concurrency race for the actual
+	// status write.
+	existingService := &v1beta1.InferenceService{}
 	if err := r.Get(context.TODO(), namespacedName, existingService); err != nil {
 		return err
 	}
@@ -579,21 +587,46 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 		// This is important because the copy we loaded from the informer's
 		// cache may be stale, and we don't want to overwrite a prior update
 		// to status with this stale state.
-	} else if err := r.Status().Update(context.TODO(), desiredService); err != nil {
+		return nil
+	}
+
+	// STATUS-5: wrap Status().Update in retry.RetryOnConflict. Without
+	// this wrapper, OMENative-driven status churn (drain / Mark / op
+	// transitions) reliably 409s the outer reconciler's final flush
+	// and wedges the entire ISVC reconcile in a re-loop that never
+	// converges. Mirrors the pattern OMENative's per-Instance writes
+	// got in PR C2 (STATUS-1) — same root cause, different code path.
+	//
+	// On conflict: re-Get the live ISVC, copy our desired Status onto
+	// the fresh ResourceVersion, and retry. We deliberately don't
+	// re-compute desired.Status — the caller's view of "what the
+	// status should look like" is authoritative for this reconcile pass;
+	// conflicting concurrent writes are expected to be a different
+	// reconcile's view that we're overwriting (post-#209 STATUS-4 most
+	// of those have settled before we get here).
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &v1beta1.InferenceService{}
+		if err := r.Get(context.TODO(), namespacedName, latest); err != nil {
+			return err
+		}
+		latest.Status = desiredService.Status
+		return r.Status().Update(context.TODO(), latest)
+	}); err != nil {
 		r.Log.Error(err, "Failed to update InferenceService status", "InferenceService", desiredService.Name)
 		r.Recorder.Eventf(desiredService, v1.EventTypeWarning, "UpdateFailed",
 			"Failed to update status for InferenceService %q: %v", desiredService.Name, err)
 		return errors.Wrapf(err, "fails to update InferenceService status")
-	} else {
-		// If there was a difference and there was no error.
-		isReady := inferenceServiceReadiness(desiredService.Status)
-		if wasReady && !isReady { // Moved to NotReady State
-			r.Recorder.Eventf(desiredService, v1.EventTypeWarning, string(InferenceServiceNotReadyState),
-				fmt.Sprintf("InferenceService [%v] is no longer Ready", desiredService.GetName()))
-		} else if !wasReady && isReady { // Moved to Ready State
-			r.Recorder.Eventf(desiredService, v1.EventTypeNormal, string(InferenceServiceReadyState),
-				fmt.Sprintf("InferenceService [%v] is Ready", desiredService.GetName()))
-		}
+	}
+
+	// Ready / NotReady transition events fire only after a successful
+	// status write that actually flipped readiness.
+	isReady := inferenceServiceReadiness(desiredService.Status)
+	if wasReady && !isReady {
+		r.Recorder.Eventf(desiredService, v1.EventTypeWarning, string(InferenceServiceNotReadyState),
+			fmt.Sprintf("InferenceService [%v] is no longer Ready", desiredService.GetName()))
+	} else if !wasReady && isReady {
+		r.Recorder.Eventf(desiredService, v1.EventTypeNormal, string(InferenceServiceReadyState),
+			fmt.Sprintf("InferenceService [%v] is Ready", desiredService.GetName()))
 	}
 	return nil
 }
