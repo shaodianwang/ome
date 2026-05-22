@@ -254,10 +254,38 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 	}
 
 	// Step 4: patch container images on every pod.
+	//
+	// OPS-4: when the strategy drains first (markNotReady=true), re-read
+	// the pod and re-check IsServing immediately before each patch. A
+	// concurrent writer (another controller, a pod-mutating webhook re-
+	// injecting a sidecar) could flip serving back to True after the
+	// drain check passed; patching images on a serving pod violates the
+	// always-drain-before-image-patch invariant. On detection, re-flip
+	// NotServing and requeue; the next pass re-runs the drain wait.
+	//
+	// Live reader on the re-read so a stale cache view of serving=False
+	// doesn't fail the recheck open.
 	patched := false
 	for _, pod := range pods {
 		if podImagesMatch(pod, targetSpec) {
 			continue
+		}
+		if markNotReady {
+			fresh := &corev1.Pod{}
+			if gerr := p.reader().Get(ctx, client.ObjectKeyFromObject(pod), fresh); gerr != nil {
+				if apierrors.IsNotFound(gerr) {
+					continue
+				}
+				return false, fmt.Errorf("re-read pod for serving recheck (instance=%d, pod=%s): %w", inst.Index, pod.Name, gerr)
+			}
+			if IsServing(fresh) {
+				if err := MarkPodNotServing(ctx, p.Client, fresh, WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
+					return false, fmt.Errorf("re-mark not serving (instance=%d, pod=%s): %w", inst.Index, fresh.Name, err)
+				}
+				// Bail and requeue — next pass re-runs the drain wait.
+				return false, nil
+			}
+			pod = fresh
 		}
 		if err := patchPodImages(ctx, p.Client, pod, targetSpec); err != nil {
 			return false, fmt.Errorf("patch images (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
@@ -338,7 +366,20 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 			instanceKey(plan.Component, inst.Index), target.Name, newInc)
 	}
 
-	oldPods, newPods := partitionPodsByIncarnation(pods, newInc)
+	oldPods, newPods, unknownPods := partitionPodsByIncarnation(pods, newInc)
+
+	// OPS-3: surface orphan pods (label-missing) as warning events and
+	// refuse to proceed. Same rationale as Restart: a label strip or a
+	// third-party operator stamping the OMENative managed-by label
+	// would otherwise be silently torn down by Phase A.
+	if len(unknownPods) > 0 {
+		for _, pod := range unknownPods {
+			recordWarning(p, EventReasonFoundOrphan,
+				"OMENative %s found orphan pod %s/%s without ome.io/instance-incarnation; refusing to recreate-update",
+				instanceKey(plan.Component, inst.Index), pod.Namespace, pod.Name)
+		}
+		return false, nil
+	}
 
 	// Phase A: drain + delete old pods (same as Restart's old-pod phase).
 	if len(oldPods) > 0 {

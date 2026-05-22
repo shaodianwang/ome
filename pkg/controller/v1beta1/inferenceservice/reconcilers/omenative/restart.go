@@ -74,7 +74,22 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 	if err != nil {
 		return false, fmt.Errorf("Restart: list pods (instance=%d): %w", inst.Index, err)
 	}
-	oldPods, newPods := partitionPodsByIncarnation(pods, newInc)
+	oldPods, newPods, unknownPods := partitionPodsByIncarnation(pods, newInc)
+
+	// OPS-3: surface orphan pods (label-missing) as warning events and
+	// refuse to delete them. A label strip or a third-party operator
+	// stamping the OMENative managed-by label would otherwise be
+	// silently torn down by Phase A. The Restart op blocks until an
+	// operator either re-labels the pod (re-classifying it as old or
+	// fresh) or deletes the pod themselves.
+	if len(unknownPods) > 0 {
+		for _, pod := range unknownPods {
+			recordWarning(p, EventReasonFoundOrphan,
+				"OMENative %s found orphan pod %s/%s without ome.io/instance-incarnation; refusing to delete",
+				instanceKey(plan.Component, inst.Index), pod.Namespace, pod.Name)
+		}
+		return false, nil
+	}
 
 	// Phase A — old pods still present: drain + delete.
 	if len(oldPods) > 0 {
@@ -299,17 +314,31 @@ func totalPodsForInstance(inst InstancePlan) int32 {
 	return n
 }
 
-// partitionPodsByIncarnation splits pods into (old, new) buckets by the
-// ome.io/instance-incarnation label. Pods at strictly smaller incarnations
-// (or missing the label altogether) are old; pods at >= current are new.
-// Pods at incarnations strictly above current shouldn't exist under normal
-// operation but are treated as new — Restart will never create such a pod
-// itself and a stray with a future incarnation is left alone rather than
-// deleted, since deleting it could lose work.
-func partitionPodsByIncarnation(pods []*corev1.Pod, current int64) (old, fresh []*corev1.Pod) {
+// partitionPodsByIncarnation splits pods into three buckets by the
+// ome.io/instance-incarnation label:
+//
+//   - old:     label present AND value < current. Safe to delete in
+//     Phase A of Restart — these are the prior incarnation
+//     that bumping current displaces.
+//   - fresh:   label present AND value >= current. The new incarnation
+//     (or strictly above; pods at a future incarnation should
+//     never exist but are left alone rather than deleted —
+//     deleting them could lose work).
+//   - unknown: label MISSING or malformed (OPS-3). Could be a
+//     third-party operator stamping the same managed-by label,
+//     or a manual label strip. The previous behavior of
+//     treating these as old produced silent deletes of
+//     foreign pods. Callers emit `FoundOrphan` and refuse to
+//     delete in Phase A; operators must classify the pod
+//     before the restart can proceed.
+func partitionPodsByIncarnation(pods []*corev1.Pod, current int64) (old, fresh, unknown []*corev1.Pod) {
 	for _, pod := range pods {
 		inc, ok := instanceIncarnationFromLabels(pod)
-		if !ok || inc < current {
+		if !ok {
+			unknown = append(unknown, pod)
+			continue
+		}
+		if inc < current {
 			old = append(old, pod)
 			continue
 		}

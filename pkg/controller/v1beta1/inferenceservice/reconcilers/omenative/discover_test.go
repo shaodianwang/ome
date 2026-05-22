@@ -134,11 +134,15 @@ func TestLiveOldPodsClearedForRecreate_OldTerminatingTolerated(t *testing.T) {
 	}
 }
 
-func TestLiveOldPodsClearedForRecreate_MissingLabelTreatedAsOld(t *testing.T) {
-	// A pod missing the incarnation label is classified as old
-	// (consistent with partitionPodsByIncarnation). If it's not
-	// terminating, Phase B must NOT proceed — same as a stale old
-	// pod could conflict on the stable name.
+func TestLiveOldPodsClearedForRecreate_MissingLabelDoesNotBlockPhaseB(t *testing.T) {
+	// OPS-3: label-missing pods are now classified as `unknown`, not
+	// `old`. liveOldPodsClearedForRecreate gates only on OLD pods, so
+	// an unknown pod doesn't block Phase B from this helper's
+	// perspective. The caller (Restart) routes orphan pods through
+	// the FoundOrphan event path BEFORE reaching this helper, so in
+	// production an unknown pod would short-circuit Restart entirely
+	// before liveOldPodsClearedForRecreate runs. This test pins the
+	// helper's narrower contract: "old pods, are they all terminating?"
 	pod := newDiscoverPod("p-orphan", 0, 0, false)
 	delete(pod.Labels, labelInstanceIncarnation)
 	p := newDiscoverParams(t, pod)
@@ -147,8 +151,8 @@ func TestLiveOldPodsClearedForRecreate_MissingLabelTreatedAsOld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if clear {
-		t.Errorf("expected clear=false for label-missing pod, got true")
+	if !clear {
+		t.Errorf("expected clear=true: unknown bucket pods don't count as old, so the old set is empty")
 	}
 }
 

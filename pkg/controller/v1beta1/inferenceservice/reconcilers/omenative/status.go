@@ -182,9 +182,12 @@ func collectLiveRevisionNames(cs *v1beta1.OMENativeComponentStatus) []string {
 }
 
 // availablePodSet returns the set of pod names whose endpoint is Ready
-// in any EndpointSlice for serviceName. Equivalent to "IsPodInRotation
-// for every pod at once" but with a single slice list to avoid the N+1
-// reads AggregateAndWriteStatus would otherwise do.
+// in any EndpointSlice for serviceName. Uses endpointAvailable (DRAIN-1)
+// so terminating-but-still-Ready endpoints are excluded — a pod in
+// graceful termination shouldn't count toward AvailableReplicas because
+// kube-proxy won't route new requests to it. Equivalent to
+// "IsPodInRotation for every pod at once" but with a single slice list
+// to avoid the N+1 reads AggregateAndWriteStatus would otherwise do.
 func availablePodSet(ctx context.Context, reads client.Reader, namespace, serviceName string) (map[string]struct{}, error) {
 	out := map[string]struct{}{}
 	slices, err := endpointSlicesForService(ctx, reads, namespace, serviceName)
@@ -196,7 +199,7 @@ func availablePodSet(ctx context.Context, reads client.Reader, namespace, servic
 			if ep.TargetRef == nil || ep.TargetRef.Kind != "" && ep.TargetRef.Kind != "Pod" {
 				continue
 			}
-			if !endpointIsReady(ep) {
+			if !endpointAvailable(ep) {
 				continue
 			}
 			out[ep.TargetRef.Name] = struct{}{}

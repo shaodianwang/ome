@@ -61,6 +61,10 @@ func liveOldPodsClearedForRecreate(ctx context.Context, p ReconcileParams, compo
 	if err != nil {
 		return false, err
 	}
-	oldPods, _ := partitionPodsByIncarnation(pods, currentInc)
+	// Unknown (label-missing) pods are ignored here: the gate is
+	// "no OLD pods still alive", and orphans don't represent the prior
+	// incarnation. OPS-3 routes orphans through the FoundOrphan event
+	// path in Restart's caller; they don't block Phase B's recreate.
+	oldPods, _, _ := partitionPodsByIncarnation(pods, currentInc)
 	return allTerminating(oldPods), nil
 }

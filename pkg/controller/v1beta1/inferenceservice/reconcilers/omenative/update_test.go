@@ -7,9 +7,12 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -91,6 +94,102 @@ func TestUpdate_NilClient(t *testing.T) {
 	_, err := Update(context.Background(), ReconcileParams{}, ComponentPlan{Component: v1beta1.EngineComponent}, InstancePlan{Index: 0, Incarnation: 1}, &appsv1.ControllerRevision{}, &corev1.PodSpec{})
 	if err == nil {
 		t.Fatal("expected error for nil client")
+	}
+}
+
+func TestUpdate_InPlace_RechecksServingBeforePatch(t *testing.T) {
+	// OPS-4: between the drain wait passing and the image patch firing,
+	// a concurrent writer (another controller, a pod-mutating webhook
+	// re-injection) could have flipped ome.io/serving back to True.
+	// Patching images on a serving pod violates the always-drain-before-
+	// image-patch invariant. The fix re-reads the pod immediately before
+	// each patch and, on detecting serving=True, re-flips NotServing
+	// and requeues without patching.
+	//
+	// To simulate the race in a unit test: a Get interceptor flips
+	// serving=True on the pod ONLY during the Step 4 re-read. The
+	// earlier Step 2 (list pods, drain those that are serving) sees
+	// the original pod-set passed in by listPodsForInstance — not
+	// affected by the interceptor — and the Step 3 drain check looks
+	// at EndpointSlices, not the pod. So the interceptor's flip is
+	// observed exclusively by Step 4's re-read.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
+		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+				MarkNotReadyDuringLifecycle: boolPtr(true),
+			},
+		},
+	}
+	// Pod: image v1, ContainersReady, NOT serving (Step 2 will skip it).
+	pod := podAtIncarnation(isvc, 0, 1, true /* ready */, false /* not serving */)
+	pod.Spec.Containers = []corev1.Container{{Name: "main", Image: "llama:v1"}}
+	target := targetSpecImage("llama:v2")
+	// Slice claims the pod is drained — Step 3 drain check passes.
+	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, false /* drained */)
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = discoveryv1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+	_ = v1beta1.AddToScheme(scheme)
+
+	// Get interceptor: when Step 4 re-reads the pod, hand it back with
+	// serving=True. Only fires for *corev1.Pod Gets matching pod.Name.
+	flipServingOnGet := func(ctx context.Context, cli client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		if err := cli.Get(ctx, key, obj, opts...); err != nil {
+			return err
+		}
+		if p, ok := obj.(*corev1.Pod); ok && p.Name == pod.Name {
+			// Strip any existing serving condition and append a True
+			// one — simulates a concurrent writer who removed all keys.
+			out := make([]corev1.PodCondition, 0, len(p.Status.Conditions))
+			for _, c := range p.Status.Conditions {
+				if c.Type == "ome.io/serving" {
+					continue
+				}
+				out = append(out, c)
+			}
+			out = append(out, corev1.PodCondition{
+				Type:   "ome.io/serving",
+				Status: corev1.ConditionTrue,
+			})
+			p.Status.Conditions = out
+		}
+		return nil
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(isvc, pod, slice).
+		WithInterceptorFuncs(interceptor.Funcs{Get: flipServingOnGet}).
+		Build()
+
+	seedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, targetSpecImage("llama:v1"))
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, target)
+
+	done, err := Update(context.Background(), p, plan, plan.Instances[0], tcr, target)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if done {
+		t.Fatalf("expected done=false after detecting serving=True race")
+	}
+
+	// Image must NOT have been patched (recheck bailed before patch).
+	got := &corev1.Pod{}
+	// Bypass the interceptor's serving-flip by querying via Tracker —
+	// but for image we don't need to; image is in Spec, interceptor
+	// only mutates Status. Direct Get is fine.
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), got); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if got.Spec.Containers[0].Image != "llama:v1" {
+		t.Errorf("image should still be v1 (no patch on serving pod); got %q", got.Spec.Containers[0].Image)
 	}
 }
 

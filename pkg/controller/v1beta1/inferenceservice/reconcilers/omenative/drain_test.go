@@ -379,3 +379,112 @@ func TestIsPodDrained_TargetRefKindNotPod_Rejected(t *testing.T) {
 		t.Fatalf("expected drained=true when TargetRef.Kind is not 'Pod' (must not match)")
 	}
 }
+
+// --- DRAIN-1: endpointAvailable tri-state ---
+
+func TestEndpointAvailable_ReadyTrueTerminatingFalseIsAvailable(t *testing.T) {
+	ep := discoveryv1.Endpoint{
+		Conditions: discoveryv1.EndpointConditions{
+			Ready:       ptr.To(true),
+			Terminating: ptr.To(false),
+		},
+	}
+	if !endpointAvailable(ep) {
+		t.Errorf("Ready=true, Terminating=false should be available")
+	}
+}
+
+func TestEndpointAvailable_ReadyTrueTerminatingNilIsAvailable(t *testing.T) {
+	// nil Terminating is the steady-state shape (no termination underway).
+	ep := discoveryv1.Endpoint{
+		Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)},
+	}
+	if !endpointAvailable(ep) {
+		t.Errorf("Ready=true, Terminating=nil should be available")
+	}
+}
+
+func TestEndpointAvailable_ReadyTrueTerminatingTrueIsNotAvailable(t *testing.T) {
+	// DRAIN-1 core case: kube-proxy keeps a terminating-but-still-Ready
+	// endpoint in rotation for in-flight requests; it shouldn't count
+	// as Available for status or surge-rotation checks.
+	ep := discoveryv1.Endpoint{
+		Conditions: discoveryv1.EndpointConditions{
+			Ready:       ptr.To(true),
+			Terminating: ptr.To(true),
+		},
+	}
+	if endpointAvailable(ep) {
+		t.Errorf("Ready=true, Terminating=true must NOT be available")
+	}
+}
+
+func TestEndpointAvailable_ReadyFalseIsNotAvailable(t *testing.T) {
+	ep := discoveryv1.Endpoint{
+		Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(false)},
+	}
+	if endpointAvailable(ep) {
+		t.Errorf("Ready=false should never be available")
+	}
+}
+
+// --- DRAIN-1: IsPodInRotation excludes terminating endpoints ---
+
+func TestIsPodInRotation_TerminatingEndpointReportedNotInRotation(t *testing.T) {
+	// Even with Ready=true, a terminating endpoint must not be
+	// considered "in rotation" — Migrate would otherwise swap onto a
+	// pod that's about to disappear.
+	pod := testPod("ns", "p1")
+	slice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s",
+			Namespace: "ns",
+			Labels:    map[string]string{discoveryv1.LabelServiceName: "svc"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.0.0.1"},
+			Conditions: discoveryv1.EndpointConditions{
+				Ready:       ptr.To(true),
+				Terminating: ptr.To(true),
+			},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "ns", Name: "p1"},
+		}},
+	}
+	c := newDrainTestClient(t, slice)
+	in, err := IsPodInRotation(context.Background(), c, "ns", "svc", pod)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if in {
+		t.Errorf("terminating endpoint must not be reported as in-rotation")
+	}
+}
+
+func TestIsPodInRotation_ReadyTrueNotTerminatingReportedInRotation(t *testing.T) {
+	pod := testPod("ns", "p1")
+	slice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "s",
+			Namespace: "ns",
+			Labels:    map[string]string{discoveryv1.LabelServiceName: "svc"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{
+			Addresses: []string{"10.0.0.1"},
+			Conditions: discoveryv1.EndpointConditions{
+				Ready:       ptr.To(true),
+				Terminating: ptr.To(false),
+			},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "ns", Name: "p1"},
+		}},
+	}
+	c := newDrainTestClient(t, slice)
+	in, err := IsPodInRotation(context.Background(), c, "ns", "svc", pod)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !in {
+		t.Errorf("non-terminating Ready endpoint must be reported as in-rotation")
+	}
+}

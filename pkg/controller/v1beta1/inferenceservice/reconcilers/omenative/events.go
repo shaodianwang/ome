@@ -49,6 +49,12 @@ const (
 	// Migration overlay validation rejection (PR G, REV-6).
 	EventReasonMigrationNodeAffinityConflict = "MigrationNodeAffinityConflict"
 
+	// Orphan pod classification (PR I, OPS-3). Fired when a pod under
+	// the OMENative selector lacks ome.io/instance-incarnation; the
+	// controller refuses to delete it and surfaces the orphan for
+	// operator triage.
+	EventReasonFoundOrphan = "FoundOrphan"
+
 	// Revision-collision (rare; salted retry succeeded).
 	EventReasonRevisionCollision = "RevisionCollision"
 )

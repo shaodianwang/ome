@@ -153,6 +153,39 @@ func TestRestart_DeletesOldPodOnceDrained(t *testing.T) {
 	}
 }
 
+func TestRestart_RefusesToDeleteOrphanPod(t *testing.T) {
+	// OPS-3: a pod selected by labels=managed-by=OMENative but missing
+	// ome.io/instance-incarnation is treated as `unknown` (third bucket).
+	// Restart must NOT delete it; instead emit a FoundOrphan warning and
+	// short-circuit. Operator triage decides whether to re-label or delete
+	// the orphan manually.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	orphan := podAtIncarnation(isvc, 0, 1, true, false)
+	orphan.Name = "orphan-pod"
+	delete(orphan.Labels, labelInstanceIncarnation)
+	c := newFakeClientWithDiscovery(t, isvc, orphan)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	done, err := Restart(context.Background(), p, plan, plan.Instances[0], "trigger")
+	if err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if done {
+		t.Fatalf("expected done=false: orphan must block Restart from advancing")
+	}
+
+	// Orphan pod must STILL exist.
+	got := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(orphan), got); err != nil {
+		t.Fatalf("orphan pod must still exist after Restart bails: %v", err)
+	}
+	if got.DeletionTimestamp != nil {
+		t.Errorf("orphan pod must NOT have been deleted; got DeletionTimestamp=%v", got.DeletionTimestamp)
+	}
+}
+
 func TestRestart_CreatesNewPodAtBumpedIncarnation(t *testing.T) {
 	// Status is Restarting at Inc=2, no pods (old already deleted, new
 	// not yet created). Restart should create the new pod at Inc=2.
@@ -438,6 +471,8 @@ func TestReconcileComponent_RestartTriggerDispatches(t *testing.T) {
 }
 
 func TestPartitionPodsByIncarnation(t *testing.T) {
+	// OPS-3: label-missing pods land in the unknown bucket rather
+	// than silently being deleted alongside old-incarnation pods.
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	p1 := podAtIncarnation(isvc, 0, 1, false, false)
@@ -448,12 +483,15 @@ func TestPartitionPodsByIncarnation(t *testing.T) {
 	noLabel.Name = "noLabel"
 	delete(noLabel.Labels, labelInstanceIncarnation)
 
-	old, fresh := partitionPodsByIncarnation([]*corev1.Pod{p1, p2, noLabel}, 2)
-	if len(old) != 2 {
-		t.Errorf("old: got %d want 2 (p1 at inc=1 and noLabel)", len(old))
+	old, fresh, unknown := partitionPodsByIncarnation([]*corev1.Pod{p1, p2, noLabel}, 2)
+	if len(old) != 1 || old[0].Name != "p1" {
+		t.Errorf("old: got %v want [p1]", podNamesOf(old))
 	}
 	if len(fresh) != 1 || fresh[0].Name != "p2" {
-		t.Errorf("fresh: got %+v want [p2]", podNamesOf(fresh))
+		t.Errorf("fresh: got %v want [p2]", podNamesOf(fresh))
+	}
+	if len(unknown) != 1 || unknown[0].Name != "noLabel" {
+		t.Errorf("unknown: got %v want [noLabel]", podNamesOf(unknown))
 	}
 }
 
