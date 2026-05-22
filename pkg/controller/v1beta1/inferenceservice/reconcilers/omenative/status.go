@@ -8,6 +8,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -44,52 +45,60 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		return fmt.Errorf("status: compute availability: %w", err)
 	}
 
-	// Re-read the ISVC so per-op writes from this reconcile are visible.
-	fresh := &v1beta1.InferenceService{}
-	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
-		return fmt.Errorf("status: re-read ISVC: %w", err)
-	}
-
-	if fresh.Status.Components == nil {
-		fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
-	}
-	cs := fresh.Status.Components[plan.Component]
-	if cs.OMENative == nil {
-		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
-	}
-
-	// Per-Instance counters.
-	for i := range cs.OMENative.InstanceStatuses {
-		s := &cs.OMENative.InstanceStatuses[i]
-		instPods := byIndex[s.Index]
-		s.PodCount = int32(len(instPods))
-		s.ReadyPodCount = countReadyPods(instPods)
-		s.ScheduledPodCount = countScheduledPods(instPods)
-		s.AvailablePodCount = countAvailablePods(instPods, availableByPod)
-		s.NodesOccupied = uniqueNodes(instPods)
-	}
-
-	// Component-level counters.
-	cs.OMENative.Replicas = int32(len(cs.OMENative.InstanceStatuses))
-	cs.OMENative.ReadyReplicas = countReadyInstances(cs.OMENative.InstanceStatuses)
-	cs.OMENative.AvailableReplicas = countAvailableInstances(cs.OMENative.InstanceStatuses)
-	if target != nil {
-		cs.OMENative.UpdatedReplicas, cs.OMENative.UpdatedReadyReplicas =
-			countUpdatedInstances(cs.OMENative.InstanceStatuses, target.Name)
-		cs.OMENative.UpdateRevision = target.Name
-		if rolloutComplete(cs.OMENative.InstanceStatuses, target.Name) {
-			cs.OMENative.CurrentRevision = target.Name
+	// Re-read ISVC + recompute counters + Update wrapped in
+	// RetryOnConflict so concurrent component reconciles (engine +
+	// decoder + router all ending with their own AggregateAndWriteStatus)
+	// don't race-fail on the status subresource. Per-Instance counters
+	// are recomputed against the freshly-read ISVC's InstanceStatuses
+	// on every attempt so a parallel op that added/removed an Instance
+	// doesn't get its bookkeeping clobbered.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &v1beta1.InferenceService{}
+		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+			return fmt.Errorf("status: re-read ISVC: %w", err)
 		}
-	}
 
-	cs.OMENative.ObservedGeneration = fresh.Generation
-	cs.OMENative.LabelSelector = componentLabelSelectorString(p.ISVC.Name, plan.Component)
+		if fresh.Status.Components == nil {
+			fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+		}
+		cs := fresh.Status.Components[plan.Component]
+		if cs.OMENative == nil {
+			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+		}
 
-	fresh.Status.Components[plan.Component] = cs
-	if err := p.Client.Status().Update(ctx, fresh); err != nil {
-		return fmt.Errorf("status: update: %w", err)
-	}
-	return nil
+		// Per-Instance counters.
+		for i := range cs.OMENative.InstanceStatuses {
+			s := &cs.OMENative.InstanceStatuses[i]
+			instPods := byIndex[s.Index]
+			s.PodCount = int32(len(instPods))
+			s.ReadyPodCount = countReadyPods(instPods)
+			s.ScheduledPodCount = countScheduledPods(instPods)
+			s.AvailablePodCount = countAvailablePods(instPods, availableByPod)
+			s.NodesOccupied = uniqueNodes(instPods)
+		}
+
+		// Component-level counters.
+		cs.OMENative.Replicas = int32(len(cs.OMENative.InstanceStatuses))
+		cs.OMENative.ReadyReplicas = countReadyInstances(cs.OMENative.InstanceStatuses)
+		cs.OMENative.AvailableReplicas = countAvailableInstances(cs.OMENative.InstanceStatuses)
+		if target != nil {
+			cs.OMENative.UpdatedReplicas, cs.OMENative.UpdatedReadyReplicas =
+				countUpdatedInstances(cs.OMENative.InstanceStatuses, target.Name)
+			cs.OMENative.UpdateRevision = target.Name
+			if rolloutComplete(cs.OMENative.InstanceStatuses, target.Name) {
+				cs.OMENative.CurrentRevision = target.Name
+			}
+		}
+
+		cs.OMENative.ObservedGeneration = fresh.Generation
+		cs.OMENative.LabelSelector = componentLabelSelectorString(p.ISVC.Name, plan.Component)
+
+		fresh.Status.Components[plan.Component] = cs
+		if err := p.Client.Status().Update(ctx, fresh); err != nil {
+			return fmt.Errorf("status: update: %w", err)
+		}
+		return nil
+	})
 }
 
 // availablePodSet returns the set of pod names whose endpoint is Ready

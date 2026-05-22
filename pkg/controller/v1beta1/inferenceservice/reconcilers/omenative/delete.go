@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -200,37 +201,53 @@ func patchInstanceStatusDeleting(ctx context.Context, p ReconcileParams, compone
 // idx) from the parent ISVC. Returns (hadEntry, err): hadEntry=true if
 // an entry was actually removed, false if the index wasn't present
 // (already cleared by a previous pass).
+//
+// Wrapped in retry.RetryOnConflict so concurrent component reconciles
+// can't lose the removal. Each retry re-checks whether the InstanceStatus
+// entry still exists — if a parallel write already cleared it, hadEntry
+// is false on the next attempt and no Update is issued.
 func removeInstanceStatus(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32) (bool, error) {
-	fresh := &v1beta1.InferenceService{}
-	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
-		return false, fmt.Errorf("re-read ISVC: %w", err)
-	}
-	if fresh.Status.Components == nil {
-		return false, nil
-	}
-	cs, ok := fresh.Status.Components[component]
-	if !ok || cs.OMENative == nil {
-		return false, nil
-	}
-	insts := cs.OMENative.InstanceStatuses
-	pos := -1
-	for i, s := range insts {
-		if s.Index == idx {
-			pos = i
-			break
+	var hadEntry bool
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		hadEntry = false
+		fresh := &v1beta1.InferenceService{}
+		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+			return fmt.Errorf("re-read ISVC: %w", err)
 		}
-	}
-	if pos == -1 {
-		return false, nil
-	}
-	cs.OMENative.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
-	fresh.Status.Components[component] = cs
+		if fresh.Status.Components == nil {
+			return nil
+		}
+		cs, ok := fresh.Status.Components[component]
+		if !ok || cs.OMENative == nil {
+			return nil
+		}
+		insts := cs.OMENative.InstanceStatuses
+		pos := -1
+		for i, s := range insts {
+			if s.Index == idx {
+				pos = i
+				break
+			}
+		}
+		if pos == -1 {
+			return nil
+		}
+		cs.OMENative.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
+		fresh.Status.Components[component] = cs
 
-	if err := p.Client.Status().Update(ctx, fresh); err != nil {
-		return false, fmt.Errorf("update ISVC status: %w", err)
+		if err := p.Client.Status().Update(ctx, fresh); err != nil {
+			return fmt.Errorf("update ISVC status: %w", err)
+		}
+		hadEntry = true
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	// Forget the expectations entry so the (now-vanished) Instance isn't
-	// stuck in an "expected deletes" state if its index is later reused.
-	p.expectations().Forget(p.ISVC.Namespace, p.ISVC.Name, component, idx)
-	return true, nil
+	if hadEntry {
+		// Forget the expectations entry so the (now-vanished) Instance isn't
+		// stuck in an "expected deletes" state if its index is later reused.
+		p.expectations().Forget(p.ISVC.Namespace, p.ISVC.Name, component, idx)
+	}
+	return hadEntry, nil
 }

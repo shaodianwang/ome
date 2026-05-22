@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -313,28 +314,43 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 // bumpCollisionCount increments OMENativeComponentStatus.CollisionCount
 // (initializing to 1 when nil) and persists the status. Returns the
 // new pointer for the retry caller.
+//
+// Wrapped in retry.RetryOnConflict so concurrent component reconciles
+// can't lose the bump. Each retry re-reads the current count and
+// increments from there — collision counting is monotonic, so
+// incrementing whatever the apiserver currently shows is the right
+// semantic.
 func bumpCollisionCount(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType) (*int32, error) {
-	fresh := &v1beta1.InferenceService{}
-	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
-		return nil, fmt.Errorf("re-read ISVC for CollisionCount bump: %w", err)
+	var next int32
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &v1beta1.InferenceService{}
+		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+			return fmt.Errorf("re-read ISVC for CollisionCount bump: %w", err)
+		}
+		if fresh.Status.Components == nil {
+			fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+		}
+		cs := fresh.Status.Components[component]
+		if cs.OMENative == nil {
+			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+		}
+		next = int32(1)
+		if cs.OMENative.CollisionCount != nil {
+			next = *cs.OMENative.CollisionCount + 1
+		}
+		cs.OMENative.CollisionCount = &next
+		fresh.Status.Components[component] = cs
+		if err := p.Client.Status().Update(ctx, fresh); err != nil {
+			return fmt.Errorf("persist CollisionCount: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if fresh.Status.Components == nil {
-		fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
-	}
-	cs := fresh.Status.Components[component]
-	if cs.OMENative == nil {
-		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
-	}
-	next := int32(1)
-	if cs.OMENative.CollisionCount != nil {
-		next = *cs.OMENative.CollisionCount + 1
-	}
-	cs.OMENative.CollisionCount = &next
-	fresh.Status.Components[component] = cs
-	if err := p.Client.Status().Update(ctx, fresh); err != nil {
-		return nil, fmt.Errorf("persist CollisionCount: %w", err)
-	}
-	// Mirror onto the cached ISVC the caller is reading.
+	// Mirror the final landed value onto the cached ISVC the caller
+	// is reading. Done outside the retry because it only needs to
+	// reflect the value that successfully committed.
 	if p.ISVC.Status.Components == nil {
 		p.ISVC.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}

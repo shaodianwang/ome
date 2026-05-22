@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -293,46 +294,54 @@ func patchInstanceStatusReady(ctx context.Context, p ReconcileParams, component 
 // InstanceStatus entry for the given (component, idx) pair (creating it
 // if missing), and writes back via Status().Update(). The mutate function
 // returns true when an actual change was made; if false, no write is
-// issued. Cross-controller condition writes are out of scope of this PR.
+// issued.
+//
+// Wrapped in retry.RetryOnConflict so concurrent component reconciles
+// writing sibling Component slots don't race-fail. The mutate callback
+// runs once per retry attempt against the freshly-read InstanceStatus,
+// so a callback that diffs `s.Phase` etc. against the live state stays
+// correct across retries.
 func mutateInstanceStatus(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32, mutate func(*v1beta1.OMENativeInstanceStatus) bool) error {
-	fresh := &v1beta1.InferenceService{}
-	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
-		return fmt.Errorf("re-read ISVC: %w", err)
-	}
-
-	if fresh.Status.Components == nil {
-		fresh.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
-	}
-	cs := fresh.Status.Components[component]
-	if cs.OMENative == nil {
-		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
-	}
-
-	// Locate or append the InstanceStatus entry.
-	insts := cs.OMENative.InstanceStatuses
-	pos := -1
-	for i, s := range insts {
-		if s.Index == idx {
-			pos = i
-			break
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &v1beta1.InferenceService{}
+		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+			return fmt.Errorf("re-read ISVC: %w", err)
 		}
-	}
-	var slot *v1beta1.OMENativeInstanceStatus
-	if pos == -1 {
-		insts = append(insts, v1beta1.OMENativeInstanceStatus{Index: idx})
-		slot = &insts[len(insts)-1]
-	} else {
-		slot = &insts[pos]
-	}
 
-	if !mutate(slot) {
+		if fresh.Status.Components == nil {
+			fresh.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
+		}
+		cs := fresh.Status.Components[component]
+		if cs.OMENative == nil {
+			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+		}
+
+		// Locate or append the InstanceStatus entry.
+		insts := cs.OMENative.InstanceStatuses
+		pos := -1
+		for i, s := range insts {
+			if s.Index == idx {
+				pos = i
+				break
+			}
+		}
+		var slot *v1beta1.OMENativeInstanceStatus
+		if pos == -1 {
+			insts = append(insts, v1beta1.OMENativeInstanceStatus{Index: idx})
+			slot = &insts[len(insts)-1]
+		} else {
+			slot = &insts[pos]
+		}
+
+		if !mutate(slot) {
+			return nil
+		}
+		cs.OMENative.InstanceStatuses = insts
+		fresh.Status.Components[component] = cs
+
+		if err := p.Client.Status().Update(ctx, fresh); err != nil {
+			return fmt.Errorf("update ISVC status: %w", err)
+		}
 		return nil
-	}
-	cs.OMENative.InstanceStatuses = insts
-	fresh.Status.Components[component] = cs
-
-	if err := p.Client.Status().Update(ctx, fresh); err != nil {
-		return fmt.Errorf("update ISVC status: %w", err)
-	}
-	return nil
+	})
 }
