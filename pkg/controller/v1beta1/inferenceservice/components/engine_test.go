@@ -509,6 +509,7 @@ func TestEngineReconcile(t *testing.T) {
 			engine := NewEngine(
 				c,
 				clientset,
+				nil, // apiReader
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				tt.deploymentMode,
@@ -527,7 +528,7 @@ func TestEngineReconcile(t *testing.T) {
 			}
 
 			// Reconcile
-			result, err := engine.Reconcile(tt.isvc)
+			result, err := engine.Reconcile(context.TODO(), tt.isvc)
 
 			if tt.wantErr {
 				g.Expect(err).To(gomega.HaveOccurred())
@@ -689,6 +690,7 @@ func TestEngineReconcileObjectMeta(t *testing.T) {
 			engine := NewEngine(
 				c,
 				clientset,
+				nil, // apiReader
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				constants.RawDeployment,
@@ -827,6 +829,7 @@ func TestEngineWorkerPodSpec(t *testing.T) {
 			engine := NewEngine(
 				c,
 				clientset,
+				nil, // apiReader
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				constants.RawDeployment,

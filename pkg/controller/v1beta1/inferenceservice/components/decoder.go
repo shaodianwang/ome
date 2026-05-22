@@ -38,6 +38,7 @@ type Decoder struct {
 func NewDecoder(
 	client client.Client,
 	clientset kubernetes.Interface,
+	apiReader client.Reader,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 	deploymentMode constants.DeploymentModeType,
@@ -52,6 +53,7 @@ func NewDecoder(
 	base := BaseComponentFields{
 		Client:                 client,
 		Clientset:              clientset,
+		APIReader:              apiReader,
 		Scheme:                 scheme,
 		InferenceServiceConfig: inferenceServiceConfig,
 		DeploymentMode:         deploymentMode,
@@ -82,7 +84,7 @@ func NewDecoder(
 }
 
 // Reconcile implements the Component interface for Decoder
-func (d *Decoder) Reconcile(isvc *v1beta1.InferenceService) (ctrl.Result, error) {
+func (d *Decoder) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {
 	d.Log.Info("Reconciling decoder component", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
 
 	// Validate decoder spec
@@ -119,7 +121,7 @@ func (d *Decoder) Reconcile(isvc *v1beta1.InferenceService) (ctrl.Result, error)
 	size := d.getWorkerSize()
 
 	// Reconcile deployment based on deployment mode
-	if result, err := d.reconcileDeployment(isvc, objectMeta, podSpec, size, workerPodSpec); err != nil {
+	if result, err := d.reconcileDeployment(ctx, isvc, objectMeta, podSpec, size, workerPodSpec); err != nil {
 		return result, err
 	}
 
@@ -147,7 +149,7 @@ func (d *Decoder) getWorkerSize() int {
 }
 
 // reconcileDeployment manages the deployment logic for different deployment modes
-func (d *Decoder) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, workerSize int, workerPodSpec *v1.PodSpec) (ctrl.Result, error) {
+func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, workerSize int, workerPodSpec *v1.PodSpec) (ctrl.Result, error) {
 	switch d.DeploymentMode {
 	case constants.RawDeployment:
 		return d.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &d.decoderSpec.ComponentExtensionSpec, v1beta1.DecoderComponent)
@@ -157,7 +159,7 @@ func (d *Decoder) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
 		multiPod := d.decoderSpec.Leader != nil && d.decoderSpec.Worker != nil
-		return omenative.ReconcileComponent(context.TODO(), omenative.ReconcileParams{
+		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
 			ISVC:          isvc,
 			ObjectMeta:    objectMeta,
 			PodSpec:       podSpec,
@@ -167,6 +169,7 @@ func (d *Decoder) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta
 			WorkerPodSpec: workerPodSpec,
 			MultiPod:      multiPod,
 			Client:        d.Client,
+			APIReader:     d.APIReader,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for decoder")

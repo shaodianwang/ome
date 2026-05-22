@@ -27,8 +27,13 @@ import (
 
 // BaseComponentFields contains common fields for all components
 type BaseComponentFields struct {
-	Client                            client.Client
-	Clientset                         kubernetes.Interface
+	Client    client.Client
+	Clientset kubernetes.Interface
+	// APIReader is the live (uncached) reader, typically mgr.GetAPIReader().
+	// Use it for reads where cache lag would be a correctness problem —
+	// OMENative passes it through to ReconcileParams.APIReader for revision
+	// bookkeeping, audit ledger dedup, and EndpointSlice drain checks.
+	APIReader                         client.Reader
 	Scheme                            *runtime.Scheme
 	InferenceServiceConfig            *controllerconfig.InferenceServicesConfig
 	DeploymentMode                    constants.DeploymentModeType

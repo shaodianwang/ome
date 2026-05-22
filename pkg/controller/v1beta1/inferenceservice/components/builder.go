@@ -19,6 +19,7 @@ import (
 type ComponentBuilder struct {
 	client                 client.Client
 	clientset              kubernetes.Interface
+	apiReader              client.Reader
 	scheme                 *runtime.Scheme
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig
 	deploymentMode         constants.DeploymentModeType
@@ -31,16 +32,21 @@ type ComponentBuilder struct {
 	logger                 logr.Logger
 }
 
-// NewComponentBuilder creates a new component builder
+// NewComponentBuilder creates a new component builder. apiReader is the
+// live (uncached) reader (typically mgr.GetAPIReader()); the OMENative
+// backend uses it for reads where cache lag would be a correctness
+// problem. May be nil — backends fall back to the cached client.
 func NewComponentBuilder(
 	client client.Client,
 	clientset kubernetes.Interface,
+	apiReader client.Reader,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 ) *ComponentBuilder {
 	return &ComponentBuilder{
 		client:                 client,
 		clientset:              clientset,
+		apiReader:              apiReader,
 		scheme:                 scheme,
 		inferenceServiceConfig: inferenceServiceConfig,
 		logger:                 ctrl.Log.WithName("ComponentBuilder"),
@@ -91,6 +97,7 @@ func (b *ComponentBuilder) buildBaseFields() BaseComponentFields {
 	return BaseComponentFields{
 		Client:                 b.client,
 		Clientset:              b.clientset,
+		APIReader:              b.apiReader,
 		Scheme:                 b.scheme,
 		InferenceServiceConfig: b.inferenceServiceConfig,
 		DeploymentMode:         b.deploymentMode,
@@ -109,6 +116,7 @@ func (b *ComponentBuilder) BuildEngine(spec *v1beta1.EngineSpec) Component {
 	return NewEngine(
 		b.client,
 		b.clientset,
+		b.apiReader,
 		b.scheme,
 		b.inferenceServiceConfig,
 		b.deploymentMode,
@@ -127,6 +135,7 @@ func (b *ComponentBuilder) BuildDecoder(spec *v1beta1.DecoderSpec) Component {
 	return NewDecoder(
 		b.client,
 		b.clientset,
+		b.apiReader,
 		b.scheme,
 		b.inferenceServiceConfig,
 		b.deploymentMode,
@@ -145,6 +154,7 @@ func (b *ComponentBuilder) BuildRouter(spec *v1beta1.RouterSpec) Component {
 	return NewRouter(
 		b.client,
 		b.clientset,
+		b.apiReader,
 		b.scheme,
 		b.inferenceServiceConfig,
 		b.deploymentMode,
@@ -171,20 +181,25 @@ func (b *ComponentBuilder) BuildCustomComponent(componentType v1beta1.ComponentT
 type ComponentBuilderFactory struct {
 	client                 client.Client
 	clientset              kubernetes.Interface
+	apiReader              client.Reader
 	scheme                 *runtime.Scheme
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig
 }
 
-// NewComponentBuilderFactory creates a new factory
+// NewComponentBuilderFactory creates a new factory. apiReader is the
+// live API reader (typically mgr.GetAPIReader()) plumbed through to
+// the OMENative backend; may be nil.
 func NewComponentBuilderFactory(
 	client client.Client,
 	clientset kubernetes.Interface,
+	apiReader client.Reader,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 ) *ComponentBuilderFactory {
 	return &ComponentBuilderFactory{
 		client:                 client,
 		clientset:              clientset,
+		apiReader:              apiReader,
 		scheme:                 scheme,
 		inferenceServiceConfig: inferenceServiceConfig,
 	}
@@ -192,7 +207,7 @@ func NewComponentBuilderFactory(
 
 // NewBuilder creates a new component builder
 func (f *ComponentBuilderFactory) NewBuilder() *ComponentBuilder {
-	return NewComponentBuilder(f.client, f.clientset, f.scheme, f.inferenceServiceConfig)
+	return NewComponentBuilder(f.client, f.clientset, f.apiReader, f.scheme, f.inferenceServiceConfig)
 }
 
 // CreateEngineComponent is a convenience method to create an engine component

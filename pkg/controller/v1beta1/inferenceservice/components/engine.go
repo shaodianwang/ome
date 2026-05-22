@@ -34,10 +34,14 @@ type Engine struct {
 	podSpecReconciler    *common.PodSpecReconciler
 }
 
-// NewEngine creates a new Engine component instance
+// NewEngine creates a new Engine component instance. apiReader is the
+// live (uncached) reader threaded through to OMENative dispatch; may
+// be nil, in which case the OMENative backend falls back to the
+// cached client.
 func NewEngine(
 	client client.Client,
 	clientset kubernetes.Interface,
+	apiReader client.Reader,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 	deploymentMode constants.DeploymentModeType,
@@ -52,6 +56,7 @@ func NewEngine(
 	base := BaseComponentFields{
 		Client:                 client,
 		Clientset:              clientset,
+		APIReader:              apiReader,
 		Scheme:                 scheme,
 		InferenceServiceConfig: inferenceServiceConfig,
 		DeploymentMode:         deploymentMode,
@@ -82,7 +87,7 @@ func NewEngine(
 }
 
 // Reconcile implements the Component interface for Engine
-func (e *Engine) Reconcile(isvc *v1beta1.InferenceService) (ctrl.Result, error) {
+func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {
 	e.Log.Info("Reconciling engine component", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
 
 	// Validate engine spec
@@ -119,7 +124,7 @@ func (e *Engine) Reconcile(isvc *v1beta1.InferenceService) (ctrl.Result, error) 
 	size := e.getWorkerSize()
 
 	// Reconcile deployment based on deployment mode
-	if result, err := e.reconcileDeployment(isvc, objectMeta, podSpec, size, workerPodSpec); err != nil {
+	if result, err := e.reconcileDeployment(ctx, isvc, objectMeta, podSpec, size, workerPodSpec); err != nil {
 		return result, err
 	}
 
@@ -147,7 +152,7 @@ func (e *Engine) getWorkerSize() int {
 }
 
 // reconcileDeployment manages the deployment logic for different deployment modes
-func (e *Engine) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, workerSize int, workerPodSpec *v1.PodSpec) (ctrl.Result, error) {
+func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec, workerSize int, workerPodSpec *v1.PodSpec) (ctrl.Result, error) {
 	switch e.DeploymentMode {
 	case constants.RawDeployment:
 		return e.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
@@ -157,7 +162,7 @@ func (e *Engine) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
 		multiPod := e.engineSpec.Leader != nil && e.engineSpec.Worker != nil
-		return omenative.ReconcileComponent(context.TODO(), omenative.ReconcileParams{
+		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
 			ISVC:          isvc,
 			ObjectMeta:    objectMeta,
 			PodSpec:       podSpec,
@@ -167,6 +172,7 @@ func (e *Engine) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta 
 			WorkerPodSpec: workerPodSpec,
 			MultiPod:      multiPod,
 			Client:        e.Client,
+			APIReader:     e.APIReader,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for engine")

@@ -1,6 +1,8 @@
 package components
 
 import (
+	"context"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -10,7 +12,7 @@ import (
 
 // Component can be reconciled to create underlying resources for an InferenceService
 type Component interface {
-	Reconcile(isvc *v1beta1.InferenceService) (ctrl.Result, error)
+	Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error)
 }
 
 // ComponentConfig defines the interface for component-specific configuration

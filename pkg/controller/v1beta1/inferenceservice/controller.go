@@ -99,8 +99,14 @@ const (
 // InferenceServiceReconciler reconciles an InferenceService object
 type InferenceServiceReconciler struct {
 	client.Client
-	ClientConfig    *rest.Config
-	Clientset       kubernetes.Interface
+	ClientConfig *rest.Config
+	Clientset    kubernetes.Interface
+	// APIReader is the live (uncached) reader, populated from
+	// mgr.GetAPIReader() in SetupWithManager. Threaded through the
+	// component builder to OMENative for reads where cache lag would
+	// be a correctness problem (revision bookkeeping, audit ledger,
+	// EndpointSlice drain checks).
+	APIReader       client.Reader
 	Log             logr.Logger
 	Scheme          *runtime.Scheme
 	Recorder        record.EventRecorder
@@ -194,7 +200,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Initialize ComponentBuilderFactory
 	// Note: isvcConfig is created a few lines above inside the Reconcile function
 	// for NewInferenceServicesConfig. We will use that existing isvcConfig.
-	componentBuilderFactory := components.NewComponentBuilderFactory(r.Client, r.Clientset, r.Scheme, isvcConfig)
+	componentBuilderFactory := components.NewComponentBuilderFactory(r.Client, r.Clientset, r.APIReader, r.Scheme, isvcConfig)
 
 	// Determine which components to reconcile based on the spec
 	var reconcilers []components.Component
@@ -403,7 +409,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// Step 6: Run all reconcilers
 	for _, reconciler := range reconcilers {
-		result, err := reconciler.Reconcile(isvc)
+		result, err := reconciler.Reconcile(ctx, isvc)
 		if err != nil {
 			r.Log.Error(err, "Failed to reconcile component",
 				"component", fmt.Sprintf("%T", reconciler),
@@ -612,6 +618,7 @@ func (r *InferenceServiceReconciler) ensureIngressDisableAnnotation(isvc *v1beta
 
 func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployConfig *controllerconfig.DeployConfig, ingressConfig *controllerconfig.IngressConfig) error {
 	r.ClientConfig = mgr.GetConfig()
+	r.APIReader = mgr.GetAPIReader()
 
 	// NEW: Initialize StatusReconciler
 	r.StatusManager = status.NewStatusReconciler()

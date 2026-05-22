@@ -340,6 +340,7 @@ func TestDecoderReconcile(t *testing.T) {
 			decoder := NewDecoder(
 				c,
 				clientset,
+				nil, // apiReader
 				scheme,
 				isvcConfig,
 				tt.deploymentMode,
@@ -353,7 +354,7 @@ func TestDecoderReconcile(t *testing.T) {
 			)
 
 			// Reconcile
-			result, err := decoder.Reconcile(tt.isvc)
+			result, err := decoder.Reconcile(context.TODO(), tt.isvc)
 
 			if tt.wantErr {
 				g.Expect(err).To(gomega.HaveOccurred())
@@ -464,6 +465,7 @@ func TestDecoderReconcileObjectMeta(t *testing.T) {
 			decoder := NewDecoder(
 				c,
 				clientset,
+				nil, // apiReader
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				constants.RawDeployment,
@@ -573,6 +575,7 @@ func TestDecoderWorkerPodSpec(t *testing.T) {
 			decoder := NewDecoder(
 				c,
 				clientset,
+				nil, // apiReader
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				constants.RawDeployment,
@@ -650,6 +653,7 @@ func TestDecoderComponentConfig(t *testing.T) {
 			decoder := NewDecoder(
 				c,
 				clientset,
+				nil, // apiReader
 				scheme,
 				&controllerconfig.InferenceServicesConfig{},
 				constants.RawDeployment,

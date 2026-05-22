@@ -39,6 +39,7 @@ type Router struct {
 func NewRouter(
 	client client.Client,
 	clientset kubernetes.Interface,
+	apiReader client.Reader,
 	scheme *runtime.Scheme,
 	inferenceServiceConfig *controllerconfig.InferenceServicesConfig,
 	deploymentMode constants.DeploymentModeType,
@@ -52,6 +53,7 @@ func NewRouter(
 	base := BaseComponentFields{
 		Client:                 client,
 		Clientset:              clientset,
+		APIReader:              apiReader,
 		Scheme:                 scheme,
 		InferenceServiceConfig: inferenceServiceConfig,
 		DeploymentMode:         deploymentMode,
@@ -81,7 +83,7 @@ func NewRouter(
 }
 
 // Reconcile implements the Component interface for Router
-func (r *Router) Reconcile(isvc *v1beta1.InferenceService) (ctrl.Result, error) {
+func (r *Router) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {
 	r.Log.Info("Reconciling router component", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
 
 	// Validate router spec
@@ -117,7 +119,7 @@ func (r *Router) Reconcile(isvc *v1beta1.InferenceService) (ctrl.Result, error) 
 	podSpec.ServiceAccountName = r.rbacReconciler.GetServiceAccountName()
 
 	// Reconcile deployment based on deployment mode
-	if result, err := r.reconcileDeployment(isvc, objectMeta, podSpec); err != nil {
+	if result, err := r.reconcileDeployment(ctx, isvc, objectMeta, podSpec); err != nil {
 		return result, err
 	}
 
@@ -130,18 +132,19 @@ func (r *Router) Reconcile(isvc *v1beta1.InferenceService) (ctrl.Result, error) 
 }
 
 // reconcileDeployment manages the deployment logic for different deployment modes
-func (r *Router) reconcileDeployment(isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec) (ctrl.Result, error) {
+func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec) (ctrl.Result, error) {
 	switch r.DeploymentMode {
 	case constants.RawDeployment:
 		return r.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
 	case constants.OMENative:
-		return omenative.ReconcileComponent(context.TODO(), omenative.ReconcileParams{
+		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
 			ISVC:         isvc,
 			ObjectMeta:   objectMeta,
 			PodSpec:      podSpec,
 			Component:    v1beta1.RouterComponent,
 			ComponentExt: &r.routerSpec.ComponentExtensionSpec,
 			Client:       r.Client,
+			APIReader:    r.APIReader,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for router")
