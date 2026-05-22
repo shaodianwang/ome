@@ -13,6 +13,14 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
+// restartDrainKey identifies a Restart drain writer against a
+// specific Instance materialization. Same key shape as the Update
+// drain key but a distinct WriterRestartDrain userAgent so the two
+// can't accidentally cancel each other out.
+func restartDrainKey(idx int32, incarnation int64) string {
+	return strconv.Itoa(int(idx)) + "-" + strconv.FormatInt(incarnation, 10)
+}
+
 // restartRequeueInterval is the wait between passes while a Restart is
 // in flight.
 const restartRequeueInterval = 5 * time.Second
@@ -66,7 +74,9 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 			if !IsServing(pod) {
 				continue
 			}
-			if err := MarkPodNotServing(ctx, p.Client, pod, "Restarting", "OMENative restarting Instance"); err != nil {
+			// Restart drain on OLD pods. NEW pods at the bumped
+			// incarnation get the Lifecycle key instead.
+			if err := MarkPodNotServing(ctx, p.Client, pod, WriterRestartDrain, restartDrainKey(inst.Index, newInc)); err != nil {
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
@@ -146,7 +156,9 @@ func Restart(ctx context.Context, p ReconcileParams, plan ComponentPlan, inst In
 		if IsServing(pod) {
 			continue
 		}
-		if err := MarkPodServing(ctx, p.Client, pod); err != nil {
+		// NEW pods are fresh — go through Lifecycle. The
+		// Restart-drain key was on the now-deleted OLD pods.
+		if err := MarkPodServing(ctx, p.Client, pod, WriterLifecycle, KeyLifecycleInstanceReady); err != nil {
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}

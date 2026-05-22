@@ -3,6 +3,7 @@ package omenative
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +14,15 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
+
+// deleteDrainKey is the per-Instance key the Delete-drain writer
+// adds to the ome.io/serving condition's message list. Each pod in
+// the Instance gets the same key so a single RemoveNotReadyKey
+// would clear all of them — though for Delete we never explicitly
+// remove (the pod is deleted and the key goes with it).
+func deleteDrainKey(idx int32) string {
+	return strconv.Itoa(int(idx))
+}
 
 // deleteRequeueInterval is the wait between drain / gone-confirmation
 // checks while a Delete is in flight.
@@ -70,7 +80,7 @@ func Delete(ctx context.Context, p ReconcileParams, plan ComponentPlan, idx int3
 		if !IsServing(pod) {
 			continue
 		}
-		if err := MarkPodNotServing(ctx, p.Client, pod, "Draining", "OMENative draining pod for delete"); err != nil {
+		if err := MarkPodNotServing(ctx, p.Client, pod, WriterDeleteDrain, deleteDrainKey(idx)); err != nil {
 			return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", idx, pod.Name, err)
 		}
 	}

@@ -108,12 +108,16 @@ func reconcileInstance(ctx context.Context, p ReconcileParams, plan ComponentPla
 		return false, nil
 	}
 
-	// Flip ome.io/serving=True on each pod.
+	// Flip ome.io/serving=True on each pod. For freshly-created pods
+	// the condition doesn't exist yet; the Lifecycle writer's
+	// "remove key" on a non-existent condition creates it with
+	// Status=True. Subsequent reconciles see IsServing=true and
+	// skip the (idempotent) re-flip.
 	for _, pod := range existing {
 		if IsServing(pod) {
 			continue
 		}
-		if err := MarkPodServing(ctx, p.Client, pod); err != nil {
+		if err := MarkPodServing(ctx, p.Client, pod, WriterLifecycle, KeyLifecycleInstanceReady); err != nil {
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}

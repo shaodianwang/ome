@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -15,6 +16,13 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
+
+// updateDrainKey identifies an in-place or recreate Update writer
+// against a specific Instance materialization. Same key on Add and
+// Remove so an in-place flow ends with the gate flipping back True.
+func updateDrainKey(idx int32, incarnation int64) string {
+	return strconv.Itoa(int(idx)) + "-" + strconv.FormatInt(incarnation, 10)
+}
 
 // updateRequeueInterval is the wait between passes while an Update is
 // in flight.
@@ -209,7 +217,7 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 			if !IsServing(pod) {
 				continue
 			}
-			if err := MarkPodNotServing(ctx, p.Client, pod, "Updating", "OMENative draining pod for in-place update"); err != nil {
+			if err := MarkPodNotServing(ctx, p.Client, pod, WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
@@ -266,7 +274,7 @@ func inPlaceUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, i
 		if IsServing(pod) {
 			continue
 		}
-		if err := MarkPodServing(ctx, p.Client, pod); err != nil {
+		if err := MarkPodServing(ctx, p.Client, pod, WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}
@@ -302,7 +310,7 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 			if !IsServing(pod) {
 				continue
 			}
-			if err := MarkPodNotServing(ctx, p.Client, pod, "Updating", "OMENative draining pod for recreate update"); err != nil {
+			if err := MarkPodNotServing(ctx, p.Client, pod, WriterUpdateRecreateDrain, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
@@ -372,7 +380,10 @@ func recreateUpdate(ctx context.Context, p ReconcileParams, plan ComponentPlan, 
 		if IsServing(pod) {
 			continue
 		}
-		if err := MarkPodServing(ctx, p.Client, pod); err != nil {
+		// NEW pods are fresh — go through Lifecycle, not the old
+		// Update-recreate-drain key (which was on the now-deleted
+		// old pods).
+		if err := MarkPodServing(ctx, p.Client, pod, WriterLifecycle, KeyLifecycleInstanceReady); err != nil {
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}

@@ -77,9 +77,17 @@ func Render(
 
 	pod.Spec.Hostname = name
 	pod.Spec.Subdomain = subdomain
-	pod.Spec.ReadinessGates = append(pod.Spec.ReadinessGates, corev1.PodReadinessGate{
-		ConditionType: servingConditionType,
-	})
+	// REV-1: if the user template (or the ServingRuntime) already
+	// declares the ome.io/serving gate, reuse it instead of
+	// appending a duplicate. Kubelet AND's all gates into PodReady,
+	// so two copies of the same gate keep PodReady=False forever
+	// (the controller only writes one condition status). OEP §4.1.1
+	// requires this dedup.
+	if !hasServingReadinessGate(pod.Spec.ReadinessGates) {
+		pod.Spec.ReadinessGates = append(pod.Spec.ReadinessGates, corev1.PodReadinessGate{
+			ConditionType: servingConditionType,
+		})
+	}
 
 	injectOMENativeEnv(pod, plan, inst, runner, ordinal, isvc.Name)
 	applyMigrationOverlay(pod, inst.MigrationOverlay)
@@ -154,6 +162,18 @@ func applyMigrationOverlay(pod *corev1.Pod, overlay *MigrationOverlay) {
 // isvcGroupVersionKind identifies the InferenceService owner reference
 // used when stamping child pods.
 var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
+
+// hasServingReadinessGate reports whether gates already includes the
+// controller-owned ome.io/serving gate. Used by Render to skip
+// duplicate-appending when the user template declared it.
+func hasServingReadinessGate(gates []corev1.PodReadinessGate) bool {
+	for _, g := range gates {
+		if g.ConditionType == servingConditionType {
+			return true
+		}
+	}
+	return false
+}
 
 func podName(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, ordinal int32) string {
 	return fmt.Sprintf("%s-%s-%d-%s-%d", isvc, component, instanceIdx, runner, ordinal)

@@ -142,6 +142,28 @@ func TestRender_AppendsServingReadinessGateWithoutClobberingExisting(t *testing.
 	}
 }
 
+func TestRender_DoesNotDuplicateExistingServingGate(t *testing.T) {
+	// REV-1 fix: if the user template already declares ome.io/serving,
+	// Render must not append a duplicate. Two copies of the same gate
+	// would keep PodReady=False forever — kubelet AND's all gates,
+	// the controller only writes one condition.
+	plan, inst, runner := singlePodPlan()
+	ps := basicPodSpec()
+	ps.ReadinessGates = []corev1.PodReadinessGate{
+		{ConditionType: servingConditionType},
+	}
+	pod, err := Render(basicISVC(), ps, plan, inst, runner, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pod.Spec.ReadinessGates) != 1 {
+		t.Fatalf("ReadinessGates duplicated: got %d want 1: %+v", len(pod.Spec.ReadinessGates), pod.Spec.ReadinessGates)
+	}
+	if pod.Spec.ReadinessGates[0].ConditionType != servingConditionType {
+		t.Errorf("preserved gate type wrong: %v", pod.Spec.ReadinessGates[0].ConditionType)
+	}
+}
+
 func TestRender_OMEEnvVarsInEveryContainer(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
 	ps := &corev1.PodSpec{

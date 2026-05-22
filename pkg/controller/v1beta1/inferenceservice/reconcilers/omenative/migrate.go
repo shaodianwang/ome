@@ -177,7 +177,8 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		if IsServing(pod) {
 			continue
 		}
-		if err := MarkPodServing(ctx, p.Client, pod); err != nil {
+		// Surge pods are fresh — use the Lifecycle key.
+		if err := MarkPodServing(ctx, p.Client, pod, WriterLifecycle, KeyLifecycleInstanceReady); err != nil {
 			return false, fmt.Errorf("Migrate: serving=True on surge pod %s: %w", pod.Name, err)
 		}
 	}
@@ -203,7 +204,10 @@ func Migrate(ctx context.Context, p ReconcileParams, plan ComponentPlan, sourceI
 		if !IsServing(pod) {
 			continue
 		}
-		if err := MarkPodNotServing(ctx, p.Client, pod, "Migrating", "OMENative draining source pod for migration"); err != nil {
+		// Source pods get the Migrate-source-drain key. The key is
+		// removed by virtue of source pod deletion at the end of
+		// the migration; no explicit RemoveNotReadyKey needed.
+		if err := MarkPodNotServing(ctx, p.Client, pod, WriterMigrateSourceDrain, requestUUID); err != nil {
 			return false, fmt.Errorf("Migrate: serving=False on source pod %s: %w", pod.Name, err)
 		}
 	}

@@ -2,12 +2,11 @@ package omenative
 
 import (
 	"context"
-	"fmt"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
 )
 
 // IsContainersReady reports whether the kubelet-owned ContainersReady
@@ -33,77 +32,70 @@ func IsContainersReady(pod *corev1.Pod) bool {
 	return false
 }
 
-// IsServing reports whether the ome.io/serving condition has been recorded
-// as True on the pod's status. Distinct from IsPodReady: the controller
-// flips this only after the runtime probe reports Ready, and uses it to
-// drain traffic during update / restart / migration.
+// IsServing reports whether the ome.io/serving condition has been
+// written as True — i.e., no writer currently holds the pod NotReady
+// via the multi-writer protocol in podreadiness.
 func IsServing(pod *corev1.Pod) bool {
-	if pod == nil {
-		return false
-	}
-	for _, c := range pod.Status.Conditions {
-		if c.Type == servingConditionType {
-			return c.Status == corev1.ConditionTrue
-		}
-	}
-	return false
+	return podreadiness.IsServing(pod)
 }
 
-// MarkPodServing patches the pod's status subresource to set the
-// controller-owned ome.io/serving condition to True. Idempotent: skips
-// the write when the condition is already True.
-func MarkPodServing(ctx context.Context, c client.Client, pod *corev1.Pod) error {
-	return setServingCondition(ctx, c, pod, corev1.ConditionTrue, "Serving",
-		"OMENative marked pod as serving traffic")
+// MarkPodServing removes the {userAgent, key} entry from the
+// ome.io/serving condition's writer list. If the resulting list is
+// empty (or the condition didn't exist yet — fresh pod case), the
+// condition is written with Status=True and the pod becomes eligible
+// for Service rotation.
+//
+// Idempotent: removing a key that isn't present is a no-op (no
+// patch issued) when the condition is already Status=True.
+func MarkPodServing(ctx context.Context, c client.Client, pod *corev1.Pod, userAgent, key string) error {
+	return podreadiness.RemoveNotReadyKey(ctx, c, pod, podreadiness.Message{UserAgent: userAgent, Key: key})
 }
 
-// MarkPodNotServing flips the condition to False, e.g., for drain.
-func MarkPodNotServing(ctx context.Context, c client.Client, pod *corev1.Pod, reason, message string) error {
-	return setServingCondition(ctx, c, pod, corev1.ConditionFalse, reason, message)
+// MarkPodNotServing adds the {userAgent, key} entry to the
+// ome.io/serving condition's writer list. Status becomes False
+// (because the list is non-empty). The pod is removed from Service
+// rotation via kube-proxy's standard PodReady gate machinery.
+//
+// Idempotent: re-adding the same key is a no-op.
+func MarkPodNotServing(ctx context.Context, c client.Client, pod *corev1.Pod, userAgent, key string) error {
+	return podreadiness.AddNotReadyKey(ctx, c, pod, podreadiness.Message{UserAgent: userAgent, Key: key})
 }
 
-func setServingCondition(ctx context.Context, c client.Client, pod *corev1.Pod, status corev1.ConditionStatus, reason, message string) error {
-	if pod == nil {
-		return fmt.Errorf("nil pod")
-	}
-	// Re-read the pod to avoid clobbering kubelet-managed conditions
-	// (PodScheduled, Initialized, ContainersReady, Ready) and any other
-	// controller's custom readiness gates.
-	fresh := &corev1.Pod{}
-	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), fresh); err != nil {
-		return fmt.Errorf("re-read pod %s/%s: %w", pod.Namespace, pod.Name, err)
-	}
+// Writer userAgents used across the OMENative ops. Centralized here
+// so a stray drift in any one site is easy to catch in `git grep`.
+const (
+	// WriterLifecycle is what flips a fresh pod's gate to Status=True
+	// once all Instance siblings reach ContainersReady. The key
+	// (InstanceReady) is the same across all sites — the userAgent +
+	// key tuple is the lookup; we never need to differentiate.
+	WriterLifecycle = "Lifecycle"
 
-	// Locate (or append) the ome.io/serving condition.
-	now := metav1.NewTime(time.Now())
-	found := false
-	for i, cond := range fresh.Status.Conditions {
-		if cond.Type != servingConditionType {
-			continue
-		}
-		if cond.Status == status {
-			// Already in the desired state.
-			return nil
-		}
-		fresh.Status.Conditions[i].Status = status
-		fresh.Status.Conditions[i].Reason = reason
-		fresh.Status.Conditions[i].Message = message
-		fresh.Status.Conditions[i].LastTransitionTime = now
-		found = true
-		break
-	}
-	if !found {
-		fresh.Status.Conditions = append(fresh.Status.Conditions, corev1.PodCondition{
-			Type:               servingConditionType,
-			Status:             status,
-			Reason:             reason,
-			Message:            message,
-			LastTransitionTime: now,
-		})
-	}
+	// WriterUpdateInPlace drains a pod for in-place container image
+	// update. Same key on Add (drain) and Remove (un-drain) on the
+	// same pod.
+	WriterUpdateInPlace = "Update-in-place"
 
-	if err := c.Status().Update(ctx, fresh); err != nil {
-		return fmt.Errorf("patch %s on pod %s/%s: %w", servingConditionType, fresh.Namespace, fresh.Name, err)
-	}
-	return nil
-}
+	// WriterUpdateRecreateDrain drains the OLD pods for a recreate
+	// update. The NEW pods are fresh and go through Lifecycle.
+	WriterUpdateRecreateDrain = "Update-recreate-drain"
+
+	// WriterRestartDrain drains the OLD pods for an Instance restart.
+	// The NEW pods are fresh and go through Lifecycle.
+	WriterRestartDrain = "Restart-drain"
+
+	// WriterDeleteDrain drains a pod for scale-down deletion. The
+	// key is removed by virtue of the pod being deleted; no explicit
+	// RemoveNotReadyKey is required.
+	WriterDeleteDrain = "Delete-drain"
+
+	// WriterMigrateSourceDrain drains the source pods of a surge
+	// migration. The key is removed by virtue of the source pods
+	// being deleted at the end of the migration.
+	WriterMigrateSourceDrain = "Migrate-source-drain"
+)
+
+// KeyLifecycleInstanceReady is the universal Lifecycle key. Matches
+// RBG's convention. The pair (WriterLifecycle, KeyLifecycleInstanceReady)
+// always means "the gate is unheld; if no other writer holds it,
+// status is True".
+const KeyLifecycleInstanceReady = "InstanceReady"
