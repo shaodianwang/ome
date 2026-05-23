@@ -191,6 +191,117 @@ var _ = ginkgo.Describe("OMENative Loop B watches", ginkgo.Ordered, func() {
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
+	// RestartPolicy=None: even a PodFailed should NOT trigger Restart.
+	// detectRestartTrigger only runs under RestartPolicy=RecreateInstance;
+	// None must keep the policy gate honest. Operators set None when they
+	// want manual recovery.
+	ginkgo.It("RestartPolicy=None suppresses Restart on PodFailed", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("nopol-llama"),
+			WithCSRName("nopol-runtime"),
+			WithISVCName("nopol-isvc"),
+			WithRestartPolicy(v1beta1.OMENativeRestartPolicyNone),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		ginkgo.By("waiting for Ready at Incarnation=1")
+		var origUID string
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Incarnation).To(Equal(int64(1)))
+
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "nopol-isvc-engine-0-default-0",
+			}, pod)).To(Succeed())
+			origUID = string(pod.UID)
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("synthesizing pod.Status.Phase=Failed")
+		Eventually(func(g Gomega) {
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "nopol-isvc-engine-0-default-0",
+			}, pod)).To(Succeed())
+			pod.Status.Phase = corev1.PodFailed
+			g.Expect(k8sClient.Status().Update(suiteCtx, pod)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("asserting Incarnation stays at 1 and the failed pod survives (no Restart)")
+		Consistently(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Incarnation).To(Equal(int64(1)),
+				"RestartPolicy=None must NOT bump Incarnation on PodFailed; got %d",
+				cs.OMENative.InstanceStatuses[0].Incarnation)
+
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "nopol-isvc-engine-0-default-0",
+			}, pod)).To(Succeed())
+			g.Expect(string(pod.UID)).To(Equal(origUID),
+				"failed pod must NOT be replaced under RestartPolicy=None")
+			g.Expect(pod.DeletionTimestamp).To(BeNil(),
+				"failed pod must NOT be marked for deletion under RestartPolicy=None")
+		}, "3s", util.PollInterval).Should(Succeed())
+	})
+
+	// A2 latency: a pod-delete event should land on the parent ISVC's
+	// reconcile queue within ShortTimeout (10s). A regression that broke
+	// the EventHandler → Expectations → queue chain would push observable
+	// latency past the spec's "within one reconcile interval" budget.
+	ginkgo.It("pod-delete enqueues the parent ISVC within ShortTimeout", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("lat-llama"),
+			WithCSRName("lat-runtime"),
+			WithISVCName("lat-isvc"),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("deleting the pod and asserting Incarnation bumps within ShortTimeout")
+		victim := &corev1.Pod{}
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+			Namespace: ns.Name, Name: "lat-isvc-engine-0-default-0",
+		}, victim)).To(Succeed())
+		Expect(k8sClient.Delete(suiteCtx, victim)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Incarnation).To(BeNumerically(">=", int64(2)),
+				"pod-delete should fire Restart within ShortTimeout=10s; got Incarnation=%d",
+				cs.OMENative.InstanceStatuses[0].Incarnation)
+		}).WithTimeout(util.ShortTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
 	// Spec scenario #57 — ManagedByOMENativePredicate filters out
 	// non-OMENative pods. Bug it catches: predicate regression that
 	// causes the controller to enqueue our ISVC for every pod event

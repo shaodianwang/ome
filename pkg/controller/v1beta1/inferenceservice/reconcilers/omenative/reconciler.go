@@ -259,6 +259,13 @@ func reconcileComponentOps(ctx context.Context, p ReconcileParams, plan Componen
 			if !done {
 				return ctrl.Result{RequeueAfter: migrateRequeueInterval}, nil
 			}
+			// Migrate just removed the source InstanceStatus and promoted
+			// the surge to Ready. plan was computed with the stale
+			// pre-migration view (both source and surge present), so the
+			// Update + Create passes below would fall through to recreate
+			// the source-side index. Re-queue so the next reconcile
+			// rebuilds plan from the post-migration status.
+			return ctrl.Result{Requeue: true}, nil
 		}
 	}
 

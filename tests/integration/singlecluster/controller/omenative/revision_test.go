@@ -1,6 +1,8 @@
 package omenative
 
 import (
+	"fmt"
+
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -242,6 +244,93 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 			g.Expect(foundFresh).To(BeTrue(),
 				"expected a fresh controller-owned CR at a NEW name; got %+v",
 				crs.Items)
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
+	// Retention sweep: 12 distinct revisions should produce at most 10
+	// non-live CRs (default defaultRevisionRetention) plus the current
+	// live revision. Older non-live CRs get swept by
+	// RetainControllerRevisions in the post-commit AggregateAndWriteStatus
+	// retention hook.
+	//
+	// Sequences each bump by waiting for UpdateRevision to advance — that
+	// commit point is where retention runs, regardless of whether pods
+	// have converged. Avoids the envtest pod-recreation flake.
+	ginkgo.It("retention caps non-live ControllerRevisions at the default", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("retain-llama"),
+			WithCSRName("retain-runtime"),
+			WithISVCName("retain-isvc"),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		var initialRev string
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.UpdateRevision).NotTo(BeEmpty(),
+				"controller should publish initial UpdateRevision")
+			initialRev = cs.OMENative.UpdateRevision
+			crs := &appsv1.ControllerRevisionList{}
+			g.Expect(k8sClient.List(suiteCtx, crs,
+				client.InNamespace(ns.Name),
+				client.MatchingLabels{labelManagedByKey: managedByValue},
+			)).To(Succeed())
+			g.Expect(crs.Items).To(HaveLen(1))
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("bumping env var 12 times; wait for UpdateRevision to advance each iteration")
+		prevRev := initialRev
+		for i := 1; i <= 12; i++ {
+			val := fmt.Sprintf("v%d", i)
+			Eventually(func(g Gomega) {
+				fresh := &v1beta1.InferenceService{}
+				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+				envs := fresh.Spec.Engine.PodSpec.Containers[0].Env
+				found := false
+				for j := range envs {
+					if envs[j].Name == "REV_BUMP" {
+						envs[j].Value = val
+						found = true
+						break
+					}
+				}
+				if !found {
+					envs = append(envs, corev1.EnvVar{Name: "REV_BUMP", Value: val})
+				}
+				fresh.Spec.Engine.PodSpec.Containers[0].Env = envs
+				g.Expect(k8sClient.Update(suiteCtx, fresh)).To(Succeed())
+			}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				fresh := &v1beta1.InferenceService{}
+				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+				cs := fresh.Status.Components[v1beta1.EngineComponent]
+				g.Expect(cs.OMENative).NotTo(BeNil())
+				g.Expect(cs.OMENative.UpdateRevision).NotTo(Equal(prevRev),
+					"UpdateRevision must advance after bump %d (prev=%s, current=%s)",
+					i, prevRev, cs.OMENative.UpdateRevision)
+				prevRev = cs.OMENative.UpdateRevision
+			}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}
+
+		ginkgo.By("expecting CR count <= retention cap (10 non-live + up to 2 live)")
+		Eventually(func(g Gomega) {
+			crs := &appsv1.ControllerRevisionList{}
+			g.Expect(k8sClient.List(suiteCtx, crs,
+				client.InNamespace(ns.Name),
+				client.MatchingLabels{labelManagedByKey: managedByValue},
+			)).To(Succeed())
+			g.Expect(len(crs.Items)).To(BeNumerically("<=", 12),
+				"expected at most 12 CRs (10 non-live + 1-2 live); got %d", len(crs.Items))
+			g.Expect(len(crs.Items)).To(BeNumerically(">=", 1),
+				"at least the live CR must remain")
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 

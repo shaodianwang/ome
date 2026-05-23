@@ -83,6 +83,118 @@ var _ = ginkgo.Describe("OMENative Update", ginkgo.Ordered, func() {
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
+	// Multi-instance in-place update: both Instances' pods get image
+	// patched, both UIDs preserved. Exercises the per-Instance dispatch
+	// loop in reconcileComponentOps's Update pass.
+	ginkgo.It("MinReplicas=2 image-only update patches both pods in-place", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("multi-up-llama"),
+			WithCSRName("multi-up-runtime"),
+			WithISVCName("multi-up-isvc"),
+			WithImage("ghcr.io/test/runtime:v1"),
+			WithMinReplicas(2),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		ginkgo.By("waiting for both pods Ready at v1, capturing UIDs")
+		origUIDs := map[string]string{}
+		Eventually(func(g Gomega) {
+			for _, name := range []string{"multi-up-isvc-engine-0-default-0", "multi-up-isvc-engine-1-default-0"} {
+				pod := &corev1.Pod{}
+				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+					Namespace: ns.Name, Name: name,
+				}, pod)).To(Succeed())
+				g.Expect(pod.Spec.Containers[0].Image).To(Equal("ghcr.io/test/runtime:v1"))
+				origUIDs[name] = string(pod.UID)
+			}
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(2))
+			for _, s := range cs.OMENative.InstanceStatuses {
+				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			}
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("flipping image to v2")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			fresh.Spec.Engine.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
+			g.Expect(k8sClient.Update(suiteCtx, fresh)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("expecting both pods to flip to v2 with UIDs preserved")
+		Eventually(func(g Gomega) {
+			for name, want := range origUIDs {
+				pod := &corev1.Pod{}
+				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+					Namespace: ns.Name, Name: name,
+				}, pod)).To(Succeed())
+				g.Expect(pod.Spec.Containers[0].Image).To(Equal("ghcr.io/test/runtime:v2"),
+					"%s image should be patched to v2", name)
+				g.Expect(string(pod.UID)).To(Equal(want),
+					"%s UID must be preserved (in-place); got %s want %s", name, pod.UID, want)
+			}
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
+	// InPlaceOnly + image-only diff succeeds (no recreate fallback).
+	// Pod UID preserved; image patched.
+	ginkgo.It("InPlaceOnly strategy with image-only diff patches in-place", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("inplaceok-llama"),
+			WithCSRName("inplaceok-runtime"),
+			WithISVCName("inplaceok-isvc"),
+			WithImage("ghcr.io/test/runtime:v1"),
+			WithUpdateStrategy(v1beta1.OMENativeUpdateStrategyInPlaceOnly),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		var origUID string
+		Eventually(func(g Gomega) {
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "inplaceok-isvc-engine-0-default-0",
+			}, pod)).To(Succeed())
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			origUID = string(pod.UID)
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("flipping image to v2")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			fresh.Spec.Engine.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
+			g.Expect(k8sClient.Update(suiteCtx, fresh)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("expecting image patch in-place (UID preserved)")
+		Eventually(func(g Gomega) {
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "inplaceok-isvc-engine-0-default-0",
+			}, pod)).To(Succeed())
+			g.Expect(pod.Spec.Containers[0].Image).To(Equal("ghcr.io/test/runtime:v2"))
+			g.Expect(string(pod.UID)).To(Equal(origUID),
+				"InPlaceOnly + eligible diff must keep UID; got %s want %s", pod.UID, origUID)
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
 	// RecreatePod strategy forces recreate even when the diff IS image-
 	// only (would otherwise be in-place eligible). Pod UID changes and
 	// Incarnation bumps regardless of eligibility.

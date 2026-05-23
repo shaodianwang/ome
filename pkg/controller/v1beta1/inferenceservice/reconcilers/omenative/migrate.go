@@ -398,14 +398,95 @@ func (l *auditLedger) inFlightEntryOrSeed(uuid string, req *MigrationRequest, su
 	return &e
 }
 
-// detectMigrationRequest scans annotations for the first non-terminal
-// migration request. Schema-violating / wrong-component requests get a
-// Failed ledger entry but don't surface as Go errors.
+// nextInFlightFromLedger returns the oldest Started ledger entry for the
+// given component whose UUID has no terminal counterpart. Returns empty
+// uuid when nothing is in flight. The MigrationRequest is reconstructed
+// from the ledger entry; HintTargetNodes and Reason are lost on this
+// path but neither is needed for second-pass Migrate calls (the surge
+// already exists with the overlay applied, Operation.Reason already
+// carries the reason on the InstanceStatus).
+func nextInFlightFromLedger(ledger *auditLedger, component v1beta1.ComponentType) (string, *MigrationRequest, int32) {
+	if ledger == nil {
+		return "", nil, 0
+	}
+	// Index Started + terminal entries by UUID for O(N) selection.
+	terminal := map[string]struct{}{}
+	for _, e := range ledger.Entries {
+		if e.Phase == auditPhaseCompleted || e.Phase == auditPhaseFailed {
+			terminal[e.RequestUUID] = struct{}{}
+		}
+	}
+	var oldestStartedAt string
+	var picked *AuditEntry
+	for i := range ledger.Entries {
+		e := &ledger.Entries[i]
+		if e.Phase != auditPhaseStarted {
+			continue
+		}
+		if e.Component != string(component) {
+			continue
+		}
+		if _, done := terminal[e.RequestUUID]; done {
+			continue
+		}
+		if picked == nil || e.StartedAt < oldestStartedAt {
+			picked = e
+			oldestStartedAt = e.StartedAt
+		}
+	}
+	if picked == nil {
+		return "", nil, 0
+	}
+	req := &MigrationRequest{
+		SchemaVersion: migrationRequestSchemaV1,
+		Component:     picked.Component,
+		Instance:      picked.SourceInstance,
+		FromNode:      picked.FromNode,
+	}
+	return picked.RequestUUID, req, picked.SourceInstance
+}
+
+// detectMigrationRequest finds the next migration to drive. Two sources:
+//
+//  1. ISVC annotations carrying `ome.io/migration-request-v1-<uuid>`.
+//     These are the entry-point trigger written by the migration
+//     requester.
+//
+//  2. The audit ledger's in-flight Started entries. Once Migrate accepts
+//     a request it clears the annotation immediately (the requester's
+//     contract is 30s response-or-clear), but the migration itself takes
+//     many reconcile passes — surge create, drain, source delete,
+//     promote. Without ledger-driven detection, the very next reconcile
+//     after annotation-clear would skip the Migration pass entirely,
+//     fall through to Create, and reconcileInstance would re-promote
+//     the still-Migrating source to Ready. That mis-classification
+//     causes the post-migration scale-down pass to delete the surge as
+//     "extra" (Phase=Ready + Operation=nil at a sparse index).
+//
+// Schema-violating / wrong-component annotations get a Failed ledger
+// entry but don't surface as Go errors.
 func detectMigrationRequest(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType) (string, *MigrationRequest, int32, bool, error) {
-	if p.ISVC == nil || p.ISVC.Annotations == nil {
+	if p.ISVC == nil {
 		return "", nil, 0, false, nil
 	}
-	// Deterministic order when multiple requests are pending.
+
+	ledger, err := loadAuditLedger(ctx, p.reader(), p.ISVC)
+	if err != nil {
+		return "", nil, 0, false, err
+	}
+
+	// Source 2 first: an in-flight ledger entry means an accepted
+	// migration is still mid-flow. Drive it forward regardless of
+	// annotation state. Pick the oldest Started entry (smallest
+	// StartedAt) for deterministic dispatch when multiple are in flight.
+	if uuid, req, srcIdx := nextInFlightFromLedger(ledger, component); uuid != "" {
+		return uuid, req, srcIdx, true, nil
+	}
+
+	// Source 1: annotation-driven new requests.
+	if p.ISVC.Annotations == nil {
+		return "", nil, 0, false, nil
+	}
 	keys := make([]string, 0, len(p.ISVC.Annotations))
 	for k := range p.ISVC.Annotations {
 		if strings.HasPrefix(k, migrationRequestAnnotationPrefix) {
@@ -416,11 +497,6 @@ func detectMigrationRequest(ctx context.Context, p ReconcileParams, component v1
 		return "", nil, 0, false, nil
 	}
 	sort.Strings(keys)
-
-	ledger, err := loadAuditLedger(ctx, p.reader(), p.ISVC)
-	if err != nil {
-		return "", nil, 0, false, err
-	}
 
 	for _, k := range keys {
 		uuid := extractRequestUUID(k)

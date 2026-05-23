@@ -123,6 +123,56 @@ func TestRevisionHash_NilTemplateRejected(t *testing.T) {
 	}
 }
 
+// revisionTemplateMeta must NOT include migration-request-v1-* annotations
+// in the hashed metadata. Otherwise adding/removing a migration request
+// annotation drifts every Component's revision hash — including Components
+// that are not the migration target — and triggers a phantom rollout.
+func TestRevisionHash_MigrationAnnotationDoesNotDriftHash(t *testing.T) {
+	ps := basicPodSpecForRevision()
+
+	base := &metav1.ObjectMeta{
+		Annotations: map[string]string{
+			"ome.io/base-model-name": "llama-7b",
+			"ome.io/deploymentMode":  "OMENative",
+		},
+	}
+	withMig := &metav1.ObjectMeta{
+		Annotations: map[string]string{
+			"ome.io/base-model-name": "llama-7b",
+			"ome.io/deploymentMode":  "OMENative",
+			"ome.io/migration-request-v1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee": `{"component":"engine","schemaVersion":"v1"}`,
+		},
+	}
+
+	hBase, _, _ := revisionHash(ps, base, nil)
+	hWith, _, _ := revisionHash(ps, withMig, nil)
+	if hBase != hWith {
+		t.Errorf("migration request annotation must be filtered from revision hash: base=%s withMig=%s", hBase, hWith)
+	}
+}
+
+// User-supplied annotations MUST still contribute to the hash so a
+// legitimate pod-template metadata change triggers a rollout.
+func TestRevisionHash_UserAnnotationStillDriftsHash(t *testing.T) {
+	ps := basicPodSpecForRevision()
+
+	base := &metav1.ObjectMeta{
+		Annotations: map[string]string{"ome.io/base-model-name": "llama-7b"},
+	}
+	withUserAnnot := &metav1.ObjectMeta{
+		Annotations: map[string]string{
+			"ome.io/base-model-name": "llama-7b",
+			"k8s.grafana.com/scrape": "true",
+		},
+	}
+
+	hBase, _, _ := revisionHash(ps, base, nil)
+	hWith, _, _ := revisionHash(ps, withUserAnnot, nil)
+	if hBase == hWith {
+		t.Errorf("user annotation must still drift the hash: both=%s", hBase)
+	}
+}
+
 func TestEnsureControllerRevision_CreatesNew(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClientWithApps(t, isvc)

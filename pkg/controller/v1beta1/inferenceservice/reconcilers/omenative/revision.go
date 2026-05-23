@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -85,14 +86,54 @@ func revisionHash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, col
 // when neither labels nor annotations are set — preserves the legacy
 // `"podMeta":null` shape so ISVCs that don't yet carry template metadata
 // don't see a phantom rollout when this code first deploys.
+//
+// Filters out lifecycle annotations that the controller writes back to
+// the ISVC (migration requests) so adding/removing them does not bump
+// the revision hash. Without this, a migration request landing on the
+// ISVC would drift every Component's revision hash — including
+// Components that aren't the migration target — and force a phantom
+// rollout that envtest cannot complete.
 func revisionTemplateMeta(src *metav1.ObjectMeta) *metav1.ObjectMeta {
 	if src == nil || (len(src.Labels) == 0 && len(src.Annotations) == 0) {
 		return nil
 	}
+	filtered := src.Annotations
+	if hasLifecycleAnnotation(src.Annotations) {
+		filtered = make(map[string]string, len(src.Annotations))
+		for k, v := range src.Annotations {
+			if isLifecycleAnnotation(k) {
+				continue
+			}
+			filtered[k] = v
+		}
+	}
+	if len(src.Labels) == 0 && len(filtered) == 0 {
+		return nil
+	}
 	return &metav1.ObjectMeta{
 		Labels:      src.Labels,
-		Annotations: src.Annotations,
+		Annotations: filtered,
 	}
+}
+
+// hasLifecycleAnnotation reports whether any key in annotations is a
+// controller-written lifecycle annotation. Fast path so the common
+// no-lifecycle-annotation case skips the copy in revisionTemplateMeta.
+func hasLifecycleAnnotation(annotations map[string]string) bool {
+	for k := range annotations {
+		if isLifecycleAnnotation(k) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLifecycleAnnotation reports whether the annotation key is one the
+// controller mutates as part of normal reconcile (e.g., migration
+// requests) and therefore must not feed into the pod-template revision
+// hash. Add new prefixes here when they get introduced.
+func isLifecycleAnnotation(key string) bool {
+	return strings.HasPrefix(key, migrationRequestAnnotationPrefix)
 }
 
 // revisionName composes the ControllerRevision object name from the parent

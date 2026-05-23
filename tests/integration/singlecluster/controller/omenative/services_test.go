@@ -6,6 +6,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -72,6 +73,42 @@ var _ = ginkgo.Describe("OMENative headless Service", ginkgo.Ordered, func() {
 		// the component's pods specifically.
 		Expect(svc.Spec.Selector["ome.io/managed-by"]).To(Equal("OMENative"),
 			"selector must include ome.io/managed-by=OMENative; got %+v", svc.Spec.Selector)
+	})
+
+	// The headless Service must carry a controller OwnerReference to
+	// the parent ISVC so K8s GC cascade-deletes it on ISVC delete.
+	// Companion to the lifecycle pods+CRs OwnerRef spec.
+	ginkgo.It("headless Service has a controller OwnerReference to the ISVC", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("svc-owner-llama"),
+			WithCSRName("svc-owner-runtime"),
+			WithISVCName("svc-owner-isvc"),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			svc := &corev1.Service{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "svc-owner-isvc-engine-headless",
+			}, svc)).To(Succeed())
+
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+
+			found := false
+			for _, ref := range svc.OwnerReferences {
+				if ref.Controller != nil && *ref.Controller && ref.UID == fresh.UID {
+					found = true
+					break
+				}
+			}
+			g.Expect(found).To(BeTrue(),
+				"headless Service missing controller OwnerRef to ISVC; owners=%+v", svc.OwnerReferences)
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
 	// Spec scenario #61. Bug it catches: a regression where two

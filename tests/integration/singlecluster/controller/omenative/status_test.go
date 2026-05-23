@@ -61,6 +61,144 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
+	// DRAIN-1: a pod with DeletionTimestamp set (terminating) must be
+	// excluded from AvailableReplicas immediately, before the
+	// EndpointSlice publishes Ready=false. endpointAvailable masks
+	// terminating endpoints out of the available set the status
+	// counter reads. Without this, AvailableReplicas would stay
+	// inflated during graceful termination windows.
+	ginkgo.It("DRAIN-1: terminating pod is excluded from AvailableReplicas", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("term-llama"),
+			WithCSRName("term-runtime"),
+			WithISVCName("term-isvc"),
+			// MigrationMode=Never so deleting a pod here doesn't get
+			// caught by any migration path; we want pure Restart
+			// behavior. Restart will recreate the pod, so capture
+			// AvailableReplicas during the transient terminating window.
+			WithRestartPolicy(v1beta1.OMENativeRestartPolicyNone),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		ginkgo.By("waiting for Ready + AvailableReplicas=1")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.AvailableReplicas).To(Equal(int32(1)))
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("setting a long graceful termination on the pod, then deleting")
+		// 60s grace period gives a wide window where the pod has a
+		// DeletionTimestamp but the kubelet sim hasn't force-removed it.
+		pod := &corev1.Pod{}
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+			Namespace: ns.Name, Name: "term-isvc-engine-0-default-0",
+		}, pod)).To(Succeed())
+		grace := int64(60)
+		Expect(k8sClient.Delete(suiteCtx, pod, &client.DeleteOptions{
+			GracePeriodSeconds: &grace,
+		})).To(Succeed())
+
+		ginkgo.By("expecting AvailableReplicas to drop to 0 within ShortTimeout")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.AvailableReplicas).To(Equal(int32(0)),
+				"terminating pod must be excluded from AvailableReplicas; got %d",
+				cs.OMENative.AvailableReplicas)
+		}).WithTimeout(util.ShortTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
+	// ObservedGeneration on the Component status tracks
+	// ISVC.metadata.generation. Tooling reads ObservedGeneration to
+	// know "the status I'm reading reflects spec at this generation"
+	// — a regression that froze it on first reconcile would silently
+	// stall every downstream gauge.
+	ginkgo.It("Component.ObservedGeneration tracks ISVC.metadata.generation across edits", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("og-llama"),
+			WithCSRName("og-runtime"),
+			WithISVCName("og-isvc"),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		var initialGen int64
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.ObservedGeneration).To(Equal(fresh.Generation),
+				"ObservedGeneration should catch up to .metadata.generation")
+			initialGen = fresh.Generation
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("editing the ISVC spec to bump generation")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			two := 2
+			fresh.Spec.Engine.ComponentExtensionSpec.MinReplicas = &two
+			g.Expect(k8sClient.Update(suiteCtx, fresh)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("expecting ObservedGeneration to advance past initial")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			g.Expect(fresh.Generation).To(BeNumerically(">", initialGen),
+				"ISVC.metadata.generation should have bumped after spec edit")
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.ObservedGeneration).To(Equal(fresh.Generation),
+				"ObservedGeneration must catch up to the new generation; stuck at %d", cs.OMENative.ObservedGeneration)
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
+	// Component.UpdateRevision is set to the target revision name on
+	// every reconcile (regardless of rollout state).
+	// Component.CurrentRevision is promoted to the same name only once
+	// rolloutComplete returns true (all Instances at Phase=Ready with
+	// matching RunningRevision). Drives downstream tooling that watches
+	// for "deployment is at version X".
+	ginkgo.It("Component.UpdateRevision + CurrentRevision converge after a fresh ISVC reaches Ready", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("rev-promote-llama"),
+			WithCSRName("rev-promote-runtime"),
+			WithISVCName("rev-promote-isvc"),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.OMENative.UpdateRevision).NotTo(BeEmpty(),
+				"UpdateRevision should be stamped once the target is computed")
+			g.Expect(cs.OMENative.CurrentRevision).To(Equal(cs.OMENative.UpdateRevision),
+				"CurrentRevision should converge to UpdateRevision once rollout completes")
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
 	// Per-Instance Conditions surface AllPodsScheduled / AllPodsReady /
 	// AllPodsAvailable. Status=True with the matching Reason on the
 	// happy path. Catches a regression that drops the condition or

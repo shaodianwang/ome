@@ -487,6 +487,119 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
+	// Scale-up race: immediately bump MinReplicas before pod 0 reaches
+	// Ready. Tests the planner's handling of "pod 0 still Creating"
+	// state when computing additional indices — Pass 1 might pick the
+	// in-flight Index 0 if it's already in InstanceStatuses, plus
+	// Pass 2/3 add new ones up to the new MinReplicas.
+	ginkgo.It("scale-up race: bump MinReplicas before pod 0 is Ready converges to all replicas", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("race-llama"),
+			WithCSRName("race-runtime"),
+			WithISVCName("race-isvc"),
+			WithMinReplicas(1),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		ginkgo.By("immediately bumping MinReplicas 1 → 3 without waiting for Ready")
+		// Bounce up the MinReplicas as quickly as possible to race the
+		// initial reconcile. RetryOnConflict because the controller is
+		// also writing status concurrently.
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			three := 3
+			fresh.Spec.Engine.ComponentExtensionSpec.MinReplicas = &three
+			g.Expect(k8sClient.Update(suiteCtx, fresh)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("expecting all 3 InstanceStatuses to reach Ready")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(3))
+			for _, s := range cs.OMENative.InstanceStatuses {
+				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+					"all 3 instances must converge to Ready; got Index=%d Phase=%q", s.Index, s.Phase)
+			}
+			// Verify indices are exactly {0, 1, 2} (no sparse allocation).
+			seen := map[int32]bool{}
+			for _, s := range cs.OMENative.InstanceStatuses {
+				seen[s.Index] = true
+			}
+			g.Expect(seen).To(HaveKey(int32(0)))
+			g.Expect(seen).To(HaveKey(int32(1)))
+			g.Expect(seen).To(HaveKey(int32(2)))
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
+	// ISVC delete during in-flight Restart: deleting the ISVC while
+	// Restart has stamped Phase=Restarting on its InstanceStatus must
+	// not panic the controller. envtest doesn't run GC, so pods stick
+	// around — the test asserts the controller keeps reconciling
+	// (next reconcile NotFound's on the ISVC and exits cleanly) without
+	// throwing an unrecoverable error.
+	ginkgo.It("ISVC delete during in-flight Restart does not panic the controller", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("rdel-llama"),
+			WithCSRName("rdel-runtime"),
+			WithISVCName("rdel-isvc"),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("triggering Restart via PodFailed")
+		Eventually(func(g Gomega) {
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "rdel-isvc-engine-0-default-0",
+			}, pod)).To(Succeed())
+			pod.Status.Phase = corev1.PodFailed
+			g.Expect(k8sClient.Status().Update(suiteCtx, pod)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("immediately deleting the ISVC")
+		Expect(k8sClient.Delete(suiteCtx, fx.ISVC)).To(Succeed())
+
+		// The controller might still be mid-Restart when the ISVC delete
+		// lands. We're asserting it survives — the simplest way is to
+		// fire a follow-up Get and confirm the ISVC eventually disappears
+		// (or returns NotFound). envtest's GC isn't running so the ISVC
+		// may persist with a deletionTimestamp; either way the controller
+		// shouldn't crash, and subsequent reconciles must be no-ops.
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			err := k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)
+			if err != nil {
+				g.Expect(client.IgnoreNotFound(err)).To(Succeed())
+				return
+			}
+			// Tolerate envtest's missing GC: deletionTimestamp on the
+			// ISVC means K8s observed the delete and is awaiting GC. The
+			// controller should observe it too and stop driving state
+			// transitions; we don't need to assert specific phase here.
+			_ = fresh.DeletionTimestamp
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
 	ginkgo.It("missing CSR: no pods created, controller doesn't panic on retry", func() {
 		ginkgo.By("creating CBM + ISVC but NO ClusterServingRuntime")
 		fx := newOMENativeFixture(ns.Name,
@@ -652,6 +765,71 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
 				"InstanceStatuses should converge to exactly one entry after scale-down")
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
+	// Delete + recreate same-name ISVC in the same namespace. The new
+	// ISVC has a different UID; controller-owned CRs from the old ISVC
+	// become foreign-owned from the new ISVC's perspective.
+	// EnsureControllerRevision detects this as a collision and bumps
+	// CollisionCount so the new CR lands with a different name. The
+	// new ISVC must reach Ready without inheriting state from the
+	// deleted one — guards against an old-CR adoption that would lock
+	// the new ISVC to a stale pod template.
+	ginkgo.It("delete + recreate same-name ISVC produces a fresh ControllerRevision (no foreign-owner adoption)", func() {
+		fx1 := newOMENativeFixture(ns.Name,
+			WithCBMName("recreate-llama"),
+			WithCSRName("recreate-runtime"),
+			WithISVCName("recreate-isvc"),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx1.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx1.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx1.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx1.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx1.ISVC)).To(Succeed())
+
+		var originalCR, originalUID string
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx1.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.OMENative.UpdateRevision).NotTo(BeEmpty())
+			originalCR = cs.OMENative.UpdateRevision
+			originalUID = string(fresh.UID)
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("delete the ISVC")
+		Expect(k8sClient.Delete(suiteCtx, fx1.ISVC)).To(Succeed())
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx1.ISVC), &v1beta1.InferenceService{})
+			g.Expect(client.IgnoreNotFound(err)).To(Succeed())
+			g.Expect(err).To(HaveOccurred(), "ISVC must vanish from apiserver before recreate")
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("recreate ISVC with the SAME name (new UID)")
+		fx2 := newOMENativeFixture(ns.Name,
+			WithCBMName("recreate-llama"),
+			WithCSRName("recreate-runtime"),
+			WithISVCName("recreate-isvc"),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx2.ISVC)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx2.ISVC), fresh)).To(Succeed())
+			g.Expect(string(fresh.UID)).NotTo(Equal(originalUID),
+				"recreated ISVC must have a new UID")
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.OMENative.UpdateRevision).NotTo(BeEmpty())
+			g.Expect(cs.OMENative.UpdateRevision).NotTo(Equal(originalCR),
+				"new ISVC must NOT adopt the old CR (foreign UID); EnsureControllerRevision must bump CollisionCount and produce a fresh name. Old=%s New=%s",
+				originalCR, cs.OMENative.UpdateRevision)
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 

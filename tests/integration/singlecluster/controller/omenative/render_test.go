@@ -207,6 +207,111 @@ var _ = ginkgo.Describe("OMENative pod rendering", ginkgo.Ordered, func() {
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
+	// User-declared volumes + volumeMounts must propagate to the
+	// rendered pod. Volumes/mounts are not fields Render owns; a
+	// regression that dropped them would silently break model
+	// mounting, config sidecars, secret injection, etc.
+	ginkgo.It("user-declared volumes + volumeMounts propagate to rendered pod", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("vol-llama"),
+			WithCSRName("vol-runtime"),
+			WithISVCName("vol-isvc"),
+		)
+		fx.ISVC.Spec.Engine.PodSpec.Volumes = []corev1.Volume{{
+			Name: "scratch",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		}}
+		fx.ISVC.Spec.Engine.PodSpec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
+			Name: "scratch", MountPath: "/var/scratch",
+		}}
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "vol-isvc-engine-0-default-0",
+			}, pod)).To(Succeed())
+			gotVolume := false
+			for _, v := range pod.Spec.Volumes {
+				if v.Name == "scratch" && v.EmptyDir != nil {
+					gotVolume = true
+					break
+				}
+			}
+			g.Expect(gotVolume).To(BeTrue(),
+				"pod %s missing user-declared 'scratch' volume; volumes=%+v",
+				pod.Name, pod.Spec.Volumes)
+
+			gotMount := false
+			for _, c := range pod.Spec.Containers {
+				if c.Name != "ome-container" {
+					continue
+				}
+				for _, m := range c.VolumeMounts {
+					if m.Name == "scratch" && m.MountPath == "/var/scratch" {
+						gotMount = true
+						break
+					}
+				}
+			}
+			g.Expect(gotMount).To(BeTrue(),
+				"engine container missing 'scratch' VolumeMount at /var/scratch")
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
+	// User-supplied env vars on the engine container must survive
+	// Render's OME_* injection. Injection MUST add the OME_* set
+	// without dropping user-declared vars; user names that collide
+	// with OME_* are documented as overridden (Render wins) — the
+	// non-colliding ones should pass through unchanged.
+	ginkgo.It("user-supplied env vars survive Render's OME_* injection", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("env-user-llama"),
+			WithCSRName("env-user-runtime"),
+			WithISVCName("env-user-isvc"),
+		)
+		fx.ISVC.Spec.Engine.PodSpec.Containers[0].Env = []corev1.EnvVar{
+			{Name: "MY_FLAG", Value: "true"},
+			{Name: "LOG_LEVEL", Value: "debug"},
+		}
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "env-user-isvc-engine-0-default-0",
+			}, pod)).To(Succeed())
+			var engineC *corev1.Container
+			for i := range pod.Spec.Containers {
+				if pod.Spec.Containers[i].Name == "ome-container" {
+					engineC = &pod.Spec.Containers[i]
+					break
+				}
+			}
+			g.Expect(engineC).NotTo(BeNil())
+			byName := map[string]string{}
+			for _, e := range engineC.Env {
+				byName[e.Name] = e.Value
+			}
+			g.Expect(byName).To(HaveKeyWithValue("MY_FLAG", "true"),
+				"user-supplied env MY_FLAG must survive Render; got %+v", engineC.Env)
+			g.Expect(byName).To(HaveKeyWithValue("LOG_LEVEL", "debug"),
+				"user-supplied env LOG_LEVEL must survive Render; got %+v", engineC.Env)
+			g.Expect(byName).To(HaveKey("OME_COMPONENT"),
+				"OME_COMPONENT must still be injected alongside user env")
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
 	// Resource requests/limits set on the engine container must
 	// propagate to the rendered pod. Render is supposed to be a
 	// passthrough on container fields other than the ones it controls

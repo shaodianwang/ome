@@ -455,3 +455,13 @@ func itoaShort(n int) string {
 	// 10+ pods. fmt.Sprintf is fine here; we're not on a hot path.
 	return fmt.Sprintf("%d", n)
 }
+
+// crNames returns just the .Name fields of a CR list — useful in
+// test failure messages where the full CR objects would be too noisy.
+func crNames(items []appsv1.ControllerRevision) []string {
+	out := make([]string, 0, len(items))
+	for _, cr := range items {
+		out = append(out, cr.Name)
+	}
+	return out
+}

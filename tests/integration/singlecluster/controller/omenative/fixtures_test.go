@@ -14,16 +14,24 @@ import (
 // container, LlamaForCausalLM architecture matching the suite's CBM
 // inspection fake.
 type fixtureOptions struct {
-	cbmName         string
-	csrName         string
-	isvcName        string
-	image           string
-	minReplicas     int
-	updateStrategy  v1beta1.OMENativeUpdateStrategyType
-	restartPolicy   v1beta1.OMENativeRestartPolicy
-	migrationMode   v1beta1.OMENativeMigrationPolicyMode
-	engineAnnots    map[string]string
-	extraContainers []corev1.Container
+	cbmName            string
+	csrName            string
+	isvcName           string
+	image              string
+	minReplicas        int
+	updateStrategy     v1beta1.OMENativeUpdateStrategyType
+	restartPolicy      v1beta1.OMENativeRestartPolicy
+	migrationMode      v1beta1.OMENativeMigrationPolicyMode
+	engineAnnots       map[string]string
+	extraContainers    []corev1.Container
+	withDecoder        bool
+	decoderImage       string
+	decoderMinReplicas int
+	decoderRawMode     bool
+	withRouter         bool
+	routerImage        string
+	routerMinReplicas  int
+	routerRawMode      bool
 }
 
 // FixtureOption mutates fixtureOptions before the fixture is built.
@@ -84,6 +92,57 @@ func WithExtraContainer(c corev1.Container) FixtureOption {
 	return func(o *fixtureOptions) { o.extraContainers = append(o.extraContainers, c) }
 }
 
+// WithDecoder enables a Decoder component on the ISVC, opted into
+// OMENative via per-component annotation. Used for PD-disaggregated
+// integration coverage (OEP-0007.1 foundation).
+func WithDecoder() FixtureOption {
+	return func(o *fixtureOptions) { o.withDecoder = true }
+}
+
+// WithDecoderImage overrides the decoder container image when
+// WithDecoder is set. Defaults to the engine's image so a
+// Decoder-aware test can still bump the engine in isolation.
+func WithDecoderImage(img string) FixtureOption {
+	return func(o *fixtureOptions) { o.decoderImage = img }
+}
+
+// WithDecoderMinReplicas sets decoder.MinReplicas (only meaningful
+// with WithDecoder). Defaults to 1.
+func WithDecoderMinReplicas(n int) FixtureOption {
+	return func(o *fixtureOptions) { o.decoderMinReplicas = n }
+}
+
+// WithDecoderRawMode flips the Decoder annotation from OMENative to
+// RawDeployment. Used by mixed-mode tests asserting per-component
+// dispatch isolation.
+func WithDecoderRawMode() FixtureOption {
+	return func(o *fixtureOptions) { o.decoderRawMode = true }
+}
+
+// WithRouter enables a Router component on the ISVC, opted into
+// OMENative via per-component annotation. Used for three-way PD
+// integration coverage.
+func WithRouter() FixtureOption {
+	return func(o *fixtureOptions) { o.withRouter = true }
+}
+
+// WithRouterImage overrides the router container image. Defaults to
+// the engine's image when WithRouter is set.
+func WithRouterImage(img string) FixtureOption {
+	return func(o *fixtureOptions) { o.routerImage = img }
+}
+
+// WithRouterMinReplicas sets router.MinReplicas. Defaults to 1.
+func WithRouterMinReplicas(n int) FixtureOption {
+	return func(o *fixtureOptions) { o.routerMinReplicas = n }
+}
+
+// WithRouterRawMode flips the Router annotation from OMENative to
+// RawDeployment.
+func WithRouterRawMode() FixtureOption {
+	return func(o *fixtureOptions) { o.routerRawMode = true }
+}
+
 // omenativeFixture bundles the three objects every OMENative test
 // has to create. Methods (none yet) can layer scenario-specific
 // mutations on top.
@@ -114,17 +173,25 @@ type omenativeFixture struct {
 // or GinkgoT) and stays trivially mockable.
 func newOMENativeFixture(namespace string, opts ...FixtureOption) *omenativeFixture {
 	o := &fixtureOptions{
-		cbmName:        "fixture-llama-7b",
-		csrName:        "fixture-runtime",
-		isvcName:       "fixture-isvc",
-		image:          "ghcr.io/test/runtime:test",
-		minReplicas:    1,
-		updateStrategy: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-		restartPolicy:  v1beta1.OMENativeRestartPolicyRecreateInstance,
-		migrationMode:  v1beta1.OMENativeMigrationPolicyModeAuto,
+		cbmName:            "fixture-llama-7b",
+		csrName:            "fixture-runtime",
+		isvcName:           "fixture-isvc",
+		image:              "ghcr.io/test/runtime:test",
+		minReplicas:        1,
+		updateStrategy:     v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+		restartPolicy:      v1beta1.OMENativeRestartPolicyRecreateInstance,
+		migrationMode:      v1beta1.OMENativeMigrationPolicyModeAuto,
+		decoderMinReplicas: 1,
+		routerMinReplicas:  1,
 	}
 	for _, opt := range opts {
 		opt(o)
+	}
+	if o.decoderImage == "" {
+		o.decoderImage = o.image
+	}
+	if o.routerImage == "" {
+		o.routerImage = o.image
 	}
 
 	cbm := v1beta1testing.MakeClusterBaseModel(o.cbmName).
@@ -171,12 +238,70 @@ func newOMENativeFixture(namespace string, opts ...FixtureOption) *omenativeFixt
 		PodSpec: v1beta1.PodSpec{Containers: containers},
 	}
 
-	isvc := v1beta1testing.MakeInferenceService(o.isvcName, namespace).
+	wrapper := v1beta1testing.MakeInferenceService(o.isvcName, namespace).
 		Model(o.cbmName).
 		Runtime(o.csrName).
 		DeploymentMode(constants.OMENative).
-		Engine(engine).
-		Obj()
+		Engine(engine)
 
+	if o.withDecoder {
+		dmr := o.decoderMinReplicas
+		mode := string(constants.OMENative)
+		if o.decoderRawMode {
+			mode = string(constants.RawDeployment)
+		}
+		decoderExt := v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{constants.DeploymentMode: mode},
+			MinReplicas: &dmr,
+		}
+		if !o.decoderRawMode {
+			decoderExt.OMENative = &v1beta1.OMENativeComponentSpec{
+				UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{Type: o.updateStrategy},
+				RestartPolicy:  &o.restartPolicy,
+				MigrationPolicy: &v1beta1.OMENativeMigrationPolicy{
+					Mode: o.migrationMode,
+				},
+			}
+		}
+		decoder := &v1beta1.DecoderSpec{
+			ComponentExtensionSpec: decoderExt,
+			PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
+				Name:  "ome-container",
+				Image: o.decoderImage,
+			}}},
+		}
+		wrapper = wrapper.Decoder(decoder)
+	}
+
+	if o.withRouter {
+		rmr := o.routerMinReplicas
+		mode := string(constants.OMENative)
+		if o.routerRawMode {
+			mode = string(constants.RawDeployment)
+		}
+		routerExt := v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{constants.DeploymentMode: mode},
+			MinReplicas: &rmr,
+		}
+		if !o.routerRawMode {
+			routerExt.OMENative = &v1beta1.OMENativeComponentSpec{
+				UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{Type: o.updateStrategy},
+				RestartPolicy:  &o.restartPolicy,
+				MigrationPolicy: &v1beta1.OMENativeMigrationPolicy{
+					Mode: o.migrationMode,
+				},
+			}
+		}
+		router := &v1beta1.RouterSpec{
+			ComponentExtensionSpec: routerExt,
+			PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
+				Name:  "ome-container",
+				Image: o.routerImage,
+			}}},
+		}
+		wrapper = wrapper.Router(router)
+	}
+
+	isvc := wrapper.Obj()
 	return &omenativeFixture{CBM: cbm, CSR: csr, ISVC: isvc}
 }

@@ -267,15 +267,21 @@ var _ = ginkgo.Describe("BaseModel PVC reconcile", ginkgo.Ordered, func() {
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("flipping the Job's terminal Failed condition without writing a ConfigMap")
-		job := &batchv1.Job{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: jobName, Namespace: ns}, job)).To(Succeed())
-		job.Status.Conditions = append(job.Status.Conditions, batchv1.JobCondition{
-			Type:    batchv1.JobFailed,
-			Status:  corev1.ConditionTrue,
-			Reason:  "BackoffLimitExceeded",
-			Message: "Job has reached the specified backoff limit",
-		})
-		Expect(k8sClient.Status().Update(suiteCtx, job)).To(Succeed())
+		// Retry to absorb UID/Conflict races with the basemodel
+		// controller, which may delete-and-recreate the Job while we
+		// patch status (envtest does not run kube-controller-manager,
+		// but the basemodel reconciler still owns the Job lifecycle).
+		Eventually(func(g Gomega) {
+			job := &batchv1.Job{}
+			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: jobName, Namespace: ns}, job)).To(Succeed())
+			job.Status.Conditions = append(job.Status.Conditions, batchv1.JobCondition{
+				Type:    batchv1.JobFailed,
+				Status:  corev1.ConditionTrue,
+				Reason:  "BackoffLimitExceeded",
+				Message: "Job has reached the specified backoff limit",
+			})
+			g.Expect(k8sClient.Status().Update(suiteCtx, job)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			got := &v1beta1.BaseModel{}

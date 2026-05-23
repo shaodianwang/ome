@@ -29,16 +29,8 @@ func DetermineEngineDeploymentMode(engine *v1beta1.EngineSpec) constants.Deploym
 // DetermineDeploymentModes determines the deployment modes for all components based on their specs.
 func DetermineDeploymentModes(engine *v1beta1.EngineSpec, decoder *v1beta1.DecoderSpec, router *v1beta1.RouterSpec, runtime *v1beta1.ServingRuntimeSpec) (engineMode, decoderMode, routerMode constants.DeploymentModeType, err error) {
 	engineMode = determineComponentDeploymentMode(engine, runtime)
-	decoderMode = constants.RawDeployment
-	routerMode = constants.RawDeployment
-
-	if decoder != nil && (decoder.Leader != nil || decoder.Worker != nil) {
-		decoderMode = constants.MultiNode
-	}
-
-	if router != nil {
-		routerMode = determineComponentDeploymentMode(router, runtime)
-	}
+	decoderMode = determineComponentDeploymentMode(decoder, runtime)
+	routerMode = determineComponentDeploymentMode(router, runtime)
 
 	if engine == nil {
 		return "", "", "", fmt.Errorf("engine component is required")
@@ -47,7 +39,10 @@ func DetermineDeploymentModes(engine *v1beta1.EngineSpec, decoder *v1beta1.Decod
 	return engineMode, decoderMode, routerMode, nil
 }
 
-// determineComponentDeploymentMode determines deployment mode for a generic component
+// determineComponentDeploymentMode determines deployment mode for a generic component.
+// Annotation takes precedence; otherwise infer MultiNode from Leader/Worker presence and
+// default to RawDeployment. Symmetric for Engine, Decoder, and Router so PD-disaggregated
+// ISVCs can opt each component into OMENative independently (OEP-0007.1).
 func determineComponentDeploymentMode(spec interface{}, runtime *v1beta1.ServingRuntimeSpec) constants.DeploymentModeType {
 	switch s := spec.(type) {
 	case *v1beta1.EngineSpec:
@@ -56,6 +51,9 @@ func determineComponentDeploymentMode(spec interface{}, runtime *v1beta1.Serving
 		if s == nil {
 			return constants.RawDeployment
 		}
+		if mode, found := GetDeploymentModeFromAnnotations(s.Annotations); found {
+			return mode
+		}
 		if s.Leader != nil || s.Worker != nil {
 			return constants.MultiNode
 		}
@@ -63,6 +61,9 @@ func determineComponentDeploymentMode(spec interface{}, runtime *v1beta1.Serving
 	case *v1beta1.RouterSpec:
 		if s == nil {
 			return constants.RawDeployment
+		}
+		if mode, found := GetDeploymentModeFromAnnotations(s.Annotations); found {
+			return mode
 		}
 		return constants.RawDeployment
 	}

@@ -147,6 +147,7 @@ func migrationModeOrDefault(p *v1beta1.OMENativeMigrationPolicy) v1beta1.OMENati
 func instancePlanIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, replicas int32) []int32 {
 	used := existingInstanceIndices(isvc, component)
 	migrationProtected := migrationInFlightIndices(isvc, component)
+	migrationSource := migrationSourceIndices(isvc, component)
 
 	sorted := make([]int32, 0, len(used))
 	for idx := range used {
@@ -157,17 +158,29 @@ func instancePlanIndices(isvc *v1beta1.InferenceService, component v1beta1.Compo
 	indices := make([]int32, 0, len(sorted))
 	picked := map[int32]struct{}{}
 
-	// Pass 1: pin migration-in-flight indices (no cap).
+	// Pass 1: pin migration-in-flight indices (no cap on count; both
+	// source AND surge get pinned). Source-side entries count toward
+	// the steady replica budget — the source IS the user-facing replica
+	// being relocated. Surge-side entries are a transient +1 over
+	// MinReplicas and do NOT count. Without the source accounting,
+	// Pass 3 over-allocates a brand-new index during the surge window
+	// (e.g. replicas=1 + source@0 Migrating + surge@1 Creating →
+	// Pass 3 invents Index=2), and on the very next reconcile after
+	// Migrate completes the post-Migrate Create pass materializes a
+	// phantom pod at that index.
+	steadyCount := int32(0)
 	for _, idx := range sorted {
 		if _, protected := migrationProtected[idx]; !protected {
 			continue
 		}
 		indices = append(indices, idx)
 		picked[idx] = struct{}{}
+		if _, isSource := migrationSource[idx]; isSource {
+			steadyCount++
+		}
 	}
 
 	// Pass 2: fill the steady replica budget, oldest first.
-	steadyCount := int32(0)
 	for _, idx := range sorted {
 		if _, already := picked[idx]; already {
 			continue
@@ -219,6 +232,28 @@ func migrationInFlightIndices(isvc *v1beta1.InferenceService, component v1beta1.
 			continue
 		}
 		if s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationMigrate {
+			out[s.Index] = struct{}{}
+		}
+	}
+	return out
+}
+
+// migrationSourceIndices returns the indices of source-side migration
+// participants — InstanceStatuses with Phase=Migrating. Surge-side
+// participants (Phase=Creating + Operation.Migrate) are not included
+// because they are the +1 over MinReplicas, not the user-facing
+// replica being relocated.
+func migrationSourceIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[int32]struct{} {
+	out := map[int32]struct{}{}
+	if isvc == nil {
+		return out
+	}
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.OMENative == nil {
+		return out
+	}
+	for _, s := range cs.OMENative.InstanceStatuses {
+		if s.Phase == v1beta1.OMENativeInstanceMigrating {
 			out[s.Index] = struct{}{}
 		}
 	}
