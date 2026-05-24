@@ -337,6 +337,112 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
+	// NodeAffinity conflict: the source PodSpec hard-pins
+	// kubernetes.io/hostname to the same node the request asks to move
+	// off. The overlay's NotIn[FromNode] would render the surge
+	// permanently unschedulable. Migrate must reject up-front WITHOUT
+	// stamping source Phase=Migrating — otherwise source wedges in
+	// Migrating until tryAbandonStuckMigration fires (~30 min), the
+	// operator sees a stuck status, and Alfred can't observe the
+	// rejection within its 30s SLA.
+	ginkgo.It("NodeAffinity conflict is rejected without wedging source in Phase=Migrating", func() {
+		pinned := simNodeNames[0]
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("affinity-llama"),
+			WithCSRName("affinity-runtime"),
+			WithISVCName("affinity-isvc"),
+			WithEngineAffinity(&corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+							MatchExpressions: []corev1.NodeSelectorRequirement{{
+								Key:      "kubernetes.io/hostname",
+								Operator: corev1.NodeSelectorOpIn,
+								Values:   []string{pinned},
+							}},
+						}},
+					},
+				},
+			}),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		ginkgo.By("waiting for the source pod to be Ready on the pinned node")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.OMENative.InstanceStatuses[0].RunningRevision).NotTo(BeEmpty())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("sending a migration request whose FromNode matches the pinned host")
+		reqUUID := uuid.NewString()
+		writeMigrationRequest(NewWithT(ginkgo.GinkgoT()), client.ObjectKeyFromObject(fx.ISVC), reqUUID, pinned, 0)
+
+		ginkgo.By("expecting a Failed audit row")
+		Eventually(func(g Gomega) {
+			ledger := loadLedger(g, ns.Name, fx.ISVC.Name)
+			matched := false
+			for _, e := range ledger.Entries {
+				if e.RequestUUID == reqUUID && e.Phase == "Failed" {
+					matched = true
+					g.Expect(e.Outcome).To(ContainSubstring("hostname"),
+						"Failed Outcome should mention the hostname pin")
+					break
+				}
+			}
+			g.Expect(matched).To(BeTrue(),
+				"expected a Failed audit row for uuid=%s; got %+v", reqUUID, ledger.Entries)
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("asserting source stays Phase=Ready with no in-flight Operation and no surge")
+		Consistently(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
+				"rejection must not stamp a surge InstanceStatus")
+			src := cs.OMENative.InstanceStatuses[0]
+			g.Expect(src.Index).To(Equal(int32(0)))
+			g.Expect(src.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+				"source must remain Phase=Ready (got %q)", src.Phase)
+			g.Expect(src.Operation).To(BeNil(),
+				"source must have no in-flight Operation (got %+v)", src.Operation)
+		}, "3s", util.PollInterval).Should(Succeed())
+
+		ginkgo.By("expecting the rejected request's annotation to be cleared")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			_, present := fresh.Annotations[migrationAnnoPrefix+reqUUID]
+			g.Expect(present).To(BeFalse(),
+				"annotation must be cleared on rejection so the requester stops retrying")
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("expecting a MigrationNodeAffinityConflict warning event")
+		Eventually(func(g Gomega) {
+			events := &corev1.EventList{}
+			g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(ns.Name))).To(Succeed())
+			matched := false
+			for _, e := range events.Items {
+				if e.Reason == "MigrationNodeAffinityConflict" && e.InvolvedObject.Name == fx.ISVC.Name {
+					matched = true
+					break
+				}
+			}
+			g.Expect(matched).To(BeTrue(),
+				"expected MigrationNodeAffinityConflict warning event")
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
 	// Re-delivery of the same UUID after Completed must dedup via the
 	// audit ledger. The requester might retry if its first observation
 	// of the annotation-clear didn't land; the controller must NOT

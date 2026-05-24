@@ -153,7 +153,14 @@ func (s *podKubeletSimulator) advance(ctx context.Context, pod *corev1.Pod) {
 	// can't change. Re-binding an already-bound pod is harmless
 	// (apiserver no-ops) but skipped here to keep traffic down.
 	if pod.Spec.NodeName == "" && s.binder != nil {
-		node := s.nodeFor(pod.Name)
+		// Honor a hard NodeAffinity Required pin to kubernetes.io/hostname
+		// so tests that need a specific node assignment (NodeAffinity
+		// conflict specs, FromNode specs) get deterministic placement
+		// regardless of the round-robin counter's spec-order drift.
+		node := pinnedHostnameFromAffinity(pod)
+		if node == "" {
+			node = s.nodeFor(pod.Name)
+		}
 		// Best-effort: on bind failure we'll retry next tick.
 		_ = s.binder.Bind(ctx, pod.Namespace, pod.Name, node)
 		return
@@ -167,6 +174,29 @@ func (s *podKubeletSimulator) advance(ctx context.Context, pod *corev1.Pod) {
 		Status:             corev1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 	})
+}
+
+// pinnedHostnameFromAffinity returns the single kubernetes.io/hostname
+// value the pod's hard NodeAffinity pins to, or "" when the pin is
+// absent or admits more than one host. Used by advance() to honor
+// NodeAffinity Required pins ahead of round-robin assignment.
+func pinnedHostnameFromAffinity(pod *corev1.Pod) string {
+	if pod.Spec.Affinity == nil || pod.Spec.Affinity.NodeAffinity == nil {
+		return ""
+	}
+	req := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if req == nil || len(req.NodeSelectorTerms) != 1 {
+		return ""
+	}
+	for _, expr := range req.NodeSelectorTerms[0].MatchExpressions {
+		if expr.Key != "kubernetes.io/hostname" || expr.Operator != corev1.NodeSelectorOpIn {
+			continue
+		}
+		if len(expr.Values) == 1 {
+			return expr.Values[0]
+		}
+	}
+	return ""
 }
 
 // nodeFor returns a deterministic node name for podName. The same

@@ -837,17 +837,25 @@ func TestMigrate_RejectsNodeAffinityConflict(t *testing.T) {
 		t.Errorf("ledger should carry a terminal entry for the rejected request")
 	}
 
-	// Source InstanceStatus must NOT have been stamped Migrating —
-	// rejection happens AFTER the stamp (failMigration writes a Failed
-	// row but doesn't unstamp). Verify the stamp is consistent: source
-	// is back to a non-Migrating state OR carries an Operation reflecting
-	// the rejection. The exact post-rejection shape depends on whether
-	// the conflict was detected before or after the status stamp.
+	// Rejection must run BEFORE patchInstanceStatusMigrating — otherwise
+	// source wedges in Phase=Migrating until tryAbandonStuckMigration
+	// fires (~instanceReadyTimeout). Assert source is still steady-Ready
+	// with no in-flight Operation.
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 	src := query.FindInstanceStatus(fresh, v1beta1.EngineComponent, 0)
 	if src == nil {
 		t.Fatal("source InstanceStatus should still exist after rejection")
+	}
+	if src.Phase != v1beta1.OMENativeInstanceReady {
+		t.Errorf("source Phase = %q; want Ready (rejection must not stamp Migrating)", src.Phase)
+	}
+	if src.Operation != nil {
+		t.Errorf("source Operation = %+v; want nil (rejection must leave no in-flight op)", src.Operation)
+	}
+	// No surge InstanceStatus should exist either.
+	if surge := query.FindInstanceStatus(fresh, v1beta1.EngineComponent, 1); surge != nil {
+		t.Errorf("surge InstanceStatus exists with Phase=%q; want absent (no stamp before rejection)", surge.Phase)
 	}
 }
 

@@ -105,6 +105,29 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 			return failMigration(ctx, p, ledger, req, requestUUID, reason)
 		}
 
+		// Resolve the source's RunningRevision and check the overlay BEFORE
+		// stamping. A post-stamp rejection leaves source Phase=Migrating
+		// for ~instanceReadyTimeout until tryAbandonStuckMigration cleans
+		// up — operators see a wedged status and Alfred can't observe the
+		// rejection within its 30s SLA. (nil, nil) means the CR was GC'd
+		// or RunningRevision isn't set yet — defer.
+		_, surgeRevSpec, err := surgeRevisionAndSpec(ctx, p, plan.Component, sourceIdx, nil)
+		if err != nil {
+			return false, fmt.Errorf("Migrate: resolve surge revision: %w", err)
+		}
+		if surgeRevSpec == nil {
+			return false, nil
+		}
+		if WouldOverlayConflictWithNodeAffinity(surgeRevSpec, &core.MigrationOverlay{
+			FromNode:        req.FromNode,
+			HintTargetNodes: req.HintTargetNodes,
+		}) {
+			reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
+			status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonMigrationNodeAffinityConflict,
+				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
+			return failMigration(ctx, p, ledger, req, requestUUID, reason)
+		}
+
 		surgeIdx = core.AllocateSurgeIndex(p.ISVC, plan.Component)
 		if err := patchInstanceStatusMigrating(ctx, p, plan.Component, sourceIdx, surgeIdx, requestUUID, req, plan.InstanceReadyTimeout); err != nil {
 			return false, fmt.Errorf("Migrate: stamp source status (instance=%d): %w", sourceIdx, err)

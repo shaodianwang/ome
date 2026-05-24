@@ -129,5 +129,47 @@ var _ = ginkgo.Describe("OMENative operation deadlines", ginkgo.Ordered, func() 
 			g.Expect(matched).To(BeTrue(),
 				"expected InPlaceTimeoutFallback warning event; got %d events", len(events.Items))
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("simulating recovery: clear Phase=Updating to Ready and write RunningRevision=target")
+		// envtest can't drive a full in-flight recreate to convergence in
+		// reasonable time (multiple drain + delete + create + ready cycles
+		// against a stalled kubelet sim). The fallback condition's
+		// recovery flip is independent of how the Instance reaches steady-
+		// Ready — directly synthesize the post-recovery shape and assert
+		// the next reconcile flips the breadcrumb back.
+		var targetRev string
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs, ok := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(ok).To(BeTrue())
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.UpdateRevision).NotTo(BeEmpty())
+			targetRev = cs.OMENative.UpdateRevision
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			cs.OMENative.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceReady
+			cs.OMENative.InstanceStatuses[0].Operation = nil
+			cs.OMENative.InstanceStatuses[0].RunningRevision = targetRev
+			cs.OMENative.InstanceStatuses[0].TargetRevision = ""
+			fresh.Status.Components[v1beta1.EngineComponent] = cs
+			g.Expect(k8sClient.Status().Update(suiteCtx, fresh)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("expecting InPlaceUpdateFallback to flip back to False on the next reconcile")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			s := cs.OMENative.InstanceStatuses[0]
+			g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(s.Operation).To(BeNil(), "Operation must remain cleared post-recovery")
+			cond := meta.FindStatusCondition(s.Conditions, "InPlaceUpdateFallback")
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionFalse),
+				"InPlaceUpdateFallback must flip back to False once Instance returns to steady-Ready; got %+v", cond)
+			g.Expect(cond.Reason).To(Equal("NoInPlaceFallback"))
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 })

@@ -694,6 +694,53 @@ func TestDetectUpdateTrigger_PhaseUpdatingAlwaysTrue(t *testing.T) {
 	}
 }
 
+func TestDetectUpdateTrigger_PhaseMigratingSuppressed(t *testing.T) {
+	// A source mid-migration must not start Update — Migrate owns the
+	// lifecycle until it terminates via the audit ledger.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceMigrating
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+	target := targetSpecImage("llama:v2")
+	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, target)
+
+	trigger, err := detectUpdateTrigger(context.Background(), p, plan, plan.Instances[0], tcr, target)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if trigger {
+		t.Errorf("Phase=Migrating must suppress Update — Migrate owns the lifecycle")
+	}
+}
+
+func TestDetectUpdateTrigger_OperationMigrateSuppressed(t *testing.T) {
+	// Surge mid-create carries Operation.Type=Migrate while Phase=Creating;
+	// the explicit Operation-type guard catches the post-promote race
+	// where a just-promoted surge briefly looks like a stale-revision
+	// Instance to detectUpdateTrigger.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
+		Type: v1beta1.InstanceOperationMigrate,
+		Step: "CreatePods",
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+	target := targetSpecImage("llama:v2")
+	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, target)
+
+	trigger, err := detectUpdateTrigger(context.Background(), p, plan, plan.Instances[0], tcr, target)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if trigger {
+		t.Errorf("Operation.Type=Migrate must suppress Update")
+	}
+}
+
 func TestDetectUpdateTrigger_RunningRevisionMatchesTarget(t *testing.T) {
 	// Status's RunningRevision matches the target CR name — no update.
 	resetExpectations(t)

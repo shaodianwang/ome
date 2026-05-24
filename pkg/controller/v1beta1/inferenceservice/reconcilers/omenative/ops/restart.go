@@ -183,10 +183,16 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 
 // detectRestartTrigger fires when the Instance is mid-restart, or when
 // Phase=Ready and a pod is Failed / the live pod count is below desired.
-// Creating / Deleting are not interruptible — they finish first.
+// Creating / Deleting are not interruptible — they finish first. A
+// Migrate-owned Instance (source mid-drain, surge mid-create) is
+// suppressed explicitly because Migrate's source-pod deletion will
+// otherwise trip the "pod count below desired" trigger on the source.
 func detectRestartTrigger(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan) (bool, string, error) {
 	s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index)
 	if s == nil {
+		return false, "", nil
+	}
+	if isMigrateOwned(s) {
 		return false, "", nil
 	}
 	if s.Phase == v1beta1.OMENativeInstanceRestarting {
@@ -211,6 +217,21 @@ func detectRestartTrigger(ctx context.Context, p core.ReconcileParams, plan core
 		return true, fmt.Sprintf("pod count %d below desired %d", len(pods), expected), nil
 	}
 	return false, "", nil
+}
+
+// isMigrateOwned reports whether Migrate is the active owner of this
+// Instance's lifecycle. Source pods are Phase=Migrating; surge pods
+// during create carry Operation.Type=Migrate even while Phase=Creating.
+// Detectors (restart, update) consult this to keep their guards explicit
+// rather than relying on the incidental "Phase != Ready" skip.
+func isMigrateOwned(s *v1beta1.OMENativeInstanceStatus) bool {
+	if s == nil {
+		return false
+	}
+	if s.Phase == v1beta1.OMENativeInstanceMigrating {
+		return true
+	}
+	return s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationMigrate
 }
 
 // patchInstanceStatusRestarting idempotently stamps Phase=Restarting +

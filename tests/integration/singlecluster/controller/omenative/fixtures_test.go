@@ -24,6 +24,7 @@ type fixtureOptions struct {
 	migrationMode      v1beta1.OMENativeMigrationPolicyMode
 	engineAnnots       map[string]string
 	extraContainers    []corev1.Container
+	engineAffinity     *corev1.Affinity
 	withDecoder        bool
 	decoderImage       string
 	decoderMinReplicas int
@@ -90,6 +91,13 @@ func WithEngineAnnotation(k, v string) FixtureOption {
 // PodSpec. Useful for tests asserting on multi-container behavior.
 func WithExtraContainer(c corev1.Container) FixtureOption {
 	return func(o *fixtureOptions) { o.extraContainers = append(o.extraContainers, c) }
+}
+
+// WithEngineAffinity sets engine.PodSpec.Affinity. Used by migration
+// specs to construct a PodSpec whose hard NodeAffinity collides with
+// the overlay's NotIn[FromNode].
+func WithEngineAffinity(a *corev1.Affinity) FixtureOption {
+	return func(o *fixtureOptions) { o.engineAffinity = a }
 }
 
 // WithDecoder enables a Decoder component on the ISVC, opted into
@@ -235,7 +243,7 @@ func newOMENativeFixture(namespace string, opts ...FixtureOption) *omenativeFixt
 				},
 			},
 		},
-		PodSpec: v1beta1.PodSpec{Containers: containers},
+		PodSpec: v1beta1.PodSpec{Containers: containers, Affinity: o.engineAffinity},
 	}
 
 	wrapper := v1beta1testing.MakeInferenceService(o.isvcName, namespace).

@@ -349,6 +349,73 @@ func TestDetectRestartTrigger_PhaseCreating_NoTrigger(t *testing.T) {
 	}
 }
 
+func TestDetectRestartTrigger_PhaseMigratingSuppressed(t *testing.T) {
+	// Migrate's source-drain deletes the source pods; without the
+	// explicit suppression, detectRestartTrigger would observe "pod
+	// count below desired" and try to Restart the source mid-migration.
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+					{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceMigrating},
+				},
+			},
+		},
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+
+	trigger, _, err := detectRestartTrigger(context.Background(), p, plan, plan.Instances[0])
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if trigger {
+		t.Errorf("Phase=Migrating must not be interruptible by Restart")
+	}
+}
+
+func TestDetectRestartTrigger_OperationMigrateSuppressed(t *testing.T) {
+	// A surge that just got promoted to Phase=Ready with Operation=nil
+	// is fine — but during its Creating window it carries
+	// Operation.Type=Migrate. The guard catches that transient state.
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+					{
+						Index: 1, Incarnation: 1,
+						Phase: v1beta1.OMENativeInstanceCreating,
+						Operation: &v1beta1.InstanceOperation{
+							Type: v1beta1.InstanceOperationMigrate,
+							Step: "CreatePods",
+						},
+					},
+				},
+			},
+		},
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+	// The plan doesn't include index=1 (sparse); fake one for the call.
+	inst := core.InstancePlan{
+		Index: 1, Incarnation: 1,
+		Runners: []core.RunnerPlan{{Name: "default", Size: 1}},
+	}
+	trigger, _, err := detectRestartTrigger(context.Background(), p, plan, inst)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if trigger {
+		t.Errorf("Operation.Type=Migrate must suppress Restart")
+	}
+}
+
 func TestDetectRestartTrigger_PodFailed(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)

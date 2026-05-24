@@ -432,9 +432,16 @@ func recreateUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compo
 // detectUpdateTrigger fires when the Instance is mid-update, or when
 // Phase=Ready and a pod's PodSpec hashes to a non-target revision.
 // Creating / Deleting / Restarting / Migrating are not interruptible.
+// The Migrate-owned suppression is explicit because a just-promoted
+// surge briefly carries RunningRevision=sourceRev while the post-
+// promote scale-down pass runs — without the guard the spec-bump that
+// triggered the migration would race the surge promote.
 func detectUpdateTrigger(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec) (bool, error) {
 	s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index)
 	if s == nil {
+		return false, nil
+	}
+	if isMigrateOwned(s) {
 		return false, nil
 	}
 	if s.Phase == v1beta1.OMENativeInstanceUpdating {

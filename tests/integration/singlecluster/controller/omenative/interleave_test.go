@@ -357,4 +357,87 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings", ginkgo.Ordered,
 				"expected <= 12 CRs (retention cap); got %d. Names: %v", len(crs), crNames(crs))
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
+
+	// INT-6 — Spec bump during in-flight migration. While the source
+	// is Phase=Migrating (and surge carries Operation.Type=Migrate),
+	// detectUpdateTrigger and detectRestartTrigger must NOT fire on
+	// those Instances even though the user just bumped the image.
+	// Pins the explicit Migrating short-circuit in both detectors.
+	ginkgo.It("INT-6: detectors skip Migrate-owned instances during in-flight migration", func() {
+		fx := newOMENativeFixture(ns.Name,
+			WithCBMName("int6-llama"),
+			WithCSRName("int6-runtime"),
+			WithISVCName("int6-isvc"),
+			WithImage("ghcr.io/test/runtime:v1"),
+		)
+		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
+		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
+		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+
+		var sourceNode string
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "int6-isvc-engine-0-default-0",
+			}, pod)).To(Succeed())
+			sourceNode = pod.Spec.NodeName
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("firing a migration and immediately bumping the image to v2")
+		reqUUID := uuid.NewString()
+		writeMigrationRequest(NewWithT(ginkgo.GinkgoT()), client.ObjectKeyFromObject(fx.ISVC), reqUUID, sourceNode, 0)
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			fresh.Spec.Engine.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
+			g.Expect(k8sClient.Update(suiteCtx, fresh)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		ginkgo.By("while Migrate-owned, neither InstanceStatus carries Operation.Type=Update or Phase=Restarting")
+		Consistently(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			for _, s := range cs.OMENative.InstanceStatuses {
+				// While owned by Migrate, no other op may stamp the Instance.
+				if s.Phase != v1beta1.OMENativeInstanceMigrating &&
+					(s.Operation == nil || s.Operation.Type != v1beta1.InstanceOperationMigrate) {
+					continue
+				}
+				g.Expect(s.Phase).NotTo(Equal(v1beta1.OMENativeInstanceRestarting),
+					"detectRestartTrigger must not fire on Migrate-owned idx=%d", s.Index)
+				if s.Operation != nil {
+					g.Expect(s.Operation.Type).NotTo(Equal(v1beta1.InstanceOperationUpdate),
+						"detectUpdateTrigger must not fire on Migrate-owned idx=%d (got Op=%+v)", s.Index, s.Operation)
+					g.Expect(s.Operation.Type).NotTo(Equal(v1beta1.InstanceOperationRestart),
+						"detectRestartTrigger must not stamp Restart on Migrate-owned idx=%d", s.Index)
+				}
+			}
+		}, "3s", util.PollInterval).Should(Succeed())
+
+		ginkgo.By("after migration completes, the surviving instance eventually rolls to v2 via Update")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			ledger := loadLedger(g, ns.Name, fx.ISVC.Name)
+			matched := false
+			for _, e := range ledger.Entries {
+				if e.RequestUUID == reqUUID && e.Phase == "Completed" {
+					matched = true
+					break
+				}
+			}
+			g.Expect(matched).To(BeTrue(), "migration must complete")
+			g.Expect(fresh.Spec.Engine.PodSpec.Containers[0].Image).To(Equal("ghcr.io/test/runtime:v2"))
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
 })

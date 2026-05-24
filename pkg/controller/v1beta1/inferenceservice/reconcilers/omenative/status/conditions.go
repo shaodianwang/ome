@@ -199,8 +199,11 @@ func stuckOperations(cs *v1beta1.OMENativeComponentStatus) []int32 {
 // — those need pod-state tracking we don't carry yet.
 //
 // InPlaceUpdateFallback is set by fallbackInPlaceToRecreate's caller
-// (timeouts.go); this function defaults it to False if not already
-// present so the condition shape stays stable.
+// (timeouts.go) and flips back to False once the Instance returns to
+// steady-Ready (Phase=Ready, no in-flight Operation) — i.e. the
+// recreate triggered by the fallback has converged. Without the
+// recovery flip the breadcrumb is sticky-True forever, violating the
+// K8s convention that conditions reflect current state, not history.
 func ComputeInstanceConditions(s *v1beta1.OMENativeInstanceStatus, generation int64) []metav1.Condition {
 	if s == nil {
 		return nil
@@ -211,20 +214,20 @@ func ComputeInstanceConditions(s *v1beta1.OMENativeInstanceStatus, generation in
 		allPodsReadyCondition(s, generation, now),
 		allPodsAvailableCondition(s, generation, now),
 	}
-	// Preserve InPlaceUpdateFallback if it was set by timeouts.go's
-	// fallback path. Default False otherwise so the condition shape
-	// stays stable across reconciles.
-	if existing := apimeta.FindStatusCondition(s.Conditions, ConditionInPlaceUpdateFallback); existing != nil {
-		out = append(out, *existing)
-	} else {
-		out = append(out, metav1.Condition{
-			Type:               ConditionInPlaceUpdateFallback,
-			Status:             metav1.ConditionFalse,
-			Reason:             ReasonNoInPlaceFallback,
-			LastTransitionTime: now,
-			ObservedGeneration: generation,
-		})
+	fallback := metav1.Condition{
+		Type:               ConditionInPlaceUpdateFallback,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonNoInPlaceFallback,
+		LastTransitionTime: now,
+		ObservedGeneration: generation,
 	}
+	if existing := apimeta.FindStatusCondition(s.Conditions, ConditionInPlaceUpdateFallback); existing != nil &&
+		existing.Status == metav1.ConditionTrue &&
+		!(s.Phase == v1beta1.OMENativeInstanceReady && s.Operation == nil) {
+		// Still recovering from the fallback — preserve the breadcrumb.
+		fallback = *existing
+	}
+	out = append(out, fallback)
 	return out
 }
 

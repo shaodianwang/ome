@@ -168,11 +168,17 @@ func TestComputeInstanceConditions_AllPodsAggregates(t *testing.T) {
 
 func TestComputeInstanceConditions_PreservesInPlaceFallbackBreadcrumb(t *testing.T) {
 	// fallbackInPlaceToRecreate (timeouts.go) writes
-	// InPlaceUpdateFallback=True; subsequent AggregateAndWriteStatus
-	// passes must preserve it rather than overwriting back to False.
+	// InPlaceUpdateFallback=True; while the Instance is still mid-recreate
+	// (Operation in flight or Phase != Ready) subsequent
+	// AggregateAndWriteStatus passes must preserve the breadcrumb.
 	s := &v1beta1.OMENativeInstanceStatus{
 		Index:    0,
 		PodCount: 1,
+		Phase:    v1beta1.OMENativeInstanceUpdating,
+		Operation: &v1beta1.InstanceOperation{
+			Type: v1beta1.InstanceOperationUpdate,
+			Step: "Drain",
+		},
 		Conditions: []metav1.Condition{{
 			Type:    ConditionInPlaceUpdateFallback,
 			Status:  metav1.ConditionTrue,
@@ -187,6 +193,34 @@ func TestComputeInstanceConditions_PreservesInPlaceFallbackBreadcrumb(t *testing
 	}
 	if got.Reason != ReasonInPlaceTimeoutFallback {
 		t.Errorf("breadcrumb Reason not preserved: got %q", got.Reason)
+	}
+}
+
+func TestComputeInstanceConditions_FlipsInPlaceFallbackBackOnRecovery(t *testing.T) {
+	// Once the Instance returns to steady-Ready (Phase=Ready, Operation=nil),
+	// the recreate triggered by the fallback has converged. The breadcrumb
+	// must flip back to False — otherwise the condition is sticky-True
+	// forever and operators can't tell current state from history.
+	s := &v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		PodCount:        1,
+		ReadyPodCount:   1,
+		Phase:           v1beta1.OMENativeInstanceReady,
+		RunningRevision: "rev-recovered",
+		Conditions: []metav1.Condition{{
+			Type:    ConditionInPlaceUpdateFallback,
+			Status:  metav1.ConditionTrue,
+			Reason:  ReasonInPlaceTimeoutFallback,
+			Message: "previous in-place attempt timed out",
+		}},
+	}
+	conditions := ComputeInstanceConditions(s, 1)
+	got := apimeta.FindStatusCondition(conditions, ConditionInPlaceUpdateFallback)
+	if got == nil || got.Status != metav1.ConditionFalse {
+		t.Errorf("breadcrumb should flip to False on recovery, got %+v", got)
+	}
+	if got.Reason != ReasonNoInPlaceFallback {
+		t.Errorf("Reason should reset to %q, got %q", ReasonNoInPlaceFallback, got.Reason)
 	}
 }
 
