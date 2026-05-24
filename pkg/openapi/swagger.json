@@ -380,9 +380,21 @@
           "description": "Addressable endpoint for the InferenceService",
           "$ref": "#/definitions/knative.Addressable"
         },
+        "latestReadyRevision": {
+          "description": "LatestReadyRevision names the most recent ControllerRevision whose pods reached Ready. Equal to LatestRolledoutRevision once the rollout completes; set ahead of it during in-flight rollouts.",
+          "type": "string"
+        },
+        "latestRolledoutRevision": {
+          "description": "LatestRolledoutRevision names the most recent ControllerRevision that fully owns this Component's traffic (i.e., the rollout has completed). Drives the consumer-side HTTPRoute backendRef.",
+          "type": "string"
+        },
         "omenative": {
           "description": "OMENative reports OMENative-managed state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.",
           "$ref": "#/definitions/v1beta1.OMENativeComponentStatus"
+        },
+        "previousRolledoutRevision": {
+          "description": "PreviousRolledoutRevision names the prior rolled-out ControllerRevision, retained for diagnosis and traffic reverence during partial rollbacks.",
+          "type": "string"
         },
         "restURL": {
           "description": "REST endpoint of the component if available.",
@@ -392,9 +404,50 @@
           "description": "RolloutPhase reflects the current rollout state for this Component (OEP-0011 Part 2). One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
           "type": "string"
         },
+        "traffic": {
+          "description": "Traffic reports per-revision traffic weights for this Component. Each entry corresponds to one revision currently receiving traffic. The OEP-0011 HTTPRoute builder reads this to emit weighted backendRefs.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.ComponentTrafficTarget"
+          },
+          "x-kubernetes-list-map-keys": [
+            "revisionName"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
         "url": {
           "description": "URL holds the primary url for this component. It generally has the form http[s]://{name}.{namespace}.{cluster-level-suffix}",
           "$ref": "#/definitions/knative.URL"
+        }
+      }
+    },
+    "v1beta1.ComponentTrafficTarget": {
+      "description": "ComponentTrafficTarget describes the percentage of traffic routed to one revision of one Component. RevisionName is the per-revision Service name produced by OMENative's coordination layer (e.g. `llama-engine-rev-abc123`), which the OEP-0011 HTTPRoute builder consumes directly as a backend reference.",
+      "type": "object",
+      "required": [
+        "revisionName",
+        "percent"
+      ],
+      "properties": {
+        "latestRevision": {
+          "description": "LatestRevision is true when this entry corresponds to the LatestRolledoutRevision for the Component.",
+          "type": "boolean"
+        },
+        "percent": {
+          "description": "Percent is the percentage of traffic the consumer should route to RevisionName. Sum across all entries for one Component is 100.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "revisionName": {
+          "description": "RevisionName is the per-revision Service name for this target.",
+          "type": "string",
+          "default": ""
+        },
+        "tag": {
+          "description": "Tag is an optional short identifier for the target (e.g. \"latest\", \"prev\"). Cosmetic; not used by the consumer.",
+          "type": "string"
         }
       }
     },
@@ -422,6 +475,29 @@
           "description": "Type selects the hash source.",
           "type": "string",
           "default": ""
+        }
+      }
+    },
+    "v1beta1.CoordinationPacing": {
+      "description": "CoordinationPacing controls how surge / drain pacing is computed within a coordination group.",
+      "type": "object",
+      "properties": {
+        "maxSurge": {
+          "description": "MaxSurge is the maximum fraction (or absolute count) of pods OMENative may add above the desired Component replica count during a coordinated rollout. Applies group-wide. Default: 25%.",
+          "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
+        },
+        "maxUnavailable": {
+          "description": "MaxUnavailable is the maximum fraction (or absolute count) of pods that may be not-Ready at once during the rollout. Applies group-wide. Default: 0.",
+          "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
+        },
+        "ratioTolerance": {
+          "description": "RatioTolerance is the percentage drift from the original cross-Component ratio that RatioBalanced pacing allows before refusing further surge. Default: 5.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "type": {
+          "description": "Type selects the pacing computation.\n  - PerComponent: each Component's omenative.updateStrategy\n    rollingUpdate applies independently. Group-wide MaxSurge\n    still applies on top. Default.\n  - RatioBalanced: pacing surges proportionally across all\n    Components in the group, never letting the cross-Component\n    ratio drift past the original.",
+          "type": "string"
         }
       }
     },
@@ -1443,6 +1519,10 @@
           "description": "Model defines the model to be used for inference, referencing either a BaseModel or a custom model. This allows models to be managed independently of the serving configuration.",
           "$ref": "#/definitions/v1beta1.ModelRef"
         },
+        "rolloutCoordination": {
+          "description": "RolloutCoordination declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently (the default).\n\nOnly meaningful when at least one referenced Component uses ome.io/deploymentMode=OMENative. Webhook rejects groups that reference non-OMENative Components.",
+          "$ref": "#/definitions/v1beta1.RolloutCoordinationSpec"
+        },
         "router": {
           "description": "Router defines the router spec",
           "$ref": "#/definitions/v1beta1.RouterSpec"
@@ -1529,6 +1609,10 @@
         "pinnedRevisionName": {
           "description": "PinnedRevisionName is the ControllerRevision (OME ns) driving pod specs. Empty when autoSync is true.",
           "type": "string"
+        },
+        "rolloutCoordination": {
+          "description": "RolloutCoordination reports per-group cross-Component coordination state for the InferenceService. Populated only when spec.rolloutCoordination is declared. See RolloutCoordinationSpec.",
+          "$ref": "#/definitions/v1beta1.RolloutCoordinationStatus"
         },
         "traffic": {
           "description": "Traffic reflects the resolved backend traffic policy (OEP-0011) and the emitted policy resource. Populated only when traffic intent is declared via spec.traffic or any ome.io/* traffic annotation; otherwise nil so older clients see nothing.",
@@ -2850,6 +2934,174 @@
           "x-kubernetes-list-type": "map",
           "x-kubernetes-patch-merge-key": "name",
           "x-kubernetes-patch-strategy": "merge,retainKeys"
+        }
+      }
+    },
+    "v1beta1.RolloutCoordinationGroup": {
+      "description": "RolloutCoordinationGroup binds a set of Components under one coordination policy.",
+      "type": "object",
+      "required": [
+        "components",
+        "policy"
+      ],
+      "properties": {
+        "components": {
+          "description": "Components lists the Component names included in this group. Valid values: \"router\", \"engine\", \"decoder\".",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "order": {
+          "description": "Order has two meanings depending on Policy:\n  - Atomic: pins the surge sequence within the single rollout\n    unit (decoder surges first, then engine, etc.) but all\n    Components traffic-shift together once every set is Ready.\n    Optional; default no ordering (parallel surge).\n  - Sequential: REQUIRED. Pins the order in which Components\n    walk their full state machine. The next Component cannot\n    enter Surging until the previous Component is back at Idle\n    on the new revision.\n  - Independent / PairedMixable: ignored.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "pacing": {
+          "description": "Pacing controls how surge / drain pacing is computed within the group. When omitted, defaults to per-Component pacing.",
+          "$ref": "#/definitions/v1beta1.CoordinationPacing"
+        },
+        "policy": {
+          "description": "Policy selects the coordination semantic for this group.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "v1beta1.RolloutCoordinationGroupStatus": {
+      "description": "RolloutCoordinationGroupStatus reports the observed state of one coordination group.",
+      "type": "object",
+      "properties": {
+        "components": {
+          "description": "Components mirrors spec.rolloutCoordination.groups[i].components for operator readability.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "compositePhase": {
+          "description": "CompositePhase is a human-readable composite of Phase plus the active Component for Sequential / per-Component-aware policies (e.g. \"decoder.Surging\", \"Sequential.AwaitingNextComponent\"). Operator-facing; metrics use Phase, not CompositePhase.",
+          "type": "string"
+        },
+        "currentComponent": {
+          "description": "CurrentComponent names the Component the group is actively reconciling (Sequential policy). Empty otherwise.",
+          "type": "string"
+        },
+        "lastTransitionTime": {
+          "description": "LastTransitionTime is when Phase last changed.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "message": {
+          "description": "Message is a short operator-facing explanation of the current Phase. Set on Failed / RollingBack / Paused phases.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name uniquely identifies the group within the RolloutCoordinationStatus. Auto-derived from the group index (stringified) on first observation.",
+          "type": "string",
+          "default": ""
+        },
+        "observedRatio": {
+          "description": "ObservedRatio reports cross-Component ratio snapshots when the group uses RatioBalanced pacing. Nil for PerComponent pacing.",
+          "$ref": "#/definitions/v1beta1.RolloutCoordinationRatio"
+        },
+        "observedSurge": {
+          "description": "ObservedSurge is the IntOrString surge target applied during the current Surging / Waiting phase. Empty when the group is Idle.",
+          "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
+        },
+        "order": {
+          "description": "Order mirrors the spec order (Sequential / Atomic-ordered).",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "phase": {
+          "description": "Phase reports the base coordination phase. Metric-stable enum.",
+          "type": "string"
+        },
+        "policy": {
+          "description": "Policy mirrors the spec policy.",
+          "type": "string"
+        },
+        "previousComponent": {
+          "description": "PreviousComponent names the most recently completed Component in a Sequential group's order. Empty when no Component has yet reached Idle on the new revision.",
+          "type": "string"
+        }
+      }
+    },
+    "v1beta1.RolloutCoordinationRatio": {
+      "description": "RolloutCoordinationRatio is the cross-Component ratio snapshot used by RatioBalanced pacing.",
+      "type": "object",
+      "properties": {
+        "current": {
+          "description": "Current reports the live replica counts per Component.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          }
+        },
+        "newPods": {
+          "description": "NewPods reports the new-revision pod counts per Component.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          }
+        },
+        "original": {
+          "description": "Original is the snapshot of desired replica counts per Component at rollout start. The keys are ComponentType strings.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          }
+        }
+      }
+    },
+    "v1beta1.RolloutCoordinationSpec": {
+      "description": "RolloutCoordinationSpec declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently.",
+      "type": "object",
+      "properties": {
+        "groups": {
+          "description": "Groups is the list of coordination groups. Each group binds a set of Components under one policy. A Component may appear in at most one group; webhook rejects multi-membership.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.RolloutCoordinationGroup"
+          },
+          "x-kubernetes-list-type": "atomic"
+        }
+      }
+    },
+    "v1beta1.RolloutCoordinationStatus": {
+      "description": "RolloutCoordinationStatus reports per-group coordination state for the InferenceService.",
+      "type": "object",
+      "properties": {
+        "groups": {
+          "description": "Groups reports the observed state of each declared RolloutCoordinationGroup, indexed by position in spec.rolloutCoordination.groups[].",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.RolloutCoordinationGroupStatus"
+          },
+          "x-kubernetes-list-map-keys": [
+            "name"
+          ],
+          "x-kubernetes-list-type": "map"
         }
       }
     },

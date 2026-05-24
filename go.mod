@@ -15,6 +15,7 @@ require (
 	github.com/oracle/oci-go-sdk/v65 v65.71.0
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.79.2
+	github.com/prometheus/client_golang v1.22.0
 	github.com/sgl-project/ome v0.1.6-0.20260510082155-6a8fea26adf4
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.19.0
@@ -76,7 +77,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_golang v1.22.0 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect

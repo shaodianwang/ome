@@ -93,6 +93,41 @@ func TestRender_Labels(t *testing.T) {
 	}
 }
 
+func TestRenderWithRevision_StampsRevisionHashLabel(t *testing.T) {
+	plan, inst, runner := singlePodPlan()
+	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), plan, inst, runner, 0, "abc12345")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := pod.Labels[query.LabelRevisionHash]; got != "abc12345" {
+		t.Errorf("%s: got %q want %q", query.LabelRevisionHash, got, "abc12345")
+	}
+}
+
+func TestRenderWithRevision_EmptyHashOmitsRevisionLabel(t *testing.T) {
+	plan, inst, runner := singlePodPlan()
+	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), plan, inst, runner, 0, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, present := pod.Labels[query.LabelRevisionHash]; present {
+		t.Errorf("%s should be absent when hash is empty, got: %+v", query.LabelRevisionHash, pod.Labels)
+	}
+}
+
+func TestRender_DelegatesToRenderWithRevisionEmptyHash(t *testing.T) {
+	// Render() is the back-compat entry point and must produce the same
+	// pod as RenderWithRevision(..., "") — i.e., no revision-hash label.
+	plan, inst, runner := singlePodPlan()
+	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, present := pod.Labels[query.LabelRevisionHash]; present {
+		t.Errorf("Render() must omit %s; got pod labels: %+v", query.LabelRevisionHash, pod.Labels)
+	}
+}
+
 func TestRender_IncarnationStampedOnLabel(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
 	inst.Incarnation = 7

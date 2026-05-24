@@ -10,6 +10,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -488,4 +489,102 @@ func TestDefault(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "expected an InferenceService object but got")
 	})
+}
+
+func TestDefaultRolloutCoordination_FillsPacingDefaults(t *testing.T) {
+	spec := &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Pacing:     &v1beta1.CoordinationPacing{},
+			},
+		},
+	}
+	defaultRolloutCoordination(spec)
+	g := spec.Groups[0]
+	if g.Pacing.Type != v1beta1.CoordinationPacingPerComponent {
+		t.Errorf("Type default: got %q want PerComponent", g.Pacing.Type)
+	}
+	if g.Pacing.MaxSurge == nil || g.Pacing.MaxSurge.StrVal != "25%" {
+		t.Errorf("MaxSurge default: got %+v want 25%%", g.Pacing.MaxSurge)
+	}
+	if g.Pacing.MaxUnavailable == nil || g.Pacing.MaxUnavailable.IntValue() != 0 {
+		t.Errorf("MaxUnavailable default: got %+v want 0", g.Pacing.MaxUnavailable)
+	}
+	if g.Pacing.RatioTolerance != nil {
+		t.Errorf("PerComponent should not set RatioTolerance: got %+v", g.Pacing.RatioTolerance)
+	}
+}
+
+func TestDefaultRolloutCoordination_RatioBalancedSetsRatioTolerance(t *testing.T) {
+	spec := &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Pacing:     &v1beta1.CoordinationPacing{Type: v1beta1.CoordinationPacingRatioBalanced},
+			},
+		},
+	}
+	defaultRolloutCoordination(spec)
+	if spec.Groups[0].Pacing.RatioTolerance == nil {
+		t.Fatalf("RatioBalanced should default RatioTolerance")
+	}
+	if *spec.Groups[0].Pacing.RatioTolerance != 5 {
+		t.Errorf("RatioTolerance: got %d want 5", *spec.Groups[0].Pacing.RatioTolerance)
+	}
+}
+
+func TestDefaultRolloutCoordination_AbsentPacingNotPopulated(t *testing.T) {
+	// pacing nil → defaulter leaves it nil (coordination is opt-in via
+	// declaration; the runtime resolver supplies the same defaults).
+	spec := &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Policy:     v1beta1.CoordinationPolicyIndependent,
+			},
+		},
+	}
+	defaultRolloutCoordination(spec)
+	if spec.Groups[0].Pacing != nil {
+		t.Errorf("absent pacing should stay nil: got %+v", spec.Groups[0].Pacing)
+	}
+}
+
+func TestDefaultRolloutCoordination_PreservesOperatorOverrides(t *testing.T) {
+	ms := intstr.FromInt(7)
+	mu := intstr.FromInt(3)
+	tol := int32(15)
+	spec := &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Pacing: &v1beta1.CoordinationPacing{
+					Type:           v1beta1.CoordinationPacingRatioBalanced,
+					MaxSurge:       &ms,
+					MaxUnavailable: &mu,
+					RatioTolerance: &tol,
+				},
+			},
+		},
+	}
+	defaultRolloutCoordination(spec)
+	g := spec.Groups[0]
+	if g.Pacing.MaxSurge.IntValue() != 7 {
+		t.Errorf("MaxSurge preserved: got %+v want 7", g.Pacing.MaxSurge)
+	}
+	if g.Pacing.MaxUnavailable.IntValue() != 3 {
+		t.Errorf("MaxUnavailable preserved: got %+v want 3", g.Pacing.MaxUnavailable)
+	}
+	if *g.Pacing.RatioTolerance != 15 {
+		t.Errorf("RatioTolerance preserved: got %d want 15", *g.Pacing.RatioTolerance)
+	}
+}
+
+func TestDefaultRolloutCoordination_NilSpec(t *testing.T) {
+	// Must not panic.
+	defaultRolloutCoordination(nil)
 }

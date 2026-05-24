@@ -184,7 +184,7 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 		// creates track separately from source-side deletes.
 		surgeP := p
 		surgeP.PodSpec = surgeRevSpec
-		if _, cerr := createMissingPods(ctx, surgeP, plan, surgeInst, surgeIdx, missing); cerr != nil {
+		if _, cerr := createMissingPods(ctx, surgeP, plan, surgeInst, surgeIdx, missing, revisionHashFromTarget(surgeRev)); cerr != nil {
 			return false, fmt.Errorf("Migrate: create surge pod set: %w", cerr)
 		}
 		return false, nil

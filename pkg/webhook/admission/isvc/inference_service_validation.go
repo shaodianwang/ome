@@ -73,6 +73,14 @@ func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldObj, 
 		return nil, err
 	}
 	validatorLogger.Info("validate update", "name", isvc.Name)
+	oldIsvc, err := convertToInferenceService(oldObj)
+	if err != nil {
+		validatorLogger.Error(err, "Unable to convert prior object to InferenceService")
+		return nil, err
+	}
+	if err := validation.ValidateCoordinationUpdate(&oldIsvc.Spec, &isvc.Spec); err != nil {
+		return nil, err
+	}
 	return v.validateInferenceService(ctx, isvc)
 }
 
@@ -151,6 +159,15 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	// decoder.canaryTrafficPercent).
 	if err := validation.ValidateCanaryPercent(&isvc.Spec); err != nil {
 		return allWarnings, err
+	}
+
+	// Cross-Component rollout coordination structural validation
+	// (component membership, sequential order coverage, etc.).
+	if err := validation.ValidateCoordination(&isvc.Spec); err != nil {
+		return allWarnings, err
+	}
+	if warning := validation.CoordinationRatioToleranceWarning(&isvc.Spec); warning != "" {
+		allWarnings = append(allWarnings, warning)
 	}
 
 	// At least one of spec.model or spec.runtime must be set. When

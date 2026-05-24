@@ -22,7 +22,9 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList":      schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentExtensionSpec":         schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec":            schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget":         schema_pkg_apis_ome_v1beta1_ComponentTrafficTarget(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec":             schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CoordinationPacing":             schema_pkg_apis_ome_v1beta1_CoordinationPacing(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec":                    schema_pkg_apis_ome_v1beta1_DecoderSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionComponentSpec":         schema_pkg_apis_ome_v1beta1_DiffusionComponentSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec":          schema_pkg_apis_ome_v1beta1_DiffusionPipelineSpec(ref),
@@ -64,6 +66,11 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeUpdateStrategy":        schema_pkg_apis_ome_v1beta1_OMENativeUpdateStrategy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":                schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                        schema_pkg_apis_ome_v1beta1_PodSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus": schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationRatio":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationRatio(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec":        schema_pkg_apis_ome_v1beta1_RolloutCoordinationSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus":      schema_pkg_apis_ome_v1beta1_RolloutCoordinationStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause":                   schema_pkg_apis_ome_v1beta1_RolloutPause(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                    schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep":                    schema_pkg_apis_ome_v1beta1_RolloutStep(ref),
@@ -764,11 +771,98 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 							Format:      "",
 						},
 					},
+					"latestReadyRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LatestReadyRevision names the most recent ControllerRevision whose pods reached Ready. Equal to LatestRolledoutRevision once the rollout completes; set ahead of it during in-flight rollouts.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"latestRolledoutRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LatestRolledoutRevision names the most recent ControllerRevision that fully owns this Component's traffic (i.e., the rollout has completed). Drives the consumer-side HTTPRoute backendRef.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"previousRolledoutRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PreviousRolledoutRevision names the prior rolled-out ControllerRevision, retained for diagnosis and traffic reverence during partial rollbacks.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"traffic": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"revisionName",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Traffic reports per-revision traffic weights for this Component. Each entry corresponds to one revision currently receiving traffic. The OEP-0011 HTTPRoute builder reads this to emit weighted backendRefs.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget"),
+									},
+								},
+							},
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_ComponentTrafficTarget(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ComponentTrafficTarget describes the percentage of traffic routed to one revision of one Component. RevisionName is the per-revision Service name produced by OMENative's coordination layer (e.g. `llama-engine-rev-abc123`), which the OEP-0011 HTTPRoute builder consumes directly as a backend reference.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"revisionName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RevisionName is the per-revision Service name for this target.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"percent": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Percent is the percentage of traffic the consumer should route to RevisionName. Sum across all entries for one Component is 100.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"tag": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Tag is an optional short identifier for the target (e.g. \"latest\", \"prev\"). Cosmetic; not used by the consumer.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"latestRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LatestRevision is true when this entry corresponds to the LatestRolledoutRevision for the Component.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"revisionName", "percent"},
+			},
+		},
 	}
 }
 
@@ -818,6 +912,47 @@ func schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref common.ReferenceCallback
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_CoordinationPacing(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CoordinationPacing controls how surge / drain pacing is computed within a coordination group.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Type selects the pacing computation.\n  - PerComponent: each Component's omenative.updateStrategy\n    rollingUpdate applies independently. Group-wide MaxSurge\n    still applies on top. Default.\n  - RatioBalanced: pacing surges proportionally across all\n    Components in the group, never letting the cross-Component\n    ratio drift past the original.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"maxSurge": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxSurge is the maximum fraction (or absolute count) of pods OMENative may add above the desired Component replica count during a coordinated rollout. Applies group-wide. Default: 25%.",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+					"maxUnavailable": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxUnavailable is the maximum fraction (or absolute count) of pods that may be not-Ready at once during the rollout. Applies group-wide. Default: 0.",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+					"ratioTolerance": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RatioTolerance is the percentage drift from the original cross-Component ratio that RatioBalanced pacing allows before refusing further surge. Default: 5.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -2605,11 +2740,17 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"),
 						},
 					},
+					"rolloutCoordination": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RolloutCoordination declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently (the default).\n\nOnly meaningful when at least one referenced Component uses ome.io/deploymentMode=OMENative. Webhook rejects groups that reference non-OMENative Components.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
 	}
 }
 
@@ -2758,11 +2899,17 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 							Format:      "",
 						},
 					},
+					"rolloutCoordination": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RolloutCoordination reports per-group cross-Component coordination state for the InferenceService. Populated only when spec.rolloutCoordination is declared. See RolloutCoordinationSpec.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus", "knative.dev/pkg/apis.Condition", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus", "knative.dev/pkg/apis.Condition", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
 	}
 }
 
@@ -5049,6 +5196,331 @@ func schema_pkg_apis_ome_v1beta1_PodSpec(ref common.ReferenceCallback) common.Op
 		},
 		Dependencies: []string{
 			"k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutCoordinationGroup binds a set of Components under one coordination policy.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"components": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Components lists the Component names included in this group. Valid values: \"router\", \"engine\", \"decoder\".",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"policy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Policy selects the coordination semantic for this group.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"pacing": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Pacing controls how surge / drain pacing is computed within the group. When omitted, defaults to per-Component pacing.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CoordinationPacing"),
+						},
+					},
+					"order": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Order has two meanings depending on Policy:\n  - Atomic: pins the surge sequence within the single rollout\n    unit (decoder surges first, then engine, etc.) but all\n    Components traffic-shift together once every set is Ready.\n    Optional; default no ordering (parallel surge).\n  - Sequential: REQUIRED. Pins the order in which Components\n    walk their full state machine. The next Component cannot\n    enter Surging until the previous Component is back at Idle\n    on the new revision.\n  - Independent / PairedMixable: ignored.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"components", "policy"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CoordinationPacing"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutCoordinationGroupStatus reports the observed state of one coordination group.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name uniquely identifies the group within the RolloutCoordinationStatus. Auto-derived from the group index (stringified) on first observation.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"components": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Components mirrors spec.rolloutCoordination.groups[i].components for operator readability.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"policy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Policy mirrors the spec policy.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"order": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Order mirrors the spec order (Sequential / Atomic-ordered).",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"phase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Phase reports the base coordination phase. Metric-stable enum.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"compositePhase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CompositePhase is a human-readable composite of Phase plus the active Component for Sequential / per-Component-aware policies (e.g. \"decoder.Surging\", \"Sequential.AwaitingNextComponent\"). Operator-facing; metrics use Phase, not CompositePhase.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"currentComponent": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CurrentComponent names the Component the group is actively reconciling (Sequential policy). Empty otherwise.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"previousComponent": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PreviousComponent names the most recently completed Component in a Sequential group's order. Empty when no Component has yet reached Idle on the new revision.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"observedSurge": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedSurge is the IntOrString surge target applied during the current Surging / Waiting phase. Empty when the group is Idle.",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+					"observedRatio": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedRatio reports cross-Component ratio snapshots when the group uses RatioBalanced pacing. Nil for PerComponent pacing.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationRatio"),
+						},
+					},
+					"lastTransitionTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastTransitionTime is when Phase last changed.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"message": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Message is a short operator-facing explanation of the current Phase. Set on Failed / RollingBack / Paused phases.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationRatio", "k8s.io/apimachinery/pkg/apis/meta/v1.Time", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RolloutCoordinationRatio(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutCoordinationRatio is the cross-Component ratio snapshot used by RatioBalanced pacing.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"original": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Original is the snapshot of desired replica counts per Component at rollout start. The keys are ComponentType strings.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: 0,
+										Type:    []string{"integer"},
+										Format:  "int32",
+									},
+								},
+							},
+						},
+					},
+					"current": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Current reports the live replica counts per Component.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: 0,
+										Type:    []string{"integer"},
+										Format:  "int32",
+									},
+								},
+							},
+						},
+					},
+					"newPods": {
+						SchemaProps: spec.SchemaProps{
+							Description: "NewPods reports the new-revision pod counts per Component.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: 0,
+										Type:    []string{"integer"},
+										Format:  "int32",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RolloutCoordinationSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutCoordinationSpec declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"groups": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Groups is the list of coordination groups. Each group binds a set of Components under one policy. A Component may appear in at most one group; webhook rejects multi-membership.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RolloutCoordinationStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutCoordinationStatus reports per-group coordination state for the InferenceService.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"groups": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"name",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Groups reports the observed state of each declared RolloutCoordinationGroup, indexed by position in spec.rolloutCoordination.groups[].",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus"},
 	}
 }
 

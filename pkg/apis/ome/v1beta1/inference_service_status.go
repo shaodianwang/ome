@@ -60,6 +60,13 @@ type InferenceServiceStatus struct {
 	// when the live annotation differs from this.
 	// +optional
 	LastRuntimeSyncToken string `json:"lastRuntimeSyncToken,omitempty"`
+
+	// RolloutCoordination reports per-group cross-Component
+	// coordination state for the InferenceService. Populated only
+	// when spec.rolloutCoordination is declared. See
+	// RolloutCoordinationSpec.
+	// +optional
+	RolloutCoordination *RolloutCoordinationStatus `json:"rolloutCoordination,omitempty"`
 }
 
 // MountedOverlay records one overlay the controller wired into the
@@ -101,6 +108,60 @@ type ComponentStatusSpec struct {
 	// +optional
 	// +kubebuilder:validation:Enum=Stable;Canarying;BlueGreenStandby;Pending;Paused;Promoting;RollingBack;Failed
 	RolloutPhase RolloutPhase `json:"rolloutPhase,omitempty"`
+
+	// LatestReadyRevision names the most recent ControllerRevision
+	// whose pods reached Ready. Equal to LatestRolledoutRevision once
+	// the rollout completes; set ahead of it during in-flight rollouts.
+	// +optional
+	LatestReadyRevision string `json:"latestReadyRevision,omitempty"`
+
+	// LatestRolledoutRevision names the most recent ControllerRevision
+	// that fully owns this Component's traffic (i.e., the rollout has
+	// completed). Drives the consumer-side HTTPRoute backendRef.
+	// +optional
+	LatestRolledoutRevision string `json:"latestRolledoutRevision,omitempty"`
+
+	// PreviousRolledoutRevision names the prior rolled-out
+	// ControllerRevision, retained for diagnosis and traffic
+	// reverence during partial rollbacks.
+	// +optional
+	PreviousRolledoutRevision string `json:"previousRolledoutRevision,omitempty"`
+
+	// Traffic reports per-revision traffic weights for this
+	// Component. Each entry corresponds to one revision currently
+	// receiving traffic. The OEP-0011 HTTPRoute builder reads this to
+	// emit weighted backendRefs.
+	// +optional
+	// +listType=map
+	// +listMapKey=revisionName
+	Traffic []ComponentTrafficTarget `json:"traffic,omitempty"`
+}
+
+// ComponentTrafficTarget describes the percentage of traffic routed to
+// one revision of one Component. RevisionName is the per-revision
+// Service name produced by OMENative's coordination layer (e.g.
+// `llama-engine-rev-abc123`), which the OEP-0011 HTTPRoute builder
+// consumes directly as a backend reference.
+type ComponentTrafficTarget struct {
+	// RevisionName is the per-revision Service name for this target.
+	RevisionName string `json:"revisionName"`
+
+	// Percent is the percentage of traffic the consumer should route
+	// to RevisionName. Sum across all entries for one Component is
+	// 100.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	Percent int32 `json:"percent"`
+
+	// Tag is an optional short identifier for the target (e.g.
+	// "latest", "prev"). Cosmetic; not used by the consumer.
+	// +optional
+	Tag string `json:"tag,omitempty"`
+
+	// LatestRevision is true when this entry corresponds to the
+	// LatestRolledoutRevision for the Component.
+	// +optional
+	LatestRevision bool `json:"latestRevision,omitempty"`
 }
 
 // ComponentType contains the different types of components of the service

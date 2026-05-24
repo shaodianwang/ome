@@ -97,7 +97,7 @@ func reconcileInstance(ctx context.Context, p core.ReconcileParams, plan core.Co
 			return false, nil
 		}
 
-		if _, err := createMissingPods(ctx, p, plan, inst, inst.Index, missing); err != nil {
+		if _, err := createMissingPods(ctx, p, plan, inst, inst.Index, missing, revisionHashFromTarget(target)); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -168,7 +168,9 @@ func expectedPodNamesForInstance(isvc string, component v1beta1.ComponentType, i
 // ExpectCreates bookkeeping. idx is the expectations bucket — pass
 // inst.Index for steady-state Create / Restart Phase B; surgeIdx for
 // Migrate's surge create. Callers must NOT call ExpectCreates themselves.
-func createMissingPods(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan, idx int32, targets []podTarget) (int, error) {
+// revisionHash, when non-empty, stamps ome.io/revision-hash on every
+// created pod so per-revision Services can select it.
+func createMissingPods(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan, idx int32, targets []podTarget, revisionHash string) (int, error) {
 	created := 0
 	for _, t := range targets {
 		template := p.PodSpec
@@ -176,7 +178,7 @@ func createMissingPods(ctx context.Context, p core.ReconcileParams, plan core.Co
 			template = p.WorkerPodSpec
 		}
 
-		pod, err := Render(p.ISVC, template, plan, inst, t.Runner, t.Ordinal)
+		pod, err := RenderWithRevision(p.ISVC, template, plan, inst, t.Runner, t.Ordinal, revisionHash)
 		if err != nil {
 			return created, fmt.Errorf("render pod %s: %w", t.Name, err)
 		}
@@ -195,6 +197,48 @@ func createMissingPods(ctx context.Context, p core.ReconcileParams, plan core.Co
 		created++
 	}
 	return created, nil
+}
+
+// revisionHashFromTarget extracts the hash suffix from a target
+// ControllerRevision. Returns "" when target is nil so callers can
+// pass-through to RenderWithRevision; an empty hash skips the
+// ome.io/revision-hash label.
+func revisionHashFromTarget(target *appsv1.ControllerRevision) string {
+	if target == nil {
+		return ""
+	}
+	return query.RevisionHashFromControllerRevisionName(target.Name)
+}
+
+// revisionHashForInstance returns the revision hash to stamp on pods
+// being created for one Instance, given the optional target
+// ControllerRevision and the Instance's current status. Used by
+// callers (Restart, Migrate) that don't carry a target *CR but still
+// need the per-revision label to be correct — the Instance is staying
+// on its existing revision, so we read RunningRevision from status.
+func revisionHashForInstance(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, target *appsv1.ControllerRevision) string {
+	if hash := revisionHashFromTarget(target); hash != "" {
+		return hash
+	}
+	if isvc == nil {
+		return ""
+	}
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.OMENative == nil {
+		return ""
+	}
+	for _, s := range cs.OMENative.InstanceStatuses {
+		if s.Index == idx && s.RunningRevision != "" {
+			return query.RevisionHashFromControllerRevisionName(s.RunningRevision)
+		}
+	}
+	// Fall back to the Component-level UpdateRevision when no
+	// per-Instance running revision is recorded — first-create paths
+	// hit this branch.
+	if cs.OMENative.UpdateRevision != "" {
+		return query.RevisionHashFromControllerRevisionName(cs.OMENative.UpdateRevision)
+	}
+	return query.RevisionHashFromControllerRevisionName(cs.OMENative.CurrentRevision)
 }
 
 // patchInstanceStatusCreating idempotently stamps Phase=Creating with the

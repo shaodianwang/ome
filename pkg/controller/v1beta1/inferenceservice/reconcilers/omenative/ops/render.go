@@ -13,7 +13,24 @@ import (
 )
 
 // Render builds the corev1.Pod for one ordinal of one Runner of one
-// Instance, derived from a shared rendered PodSpec template.
+// Instance, derived from a shared rendered PodSpec template. Equivalent
+// to RenderWithRevision with revisionHash="" — kept as a back-compat
+// entry point for tests and callers that don't have a target revision
+// in scope.
+func Render(
+	isvc *v1beta1.InferenceService,
+	podSpec *corev1.PodSpec,
+	plan core.ComponentPlan,
+	inst core.InstancePlan,
+	runner core.RunnerPlan,
+	ordinal int32,
+) (*corev1.Pod, error) {
+	return RenderWithRevision(isvc, podSpec, plan, inst, runner, ordinal, "")
+}
+
+// RenderWithRevision builds the corev1.Pod for one ordinal of one
+// Runner of one Instance, stamping ome.io/revision-hash with
+// revisionHash so per-revision Services can select the pod.
 //
 // Single-pod scope: the caller passes plan with one Runner per Instance
 // of size 1. Multi-pod Runner layout (leader + N workers per Instance)
@@ -23,20 +40,22 @@ import (
 //   - stable name <isvc>-<comp>-<inst-idx>-<runner>-<ordinal>
 //   - hostname + subdomain so peer DNS resolves under the Component's
 //     headless service
-//   - five OMENative labels (inferenceservice / component /
-//     instance-index / runner / managed-by)
+//   - the OMENative labels (inferenceservice / component /
+//     instance-index / instance-incarnation / runner / managed-by),
+//     plus ome.io/revision-hash when revisionHash is non-empty
 //   - controller-owned `ome.io/serving` readiness gate appended after
 //     any user-declared gates
 //   - OME_* environment variables injected into every container
 //     (OMENative values override user-supplied ones with the same Name)
 //   - one OwnerReference back to the parent InferenceService
-func Render(
+func RenderWithRevision(
 	isvc *v1beta1.InferenceService,
 	podSpec *corev1.PodSpec,
 	plan core.ComponentPlan,
 	inst core.InstancePlan,
 	runner core.RunnerPlan,
 	ordinal int32,
+	revisionHash string,
 ) (*corev1.Pod, error) {
 	if isvc == nil {
 		return nil, fmt.Errorf("nil InferenceService")
@@ -48,11 +67,15 @@ func Render(
 	name := query.PodName(isvc.Name, plan.Component, inst.Index, runner.Name, ordinal)
 	subdomain := query.HeadlessServiceName(isvc.Name, plan.Component)
 
+	lbls := podLabels(isvc.Name, plan.Component, inst.Index, runner.Name, inst.Incarnation)
+	if revisionHash != "" {
+		lbls[query.LabelRevisionHash] = revisionHash
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: isvc.Namespace,
-			Labels:    podLabels(isvc.Name, plan.Component, inst.Index, runner.Name, inst.Incarnation),
+			Labels:    lbls,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(isvc, isvcGroupVersionKind),
 			},

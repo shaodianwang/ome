@@ -24623,6 +24623,69 @@ spec:
                   required:
                     - name
                   type: object
+                rolloutCoordination:
+                  properties:
+                    groups:
+                      items:
+                        properties:
+                          components:
+                            items:
+                              type: string
+                            minItems: 1
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          order:
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          pacing:
+                            properties:
+                              maxSurge:
+                                anyOf:
+                                  - type: integer
+                                  - type: string
+                                x-kubernetes-int-or-string: true
+                              maxUnavailable:
+                                anyOf:
+                                  - type: integer
+                                  - type: string
+                                x-kubernetes-int-or-string: true
+                              ratioTolerance:
+                                format: int32
+                                maximum: 100
+                                minimum: 0
+                                type: integer
+                              type:
+                                allOf:
+                                  - enum:
+                                      - PerComponent
+                                      - RatioBalanced
+                                  - enum:
+                                      - PerComponent
+                                      - RatioBalanced
+                                type: string
+                            type: object
+                          policy:
+                            allOf:
+                              - enum:
+                                  - Atomic
+                                  - Independent
+                                  - PairedMixable
+                                  - Sequential
+                              - enum:
+                                  - Atomic
+                                  - Independent
+                                  - PairedMixable
+                                  - Sequential
+                            type: string
+                        required:
+                          - components
+                          - policy
+                        type: object
+                      type: array
+                      x-kubernetes-list-type: atomic
+                  type: object
                 router:
                   properties:
                     activeDeadlineSeconds:
@@ -28488,6 +28551,10 @@ spec:
                           url:
                             type: string
                         type: object
+                      latestReadyRevision:
+                        type: string
+                      latestRolledoutRevision:
+                        type: string
                       omenative:
                         properties:
                           availableReplicas:
@@ -28695,6 +28762,8 @@ spec:
                             format: int32
                             type: integer
                         type: object
+                      previousRolledoutRevision:
+                        type: string
                       restURL:
                         type: string
                       rolloutPhase:
@@ -28708,6 +28777,28 @@ spec:
                           - RollingBack
                           - Failed
                         type: string
+                      traffic:
+                        items:
+                          properties:
+                            latestRevision:
+                              type: boolean
+                            percent:
+                              format: int32
+                              maximum: 100
+                              minimum: 0
+                              type: integer
+                            revisionName:
+                              type: string
+                            tag:
+                              type: string
+                          required:
+                            - percent
+                            - revisionName
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                          - revisionName
+                        x-kubernetes-list-type: map
                       url:
                         type: string
                     type: object
@@ -28896,6 +28987,84 @@ spec:
                   type: integer
                 pinnedRevisionName:
                   type: string
+                rolloutCoordination:
+                  properties:
+                    groups:
+                      items:
+                        properties:
+                          components:
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          compositePhase:
+                            type: string
+                          currentComponent:
+                            type: string
+                          lastTransitionTime:
+                            format: date-time
+                            type: string
+                          message:
+                            type: string
+                          name:
+                            type: string
+                          observedRatio:
+                            properties:
+                              current:
+                                additionalProperties:
+                                  format: int32
+                                  type: integer
+                                type: object
+                              newPods:
+                                additionalProperties:
+                                  format: int32
+                                  type: integer
+                                type: object
+                              original:
+                                additionalProperties:
+                                  format: int32
+                                  type: integer
+                                type: object
+                            type: object
+                          observedSurge:
+                            anyOf:
+                              - type: integer
+                              - type: string
+                            x-kubernetes-int-or-string: true
+                          order:
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          phase:
+                            enum:
+                              - Idle
+                              - Surging
+                              - Waiting
+                              - Shifting
+                              - Draining
+                              - ScalingDown
+                              - Failed
+                              - RollingBack
+                              - Paused
+                            type: string
+                          policy:
+                            enum:
+                              - Atomic
+                              - Independent
+                              - PairedMixable
+                              - Sequential
+                            type: string
+                          previousComponent:
+                            type: string
+                        required:
+                          - name
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - name
+                      x-kubernetes-list-type: map
+                  type: object
                 traffic:
                   properties:
                     algorithm:

@@ -49,6 +49,18 @@ type InferenceServiceSpec struct {
 	// and the TrafficSpec doc for details.
 	// +optional
 	Traffic *TrafficSpec `json:"traffic,omitempty"`
+
+	// RolloutCoordination declares cross-Component rollout coupling
+	// for OMENative-managed Components. Each group lists the
+	// Components that roll together and the policy that governs their
+	// coordination. Components not listed in any group roll
+	// independently (the default).
+	//
+	// Only meaningful when at least one referenced Component uses
+	// ome.io/deploymentMode=OMENative. Webhook rejects groups that
+	// reference non-OMENative Components.
+	// +optional
+	RolloutCoordination *RolloutCoordinationSpec `json:"rolloutCoordination,omitempty"`
 }
 
 // EngineSpec defines the configuration for the Engine component (can be used for both single-node and multi-node deployments)

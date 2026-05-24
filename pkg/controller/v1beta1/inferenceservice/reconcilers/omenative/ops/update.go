@@ -400,7 +400,7 @@ func recreateUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compo
 		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
-		if _, err := createMissingPods(ctx, p, plan, newInst, inst.Index, missing); err != nil {
+		if _, err := createMissingPods(ctx, p, plan, newInst, inst.Index, missing, revisionHashFromTarget(target)); err != nil {
 			return false, err
 		}
 		return false, nil

@@ -151,7 +151,7 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
-		if _, err := createMissingPods(ctx, p, plan, newInst, inst.Index, missing); err != nil {
+		if _, err := createMissingPods(ctx, p, plan, newInst, inst.Index, missing, revisionHashForInstance(p.ISVC, plan.Component, inst.Index, nil)); err != nil {
 			return false, err
 		}
 		return false, nil
