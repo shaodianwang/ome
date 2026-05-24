@@ -15,6 +15,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
 )
 
 func TestManagedByOMENativePredicate(t *testing.T) {
@@ -27,8 +29,8 @@ func TestManagedByOMENativePredicate(t *testing.T) {
 	}{
 		{"nil labels", nil, false},
 		{"missing label", map[string]string{"other": "value"}, false},
-		{"wrong value", map[string]string{labelManagedBy: "Deployment"}, false},
-		{"match", map[string]string{labelManagedBy: managedByOMENative}, true},
+		{"wrong value", map[string]string{query.LabelManagedBy: "Deployment"}, false},
+		{"match", map[string]string{query.LabelManagedBy: query.ManagedByOMENative}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,17 +119,17 @@ func TestPodEventHandler_NoOwnerNoEnqueue(t *testing.T) {
 
 func TestPodEventHandler_NilExpectationsFallsBackToDefault(t *testing.T) {
 	// Test that passing nil Expectations doesn't panic — handler
-	// falls back to DefaultExpectations.
+	// falls back to core.DefaultExpectations.
 	pod := newOMENativePod("prod", "llama-70b", v1beta1.EngineComponent, 0, true)
 	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
 
-	defer DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+	defer core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
 
 	h := NewPodEventHandler(nil)
 	h.Create(context.Background(), event.TypedCreateEvent[client.Object]{Object: pod}, q)
 
 	if q.Len() != 1 {
-		t.Errorf("expected enqueue via DefaultExpectations fallback, got %d", q.Len())
+		t.Errorf("expected enqueue via core.DefaultExpectations fallback, got %d", q.Len())
 	}
 }
 
@@ -144,45 +146,45 @@ func TestExtractOMENativeKey(t *testing.T) {
 			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
 				constants.InferenceServicePodLabelKey: "x",
 				constants.OMEComponentLabel:           "engine",
-				labelInstanceIdx:                      "0",
+				query.LabelInstanceIdx:                "0",
 			}}},
 			false,
 		},
 		{
 			"missing isvc",
 			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-				labelManagedBy:              managedByOMENative,
+				query.LabelManagedBy:        query.ManagedByOMENative,
 				constants.OMEComponentLabel: "engine",
-				labelInstanceIdx:            "0",
+				query.LabelInstanceIdx:      "0",
 			}}},
 			false,
 		},
 		{
 			"missing component",
 			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-				labelManagedBy:                        managedByOMENative,
+				query.LabelManagedBy:                  query.ManagedByOMENative,
 				constants.InferenceServicePodLabelKey: "x",
-				labelInstanceIdx:                      "0",
+				query.LabelInstanceIdx:                "0",
 			}}},
 			false,
 		},
 		{
 			"bad instance index",
 			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-				labelManagedBy:                        managedByOMENative,
+				query.LabelManagedBy:                  query.ManagedByOMENative,
 				constants.InferenceServicePodLabelKey: "x",
 				constants.OMEComponentLabel:           "engine",
-				labelInstanceIdx:                      "not-a-number",
+				query.LabelInstanceIdx:                "not-a-number",
 			}}},
 			false,
 		},
 		{
 			"ok",
 			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-				labelManagedBy:                        managedByOMENative,
+				query.LabelManagedBy:                  query.ManagedByOMENative,
 				constants.InferenceServicePodLabelKey: "x",
 				constants.OMEComponentLabel:           "engine",
-				labelInstanceIdx:                      "3",
+				query.LabelInstanceIdx:                "3",
 			}}},
 			true,
 		},
@@ -252,18 +254,18 @@ func TestEndpointSliceToISVC_NonSliceObject(t *testing.T) {
 func newOMENativePod(ns, isvc string, component v1beta1.ComponentType, idx int32, withOwner bool) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      podName(isvc, component, idx, "default", 0),
+			Name:      query.PodName(isvc, component, idx, "default", 0),
 			Namespace: ns,
 			Labels: map[string]string{
-				labelManagedBy:                        managedByOMENative,
+				query.LabelManagedBy:                  query.ManagedByOMENative,
 				constants.InferenceServicePodLabelKey: isvc,
 				constants.OMEComponentLabel:           string(component),
-				labelInstanceIdx:                      "0",
+				query.LabelInstanceIdx:                "0",
 			},
 		},
 	}
 	if idx != 0 {
-		pod.Labels[labelInstanceIdx] = intToA(idx)
+		pod.Labels[query.LabelInstanceIdx] = intToA(idx)
 	}
 	if withOwner {
 		isController := true

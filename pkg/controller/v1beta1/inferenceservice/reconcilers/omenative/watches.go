@@ -16,6 +16,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
 )
 
 // isvcKind is the Kind string carried on owner references OMENative
@@ -36,7 +38,7 @@ const headlessServiceSuffix = "-headless"
 // a label scan.
 func ManagedByOMENativePredicate() predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		return obj.GetLabels()[labelManagedBy] == managedByOMENative
+		return obj.GetLabels()[query.LabelManagedBy] == query.ManagedByOMENative
 	})
 }
 
@@ -47,11 +49,11 @@ func ManagedByOMENativePredicate() predicate.Predicate {
 // expectations entry and stays in cooldown, even though the watch
 // just confirmed the writes.
 //
-// exp may be nil; the handler then falls back to DefaultExpectations
+// exp may be nil; the handler then falls back to core.DefaultExpectations
 // so manager wiring before the refactor stays valid.
 func NewPodEventHandler(exp *Expectations) handler.EventHandler {
 	if exp == nil {
-		exp = DefaultExpectations
+		exp = core.DefaultExpectations
 	}
 	return &podEventHandler{expectations: exp}
 }
@@ -142,7 +144,7 @@ func extractOMENativeKey(pod *corev1.Pod) (isvc string, component v1beta1.Compon
 	if pod == nil || pod.Labels == nil {
 		return "", "", 0, false
 	}
-	if pod.Labels[labelManagedBy] != managedByOMENative {
+	if pod.Labels[query.LabelManagedBy] != query.ManagedByOMENative {
 		return "", "", 0, false
 	}
 	isvc = pod.Labels[constants.InferenceServicePodLabelKey]
@@ -153,7 +155,7 @@ func extractOMENativeKey(pod *corev1.Pod) (isvc string, component v1beta1.Compon
 	if compRaw == "" {
 		return "", "", 0, false
 	}
-	parsedIdx, ok := instanceIdxFromLabels(pod)
+	parsedIdx, ok := query.InstanceIdxFromLabels(pod)
 	if !ok {
 		return "", "", 0, false
 	}

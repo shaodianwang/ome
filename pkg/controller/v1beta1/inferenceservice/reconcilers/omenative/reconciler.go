@@ -10,93 +10,43 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 )
 
-// ReconcileParams is the input bag the OMENative reconciler reads on each
-// invocation. Constructed at the dispatch site in
-// components/{engine,decoder,router}.go from the values reconcileDeployment
-// already has in scope.
-type ReconcileParams struct {
-	// ISVC is the parent InferenceService being reconciled.
-	ISVC *v1beta1.InferenceService
+// Carrier types defined in core/ are re-exported here so the rest of
+// the omenative package (and its callers) only import the umbrella
+// package. The aliases are package-API declarations, not wrappers —
+// they share the underlying type with core/ at compile time.
+type (
+	ReconcileParams  = core.ReconcileParams
+	ComponentPlan    = core.ComponentPlan
+	InstancePlan     = core.InstancePlan
+	RunnerPlan       = core.RunnerPlan
+	MigrationOverlay = core.MigrationOverlay
+	Expectations     = core.Expectations
+)
 
-	// ObjectMeta is the rendered per-Component metadata (labels,
-	// annotations, owner refs).
-	ObjectMeta metav1.ObjectMeta
-
-	// PodSpec is the rendered pod template for the Component's leader /
-	// single-pod runner.
-	PodSpec *v1.PodSpec
-
-	// Component identifies which of router / engine / decoder is being
-	// reconciled.
-	Component v1beta1.ComponentType
-
-	// ComponentExt is the merged ComponentExtensionSpec, including the
-	// `omenative` sub-block populated by the mutating webhook defaulter.
-	ComponentExt *v1beta1.ComponentExtensionSpec
-
-	// WorkerSize is Worker.Size for multi-pod Instances. Zero when the
-	// Component is single-pod or has no Worker block (e.g., Router).
-	WorkerSize int
-
-	// WorkerPodSpec is the rendered pod template for the Worker runner.
-	// Nil when WorkerSize is 0.
-	WorkerPodSpec *v1.PodSpec
-
-	// MultiPod indicates the Component declares Leader or Worker (Size > 0),
-	// i.e., each Instance materializes more than one pod. Router is always
-	// single-pod (MultiPod=false). Set at the dispatch site since
-	// EngineSpec/DecoderSpec/RouterSpec aren't carried through this bag.
-	MultiPod bool
-
-	// Client is the controller-runtime client used to materialize pods,
-	// patch status, and observe cluster state. Set at the dispatch site
-	// from BaseComponentFields.Client.
-	Client client.Client
-
-	// APIReader is an optional live API reader, typically mgr.GetAPIReader().
-	// When set it is used for the correctness-critical reads in revision
-	// bookkeeping where stale cache contents could cause spurious
-	// collisions or duplicate Revision numbers. When nil the cached Client
-	// is used and the caller accepts the cache-lag exposure. Callers wire
-	// this in once the controller manager exposes a live reader; tests
-	// leave it nil since the fake client is a live source.
-	APIReader client.Reader
-
-	// Expectations is the create/delete bookkeeping cache the OMENative
-	// reconciler uses to avoid re-issuing batches before the controller-
-	// runtime watch has confirmed prior writes. Production wires the
-	// same instance into the Pod event handler (watches.go) so observed
-	// create / delete events release expectations immediately. When nil
-	// the package-level DefaultExpectations singleton is used.
-	Expectations *Expectations
-
-	// Recorder emits K8s Events against the parent InferenceService at
-	// lifecycle transitions (InstanceCreated, InPlaceUpdateStarted,
-	// MigrationCompleted, etc. — see events.go for the full reason
-	// set). nil-safe: when unset, recordEventf is a no-op so tests
-	// don't need to plumb a recorder.
-	Recorder record.EventRecorder
-}
-
-// reader returns the live API reader when APIReader is set; otherwise the
-// cached Client. Callers use this for revision bookkeeping and other
-// reads that must not observe a stale cache.
-func (p *ReconcileParams) reader() client.Reader {
-	if p.APIReader != nil {
-		return p.APIReader
-	}
-	return p.Client
-}
+// BuildPlan / NewExpectations are the constructors paired with the
+// carrier types above. Re-exported as `var` so callers see a single
+// symbol in the omenative package. The DefaultExpectations *singleton*
+// is intentionally not re-exported — a `var` re-export would copy the
+// pointer at init time, and any caller that reassigns the local copy
+// (e.g. test fixtures) would silently desync from the core singleton
+// used by core/params.go's ExpectationsCache fallback. Callers that
+// need the singleton import core directly.
+var (
+	BuildPlan                  = core.BuildPlan
+	NewExpectations            = core.NewExpectations
+	ErrMultiPodNotYetSupported = core.ErrMultiPodNotYetSupported
+)
 
 // derefInt32 is a small helper for event messages where we want to
 // print the value of an *int32 without an "<nil>" surprise.
@@ -105,17 +55,6 @@ func derefInt32(p *int32) int32 {
 		return 0
 	}
 	return *p
-}
-
-// expectations returns the Expectations cache to use this reconcile —
-// the per-reconciler instance threaded through ReconcileParams when
-// set, or the package-level DefaultExpectations singleton as a
-// fallback for tests and pre-wiring callers.
-func (p *ReconcileParams) expectations() *Expectations {
-	if p.Expectations != nil {
-		return p.Expectations
-	}
-	return DefaultExpectations
 }
 
 // ReconcileComponent is the Loop A entry point for OMENative-managed
@@ -155,8 +94,8 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 
 	// Reconcile the per-Component headless Service after the plan
 	// validates the Component is supported but before any per-Instance
-	// op runs. Every drain check downstream (IsPodDrained /
-	// IsPodInRotation) reads the EndpointSlices owned by this Service;
+	// op runs. Every drain check downstream (drain.IsPodDrained /
+	// drain.IsPodInRotation) reads the EndpointSlices owned by this Service;
 	// without it, drain would fail-loud rather than silently complete.
 	// Done after BuildPlan so multi-pod's ErrMultiPodNotYetSupported
 	// short-circuits without leaving an orphan Service behind.
@@ -186,114 +125,8 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 		}
 	}()
 
-	result, err = reconcileComponentOps(ctx, p, plan, target)
+	result, err = ops.ReconcileComponentOps(ctx, p, plan, target)
 	return
-}
-
-// reconcileComponentOps drives the five lifecycle operations. Lifted
-// out of ReconcileComponent so the deferred status write in the
-// caller runs unconditionally, even on early returns from this path.
-func reconcileComponentOps(ctx context.Context, p ReconcileParams, plan ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
-	// Expire any in-flight Operation whose Deadline has elapsed. The
-	// in-place update path auto-falls-back to recreate; other ops are
-	// flagged with Operation.Reason=DeadlineExceeded so the condition
-	// surface can show OperationStuck. Runs before the per-op
-	// dispatchers so a timed-out op doesn't get re-driven.
-	if err := ExpireOperationsIfDeadlinePassed(ctx, p, plan); err != nil {
-		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: expire timeouts (component=%s): %w", plan.Component, err)
-	}
-
-	// Scale-down first. An ISVC that drops MinReplicas leaves
-	// InstanceStatus entries above the new replica count; Delete drives
-	// each to gone.
-	extras := extraInstanceIndices(p.ISVC, plan.Component, plan)
-	allDeleted := true
-	for _, idx := range extras {
-		done, derr := Delete(ctx, p, plan, idx)
-		if derr != nil {
-			return ctrl.Result{}, fmt.Errorf("OMENative reconciler: delete instance %d: %w", idx, derr)
-		}
-		if !done {
-			allDeleted = false
-		}
-	}
-	if !allDeleted {
-		return ctrl.Result{RequeueAfter: deleteRequeueInterval}, nil
-	}
-
-	// Per-Instance restart pass.
-	anyRestarting := false
-	if plan.RestartPolicy == v1beta1.OMENativeRestartPolicyRecreateInstance {
-		for _, inst := range plan.Instances {
-			needsRestart, reason, derr := detectRestartTrigger(ctx, p, plan, inst)
-			if derr != nil {
-				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: detect restart trigger (instance=%d): %w", inst.Index, derr)
-			}
-			if !needsRestart {
-				continue
-			}
-			done, rerr := Restart(ctx, p, plan, inst, reason)
-			if rerr != nil {
-				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: restart instance %d: %w", inst.Index, rerr)
-			}
-			if !done {
-				anyRestarting = true
-			}
-		}
-	}
-	if anyRestarting {
-		return ctrl.Result{RequeueAfter: restartRequeueInterval}, nil
-	}
-
-	// Per-Component migration pass.
-	if plan.MigrationMode != v1beta1.OMENativeMigrationPolicyModeNever {
-		uuid, req, sourceIdx, found, mderr := detectMigrationRequest(ctx, p, plan.Component)
-		if mderr != nil {
-			return ctrl.Result{}, fmt.Errorf("OMENative reconciler: detect migration request (component=%s): %w", plan.Component, mderr)
-		}
-		if found {
-			done, merr := Migrate(ctx, p, plan, sourceIdx, uuid, req)
-			if merr != nil {
-				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: migrate instance %d: %w", sourceIdx, merr)
-			}
-			if !done {
-				return ctrl.Result{RequeueAfter: migrateRequeueInterval}, nil
-			}
-			// Migrate just removed the source InstanceStatus and promoted
-			// the surge to Ready. plan was computed with the stale
-			// pre-migration view (both source and surge present), so the
-			// Update + Create passes below would fall through to recreate
-			// the source-side index. Re-queue so the next reconcile
-			// rebuilds plan from the post-migration status.
-			return ctrl.Result{Requeue: true}, nil
-		}
-	}
-
-	// Per-Instance update pass.
-	if target != nil {
-		anyUpdating := false
-		for _, inst := range plan.Instances {
-			needs, derr := detectUpdateTrigger(ctx, p, plan, inst, target, p.PodSpec)
-			if derr != nil {
-				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: detect update trigger (instance=%d): %w", inst.Index, derr)
-			}
-			if !needs {
-				continue
-			}
-			done, uerr := Update(ctx, p, plan, inst, target, p.PodSpec)
-			if uerr != nil {
-				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: update instance %d: %w", inst.Index, uerr)
-			}
-			if !done {
-				anyUpdating = true
-			}
-		}
-		if anyUpdating {
-			return ctrl.Result{RequeueAfter: updateRequeueInterval}, nil
-		}
-	}
-
-	return Create(ctx, p, plan, target)
 }
 
 // ensureRevisionWithCollisionRetry computes the target ControllerRevision
@@ -313,7 +146,7 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	if cs, ok := p.ISVC.Status.Components[component]; ok && cs.OMENative != nil {
 		collisionCount = cs.OMENative.CollisionCount
 	}
-	target, collision, err := EnsureControllerRevision(ctx, p.Client, p.reader(), p.ISVC, component, p.PodSpec, &p.ObjectMeta, collisionCount)
+	target, collision, err := revision.EnsureControllerRevision(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, &p.ObjectMeta, collisionCount)
 	if err != nil {
 		return nil, err
 	}
@@ -325,10 +158,10 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	if err != nil {
 		return nil, fmt.Errorf("bump CollisionCount after revision collision: %w", err)
 	}
-	recordWarning(p, EventReasonRevisionCollision,
+	status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonRevisionCollision,
 		"OMENative component=%s ControllerRevision hash collision; CollisionCount bumped to %d",
 		component, derefInt32(bumped))
-	target, collision, err = EnsureControllerRevision(ctx, p.Client, p.reader(), p.ISVC, component, p.PodSpec, &p.ObjectMeta, bumped)
+	target, collision, err = revision.EnsureControllerRevision(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, &p.ObjectMeta, bumped)
 	if err != nil {
 		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)
 	}
