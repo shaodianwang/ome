@@ -216,8 +216,6 @@ type coordFixture struct {
 // OMENative) the suite's stock CBM-inspection fake accepts.
 func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	o := &fixtureOptions{
-		cbmName:            "fixture-llama-7b",
-		csrName:            "fixture-runtime",
 		isvcName:           "fixture-isvc",
 		engineImage:        "ghcr.io/test/runtime:test",
 		engineMinReplicas:  1,
@@ -226,6 +224,18 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	}
 	for _, opt := range opts {
 		opt(o)
+	}
+	// Default CBM/CSR names derive from the ISVC name so each test
+	// gets unique cluster-scoped resources by default. Sharing the
+	// same default across Ordered tests previously caused DeferCleanup
+	// races where Test2 saw Test1's mid-delete CBM and reconcile
+	// surfaced "ClusterBaseModel not found". Tests that want explicit
+	// names still use WithCBMName / WithCSRName.
+	if o.cbmName == "" {
+		o.cbmName = o.isvcName + "-cbm"
+	}
+	if o.csrName == "" {
+		o.csrName = o.isvcName + "-csr"
 	}
 	if o.decoderImage == "" {
 		o.decoderImage = o.engineImage

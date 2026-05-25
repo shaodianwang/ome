@@ -60,11 +60,14 @@ var _ = ginkgo.Describe("BaseModel Distribution change at runtime", ginkgo.Order
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("flip Distribution=Sharded → controller must take the sharded branch on next reconcile")
-		got := &v1beta1.ClusterBaseModel{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "dist-pn2sharded"}, got)).To(Succeed())
-		dist := v1beta1.DistributionSharded
-		got.Spec.Distribution = &dist
-		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+		// Wrap Get+mutate+Update in Eventually for retry-on-conflict.
+		Eventually(func(g Gomega) {
+			got := &v1beta1.ClusterBaseModel{}
+			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "dist-pn2sharded"}, got)).To(Succeed())
+			dist := v1beta1.DistributionSharded
+			got.Spec.Distribution = &dist
+			g.Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		// Sharded path drives Ready=True via inline metadata parse.
 		// NodesReady belongs to the per-node path; the controller
@@ -109,10 +112,15 @@ var _ = ginkgo.Describe("BaseModel Distribution change at runtime", ginkgo.Order
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("flip Distribution back to PerNode by clearing the field")
-		got := &v1beta1.ClusterBaseModel{}
-		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "dist-sharded2pn"}, got)).To(Succeed())
-		got.Spec.Distribution = nil
-		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+		// Wrap Get+mutate+Update in Eventually for retry-on-conflict —
+		// the controller's status writer races with this user-driven
+		// spec edit and the bare Update flakes with HTTP 409.
+		Eventually(func(g Gomega) {
+			got := &v1beta1.ClusterBaseModel{}
+			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "dist-sharded2pn"}, got)).To(Succeed())
+			got.Spec.Distribution = nil
+			g.Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		ginkgo.By("agent reports Ready on the per-node path — proves controller is now driving per-node, not sharded")
 		Expect(writeNodeAgentEntry(suiteCtx, k8sClient,

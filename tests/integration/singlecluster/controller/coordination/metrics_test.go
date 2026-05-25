@@ -120,7 +120,7 @@ var _ = ginkgo.Describe("Coordination metrics (OEP-0007.1)", ginkgo.Ordered, fun
 				"different `reason` label values must produce independent counters")
 	})
 
-	ginkgo.It("M-4 RecordGroupTransition increments (G5: not invoked from production)", func() {
+	ginkgo.It("M-4 RecordGroupTransition increments", func() {
 		labels := prometheus.Labels{"isvc": "m4-isvc", "group": "g0", "from": "Surging", "to": "Shifting"}
 		start := counterFor("ome_omenative_rollout_group_transition_total", labels)
 		coordination.RecordGroupTransition("m4-isvc", "g0", "Surging", "Shifting")
@@ -136,7 +136,7 @@ var _ = ginkgo.Describe("Coordination metrics (OEP-0007.1)", ginkgo.Ordered, fun
 			To(Equal(start), "same-phase transition must not increment (defensive)")
 	})
 
-	ginkgo.It("M-5 RecordRatioSkew increments (G3+G5: not invoked from production)", func() {
+	ginkgo.It("M-5 RecordRatioSkew increments", func() {
 		labels := prometheus.Labels{"isvc": "m5-isvc", "group": "g0"}
 		start := counterFor("ome_omenative_ratio_skew_total", labels)
 		coordination.RecordRatioSkew("m5-isvc", "g0")
@@ -145,7 +145,7 @@ var _ = ginkgo.Describe("Coordination metrics (OEP-0007.1)", ginkgo.Ordered, fun
 			To(Equal(float64(2)))
 	})
 
-	ginkgo.It("M-6 RecordMixedPairing increments (G5: not invoked from production)", func() {
+	ginkgo.It("M-6 RecordMixedPairing increments", func() {
 		labels := prometheus.Labels{"isvc": "m6-isvc", "group": "g0"}
 		start := counterFor("ome_omenative_mixed_pairing_total", labels)
 		coordination.RecordMixedPairing("m6-isvc", "g0")
@@ -255,14 +255,7 @@ var _ = ginkgo.Describe("Coordination metrics (OEP-0007.1)", ginkgo.Ordered, fun
 			To(BeZero(), "empty isvc must not have produced a counter sample")
 	})
 
-	// ----------------------------------------------------------------
-	// G5-blocked PIts: end-to-end emission via reconciler
-	// ----------------------------------------------------------------
-
-	ginkgo.PIt("G5: M-4 E2E group_transition_total fires from reconciler on phase boundary", func() {
-		// Today the Record* helpers exist but the reconciler never
-		// invokes RecordGroupTransition. End-to-end: spin up a coord
-		// group, observe a phase change, expect the counter to bump.
+	ginkgo.It("M-4 E2E group_transition_total fires from reconciler on phase boundary", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("m4e"),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
@@ -278,9 +271,7 @@ var _ = ginkgo.Describe("Coordination metrics (OEP-0007.1)", ginkgo.Ordered, fun
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G3+G5: M-5 E2E ratio_skew_total fires when RatioBalanced rejects a surge", func() {
-		// Blocked on G3 (state machine doesn't invoke EvaluateSurge)
-		// AND G5 (RecordRatioSkew never called from production).
+	ginkgo.It("M-5 E2E ratio_skew_total fires when RatioBalanced rejects a surge", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("m5e"),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{

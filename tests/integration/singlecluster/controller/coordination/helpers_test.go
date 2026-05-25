@@ -39,9 +39,30 @@ const (
 // applyFixture creates the CBM, CSR, and ISVC in order and returns the
 // applied ISVC for the spec to assert against. Caller chains
 // ginkgo.DeferCleanup to tear them down.
+//
+// Waits for the CBM + CSR to be visible in the controller manager's
+// CACHED reader BEFORE creating the ISVC. The framework's k8sClient is
+// a direct (uncached) apiserver client — Get returns the moment
+// apiserver acks the Create. But the controller's reconciler reads
+// through its informer cache, which lags behind. Without the cached
+// wait the ISVC reconciler can fire with a stale cache, surface
+// "ClusterBaseModel not found", and requeue with controller-runtime's
+// exponential backoff (5ms → 16ms → ... → up to 1000s). By the time
+// the cache catches up, the test's Eventually has already timed out.
+//
+// suiteFwk.Manager().GetClient() returns the cached reader the
+// reconciler actually consults, so waiting on it is the deterministic
+// way to detect cache convergence.
 func applyFixture(g gomega.Gomega, f *coordFixture) {
 	g.ExpectWithOffset(1, k8sClient.Create(suiteCtx, f.CBM)).To(gomega.Succeed(), "create CBM")
 	g.ExpectWithOffset(1, k8sClient.Create(suiteCtx, f.CSR)).To(gomega.Succeed(), "create CSR")
+	cachedClient := suiteFwk.Manager().GetClient()
+	gomega.EventuallyWithOffset(1, func(gg gomega.Gomega) {
+		got := &v1beta1.ClusterBaseModel{}
+		gg.Expect(cachedClient.Get(suiteCtx, client.ObjectKey{Name: f.CBM.Name}, got)).To(gomega.Succeed())
+		got2 := &v1beta1.ClusterServingRuntime{}
+		gg.Expect(cachedClient.Get(suiteCtx, client.ObjectKey{Name: f.CSR.Name}, got2)).To(gomega.Succeed())
+	}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(gomega.Succeed())
 	g.ExpectWithOffset(1, k8sClient.Create(suiteCtx, f.ISVC)).To(gomega.Succeed(), "create ISVC")
 }
 

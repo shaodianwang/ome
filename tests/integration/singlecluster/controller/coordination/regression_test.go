@@ -12,12 +12,6 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Regression specs for OEP-0007.1.
-//
-// REG-* are the "this shipped, must not regress" suite. They double
-// as a structural-properties checklist that catches accidental scope
-// creep (new CRDs, status-condition pollution, etc.).
-
 var _ = ginkgo.Describe("Coordination regression suite (OEP-0007.1)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -29,43 +23,20 @@ var _ = ginkgo.Describe("Coordination regression suite (OEP-0007.1)", ginkgo.Ord
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// ----------------------------------------------------------------
-	// Structural-properties specs (green today, structural-only)
-	// ----------------------------------------------------------------
-
 	ginkgo.It("REG-9 OEP-0007.1 stayed in-CRD: RolloutCoordination is a *field* on InferenceService, not its own CRD", func() {
-		// Honest version: the proper "no new CRDs" assertion would
-		// query the apiserver, but apiextensionsv1 isn't in our
-		// suite scheme. Instead pin the structural invariant we
-		// actually care about: RolloutCoordinationSpec/Status are
-		// fields on InferenceServiceSpec/Status, not standalone CRDs.
-		// If anyone introduces `type RolloutCoordination` as a
-		// kubebuilder root resource, this test compiles+passes today
-		// but a follow-up review will see the new file and the test
-		// stays a useful documentation point.
 		var spec v1beta1.InferenceServiceSpec
 		var status v1beta1.InferenceServiceStatus
-		// Compile-time structural check.
 		_ = spec.RolloutCoordination
 		_ = status.RolloutCoordination
-		// Runtime sanity: zero-value Spec has nil RolloutCoordination
-		// (no coordination block declared by default).
 		Expect(spec.RolloutCoordination).To(BeNil())
 		Expect(status.RolloutCoordination).To(BeNil())
 	})
 
 	ginkgo.It("REG-10 RolloutCoordinationReady condition NOT stamped when no groups declared", func() {
-		// Opt-in semantics: ISVC without a rolloutCoordination block
-		// should not have the RolloutCoordinationReady condition stamped.
-		// The reconciler skips the SetRolloutCoordinationReady call
-		// when there are no group statuses. Pure-function check via
-		// the condition setter.
 		isvc := &v1beta1.InferenceService{}
 		isvc.Name = "reg10"
 		isvc.Namespace = ns.Name
-		// Call with empty groups — should be a no-op.
 		coordination.SetRolloutCoordinationReady(isvc, nil, time.Now())
-		// Status.Conditions should not contain RolloutCoordinationReady.
 		for _, c := range isvc.Status.Conditions {
 			Expect(string(c.Type)).NotTo(Equal(v1beta1.RolloutCoordinationReady),
 				"with no groups, RolloutCoordinationReady must NOT be stamped")
@@ -73,30 +44,54 @@ var _ = ginkgo.Describe("Coordination regression suite (OEP-0007.1)", ginkgo.Ord
 	})
 
 	ginkgo.It("REG-Pure-Aux ResolveGroups on nil RolloutCoordinationSpec → empty slice (no-op preserved)", func() {
-		// Opt-in: nil rolloutCoordination yields zero groups, which
-		// short-circuits the entire coord layer in Reconcile.
 		groups := coordination.ResolveGroups(nil)
 		Expect(groups).To(BeEmpty())
 	})
 
-	// ----------------------------------------------------------------
-	// G1-blocked / E2E PIts
-	// ----------------------------------------------------------------
+	ginkgo.It("REG-1 ISVC without coordination block has no Status.RolloutCoordination + no Ready condition", func() {
+		fix := newCoordFixture(ns.Name, WithISVCName("reg1"))
+		fix.ISVC.Spec.RolloutCoordination = nil
+		applyFixture(Default, fix)
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
 
-	ginkgo.PIt("G1: REG-1 ISVC without coordination block has no Status.RolloutCoordination + no Ready condition", func() {
-		// E2E counterpart to REG-10 / REG-Pure-Aux. Needs the full
-		// reconciler running to confirm no status field is touched.
+		Eventually(func(g Gomega) {
+			isvc := freshISVC(g, ns.Name, "reg1")
+			g.Expect(isvc.Status.RolloutCoordination).To(BeNil(),
+				"Status.RolloutCoordination should not be populated without a coord block")
+			for _, c := range isvc.Status.Conditions {
+				g.Expect(string(c.Type)).NotTo(Equal(v1beta1.RolloutCoordinationReady),
+					"RolloutCoordinationReady condition must not be stamped")
+			}
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G1: REG-2 RawDeployment Component in mixed-mode: coordination ignores it (no per-revision Service for it)", func() {})
-	ginkgo.PIt("G1: REG-3 OEP-0011 traffic translator still reads Traffic[] correctly", func() {})
-	ginkgo.PIt("G1: REG-4 OEP-0007 single-Component lifecycle unchanged (no coord block → behaves like before)", func() {})
-	ginkgo.PIt("G1: REG-5 migration verb on coordinated ISVC works (per-revision Services + surge don't fight)", func() {})
-	ginkgo.PIt("G1: REG-6 webhook acceptance doesn't break ISVC creation throughput (load test)", func() {})
-	ginkgo.PIt("G1: REG-7 existing OMENative integration suite still passes (smoke; CI runs both suites)", func() {
-		// Implicit in the full integration suite run: this PR keeps the
-		// OMENative suite green across every commit (modulo pre-existing
-		// flakes like WATCH-1 STATUS-5).
+	ginkgo.PIt("REG-2 RawDeployment Component in mixed-mode — needs mixed-mode controller setup not in this suite", func() {})
+	ginkgo.PIt("REG-3 OEP-0011 traffic translator reader — belongs in ingress suite", func() {})
+
+	ginkgo.It("REG-4 OEP-0007 single-Component lifecycle unchanged (no coord block → behaves like before)", func() {
+		fix := newCoordFixture(ns.Name, WithISVCName("reg4"), WithoutDecoder())
+		fix.ISVC.Spec.RolloutCoordination = nil
+		applyFixture(Default, fix)
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+
+		// With no coord block, per-revision Services + Traffic[] still
+		// emit for any OMENative Component; coord status stays nil.
+		Eventually(func(g Gomega) {
+			isvc := freshISVC(g, ns.Name, "reg4")
+			g.Expect(isvc.Status.RolloutCoordination).To(BeNil(),
+				"no coord block → no coord status")
+			traffic := trafficForComponent(isvc, v1beta1.EngineComponent)
+			g.Expect(traffic).NotTo(BeEmpty(),
+				"data plane (Traffic[]) should still emit for OMENative Component")
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
-	ginkgo.PIt("G1: REG-8 'coordination is a status-only layer, safe to retry' — fail mid-reconcile, retry, converges", func() {})
+
+	ginkgo.PIt("REG-5 migration verb cross-feature — covered by OMENative MIGRATE-* suite", func() {})
+	ginkgo.PIt("REG-6 webhook throughput — belongs in a benchmark suite", func() {})
+	ginkgo.PIt("REG-7 OMENative integration suite passes — covered by OMENative suite's own CI job", func() {})
+	ginkgo.PIt("REG-8 fault-injection retry — needs fault-injecting client wrapper not wired into this suite", func() {})
 })

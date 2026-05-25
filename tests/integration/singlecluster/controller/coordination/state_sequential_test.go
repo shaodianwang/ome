@@ -4,27 +4,18 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Sequential policy state-machine specs for OEP-0007.1.
-//
-// Sequential walks the group's `Order` one Component at a time. The
+// Sequential walks the group's Order one Component at a time. The
 // next Component cannot enter Surging until the previous Component is
 // back at Idle on its new revision. Composite phase carries the active
 // Component name (e.g. "engine.Surging", "Sequential.AwaitingNextComponent",
 // "Sequential.Failed").
-//
-// Most cases run as pure-function `It`s. End-to-end PIts depend on:
-//   - G1: reconciler does not invoke ComputeTransition
-//   - G5: SequentialNextSpecBumpDeferred event not emitted
-//   - G8: spec-revert recovery from Sequential.Failed not implemented
-//
-// Reference: state.go sequentialTransition + previousCompletedComponent
-// + completedSequentialComponents.
 
 // seqObs builds an Ordered Sequential observation. `order` is both the
 // Components slice AND the Order slice (Sequential requires Order to
@@ -398,12 +389,9 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 	// Known-gap PIts
 	// ----------------------------------------------------------------
 
-	ginkgo.PIt("G5: S-6 SequentialNextSpecBumpDeferred event when next Component spec changes while previous still rolling", func() {
-		// User bumps engine's spec while decoder is still rolling.
-		// Sequential MUST NOT start engine's surge — and should emit
-		// a SequentialNextSpecBumpDeferred event so the operator knows
-		// the bump is queued, not applied.
+	ginkgo.It("S-6 SequentialNextSpecBumpDeferred event when next-in-Order spec changes while previous still rolling", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("s6"),
+			WithEngineImage("ghcr.io/test/runtime:v1"),
 			WithSequentialGroup(v1beta1.DecoderComponent, v1beta1.EngineComponent))
 		applyFixture(Default, fix)
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
@@ -411,8 +399,26 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
 
 		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "s6")
+			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(cur.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		// Bump both Component images so both have TargetRevisionHash !=
+		// CurrentRevisionHash. Sequential picks decoder as active and
+		// defers engine, emitting the warning event.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "s6")
+			cur.Spec.Engine.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
+			if cur.Spec.Decoder != nil {
+				cur.Spec.Decoder.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
+			}
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
 			events := &corev1.EventList{}
-			g.Expect(k8sClient.List(suiteCtx, events)).To(Succeed())
+			g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(ns.Name))).To(Succeed())
 			var saw bool
 			for _, e := range events.Items {
 				if e.InvolvedObject.Name == "s6" && e.Reason == "SequentialNextSpecBumpDeferred" {
@@ -424,15 +430,10 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("S-9 operator reverts decoder spec → group exits Failed back to Idle (closes G8 pure-function path)", func() {
-		// Closes G8 at the state-machine level: sequentialTransition is
-		// stateless w.r.t. Failed — when the caller clears Component.Failed
-		// (on spec revert), the next transition naturally falls through
-		// to Idle. No "explicit recovery branch" is needed; the spec's
-		// G8 framing assumed sticky Failed state that doesn't exist.
-		// Upstream caller responsibility: clear Component.Failed when
-		// observing a spec revert. The state machine reflects whatever
-		// the caller passes.
+	ginkgo.It("S-9 operator reverts decoder spec → group exits Failed back to Idle", func() {
+		// sequentialTransition is stateless w.r.t. Failed: the upstream
+		// caller clears Component.Failed on spec revert; the next
+		// transition naturally falls through to Idle.
 		obs := seqObs(v1beta1.DecoderComponent, v1beta1.EngineComponent)
 		mutate(&obs, v1beta1.DecoderComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
@@ -451,7 +452,7 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 				"stateless state machine: clearing Failed must let group fall through to Idle")
 	})
 
-	ginkgo.It("S-12 Failed recovers in 3-Component Order → group falls through to 'complete' (closes G8)", func() {
+	ginkgo.It("S-12 Failed recovers in 3-Component Order → group falls through to 'complete'", func() {
 		// 3-Component: router done, engine was Failed, decoder never
 		// started. After clearing engine.Failed and marking it done on
 		// rev2, the state machine sees all Components RolloutInFlight=false
@@ -481,7 +482,7 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 			"all Components RolloutInFlight=false → 'complete' branch (stateless recovery)")
 	})
 
-	ginkgo.PIt("G1: S-13 Sequential Order reordered mid-rollout (operator edit) → coordination handles gracefully", func() {
+	ginkgo.It("S-13 Sequential Order reordered mid-rollout (operator edit) → coordination handles gracefully", func() {
 		// Operator edits Order mid-rollout: from [decoder, engine] to
 		// [engine, decoder]. Reconciler must not panic; the active
 		// Component logic must re-evaluate against the new Order.
@@ -497,10 +498,12 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
-		cur := freshISVC(Default, ns.Name, "s13")
-		cur.Spec.RolloutCoordination.Groups[0].Order =
-			[]v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
-		Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "s13")
+			cur.Spec.RolloutCoordination.Groups[0].Order =
+				[]v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "s13")
@@ -510,14 +513,14 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G3+G6: S-14 Sequential + RatioBalanced pacing → ratio computed per-Component-window", func() {
-		// Sequential rolls one Component at a time, so RatioBalanced
-		// pacing has to compute ratio against a per-Component window
-		// rather than across the whole group. Today neither the
-		// RatioBalanced pacing path (G3) nor the ObservedRatio status
-		// writer (G6) is wired in.
+	ginkgo.It("S-14 Sequential + RatioBalanced pacing → ObservedRatio populated", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("s14"),
 			WithSequentialGroup(v1beta1.DecoderComponent, v1beta1.EngineComponent))
+		// Override pacing on the group to RatioBalanced so G6 writes
+		// ObservedRatio.
+		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
+			Type: v1beta1.CoordinationPacingRatioBalanced,
+		}
 		applyFixture(Default, fix)
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
@@ -526,6 +529,7 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "s14")
 			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(cur.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(cur.Status.RolloutCoordination.Groups[0].ObservedRatio).NotTo(BeNil(),
 				"RatioBalanced pacing must populate ObservedRatio")
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())

@@ -10,19 +10,6 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Concurrency & failure-path specs for OEP-0007.1.
-//
-// Most CON-* are end-to-end behavior under contention (5xx retries,
-// 409 conflicts, ctx cancellation, controller restarts). These need:
-//   - the full reconciler invoking coordination (G1)
-//   - fault injection that envtest can't simulate
-//   - timing the test framework can't guarantee
-//
-// We pin idempotency and statelessness of the public coordination
-// surface (ComputeTransition is a pure function, so back-to-back calls
-// with the same observation return identical decisions). Everything
-// requiring real controller-runtime invocations is PIt'd.
-
 var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -34,15 +21,7 @@ var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)",
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// ----------------------------------------------------------------
-	// Pure-function specs
-	// ----------------------------------------------------------------
-
 	ginkgo.It("CON-8 idempotency: two back-to-back ComputeTransition calls with same obs → same decision", func() {
-		// Codifies the stateless contract. The reconciler enqueues
-		// requests via controller-runtime, which may dedupe but can
-		// also fire two back-to-back reconciles. Both must produce
-		// the same GroupTransition for identical observations.
 		obs := atomicObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
@@ -58,13 +37,9 @@ var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)",
 	})
 
 	ginkgo.It("CON-9 ComputeTransition takes no context — cannot be canceled mid-call", func() {
-		// Pure function: no I/O, no ctx parameter. There's nothing to
-		// cancel. This pins the "no I/O in state machine" contract so
-		// a future refactor that takes a ctx is a deliberate decision.
+		// Compile-time guarantee: function signature has no ctx parameter.
 		obs := atomicObs()
 		_ = coordination.ComputeTransition(obs)
-		// Compile-time guarantee — function signature has no ctx.
-		// If someone adds ctx as a parameter, this test breaks at compile.
 	})
 
 	ginkgo.It("CON-12 two distinct observations (e.g. two ISVCs) → independent decisions, no shared state", func() {
@@ -79,8 +54,7 @@ var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)",
 			o.NewRevisionPods = 0
 			o.TargetRevisionHash = "rev2"
 		})
-		obsB := atomicObs() // idle
-		// Interleave calls.
+		obsB := atomicObs()
 		trA1 := coordination.ComputeTransition(obsA)
 		trB1 := coordination.ComputeTransition(obsB)
 		trA2 := coordination.ComputeTransition(obsA)
@@ -91,7 +65,6 @@ var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)",
 		Expect(trA2).To(Equal(trA1))
 		Expect(trB2).To(Equal(trB1))
 
-		// Mutate obsB; obsA must not be affected (no shared map state).
 		mutate(&obsB, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
 		})
@@ -100,9 +73,6 @@ var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)",
 	})
 
 	ginkgo.It("CON-Pure-Aux state machine returns the same shape on repeated identical input (race-safe by construction)", func() {
-		// 50 iterations of identical observation → 50 identical results.
-		// Pure-function guarantee. If a stateful bug ever crept in
-		// (caching, closures), this would catch it.
 		obs := atomicObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.RolloutInFlight = true
@@ -144,86 +114,18 @@ var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)",
 	})
 
 	ginkgo.It("CON-Pure-Aux metrics Record* helpers are thread-safe by Prometheus contract", func() {
-		// Prometheus counters are atomic. Concurrent Record calls
-		// from different goroutines should not race. We don't drive
-		// goroutines here (envtest is single-threaded), but pin that
-		// the helpers don't carry mutex state of their own — any
-		// race would be in Prometheus, not coordination.
 		for i := 0; i < 100; i++ {
 			coordination.RecordGroupPhase("con-aux", "0", "Idle")
 		}
-		// Final value should be exactly +100 from the initial state.
-		// No explicit assertion here because we don't have isolated
-		// access to the counter — M-* tests verify counter values
-		// directly. This spec just exercises the call surface.
 	})
 
-	// ----------------------------------------------------------------
-	// G1-blocked / end-to-end / fault-injection PIts
-	// ----------------------------------------------------------------
-
-	ginkgo.PIt("G1: CON-1 Status Update 409 conflict → RetryOnConflict resolves", func() {
-		// Outer reconciler's updateStatus is wrapped in
-		// retry.RetryOnConflict. Without G1 the coord-status writer
-		// isn't invoked at all, so this needs to wait for both G1 +
-		// the OEP-0007 STATUS-5 race fix referenced in earlier
-		// branch stashes.
-		fix := newCoordFixture(ns.Name, WithISVCName("con1"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
-		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
-
-		// Synthetic conflict via concurrent annotation pokes is hard
-		// to script reliably in envtest; placeholder for the wiring.
-	})
-
-	ginkgo.PIt("CON-2 API server 5xx during EnsurePerRevisionServices → next reconcile recovers", func() {
-		// envtest doesn't have a 5xx-injection hook; this needs an
-		// in-process apiserver intercept or test seam. Documented as
-		// the contract: 5xx must be retryable, controller-runtime's
-		// requeue handles it for free.
-	})
-
-	ginkgo.PIt("CON-3 stale cache during pod observation → next reconcile drift-corrects", func() {
-		// Stale-cache simulation requires injecting a fake cache; out
-		// of envtest scope. controller-runtime's Watch-based cache
-		// invariant makes this rare in production.
-	})
-
-	ginkgo.PIt("CON-4 coordination + Component reconciler racing on same ISVC", func() {
-		// controller-runtime serializes per object key. Codified at the
-		// framework level; pinning here requires a multi-controller
-		// envtest harness that we don't have. Listed for completeness.
-	})
-
-	ginkgo.PIt("CON-5 controller restart mid-Sequential rollout → resumes from status", func() {
-		// envtest doesn't model controller restart. Would need a
-		// suite-level harness that stops & restarts the controller
-		// goroutine; out of scope.
-	})
-
-	ginkgo.PIt("CON-6 pod-watch event lag → next reconcile picks up", func() {
-		// Watch lag simulation requires intercepting controller-runtime's
-		// Watch stream. No envtest seam.
-	})
-
-	ginkgo.PIt("CON-7 ResourceVersion mismatch on coord Status write → retries", func() {
-		// Same as CON-1 — depends on retry wrapper around the coord
-		// status write. PIt until G1 + a similar retry wrapper land.
-	})
-
-	ginkgo.PIt("CON-10 API server 429 throttling → retries with backoff", func() {
-		// Throttling injection is not available in envtest.
-		// controller-runtime's client library handles 429 automatically;
-		// listed for completeness.
-	})
-
-	ginkgo.PIt("CON-11 reconcile interrupted between EnsurePerRevisionServices and Status write → next reconcile recovers", func() {
-		// Requires deliberate mid-reconcile interruption (panic / OOM)
-		// which envtest can't model. controller-runtime requeues on
-		// error so the next reconcile recovers — codified at the
-		// framework level.
-	})
+	ginkgo.PIt("CON-1 Status Update 409 conflict — covered by retry.RetryOnConflict wrapper in updateStatus", func() {})
+	ginkgo.PIt("CON-2 5xx during EnsurePerRevisionServices — no envtest 5xx injection seam", func() {})
+	ginkgo.PIt("CON-3 stale-cache simulation — would require fake-cache injection", func() {})
+	ginkgo.PIt("CON-4 coordination + Component reconciler race — controller-runtime serializes per object key", func() {})
+	ginkgo.PIt("CON-5 controller restart mid-Sequential — needs restart harness", func() {})
+	ginkgo.PIt("CON-6 pod-watch event lag — needs Watch-stream intercept", func() {})
+	ginkgo.PIt("CON-7 ResourceVersion mismatch — covered by retry.RetryOnConflict wrapper", func() {})
+	ginkgo.PIt("CON-10 429 throttling — no envtest throttle injection", func() {})
+	ginkgo.PIt("CON-11 mid-reconcile interruption — controller-runtime requeue handles this", func() {})
 })

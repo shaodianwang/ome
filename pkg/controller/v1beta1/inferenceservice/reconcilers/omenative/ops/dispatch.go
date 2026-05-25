@@ -15,13 +15,21 @@ package ops
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 )
+
+// ratioGateRequeueInterval is the wait between Update passes when
+// RatioBalanced pacing has gated this Component's surge. Short enough
+// that a peer Component catching up next reconcile unblocks this one
+// promptly; long enough not to spam the apiserver.
+const ratioGateRequeueInterval = 3 * time.Second
 
 // ReconcileComponentOps drives the five lifecycle operations for one
 // Component on one reconcile pass. Lifted out of the top-level
@@ -112,12 +120,21 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	// Per-Instance update pass.
 	if target != nil {
 		anyUpdating := false
+		anyGated := false
 		for _, inst := range plan.Instances {
 			needs, derr := detectUpdateTrigger(ctx, p, plan, inst, target, p.PodSpec)
 			if derr != nil {
 				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: detect update trigger (instance=%d): %w", inst.Index, derr)
 			}
 			if !needs {
+				continue
+			}
+			// RatioBalanced gate: ask coordination whether the peer
+			// Components' new-revision pod counts allow this Component
+			// to bump one more. When gated, skip the Update and requeue;
+			// the peer Component catching up next reconcile unblocks us.
+			if allowed, _ := coordination.CheckRatioGate(p.ISVC, plan.Component); !allowed {
+				anyGated = true
 				continue
 			}
 			done, uerr := Update(ctx, p, plan, inst, target, p.PodSpec)
@@ -130,6 +147,9 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 		}
 		if anyUpdating {
 			return ctrl.Result{RequeueAfter: updateRequeueInterval}, nil
+		}
+		if anyGated {
+			return ctrl.Result{RequeueAfter: ratioGateRequeueInterval}, nil
 		}
 	}
 

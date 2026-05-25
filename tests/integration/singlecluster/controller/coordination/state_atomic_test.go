@@ -16,16 +16,7 @@ import (
 // Atomic is the "gang" policy: every Component in the group surges
 // together, waits together, shifts together, drains together. Failure
 // in any Component fails the whole group. The state machine is a pure
-// function — ComputeTransition(GroupObservation) → GroupTransition —
-// so the bulk of these specs run as `It`s that exercise the pure
-// transition directly. End-to-end specs that need the status writer or
-// reconciler to fire (A-7, A-8, A-9, A-10, A-14, A-17) are PIts gated
-// on **G1**: ops/reconciler does not invoke coordination.ComputeTransition
-// or write Status.RolloutCoordination. They flip to It mechanically when
-// G1 wiring lands.
-//
-// Reference: pkg/controller/v1beta1/inferenceservice/reconcilers/
-//            omenative/coordination/state.go (atomicTransition).
+// function — ComputeTransition(GroupObservation) → GroupTransition.
 
 // atomicObs builds a `n`-Component Atomic observation. Defaults: 2
 // replicas per Component, all live + Ready on rev1, no rollout in
@@ -302,9 +293,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 			"Atomic policy ignores Order; transition outputs must match")
 	})
 
-	ginkgo.It("A-G7 Atomic Surging populates SurgeBudget from group pacing (closes G7)", func() {
-		// G7: state machine now invokes MaxSurgeBudget under the hood
-		// and surfaces the per-Component budget on the GroupTransition.
+	ginkgo.It("A-G7 Atomic Surging populates SurgeBudget from group pacing", func() {
 		// MaxSurge=2 on a 4-replica engine + 4-replica decoder → 2 surge
 		// pods per Component allowed.
 		obs := atomicObs()
@@ -384,12 +373,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 				"spec revert must collapse the group back to Idle without going through Failed")
 	})
 
-	// ----------------------------------------------------------------
-	// End-to-end (G1-blocked PIts) — wait for ops/reconciler to invoke
-	// coordination.ComputeTransition and write Status.RolloutCoordination.
-	// ----------------------------------------------------------------
-
-	ginkgo.PIt("G1: A-7 CoordinationGroupSurging/Shifting/Failed/Completed events fire on phase boundary", func() {
+	ginkgo.It("A-7 CoordinationGroupSurging/Shifting/Failed/Completed events fire on phase boundary", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("a7"),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
@@ -411,7 +395,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G1: A-8 Status.RolloutCoordination populated; RolloutCoordinationReady condition stamped", func() {
+	ginkgo.It("A-8 Status.RolloutCoordination populated; RolloutCoordinationReady condition stamped", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("a8"),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
@@ -427,7 +411,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G1: A-9 LastTransitionTime preserved across same-phase reconciles", func() {
+	ginkgo.It("A-9 LastTransitionTime preserved across same-phase reconciles", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("a9"),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
@@ -447,12 +431,16 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 			firstTime = ltt.String()
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
-		cur := freshISVC(Default, ns.Name, "a9")
-		if cur.Annotations == nil {
-			cur.Annotations = map[string]string{}
-		}
-		cur.Annotations["coord.test/poke"] = "1"
-		Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		// Retry on 409 — the controller reconciles the ISVC concurrently,
+		// so the cached object may be stale on the first Update.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "a9")
+			if cur.Annotations == nil {
+				cur.Annotations = map[string]string{}
+			}
+			cur.Annotations["coord.test/poke"] = "1"
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "a9")
@@ -462,7 +450,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G1: A-10 ObservedSurge reflects the pacing block's MaxSurge", func() {
+	ginkgo.It("A-10 ObservedSurge reflects the pacing block's MaxSurge", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("a10"),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		ms := intstr.FromInt(2)
@@ -485,7 +473,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G1: A-14 Component count change mid-rollout (group spec mutated) handled gracefully", func() {
+	ginkgo.It("A-14 Component count change mid-rollout (group spec mutated) handled gracefully", func() {
 		// Start with 2-Component Atomic, then add router to the group.
 		// The controller must not panic; next reconcile observes 3 Components.
 		fix := newCoordFixture(ns.Name, WithISVCName("a14"), WithRouter(),
@@ -500,10 +488,12 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
-		cur := freshISVC(Default, ns.Name, "a14")
-		cur.Spec.RolloutCoordination.Groups[0].Components = append(
-			cur.Spec.RolloutCoordination.Groups[0].Components, v1beta1.RouterComponent)
-		Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "a14")
+			cur.Spec.RolloutCoordination.Groups[0].Components = append(
+				cur.Spec.RolloutCoordination.Groups[0].Components, v1beta1.RouterComponent)
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "a14")
@@ -514,7 +504,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G1: A-17 Atomic group covers engine+decoder; router not in group rolls independently", func() {
+	ginkgo.It("A-17 Atomic group covers engine+decoder; router not in group rolls independently", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("a17"), WithRouter(),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)

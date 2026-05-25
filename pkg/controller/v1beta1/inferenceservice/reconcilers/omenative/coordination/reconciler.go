@@ -90,17 +90,16 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	groups := ResolveGroups(in.ISVC.Spec.RolloutCoordination)
 	result := &Result{}
 
-	// Coordination is opt-in via spec.rolloutCoordination.groups[].
-	// When unset, the entire layer is a no-op: no per-revision
-	// Services are emitted, no Status.Traffic[] is written, no
-	// per-group state machine runs. This preserves the per-reconcile
-	// I/O cost and observable-status shape from before coordination
-	// existed, so ISVCs that haven't opted in see zero behavior
-	// change.
-	if len(groups) == 0 {
-		return result, nil
-	}
-
+	// Per-revision Service / Traffic[] producer: emitted for EVERY
+	// OMENative-mode Component, with or without a rolloutCoordination
+	// group declared. These artifacts are the data-plane for OEP-0011's
+	// HTTPRoute weighted-backendRef consumer; an opt-in gate would
+	// break the traffic layer for ISVCs that haven't (yet) declared a
+	// coord group but still want per-revision routing.
+	//
+	// The per-group state machine (Status.RolloutCoordination,
+	// RolloutCoordinationReady condition, group events) remains
+	// opt-in — those only run when groups are declared.
 	componentsTouched := collectOMENativeComponents(in.ISVC)
 	if len(componentsTouched) == 0 {
 		return result, nil
@@ -128,13 +127,10 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		}
 		SetPerRevisionServiceCount(in.ISVC.Name, string(c), float64(len(perRevisionPods[c])))
 
-		// G4: GC per-revision Services whose hash has no live pods.
-		// List existing Services with the (isvc, component) labels and
-		// delete pairs whose revision-hash is not in the current
-		// observation. Safe because we only Ensure for hashes that
-		// have pods, so a hash with zero pods is genuinely past
-		// retention. Concurrent racing pods (added between this list
-		// and the GC delete) re-Ensure on the next reconcile.
+		// Delete per-revision Service pairs whose revision-hash has no
+		// live pods. Safe because we Ensure only for hashes with pods —
+		// a hash with zero pods is genuinely past retention. Pods added
+		// between the list and the delete re-Ensure on the next reconcile.
 		if err := gcOrphanedPerRevisionServices(ctx, in.Client, in.ISVC, c, perRevisionPods[c]); err != nil {
 			return nil, fmt.Errorf("gc per-revision services for %s: %w", c, err)
 		}
@@ -151,7 +147,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			return nil, fmt.Errorf("invalid coordination group shape: %w", err)
 		}
 		obs := buildGroupObservation(in.ISVC, g, perRevisionPods)
-		// G6: snapshot Original on first observation, then preserve it
+		// Snapshot Original on first observation, then preserve it
 		// across reconciles via the previously-written ObservedRatio.
 		// Always refresh Current + NewPods from the live observation.
 		ratio := buildRatioState(in.ISVC, g, obs, perRevisionPods)
@@ -169,10 +165,9 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			RecordGroupFailure(in.ISVC.Name, g.Name, tr.Message)
 		}
 
-		// G5: PairedMixable mixed-pairing observability — emit when
-		// the group observes distinct revision hashes per Component
-		// (the "v1 engine + v2 decoder coexists" case PairedMixable
-		// permits but operators want to know about).
+		// PairedMixable mixed-pairing observability: emit when distinct
+		// revision hashes coexist across Components (PairedMixable
+		// permits this but operators want to know).
 		if g.Policy == v1beta1.CoordinationPolicyPairedMixable && hasMixedPairing(g, perRevisionPods) {
 			RecordMixedPairing(in.ISVC.Name, g.Name)
 			if in.Recorder != nil {
@@ -181,9 +176,9 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			}
 		}
 
-		// G5 + G3: RatioBalanced skew rejection signal — fire metric
-		// + event when EvaluateSurge zeroed at least one Component's
-		// surge budget to preserve the cross-Component ratio.
+		// RatioBalanced skew rejection: fire metric + event when
+		// EvaluateSurge zeroed at least one Component's surge budget
+		// to preserve the cross-Component ratio.
 		if tr.RatioSkewRejected {
 			RecordRatioSkew(in.ISVC.Name, g.Name)
 			if in.Recorder != nil {
@@ -192,9 +187,8 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			}
 		}
 
-		// Event emission on phase boundary. Compare to previously-
-		// observed phase.
 		emitPhaseEvents(in.Recorder, in.ISVC, g, tr)
+		emitSequentialDeferredEvent(in.Recorder, in.ISVC, g, obs)
 
 		result.GroupStatuses = append(result.GroupStatuses, groupStatus)
 	}
@@ -452,10 +446,10 @@ func gcOrphanedPerRevisionServices(ctx context.Context, c client.Client, isvc *v
 }
 
 // buildRatioState assembles the per-group RatioState that BuildGroupStatus
-// turns into Status.RolloutCoordination.Groups[i].ObservedRatio. Closes G6:
-// SnapshotOriginal is now invoked on first observation of the group, then
-// preserved (read back from the existing Status) across subsequent
-// reconciles so the anchor doesn't shift when MinReplicas changes mid-rollout.
+// turns into Status.RolloutCoordination.Groups[i].ObservedRatio.
+// SnapshotOriginal runs on first observation; Original is preserved
+// across reconciles via the previously-written ObservedRatio so the
+// anchor doesn't shift when MinReplicas changes mid-rollout.
 //
 // Always populated even for non-RatioBalanced pacing (cheap; BuildGroupStatus
 // suppresses it on the status side based on policy).
@@ -603,6 +597,56 @@ func emitPhaseEvents(recorder record.EventRecorder, isvc *v1beta1.InferenceServi
 	if tr.CompositePhase == v1beta1.CompositePhaseSequentialAwaiting {
 		recorder.Eventf(isvc, corev1.EventTypeNormal, EventReasonSequentialAwaitingNext,
 			"sequential group %s awaiting next Component: %s", g.Name, tr.Message)
+	}
+}
+
+// emitSequentialDeferredEvent fires SequentialNextSpecBumpDeferred
+// when an operator bumped a later-in-Order Component's spec while an
+// earlier Component is still rolling — Sequential semantics silently
+// defer the later rollout, and the operator gets a warning event.
+//
+// Detection (pure, stateless): for each Component at index j > i
+// where i is the active rolling Component's index in Order (or -1
+// when none rolling), if the later Component has RolloutInFlight=true,
+// emit the event. No-op for non-Sequential policies and for groups
+// with no Component rolling.
+func emitSequentialDeferredEvent(recorder record.EventRecorder, isvc *v1beta1.InferenceService, g ResolvedGroup, obs GroupObservation) {
+	if recorder == nil || g.Policy != v1beta1.CoordinationPolicySequential {
+		return
+	}
+	if len(g.Order) == 0 {
+		return
+	}
+	// Find the active Component's index (first non-Idle in Order).
+	activeIdx := -1
+	for i, c := range g.Order {
+		comp, ok := obs.Components[c]
+		if !ok {
+			continue
+		}
+		if comp.RolloutInFlight {
+			activeIdx = i
+			break
+		}
+	}
+	if activeIdx < 0 {
+		// No active Component — soak window or fully Idle. Either way,
+		// later-Component bumps are not "deferred" — they're "next in
+		// line", which the SequentialAwaitingNext event already covers.
+		return
+	}
+	// Any later-in-Order Component with RolloutInFlight=true is a
+	// deferred spec bump.
+	for j := activeIdx + 1; j < len(g.Order); j++ {
+		laterC := g.Order[j]
+		laterObs, ok := obs.Components[laterC]
+		if !ok || !laterObs.RolloutInFlight {
+			continue
+		}
+		activeC := g.Order[activeIdx]
+		recorder.Eventf(isvc, corev1.EventTypeWarning, EventReasonSequentialNextSpecBumpDeferred,
+			"sequential group %s: spec bump on later Component %s deferred while active Component %s (target=%s) is still rolling",
+			g.Name, laterC, activeC, laterObs.TargetRevisionHash)
 	}
 }
 

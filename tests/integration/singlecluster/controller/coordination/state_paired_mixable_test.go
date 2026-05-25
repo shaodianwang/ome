@@ -288,7 +288,7 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 				"PairedMixable with ALL Components Paused must return Paused")
 	})
 
-	ginkgo.PIt("G5: PM-5 MixedPairingObserved event fires when distinct (engine-rev, decoder-rev) pairs observed", func() {
+	ginkgo.It("PM-5 MixedPairingObserved event fires when distinct (engine-rev, decoder-rev) pairs observed", func() {
 		// PairedMixable explicitly permits running engine and decoder
 		// on different revisions simultaneously. When the controller
 		// observes this state (e.g. engine on rev1+rev2, decoder on
@@ -316,12 +316,11 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G1: PM-8 PairedMixable + per-Component pacing — each Component honors its own pacing budget", func() {
+	ginkgo.It("PM-8 PairedMixable + per-Component pacing — each Component honors its own pacing budget", func() {
 		// PairedMixable's pacing block is interpreted PER COMPONENT
 		// (vs. RatioBalanced's cross-Component snap). With MaxSurge=1
-		// on each Component, engine and decoder should each get
-		// exactly 1 surge pod regardless of the other's progress.
-		// Blocked on G1: reconciler doesn't invoke pacing math.
+		// on each Component, engine and decoder each get exactly 1
+		// surge pod regardless of the other's progress.
 		fix := newCoordFixture(ns.Name, WithISVCName("pm8"),
 			WithPairedMixableGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		ms := intstr.FromInt(1)

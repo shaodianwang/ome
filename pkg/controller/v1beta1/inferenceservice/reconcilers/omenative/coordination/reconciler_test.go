@@ -75,11 +75,14 @@ func TestReconcile_EmitsPerRevisionServiceForOMENativeComponent(t *testing.T) {
 	}
 }
 
-func TestReconcile_NoOpWhenNoCoordinationGroupDeclared(t *testing.T) {
-	// Without spec.rolloutCoordination, the coordination layer must be
-	// a complete no-op even on an OMENative-annotated ISVC — preserves
-	// per-reconcile I/O cost and observable status shape for ISVCs
-	// that haven't opted in.
+func TestReconcile_DataPlaneRunsWithoutCoordinationGroup(t *testing.T) {
+	// Updated contract: per-revision Services + Traffic[] are the
+	// data plane for OEP-0011 HTTPRoute weighted-backendRef consumers.
+	// They emit for every OMENative-mode Component, with or without a
+	// rolloutCoordination group declared. Only the per-group state
+	// machine (Status.RolloutCoordination, RolloutCoordinationReady
+	// condition, group events) stays opt-in via the rolloutCoordination
+	// block.
 	isvc := testOMENativeISVC()
 	pods := []runtime.Object{
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
@@ -91,15 +94,15 @@ func TestReconcile_NoOpWhenNoCoordinationGroupDeclared(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if r.PerRevisionServicesEnsured != 0 {
-		t.Errorf("no groups: should not ensure Services, got %d", r.PerRevisionServicesEnsured)
+	if r.PerRevisionServicesEnsured == 0 {
+		t.Errorf("no groups: per-revision Services should still emit for the data plane, got %d", r.PerRevisionServicesEnsured)
 	}
 	if isvc.Status.RolloutCoordination != nil {
 		t.Errorf("no groups: should not write RolloutCoordination status, got %+v", isvc.Status.RolloutCoordination)
 	}
 	cs, ok := isvc.Status.Components[v1beta1.EngineComponent]
-	if ok && len(cs.Traffic) > 0 {
-		t.Errorf("no groups: should not write Traffic[], got %+v", cs.Traffic)
+	if !ok || len(cs.Traffic) == 0 {
+		t.Errorf("no groups: Traffic[] should still populate from observed pods, got %+v", cs)
 	}
 }
 

@@ -15,15 +15,7 @@ import (
 // RatioBalanced pacing keeps cross-Component pod ratios within a
 // tolerance band as the rollout surges. The math lives in
 // coordination.EvaluateSurge — a pure function — so most R-* cases
-// run directly against that contract. End-to-end PIts cover:
-//
-//   - G3: state machine never invokes EvaluateSurge → RatioBalanced
-//         has no effect on actual surge decisions
-//   - G5: RatioSkewRejected event/counter never emitted
-//   - G6: SnapshotOriginal never invoked + ObservedRatio status not
-//         populated by the controller
-//
-// Reference: pkg/.../coordination/ratio.go
+// run directly against that contract.
 
 // pacing helpers
 func ratioPacing(tolerance *int32) v1beta1.CoordinationPacing {
@@ -323,15 +315,7 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 			"negative is also coerced to 1 (defensive)")
 	})
 
-	// ----------------------------------------------------------------
-	// Known-gap PIts
-	// ----------------------------------------------------------------
-
-	ginkgo.PIt("G3+G5: R-3 RatioSkewRejected event + counter fire when EvaluateSurge returns SkewRejected", func() {
-		// EvaluateSurge returns SkewRejected=true today, but neither
-		// the state machine consults it (G3) nor does the metrics
-		// layer emit RatioSkewRejected events / increment the counter
-		// (G5). End-to-end this needs both fixes.
+	ginkgo.It("R-3 RatioSkewRejected event + counter fire when EvaluateSurge returns SkewRejected", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("r3"),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
@@ -357,10 +341,9 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G6: R-6 ObservedRatio populated in RolloutCoordinationGroupStatus", func() {
-		// SnapshotOriginal is never called in production today, so the
-		// status writer can't fill ObservedRatio. Once G6 lands, this
-		// should populate at the first surge observation.
+	ginkgo.It("R-6 ObservedRatio populated in RolloutCoordinationGroupStatus", func() {
+		// buildRatioState invokes SnapshotOriginal on first observation
+		// and BuildGroupStatus populates ObservedRatio.
 		fix := newCoordFixture(ns.Name, WithISVCName("r6"),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
@@ -378,5 +361,42 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 			g.Expect(cur.Status.RolloutCoordination.Groups[0].ObservedRatio).NotTo(BeNil(),
 				"RatioBalanced must populate ObservedRatio at first surge")
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("R-PD-Gate canonical PD scenario: decoder=25% of engine, ObservedRatio snapshot wires", func() {
+		// Engine 20 pods + decoder 5 pods + RatioBalanced @ tolerance=20%.
+		// Verify Status.RolloutCoordination snapshots a non-empty
+		// ObservedRatio.Original. Snapshot timing in envtest races
+		// against OMENative's Replicas report, so we don't pin exact
+		// values — the math is unit-tested in ratio_test.go.
+		fix := newCoordFixture(ns.Name, WithISVCName("rpdg"),
+			WithEngineReplicas(20),
+			WithDecoderReplicas(5),
+			WithEngineImage("ghcr.io/test/runtime:v1"),
+			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
+			Type:           v1beta1.CoordinationPacingRatioBalanced,
+			RatioTolerance: int32Ptr(20),
+		}
+		applyFixture(Default, fix)
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+
+		// Wait for the producer to emit ObservedRatio. We don't pin
+		// exact Original values because snapshot timing is racy in
+		// envtest (kubelet sim vs. first coord reconcile).
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "rpdg")
+			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(cur.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
+			gs := cur.Status.RolloutCoordination.Groups[0]
+			g.Expect(gs.ObservedRatio).NotTo(BeNil(),
+				"ObservedRatio must be populated for RatioBalanced PD scenario")
+			g.Expect(gs.ObservedRatio.Original).NotTo(BeEmpty(),
+				"Original snapshot must contain both Components")
+			g.Expect(gs.ObservedRatio.Original).To(HaveKey(v1beta1.EngineComponent))
+			g.Expect(gs.ObservedRatio.Original).To(HaveKey(v1beta1.DecoderComponent))
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 })

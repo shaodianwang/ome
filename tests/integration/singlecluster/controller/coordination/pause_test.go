@@ -268,8 +268,8 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 	// G1-blocked PIts: end-to-end pause behavior through the reconciler
 	// ----------------------------------------------------------------
 
-	ginkgo.PIt("G1: P-E2E-1 setting ome.io/rollout-paused=true on a live ISVC freezes group transitions", func() {
-		fix := newCoordFixture(ns.Name, WithISVCName("pE1"), WithRolloutPaused(),
+	ginkgo.It("P-E2E-1 setting ome.io/rollout-paused=true on a live ISVC freezes group transitions", func() {
+		fix := newCoordFixture(ns.Name, WithISVCName("pause-e2e-1"), WithRolloutPaused(),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
@@ -277,7 +277,7 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
 
 		Eventually(func(g Gomega) {
-			cur := freshISVC(g, ns.Name, "pE1")
+			cur := freshISVC(g, ns.Name, "pause-e2e-1")
 			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
 			g.Expect(cur.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(cur.Status.RolloutCoordination.Groups[0].Phase).
@@ -285,46 +285,54 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G1: P-E2E-2 removing the pause annotation lets the group resume", func() {
-		fix := newCoordFixture(ns.Name, WithISVCName("pE2"), WithRolloutPaused(),
+	ginkgo.It("P-E2E-2 removing the pause annotation lets the group resume", func() {
+		fix := newCoordFixture(ns.Name, WithISVCName("pause-e2e-2"), WithRolloutPaused(),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
 
-		// Wait for Paused.
+		// Wait for Paused — guard against nil deref while the status
+		// is still being populated by the first reconcile.
 		Eventually(func(g Gomega) {
-			cur := freshISVC(g, ns.Name, "pE2")
+			cur := freshISVC(g, ns.Name, "pause-e2e-2")
+			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(cur.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(cur.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhasePaused))
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
-		// Remove the annotation.
-		cur := freshISVC(Default, ns.Name, "pE2")
-		delete(cur.Annotations, "ome.io/rollout-paused")
-		Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		// Remove the annotation — retry on 409 since the controller
+		// reconciles concurrently.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "pause-e2e-2")
+			delete(cur.Annotations, "ome.io/rollout-paused")
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		// Group should leave Paused.
 		Eventually(func(g Gomega) {
-			cur := freshISVC(g, ns.Name, "pE2")
+			cur := freshISVC(g, ns.Name, "pause-e2e-2")
+			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(cur.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(cur.Status.RolloutCoordination.Groups[0].Phase).
 				NotTo(Equal(v1beta1.CoordinationPhasePaused))
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("G1: P-E2E-3 pause on an ISVC with NO rolloutCoordination block → no-op", func() {
+	ginkgo.It("P-E2E-3 pause on an ISVC with NO rolloutCoordination block → no-op", func() {
 		// Without a coordination block, Status.RolloutCoordination is
 		// never written. Setting pause should have no observable effect
 		// (no Paused phase to enter — there are no groups).
-		fix := newCoordFixture(ns.Name, WithISVCName("pE3"), WithRolloutPaused())
+		fix := newCoordFixture(ns.Name, WithISVCName("pause-e2e-3"), WithRolloutPaused())
 		applyFixture(Default, fix)
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
 
 		Consistently(func(g Gomega) {
-			cur := freshISVC(g, ns.Name, "pE3")
+			cur := freshISVC(g, ns.Name, "pause-e2e-3")
 			if cur.Status.RolloutCoordination != nil {
 				g.Expect(cur.Status.RolloutCoordination.Groups).To(BeEmpty(),
 					"ISVC with no rolloutCoordination block must not surface group statuses")

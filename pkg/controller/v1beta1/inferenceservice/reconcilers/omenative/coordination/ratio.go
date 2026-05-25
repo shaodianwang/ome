@@ -160,3 +160,93 @@ func SnapshotOriginal(replicas map[v1beta1.ComponentType]int32) map[v1beta1.Comp
 	}
 	return out
 }
+
+// CheckRatioGate is the consumer side of RatioBalanced pacing. The
+// OMENative ops dispatcher calls it before kicking off a per-Instance
+// Update to ask: "given the live cross-Component pod distribution, may
+// this Component bump one more pod to the new revision without skewing
+// the ratio past tolerance?"
+//
+// Returns allowed=true when:
+//   - The Component is not in any RatioBalanced coord group,
+//   - The component is alone in its group (no peer to skew against),
+//   - The group has no ObservedRatio snapshot yet (first reconcile),
+//   - OR the projected NewPods[component]+1 stays within the group's
+//     RatioTolerance band against every peer Component.
+//
+// Returns allowed=false when EvaluateSurge rejects the +1 surge. Caller
+// requeues; the peer Component will have caught up by the next reconcile.
+//
+// Reads exclusively from isvc.Status — no client/cache hits — so it is
+// safe to call from hot paths.
+func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) (allowed bool, reason string) {
+	if isvc == nil {
+		return true, "nil ISVC"
+	}
+	if isvc.Spec.RolloutCoordination == nil || len(isvc.Spec.RolloutCoordination.Groups) == 0 {
+		return true, "no coordination block"
+	}
+	// Find the group this component is part of.
+	groups := ResolveGroups(isvc.Spec.RolloutCoordination)
+	var group *ResolvedGroup
+	for i := range groups {
+		for _, c := range groups[i].Components {
+			if c == component {
+				group = &groups[i]
+				break
+			}
+		}
+		if group != nil {
+			break
+		}
+	}
+	if group == nil {
+		return true, "component not in any coord group"
+	}
+	if group.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
+		return true, "not RatioBalanced pacing"
+	}
+	if len(group.Components) <= 1 {
+		return true, "single-component group"
+	}
+
+	// Build RatioState from the live ISVC status. Original is read from
+	// the previously-recorded ObservedRatio (which is SnapshotOriginal'd
+	// at rollout start). If absent (first reconcile), let the surge
+	// through — the next pass will snapshot and gate.
+	state := RatioState{
+		Original: make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		Current:  make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		NewPods:  make(map[v1beta1.ComponentType]int32, len(group.Components)),
+	}
+	var groupStatus *v1beta1.RolloutCoordinationGroupStatus
+	if isvc.Status.RolloutCoordination != nil {
+		for i := range isvc.Status.RolloutCoordination.Groups {
+			gs := &isvc.Status.RolloutCoordination.Groups[i]
+			if gs.Name == group.Name {
+				groupStatus = gs
+				break
+			}
+		}
+	}
+	if groupStatus == nil || groupStatus.ObservedRatio == nil || len(groupStatus.ObservedRatio.Original) == 0 {
+		return true, "no ObservedRatio snapshot yet (first reconcile)"
+	}
+	for _, c := range group.Components {
+		orig := groupStatus.ObservedRatio.Original[c]
+		if orig <= 0 {
+			orig = 1
+		}
+		state.Original[c] = orig
+		if cs, ok := isvc.Status.Components[c]; ok && cs.OMENative != nil {
+			state.Current[c] = cs.OMENative.Replicas
+			state.NewPods[c] = cs.OMENative.UpdatedReplicas
+		}
+	}
+
+	decision := EvaluateSurge(group.Pacing, state, component, 1)
+	if decision.AllowedSurgeDelta >= 1 {
+		return true, decision.Reason
+	}
+	return false, decision.Reason
+}

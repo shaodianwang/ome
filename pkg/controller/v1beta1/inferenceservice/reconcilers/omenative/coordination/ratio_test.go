@@ -209,3 +209,227 @@ func TestSnapshotOriginal(t *testing.T) {
 		t.Errorf("input mutated: %v", in)
 	}
 }
+
+// =============================================================================
+// CheckRatioGate
+// =============================================================================
+
+func TestCheckRatioGate_NilISVC(t *testing.T) {
+	allowed, _ := CheckRatioGate(nil, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("nil ISVC should be allowed (no-op gate)")
+	}
+}
+
+func TestCheckRatioGate_NoCoordBlock(t *testing.T) {
+	isvc := &v1beta1.InferenceService{}
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("no coord block should be allowed: %s", reason)
+	}
+}
+
+func TestCheckRatioGate_PerComponentPacingBypasses(t *testing.T) {
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type: v1beta1.CoordinationPacingPerComponent,
+					},
+				}},
+			},
+		},
+	}
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("PerComponent pacing should bypass the gate: %s", reason)
+	}
+}
+
+func TestCheckRatioGate_FirstReconcileAllowed(t *testing.T) {
+	// RatioBalanced configured but no ObservedRatio snapshot yet.
+	// First reconcile must allow the surge so SnapshotOriginal can run
+	// next pass.
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:           v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerance: int32Ptr(5),
+					},
+				}},
+			},
+		},
+	}
+	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("first reconcile (no ObservedRatio yet) must allow surge")
+	}
+}
+
+func TestCheckRatioGate_PDScenarioEngineMustWaitForDecoder(t *testing.T) {
+	// Canonical PD: engine 20 pods, decoder 5 pods (4:1, decoder=25%).
+	// Tolerance 5%. After engine surges 1 pod (1/20 = 5%) and decoder is
+	// still at 0/5 (0%), the next engine surge would push 2/20 = 10%
+	// against 0% → 10pp diff > 5pp tolerance → MUST be denied.
+	isvc := mkPDFixture(int32Ptr(5))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:        20,
+				UpdatedReplicas: 1,
+			},
+		},
+		v1beta1.DecoderComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:        5,
+				UpdatedReplicas: 0,
+			},
+		},
+	}
+
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent)
+	if allowed {
+		t.Errorf("engine should be gated when decoder hasn't moved (1/20=5%% vs 0/5=0%%, asking for 2/20=10%%): got allowed=true reason=%s", reason)
+	}
+}
+
+func TestCheckRatioGate_PDScenarioDecoderAllowedToCatchUp(t *testing.T) {
+	// Same PD setup; ask whether decoder can move. decoder going from
+	// 0/5 to 1/5 = 20% is a 15pp leap from 5% (engine), beyond 5%
+	// tolerance — so the strict band-check rejects decoder too. This is
+	// the "ratio convergence freezes" failure mode the operator must
+	// address by widening tolerance or restructuring replicas. The gate
+	// reports it honestly.
+	isvc := mkPDFixture(int32Ptr(5))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:        20,
+				UpdatedReplicas: 1,
+			},
+		},
+		v1beta1.DecoderComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:        5,
+				UpdatedReplicas: 0,
+			},
+		},
+	}
+	allowed, _ := CheckRatioGate(isvc, v1beta1.DecoderComponent)
+	// At tolerance=5, the discrete granularity prevents decoder from
+	// moving. The test pins this honest deadlock so a reviewer can see
+	// it; widening tolerance fixes it.
+	if allowed {
+		t.Errorf("expected decoder gated at tolerance=5: discrete granularity (decoder pod = 20%% jump) cannot satisfy band; got allowed=true")
+	}
+}
+
+func TestCheckRatioGate_PDScenarioWiderToleranceAllowsCatchUp(t *testing.T) {
+	// Same PD setup but tolerance=20%. Decoder going 0/5 → 1/5 = 20%
+	// against engine 1/20 = 5% → diff 15pp, within 20pp → allowed.
+	isvc := mkPDFixture(int32Ptr(20))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:        20,
+				UpdatedReplicas: 1,
+			},
+		},
+		v1beta1.DecoderComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:        5,
+				UpdatedReplicas: 0,
+			},
+		},
+	}
+	allowed, reason := CheckRatioGate(isvc, v1beta1.DecoderComponent)
+	if !allowed {
+		t.Errorf("expected decoder allowed at tolerance=20: got reason=%s", reason)
+	}
+}
+
+func TestCheckRatioGate_SingleComponentGroupBypasses(t *testing.T) {
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:           v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerance: int32Ptr(0),
+					},
+				}},
+			},
+		},
+	}
+	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("single-component group must bypass the gate")
+	}
+}
+
+func TestCheckRatioGate_ComponentNotInAnyGroup(t *testing.T) {
+	// router not in declared group → no gate, allowed.
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type: v1beta1.CoordinationPacingRatioBalanced,
+					},
+				}},
+			},
+		},
+	}
+	allowed, _ := CheckRatioGate(isvc, v1beta1.RouterComponent)
+	if !allowed {
+		t.Errorf("component outside any coord group must bypass the gate")
+	}
+}
+
+// mkPDFixture returns a coordinated ISVC with engine+decoder in one
+// RatioBalanced group + an ObservedRatio snapshot of 20:5 (4:1, decoder
+// = 25% of engine). Caller sets Status.Components.
+func mkPDFixture(tolerance *int32) *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:           v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerance: tolerance,
+					},
+				}},
+			},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name:       "0",
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyAtomic,
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
+						Original: map[v1beta1.ComponentType]int32{
+							v1beta1.EngineComponent:  20,
+							v1beta1.DecoderComponent: 5,
+						},
+					},
+				}},
+			},
+		},
+	}
+}
+
+func int32Ptr(v int32) *int32 { return &v }
