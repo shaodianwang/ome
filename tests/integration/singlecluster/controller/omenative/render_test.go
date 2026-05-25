@@ -49,7 +49,7 @@ var _ = ginkgo.Describe("OMENative pod rendering", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).NotTo(BeEmpty())
 			for i := range pods.Items {
@@ -101,7 +101,7 @@ var _ = ginkgo.Describe("OMENative pod rendering", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).NotTo(BeEmpty())
 
@@ -152,7 +152,7 @@ var _ = ginkgo.Describe("OMENative pod rendering", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).NotTo(BeEmpty())
 

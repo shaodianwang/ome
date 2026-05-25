@@ -58,7 +58,7 @@ var _ = ginkgo.Describe("OMENative Loop B watches", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).To(HaveLen(1))
 			originalPodUID = string(pods.Items[0].UID)
@@ -89,7 +89,7 @@ var _ = ginkgo.Describe("OMENative Loop B watches", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).NotTo(BeEmpty(), "expected at least one pod post-Restart")
 			foundFresh := false
@@ -142,7 +142,7 @@ var _ = ginkgo.Describe("OMENative Loop B watches", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).To(HaveLen(1))
 			originalPodUID = string(pods.Items[0].UID)
@@ -176,7 +176,7 @@ var _ = ginkgo.Describe("OMENative Loop B watches", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).NotTo(BeEmpty(), "expected at least one pod post-Restart")
 			foundFresh := false
@@ -354,7 +354,7 @@ var _ = ginkgo.Describe("OMENative Loop B watches", ginkgo.Ordered, func() {
 		Consistently(func(g Gomega) {
 			got := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(intruder), got)).To(Succeed())
-			g.Expect(got.Labels[labelManagedByKey]).To(BeEmpty(),
+			g.Expect(got.Labels[util.LabelManagedByKey]).To(BeEmpty(),
 				"intruder pod should not have been relabeled by the controller; labels=%+v", got.Labels)
 			for _, ref := range got.OwnerReferences {
 				g.Expect(ref.UID).NotTo(Equal(fx.ISVC.UID),

@@ -179,7 +179,7 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			// Only the surge pod should remain after the migration completes.
 			alive := 0
@@ -346,7 +346,7 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 	// operator sees a stuck status, and Alfred can't observe the
 	// rejection within its 30s SLA.
 	ginkgo.It("NodeAffinity conflict is rejected without wedging source in Phase=Migrating", func() {
-		pinned := simNodeNames[0]
+		pinned := util.SimNodeNames[0]
 		fx := newOMENativeFixture(ns.Name,
 			WithCBMName("affinity-llama"),
 			WithCSRName("affinity-runtime"),

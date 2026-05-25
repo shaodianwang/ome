@@ -115,7 +115,7 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation", ginkgo.Ordered,
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 
 			var engineCount, decoderCount int
@@ -201,7 +201,7 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation", ginkgo.Ordered,
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			haveEng, haveDec := false, false
 			for _, cr := range crs.Items {
@@ -230,7 +230,7 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation", ginkgo.Ordered,
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 
 			var engineNames, decoderNames []string
@@ -335,7 +335,7 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation", ginkgo.Ordered,
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue, "component": "decoder"},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue, "component": "decoder"},
 			)).To(Succeed())
 			g.Expect(crs.Items).To(HaveLen(1),
 				"Decoder must have exactly one CR; multiple means lifecycle annotations are still drifting the hash")

@@ -96,7 +96,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).NotTo(BeEmpty(), "expected at least one OMENative-managed pod")
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
@@ -120,14 +120,14 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).NotTo(BeEmpty(), "no OMENative-managed pods to advance")
 			for i := range pods.Items {
 				p := &pods.Items[i]
 				g.Expect(p.Spec.NodeName).NotTo(BeEmpty(),
 					"pod %s should have NodeName assigned by the binder", p.Name)
-				g.Expect(hasConditionTrue(p.Status.Conditions, corev1.ContainersReady)).To(BeTrue(),
+				g.Expect(util.HasConditionTrue(p.Status.Conditions, corev1.ContainersReady)).To(BeTrue(),
 					"pod %s should have ContainersReady=True; conditions=%+v", p.Name, p.Status.Conditions)
 			}
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
@@ -237,7 +237,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).NotTo(BeEmpty(), "expected at least one pod")
 			crs := listOMENativeRevisions(g, ns.Name)
@@ -266,7 +266,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 		pods := &corev1.PodList{}
 		Expect(k8sClient.List(suiteCtx, pods,
 			client.InNamespace(ns.Name),
-			client.MatchingLabels{labelManagedByKey: managedByValue},
+			client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 		)).To(Succeed())
 		for _, pod := range pods.Items {
 			found := false
@@ -283,7 +283,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 		crList := &appsv1.ControllerRevisionList{}
 		Expect(k8sClient.List(suiteCtx, crList,
 			client.InNamespace(ns.Name),
-			client.MatchingLabels{labelManagedByKey: managedByValue},
+			client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 		)).To(Succeed())
 		for _, cr := range crList.Items {
 			found := false
@@ -341,7 +341,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).NotTo(BeEmpty(),
 				"observed behavior: MinReplicas=0 promotes to 1 pod (file as P2 finding if scale-to-zero is desired)")
@@ -392,7 +392,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(stranger), got)).To(Succeed())
 			// Placeholder still has the placeholder label, hasn't been
 			// adopted by the controller.
-			g.Expect(got.Labels[labelManagedByKey]).NotTo(Equal(managedByValue),
+			g.Expect(got.Labels[util.LabelManagedByKey]).NotTo(Equal(util.ManagedByOMENativeValue),
 				"controller must not adopt a stranger pod by relabeling it; labels=%+v", got.Labels)
 		}, "3s", util.PollInterval).Should(Succeed())
 	})
@@ -428,7 +428,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).To(BeEmpty(),
 				"missing CBM must block pod creation; got %d OMENative pod(s)", len(pods.Items))
@@ -462,7 +462,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			// Reset seen on each retry so any reconcile flap doesn't latch
 			// a stale flag — this iteration's snapshot must show all three
@@ -616,7 +616,7 @@ var _ = ginkgo.Describe("OMENative basic lifecycle", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).To(BeEmpty(),
 				"missing CSR must block pod creation; got %d OMENative pod(s)", len(pods.Items))

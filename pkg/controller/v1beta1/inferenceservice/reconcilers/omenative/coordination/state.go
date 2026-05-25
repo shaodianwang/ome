@@ -100,6 +100,28 @@ type GroupTransition struct {
 
 	// Message is the operator-facing explanation of the phase.
 	Message string
+
+	// SurgeBudget reports the maximum number of new-revision pods the
+	// caller may create for each Component this reconcile, computed
+	// from the group's pacing block via MaxSurgeBudget AND (for
+	// RatioBalanced pacing) gated by EvaluateSurge. Nil when the
+	// transition's Phase doesn't authorize surge (Idle, Paused, Failed,
+	// Shifting, ScalingDown). Caller plumbs these into the per-Component
+	// surge logic to respect the operator-supplied MaxSurge.
+	SurgeBudget map[v1beta1.ComponentType]int32
+
+	// UnavailableBudget reports the maximum number of old-revision pods
+	// the caller may terminate before the new-revision replacements are
+	// Ready. Mirrors SurgeBudget — nil when not in a phase that
+	// authorizes pod termination.
+	UnavailableBudget map[v1beta1.ComponentType]int32
+
+	// RatioSkewRejected is true when at least one Component's surge
+	// budget was reduced to zero by RatioBalanced pacing this reconcile.
+	// Surfaces the EvaluateSurge SkewRejected signal so callers can
+	// emit the RatioSkewRejected event + increment the ratio_skew_total
+	// counter. Always false for PerComponent pacing.
+	RatioSkewRejected bool
 }
 
 // ComputeTransition walks the group's state machine for this reconcile
@@ -190,16 +212,24 @@ func atomicTransition(obs GroupObservation) GroupTransition {
 
 	switch {
 	case !allHaveSurge:
+		budget, skew := computeSurgeBudgetWithRatio(obs)
 		return GroupTransition{
-			Phase:          v1beta1.CoordinationPhaseSurging,
-			CompositePhase: string(v1beta1.CoordinationPhaseSurging),
-			Message:        "creating new-revision pods",
+			Phase:             v1beta1.CoordinationPhaseSurging,
+			CompositePhase:    string(v1beta1.CoordinationPhaseSurging),
+			Message:           "creating new-revision pods",
+			SurgeBudget:       budget,
+			UnavailableBudget: computeUnavailableBudget(obs),
+			RatioSkewRejected: skew,
 		}
 	case !allNewReady:
+		budget, skew := computeSurgeBudgetWithRatio(obs)
 		return GroupTransition{
-			Phase:          v1beta1.CoordinationPhaseWaiting,
-			CompositePhase: string(v1beta1.CoordinationPhaseWaiting),
-			Message:        "waiting for new-revision pods to be Ready",
+			Phase:             v1beta1.CoordinationPhaseWaiting,
+			CompositePhase:    string(v1beta1.CoordinationPhaseWaiting),
+			Message:           "waiting for new-revision pods to be Ready",
+			SurgeBudget:       budget,
+			UnavailableBudget: computeUnavailableBudget(obs),
+			RatioSkewRejected: skew,
 		}
 	}
 
@@ -234,6 +264,11 @@ func atomicTransition(obs GroupObservation) GroupTransition {
 // state machines walk in parallel; the group phase is the union (any
 // Component still surging means the group is Surging; otherwise
 // Waiting → Shifting → ScalingDown → Idle).
+//
+// Pause semantics differ from Atomic: Atomic short-circuits to Paused
+// when ANY Component is paused (gang-stop), but PairedMixable lets
+// each Component progress independently, so the group is Paused only
+// when EVERY Component is paused.
 func pairedMixableTransition(obs GroupObservation) GroupTransition {
 	failed := false
 	for _, c := range obs.Components {
@@ -247,6 +282,21 @@ func pairedMixableTransition(obs GroupObservation) GroupTransition {
 			Phase:          v1beta1.CoordinationPhaseFailed,
 			CompositePhase: string(v1beta1.CoordinationPhaseFailed),
 			Message:        "one or more Components in the PairedMixable group failed",
+		}
+	}
+
+	allPaused := len(obs.Components) > 0
+	for _, c := range obs.Components {
+		if !c.Paused {
+			allPaused = false
+			break
+		}
+	}
+	if allPaused {
+		return GroupTransition{
+			Phase:          v1beta1.CoordinationPhasePaused,
+			CompositePhase: string(v1beta1.CoordinationPhasePaused),
+			Message:        "all Components in the PairedMixable group are paused",
 		}
 	}
 
@@ -286,16 +336,24 @@ func pairedMixableTransition(obs GroupObservation) GroupTransition {
 	}
 	switch {
 	case anySurging:
+		budget, skew := computeSurgeBudgetWithRatio(obs)
 		return GroupTransition{
-			Phase:          v1beta1.CoordinationPhaseSurging,
-			CompositePhase: string(v1beta1.CoordinationPhaseSurging),
-			Message:        "at least one Component is surging",
+			Phase:             v1beta1.CoordinationPhaseSurging,
+			CompositePhase:    string(v1beta1.CoordinationPhaseSurging),
+			Message:           "at least one Component is surging",
+			SurgeBudget:       budget,
+			UnavailableBudget: computeUnavailableBudget(obs),
+			RatioSkewRejected: skew,
 		}
 	case anyWaiting:
+		budget, skew := computeSurgeBudgetWithRatio(obs)
 		return GroupTransition{
-			Phase:          v1beta1.CoordinationPhaseWaiting,
-			CompositePhase: string(v1beta1.CoordinationPhaseWaiting),
-			Message:        "waiting for new-revision pods to be Ready",
+			Phase:             v1beta1.CoordinationPhaseWaiting,
+			CompositePhase:    string(v1beta1.CoordinationPhaseWaiting),
+			Message:           "waiting for new-revision pods to be Ready",
+			SurgeBudget:       budget,
+			UnavailableBudget: computeUnavailableBudget(obs),
+			RatioSkewRejected: skew,
 		}
 	case anyScalingDown:
 		return GroupTransition{
@@ -317,9 +375,14 @@ func pairedMixableTransition(obs GroupObservation) GroupTransition {
 // explicit Independent groups and as the implicit default when no
 // group is declared (callers that drive an InferenceService without a
 // rolloutCoordination block hit this branch).
+//
+// Pause semantics match PairedMixable's: Independent allows each
+// Component to progress on its own, so the group is Paused only when
+// EVERY Component is paused (not Atomic's "ANY paused").
 func independentTransition(obs GroupObservation) GroupTransition {
 	anyRolling := false
 	failed := false
+	allPaused := len(obs.Components) > 0
 	for _, c := range obs.Components {
 		if c.Failed {
 			failed = true
@@ -327,12 +390,22 @@ func independentTransition(obs GroupObservation) GroupTransition {
 		if c.RolloutInFlight {
 			anyRolling = true
 		}
+		if !c.Paused {
+			allPaused = false
+		}
 	}
 	if failed {
 		return GroupTransition{
 			Phase:          v1beta1.CoordinationPhaseFailed,
 			CompositePhase: string(v1beta1.CoordinationPhaseFailed),
 			Message:        "one or more Components in the Independent group failed",
+		}
+	}
+	if allPaused {
+		return GroupTransition{
+			Phase:          v1beta1.CoordinationPhasePaused,
+			CompositePhase: string(v1beta1.CoordinationPhasePaused),
+			Message:        "all Components in the Independent group are paused",
 		}
 	}
 	if !anyRolling {
@@ -463,4 +536,79 @@ func previousCompletedComponent(obs GroupObservation, c v1beta1.ComponentType) v
 		return obs.Group.Order[i-1]
 	}
 	return ""
+}
+
+// computeSurgeBudget returns the per-Component MaxSurge budget for the
+// group's pacing, keyed by Component. Caller plumbs each value into
+// the per-Component surge logic so the operator's MaxSurge bound is
+// respected end-to-end. PerComponent-pacing only — for RatioBalanced,
+// use computeSurgeBudgetWithRatio.
+func computeSurgeBudget(obs GroupObservation) map[v1beta1.ComponentType]int32 {
+	pacing := obs.Group.Pacing
+	out := make(map[v1beta1.ComponentType]int32, len(obs.Components))
+	for c, comp := range obs.Components {
+		replicas := comp.DesiredReplicas
+		if replicas <= 0 {
+			replicas = 1
+		}
+		out[c] = MaxSurgeBudget(pacing, replicas)
+	}
+	return out
+}
+
+// computeSurgeBudgetWithRatio returns SurgeBudget and a skew-rejected
+// flag. For PerComponent pacing this is identical to computeSurgeBudget
+// + skew=false. For RatioBalanced pacing, EvaluateSurge gates the
+// MaxSurge budget — when the ratio band would be exceeded by even one
+// surge, the budget is zeroed and skew=true so the caller can fire
+// RatioSkewRejected metrics/events.
+//
+// Closes G3 + threads into G5 (RatioSkewRejected) and G6 (RatioState
+// reads OriginalReplicas + NewPods from obs).
+func computeSurgeBudgetWithRatio(obs GroupObservation) (map[v1beta1.ComponentType]int32, bool) {
+	budget := computeSurgeBudget(obs)
+	if obs.Group.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
+		return budget, false
+	}
+	if len(obs.OriginalReplicas) == 0 {
+		// No anchor yet — let MaxSurge govern alone, no skew possible
+		// until the next reconcile when SnapshotOriginal has run.
+		return budget, false
+	}
+	state := RatioState{
+		Original: obs.OriginalReplicas,
+		Current:  make(map[v1beta1.ComponentType]int32, len(obs.Components)),
+		NewPods:  make(map[v1beta1.ComponentType]int32, len(obs.Components)),
+	}
+	for c, comp := range obs.Components {
+		state.Current[c] = comp.TotalPods
+		state.NewPods[c] = comp.NewRevisionPods
+	}
+	var skew bool
+	for c, proposed := range budget {
+		if proposed <= 0 {
+			continue
+		}
+		d := EvaluateSurge(obs.Group.Pacing, state, c, proposed)
+		budget[c] = d.AllowedSurgeDelta
+		if d.SkewRejected {
+			skew = true
+		}
+	}
+	return budget, skew
+}
+
+// computeUnavailableBudget mirrors computeSurgeBudget for the
+// MaxUnavailable side.
+func computeUnavailableBudget(obs GroupObservation) map[v1beta1.ComponentType]int32 {
+	pacing := obs.Group.Pacing
+	out := make(map[v1beta1.ComponentType]int32, len(obs.Components))
+	for c, comp := range obs.Components {
+		replicas := comp.DesiredReplicas
+		if replicas <= 0 {
+			replicas = 1
+		}
+		out[c] = MaxUnavailableBudget(pacing, replicas)
+	}
+	return out
 }

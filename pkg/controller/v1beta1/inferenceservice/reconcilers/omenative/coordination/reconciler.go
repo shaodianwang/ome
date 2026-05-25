@@ -127,6 +127,17 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			result.PerRevisionServicesEnsured++
 		}
 		SetPerRevisionServiceCount(in.ISVC.Name, string(c), float64(len(perRevisionPods[c])))
+
+		// G4: GC per-revision Services whose hash has no live pods.
+		// List existing Services with the (isvc, component) labels and
+		// delete pairs whose revision-hash is not in the current
+		// observation. Safe because we only Ensure for hashes that
+		// have pods, so a hash with zero pods is genuinely past
+		// retention. Concurrent racing pods (added between this list
+		// and the GC delete) re-Ensure on the next reconcile.
+		if err := gcOrphanedPerRevisionServices(ctx, in.Client, in.ISVC, c, perRevisionPods[c]); err != nil {
+			return nil, fmt.Errorf("gc per-revision services for %s: %w", c, err)
+		}
 	}
 
 	// Write per-Component Traffic[] from observed pod distribution
@@ -140,13 +151,45 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			return nil, fmt.Errorf("invalid coordination group shape: %w", err)
 		}
 		obs := buildGroupObservation(in.ISVC, g, perRevisionPods)
+		// G6: snapshot Original on first observation, then preserve it
+		// across reconciles via the previously-written ObservedRatio.
+		// Always refresh Current + NewPods from the live observation.
+		ratio := buildRatioState(in.ISVC, g, obs, perRevisionPods)
+		obs.OriginalReplicas = ratio.Original
 		tr := ComputeTransition(obs)
-		groupStatus := BuildGroupStatus(g, tr, nil, now)
+		groupStatus := BuildGroupStatus(g, tr, ratio, now)
 
 		// Record observability for this group.
+		prevPhase := previousGroupPhase(in.ISVC, g.Name)
 		RecordGroupPhase(in.ISVC.Name, g.Name, string(tr.Phase))
+		if prevPhase != "" && string(prevPhase) != string(tr.Phase) {
+			RecordGroupTransition(in.ISVC.Name, g.Name, string(prevPhase), string(tr.Phase))
+		}
 		if tr.Phase == v1beta1.CoordinationPhaseFailed {
 			RecordGroupFailure(in.ISVC.Name, g.Name, tr.Message)
+		}
+
+		// G5: PairedMixable mixed-pairing observability — emit when
+		// the group observes distinct revision hashes per Component
+		// (the "v1 engine + v2 decoder coexists" case PairedMixable
+		// permits but operators want to know about).
+		if g.Policy == v1beta1.CoordinationPolicyPairedMixable && hasMixedPairing(g, perRevisionPods) {
+			RecordMixedPairing(in.ISVC.Name, g.Name)
+			if in.Recorder != nil {
+				in.Recorder.Eventf(in.ISVC, corev1.EventTypeNormal, EventReasonMixedPairingObserved,
+					"PairedMixable group %s observed distinct per-Component revision hashes", g.Name)
+			}
+		}
+
+		// G5 + G3: RatioBalanced skew rejection signal — fire metric
+		// + event when EvaluateSurge zeroed at least one Component's
+		// surge budget to preserve the cross-Component ratio.
+		if tr.RatioSkewRejected {
+			RecordRatioSkew(in.ISVC.Name, g.Name)
+			if in.Recorder != nil {
+				in.Recorder.Eventf(in.ISVC, corev1.EventTypeNormal, EventReasonRatioSkewRejected,
+					"RatioBalanced pacing rejected surge in group %s to preserve cross-Component ratio", g.Name)
+			}
 		}
 
 		// Event emission on phase boundary. Compare to previously-
@@ -312,18 +355,17 @@ func buildGroupObservation(isvc *v1beta1.InferenceService, g ResolvedGroup, perR
 	for _, c := range g.Components {
 		obs.Components[c] = buildComponentObservation(isvc, c, perRevisionPods[c])
 	}
-	if isvc.Annotations[paussedAnnotationKey()] == "true" {
+	if isvc.Annotations[PausedRolloutAnnotation] == "true" {
 		obs.PausedGlobal = true
 	}
 	return obs
 }
 
-// paussedAnnotationKey returns the ome.io/rollout-paused annotation
-// key. Declared inline rather than in constants.go to keep the
+// PausedRolloutAnnotation is the ISVC annotation operators set to
+// "true" to freeze every coordination group at its current phase.
+// Declared inline rather than in pkg/constants to keep the
 // coordination subpackage's surface small.
-func paussedAnnotationKey() string {
-	return "ome.io/rollout-paused"
-}
+const PausedRolloutAnnotation = "ome.io/rollout-paused"
 
 // buildComponentObservation aggregates one Component's observation from
 // OMENativeComponentStatus and per-revision pod counts.
@@ -355,6 +397,184 @@ func sumPodCounts(in map[string]int32) int32 {
 		sum += n
 	}
 	return sum
+}
+
+// gcOrphanedPerRevisionServices deletes per-revision Service pairs
+// whose revision-hash has no live pods for `component`. Closes G4.
+//
+// The sweep lists Services in the ISVC's namespace that carry the
+// (inferenceservice + component + revision-hash) selector keys, then
+// drops every pair whose revision-hash isn't in `liveHashes`.
+//
+// Idempotent: deleting an already-deleted Service is a NotFound
+// success per GCPerRevisionServices.
+func gcOrphanedPerRevisionServices(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, liveHashes map[string]int32) error {
+	if c == nil {
+		return nil
+	}
+	live := make(map[string]struct{}, len(liveHashes))
+	for h := range liveHashes {
+		if h == "" {
+			continue
+		}
+		live[h] = struct{}{}
+	}
+	svcs := &corev1.ServiceList{}
+	if err := c.List(ctx, svcs,
+		client.InNamespace(isvc.Namespace),
+		client.MatchingLabels{
+			constants.InferenceServicePodLabelKey: isvc.Name,
+			constants.OMEComponentLabel:           string(component),
+		},
+	); err != nil {
+		return fmt.Errorf("list per-revision services: %w", err)
+	}
+	for i := range svcs.Items {
+		hash := svcs.Items[i].Spec.Selector[query.LabelRevisionHash]
+		if hash == "" {
+			continue // not a per-revision Service
+		}
+		if _, alive := live[hash]; alive {
+			continue
+		}
+		// Skip headless variant — GCPerRevisionServices already
+		// handles both halves of the pair when called with the
+		// routing hash. The routing variant's name is the bare
+		// `<isvc>-<c>-rev-<hash>` shape; headless adds `-headless`.
+		if svcs.Items[i].Name != PerRevisionServiceName(isvc.Name, component, hash) {
+			continue
+		}
+		if err := GCPerRevisionServices(ctx, c, isvc.Namespace, isvc.Name, component, hash); err != nil {
+			return fmt.Errorf("gc service for %s/%s: %w", component, hash, err)
+		}
+	}
+	return nil
+}
+
+// buildRatioState assembles the per-group RatioState that BuildGroupStatus
+// turns into Status.RolloutCoordination.Groups[i].ObservedRatio. Closes G6:
+// SnapshotOriginal is now invoked on first observation of the group, then
+// preserved (read back from the existing Status) across subsequent
+// reconciles so the anchor doesn't shift when MinReplicas changes mid-rollout.
+//
+// Always populated even for non-RatioBalanced pacing (cheap; BuildGroupStatus
+// suppresses it on the status side based on policy).
+func buildRatioState(isvc *v1beta1.InferenceService, g ResolvedGroup, obs GroupObservation, perRevisionPods map[v1beta1.ComponentType]map[string]int32) *RatioState {
+	state := &RatioState{
+		Current: make(map[v1beta1.ComponentType]int32, len(g.Components)),
+		NewPods: make(map[v1beta1.ComponentType]int32, len(g.Components)),
+	}
+	// Current = total live pods this Component, any revision.
+	// NewPods = pods on target revision (matched by Component obs).
+	for _, c := range g.Components {
+		hashes := perRevisionPods[c]
+		var total int32
+		for _, n := range hashes {
+			total += n
+		}
+		state.Current[c] = total
+		cObs := obs.Components[c]
+		if cObs.TargetRevisionHash != "" {
+			state.NewPods[c] = hashes[cObs.TargetRevisionHash]
+		}
+	}
+	// Original: read from existing Status, snapshot from current
+	// desired replicas if not yet recorded (first observation).
+	state.Original = existingOriginalReplicas(isvc, g.Name)
+	if len(state.Original) == 0 {
+		desired := make(map[v1beta1.ComponentType]int32, len(g.Components))
+		for _, c := range g.Components {
+			desired[c] = obs.Components[c].DesiredReplicas
+		}
+		state.Original = SnapshotOriginal(desired)
+	}
+	return state
+}
+
+// existingOriginalReplicas reads the previously-recorded Original
+// from the ISVC's status, if any. Empty when first observation of the
+// group.
+func existingOriginalReplicas(isvc *v1beta1.InferenceService, groupName string) map[v1beta1.ComponentType]int32 {
+	if isvc.Status.RolloutCoordination == nil {
+		return nil
+	}
+	for _, gs := range isvc.Status.RolloutCoordination.Groups {
+		if gs.Name != groupName || gs.ObservedRatio == nil {
+			continue
+		}
+		if len(gs.ObservedRatio.Original) == 0 {
+			return nil
+		}
+		out := make(map[v1beta1.ComponentType]int32, len(gs.ObservedRatio.Original))
+		for k, v := range gs.ObservedRatio.Original {
+			out[k] = v
+		}
+		return out
+	}
+	return nil
+}
+
+// previousGroupPhase returns the Phase observed for `groupName` in the
+// most recent reconcile (read from the ISVC's existing status). Empty
+// when no prior observation exists — caller treats that as "no
+// transition" so the very first reconcile doesn't synthesize a
+// spurious from="" → to=Idle transition increment.
+func previousGroupPhase(isvc *v1beta1.InferenceService, groupName string) v1beta1.CoordinationPhase {
+	if isvc.Status.RolloutCoordination == nil {
+		return ""
+	}
+	for _, gs := range isvc.Status.RolloutCoordination.Groups {
+		if gs.Name == groupName {
+			return gs.Phase
+		}
+	}
+	return ""
+}
+
+// hasMixedPairing reports whether the PairedMixable group's Components
+// observe distinct revision hashes — the cross-revision pairing case
+// PairedMixable permits but operators want surfaced.
+//
+// A pairing is "mixed" when at least one Component in the group has
+// pods on 2+ revisions OR when different Components in the group are
+// on different revisions. Both indicate ad-hoc cross-revision pod
+// interaction that's worth flagging.
+func hasMixedPairing(g ResolvedGroup, perRevisionPods map[v1beta1.ComponentType]map[string]int32) bool {
+	if len(g.Components) < 2 {
+		return false
+	}
+	// Single-Component multi-hash: any Component with >1 hash present.
+	for _, c := range g.Components {
+		hashes := perRevisionPods[c]
+		nonZero := 0
+		for _, n := range hashes {
+			if n > 0 {
+				nonZero++
+			}
+		}
+		if nonZero > 1 {
+			return true
+		}
+	}
+	// Cross-Component hash mismatch: pick the first non-empty Component's
+	// only hash and compare to others.
+	var ref string
+	for _, c := range g.Components {
+		hashes := perRevisionPods[c]
+		for h, n := range hashes {
+			if n == 0 {
+				continue
+			}
+			if ref == "" {
+				ref = h
+				break
+			}
+			if h != ref {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // emitPhaseEvents fires K8s events on phase transitions for the

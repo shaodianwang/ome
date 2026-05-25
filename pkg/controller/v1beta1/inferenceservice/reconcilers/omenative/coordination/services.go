@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -14,6 +15,15 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
 )
+
+// perRevisionServicePort is the default port the per-revision routing
+// Service exposes when the Component spec doesn't pin one. 8080 is the
+// long-standing inferencing convention (kserve / kfserving / OME).
+// HTTPRoute backendRef consumers target this port; runtimes that listen
+// elsewhere should set spec.Engine.Runner.Ports (G14 — make this
+// configurable). For now, hard-coded to keep the producer-side surface
+// minimal and unblock the ClusterIP validation which requires ≥1 port.
+const perRevisionServicePort int32 = 8080
 
 // isvcGroupVersionKind identifies the InferenceService owner reference
 // on each per-revision Service. Duplicated from the top-level
@@ -82,8 +92,22 @@ func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1
 			Type:                     corev1.ServiceTypeClusterIP,
 			Selector:                 selector,
 			PublishNotReadyAddresses: false,
+			Ports:                    perRevisionRoutingPorts(),
 		},
 	}, nil
+}
+
+// perRevisionRoutingPorts is the standard inferencing-port set.
+// ClusterIP Services require at least one port (k8s validation); the
+// headless variant accepts an empty list because peer DNS uses pod-IP
+// resolution. HTTPRoute backendRef consumers route to this port.
+func perRevisionRoutingPorts() []corev1.ServicePort {
+	return []corev1.ServicePort{{
+		Name:       "http",
+		Port:       perRevisionServicePort,
+		TargetPort: intstr.FromInt32(perRevisionServicePort),
+		Protocol:   corev1.ProtocolTCP,
+	}}
 }
 
 // BuildPerRevisionHeadlessService produces the headless per-revision
@@ -181,6 +205,7 @@ func ensureService(
 		}
 		target.Spec.PublishNotReadyAddresses = desired.Spec.PublishNotReadyAddresses
 		target.Spec.Selector = desired.Spec.Selector
+		target.Spec.Ports = desired.Spec.Ports
 		target.Labels = desired.Labels
 		target.OwnerReferences = desired.OwnerReferences
 		return nil

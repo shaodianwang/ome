@@ -54,7 +54,7 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(crs.Items).NotTo(BeEmpty(), "expected at least one OMENative CR")
 			// The FIRST revision must be #1. Higher numbers indicate
@@ -95,7 +95,7 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(crs.Items).NotTo(BeEmpty())
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
@@ -123,7 +123,7 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(crs.Items).To(HaveLen(1), "spec edits that don't change PodSpec must NOT create new CRs; got %d", len(crs.Items))
 		}, "3s", util.PollInterval).Should(Succeed())
@@ -155,7 +155,7 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(crs.Items).To(HaveLen(1))
 			origName = crs.Items[0].Name
@@ -183,7 +183,7 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 				Name:      origName,
 				Namespace: ns.Name,
 				Labels: map[string]string{
-					labelManagedByKey: managedByValue,
+					util.LabelManagedByKey: util.ManagedByOMENativeValue,
 				},
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: "ome.io/v1beta1",
@@ -226,7 +226,7 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			// One impostor (foreign UID) + one fresh CR with controller UID.
 			foundFresh := false
@@ -280,7 +280,7 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(crs.Items).To(HaveLen(1))
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
@@ -325,7 +325,7 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(len(crs.Items)).To(BeNumerically("<=", 12),
 				"expected at most 12 CRs (10 non-live + 1-2 live); got %d", len(crs.Items))
@@ -358,7 +358,7 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(crs.Items).To(HaveLen(1))
 			initialName = crs.Items[0].Name
@@ -378,7 +378,7 @@ var _ = ginkgo.Describe("OMENative ControllerRevision lifecycle", ginkgo.Ordered
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(len(crs.Items)).To(BeNumerically(">=", 2),
 				"image bump must produce a new CR; got %d total", len(crs.Items))

@@ -43,16 +43,17 @@ var (
 	// kubeletSim ticks NodeName (via binder) + ContainersReady onto
 	// OMENative-owned pods so the gate pipeline can converge against
 	// envtest's no-kubelet world. Started in BeforeSuite, stopped in
-	// AfterSuite.
-	kubeletSim *podKubeletSimulator
+	// AfterSuite. Type lives in tests/integration/util/simulators.go so
+	// the coordination integration suite can reuse it.
+	kubeletSim *util.PodKubeletSimulator
 	// sliceSim mirrors pod state into EndpointSlices so drain waits +
 	// IsPodInRotation converge against envtest's missing
 	// endpointslice-controller.
-	sliceSim *endpointSliceSimulator
+	sliceSim *util.EndpointSliceSimulator
 	// suiteBinder is the clientset-backed binding helper. Exported to
 	// specs that need to pin a pod to a specific node (e.g. Migrate's
 	// FromNode validation) rather than letting the kubelet sim pick.
-	suiteBinder *podBinder
+	suiteBinder *util.PodBinder
 )
 
 var _ = ginkgo.BeforeSuite(func() {
@@ -120,12 +121,12 @@ var _ = ginkgo.BeforeSuite(func() {
 	// unscheduled pods.
 	cs, err := kubernetes.NewForConfig(s.Cfg)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "kubernetes.NewForConfig")
-	suiteBinder = newPodBinder(cs)
-	kubeletSim = newPodKubeletSimulator(k8sClient, suiteBinder)
+	suiteBinder = util.NewPodBinder(cs)
+	kubeletSim = util.NewPodKubeletSimulator(k8sClient, suiteBinder)
 	kubeletSim.Start(suiteCtx)
 
 	ginkgo.By("starting the EndpointSlice simulator to mirror pod state")
-	sliceSim = newEndpointSliceSimulator(k8sClient)
+	sliceSim = util.NewEndpointSliceSimulator(k8sClient)
 	sliceSim.Start(suiteCtx)
 })
 

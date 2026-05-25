@@ -139,7 +139,7 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies", ginkgo
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 
 			counts := map[string]int{"engine": 0, "decoder": 0, "router": 0}
@@ -180,7 +180,7 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies", ginkgo
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			seen := 0
 			for _, cr := range crs.Items {
@@ -211,7 +211,7 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies", ginkgo
 			crs := &appsv1.ControllerRevisionList{}
 			g.Expect(k8sClient.List(suiteCtx, crs,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			engineNames, decoderNames, routerNames := []string{}, []string{}, []string{}
 			for _, cr := range crs.Items {

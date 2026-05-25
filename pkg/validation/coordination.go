@@ -29,6 +29,7 @@ const (
 	ReasonSequentialRequiresOrder                 = "SequentialRequiresOrder"
 	ReasonSequentialIncompleteOrder               = "SequentialIncompleteOrder"
 	ReasonSequentialRequiresMultipleComponents    = "SequentialRequiresMultipleComponents"
+	ReasonSequentialDuplicateOrder                = "SequentialDuplicateOrder"
 )
 
 // ratioToleranceWarningThreshold is the upper bound the validator
@@ -173,11 +174,17 @@ func validateOrderSubset(idx int, components, order []v1beta1.ComponentType) err
 	for _, c := range components {
 		in[c] = struct{}{}
 	}
+	seen := make(map[v1beta1.ComponentType]struct{}, len(order))
 	for _, c := range order {
 		if _, ok := in[c]; !ok {
 			return fmt.Errorf("spec.rolloutCoordination.groups[%d]: order entry %q is not in components (%s)",
 				idx, c, ReasonInvalidCoordinationOrder)
 		}
+		if _, dup := seen[c]; dup {
+			return fmt.Errorf("spec.rolloutCoordination.groups[%d]: order entry %q appears more than once; each Component must walk the Sequential / Atomic order exactly once (%s)",
+				idx, c, ReasonSequentialDuplicateOrder)
+		}
+		seen[c] = struct{}{}
 	}
 	return nil
 }
@@ -291,29 +298,69 @@ func omenativeDeploymentModeMap(spec *v1beta1.InferenceServiceSpec) map[v1beta1.
 	return out
 }
 
-// componentImages returns the runner container image per Component
-// in `components` from the spec. Empty when the Component or its
-// runner is absent.
+// componentImages returns the container image per Component in
+// `components`. The Runner field is the preferred image source (the
+// OEP-0007 contract), but users may also specify the image via
+// PodSpec.Containers[0].Image — both surfaces must produce the same
+// lockstep signal so that an image bump via either path is detected.
+//
+// Precedence: Runner.Image if non-empty, otherwise the first container's
+// image in PodSpec. Empty when neither is set or the Component spec is
+// absent.
 func componentImages(spec *v1beta1.InferenceServiceSpec, components []v1beta1.ComponentType) map[v1beta1.ComponentType]string {
 	out := map[v1beta1.ComponentType]string{}
 	if spec == nil {
 		return out
 	}
 	for _, c := range components {
+		var img string
 		switch c {
 		case v1beta1.EngineComponent:
-			if spec.Engine != nil && spec.Engine.Runner != nil {
-				out[c] = spec.Engine.Runner.Image
+			if spec.Engine != nil {
+				img = engineRunnerOrPodSpecImage(spec.Engine)
 			}
 		case v1beta1.DecoderComponent:
-			if spec.Decoder != nil && spec.Decoder.Runner != nil {
-				out[c] = spec.Decoder.Runner.Image
+			if spec.Decoder != nil {
+				img = decoderRunnerOrPodSpecImage(spec.Decoder)
 			}
 		case v1beta1.RouterComponent:
-			if spec.Router != nil && spec.Router.Runner != nil {
-				out[c] = spec.Router.Runner.Image
+			if spec.Router != nil {
+				img = routerRunnerOrPodSpecImage(spec.Router)
 			}
+		}
+		if img != "" {
+			out[c] = img
 		}
 	}
 	return out
+}
+
+func engineRunnerOrPodSpecImage(e *v1beta1.EngineSpec) string {
+	if e.Runner != nil && e.Runner.Image != "" {
+		return e.Runner.Image
+	}
+	if len(e.PodSpec.Containers) > 0 {
+		return e.PodSpec.Containers[0].Image
+	}
+	return ""
+}
+
+func decoderRunnerOrPodSpecImage(d *v1beta1.DecoderSpec) string {
+	if d.Runner != nil && d.Runner.Image != "" {
+		return d.Runner.Image
+	}
+	if len(d.PodSpec.Containers) > 0 {
+		return d.PodSpec.Containers[0].Image
+	}
+	return ""
+}
+
+func routerRunnerOrPodSpecImage(r *v1beta1.RouterSpec) string {
+	if r.Runner != nil && r.Runner.Image != "" {
+		return r.Runner.Image
+	}
+	if len(r.PodSpec.Containers) > 0 {
+		return r.PodSpec.Containers[0].Image
+	}
+	return ""
 }

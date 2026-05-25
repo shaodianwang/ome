@@ -71,15 +71,15 @@ var _ = ginkgo.Describe("OMENative diagnostic", ginkgo.Ordered, func() {
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(suiteCtx, pods,
 				client.InNamespace(ns.Name),
-				client.MatchingLabels{labelManagedByKey: managedByValue},
+				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
 			)).To(Succeed())
 			g.Expect(pods.Items).To(HaveLen(1), "expected exactly one OMENative pod for MinReplicas=1")
 			for i := range pods.Items {
 				p := &pods.Items[i]
 				ginkgo.By(formatPodDiag(p))
-				g.Expect(hasConditionTrue(p.Status.Conditions, corev1.ContainersReady)).To(BeTrue(),
+				g.Expect(util.HasConditionTrue(p.Status.Conditions, corev1.ContainersReady)).To(BeTrue(),
 					"pod %s ContainersReady should be True (kubelet sim)", p.Name)
-				g.Expect(hasConditionTrue(p.Status.Conditions, "ome.io/serving")).To(BeTrue(),
+				g.Expect(util.HasConditionTrue(p.Status.Conditions, "ome.io/serving")).To(BeTrue(),
 					"pod %s ome.io/serving should be True (Create's MarkPodServing)", p.Name)
 			}
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
@@ -115,7 +115,7 @@ func formatPodDiag(p *corev1.Pod) string {
 		}
 	}
 	containersReady := "false"
-	if hasConditionTrue(p.Status.Conditions, corev1.ContainersReady) {
+	if util.HasConditionTrue(p.Status.Conditions, corev1.ContainersReady) {
 		containersReady = "true"
 	}
 	return fmt.Sprintf(

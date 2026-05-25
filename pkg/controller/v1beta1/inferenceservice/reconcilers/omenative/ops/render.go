@@ -8,6 +8,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
 )
@@ -96,9 +97,43 @@ func RenderWithRevision(
 	}
 
 	injectOMENativeEnv(pod, plan, inst, runner, ordinal, isvc.Name)
+	injectPeerEndpointEnv(pod, isvc, plan.Component, revisionHash)
 	applyMigrationOverlay(pod, inst.MigrationOverlay)
 
 	return pod, nil
+}
+
+// injectPeerEndpointEnv stamps OME_<PEER>_ENDPOINT and
+// OME_<PEER>_REVISION_ENDPOINT env vars on every container so each
+// pod can dial its coordination peers at generation-scoped DNS.
+// No-op for ISVCs without a rolloutCoordination block, for the
+// degenerate single-Component group case, or when revisionHash is
+// empty (caller didn't go through RenderWithRevision).
+//
+// Per the OEP-0007.1 contract: the revision-aware endpoint uses the
+// pod's OWN revision-hash — Atomic gang semantics guarantee peers
+// surge together, so a new-revision pod dials peers at the same
+// hash. PairedMixable permits cross-revision but the REVISION_ENDPOINT
+// still points at the pod's-own-revision peer; runtimes use the
+// generic ENDPOINT form when cross-revision peers are acceptable.
+//
+// Closes G2: previously coordination.InjectPeerEnv existed but no
+// production caller invoked it from the render path. Runtimes that
+// read OME_<PEER>_ENDPOINT saw empty values.
+func injectPeerEndpointEnv(pod *corev1.Pod, isvc *v1beta1.InferenceService, c v1beta1.ComponentType, revisionHash string) {
+	if isvc.Spec.RolloutCoordination == nil {
+		return
+	}
+	groups := coordination.ResolveGroups(isvc.Spec.RolloutCoordination)
+	peers := coordination.SortedPeers(groups, c, nil)
+	if len(peers) == 0 {
+		return
+	}
+	var hashFn func(v1beta1.ComponentType) string
+	if revisionHash != "" {
+		hashFn = func(_ v1beta1.ComponentType) string { return revisionHash }
+	}
+	coordination.InjectPeerEnv(pod, isvc.Name, isvc.Namespace, peers, hashFn)
 }
 
 // applyMigrationOverlay layers migration placement onto the rendered pod.

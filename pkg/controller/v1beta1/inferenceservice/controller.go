@@ -420,7 +420,14 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		"namespace", isvc.Namespace,
 		"inferenceService", isvc.Name)
 
-	// Step 6: Run all reconcilers
+	// Step 6: Run all reconcilers. Capture the max-requeue across
+	// per-Component reconcilers WITHOUT short-circuiting — coordination
+	// must run at the end of every reconcile pass even when individual
+	// Components requeue (which they do constantly during active
+	// rollouts). Closes G1: previously the loop returned on the first
+	// requeuing reconciler, leaving Status.RolloutCoordination /
+	// per-revision Services / Traffic[] stale until convergence.
+	var pendingRequeue reconcile.Result
 	for _, reconciler := range reconcilers {
 		result, err := reconciler.Reconcile(ctx, isvc)
 		if err != nil {
@@ -430,8 +437,11 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				"inferenceService", isvc.Name)
 			return result, err
 		}
-		if result.Requeue || result.RequeueAfter > 0 {
-			return result, nil
+		if result.Requeue {
+			pendingRequeue.Requeue = true
+		}
+		if result.RequeueAfter > pendingRequeue.RequeueAfter {
+			pendingRequeue.RequeueAfter = result.RequeueAfter
 		}
 	}
 
@@ -452,6 +462,17 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		r.Log.Error(err, "Failed to reconcile cross-Component coordination",
 			"namespace", isvc.Namespace, "inferenceService", isvc.Name)
 		return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile coordination")
+	}
+
+	// If any Component asked to requeue, return that signal AFTER
+	// coordination has run. Ingress / traffic / external-service
+	// reconciliation downstream is skipped this pass — they re-run on
+	// the requeue. This preserves the prior short-circuit semantics
+	// for downstream reconcilers while ensuring coordination's
+	// producer-side status writes (Traffic, RolloutCoordination) land
+	// every pass.
+	if pendingRequeue.Requeue || pendingRequeue.RequeueAfter > 0 {
+		return pendingRequeue, nil
 	}
 
 	// Now reconcile ingress and external service after components have created their services
