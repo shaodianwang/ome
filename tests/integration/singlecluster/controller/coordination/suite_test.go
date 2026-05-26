@@ -128,6 +128,14 @@ var _ = ginkgo.BeforeSuite(func() {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "kubernetes.NewForConfig")
 	suiteBinder = util.NewPodBinder(cs)
 	kubeletSim = util.NewPodKubeletSimulator(k8sClient, suiteBinder)
+	// Coordination specs assert on full bump-cycle convergence (E2E-1,
+	// REG-1 update path, etc.), which requires podRuntimeImagesMatch to
+	// eventually flip True. Without the image-status mirror, in-place
+	// updates stall at that gate until the InstanceReadyTimeout (30m
+	// default) trips fallback — way past any spec timeout. The OMENative
+	// timeouts suite deliberately leaves this off to exercise the
+	// deadline-fallback path.
+	kubeletSim.SetImageStatusMirror(true)
 	kubeletSim.Start(suiteCtx)
 
 	ginkgo.By("starting the EndpointSlice simulator to mirror pod state")

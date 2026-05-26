@@ -3,6 +3,8 @@ package coordination
 import (
 	"testing"
 
+	"k8s.io/apimachinery/pkg/util/intstr"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
@@ -433,3 +435,146 @@ func mkPDFixture(tolerance *int32) *v1beta1.InferenceService {
 }
 
 func int32Ptr(v int32) *int32 { return &v }
+
+// =============================================================================
+// CheckUnavailabilityGate
+// =============================================================================
+
+func TestCheckUnavailabilityGate_NilISVC(t *testing.T) {
+	allowed, _ := CheckUnavailabilityGate(nil, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("nil ISVC should bypass the gate")
+	}
+}
+
+func TestCheckUnavailabilityGate_NoCoordBlock(t *testing.T) {
+	isvc := &v1beta1.InferenceService{}
+	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("no coord block should bypass the gate")
+	}
+}
+
+func TestCheckUnavailabilityGate_ComponentNotInAnyGroup(t *testing.T) {
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				}},
+			},
+		},
+	}
+	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.RouterComponent)
+	if !allowed {
+		t.Errorf("component outside any coord group must bypass the gate")
+	}
+}
+
+func TestCheckUnavailabilityGate_NoObservationYet(t *testing.T) {
+	isvc := mkUnavailFixture(iosInt(1))
+	// No Status.Components populated.
+	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("missing OMENative observation must bypass the gate (first reconcile)")
+	}
+}
+
+func TestCheckUnavailabilityGate_WithinBudget(t *testing.T) {
+	// MaxUnavailable=1, 5 replicas, 5 Ready → currentUnavailable=0,
+	// projected=1, budget=1 → ALLOWED.
+	isvc := mkUnavailFixture(iosInt(1))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:      5,
+				ReadyReplicas: 5,
+			},
+		},
+	}
+	allowed, reason := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("0 current unavailable + budget=1 must allow: %s", reason)
+	}
+}
+
+func TestCheckUnavailabilityGate_BudgetExhausted(t *testing.T) {
+	// MaxUnavailable=1, 5 replicas, 4 Ready → currentUnavailable=1,
+	// projected=2, budget=1 → DENIED.
+	isvc := mkUnavailFixture(iosInt(1))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:      5,
+				ReadyReplicas: 4,
+			},
+		},
+	}
+	allowed, reason := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	if allowed {
+		t.Errorf("1 current unavailable + budget=1 must deny next termination: %s", reason)
+	}
+}
+
+func TestCheckUnavailabilityGate_ZeroBudgetDeadlocks(t *testing.T) {
+	// MaxUnavailable=0 + 5 Ready/5 Replicas → projected=1 > budget=0 → DENIED.
+	// This is the documented honest semantic: zero maxUnavailable without
+	// surge-then-drain support deadlocks rollouts.
+	isvc := mkUnavailFixture(iosInt(0))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:      5,
+				ReadyReplicas: 5,
+			},
+		},
+	}
+	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	if allowed {
+		t.Errorf("MaxUnavailable=0 + all Ready must STILL deny (no surge-then-drain support)")
+	}
+}
+
+func TestCheckUnavailabilityGate_PercentBudget(t *testing.T) {
+	// MaxUnavailable=20%, 10 replicas → budget=2. 0 unavailable, projected=1
+	// → ALLOWED.
+	pct := intstr.FromString("20%")
+	isvc := mkUnavailFixture(&pct)
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:      10,
+				ReadyReplicas: 10,
+			},
+		},
+	}
+	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("20%% of 10 = 2 budget; first termination must be allowed")
+	}
+}
+
+func iosInt(v int) *intstr.IntOrString {
+	x := intstr.FromInt(v)
+	return &x
+}
+
+// mkUnavailFixture returns a coordinated ISVC with engine in one group
+// using PerComponent pacing + specified MaxUnavailable. Caller sets
+// Status.Components.
+func mkUnavailFixture(maxUnavail *intstr.IntOrString) *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:           v1beta1.CoordinationPacingPerComponent,
+						MaxUnavailable: maxUnavail,
+					},
+				}},
+			},
+		},
+	}
+}

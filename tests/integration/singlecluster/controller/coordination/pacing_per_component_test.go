@@ -203,7 +203,12 @@ var _ = ginkgo.Describe("Coordination PerComponent pacing (OEP-0007.1)", ginkgo.
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("PC-E2E-2 MaxUnavailable=0 (zero-downtime) → no ReadyPods dip during rollout — UnavailableBudget consumer in OMENative drain/restart not yet wired", func() {
+	ginkgo.It("PC-E2E-2 MaxUnavailable=0 (zero-downtime) → no ReadyPods dip during rollout", func() {
+		// With MaxUnavailable=0, the unavailability gate denies every
+		// Update attempt because terminating one pod would push currentUnavailable
+		// above 0. ReadyPods stays at the original count for the entire
+		// Consistently window. The rollout effectively deadlocks; that's
+		// the documented honest semantic (no surge-then-drain support yet).
 		fix := newCoordFixture(ns.Name, WithISVCName("pc-e2e-2"),
 			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent),
 			WithEngineReplicas(3))
@@ -230,9 +235,14 @@ var _ = ginkgo.Describe("Coordination PerComponent pacing (OEP-0007.1)", ginkgo.
 			g.Expect(ready).To(BeNumerically(">=", 3))
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
-		cur := freshISVC(Default, ns.Name, "pc-e2e-2")
-		cur.Spec.Engine.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
-		Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		// Wrap Get+mutate+Update in Eventually for retry-on-conflict —
+		// the coordination reconciler updates Status concurrently and
+		// the bare Update races with it.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "pc-e2e-2")
+			cur.Spec.Engine.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
 		Consistently(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "pc-e2e-2")

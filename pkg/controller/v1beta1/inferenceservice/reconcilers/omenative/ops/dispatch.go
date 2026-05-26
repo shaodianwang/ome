@@ -137,6 +137,15 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 				anyGated = true
 				continue
 			}
+			// MaxUnavailable gate: don't take another pod offline if doing
+			// so would push the Component above its unavailability budget.
+			// Without this, the per-Instance Update loop can recreate every
+			// pod in parallel, blowing through maxUnavailable=1 (and the
+			// usual rolling-update intuition).
+			if allowed, _ := coordination.CheckUnavailabilityGate(p.ISVC, plan.Component); !allowed {
+				anyGated = true
+				continue
+			}
 			done, uerr := Update(ctx, p, plan, inst, target, p.PodSpec)
 			if uerr != nil {
 				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: update instance %d: %w", inst.Index, uerr)

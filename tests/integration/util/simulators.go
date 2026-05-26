@@ -72,6 +72,14 @@ type PodKubeletSimulator struct {
 	// the same pod (e.g., after a recreate) get the same node.
 	mu     sync.Mutex
 	nodeOf map[string]string
+
+	// mirrorImageStatus controls whether each tick mirrors
+	// Spec.Containers[*].Image into Status.ContainerStatuses[*].Image.
+	// Off by default to preserve the "natural in-place stall" envtest
+	// assumption the OMENative timeouts-fallback suite relies on; opt
+	// in via SetImageStatusMirror when a suite needs in-place rollouts
+	// to actually converge (coordination's full-cycle bump specs).
+	mirrorImageStatus bool
 }
 
 // SimNodeNames is the pool the simulator round-robins over for pods
@@ -88,6 +96,16 @@ func NewPodKubeletSimulator(c client.Client, binder *PodBinder) *PodKubeletSimul
 		pollEvery: SimulatorPollInterval,
 		nodeOf:    map[string]string{},
 	}
+}
+
+// SetImageStatusMirror toggles the Spec.Containers→Status.ContainerStatuses
+// image mirror. Tests that need in-place updates to fully converge in
+// envtest (so podRuntimeImagesMatch flips true and the Update op promotes
+// Phase=Ready / RunningRevision) enable this in BeforeSuite. Tests that
+// rely on the natural in-place stall (timeout-fallback specs) leave it
+// off. Safe to call before Start.
+func (s *PodKubeletSimulator) SetImageStatusMirror(enabled bool) {
+	s.mirrorImageStatus = enabled
 }
 
 // Start spins the simulator loop in a goroutine. Loop exits when ctx
@@ -141,12 +159,13 @@ func (s *PodKubeletSimulator) step(ctx context.Context) {
 }
 
 // advance walks pod through the lifecycle a real kubelet would
-// produce: bind to a node, stamp ContainersReady=True, and on deletion
-// ack the kubelet-side cleanup by force-removing the pod (envtest has
-// no kubelet, so a regular Delete leaves the pod sitting forever with
-// DeletionTimestamp; restart / scale-down state machines that wait for
-// the pod to actually disappear would hang otherwise). Idempotent on
-// re-entry.
+// produce: bind to a node, stamp ContainersReady=True + mirror
+// Spec.Containers[*].Image into Status.ContainerStatuses, and on
+// deletion ack the kubelet-side cleanup by force-removing the pod
+// (envtest has no kubelet, so a regular Delete leaves the pod sitting
+// forever with DeletionTimestamp; restart / scale-down state machines
+// that wait for the pod to actually disappear would hang otherwise).
+// Idempotent on re-entry.
 func (s *PodKubeletSimulator) advance(ctx context.Context, pod *corev1.Pod) {
 	// Deletion ack: pod is marked for deletion → finish the job by
 	// force-removing via GracePeriodSeconds=0. Mimics what a real
@@ -175,6 +194,10 @@ func (s *PodKubeletSimulator) advance(ctx context.Context, pod *corev1.Pod) {
 		return
 	}
 
+	if s.mirrorImageStatus {
+		s.syncContainerStatuses(ctx, pod)
+	}
+
 	if HasCondition(pod.Status.Conditions, corev1.ContainersReady, corev1.ConditionTrue) {
 		return
 	}
@@ -183,6 +206,47 @@ func (s *PodKubeletSimulator) advance(ctx context.Context, pod *corev1.Pod) {
 		Status:             corev1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 	})
+}
+
+// syncContainerStatuses mirrors Spec.Containers[*].Image into
+// Status.ContainerStatuses so envtest can satisfy
+// podRuntimeImagesMatch — the gate in-place updates wait on before
+// promoting Phase=Ready / RunningRevision. A real kubelet writes these
+// after it pulls + starts each container; without the mirror, every
+// in-place rollout in envtest stalls until the InstanceReadyTimeout
+// (30m default) trips the recreate fallback.
+//
+// Best-effort: a conflict on the next tick retries naturally because
+// the status will still be stale.
+func (s *PodKubeletSimulator) syncContainerStatuses(ctx context.Context, pod *corev1.Pod) {
+	fresh := &corev1.Pod{}
+	if err := s.c.Get(ctx, client.ObjectKeyFromObject(pod), fresh); err != nil {
+		return
+	}
+	desired := make([]corev1.ContainerStatus, 0, len(fresh.Spec.Containers))
+	existingByName := make(map[string]corev1.ContainerStatus, len(fresh.Status.ContainerStatuses))
+	for _, cs := range fresh.Status.ContainerStatuses {
+		existingByName[cs.Name] = cs
+	}
+	changed := len(fresh.Status.ContainerStatuses) != len(fresh.Spec.Containers)
+	for _, c := range fresh.Spec.Containers {
+		cs, ok := existingByName[c.Name]
+		if !ok {
+			cs = corev1.ContainerStatus{Name: c.Name, Ready: true, Started: ptr.To(true)}
+			changed = true
+		}
+		if cs.Image != c.Image {
+			cs.Image = c.Image
+			cs.ImageID = "sim-image://" + c.Image
+			changed = true
+		}
+		desired = append(desired, cs)
+	}
+	if !changed {
+		return
+	}
+	fresh.Status.ContainerStatuses = desired
+	_ = s.c.Status().Update(ctx, fresh)
 }
 
 // nodeFor returns a deterministic node name for podName. The same pod

@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -262,4 +263,83 @@ func testClient(objs ...runtime.Object) client.Client {
 		panic(err)
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+}
+
+func TestReconcile_ConsiderCoordinationGroupEventFiresForMultiOMENativeWithoutCoord(t *testing.T) {
+	isvc := testOMENativeISVC()
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{
+				constants.DeploymentMode: string(constants.OMENative),
+			},
+		},
+	}
+	rec := record.NewFakeRecorder(10)
+	c := testClient()
+	_, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	events := drainEvents(rec)
+	var saw bool
+	for _, e := range events {
+		if contains(e, EventReasonConsiderCoordinationGroup) {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Errorf("expected %s event for multi-OMENative ISVC without coord block; got %v",
+			EventReasonConsiderCoordinationGroup, events)
+	}
+}
+
+func TestReconcile_ConsiderCoordinationGroupEventNotFiredForSingleComponent(t *testing.T) {
+	isvc := testOMENativeISVC() // engine only
+	rec := record.NewFakeRecorder(10)
+	c := testClient()
+	_, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	events := drainEvents(rec)
+	for _, e := range events {
+		if contains(e, EventReasonConsiderCoordinationGroup) {
+			t.Errorf("single-Component ISVC must not get the hint event; got %v", events)
+		}
+	}
+}
+
+func TestReconcile_ConsiderCoordinationGroupEventNotFiredWhenGroupDeclared(t *testing.T) {
+	isvc := testOMENativeISVC()
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{
+				constants.DeploymentMode: string(constants.OMENative),
+			},
+		},
+	}
+	isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{{
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+			Policy:     v1beta1.CoordinationPolicyAtomic,
+		}},
+	}
+	rec := record.NewFakeRecorder(10)
+	c := testClient()
+	_, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Recorder: rec, Now: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	events := drainEvents(rec)
+	for _, e := range events {
+		if contains(e, EventReasonConsiderCoordinationGroup) {
+			t.Errorf("ISVC with coord block must not get the hint event; got %v", events)
+		}
+	}
 }

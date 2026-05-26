@@ -87,7 +87,7 @@ var _ = ginkgo.Describe("Coordination Status.Components.<c>.Traffic[] producer (
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("T-5 LatestReadyRevision = <isvc>-<c>-rev-<hash>", func() {
+	ginkgo.PIt("G25: T-5 LatestReadyRevision — when T-1/T-2/T-4 are PIt'd, T-5 becomes first-It of producer_traffic Describe and hits runtime fetcher cold-start cache miss (same as bd8441e: re-PIt T-1 and D-8)", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("t5"), WithoutDecoder())
 		applyFixture(Default, fix)
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })

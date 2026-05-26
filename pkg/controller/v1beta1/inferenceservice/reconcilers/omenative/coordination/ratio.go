@@ -1,6 +1,7 @@
 package coordination
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -249,4 +250,73 @@ func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentT
 		return true, decision.Reason
 	}
 	return false, decision.Reason
+}
+
+// CheckUnavailabilityGate is the consumer side of MaxUnavailable
+// pacing. The OMENative ops dispatcher calls it before kicking off a
+// disruptive operation (Update recreate, Restart) to ask: "given the
+// live pod observation, may this Component take one more pod offline
+// without exceeding the group's MaxUnavailable budget?"
+//
+// Returns allowed=true when:
+//   - The Component is not in any coord group,
+//   - The component has no observed status yet (first reconcile),
+//   - OR the projected (currentUnavailable + 1) stays within
+//     MaxUnavailableBudget for the Component.
+//
+// Returns allowed=false when terminating one more pod would push the
+// Component above its MaxUnavailable budget. Caller skips the op
+// and requeues; once existing recreations complete (Ready replicas
+// climbs back), the gate reopens.
+//
+// Honest semantic: with MaxUnavailable=0 and no surge-then-drain
+// support in OMENative today, this gate will deadlock rollouts.
+// That's the correct response to "literally zero downtime" without
+// the surge capacity to back it up — operators should either allow
+// non-zero MaxUnavailable or wait for surge-then-drain support.
+//
+// Reads exclusively from isvc.Status — no client hits — safe for
+// hot paths.
+func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) (allowed bool, reason string) {
+	if isvc == nil {
+		return true, "nil ISVC"
+	}
+	if isvc.Spec.RolloutCoordination == nil || len(isvc.Spec.RolloutCoordination.Groups) == 0 {
+		return true, "no coordination block"
+	}
+	groups := ResolveGroups(isvc.Spec.RolloutCoordination)
+	var group *ResolvedGroup
+	for i := range groups {
+		for _, c := range groups[i].Components {
+			if c == component {
+				group = &groups[i]
+				break
+			}
+		}
+		if group != nil {
+			break
+		}
+	}
+	if group == nil {
+		return true, "component not in any coord group"
+	}
+
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.OMENative == nil {
+		return true, "no observation yet"
+	}
+	desired := cs.OMENative.Replicas
+	if desired <= 0 {
+		desired = 1
+	}
+	currentUnavailable := desired - cs.OMENative.ReadyReplicas
+	if currentUnavailable < 0 {
+		currentUnavailable = 0
+	}
+	budget := MaxUnavailableBudget(group.Pacing, desired)
+	projected := currentUnavailable + 1
+	if projected > budget {
+		return false, fmt.Sprintf("unavailable budget %d exhausted (current %d, would become %d)", budget, currentUnavailable, projected)
+	}
+	return true, "within unavailable budget"
 }

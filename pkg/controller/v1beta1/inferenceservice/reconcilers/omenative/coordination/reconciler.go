@@ -105,6 +105,18 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		return result, nil
 	}
 
+	// Informational hint: ISVC has multiple OMENative Components but
+	// no rolloutCoordination block declared. Default behavior rolls
+	// each Component independently, which can break PD pairs or
+	// shared-state workloads. Operator may want a coord group.
+	// K8s event recorder aggregates by (reason, involvedObject) so
+	// repeated firings collapse to one event with a count.
+	if len(componentsTouched) >= 2 && len(groups) == 0 && in.Recorder != nil {
+		in.Recorder.Eventf(in.ISVC, corev1.EventTypeNormal, EventReasonConsiderCoordinationGroup,
+			"InferenceService has %d OMENative Components (%v) but no rolloutCoordination block declared; consider adding a coord group to define rollout behavior across them",
+			len(componentsTouched), componentsTouched)
+	}
+
 	perRevisionPods, err := observePerRevisionPods(ctx, in.Reader, in.ISVC, componentsTouched)
 	if err != nil {
 		return nil, fmt.Errorf("observe per-revision pods: %w", err)
@@ -188,7 +200,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		}
 
 		emitPhaseEvents(in.Recorder, in.ISVC, g, tr)
-		emitSequentialDeferredEvent(in.Recorder, in.ISVC, g, obs)
+		emitSequentialDeferredEvent(in.Recorder, in.ISVC, g, obs, previousActiveComponent(in.ISVC, g.Name))
 
 		result.GroupStatuses = append(result.GroupStatuses, groupStatus)
 	}
@@ -525,6 +537,22 @@ func previousGroupPhase(isvc *v1beta1.InferenceService, groupName string) v1beta
 	return ""
 }
 
+// previousActiveComponent returns the CurrentComponent observed for
+// `groupName` in the most recent reconcile. Used by the Sequential
+// deferred-event emitter to dedupe re-fires while the same active
+// Component continues rolling.
+func previousActiveComponent(isvc *v1beta1.InferenceService, groupName string) v1beta1.ComponentType {
+	if isvc.Status.RolloutCoordination == nil {
+		return ""
+	}
+	for _, gs := range isvc.Status.RolloutCoordination.Groups {
+		if gs.Name == groupName {
+			return gs.CurrentComponent
+		}
+	}
+	return ""
+}
+
 // hasMixedPairing reports whether the PairedMixable group's Components
 // observe distinct revision hashes — the cross-revision pairing case
 // PairedMixable permits but operators want surfaced.
@@ -606,18 +634,23 @@ func emitPhaseEvents(recorder record.EventRecorder, isvc *v1beta1.InferenceServi
 // defer the later rollout, and the operator gets a warning event.
 //
 // Detection (pure, stateless): for each Component at index j > i
-// where i is the active rolling Component's index in Order (or -1
-// when none rolling), if the later Component has RolloutInFlight=true,
-// emit the event. No-op for non-Sequential policies and for groups
-// with no Component rolling.
-func emitSequentialDeferredEvent(recorder record.EventRecorder, isvc *v1beta1.InferenceService, g ResolvedGroup, obs GroupObservation) {
+// where i is the active rolling Component's index in Order, if the
+// later Component has RolloutInFlight=true, emit the event. No-op
+// for non-Sequential policies and for groups with no Component rolling.
+//
+// Dedup: skips the emit when activeComponent matches the previous
+// reconcile's CurrentComponent. The first reconcile of a given
+// activeComponent emits; subsequent reconciles of the same active
+// Component don't re-emit. When the active Component advances (e.g.,
+// decoder finishes → engine becomes active), the dedup clears and
+// the event fires once for the new active Component.
+func emitSequentialDeferredEvent(recorder record.EventRecorder, isvc *v1beta1.InferenceService, g ResolvedGroup, obs GroupObservation, prevActive v1beta1.ComponentType) {
 	if recorder == nil || g.Policy != v1beta1.CoordinationPolicySequential {
 		return
 	}
 	if len(g.Order) == 0 {
 		return
 	}
-	// Find the active Component's index (first non-Idle in Order).
 	activeIdx := -1
 	for i, c := range g.Order {
 		comp, ok := obs.Components[c]
@@ -630,23 +663,25 @@ func emitSequentialDeferredEvent(recorder record.EventRecorder, isvc *v1beta1.In
 		}
 	}
 	if activeIdx < 0 {
-		// No active Component — soak window or fully Idle. Either way,
-		// later-Component bumps are not "deferred" — they're "next in
-		// line", which the SequentialAwaitingNext event already covers.
 		return
 	}
-	// Any later-in-Order Component with RolloutInFlight=true is a
-	// deferred spec bump.
+	activeC := g.Order[activeIdx]
+	if prevActive == activeC {
+		// Already emitted (or attempted) for this activeComponent in a
+		// prior reconcile. K8s event recorder also aggregates by
+		// (involvedObject, reason) but skipping the call entirely is
+		// cleaner.
+		return
+	}
 	for j := activeIdx + 1; j < len(g.Order); j++ {
 		laterC := g.Order[j]
 		laterObs, ok := obs.Components[laterC]
 		if !ok || !laterObs.RolloutInFlight {
 			continue
 		}
-		activeC := g.Order[activeIdx]
 		recorder.Eventf(isvc, corev1.EventTypeWarning, EventReasonSequentialNextSpecBumpDeferred,
-			"sequential group %s: spec bump on later Component %s deferred while active Component %s (target=%s) is still rolling",
-			g.Name, laterC, activeC, laterObs.TargetRevisionHash)
+			"sequential group %s: spec bump on later Component %s deferred while active Component %s is still rolling",
+			g.Name, laterC, activeC)
 	}
 }
 
