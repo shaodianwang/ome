@@ -3,7 +3,9 @@ package omenative
 import (
 	"context"
 	"fmt"
+	"sync"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -14,6 +16,20 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podgroup"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 )
+
+// maybeNoGangSchedulerSeen tracks which (ISVC, Component) pairs have
+// already received the `MaybeNoGangScheduler` Warning event so the
+// controller does not re-emit it on every reconcile. Keyed by
+// "<namespace>/<name>/<component>"; value is unused (presence is the
+// signal). Process-scoped — on controller restart the map is empty and
+// the warning fires once more, which is acceptable since operators
+// re-read events on restart anyway.
+//
+// sync.Map (not a plain map+mutex) because reads dominate writes:
+// every reconcile of an ISVC that has already warned does a lookup-only
+// pass, and a sync.Map's read-mostly fast path avoids contention with
+// concurrent reconciles for different ISVCs.
+var maybeNoGangSchedulerSeen sync.Map
 
 // extraPodGroupIndices returns InstanceStatus indices that the plan no
 // longer covers — i.e., scale-down targets. The PodGroups for these
@@ -123,6 +139,17 @@ func ensurePodGroups(ctx context.Context, p ReconcileParams, plan ComponentPlan)
 		}
 	}
 
+	// Soft heuristic: if at least one multi-pod Instance is in the plan
+	// AND the rendered pod template uses the default scheduler (or no
+	// scheduler at all), the PodGroup we just created will be ignored
+	// by the stock kube-scheduler and the gang contract degrades to
+	// per-pod scheduling. Emit a one-shot Warning so operators notice;
+	// see EventReasonMaybeNoGangScheduler for why this is a heuristic
+	// rather than a hard check. Wired AFTER the EnsurePodGroup loop so
+	// PodGroup-create failures take precedence (event would otherwise
+	// fire alongside a hard error and add noise).
+	maybeWarnNoGangScheduler(p, plan.Component, p.PodSpec, p.WorkerPodSpec)
+
 	// Scale-down PodGroup GC. The pod scale-down logic in ops.Delete
 	// drives pods to gone; this loop ensures the matching PodGroup is
 	// removed too. Cascade-delete from the ISVC handles whole-ISVC
@@ -208,4 +235,80 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 		}
 	}
 	return nil
+}
+
+// maybeWarnNoGangScheduler emits a one-shot Warning event on the
+// parent ISVC when a PodGroup was created for the (ISVC, Component)
+// pair but the pod template's effective `spec.schedulerName` is empty
+// or the upstream default ("default-scheduler"). The stock
+// kube-scheduler does not read scheduler-plugins' PodGroup objects, so
+// in that configuration gang scheduling is silently ineffective: each
+// pod schedules individually, the LLM runtime hangs on the slowest
+// peer pod to land, and the gang contract is broken.
+//
+// "Effective" means: if the leader (`leaderSpec`) sets a
+// schedulerName, take that; otherwise fall back to the worker
+// (`workerSpec`); otherwise treat it as unset. The two templates
+// share the runtime's `spec.schedulerName` plumbing in nearly every
+// configuration, but defending against drift is cheap.
+//
+// We can't reliably detect the case where the operator has installed
+// scheduler-plugins AS the default scheduler (single-scheduler
+// deployment with the Coscheduling plugin enabled) — from inside the
+// controller, the SchedulerName field would still be empty /
+// "default-scheduler". The warning is therefore a heuristic; we accept
+// the false-positive cost in that configuration in exchange for
+// surfacing the (much more common) misconfiguration where the
+// operator forgot to set SchedulerName entirely.
+//
+// Dedup: at most one event per (ISVC, Component) per controller
+// process. Reconciles are frequent and the warning is informational;
+// re-firing every reconcile would drown out the actionable events
+// (InstanceCreated, OperationDeadlineExceeded). On controller
+// restart the dedup map is empty and the warning re-fires once —
+// acceptable since operators typically re-scan recent events after a
+// restart anyway.
+//
+// nil-safe: nil recorder, nil ISVC, nil pod template are all no-ops.
+func maybeWarnNoGangScheduler(p ReconcileParams, component v1beta1.ComponentType, leaderSpec, workerSpec *corev1.PodSpec) {
+	if p.ISVC == nil {
+		return
+	}
+	name := effectiveSchedulerName(leaderSpec, workerSpec)
+	if name != "" && name != corev1.DefaultSchedulerName {
+		// Operator opted in to a non-default scheduler — trust them.
+		return
+	}
+	key := fmt.Sprintf("%s/%s/%s", p.ISVC.Namespace, p.ISVC.Name, component)
+	if _, alreadyWarned := maybeNoGangSchedulerSeen.LoadOrStore(key, struct{}{}); alreadyWarned {
+		return
+	}
+	status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonMaybeNoGangScheduler,
+		"OMENative component=%s created scheduler-plugins PodGroup objects but pod template's spec.schedulerName is %q (default kube-scheduler does not enforce PodGroup gang); set runtime.spec.schedulerName to a gang-aware scheduler (e.g. scheduler-plugins-scheduler) or install scheduler-plugins as a plugin in the default scheduler",
+		component, name)
+}
+
+// effectiveSchedulerName returns the leader's spec.schedulerName when
+// set, otherwise the worker's, otherwise empty. Mirrors the
+// "leader-wins" precedence the runtime templating uses elsewhere; a
+// nil template counts as "unset" for that side.
+func effectiveSchedulerName(leaderSpec, workerSpec *corev1.PodSpec) string {
+	if leaderSpec != nil && leaderSpec.SchedulerName != "" {
+		return leaderSpec.SchedulerName
+	}
+	if workerSpec != nil && workerSpec.SchedulerName != "" {
+		return workerSpec.SchedulerName
+	}
+	return ""
+}
+
+// resetMaybeNoGangSchedulerSeen clears the per-process dedup map.
+// Test-only helper exported lowercase so the table-driven dedup test
+// can reset between cases without leaking state across runs. Not used
+// by production code.
+func resetMaybeNoGangSchedulerSeen() {
+	maybeNoGangSchedulerSeen.Range(func(k, _ any) bool {
+		maybeNoGangSchedulerSeen.Delete(k)
+		return true
+	})
 }

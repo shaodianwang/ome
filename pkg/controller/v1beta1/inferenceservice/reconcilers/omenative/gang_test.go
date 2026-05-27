@@ -2,12 +2,15 @@ package omenative
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
@@ -295,6 +298,285 @@ func TestExtraPodGroupIndices(t *testing.T) {
 	want := []int32{1}
 	if len(got) != 1 || got[0] != 1 {
 		t.Errorf("extraPodGroupIndices: got %v want %v", got, want)
+	}
+}
+
+// ---------------------------------------------------------------------
+// maybeWarnNoGangScheduler — heuristic warning when the rendered pod
+// template's schedulerName is empty or "default-scheduler" while the
+// controller is creating PodGroup objects (which a stock kube-scheduler
+// will silently ignore).
+// ---------------------------------------------------------------------
+
+// TestEnsurePodGroups_MaybeNoGangSchedulerWarning_Matrix exercises the
+// four scenarios in the spec: empty/default schedulerName + multi-pod
+// fires; custom schedulerName + multi-pod is silent; single-pod is
+// silent regardless of schedulerName.
+func TestEnsurePodGroups_MaybeNoGangSchedulerWarning_Matrix(t *testing.T) {
+	tests := []struct {
+		name          string
+		schedulerName string
+		multiPod      bool
+		workerSize    int
+		wantFired     bool
+	}{
+		{
+			name:          "empty schedulerName multi-pod fires",
+			schedulerName: "",
+			multiPod:      true,
+			workerSize:    2,
+			wantFired:     true,
+		},
+		{
+			name:          "default-scheduler multi-pod fires",
+			schedulerName: corev1.DefaultSchedulerName,
+			multiPod:      true,
+			workerSize:    2,
+			wantFired:     true,
+		},
+		{
+			name:          "custom schedulerName multi-pod silent",
+			schedulerName: "scheduler-plugins-scheduler",
+			multiPod:      true,
+			workerSize:    2,
+			wantFired:     false,
+		},
+		{
+			name:          "single-pod default-scheduler silent",
+			schedulerName: corev1.DefaultSchedulerName,
+			multiPod:      false,
+			workerSize:    0,
+			wantFired:     false,
+		},
+		{
+			name:          "single-pod empty silent",
+			schedulerName: "",
+			multiPod:      false,
+			workerSize:    0,
+			wantFired:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each subtest gets a fresh dedup map so prior subtests
+			// can't suppress the next one (different ISVCs would also
+			// work, but resetting is simpler and tests the helper).
+			resetMaybeNoGangSchedulerSeen()
+
+			isvc := minimalISVC("llama-"+strings.ReplaceAll(tc.name, " ", "-"), "prod", 1)
+			c := newFakeClientWithDiscovery(t, isvc)
+			rec := record.NewFakeRecorder(8)
+			p := minimalParams(t, isvc, c)
+			p.Recorder = rec
+			p.MultiPod = tc.multiPod
+			p.WorkerSize = tc.workerSize
+			p.GangSchedulingAvailable = true
+			p.PodSpec = &corev1.PodSpec{
+				Containers:    []corev1.Container{{Name: "main", Image: "test:v1"}},
+				SchedulerName: tc.schedulerName,
+			}
+			if tc.multiPod {
+				p.WorkerPodSpec = &corev1.PodSpec{
+					Containers:    []corev1.Container{{Name: "main", Image: "test:v1"}},
+					SchedulerName: tc.schedulerName,
+				}
+			}
+			plan, _ := core.BuildPlan(p)
+
+			if err := ensurePodGroups(context.Background(), p, plan); err != nil {
+				t.Fatalf("ensurePodGroups: %v", err)
+			}
+
+			events := drainGangSchedulerEvents(rec)
+			fired := false
+			for _, e := range events {
+				if strings.Contains(e, status.EventReasonMaybeNoGangScheduler) {
+					fired = true
+					break
+				}
+			}
+			if fired != tc.wantFired {
+				t.Errorf("MaybeNoGangScheduler event fired=%v want=%v (events=%v)", fired, tc.wantFired, events)
+			}
+			if fired {
+				// Sanity: the warning must mention the suggested
+				// scheduler so the operator has a copy-paste fix.
+				var warning string
+				for _, e := range events {
+					if strings.Contains(e, status.EventReasonMaybeNoGangScheduler) {
+						warning = e
+						break
+					}
+				}
+				if !strings.Contains(warning, "scheduler-plugins-scheduler") {
+					t.Errorf("warning should suggest scheduler-plugins-scheduler, got %q", warning)
+				}
+				if !strings.HasPrefix(warning, "Warning ") {
+					t.Errorf("warning event should be Warning-type, got %q", warning)
+				}
+			}
+		})
+	}
+}
+
+// TestEnsurePodGroups_MaybeNoGangScheduler_DedupPerProcess verifies
+// that two reconciles for the same (ISVC, Component) only fire ONE
+// MaybeNoGangScheduler event — the dedup map's job.
+func TestEnsurePodGroups_MaybeNoGangScheduler_DedupPerProcess(t *testing.T) {
+	resetMaybeNoGangSchedulerSeen()
+
+	isvc := minimalISVC("dedup-llama", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	rec := record.NewFakeRecorder(16)
+	p := minimalParams(t, isvc, c)
+	p.Recorder = rec
+	p.MultiPod = true
+	p.WorkerSize = 2
+	p.GangSchedulingAvailable = true
+	// Empty schedulerName — should warn.
+	p.PodSpec = &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "test:v1"}},
+	}
+	p.WorkerPodSpec = &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "test:v1"}},
+	}
+	plan, _ := core.BuildPlan(p)
+
+	// Two reconciles back-to-back.
+	for i := 0; i < 2; i++ {
+		if err := ensurePodGroups(context.Background(), p, plan); err != nil {
+			t.Fatalf("ensurePodGroups pass %d: %v", i, err)
+		}
+	}
+
+	events := drainGangSchedulerEvents(rec)
+	count := 0
+	for _, e := range events {
+		if strings.Contains(e, status.EventReasonMaybeNoGangScheduler) {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("MaybeNoGangScheduler event count: got %d want 1 (events=%v)", count, events)
+	}
+}
+
+// TestEnsurePodGroups_MaybeNoGangScheduler_DedupSeparateComponents
+// verifies the dedup key is (ISVC, Component) — same ISVC but a
+// different Component must still get a warning. Catches the
+// regression where the key was accidentally collapsed to just the
+// ISVC name.
+func TestEnsurePodGroups_MaybeNoGangScheduler_DedupSeparateComponents(t *testing.T) {
+	resetMaybeNoGangSchedulerSeen()
+
+	isvc := minimalISVC("multi-comp", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	rec := record.NewFakeRecorder(16)
+	emptySpec := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}}
+
+	// Engine reconcile.
+	pEng := minimalParams(t, isvc, c)
+	pEng.Recorder = rec
+	pEng.MultiPod = true
+	pEng.WorkerSize = 2
+	pEng.GangSchedulingAvailable = true
+	pEng.PodSpec = emptySpec
+	pEng.WorkerPodSpec = emptySpec
+	planEng, _ := core.BuildPlan(pEng)
+	if err := ensurePodGroups(context.Background(), pEng, planEng); err != nil {
+		t.Fatalf("engine ensurePodGroups: %v", err)
+	}
+
+	// Decoder reconcile — directly invoke the helper with the Decoder
+	// component (no Decoder spec on the ISVC, so we test the helper
+	// directly rather than rebuilding a Decoder plan).
+	maybeWarnNoGangScheduler(pEng, v1beta1.DecoderComponent, emptySpec, emptySpec)
+
+	events := drainGangSchedulerEvents(rec)
+	count := 0
+	for _, e := range events {
+		if strings.Contains(e, status.EventReasonMaybeNoGangScheduler) {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Errorf("MaybeNoGangScheduler event count (engine+decoder): got %d want 2 (events=%v)", count, events)
+	}
+}
+
+// TestMaybeWarnNoGangScheduler_NilSafety guards the helper against
+// the test-fixture pattern where Recorder / ISVC / PodSpec may be nil.
+func TestMaybeWarnNoGangScheduler_NilSafety(t *testing.T) {
+	resetMaybeNoGangSchedulerSeen()
+
+	// nil ISVC: no-op (early return).
+	rec := record.NewFakeRecorder(2)
+	p := ReconcileParams{Recorder: rec}
+	maybeWarnNoGangScheduler(p, v1beta1.EngineComponent, nil, nil)
+	if len(rec.Events) != 0 {
+		t.Errorf("nil ISVC should be no-op, got %d events", len(rec.Events))
+	}
+
+	// nil PodSpec + nil WorkerPodSpec + non-nil ISVC: schedulerName is
+	// "" so the warning DOES fire (caller's responsibility to gate at
+	// ensurePodGroups, which already does — single-pod / no-podgroup
+	// paths never reach this helper). Verifies the helper itself
+	// handles nil specs gracefully.
+	rec2 := record.NewFakeRecorder(2)
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "ns"}}
+	p2 := ReconcileParams{Recorder: rec2, ISVC: isvc}
+	maybeWarnNoGangScheduler(p2, v1beta1.EngineComponent, nil, nil)
+	if len(rec2.Events) != 1 {
+		t.Errorf("nil specs + valid ISVC should fire once, got %d events", len(rec2.Events))
+	}
+
+	// nil Recorder + valid rest: helper must not panic. Dedup map is
+	// still updated though, so reset to keep test isolation clean.
+	resetMaybeNoGangSchedulerSeen()
+	p3 := ReconcileParams{ISVC: isvc}
+	maybeWarnNoGangScheduler(p3, v1beta1.EngineComponent, nil, nil) // no panic
+}
+
+// TestEffectiveSchedulerName_LeaderWinsThenWorker covers the
+// precedence: leader's schedulerName takes over worker's; both empty
+// → empty. Pure-helper test.
+func TestEffectiveSchedulerName_LeaderWinsThenWorker(t *testing.T) {
+	tests := []struct {
+		name   string
+		leader *corev1.PodSpec
+		worker *corev1.PodSpec
+		want   string
+	}{
+		{"both nil", nil, nil, ""},
+		{"both empty", &corev1.PodSpec{}, &corev1.PodSpec{}, ""},
+		{"leader set", &corev1.PodSpec{SchedulerName: "custom"}, &corev1.PodSpec{}, "custom"},
+		{"only worker set", &corev1.PodSpec{}, &corev1.PodSpec{SchedulerName: "worker-sched"}, "worker-sched"},
+		{"leader wins", &corev1.PodSpec{SchedulerName: "leader"}, &corev1.PodSpec{SchedulerName: "worker"}, "leader"},
+		{"nil leader, worker set", nil, &corev1.PodSpec{SchedulerName: "worker"}, "worker"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := effectiveSchedulerName(tc.leader, tc.worker); got != tc.want {
+				t.Errorf("effectiveSchedulerName(%+v, %+v) = %q want %q", tc.leader, tc.worker, got, tc.want)
+			}
+		})
+	}
+}
+
+// drainGangSchedulerEvents returns all events currently buffered on
+// rec. Equivalent to coordination/sequential_event_test.go's
+// drainEvents — duplicated here to keep this test file's import
+// surface narrow.
+func drainGangSchedulerEvents(rec *record.FakeRecorder) []string {
+	var out []string
+	for {
+		select {
+		case e := <-rec.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
 	}
 }
 

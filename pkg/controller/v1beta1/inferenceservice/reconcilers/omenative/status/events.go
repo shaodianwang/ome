@@ -64,6 +64,23 @@ const (
 
 	// Revision-collision (rare; salted retry succeeded).
 	EventReasonRevisionCollision = "RevisionCollision"
+
+	// EventReasonMaybeNoGangScheduler is a soft Warning fired the first
+	// time a multi-pod Instance's PodGroup is created under a pod
+	// template whose `spec.schedulerName` is unset OR equals the
+	// upstream default ("default-scheduler"). The PodGroup itself was
+	// created successfully — but a stock kube-scheduler does NOT read
+	// `scheduling.x-k8s.io/v1alpha1` PodGroup objects, so the gang
+	// contract degrades to per-pod scheduling silently. Operators must
+	// either install scheduler-plugins as a secondary scheduler and set
+	// `runtime.spec.schedulerName=scheduler-plugins-scheduler`, OR
+	// install it as a default-scheduler plugin (in which case the
+	// warning is a false positive — the controller cannot detect that
+	// arrangement from inside the cluster, so we err on the side of
+	// surfacing the heuristic). De-duplicated per (ISVC, Component)
+	// per controller process so reconciles do not spam the event log;
+	// see gang.go `maybeWarnNoGangScheduler` for the dedup map.
+	EventReasonMaybeNoGangScheduler = "MaybeNoGangScheduler"
 )
 
 // recordEventf emits a K8s Event against the parent InferenceService.

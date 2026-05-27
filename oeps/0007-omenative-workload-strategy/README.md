@@ -1290,6 +1290,49 @@ Instance failed and emits an event.
 
 Volcano and Yunikorn are explicit deferrals.
 
+**Operator-side requirement: `schedulerName`**. Creating PodGroup
+objects is not enough on its own — the pods themselves must be
+scheduled by a scheduler that reads
+`scheduling.x-k8s.io/v1alpha1`. The operator MUST set
+`runtime.spec.schedulerName` (on the ServingRuntime /
+ClusterServingRuntime, where it is propagated to every Component's
+pod template) or `podSpec.schedulerName` (on the InferenceService,
+overriding per-Component) to a gang-aware scheduler name. Supported
+values OME documents:
+
+- `scheduler-plugins-scheduler` — the standard name for the
+  scheduler-plugins controller deployed as a *secondary* scheduler
+  alongside `default-scheduler` (this is the recommended path; see
+  the [scheduler-plugins install
+  guide](https://github.com/kubernetes-sigs/scheduler-plugins/tree/master/manifests/install)).
+- A custom name when scheduler-plugins is deployed under a non-stock
+  binary name in the cluster.
+- A Volcano scheduler name (deferred — listed for completeness; not
+  enforced in v1).
+
+**Controller-side soft warning: `MaybeNoGangScheduler`**. When the
+OMENative reconciler creates a PodGroup for a multi-pod Instance and
+the rendered pod template's effective `spec.schedulerName` is empty
+or `default-scheduler`, the controller emits a one-shot Warning event
+(`reason=MaybeNoGangScheduler`) on the parent InferenceService. The
+event is heuristic: an operator who has installed scheduler-plugins
+as an *in-tree plugin* on the default scheduler (single-scheduler
+deployment) will see the warning even though their setup is correct
+— from inside the controller we cannot distinguish "stock
+kube-scheduler" from "kube-scheduler with Coscheduling plugin
+enabled". We err on the side of surfacing the heuristic because the
+much more common misconfiguration is the operator forgetting to set
+`schedulerName` entirely. The event is de-duplicated per
+`(InferenceService, Component)` per controller process so reconciles
+do not spam the event log; on controller restart the warning fires
+once more (acceptable since operators re-scan events after a
+restart).
+
+The controller deliberately does NOT fail the reconcile or block
+pod creation on the schedulerName check: gang scheduling is a soft
+contract per the discussion above, and a hard check would create
+false confidence in the in-tree-plugin case.
+
 ### Webhook Interaction
 
 OME's pod admission webhook at `pkg/webhook/admission/pod/` runs
