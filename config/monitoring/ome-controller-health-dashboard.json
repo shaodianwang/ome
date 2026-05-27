@@ -3,7 +3,10 @@
     "list": [
       {
         "builtIn": 1,
-        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -12,7 +15,7 @@
       }
     ]
   },
-  "description": "OME controller-runtime health: reconcile rate, errors, latency, workqueue, API server, leader election. Uses only controller-runtime built-in metrics — no kube-state-metrics CR config required.",
+  "description": "OME controller-runtime health: reconcile rate, errors, latency, workqueue, API server, leader election. Uses only controller-runtime built-in metrics \u2014 no kube-state-metrics CR config required. (rev: added $Cluster variable for multi-cluster Grafana Cloud)",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -20,7 +23,9 @@
   "links": [
     {
       "title": "OME Overview (full, requires KSM CR config)",
-      "tags": ["ome"],
+      "tags": [
+        "ome"
+      ],
       "type": "dashboards",
       "asDropdown": true,
       "includeVars": true,
@@ -33,7 +38,12 @@
     {
       "type": "row",
       "title": "Controller Health (controller-runtime)",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "collapsed": false,
       "id": 100,
       "panels": []
@@ -41,12 +51,20 @@
     {
       "type": "timeseries",
       "title": "Reconciles / sec by controller",
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
       "id": 1,
       "targets": [
         {
-          "expr": "sum by (controller, result) (rate(controller_runtime_reconcile_total{namespace=~\"$namespace\"}[$__rate_interval]))",
+          "expr": "sum by (controller, result) (rate(controller_runtime_reconcile_total{cluster=~\"$Cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
           "legendFormat": "{{controller}} / {{result}}",
           "refId": "A"
         }
@@ -54,20 +72,46 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
-          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 10, "showPoints": "never"}
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Reconcile errors / sec by controller",
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
       "id": 2,
       "targets": [
         {
-          "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{namespace=~\"$namespace\"}[$__rate_interval]))",
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{cluster=~\"$Cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
           "legendFormat": "{{controller}}",
           "refId": "A"
         }
@@ -75,21 +119,49 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
-          "color": {"mode": "palette-classic"},
-          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 10, "showPoints": "never"}
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Reconcile p95 latency by controller",
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
       "id": 3,
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{cluster=~\"$Cluster\", namespace=~\"$namespace\"}[$__rate_interval])))",
           "legendFormat": "{{controller}}",
           "refId": "A"
         }
@@ -97,20 +169,45 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 5, "showPoints": "never"}
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 5,
+            "showPoints": "never"
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Workqueue depth by controller",
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
       "id": 4,
       "targets": [
         {
-          "expr": "sum by (name) (workqueue_depth{namespace=~\"$namespace\"})",
+          "expr": "sum by (name) (workqueue_depth{cluster=~\"$Cluster\", namespace=~\"$namespace\"})",
           "legendFormat": "{{name}}",
           "refId": "A"
         }
@@ -118,15 +215,37 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 10, "showPoints": "never"}
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "type": "row",
       "title": "API Server + Runtime",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 17},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
       "collapsed": false,
       "id": 200,
       "panels": []
@@ -134,12 +253,20 @@
     {
       "type": "timeseries",
       "title": "REST client requests / sec by code",
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 18},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
       "id": 5,
       "targets": [
         {
-          "expr": "sum by (code) (rate(rest_client_requests_total{namespace=~\"$namespace\"}[$__rate_interval]))",
+          "expr": "sum by (code) (rate(rest_client_requests_total{cluster=~\"$Cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
           "legendFormat": "{{code}}",
           "refId": "A"
         }
@@ -147,48 +274,118 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
-          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 10, "showPoints": "never", "stacking": {"mode": "normal"}}
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
         }
       },
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean"]}, "tooltip": {"mode": "multi", "sort": "desc"}}
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Leader election (1 = leader)",
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 18},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 18
+      },
       "id": 6,
       "targets": [
         {
-          "expr": "max(leader_election_master_status{namespace=~\"$namespace\"})",
+          "expr": "max(leader_election_master_status{cluster=~\"$Cluster\", namespace=~\"$namespace\"})",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "thresholds"},
-          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]},
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
           "unit": "short",
           "mappings": [
-            {"type": "value", "options": {"0": {"text": "no leader"}}},
-            {"type": "value", "options": {"1": {"text": "leader OK"}}}
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "no leader"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "leader OK"
+                }
+              }
+            }
           ]
         }
       },
       "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "colorMode": "background"
       }
     },
     {
       "type": "timeseries",
       "title": "Go goroutines (controller pod)",
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 18},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 18
+      },
       "id": 7,
       "targets": [
         {
-          "expr": "go_goroutines{namespace=~\"$namespace\", pod=~\"ome-controller-manager.*\"}",
+          "expr": "go_goroutines{cluster=~\"$Cluster\", namespace=~\"$namespace\", pod=~\"ome-controller-manager.*\"}",
           "legendFormat": "{{pod}}",
           "refId": "A"
         }
@@ -196,19 +393,38 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 5, "showPoints": "never"}
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 5,
+            "showPoints": "never"
+          }
         }
       },
-      "options": {"legend": {"displayMode": "hidden"}, "tooltip": {"mode": "multi"}}
+      "options": {
+        "legend": {
+          "displayMode": "hidden"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["ome", "kubernetes-operator", "controller-runtime"],
+  "tags": [
+    "ome",
+    "kubernetes-operator",
+    "controller-runtime"
+  ],
   "templating": {
     "list": [
       {
-        "current": {"text": "Prometheus", "value": "Prometheus"},
+        "current": {
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Data source",
@@ -223,8 +439,37 @@
         "type": "datasource"
       },
       {
-        "current": {"text": "All", "value": "$__all"},
-        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(kube_node_info, cluster)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Cluster",
+        "multi": true,
+        "name": "Cluster",
+        "options": [],
+        "query": "label_values(kube_node_info, cluster)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "ome",
+          "value": "ome"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
         "definition": "label_values(controller_runtime_reconcile_total, namespace)",
         "hide": 0,
         "includeAll": true,
@@ -241,11 +486,14 @@
       }
     ]
   },
-  "time": {"from": "now-1h", "to": "now"},
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "OME Controller Health",
   "uid": "ome-controller-health",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
