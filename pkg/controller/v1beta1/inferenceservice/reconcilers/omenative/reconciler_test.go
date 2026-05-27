@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -71,6 +72,86 @@ func TestReconcileComponent_DispatchesToCreate(t *testing.T) {
 	}
 	if result.RequeueAfter == 0 {
 		t.Errorf("expected Requeue (Create is multi-pass), got %+v", result)
+	}
+}
+
+// TestReconcileComponent_SequentialGateDenialReturnsRequeue pins the
+// post-PR-#240 follow-up contract: when CheckSequentialGate denies the
+// per-Instance Update (because another Component is the active
+// Sequential element, or the soak window between Components is still
+// open), the OMENative reconciler MUST surface a non-zero RequeueAfter
+// so the parent component reconciler can re-fire the loop in a few
+// seconds — without it, the rollout sits idle until an unrelated
+// watch event happens to wake controller-runtime, which on the dev
+// cluster has been observed to take 60-90s post-decoder convergence.
+//
+// Set-up mirrors the moment-of-bump shape PR #240 already exercises in
+// coordination/sequential_gate_test.go: isvc.Generation advanced one
+// step (operator just bumped both Components), both Components carry
+// stale ObservedGeneration. activeSequentialComponent picks decoder
+// (first in Order), engine is denied, and the dispatcher returns
+// ratioGateRequeueInterval.
+func TestReconcileComponent_SequentialGateDenialReturnsRequeue(t *testing.T) {
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("v-seq", "prod", 1)
+	// Add the decoder spec so collectOMENativeComponents sees both.
+	// minimalISVC only sets Engine; Sequential gating needs Decoder too.
+	mr := 1
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+			MinReplicas: &mr,
+		},
+	}
+	// Sequential group [decoder, engine] with a 30s soak — the soak
+	// window doesn't fire here because the gate routes off the active
+	// selector (decoder is in flight, engine is non-active).
+	soak := metav1.Duration{Duration: 30 * time.Second}
+	isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{{
+			Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+			Policy:     v1beta1.CoordinationPolicySequential,
+			Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+			Soak:       &soak,
+		}},
+	}
+	// Operator just bumped both Components — isvc.Generation is N+1 but
+	// neither Component's status has caught up yet.
+	isvc.Generation = 2
+	if isvc.Status.Components == nil {
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+	}
+	engStatus := isvc.Status.Components[v1beta1.EngineComponent]
+	engStatus.OMENative.ObservedGeneration = 1 // stale → generationSkew=true
+	// RunningRevision on the existing Instance is the OLD canonical
+	// revision name. detectUpdateTrigger uses it to decide whether the
+	// pod needs to be re-rolled; setting it to a known stale name forces
+	// needs=true.
+	engStatus.OMENative.InstanceStatuses[0].RunningRevision = "v-seq-engine-oldhash"
+	isvc.Status.Components[v1beta1.EngineComponent] = engStatus
+	isvc.Status.Components[v1beta1.DecoderComponent] = v1beta1.ComponentStatusSpec{
+		OMENative: &v1beta1.OMENativeComponentStatus{
+			ObservedGeneration: 1, // stale → generationSkew=true → decoder.RolloutInFlight=true
+			Replicas:           1,
+		},
+	}
+
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	// Brand-new target spec (different image) — the per-Instance
+	// dispatcher sees needs=true and consults CheckSequentialGate.
+	p.PodSpec = targetSpecImage("v-seq-engine:NEW")
+
+	result, err := ReconcileComponent(context.Background(), p)
+	if err != nil {
+		t.Fatalf("ReconcileComponent: %v", err)
+	}
+	// Engine is NOT the active Sequential Component (decoder is, by
+	// generation-skew signal). The dispatcher must have hit the gate
+	// denial branch and returned ratioGateRequeueInterval — which the
+	// parent components/{engine,decoder,router}.go reconciler now
+	// preserves end-to-end.
+	if result.RequeueAfter == 0 && !result.Requeue {
+		t.Errorf("expected non-zero requeue from Sequential gate denial, got %+v", result)
 	}
 }
 

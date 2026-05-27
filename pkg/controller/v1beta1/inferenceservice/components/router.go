@@ -123,9 +123,16 @@ func (r *Router) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	// Set the service account name in the pod spec
 	podSpec.ServiceAccountName = r.rbacReconciler.GetServiceAccountName()
 
-	// Reconcile deployment based on deployment mode
-	if result, err := r.reconcileDeployment(ctx, isvc, objectMeta, podSpec); err != nil {
-		return result, err
+	// Reconcile deployment based on deployment mode. The deployment
+	// reconciler's RequeueAfter MUST be preserved through the rest of
+	// this function — OMENative's per-Instance dispatcher uses it to
+	// re-run after a Sequential / Ratio gate denial OR to poll an
+	// in-flight Update / Create. Discarding it strands the rollout
+	// until an unrelated watch event happens to fire another reconcile
+	// (the post-decoder Sequential stall, see PR #240 follow-up).
+	deploymentResult, err := r.reconcileDeployment(ctx, isvc, objectMeta, podSpec)
+	if err != nil {
+		return deploymentResult, err
 	}
 
 	// Update router status
@@ -133,7 +140,7 @@ func (r *Router) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	return deploymentResult, nil
 }
 
 // reconcileDeployment manages the deployment logic for different deployment modes

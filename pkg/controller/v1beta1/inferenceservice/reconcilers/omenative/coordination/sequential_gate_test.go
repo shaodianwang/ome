@@ -346,6 +346,82 @@ func TestCheckSequentialGate_SoakWithPriorAvailableFalseBypasses(t *testing.T) {
 	}
 }
 
+func TestCheckSequentialGate_PostDecoderConvergence_AllowsEngine(t *testing.T) {
+	// End-to-end post-convergence reproduction of the dev-cluster stall
+	// (image bf0641b9, /tmp/policy-validate-v2.sh seq):
+	//
+	//   - decoder rolled first and completed (revisions converged, the
+	//     OMENative status reconciler promoted CurrentRevision and stamped
+	//     Available=True). decoder is the previously-active Sequential
+	//     Component and has been past its Available transition for well
+	//     longer than the configured soak.
+	//   - engine's per-reconcile AggregateAndWriteStatus deferred write
+	//     advanced UpdateRevision to NEW, AND ObservedGeneration to
+	//     isvc.Generation. CurrentRevision is still OLD because no engine
+	//     pod has flipped onto the new revision yet (the gate has been
+	//     denying it the whole time decoder was rolling).
+	//
+	// The gate's revision-skew signal pins engine as RolloutInFlight=true
+	// (UpdateRev != CurrentRev). decoder shows RolloutInFlight=false
+	// (revisions converged + ObservedGeneration caught up). active selector
+	// returns engine; soak window has elapsed; the gate MUST allow engine
+	// to fire its first per-Instance Update. If it doesn't, the dispatcher
+	// returns RequeueAfter on the gate denial and the rollout stalls
+	// indefinitely until an unrelated watch event happens to wake the
+	// reconciler.
+	const soak = 10 * time.Second
+	isvc := mkSequentialFixture("seq-isvc", soak)
+	isvc.Generation = 2 // operator bumped both Components one generation ago
+
+	// Decoder: fully converged. Revisions match, ObservedGeneration
+	// caught up, Available=True well past the soak window.
+	setComponentRevisions(isvc, v1beta1.DecoderComponent, "NEW", "NEW")
+	setComponentObservedGeneration(isvc, v1beta1.DecoderComponent, 2)
+	setComponentAvailableAt(isvc, v1beta1.DecoderComponent, time.Now().Add(-(soak + 5*time.Second)))
+
+	// Engine: CurrentRevision still OLD (no pod yet on the new
+	// revision), UpdateRevision already advanced to NEW by the deferred
+	// status write, ObservedGeneration caught up.
+	setComponentRevisions(isvc, v1beta1.EngineComponent, "OLD", "NEW")
+	setComponentObservedGeneration(isvc, v1beta1.EngineComponent, 2)
+
+	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("post-decoder-convergence + soak elapsed: engine MUST be allowed, got denied: %s", reason)
+	}
+	if !strings.Contains(reason, "Sequential active Component") {
+		t.Errorf("post-decoder allowance reason should signal active-Component path: %s", reason)
+	}
+}
+
+func TestCheckSequentialGate_SoakWindowRespected(t *testing.T) {
+	// Companion to PostDecoderConvergence_AllowsEngine: SAME ISVC shape
+	// (decoder converged, engine pending), but the previous Component's
+	// Available transition is WITHIN the soak window. The gate must deny
+	// engine until soak elapses; the dispatcher's RequeueAfter cycles the
+	// reconcile every few seconds and the gate flips to allow as soon as
+	// time.Since(decoderAvailable) >= group.Soak.
+	const soak = 30 * time.Second
+	isvc := mkSequentialFixture("seq-isvc", soak)
+	isvc.Generation = 2
+
+	setComponentRevisions(isvc, v1beta1.DecoderComponent, "NEW", "NEW")
+	setComponentObservedGeneration(isvc, v1beta1.DecoderComponent, 2)
+	// Decoder just became Available 2s ago — well inside the 30s soak.
+	setComponentAvailableAt(isvc, v1beta1.DecoderComponent, time.Now().Add(-2*time.Second))
+
+	setComponentRevisions(isvc, v1beta1.EngineComponent, "OLD", "NEW")
+	setComponentObservedGeneration(isvc, v1beta1.EngineComponent, 2)
+
+	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	if allowed {
+		t.Errorf("within-soak-window: engine MUST be denied, got allowed: %s", reason)
+	}
+	if !strings.Contains(reason, "Sequential.Soak") {
+		t.Errorf("within-soak denial reason should mention 'Sequential.Soak': %s", reason)
+	}
+}
+
 func TestCheckSequentialGate_MomentOfBump(t *testing.T) {
 	// Reproduces the bug observed on the dev cluster (image fb0bb7e2,
 	// gap=0s between decoder/engine creationTimestamps when both spec

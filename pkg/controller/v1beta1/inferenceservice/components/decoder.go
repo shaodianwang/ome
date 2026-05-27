@@ -125,9 +125,16 @@ func (d *Decoder) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService)
 	// Get worker size
 	size := d.getWorkerSize()
 
-	// Reconcile deployment based on deployment mode
-	if result, err := d.reconcileDeployment(ctx, isvc, objectMeta, podSpec, size, workerPodSpec); err != nil {
-		return result, err
+	// Reconcile deployment based on deployment mode. The deployment
+	// reconciler's RequeueAfter MUST be preserved through the rest of
+	// this function — OMENative's per-Instance dispatcher uses it to
+	// re-run after a Sequential / Ratio gate denial OR to poll an
+	// in-flight Update / Create. Discarding it strands the rollout
+	// until an unrelated watch event happens to fire another reconcile
+	// (the post-decoder Sequential stall, see PR #240 follow-up).
+	deploymentResult, err := d.reconcileDeployment(ctx, isvc, objectMeta, podSpec, size, workerPodSpec)
+	if err != nil {
+		return deploymentResult, err
 	}
 
 	// Update decoder status
@@ -135,7 +142,7 @@ func (d *Decoder) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService)
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	return deploymentResult, nil
 }
 
 // getWorkerSize returns the worker size for multi-node deployments
