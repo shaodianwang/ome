@@ -4,8 +4,17 @@ import (
 	"fmt"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
+
+// conditionAvailable is the Component-level condition type stamped by
+// the OMENative status reconciler when AvailableReplicas==Replicas.
+// Duplicated as a local const to avoid importing the OMENative status
+// package (which would pull the entire pod/conditions write path into
+// the coordination layer's import graph).
+const conditionAvailable = "Available"
 
 // CheckSequentialGate is the consumer side of Sequential coordination.
 // The OMENative ops dispatcher calls it before kicking off a fresh
@@ -100,13 +109,25 @@ func CheckSequentialGate(isvc *v1beta1.InferenceService, component v1beta1.Compo
 	// composite phase at Sequential.Awaiting during the soak; the gate
 	// mirrors that on the dispatcher side so the per-Instance Update
 	// doesn't fire while the operator's soak is still elapsing.
-	if group.Soak > 0 && previousCompletedComponentForGate(group.Order, observations, component) != "" {
-		entered := previousPhaseEnteredAtFor(isvc, group.Name)
-		if !entered.IsZero() {
-			elapsed := time.Since(entered)
-			if elapsed < group.Soak {
-				remaining := group.Soak - elapsed
-				return false, fmt.Sprintf("Sequential.Soak: %s remaining", remaining)
+	//
+	// Timestamp source: read the previous Component's Available
+	// condition's LastTransitionTime. The Available condition flips to
+	// True the moment AvailableReplicas==Replicas — exactly when the
+	// previous Component finished its rollout. The group's
+	// LastTransitionTime is the wrong source: it only updates when the
+	// base Phase changes, and Sequential's soak window holds the group
+	// at Phase=Idle (CompositePhase=Sequential.AwaitingNextComponent),
+	// so LastTransitionTime points back at the pre-rollout Idle and
+	// time.Since(entered) is always past soakDuration.
+	if group.Soak > 0 {
+		if prev := previousCompletedComponentForGate(group.Order, observations, component); prev != "" {
+			completed := previousComponentReadyAt(isvc, prev)
+			if !completed.IsZero() {
+				elapsed := time.Since(completed)
+				if elapsed < group.Soak {
+					remaining := group.Soak - elapsed
+					return false, fmt.Sprintf("Sequential.Soak: %s remaining", remaining)
+				}
 			}
 		}
 	}
@@ -165,19 +186,42 @@ func previousCompletedComponentForGate(order []v1beta1.ComponentType, observatio
 	return ""
 }
 
-// previousPhaseEnteredAtFor reads the LastTransitionTime of the named
-// group from the ISVC's status — the soak gate consumes this to time
-// the "how long since the previous Component completed?" question.
-// Returns zero time when no prior group status exists; callers treat
-// that as "no clock running, don't gate."
-func previousPhaseEnteredAtFor(isvc *v1beta1.InferenceService, groupName string) time.Time {
-	if isvc.Status.RolloutCoordination == nil {
+// previousComponentReadyAt returns the moment the named Component
+// became Available (every Instance Ready) — read from the Component's
+// `Available` condition's LastTransitionTime. This is the wall-clock
+// anchor the Sequential soak gate compares `time.Since(...)` against.
+//
+// Returns the zero time when:
+//   - The Component has no OMENative status block yet (first reconcile
+//     before the status writer has run).
+//   - The Available condition has not been written yet, OR is currently
+//     False (the previous Component never finished a rollout, so there
+//     is no completion timestamp to honor — the gate's caller treats
+//     this as "no soak clock, allow").
+//
+// Why not `RolloutCoordinationGroupStatus.LastTransitionTime`?
+// `LastTransitionTime` is updated only when the group's base Phase
+// changes. Sequential's soak window holds the group at Phase=Idle while
+// only CompositePhase advances to Sequential.AwaitingNextComponent —
+// Phase stays constant, so LastTransitionTime keeps pointing at the
+// initial pre-rollout Idle. `time.Since(LastTransitionTime)` is always
+// well past `soak`, the gate never fires, and the soak window is a
+// no-op. The Available condition tracks the actual rollout-completion
+// moment because `apimeta.SetStatusCondition` only updates
+// LastTransitionTime on real status transitions (False→True).
+func previousComponentReadyAt(isvc *v1beta1.InferenceService, prev v1beta1.ComponentType) time.Time {
+	cs, ok := isvc.Status.Components[prev]
+	if !ok || cs.OMENative == nil {
 		return time.Time{}
 	}
-	for _, gs := range isvc.Status.RolloutCoordination.Groups {
-		if gs.Name == groupName && gs.LastTransitionTime != nil {
-			return gs.LastTransitionTime.Time
+	for _, cond := range cs.OMENative.Conditions {
+		if cond.Type != conditionAvailable {
+			continue
 		}
+		if cond.Status != metav1.ConditionTrue {
+			return time.Time{}
+		}
+		return cond.LastTransitionTime.Time
 	}
 	return time.Time{}
 }

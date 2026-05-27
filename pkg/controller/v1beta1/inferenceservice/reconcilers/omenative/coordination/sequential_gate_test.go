@@ -112,6 +112,28 @@ func setComponentRevisions(isvc *v1beta1.InferenceService, c v1beta1.ComponentTy
 	isvc.Status.Components[c] = cs
 }
 
+// setComponentAvailableAt stamps Status.Components[c].OMENative with
+// an Available=True condition whose LastTransitionTime is `at` — the
+// timestamp shape the Sequential soak gate now consumes. Mirrors what
+// the OMENative status reconciler writes via
+// apimeta.SetStatusCondition when AvailableReplicas==Replicas.
+func setComponentAvailableAt(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, at time.Time) {
+	if isvc.Status.Components == nil {
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+	}
+	cs := isvc.Status.Components[c]
+	if cs.OMENative == nil {
+		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	}
+	cs.OMENative.Conditions = append(cs.OMENative.Conditions, metav1.Condition{
+		Type:               conditionAvailable,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Ready",
+		LastTransitionTime: metav1.NewTime(at),
+	})
+	isvc.Status.Components[c] = cs
+}
+
 func TestCheckSequentialGate_NilISVC(t *testing.T) {
 	allowed, _ := CheckSequentialGate(nil, v1beta1.EngineComponent)
 	if !allowed {
@@ -222,20 +244,14 @@ func TestCheckSequentialGate_LaterComponentActiveDeniesEarlier(t *testing.T) {
 }
 
 func TestCheckSequentialGate_SoakHoldsActiveComponent(t *testing.T) {
-	// Decoder completed at T=now-2s (recorded in
-	// LastTransitionTime), engine is now active (rolling). Soak is 5s
-	// → gate must deny engine for the remaining ~3s.
-	const soak = 5 * time.Second
+	// Decoder completed at T=now-1s (recorded in its Available
+	// condition's LastTransitionTime); engine is now active (rolling).
+	// Soak is 15s → gate must deny engine for the remaining ~14s.
+	const soak = 15 * time.Second
 	isvc := mkSequentialFixture("seq-isvc", soak)
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev2", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev2")
-	twoAgo := metav1.NewTime(time.Now().Add(-2 * time.Second))
-	isvc.Status.RolloutCoordination = &v1beta1.RolloutCoordinationStatus{
-		Groups: []v1beta1.RolloutCoordinationGroupStatus{{
-			Name:               "0", // ResolveGroups names index-only groups "0", "1", ...
-			LastTransitionTime: &twoAgo,
-		}},
-	}
+	setComponentAvailableAt(isvc, v1beta1.DecoderComponent, time.Now().Add(-1*time.Second))
 	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
 	if allowed {
 		t.Errorf("soak window must hold engine: %s", reason)
@@ -246,19 +262,13 @@ func TestCheckSequentialGate_SoakHoldsActiveComponent(t *testing.T) {
 }
 
 func TestCheckSequentialGate_SoakReleasesAfterDuration(t *testing.T) {
-	// Same shape as the hold case but LastTransitionTime is 10s ago
-	// for a 5s soak — soak has elapsed, gate allows.
+	// Same shape as the hold case but decoder's Available transition
+	// is well past the soak window — gate allows.
 	const soak = 5 * time.Second
 	isvc := mkSequentialFixture("seq-isvc", soak)
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev2", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev2")
-	tenAgo := metav1.NewTime(time.Now().Add(-10 * time.Second))
-	isvc.Status.RolloutCoordination = &v1beta1.RolloutCoordinationStatus{
-		Groups: []v1beta1.RolloutCoordinationGroupStatus{{
-			Name:               "0",
-			LastTransitionTime: &tenAgo,
-		}},
-	}
+	setComponentAvailableAt(isvc, v1beta1.DecoderComponent, time.Now().Add(-soak-1*time.Second))
 	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("soak elapsed; gate must allow: %s", reason)
@@ -273,32 +283,48 @@ func TestCheckSequentialGate_SoakNotArmedForFirstComponent(t *testing.T) {
 	isvc := mkSequentialFixture("seq-isvc", soak)
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev1", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev1")
-	now := metav1.Now()
-	isvc.Status.RolloutCoordination = &v1beta1.RolloutCoordinationStatus{
-		Groups: []v1beta1.RolloutCoordinationGroupStatus{{
-			Name:               "0",
-			LastTransitionTime: &now,
-		}},
-	}
 	allowed, reason := CheckSequentialGate(isvc, v1beta1.DecoderComponent)
 	if !allowed {
 		t.Errorf("first Component must not be soak-held: %s", reason)
 	}
 }
 
-func TestCheckSequentialGate_SoakWithoutPriorStatusBypasses(t *testing.T) {
+func TestCheckSequentialGate_SoakWithoutPriorAvailableBypasses(t *testing.T) {
 	// active==component AND a previous Component is recorded as
-	// completed, BUT no prior status was written yet — soak gate has
-	// no clock, must default to allow (matches the state machine's
-	// "PreviousPhaseEnteredAt.IsZero() => no hold" branch).
+	// completed, BUT no Available condition has been written yet —
+	// soak gate has no clock, must default to allow.
 	const soak = 5 * time.Second
 	isvc := mkSequentialFixture("seq-isvc", soak)
 	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev2", "rev2")
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev2")
-	// No Status.RolloutCoordination written.
+	// No Available condition on decoder.
 	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
 	if !allowed {
-		t.Errorf("missing prior status must bypass soak: %s", reason)
+		t.Errorf("missing prior Available must bypass soak: %s", reason)
+	}
+}
+
+func TestCheckSequentialGate_SoakWithPriorAvailableFalseBypasses(t *testing.T) {
+	// Decoder's Available condition is present but False (no rollout
+	// has finished yet on the previous Component). The gate must NOT
+	// fall back to time.Now() — return zero time so the soak doesn't
+	// fire on a bogus clock.
+	const soak = 5 * time.Second
+	isvc := mkSequentialFixture("seq-isvc", soak)
+	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev2", "rev2")
+	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev2")
+	// Available=False on decoder.
+	cs := isvc.Status.Components[v1beta1.DecoderComponent]
+	cs.OMENative.Conditions = []metav1.Condition{{
+		Type:               conditionAvailable,
+		Status:             metav1.ConditionFalse,
+		Reason:             "NotAllAvailable",
+		LastTransitionTime: metav1.Now(),
+	}}
+	isvc.Status.Components[v1beta1.DecoderComponent] = cs
+	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	if !allowed {
+		t.Errorf("Available=False must not arm soak clock: %s", reason)
 	}
 }
 
