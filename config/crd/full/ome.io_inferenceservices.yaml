@@ -6323,6 +6323,7 @@ spec:
                               type: object
                             type:
                               enum:
+                                - SurgeThenDrain
                                 - RecreatePod
                                 - InPlaceIfPossible
                                 - InPlaceOnly
@@ -18581,6 +18582,7 @@ spec:
                               type: object
                             type:
                               enum:
+                                - SurgeThenDrain
                                 - RecreatePod
                                 - InPlaceIfPossible
                                 - InPlaceOnly
@@ -24669,15 +24671,17 @@ spec:
                           policy:
                             allOf:
                               - enum:
-                                  - Atomic
+                                  - BlueGreen
+                                  - RollingUpdate
                                   - Independent
-                                  - PairedMixable
                                   - Sequential
                               - enum:
-                                  - Atomic
+                                  - BlueGreen
+                                  - RollingUpdate
                                   - Independent
-                                  - PairedMixable
                                   - Sequential
+                            type: string
+                          soak:
                             type: string
                         required:
                           - components
@@ -26695,6 +26699,7 @@ spec:
                               type: object
                             type:
                               enum:
+                                - SurgeThenDrain
                                 - RecreatePod
                                 - InPlaceIfPossible
                                 - InPlaceOnly
@@ -28732,6 +28737,9 @@ spec:
                                 scheduledPodCount:
                                   format: int32
                                   type: integer
+                                servingPodCount:
+                                  format: int32
+                                  type: integer
                                 targetRevision:
                                   type: string
                               required:
@@ -28751,6 +28759,9 @@ spec:
                             format: int32
                             type: integer
                           replicas:
+                            format: int32
+                            type: integer
+                          servingReplicas:
                             format: int32
                             type: integer
                           updateRevision:
@@ -29050,9 +29061,9 @@ spec:
                             type: string
                           policy:
                             enum:
-                              - Atomic
+                              - BlueGreen
+                              - RollingUpdate
                               - Independent
-                              - PairedMixable
                               - Sequential
                             type: string
                           previousComponent:

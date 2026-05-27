@@ -119,7 +119,7 @@ func TestSortedPeers_GroupMembershipWins(t *testing.T) {
 	groups := []ResolvedGroup{
 		{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent},
-			Policy:     v1beta1.CoordinationPolicyAtomic,
+			Policy:     v1beta1.CoordinationPolicyBlueGreen,
 		},
 	}
 	peers := SortedPeers(groups, v1beta1.EngineComponent, nil)

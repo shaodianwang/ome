@@ -52,7 +52,7 @@ var (
 	mixedPairingTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ome_omenative_mixed_pairing_total",
-			Help: "Count of distinct cross-revision pairings observed in a PairedMixable group.",
+			Help: "Count of distinct cross-revision pairings observed in a RollingUpdate group.",
 		},
 		[]string{"isvc", "group"},
 	)
@@ -115,7 +115,7 @@ func SetPerRevisionServiceCount(isvc, component string, count float64) {
 }
 
 // RecordMixedPairing increments the mixed-pairing counter when a
-// PairedMixable group sees a distinct revision-pair combination.
+// RollingUpdate group sees a distinct revision-pair combination.
 func RecordMixedPairing(isvc, group string) {
 	if isvc == "" || group == "" {
 		return

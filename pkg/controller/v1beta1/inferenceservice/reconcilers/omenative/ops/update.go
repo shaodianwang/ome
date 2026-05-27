@@ -100,9 +100,21 @@ const (
 // chooseUpdateMode resolves strategy + eligibility into a mode. nil
 // running spec is treated as ineligible, forcing recreate from a known
 // baseline. InPlaceOnly + ineligible returns an error.
+//
+// SurgeThenDrain currently delegates to recreate. Real surge-then-drain
+// semantics (create new alongside old, wait Ready, drain old) require
+// pod-naming changes or surge-index plumbing similar to Migrate, both
+// substantial architectural moves. Until then, SurgeThenDrain ==
+// RecreatePod, which is safer than in-place because the dispatcher's
+// MaxUnavailable gate throttles one drain at a time.
 func chooseUpdateMode(strategy v1beta1.OMENativeUpdateStrategyType, running, target *corev1.PodSpec) (updateMode, error) {
 	eligible := inPlaceEligible(running, target)
 	switch strategy {
+	case v1beta1.OMENativeUpdateStrategySurgeThenDrain:
+		// TODO: real surge-then-drain with new pod alongside old. For
+		// now route to recreate so the safety guarantee (no in-place
+		// gate bypass) holds, even if we don't yet deliver zero-downtime.
+		return updateModeRecreate, nil
 	case v1beta1.OMENativeUpdateStrategyRecreatePod:
 		return updateModeRecreate, nil
 	case v1beta1.OMENativeUpdateStrategyInPlaceOnly:
@@ -110,10 +122,16 @@ func chooseUpdateMode(strategy v1beta1.OMENativeUpdateStrategyType, running, tar
 			return 0, fmt.Errorf("InPlaceOnly strategy but diff exceeds container images")
 		}
 		return updateModeInPlace, nil
-	case v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, "":
+	case v1beta1.OMENativeUpdateStrategyInPlaceIfPossible:
 		if eligible {
 			return updateModeInPlace, nil
 		}
+		return updateModeRecreate, nil
+	case "":
+		// updateStrategyWithDefaults should have filled this in
+		// upstream; this empty-string branch matches the SurgeThenDrain
+		// default so a direct caller (tests, fuzz) gets safe behavior
+		// even if it skips the defaulter.
 		return updateModeRecreate, nil
 	default:
 		return 0, fmt.Errorf("unknown UpdateStrategy.Type %q", strategy)

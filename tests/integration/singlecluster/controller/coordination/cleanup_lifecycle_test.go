@@ -27,9 +27,7 @@ var _ = ginkgo.Describe("Coordination cleanup + lifecycle (OEP-0007.1)", ginkgo.
 		fix := newCoordFixture(ns.Name, WithISVCName("clean1"), WithoutDecoder(),
 			WithEngineImage("ghcr.io/test/runtime:v1"))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		var v1ServiceName string
 		Eventually(func(g Gomega) {
@@ -62,9 +60,7 @@ var _ = ginkgo.Describe("Coordination cleanup + lifecycle (OEP-0007.1)", ginkgo.
 		fix := newCoordFixture(ns.Name, WithISVCName("clean3"),
 			WithEngineImage("ghcr.io/test/runtime:v1"))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		v1Names := map[string]bool{}
 		Eventually(func(g Gomega) {
@@ -104,9 +100,7 @@ var _ = ginkgo.Describe("Coordination cleanup + lifecycle (OEP-0007.1)", ginkgo.
 	ginkgo.It("CLEAN-7 repeated reconcile doesn't create duplicate Services for same hash", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("clean7"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			g.Expect(listPerRevisionServices(g, ns.Name)).To(HaveLen(2))
@@ -143,7 +137,7 @@ var _ = ginkgo.Describe("Coordination cleanup + lifecycle (OEP-0007.1)", ginkgo.
 	})
 
 	ginkgo.PIt("LIFE-2 Sequential mid-flight delete — narrow timing window in envtest", func() {})
-	ginkgo.PIt("LIFE-3 ISVC delete during Atomic Shifting — narrow timing window in envtest", func() {})
+	ginkgo.PIt("LIFE-3 ISVC delete during BlueGreen Shifting — narrow timing window in envtest", func() {})
 	ginkgo.PIt("LIFE-4 finalizer-deferred delete — pure K8s-native semantic", func() {})
 	ginkgo.PIt("LIFE-5 paused + delete — pause is a soft annotation; pure K8s semantic", func() {})
 	ginkgo.PIt("LIFE-6 alien-owner pod — adoption logic belongs to OMENative reconciler", func() {})
@@ -151,9 +145,7 @@ var _ = ginkgo.Describe("Coordination cleanup + lifecycle (OEP-0007.1)", ginkgo.
 	ginkgo.It("LIFE-7 Service owner-ref hand-mutated → coordination drift-corrects", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("life7"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		var targetSvc corev1.Service
 		Eventually(func(g Gomega) {

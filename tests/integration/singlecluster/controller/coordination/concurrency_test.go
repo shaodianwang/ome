@@ -22,7 +22,7 @@ var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)",
 	})
 
 	ginkgo.It("CON-8 idempotency: two back-to-back ComputeTransition calls with same obs → same decision", func() {
-		obs := atomicObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
+		obs := blueGreenObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
 				o.RolloutInFlight = true
@@ -38,12 +38,12 @@ var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)",
 
 	ginkgo.It("CON-9 ComputeTransition takes no context — cannot be canceled mid-call", func() {
 		// Compile-time guarantee: function signature has no ctx parameter.
-		obs := atomicObs()
+		obs := blueGreenObs()
 		_ = coordination.ComputeTransition(obs)
 	})
 
 	ginkgo.It("CON-12 two distinct observations (e.g. two ISVCs) → independent decisions, no shared state", func() {
-		obsA := atomicObs()
+		obsA := blueGreenObs()
 		mutate(&obsA, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.RolloutInFlight = true
 			o.NewRevisionPods = 0
@@ -54,7 +54,7 @@ var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)",
 			o.NewRevisionPods = 0
 			o.TargetRevisionHash = "rev2"
 		})
-		obsB := atomicObs()
+		obsB := blueGreenObs()
 		trA1 := coordination.ComputeTransition(obsA)
 		trB1 := coordination.ComputeTransition(obsB)
 		trA2 := coordination.ComputeTransition(obsA)
@@ -73,7 +73,7 @@ var _ = ginkgo.Describe("Coordination concurrency & failure paths (OEP-0007.1)",
 	})
 
 	ginkgo.It("CON-Pure-Aux state machine returns the same shape on repeated identical input (race-safe by construction)", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.RolloutInFlight = true
 			o.NewRevisionPods = 2

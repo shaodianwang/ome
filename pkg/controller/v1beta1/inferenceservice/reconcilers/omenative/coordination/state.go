@@ -1,6 +1,8 @@
 package coordination
 
 import (
+	"time"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
@@ -77,6 +79,21 @@ type GroupObservation struct {
 	// state machine honors this by leaving every group in Paused
 	// until the annotation is removed.
 	PausedGlobal bool
+
+	// Now is the reference time the state machine compares against
+	// when evaluating time-based gates (Sequential soak). Caller
+	// passes time.Now() at the top of the reconcile pass so all gates
+	// see the same instant.
+	Now time.Time
+
+	// PreviousPhaseEnteredAt is the timestamp the group last entered
+	// its current Phase, as recorded in the previously-written status.
+	// Sequential soak compares Now - PreviousPhaseEnteredAt to the
+	// group's Soak duration. Zero when no prior status is available
+	// (first reconcile) — soak is treated as not-yet-started in that
+	// case, which means the very first reconcile after completion does
+	// trip the wait correctly.
+	PreviousPhaseEnteredAt time.Time
 }
 
 // GroupTransition is the state machine's decision for one group this
@@ -137,10 +154,10 @@ func ComputeTransition(obs GroupObservation) GroupTransition {
 		}
 	}
 	switch obs.Group.Policy {
-	case v1beta1.CoordinationPolicyAtomic:
-		return atomicTransition(obs)
-	case v1beta1.CoordinationPolicyPairedMixable:
-		return pairedMixableTransition(obs)
+	case v1beta1.CoordinationPolicyBlueGreen:
+		return blueGreenTransition(obs)
+	case v1beta1.CoordinationPolicyRollingUpdate:
+		return rollingUpdateTransition(obs)
 	case v1beta1.CoordinationPolicySequential:
 		return sequentialTransition(obs)
 	case v1beta1.CoordinationPolicyIndependent:
@@ -150,10 +167,10 @@ func ComputeTransition(obs GroupObservation) GroupTransition {
 	}
 }
 
-// atomicTransition implements the gang-style state machine: surge all
+// blueGreenTransition implements the gang-style state machine: surge all
 // Components together, wait for all Ready, shift traffic together,
 // drain, scale down. Failure in any Component fails the whole group.
-func atomicTransition(obs GroupObservation) GroupTransition {
+func blueGreenTransition(obs GroupObservation) GroupTransition {
 	allFailed := false
 	for _, c := range obs.Components {
 		if c.Failed {
@@ -165,7 +182,7 @@ func atomicTransition(obs GroupObservation) GroupTransition {
 		return GroupTransition{
 			Phase:          v1beta1.CoordinationPhaseFailed,
 			CompositePhase: string(v1beta1.CoordinationPhaseFailed),
-			Message:        "one or more Components in the Atomic group failed",
+			Message:        "one or more Components in the BlueGreen group failed",
 		}
 	}
 
@@ -180,7 +197,7 @@ func atomicTransition(obs GroupObservation) GroupTransition {
 		return GroupTransition{
 			Phase:          v1beta1.CoordinationPhasePaused,
 			CompositePhase: string(v1beta1.CoordinationPhasePaused),
-			Message:        "one or more Components in the Atomic group are paused",
+			Message:        "one or more Components in the BlueGreen group are paused",
 		}
 	}
 
@@ -260,16 +277,16 @@ func atomicTransition(obs GroupObservation) GroupTransition {
 	}
 }
 
-// pairedMixableTransition implements PairedMixable: per-Component
+// rollingUpdateTransition implements RollingUpdate: per-Component
 // state machines walk in parallel; the group phase is the union (any
 // Component still surging means the group is Surging; otherwise
 // Waiting → Shifting → ScalingDown → Idle).
 //
-// Pause semantics differ from Atomic: Atomic short-circuits to Paused
-// when ANY Component is paused (gang-stop), but PairedMixable lets
+// Pause semantics differ from BlueGreen: BlueGreen short-circuits to Paused
+// when ANY Component is paused (gang-stop), but RollingUpdate lets
 // each Component progress independently, so the group is Paused only
 // when EVERY Component is paused.
-func pairedMixableTransition(obs GroupObservation) GroupTransition {
+func rollingUpdateTransition(obs GroupObservation) GroupTransition {
 	failed := false
 	for _, c := range obs.Components {
 		if c.Failed {
@@ -281,7 +298,7 @@ func pairedMixableTransition(obs GroupObservation) GroupTransition {
 		return GroupTransition{
 			Phase:          v1beta1.CoordinationPhaseFailed,
 			CompositePhase: string(v1beta1.CoordinationPhaseFailed),
-			Message:        "one or more Components in the PairedMixable group failed",
+			Message:        "one or more Components in the RollingUpdate group failed",
 		}
 	}
 
@@ -296,7 +313,7 @@ func pairedMixableTransition(obs GroupObservation) GroupTransition {
 		return GroupTransition{
 			Phase:          v1beta1.CoordinationPhasePaused,
 			CompositePhase: string(v1beta1.CoordinationPhasePaused),
-			Message:        "all Components in the PairedMixable group are paused",
+			Message:        "all Components in the RollingUpdate group are paused",
 		}
 	}
 
@@ -376,9 +393,9 @@ func pairedMixableTransition(obs GroupObservation) GroupTransition {
 // group is declared (callers that drive an InferenceService without a
 // rolloutCoordination block hit this branch).
 //
-// Pause semantics match PairedMixable's: Independent allows each
+// Pause semantics match RollingUpdate's: Independent allows each
 // Component to progress on its own, so the group is Paused only when
-// EVERY Component is paused (not Atomic's "ANY paused").
+// EVERY Component is paused (not BlueGreen's "ANY paused").
 func independentTransition(obs GroupObservation) GroupTransition {
 	anyRolling := false
 	failed := false
@@ -453,14 +470,36 @@ func sequentialTransition(obs GroupObservation) GroupTransition {
 		if !ok || !comp.RolloutInFlight {
 			continue
 		}
+		// Soak gate: if a previous Component just completed and the
+		// group is still inside its operator-configured soak window,
+		// hold this Component at Sequential.Awaiting until the wait
+		// elapses. The soak timer reads from the previously-written
+		// status's LastTransitionTime (PreviousPhaseEnteredAt), so
+		// soak only fires AFTER the prior completion was observed in
+		// status — the very first time the Awaiting phase shows up.
+		if obs.Group.Soak > 0 && previousCompletedComponent(obs, c) != "" {
+			if !obs.PreviousPhaseEnteredAt.IsZero() {
+				elapsed := obs.Now.Sub(obs.PreviousPhaseEnteredAt)
+				if elapsed < obs.Group.Soak {
+					return GroupTransition{
+						Phase:             v1beta1.CoordinationPhaseIdle,
+						CompositePhase:    v1beta1.CompositePhaseSequentialAwaiting,
+						CurrentComponent:  c,
+						PreviousComponent: previousCompletedComponent(obs, c),
+						Message: "Sequential soak: " + (obs.Group.Soak - elapsed).String() +
+							" remaining before " + string(c) + " starts",
+					}
+				}
+			}
+		}
 		// Found the active Component — drive its per-Component phase
 		// as the group phase.
-		sub := atomicTransition(GroupObservation{
+		sub := blueGreenTransition(GroupObservation{
 			Group: ResolvedGroup{
 				Name:       obs.Group.Name,
 				Index:      obs.Group.Index,
 				Components: []v1beta1.ComponentType{c},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				Pacing:     obs.Group.Pacing,
 			},
 			Components: map[v1beta1.ComponentType]ComponentObservation{c: comp},

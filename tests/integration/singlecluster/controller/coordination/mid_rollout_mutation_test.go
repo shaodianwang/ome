@@ -21,7 +21,7 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("MUT-3 mid-call policy swap Atomic→Independent flips union semantics", func() {
+	ginkgo.It("MUT-3 mid-call policy swap BlueGreen→Independent flips union semantics", func() {
 		obs := pmObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.RolloutInFlight = true
@@ -35,10 +35,10 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 			o.TotalPods = 4
 			o.TargetRevisionHash = "rev2"
 		})
-		obs.Group.Policy = v1beta1.CoordinationPolicyAtomic
+		obs.Group.Policy = v1beta1.CoordinationPolicyBlueGreen
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseSurging),
-				"Atomic: any !allHaveSurge → Surging")
+				"BlueGreen: any !allHaveSurge → Surging")
 
 		obs.Group.Policy = v1beta1.CoordinationPolicyIndependent
 		Expect(coordination.ComputeTransition(obs).Phase).
@@ -46,7 +46,7 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 				"Independent collapses any-rolling → Shifting")
 	})
 
-	ginkgo.It("MUT-4 mid-call policy swap Independent→Atomic starts gating sub-phases", func() {
+	ginkgo.It("MUT-4 mid-call policy swap Independent→BlueGreen starts gating sub-phases", func() {
 		obs := pmObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
@@ -59,10 +59,10 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseShifting))
 
-		obs.Group.Policy = v1beta1.CoordinationPolicyAtomic
+		obs.Group.Policy = v1beta1.CoordinationPolicyBlueGreen
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseSurging),
-				"swapping to Atomic must surface the Surging sub-phase that Independent collapsed")
+				"swapping to BlueGreen must surface the Surging sub-phase that Independent collapsed")
 	})
 
 	ginkgo.It("MUT-5 Sequential Order swap mid-call → active loop re-evaluates against new Order", func() {
@@ -93,10 +93,10 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 			o.NewRevisionPods = 0
 			o.TargetRevisionHash = "rev2"
 		})
-		obs.Group.Policy = v1beta1.CoordinationPolicyPairedMixable
+		obs.Group.Policy = v1beta1.CoordinationPolicyRollingUpdate
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseSurging),
-				"PairedMixable: anySurging branch")
+				"RollingUpdate: anySurging branch")
 
 		obs.Group.Policy = ""
 		Expect(coordination.ComputeTransition(obs).Phase).
@@ -106,7 +106,7 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 
 	ginkgo.It("MUT-12 PausedGlobal=true blocks bump-induced transition until cleared", func() {
 		obs := pmObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
-		obs.Group.Policy = v1beta1.CoordinationPolicyAtomic
+		obs.Group.Policy = v1beta1.CoordinationPolicyBlueGreen
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.RolloutInFlight = true
 			o.NewRevisionPods = 0
@@ -129,7 +129,7 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 
 	ginkgo.It("MUT-Aux mutating observation between consecutive ComputeTransition calls drives the state forward", func() {
 		obs := pmObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
-		obs.Group.Policy = v1beta1.CoordinationPolicyAtomic
+		obs.Group.Policy = v1beta1.CoordinationPolicyBlueGreen
 
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseIdle))
@@ -186,9 +186,7 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 	ginkgo.It("MUT-6 Add brand-new group mid-rollout → coordination ensures per-revision Services", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("mut6"))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			g.Expect(listPerRevisionServices(g, ns.Name)).NotTo(BeEmpty())
@@ -199,7 +197,7 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 			cur.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				}},
 			}
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
@@ -218,15 +216,13 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 
 	ginkgo.It("MUT-10 Edit MaxSurge mid-rollout — ObservedSurge reflects post-edit MaxSurge", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("mut10"), WithEngineReplicas(4),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type:     v1beta1.CoordinationPacingPerComponent,
 			MaxSurge: iosInt(1),
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "mut10")
@@ -253,15 +249,13 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 
 	ginkgo.It("MUT-11 Edit RatioTolerance mid-RatioBalanced rollout — next reconcile uses the new band", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("mut11"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type:           v1beta1.CoordinationPacingRatioBalanced,
 			RatioTolerance: int32Ptr(5),
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "mut11")
@@ -287,11 +281,9 @@ var _ = ginkgo.Describe("Coordination mid-rollout mutation (OEP-0007.1)", ginkgo
 
 	ginkgo.It("MUT-9 Bump model + bump runtime concurrently → per-revision Services materialize for both Components", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("mut9"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			services := listPerRevisionServices(g, ns.Name)

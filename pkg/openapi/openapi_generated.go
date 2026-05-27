@@ -4379,6 +4379,13 @@ func schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref common.ReferenceCa
 							Format:      "int32",
 						},
 					},
+					"servingReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServingReplicas is the number of Instances whose every pod is BOTH ContainersReady AND has serving=True on the controller-managed readiness gate — i.e., the pod is actually in the load balancer's rotation. This is the count operators care about for traffic availability, and the count MaxUnavailable budgets gate against.\n\nDiverges from ReadyReplicas during in-place updates and any other scenario where the controller flips the serving gate to False while containers remain technically Ready.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 					"availableReplicas": {
 						SchemaProps: spec.SchemaProps{
 							Description: "AvailableReplicas is the number of Instances that have been Ready continuously for at least MinReadySeconds.",
@@ -4537,6 +4544,13 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 							Format:      "int32",
 						},
 					},
+					"servingPodCount": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServingPodCount is the number of pods that are BOTH ContainersReady AND have serving=True on the controller-managed readiness gate — i.e., pods actually in the load balancer rotation. Diverges from ReadyPodCount whenever the controller flips the serving gate (in-place updates, drain steps, etc.). MaxUnavailable budgets are computed against the serving count, not the ready count, so that \"missing from traffic\" reflects reality.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 					"availablePodCount": {
 						SchemaProps: spec.SchemaProps{
 							Description: "AvailablePodCount is the number of pods ready for at least MinReadySeconds.",
@@ -4664,7 +4678,7 @@ func schema_pkg_apis_ome_v1beta1_OMENativeUpdateStrategy(ref common.ReferenceCal
 				Properties: map[string]spec.Schema{
 					"type": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Type selects the rollout mechanism. Defaults to InPlaceIfPossible.",
+							Description: "Type selects the rollout mechanism. Defaults to SurgeThenDrain for safety — preserves serving capacity throughout the rollout.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -5247,7 +5261,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref common.ReferenceCa
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Order has two meanings depending on Policy:\n  - Atomic: pins the surge sequence within the single rollout\n    unit (decoder surges first, then engine, etc.) but all\n    Components traffic-shift together once every set is Ready.\n    Optional; default no ordering (parallel surge).\n  - Sequential: REQUIRED. Pins the order in which Components\n    walk their full state machine. The next Component cannot\n    enter Surging until the previous Component is back at Idle\n    on the new revision.\n  - Independent / PairedMixable: ignored.",
+							Description: "Order has two meanings depending on Policy:\n  - BlueGreen: pins the surge sequence within the single rollout\n    unit (decoder surges first, then engine, etc.) but all\n    Components traffic-shift together once every set is Ready.\n    Optional; default no ordering (parallel surge).\n  - Sequential: REQUIRED. Pins the order in which Components\n    walk their full state machine. The next Component cannot\n    enter Surging until the previous Component is back at Idle\n    on the new revision.\n  - Independent / RollingUpdate: ignored.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -5260,12 +5274,18 @@ func schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref common.ReferenceCa
 							},
 						},
 					},
+					"soak": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Soak is the duration the coordination layer waits AFTER a Sequential Component reaches Idle on the new revision BEFORE the next Component in Order begins its rollout. Lets operators validate one Component under live production traffic before risking the next. Only honored for Policy=Sequential.\n\nDefault: 0 (no wait — the next Component starts immediately).",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
 				},
 				Required: []string{"components", "policy"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CoordinationPacing"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CoordinationPacing", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
 	}
 }
 
@@ -5318,7 +5338,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref common.Refer
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Order mirrors the spec order (Sequential / Atomic-ordered).",
+							Description: "Order mirrors the spec order (Sequential / BlueGreen-ordered).",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{

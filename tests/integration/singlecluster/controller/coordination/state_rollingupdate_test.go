@@ -11,9 +11,9 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// PairedMixable policy state-machine specs for OEP-0007.1.
+// RollingUpdate policy state-machine specs for OEP-0007.1.
 //
-// PairedMixable lets each Component walk its own state machine in
+// RollingUpdate lets each Component walk its own state machine in
 // parallel. The GROUP phase is the union of per-Component states:
 //
 //   anySurging       → Surging
@@ -27,9 +27,9 @@ import (
 // are blocked on G5 (MixedPairingObserved event emission) and G1
 // (reconciler not invoking ComputeTransition / pacing math).
 //
-// Reference: state.go pairedMixableTransition.
+// Reference: state.go rollingUpdateTransition.
 
-// pmObs builds an N-Component PairedMixable observation. Defaults: 2
+// pmObs builds an N-Component RollingUpdate observation. Defaults: 2
 // replicas per Component, all live + Ready on rev1, no rollout in
 // flight. Specs mutate as needed.
 func pmObs(components ...v1beta1.ComponentType) coordination.GroupObservation {
@@ -39,7 +39,7 @@ func pmObs(components ...v1beta1.ComponentType) coordination.GroupObservation {
 	g := coordination.ResolvedGroup{
 		Name:       "0",
 		Components: components,
-		Policy:     v1beta1.CoordinationPolicyPairedMixable,
+		Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 	}
 	obs := coordination.GroupObservation{
 		Group:      g,
@@ -61,7 +61,7 @@ func pmObs(components ...v1beta1.ComponentType) coordination.GroupObservation {
 	return obs
 }
 
-var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("Coordination RollingUpdate state machine (OEP-0007.1)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
 		var err error
@@ -114,7 +114,7 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 		})
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseSurging),
-				"Surging must take precedence over Waiting in PairedMixable union")
+				"Surging must take precedence over Waiting in RollingUpdate union")
 	})
 
 	ginkgo.It("PM-1b Waiting wins over ScalingDown in the union", func() {
@@ -135,7 +135,7 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 		})
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseWaiting),
-				"Waiting must take precedence over ScalingDown in PairedMixable union")
+				"Waiting must take precedence over ScalingDown in RollingUpdate union")
 	})
 
 	ginkgo.It("PM-2 per-Component independence: idle Components don't influence the union", func() {
@@ -151,7 +151,7 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseSurging))
 		Expect(obs.Components[v1beta1.EngineComponent].RolloutInFlight).To(BeFalse(),
-			"engine remains Idle while decoder rolls — that's the point of PairedMixable")
+			"engine remains Idle while decoder rolls — that's the point of RollingUpdate")
 	})
 
 	ginkgo.It("PM-3 single Component failed → whole group Failed", func() {
@@ -161,7 +161,7 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 		})
 		tr := coordination.ComputeTransition(obs)
 		Expect(tr.Phase).To(Equal(v1beta1.CoordinationPhaseFailed))
-		Expect(tr.Message).To(ContainSubstring("PairedMixable"))
+		Expect(tr.Message).To(ContainSubstring("RollingUpdate"))
 	})
 
 	ginkgo.It("PM-3a Failed beats every other state in the union", func() {
@@ -183,7 +183,7 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 	ginkgo.It("PM-4 mixed v1+v2 engine + v1+v2 decoder allowed (no auto-rollback)", func() {
 		// Both Components at intermediate state: 2 new pods + 2 old still
 		// up. anyScalingDown=true so group is ScalingDown — never
-		// RollingBack. PairedMixable explicitly permits cross-revision
+		// RollingBack. RollingUpdate explicitly permits cross-revision
 		// pod coexistence.
 		obs := pmObs()
 		for _, c := range obs.Group.Components {
@@ -197,7 +197,7 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 		}
 		tr := coordination.ComputeTransition(obs)
 		Expect(tr.Phase).To(Equal(v1beta1.CoordinationPhaseScalingDown),
-			"PairedMixable must NOT auto-rollback when old + new pods coexist")
+			"RollingUpdate must NOT auto-rollback when old + new pods coexist")
 		Expect(tr.Phase).NotTo(Equal(v1beta1.CoordinationPhaseRollingBack))
 	})
 
@@ -209,7 +209,7 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 			To(ContainSubstring("no rollout"))
 	})
 
-	ginkgo.It("PM-7 3-Component PairedMixable: each Component rolls independently in the union", func() {
+	ginkgo.It("PM-7 3-Component RollingUpdate: each Component rolls independently in the union", func() {
 		obs := pmObs(v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent)
 		// Engine: surging. Decoder: waiting. Router: scaling down.
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
@@ -248,14 +248,14 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 	})
 
 	ginkgo.It("PM-12 empty Components map → Idle (degenerate observation)", func() {
-		// Empty PairedMixable group: no Components observed, no rollout
-		// in flight. Atomic and Independent handle this; PairedMixable
+		// Empty RollingUpdate group: no Components observed, no rollout
+		// in flight. BlueGreen and Independent handle this; RollingUpdate
 		// must too.
 		obs := coordination.GroupObservation{
 			Group: coordination.ResolvedGroup{
 				Name:       "0",
 				Components: []v1beta1.ComponentType{},
-				Policy:     v1beta1.CoordinationPolicyPairedMixable,
+				Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 			},
 			Components: map[v1beta1.ComponentType]coordination.ComponentObservation{},
 		}
@@ -269,8 +269,8 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 	// ----------------------------------------------------------------
 
 	ginkgo.It("PM-9 ALL Components paused (not just one) → group Paused", func() {
-		// PairedMixable's Paused semantics differ from Atomic: gang
-		// policies short-circuit on any-paused, but PairedMixable lets
+		// RollingUpdate's Paused semantics differ from BlueGreen: gang
+		// policies short-circuit on any-paused, but RollingUpdate lets
 		// each Component progress independently. So we only Pause the
 		// group when EVERY Component is paused.
 		obs := pmObs()
@@ -285,22 +285,20 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 		}
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhasePaused),
-				"PairedMixable with ALL Components Paused must return Paused")
+				"RollingUpdate with ALL Components Paused must return Paused")
 	})
 
 	ginkgo.It("PM-5 MixedPairingObserved event fires when distinct (engine-rev, decoder-rev) pairs observed", func() {
-		// PairedMixable explicitly permits running engine and decoder
+		// RollingUpdate explicitly permits running engine and decoder
 		// on different revisions simultaneously. When the controller
 		// observes this state (e.g. engine on rev1+rev2, decoder on
 		// rev1+rev2), it should emit a MixedPairingObserved event for
 		// operator visibility. Today no such event exists — coordination
 		// has no event recorder wired in. Gap G5.
 		fix := newCoordFixture(ns.Name, WithISVCName("pm5"),
-			WithPairedMixableGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithRollingUpdateGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			events := &corev1.EventList{}
@@ -316,22 +314,20 @@ var _ = ginkgo.Describe("Coordination PairedMixable state machine (OEP-0007.1)",
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("PM-8 PairedMixable + per-Component pacing — each Component honors its own pacing budget", func() {
-		// PairedMixable's pacing block is interpreted PER COMPONENT
+	ginkgo.It("PM-8 RollingUpdate + per-Component pacing — each Component honors its own pacing budget", func() {
+		// RollingUpdate's pacing block is interpreted PER COMPONENT
 		// (vs. RatioBalanced's cross-Component snap). With MaxSurge=1
 		// on each Component, engine and decoder each get exactly 1
 		// surge pod regardless of the other's progress.
 		fix := newCoordFixture(ns.Name, WithISVCName("pm8"),
-			WithPairedMixableGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithRollingUpdateGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		ms := intstr.FromInt(1)
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type:     v1beta1.CoordinationPacingPerComponent,
 			MaxSurge: &ms,
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "pm8")

@@ -195,7 +195,14 @@ func updateStrategyWithDefaults(s *v1beta1.OMENativeUpdateStrategy) v1beta1.OMEN
 	}
 	out := *s
 	if out.Type == "" {
-		out.Type = v1beta1.OMENativeUpdateStrategyInPlaceIfPossible
+		// Default to SurgeThenDrain. It currently delegates to recreate
+		// (no zero-downtime surge yet), but recreates throttle to the
+		// MaxUnavailable budget at the dispatcher gate — in-place at
+		// scale could mass-drain the fleet on a single wake-up. Opt
+		// back into in-place explicitly via
+		// spec.<component>.omeNative.updateStrategy.type if you have a
+		// reason (pod-UID preservation, tight capacity).
+		out.Type = v1beta1.OMENativeUpdateStrategySurgeThenDrain
 	}
 	if out.InPlaceUpdateStrategy == nil {
 		out.InPlaceUpdateStrategy = &v1beta1.OMENativeInPlaceUpdateStrategy{}

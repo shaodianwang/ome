@@ -605,7 +605,12 @@ integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tes
 	@# dumps the full GinkgoWriter on failures — so the failure trace
 	@# you actually need is preserved via -ginkgo.trace.
 	@# Set GINKGO_VERBOSE=1 to opt back in (or TEST_LOG_LEVEL=-1 for debug).
-	@$(TEST_ENV) go test -v ./tests/... $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
+	@#
+	@# Timeout: go test defaults to 10m PER PACKAGE. The coordination
+	@# suite at scale (Test H load + ~200 other specs) brushes that
+	@# limit on buildkite envtest. 20m gives headroom without masking a
+	@# genuine deadlock — any real loop bug would still hang past 20m.
+	@$(TEST_ENV) go test -v -timeout=20m ./tests/... $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@echo "✅ Integration tests passed"
 
 

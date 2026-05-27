@@ -180,6 +180,11 @@ func removeInstanceStatus(ctx context.Context, p core.ReconcileParams, component
 		hadEntry = false
 		fresh := &v1beta1.InferenceService{}
 		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				// ISVC deleted during reconcile — the InstanceStatus
+				// entry is gone with it. Treat as a successful no-op.
+				return nil
+			}
 			return fmt.Errorf("re-read ISVC: %w", err)
 		}
 		if fresh.Status.Components == nil {
@@ -204,6 +209,9 @@ func removeInstanceStatus(ctx context.Context, p core.ReconcileParams, component
 		fresh.Status.Components[component] = cs
 
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
 			return fmt.Errorf("update ISVC status: %w", err)
 		}
 		hadEntry = true

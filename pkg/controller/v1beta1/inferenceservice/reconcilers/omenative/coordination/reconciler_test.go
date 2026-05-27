@@ -325,7 +325,7 @@ func TestReconcile_ConsiderCoordinationGroupEventNotFiredWhenGroupDeclared(t *te
 	isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-			Policy:     v1beta1.CoordinationPolicyAtomic,
+			Policy:     v1beta1.CoordinationPolicyBlueGreen,
 		}},
 	}
 	rec := record.NewFakeRecorder(10)

@@ -164,6 +164,8 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		// Always refresh Current + NewPods from the live observation.
 		ratio := buildRatioState(in.ISVC, g, obs, perRevisionPods)
 		obs.OriginalReplicas = ratio.Original
+		obs.Now = now
+		obs.PreviousPhaseEnteredAt = previousPhaseEnteredAt(in.ISVC, g.Name)
 		tr := ComputeTransition(obs)
 		groupStatus := BuildGroupStatus(g, tr, ratio, now)
 
@@ -177,14 +179,14 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			RecordGroupFailure(in.ISVC.Name, g.Name, tr.Message)
 		}
 
-		// PairedMixable mixed-pairing observability: emit when distinct
-		// revision hashes coexist across Components (PairedMixable
+		// RollingUpdate mixed-pairing observability: emit when distinct
+		// revision hashes coexist across Components (RollingUpdate
 		// permits this but operators want to know).
-		if g.Policy == v1beta1.CoordinationPolicyPairedMixable && hasMixedPairing(g, perRevisionPods) {
+		if g.Policy == v1beta1.CoordinationPolicyRollingUpdate && hasMixedPairing(g, perRevisionPods) {
 			RecordMixedPairing(in.ISVC.Name, g.Name)
 			if in.Recorder != nil {
 				in.Recorder.Eventf(in.ISVC, corev1.EventTypeNormal, EventReasonMixedPairingObserved,
-					"PairedMixable group %s observed distinct per-Component revision hashes", g.Name)
+					"RollingUpdate group %s observed distinct per-Component revision hashes", g.Name)
 			}
 		}
 
@@ -553,9 +555,26 @@ func previousActiveComponent(isvc *v1beta1.InferenceService, groupName string) v
 	return ""
 }
 
-// hasMixedPairing reports whether the PairedMixable group's Components
+// previousPhaseEnteredAt returns the timestamp the group last entered
+// its current Phase, as captured in LastTransitionTime on the
+// previously-written group status. Returns zero time when no prior
+// status exists — callers (Sequential soak gate) treat zero as
+// "no clock running yet."
+func previousPhaseEnteredAt(isvc *v1beta1.InferenceService, groupName string) time.Time {
+	if isvc.Status.RolloutCoordination == nil {
+		return time.Time{}
+	}
+	for _, gs := range isvc.Status.RolloutCoordination.Groups {
+		if gs.Name == groupName && gs.LastTransitionTime != nil {
+			return gs.LastTransitionTime.Time
+		}
+	}
+	return time.Time{}
+}
+
+// hasMixedPairing reports whether the RollingUpdate group's Components
 // observe distinct revision hashes — the cross-revision pairing case
-// PairedMixable permits but operators want surfaced.
+// RollingUpdate permits but operators want surfaced.
 //
 // A pairing is "mixed" when at least one Component in the group has
 // pods on 2+ revisions OR when different Components in the group are

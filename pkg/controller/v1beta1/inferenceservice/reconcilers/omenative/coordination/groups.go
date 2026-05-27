@@ -3,6 +3,9 @@ package coordination
 import (
 	"fmt"
 	"strconv"
+	"time"
+
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -26,12 +29,18 @@ type ResolvedGroup struct {
 	Policy v1beta1.CoordinationPolicy
 
 	// Order pins the in-group sequence. Required for Sequential;
-	// optional for Atomic; nil for Independent / PairedMixable.
+	// optional for BlueGreen; nil for Independent / RollingUpdate.
 	Order []v1beta1.ComponentType
 
 	// Pacing is the effective pacing block after defaults are applied.
 	// Never nil.
 	Pacing v1beta1.CoordinationPacing
+
+	// Soak is the duration the Sequential state machine waits after a
+	// Component completes its rollout before starting the next
+	// Component in Order. Zero means "no wait." Only honored for
+	// Policy=Sequential; ignored for every other policy.
+	Soak time.Duration
 }
 
 // ResolveGroups turns spec.rolloutCoordination into a slice of
@@ -59,6 +68,9 @@ func resolveGroup(idx int, g *v1beta1.RolloutCoordinationGroup) ResolvedGroup {
 		Order:      append([]v1beta1.ComponentType(nil), g.Order...),
 		Pacing:     pacingWithDefaults(g.Pacing),
 	}
+	if g.Soak != nil {
+		out.Soak = g.Soak.Duration
+	}
 	return out
 }
 
@@ -78,7 +90,12 @@ func pacingWithDefaults(in *v1beta1.CoordinationPacing) v1beta1.CoordinationPaci
 		out.MaxSurge = ptrIntOrStringFromString("25%")
 	}
 	if out.MaxUnavailable == nil {
-		out.MaxUnavailable = ptrIntOrStringFromInt(0)
+		// 25% matches K8s Deployment convention. A default of 0
+		// deadlocks single-replica rollouts because the gate would
+		// refuse to take the only pod offline; 25% gives at-least-1
+		// budget at any positive replica count via the floor-rounded
+		// MaxUnavailableBudget math.
+		out.MaxUnavailable = ptrIntOrStringFromString("25%")
 	}
 	if out.Type == v1beta1.CoordinationPacingRatioBalanced && out.RatioTolerance == nil {
 		t := int32(5)
@@ -195,9 +212,9 @@ func SequentialSuccessor(g ResolvedGroup, c v1beta1.ComponentType) v1beta1.Compo
 // bypassed validation.
 func ValidateGroupShape(g ResolvedGroup) error {
 	switch g.Policy {
-	case v1beta1.CoordinationPolicyAtomic,
+	case v1beta1.CoordinationPolicyBlueGreen,
 		v1beta1.CoordinationPolicyIndependent,
-		v1beta1.CoordinationPolicyPairedMixable,
+		v1beta1.CoordinationPolicyRollingUpdate,
 		v1beta1.CoordinationPolicySequential:
 	default:
 		return fmt.Errorf("group %s: unknown policy %q", g.Name, g.Policy)
@@ -207,8 +224,8 @@ func ValidateGroupShape(g ResolvedGroup) error {
 		return fmt.Errorf("group %s: empty components", g.Name)
 	}
 
-	if g.Policy == v1beta1.CoordinationPolicyPairedMixable && len(g.Components) < 2 {
-		return fmt.Errorf("group %s: PairedMixable requires at least 2 components", g.Name)
+	if g.Policy == v1beta1.CoordinationPolicyRollingUpdate && len(g.Components) < 2 {
+		return fmt.Errorf("group %s: RollingUpdate requires at least 2 components", g.Name)
 	}
 
 	if g.Policy == v1beta1.CoordinationPolicySequential {
@@ -231,6 +248,50 @@ func ValidateGroupShape(g ResolvedGroup) error {
 			}
 			delete(want, c)
 		}
+		// RatioBalanced is meaningless for Sequential — only one
+		// Component is in flight at a time, so there's no cross-Component
+		// ratio to balance. Reject so operators see the conflict at
+		// admission instead of getting silently downgraded pacing.
+		if g.Pacing.Type == v1beta1.CoordinationPacingRatioBalanced {
+			return fmt.Errorf("group %s: Sequential cannot use RatioBalanced pacing — only one Component rolls at a time", g.Name)
+		}
+	}
+
+	// maxSurge=0 AND maxUnavailable=0 deadlocks any rollout (no surge
+	// headroom, no drain headroom). Applies to every policy that uses
+	// pacing for per-Component bumps (BlueGreen, Independent,
+	// RollingUpdate); Sequential's per-Component pacing inherits the
+	// same check.
+	if g.Pacing.Type == v1beta1.CoordinationPacingPerComponent {
+		if pacingZeroSurge(g.Pacing) && pacingZeroUnavailable(g.Pacing) {
+			return fmt.Errorf("group %s: maxSurge=0 AND maxUnavailable=0 deadlocks rollouts — set at least one non-zero", g.Name)
+		}
 	}
 	return nil
+}
+
+// pacingZeroSurge reports whether the resolved pacing's MaxSurge
+// computes to 0 for any non-zero replica count (i.e., MaxSurge is
+// literally 0 or 0%, not just a percent that rounds to 0 at low
+// replica counts).
+func pacingZeroSurge(p v1beta1.CoordinationPacing) bool {
+	if p.MaxSurge == nil {
+		return false
+	}
+	if p.MaxSurge.Type == intstr.Int {
+		return p.MaxSurge.IntValue() == 0
+	}
+	return p.MaxSurge.StrVal == "0%" || p.MaxSurge.StrVal == "0"
+}
+
+// pacingZeroUnavailable mirrors pacingZeroSurge for MaxUnavailable.
+// Nil means "use default" which is 0 today — count nil as zero too.
+func pacingZeroUnavailable(p v1beta1.CoordinationPacing) bool {
+	if p.MaxUnavailable == nil {
+		return true
+	}
+	if p.MaxUnavailable.Type == intstr.Int {
+		return p.MaxUnavailable.IntValue() == 0
+	}
+	return p.MaxUnavailable.StrVal == "0%" || p.MaxUnavailable.StrVal == "0"
 }

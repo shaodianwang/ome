@@ -108,8 +108,8 @@ func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
 	if plan.ReadyPolicy != v1beta1.OMENativeReadyPolicyNone {
 		t.Errorf("ReadyPolicy: got %q want None", plan.ReadyPolicy)
 	}
-	if plan.UpdateStrategy.Type != v1beta1.OMENativeUpdateStrategyInPlaceIfPossible {
-		t.Errorf("UpdateStrategy.Type: got %q want InPlaceIfPossible", plan.UpdateStrategy.Type)
+	if plan.UpdateStrategy.Type != v1beta1.OMENativeUpdateStrategySurgeThenDrain {
+		t.Errorf("UpdateStrategy.Type: got %q want SurgeThenDrain (default)", plan.UpdateStrategy.Type)
 	}
 	if plan.UpdateStrategy.InPlaceUpdateStrategy == nil ||
 		plan.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds == nil ||

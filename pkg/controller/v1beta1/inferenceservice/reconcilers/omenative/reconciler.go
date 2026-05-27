@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -182,9 +183,17 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 // semantic.
 func bumpCollisionCount(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType) (*int32, error) {
 	var next int32
+	isvcGone := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}
 		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				// ISVC deleted during the reconcile — there's no
+				// CollisionCount left to bump. Drop the work cleanly so
+				// controller-runtime doesn't retry the whole reconcile.
+				isvcGone = true
+				return nil
+			}
 			return fmt.Errorf("re-read ISVC for CollisionCount bump: %w", err)
 		}
 		if fresh.Status.Components == nil {
@@ -201,10 +210,17 @@ func bumpCollisionCount(ctx context.Context, p ReconcileParams, component v1beta
 		cs.OMENative.CollisionCount = &next
 		fresh.Status.Components[component] = cs
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				isvcGone = true
+				return nil
+			}
 			return fmt.Errorf("persist CollisionCount: %w", err)
 		}
 		return nil
 	})
+	if isvcGone {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

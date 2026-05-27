@@ -64,7 +64,7 @@ var _ = ginkgo.Describe("Coordination unhappy paths (OEP-0007.1)", ginkgo.Ordere
 	})
 
 	ginkgo.It("UH-15 zero non-zero replicas on every Component → degenerate Idle", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
 				o.DesiredReplicas = 0
@@ -79,7 +79,7 @@ var _ = ginkgo.Describe("Coordination unhappy paths (OEP-0007.1)", ginkgo.Ordere
 	})
 
 	ginkgo.It("UH-16 first-reconcile observation (no pods yet) → Idle, not Surging", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
 				o.TotalPods = 0
@@ -92,8 +92,8 @@ var _ = ginkgo.Describe("Coordination unhappy paths (OEP-0007.1)", ginkgo.Ordere
 			To(Equal(v1beta1.CoordinationPhaseIdle))
 	})
 
-	ginkgo.It("UH-19 Atomic: 1 Component Failed + 1 Component Paused → Failed wins", func() {
-		obs := atomicObs()
+	ginkgo.It("UH-19 BlueGreen: 1 Component Failed + 1 Component Paused → Failed wins", func() {
+		obs := blueGreenObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
 		})
@@ -105,11 +105,11 @@ var _ = ginkgo.Describe("Coordination unhappy paths (OEP-0007.1)", ginkgo.Ordere
 		})
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseFailed),
-				"Atomic precedence: Failed (any) > Paused (any)")
+				"BlueGreen precedence: Failed (any) > Paused (any)")
 	})
 
 	ginkgo.It("UH-20 PausedGlobal + per-Component Failed → PausedGlobal wins (outer short-circuit)", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
 		})
@@ -120,7 +120,7 @@ var _ = ginkgo.Describe("Coordination unhappy paths (OEP-0007.1)", ginkgo.Ordere
 	})
 
 	ginkgo.It("UH-21 Component declared in spec but missing from observation → state machine handles gracefully", func() {
-		obs := atomicObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
+		obs := blueGreenObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
 		delete(obs.Components, v1beta1.EngineComponent)
 		mutate(&obs, v1beta1.DecoderComponent, func(o *coordination.ComponentObservation) {
 			o.RolloutInFlight = true
@@ -131,8 +131,8 @@ var _ = ginkgo.Describe("Coordination unhappy paths (OEP-0007.1)", ginkgo.Ordere
 			To(Equal(v1beta1.CoordinationPhaseSurging))
 	})
 
-	ginkgo.It("UH-24 Atomic Failed + PausedGlobal in same reconcile → Paused wins (outer beats inner)", func() {
-		obs := atomicObs()
+	ginkgo.It("UH-24 BlueGreen Failed + PausedGlobal in same reconcile → Paused wins (outer beats inner)", func() {
+		obs := blueGreenObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
 		})

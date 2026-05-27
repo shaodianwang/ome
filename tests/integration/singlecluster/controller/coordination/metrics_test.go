@@ -257,11 +257,9 @@ var _ = ginkgo.Describe("Coordination metrics (OEP-0007.1)", ginkgo.Ordered, fun
 
 	ginkgo.It("M-4 E2E group_transition_total fires from reconciler on phase boundary", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("m4e"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			labels := prometheus.Labels{"isvc": "m4e", "group": "0"}
@@ -273,15 +271,13 @@ var _ = ginkgo.Describe("Coordination metrics (OEP-0007.1)", ginkgo.Ordered, fun
 
 	ginkgo.It("M-5 E2E ratio_skew_total fires when RatioBalanced rejects a surge", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("m5e"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type:           v1beta1.CoordinationPacingRatioBalanced,
 			RatioTolerance: int32Ptr(0),
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			labels := prometheus.Labels{"isvc": "m5e", "group": "0"}

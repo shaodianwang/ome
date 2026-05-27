@@ -52,9 +52,7 @@ var _ = ginkgo.Describe("Coordination regression suite (OEP-0007.1)", ginkgo.Ord
 		fix := newCoordFixture(ns.Name, WithISVCName("reg1"))
 		fix.ISVC.Spec.RolloutCoordination = nil
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			isvc := freshISVC(g, ns.Name, "reg1")
@@ -74,9 +72,7 @@ var _ = ginkgo.Describe("Coordination regression suite (OEP-0007.1)", ginkgo.Ord
 		fix := newCoordFixture(ns.Name, WithISVCName("reg4"), WithoutDecoder())
 		fix.ISVC.Spec.RolloutCoordination = nil
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		// With no coord block, per-revision Services + Traffic[] still
 		// emit for any OMENative Component; coord status stays nil.

@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,9 +50,16 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 	// Captured outside the closure so the post-commit retention sweep
 	// sees the names that actually committed.
 	var liveRevisionNames []string
+	isvcGone := false
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}
 		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				// ISVC deleted during reconcile — nothing to aggregate
+				// into. Drop the work cleanly to avoid retry storms.
+				isvcGone = true
+				return nil
+			}
 			return fmt.Errorf("status: re-read ISVC: %w", err)
 		}
 
@@ -69,6 +77,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 			instPods := byIndex[s.Index]
 			s.PodCount = int32(len(instPods))
 			s.ReadyPodCount = countReadyPods(instPods)
+			s.ServingPodCount = countServingPods(instPods)
 			s.ScheduledPodCount = countScheduledPods(instPods)
 			s.AvailablePodCount = countAvailablePods(instPods, availableByPod)
 			s.NodesOccupied = uniqueNodes(instPods)
@@ -78,6 +87,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// Component-level counters.
 		cs.OMENative.Replicas = int32(len(cs.OMENative.InstanceStatuses))
 		cs.OMENative.ReadyReplicas = countReadyInstances(cs.OMENative.InstanceStatuses)
+		cs.OMENative.ServingReplicas = countServingInstances(cs.OMENative.InstanceStatuses)
 		cs.OMENative.AvailableReplicas = countAvailableInstances(cs.OMENative.InstanceStatuses)
 		if target != nil {
 			cs.OMENative.UpdatedReplicas, cs.OMENative.UpdatedReadyReplicas =
@@ -97,6 +107,10 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 
 		fresh.Status.Components[plan.Component] = cs
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				isvcGone = true
+				return nil
+			}
 			return fmt.Errorf("status: update: %w", err)
 		}
 		// Capture after a successful Update so a retry replays the names
@@ -104,6 +118,9 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		liveRevisionNames = revision.CollectLiveRevisionNames(cs.OMENative)
 		return nil
 	})
+	if isvcGone {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -164,6 +181,23 @@ func countReadyPods(pods []*corev1.Pod) int32 {
 	return n
 }
 
+// countServingPods counts pods that are BOTH ContainersReady AND have
+// the controller's serving gate set to True — i.e., pods actually in
+// the load-balancer rotation. This is the count MaxUnavailable budgets
+// in coordination/ratio.go gate against; ContainersReady alone misses
+// the case where the controller has flipped serving=False (in-place
+// update drain, recreate Phase A) while containers technically remain
+// Ready.
+func countServingPods(pods []*corev1.Pod) int32 {
+	var n int32
+	for _, p := range pods {
+		if podreadiness.IsContainersReady(p) && podreadiness.IsServing(p) {
+			n++
+		}
+	}
+	return n
+}
+
 func countScheduledPods(pods []*corev1.Pod) int32 {
 	var n int32
 	for _, p := range pods {
@@ -212,6 +246,20 @@ func countReadyInstances(insts []v1beta1.OMENativeInstanceStatus) int32 {
 	var n int32
 	for _, s := range insts {
 		if s.PodCount > 0 && s.ReadyPodCount == s.PodCount {
+			n++
+		}
+	}
+	return n
+}
+
+// countServingInstances counts Instances whose every pod is BOTH
+// ContainersReady AND serving=True. This is the count
+// CheckUnavailabilityGate uses — "instances actually in the load
+// balancer rotation right now."
+func countServingInstances(insts []v1beta1.OMENativeInstanceStatus) int32 {
+	var n int32
+	for _, s := range insts {
+		if s.PodCount > 0 && s.ServingPodCount == s.PodCount {
 			n++
 		}
 	}

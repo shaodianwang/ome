@@ -47,23 +47,23 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 	// ----------------------------------------------------------------
 
 	ginkgo.It("R-1 40:20 topology, in-band surge proposal → allowed unchanged", func() {
-		// Original ratio: 40 engine : 20 decoder. Surge engine by 2
-		// (5% of 40); surge decoder by 1 (5% of 20). With default
-		// tolerance=5%, projected fractions are identical (0.05 each)
-		// → within band.
+		// Serving-ratio semantic. Original 40:20 → orig_ratio
+		// 2.0. Default tolerance 5% → band [1.9, 2.1].
+		// Serving: all original pods alive (engine=40, decoder=20).
+		// Surge decoder +1 → serving 40/21 = 1.905, in band → allowed.
 		state := coordination.RatioState{
 			Original: map[v1beta1.ComponentType]int32{
 				v1beta1.EngineComponent:  40,
 				v1beta1.DecoderComponent: 20,
 			},
-			NewPods: map[v1beta1.ComponentType]int32{
-				v1beta1.EngineComponent:  2, // already at 5%
-				v1beta1.DecoderComponent: 1, // already at 5%
+			Serving: map[v1beta1.ComponentType]int32{
+				v1beta1.EngineComponent:  40,
+				v1beta1.DecoderComponent: 20,
 			},
 		}
 		d := coordination.EvaluateSurge(ratioPacing(nil), state, v1beta1.DecoderComponent, 1)
 		Expect(d.AllowedSurgeDelta).To(Equal(int32(1)),
-			"a +1 surge that keeps decoder at 10% (vs engine at 5%) is within the 5% tolerance band")
+			"surge decoder +1 keeps live ratio at 40/21 = 1.905 within [1.9, 2.1]")
 		Expect(d.SkewRejected).To(BeFalse())
 		Expect(d.Reason).To(ContainSubstring("within tolerance"))
 	})
@@ -108,25 +108,29 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 	})
 
 	ginkgo.It("R-4 RatioTolerance=10 widens the acceptable band vs default 5", func() {
-		// Same ask: surge engine by 4 (10% of 40), decoder at 0 (0%).
-		// Default tolerance=5 → rejected. tolerance=10 → allowed.
+		// Serving-ratio semantic. Original 40:20 → orig_ratio 2.0.
+		// Serving: live 40 engine / 20 decoder → ratio 2.0 (in band).
+		// Propose surge engine +4 → projected 44/20 = 2.2.
+		//   tol=5%: band [1.9, 2.1] → 2.2 OUT → back off step by step,
+		//           +2 → 42/20=2.1 in band (boundary) → returns 2.
+		//   tol=10%: band [1.8, 2.2] → 2.2 in (boundary) → returns 4.
 		state := coordination.RatioState{
 			Original: map[v1beta1.ComponentType]int32{
 				v1beta1.EngineComponent:  40,
 				v1beta1.DecoderComponent: 20,
 			},
-			NewPods: map[v1beta1.ComponentType]int32{
-				v1beta1.EngineComponent:  0,
-				v1beta1.DecoderComponent: 0,
+			Serving: map[v1beta1.ComponentType]int32{
+				v1beta1.EngineComponent:  40,
+				v1beta1.DecoderComponent: 20,
 			},
 		}
 		dDefault := coordination.EvaluateSurge(ratioPacing(int32Ptr(5)), state, v1beta1.EngineComponent, 4)
 		Expect(dDefault.AllowedSurgeDelta).To(BeNumerically("<", int32(4)),
-			"5%% tolerance cannot fit a 10%% asymmetric surge")
+			"5%% tolerance cannot fit the full +4 engine surge (would push ratio to 2.2)")
 
 		dWide := coordination.EvaluateSurge(ratioPacing(int32Ptr(10)), state, v1beta1.EngineComponent, 4)
 		Expect(dWide.AllowedSurgeDelta).To(Equal(int32(4)),
-			"10%% tolerance must accept the same proposal that default rejected")
+			"10%% tolerance accepts the +4 engine surge (ratio 2.2 == upper band boundary)")
 	})
 
 	ginkgo.It("R-5 single-Component group → trivially satisfied (no-op short-circuit)", func() {
@@ -182,33 +186,35 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 	})
 
 	ginkgo.It("R-9 3-way 40:20:10 ratio enforced pairwise (no degenerate biggest-only)", func() {
-		// 40:20:10 topology. Surge engine (40) by 2 (5%). Router (10)
-		// has 0 new (0%). Pairwise check: engine 5% vs router 0% = 5
-		// percentage-point gap. With default 5% tolerance, this is
-		// right at the edge — and the existing 5%-vs-5% pair (engine
-		// vs decoder, both at 5%) is satisfied. Pairwise correctness
-		// means the engine-vs-router pair gates this.
+		// Serving-ratio semantic with 3-way topology.
+		// Original 40:20:10 → pairs:
+		//   engine/decoder = 40/20 = 2.0,  band [1.9, 2.1] at tol=5%
+		//   engine/router  = 40/10 = 4.0,  band [3.8, 4.2]
+		//   decoder/router = 20/10 = 2.0,  band [1.9, 2.1]
+		// Live serving: all original alive (40, 20, 10).
+		// Surge engine +2 → projected 42/20/10:
+		//   engine/decoder = 42/20 = 2.1   (at boundary, allowed)
+		//   engine/router  = 42/10 = 4.2   (at boundary, allowed)
+		//   decoder/router = 20/10 = 2.0   (unchanged, allowed)
+		// → +2 allowed. +3 would push engine/decoder to 2.15 out → reject.
 		state := coordination.RatioState{
 			Original: map[v1beta1.ComponentType]int32{
 				v1beta1.EngineComponent:  40,
 				v1beta1.DecoderComponent: 20,
 				v1beta1.RouterComponent:  10,
 			},
-			NewPods: map[v1beta1.ComponentType]int32{
-				v1beta1.EngineComponent:  0,
-				v1beta1.DecoderComponent: 1, // 5%
-				v1beta1.RouterComponent:  0,
+			Serving: map[v1beta1.ComponentType]int32{
+				v1beta1.EngineComponent:  40,
+				v1beta1.DecoderComponent: 20,
+				v1beta1.RouterComponent:  10,
 			},
 		}
 		d := coordination.EvaluateSurge(ratioPacing(int32Ptr(5)), state, v1beta1.EngineComponent, 2)
-		// engine 2/40 = 5%, decoder 1/20 = 5%, router 0/10 = 0%.
-		// engine-vs-router gap = 5pp = exactly at band (the band is
-		// `>` not `>=`, so equality is accepted). 2 is allowed.
 		Expect(d.AllowedSurgeDelta).To(Equal(int32(2)),
-			"pairwise band check accepts 5%% gap at exactly 5%% tolerance")
+			"pairwise band check accepts +2 (engine/decoder=2.1 and engine/router=4.2 both at boundary)")
 
-		// Bumping by one more: engine=3/40=7.5% vs router=0% → 7.5pp
-		// gap → rejected. AllowedSurgeDelta truncates to 2.
+		// +3 would push engine/decoder = 43/20 = 2.15 → out of [1.9, 2.1].
+		// Backoff returns 2.
 		d = coordination.EvaluateSurge(ratioPacing(int32Ptr(5)), state, v1beta1.EngineComponent, 3)
 		Expect(d.AllowedSurgeDelta).To(Equal(int32(2)),
 			"truncation walks delta down to the largest fit, not all-or-nothing")
@@ -227,17 +233,30 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 		Expect(d.Reason).To(Equal("no surge requested"))
 	})
 
-	ginkgo.It("R-11 proposedDelta negative → allowed=0 (defensive: <= 0 short-circuits)", func() {
+	ginkgo.It("R-11 proposedDelta negative → drain projection (single-step, not iterated)", func() {
+		// OEP-0007.2: negative proposedDelta is the dispatcher asking
+		// "may I pull one more pod from rotation?". Single-step
+		// projection; a partial drain isn't a unit of work the
+		// dispatcher can act on. With current serving (Engine=4, Decoder=4),
+		// asking to drain 1 engine → projected (3, 4), ratio 4/3 ≈ 1.33,
+		// orig ratio 1.0, default tolerance 5% → band [0.95, 1.05] →
+		// projected ratio outside band → SkewRejected.
 		state := coordination.RatioState{
 			Original: map[v1beta1.ComponentType]int32{
 				v1beta1.EngineComponent:  4,
 				v1beta1.DecoderComponent: 4,
 			},
+			Serving: map[v1beta1.ComponentType]int32{
+				v1beta1.EngineComponent:  4,
+				v1beta1.DecoderComponent: 4,
+			},
 		}
-		d := coordination.EvaluateSurge(ratioPacing(nil), state, v1beta1.EngineComponent, -5)
-		Expect(d.AllowedSurgeDelta).To(BeZero())
-		Expect(d.SkewRejected).To(BeFalse(),
-			"negative delta is degenerate input, NOT a skew rejection")
+		d := coordination.EvaluateSurge(ratioPacing(nil), state, v1beta1.EngineComponent, -1)
+		Expect(d.AllowedSurgeDelta).To(BeZero(),
+			"drain blocked when projected ratio crosses the band")
+		Expect(d.SkewRejected).To(BeTrue(),
+			"out-of-band drain IS a skew rejection under the new drain-projection semantic")
+		Expect(d.Reason).To(ContainSubstring("drain would skew"))
 	})
 
 	ginkgo.It("R-12 pacing.Type != RatioBalanced → bypass: returns proposed delta unchanged", func() {
@@ -255,11 +274,11 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 	})
 
 	ginkgo.It("R-G3 atomic Surging with RatioBalanced + tight band zeroes SurgeBudget + sets RatioSkewRejected", func() {
-		// Atomic group with RatioBalanced(tolerance=0). Asymmetric desired
+		// BlueGreen group with RatioBalanced(tolerance=0). Asymmetric desired
 		// replicas (40/20) — surging engine without decoder progress
 		// would blow the ratio band. EvaluateSurge zeroes the engine
 		// budget; ComputeTransition surfaces RatioSkewRejected=true.
-		obs := atomicObs()
+		obs := blueGreenObs()
 		obs.Group.Pacing = v1beta1.CoordinationPacing{
 			Type:           v1beta1.CoordinationPacingRatioBalanced,
 			RatioTolerance: int32Ptr(0),
@@ -288,7 +307,7 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 	ginkgo.It("R-G3b PerComponent pacing never sets RatioSkewRejected", func() {
 		// Same shape as R-G3 but with PerComponent pacing → no ratio
 		// gate runs. SkewRejected must stay false.
-		obs := atomicObs()
+		obs := blueGreenObs()
 		obs.Group.Pacing = v1beta1.CoordinationPacing{
 			Type: v1beta1.CoordinationPacingPerComponent,
 		}
@@ -317,15 +336,13 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 
 	ginkgo.It("R-3 RatioSkewRejected event + counter fire when EvaluateSurge returns SkewRejected", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("r3"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type:           v1beta1.CoordinationPacingRatioBalanced,
 			RatioTolerance: int32Ptr(0),
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			events := &corev1.EventList{}
@@ -345,14 +362,12 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 		// buildRatioState invokes SnapshotOriginal on first observation
 		// and BuildGroupStatus populates ObservedRatio.
 		fix := newCoordFixture(ns.Name, WithISVCName("r6"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type: v1beta1.CoordinationPacingRatioBalanced,
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "r6")
@@ -373,15 +388,13 @@ var _ = ginkgo.Describe("Coordination RatioBalanced pacing (OEP-0007.1)", ginkgo
 			WithEngineReplicas(20),
 			WithDecoderReplicas(5),
 			WithEngineImage("ghcr.io/test/runtime:v1"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type:           v1beta1.CoordinationPacingRatioBalanced,
 			RatioTolerance: int32Ptr(20),
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		// Wait for the producer to emit ObservedRatio. We don't pin
 		// exact Original values because snapshot timing is racy in

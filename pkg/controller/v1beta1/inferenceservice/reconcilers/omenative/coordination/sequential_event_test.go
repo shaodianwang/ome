@@ -19,7 +19,7 @@ func TestEmitSequentialDeferred_NotSequentialPolicy(t *testing.T) {
 	rec := record.NewFakeRecorder(10)
 	isvc := &v1beta1.InferenceService{}
 	g := ResolvedGroup{
-		Policy: v1beta1.CoordinationPolicyAtomic,
+		Policy: v1beta1.CoordinationPolicyBlueGreen,
 		Order:  []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 	}
 	obs := GroupObservation{
@@ -31,7 +31,7 @@ func TestEmitSequentialDeferred_NotSequentialPolicy(t *testing.T) {
 	}
 	emitSequentialDeferredEvent(rec, isvc, g, obs, "")
 	if got := drainEvents(rec); len(got) != 0 {
-		t.Errorf("Atomic policy must not emit Sequential events; got %v", got)
+		t.Errorf("BlueGreen policy must not emit Sequential events; got %v", got)
 	}
 }
 

@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"testing"
+	"time"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -29,7 +30,7 @@ func idleObs(g ResolvedGroup) GroupObservation {
 }
 
 func TestComputeTransition_PausedGlobal(t *testing.T) {
-	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyAtomic}
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen}
 	obs := idleObs(g)
 	obs.PausedGlobal = true
 	tr := ComputeTransition(obs)
@@ -70,8 +71,8 @@ func TestComputeTransition_IndependentFailed(t *testing.T) {
 	}
 }
 
-func TestComputeTransition_AtomicSurging(t *testing.T) {
-	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyAtomic}
+func TestComputeTransition_BlueGreenSurging(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen}
 	obs := idleObs(g)
 	// One Component is rolling but has zero new pods (not surged yet).
 	engine := obs.Components[v1beta1.EngineComponent]
@@ -82,12 +83,12 @@ func TestComputeTransition_AtomicSurging(t *testing.T) {
 	obs.Components[v1beta1.EngineComponent] = engine
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhaseSurging {
-		t.Errorf("Atomic surging: got %q want Surging", tr.Phase)
+		t.Errorf("BlueGreen surging: got %q want Surging", tr.Phase)
 	}
 }
 
-func TestComputeTransition_AtomicWaiting(t *testing.T) {
-	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyAtomic}
+func TestComputeTransition_BlueGreenWaiting(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen}
 	obs := idleObs(g)
 	// Both rolling, both have surge pods, but engine's new pods not Ready.
 	for _, c := range g.Components {
@@ -104,12 +105,12 @@ func TestComputeTransition_AtomicWaiting(t *testing.T) {
 	obs.Components[v1beta1.EngineComponent] = engine
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhaseWaiting {
-		t.Errorf("Atomic Waiting: got %q want Waiting", tr.Phase)
+		t.Errorf("BlueGreen Waiting: got %q want Waiting", tr.Phase)
 	}
 }
 
-func TestComputeTransition_AtomicShifting(t *testing.T) {
-	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyAtomic}
+func TestComputeTransition_BlueGreenShifting(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen}
 	obs := idleObs(g)
 	// Both rolling, all new pods Ready, but old pods still up.
 	for _, c := range g.Components {
@@ -123,12 +124,12 @@ func TestComputeTransition_AtomicShifting(t *testing.T) {
 	}
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhaseShifting {
-		t.Errorf("Atomic Shifting: got %q want Shifting", tr.Phase)
+		t.Errorf("BlueGreen Shifting: got %q want Shifting", tr.Phase)
 	}
 }
 
-func TestComputeTransition_AtomicScalingDown(t *testing.T) {
-	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyAtomic}
+func TestComputeTransition_BlueGreenScalingDown(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen}
 	obs := idleObs(g)
 	// All rolling, new pods Ready, old pods gone (TotalPods == NewRevisionPods).
 	for _, c := range g.Components {
@@ -142,36 +143,36 @@ func TestComputeTransition_AtomicScalingDown(t *testing.T) {
 	}
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhaseScalingDown {
-		t.Errorf("Atomic ScalingDown: got %q want ScalingDown", tr.Phase)
+		t.Errorf("BlueGreen ScalingDown: got %q want ScalingDown", tr.Phase)
 	}
 }
 
-func TestComputeTransition_AtomicFailed(t *testing.T) {
-	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyAtomic}
+func TestComputeTransition_BlueGreenFailed(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen}
 	obs := idleObs(g)
 	engine := obs.Components[v1beta1.EngineComponent]
 	engine.Failed = true
 	obs.Components[v1beta1.EngineComponent] = engine
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhaseFailed {
-		t.Errorf("Atomic any-failure: got %q want Failed", tr.Phase)
+		t.Errorf("BlueGreen any-failure: got %q want Failed", tr.Phase)
 	}
 }
 
-func TestComputeTransition_AtomicPaused(t *testing.T) {
-	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyAtomic}
+func TestComputeTransition_BlueGreenPaused(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen}
 	obs := idleObs(g)
 	c := obs.Components[v1beta1.EngineComponent]
 	c.Paused = true
 	obs.Components[v1beta1.EngineComponent] = c
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhasePaused {
-		t.Errorf("Atomic with paused Component: got %q want Paused", tr.Phase)
+		t.Errorf("BlueGreen with paused Component: got %q want Paused", tr.Phase)
 	}
 }
 
-func TestComputeTransition_PairedMixableSurging(t *testing.T) {
-	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyPairedMixable}
+func TestComputeTransition_RollingUpdateSurging(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyRollingUpdate}
 	obs := idleObs(g)
 	engine := obs.Components[v1beta1.EngineComponent]
 	engine.RolloutInFlight = true
@@ -179,27 +180,27 @@ func TestComputeTransition_PairedMixableSurging(t *testing.T) {
 	obs.Components[v1beta1.EngineComponent] = engine
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhaseSurging {
-		t.Errorf("PairedMixable any-surging: got %q want Surging", tr.Phase)
+		t.Errorf("RollingUpdate any-surging: got %q want Surging", tr.Phase)
 	}
 }
 
-func TestComputeTransition_PairedMixableIdle(t *testing.T) {
-	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyPairedMixable}
+func TestComputeTransition_RollingUpdateIdle(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyRollingUpdate}
 	tr := ComputeTransition(idleObs(g))
 	if tr.Phase != v1beta1.CoordinationPhaseIdle {
-		t.Errorf("PairedMixable idle: got %q want Idle", tr.Phase)
+		t.Errorf("RollingUpdate idle: got %q want Idle", tr.Phase)
 	}
 }
 
-func TestComputeTransition_PairedMixableFailed(t *testing.T) {
-	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyPairedMixable}
+func TestComputeTransition_RollingUpdateFailed(t *testing.T) {
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyRollingUpdate}
 	obs := idleObs(g)
 	engine := obs.Components[v1beta1.EngineComponent]
 	engine.Failed = true
 	obs.Components[v1beta1.EngineComponent] = engine
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhaseFailed {
-		t.Errorf("PairedMixable failure: got %q want Failed", tr.Phase)
+		t.Errorf("RollingUpdate failure: got %q want Failed", tr.Phase)
 	}
 }
 
@@ -307,5 +308,133 @@ func TestComputeTransition_SequentialNextStartsAfterPrevious(t *testing.T) {
 	}
 	if tr.Phase != v1beta1.CoordinationPhaseSurging {
 		t.Errorf("phase: got %q want Surging", tr.Phase)
+	}
+}
+
+// TestComputeTransition_SequentialSoakHolds verifies the soak gate
+// blocks the next Component from starting until the configured Soak
+// duration has elapsed since the previous Component completed (as
+// recorded in PreviousPhaseEnteredAt).
+func TestComputeTransition_SequentialSoakHolds(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+		Policy:     v1beta1.CoordinationPolicySequential,
+		Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+		Soak:       5 * time.Second,
+	}
+	now := time.Now()
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {
+				Component:           v1beta1.DecoderComponent,
+				DesiredReplicas:     1,
+				TargetRevisionHash:  "rev2",
+				CurrentRevisionHash: "rev2",
+				RolloutInFlight:     false,
+			},
+			v1beta1.EngineComponent: {
+				Component:           v1beta1.EngineComponent,
+				DesiredReplicas:     1,
+				TargetRevisionHash:  "rev2",
+				CurrentRevisionHash: "rev1",
+				RolloutInFlight:     true,
+			},
+		},
+		Now:                    now,
+		PreviousPhaseEnteredAt: now.Add(-2 * time.Second), // 2s into a 5s soak
+	}
+	tr := ComputeTransition(obs)
+	if tr.CompositePhase != v1beta1.CompositePhaseSequentialAwaiting {
+		t.Errorf("soak should hold engine at Sequential.Awaiting; got composite=%q phase=%q msg=%q",
+			tr.CompositePhase, tr.Phase, tr.Message)
+	}
+	if tr.CurrentComponent != v1beta1.EngineComponent {
+		t.Errorf("CurrentComponent during soak: got %q want engine", tr.CurrentComponent)
+	}
+	if tr.PreviousComponent != v1beta1.DecoderComponent {
+		t.Errorf("PreviousComponent during soak: got %q want decoder", tr.PreviousComponent)
+	}
+}
+
+// TestComputeTransition_SequentialSoakReleases verifies the soak gate
+// releases once the configured Soak duration has elapsed, letting the
+// next Component begin its rollout.
+func TestComputeTransition_SequentialSoakReleases(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+		Policy:     v1beta1.CoordinationPolicySequential,
+		Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+		Soak:       5 * time.Second,
+	}
+	now := time.Now()
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {
+				Component:           v1beta1.DecoderComponent,
+				DesiredReplicas:     1,
+				TargetRevisionHash:  "rev2",
+				CurrentRevisionHash: "rev2",
+				RolloutInFlight:     false,
+			},
+			v1beta1.EngineComponent: {
+				Component:           v1beta1.EngineComponent,
+				DesiredReplicas:     1,
+				TargetRevisionHash:  "rev2",
+				CurrentRevisionHash: "rev1",
+				RolloutInFlight:     true,
+			},
+		},
+		Now:                    now,
+		PreviousPhaseEnteredAt: now.Add(-10 * time.Second), // soak elapsed (10s > 5s)
+	}
+	tr := ComputeTransition(obs)
+	if tr.CompositePhase == v1beta1.CompositePhaseSequentialAwaiting {
+		t.Errorf("soak elapsed: must NOT be Awaiting; got composite=%q", tr.CompositePhase)
+	}
+	if tr.CurrentComponent != v1beta1.EngineComponent {
+		t.Errorf("CurrentComponent post-soak: got %q want engine", tr.CurrentComponent)
+	}
+}
+
+// TestComputeTransition_SequentialNoSoakRunsImmediately verifies the
+// default behavior (Soak=0): the next Component starts the moment
+// the previous Component finishes, no time-based hold.
+func TestComputeTransition_SequentialNoSoakRunsImmediately(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+		Policy:     v1beta1.CoordinationPolicySequential,
+		Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+		Soak:       0,
+	}
+	now := time.Now()
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {
+				Component:           v1beta1.DecoderComponent,
+				DesiredReplicas:     1,
+				TargetRevisionHash:  "rev2",
+				CurrentRevisionHash: "rev2",
+				RolloutInFlight:     false,
+			},
+			v1beta1.EngineComponent: {
+				Component:           v1beta1.EngineComponent,
+				DesiredReplicas:     1,
+				TargetRevisionHash:  "rev2",
+				CurrentRevisionHash: "rev1",
+				RolloutInFlight:     true,
+			},
+		},
+		Now:                    now,
+		PreviousPhaseEnteredAt: now.Add(-1 * time.Millisecond), // immediately after completion
+	}
+	tr := ComputeTransition(obs)
+	if tr.CompositePhase == v1beta1.CompositePhaseSequentialAwaiting {
+		t.Errorf("Soak=0 must NOT engage Awaiting; got composite=%q", tr.CompositePhase)
 	}
 }

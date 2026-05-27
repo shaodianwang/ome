@@ -8152,6 +8152,7 @@ spec:
                               type: object
                             type:
                               enum:
+                                - SurgeThenDrain
                                 - RecreatePod
                                 - InPlaceIfPossible
                                 - InPlaceOnly
@@ -21117,6 +21118,7 @@ spec:
                               type: object
                             type:
                               enum:
+                                - SurgeThenDrain
                                 - RecreatePod
                                 - InPlaceIfPossible
                                 - InPlaceOnly
@@ -29844,6 +29846,7 @@ spec:
                               type: object
                             type:
                               enum:
+                                - SurgeThenDrain
                                 - RecreatePod
                                 - InPlaceIfPossible
                                 - InPlaceOnly

@@ -111,9 +111,9 @@ func RenderWithRevision(
 // empty (caller didn't go through RenderWithRevision).
 //
 // Per the OEP-0007.1 contract: the revision-aware endpoint uses the
-// pod's OWN revision-hash — Atomic gang semantics guarantee peers
+// pod's OWN revision-hash — BlueGreen gang semantics guarantee peers
 // surge together, so a new-revision pod dials peers at the same
-// hash. PairedMixable permits cross-revision but the REVISION_ENDPOINT
+// hash. RollingUpdate permits cross-revision but the REVISION_ENDPOINT
 // still points at the pod's-own-revision peer; runtimes use the
 // generic ENDPOINT form when cross-revision peers are acceptable.
 //

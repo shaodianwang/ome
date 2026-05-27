@@ -71,7 +71,7 @@ func TestRolloutSpec_JSONRoundTrip(t *testing.T) {
 						Pause:         &RolloutPause{Duration: &pauseDuration},
 					},
 					{
-						// Atomic cutover.
+						// BlueGreen cutover.
 						NewCapacity:   intstr.FromString("100%"),
 						OldCapacity:   intStrPtr(intstr.FromString("0%")),
 						TrafficWeight: 100,

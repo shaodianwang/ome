@@ -334,7 +334,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *spec.RestartPolicy)
 
 		require.NotNil(t, spec.UpdateStrategy)
-		assert.Equal(t, v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, spec.UpdateStrategy.Type)
+		assert.Equal(t, v1beta1.OMENativeUpdateStrategySurgeThenDrain, spec.UpdateStrategy.Type)
 		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy)
 		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
 		assert.Equal(t, int32(30), *spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
@@ -381,7 +381,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 
 		// filled
 		require.NotNil(t, ext.OMENative.UpdateStrategy)
-		assert.Equal(t, v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, ext.OMENative.UpdateStrategy.Type)
+		assert.Equal(t, v1beta1.OMENativeUpdateStrategySurgeThenDrain, ext.OMENative.UpdateStrategy.Type)
 		require.NotNil(t, ext.OMENative.ReadyPolicy)
 		assert.Equal(t, v1beta1.OMENativeReadyPolicyAllPodReady, *ext.OMENative.ReadyPolicy)
 		require.NotNil(t, ext.OMENative.MigrationPolicy)
@@ -496,7 +496,7 @@ func TestDefaultRolloutCoordination_FillsPacingDefaults(t *testing.T) {
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				Pacing:     &v1beta1.CoordinationPacing{},
 			},
 		},
@@ -522,7 +522,7 @@ func TestDefaultRolloutCoordination_RatioBalancedSetsRatioTolerance(t *testing.T
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				Pacing:     &v1beta1.CoordinationPacing{Type: v1beta1.CoordinationPacingRatioBalanced},
 			},
 		},
@@ -561,7 +561,7 @@ func TestDefaultRolloutCoordination_PreservesOperatorOverrides(t *testing.T) {
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				Pacing: &v1beta1.CoordinationPacing{
 					Type:           v1beta1.CoordinationPacingRatioBalanced,
 					MaxSurge:       &ms,

@@ -23,6 +23,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
 )
 
 // ratioGateRequeueInterval is the wait between Update passes when
@@ -121,6 +122,18 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	if target != nil {
 		anyUpdating := false
 		anyGated := false
+		// inFlightUnavail tracks pods this wake-up has already flipped
+		// into a draining/recreating state from a previously-Ready
+		// baseline. Closes the within-wake-up stale-snapshot hole that
+		// otherwise lets the dispatcher fire every instance in one shot
+		// (the mass-outage bug at scale).
+		//
+		// We only count instances STARTING a new update this wake-up.
+		// Instances already in Phase=Updating from a prior wake-up are
+		// already reflected in status.ServingReplicas — counting them
+		// would double-charge the budget and deadlock the in-flight pod
+		// (it'd be denied permission to continue its own update).
+		var inFlightUnavail int32
 		for _, inst := range plan.Instances {
 			needs, derr := detectUpdateTrigger(ctx, p, plan, inst, target, p.PodSpec)
 			if derr != nil {
@@ -129,26 +142,35 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 			if !needs {
 				continue
 			}
-			// RatioBalanced gate: ask coordination whether the peer
-			// Components' new-revision pod counts allow this Component
-			// to bump one more. When gated, skip the Update and requeue;
-			// the peer Component catching up next reconcile unblocks us.
-			if allowed, _ := coordination.CheckRatioGate(p.ISVC, plan.Component); !allowed {
-				anyGated = true
-				continue
-			}
-			// MaxUnavailable gate: don't take another pod offline if doing
-			// so would push the Component above its unavailability budget.
-			// Without this, the per-Instance Update loop can recreate every
-			// pod in parallel, blowing through maxUnavailable=1 (and the
-			// usual rolling-update intuition).
-			if allowed, _ := coordination.CheckUnavailabilityGate(p.ISVC, plan.Component); !allowed {
-				anyGated = true
-				continue
+			s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index)
+			startingFresh := s == nil || s.Phase != v1beta1.OMENativeInstanceUpdating
+			if startingFresh {
+				// RatioBalanced gate: ask coordination whether the peer
+				// Components' new-revision pod counts allow this Component
+				// to bump one more. Pass inFlightUnavail so the gate
+				// projects against post-drain serving counts, not the
+				// stale snapshot (same fix the unavailability gate uses).
+				if allowed, _ := coordination.CheckRatioGate(p.ISVC, plan.Component, inFlightUnavail); !allowed {
+					anyGated = true
+					continue
+				}
+				// MaxUnavailable gate: don't take another pod offline if
+				// doing so would push the Component above its budget.
+				if allowed, _ := coordination.CheckUnavailabilityGate(p.ISVC, plan.Component, inFlightUnavail); !allowed {
+					anyGated = true
+					continue
+				}
 			}
 			done, uerr := Update(ctx, p, plan, inst, target, p.PodSpec)
 			if uerr != nil {
 				return ctrl.Result{}, fmt.Errorf("OMENative reconciler: update instance %d: %w", inst.Index, uerr)
+			}
+			if startingFresh {
+				// Charge the wake-up budget only for fresh starts. The
+				// pod has just been pulled from rotation (or is about
+				// to be); subsequent gate checks in this wake-up must
+				// account for it.
+				inFlightUnavail++
 			}
 			if !done {
 				anyUpdating = true

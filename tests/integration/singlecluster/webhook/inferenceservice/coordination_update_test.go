@@ -14,7 +14,7 @@ import (
 
 // Coordination UPDATE admission specs for OEP-0007.1. The webhook's
 // ValidateUpdate path runs validation.ValidateCoordinationUpdate
-// (PairedMixable lockstep) + validation.ValidateCoordination (the
+// (RollingUpdate lockstep) + validation.ValidateCoordination (the
 // CREATE-time structural rules, re-applied so update can't escape
 // them). These tests prove both halves wire correctly under
 // real apiserver Update calls.
@@ -23,19 +23,19 @@ import (
 // Each test factors out the create step into a small helper so the
 // assertion focuses on the update's accept/reject decision.
 
-// pmGroup builds a PairedMixable group over engine + decoder.
+// pmGroup builds a RollingUpdate group over engine + decoder.
 func pmGroup() v1beta1.RolloutCoordinationGroup {
 	return v1beta1.RolloutCoordinationGroup{
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-		Policy:     v1beta1.CoordinationPolicyPairedMixable,
+		Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 	}
 }
 
-// atomicGroup builds an Atomic group over engine + decoder.
+// blueGreenGroup builds a BlueGreen group over engine + decoder.
 func atomicGroup() v1beta1.RolloutCoordinationGroup {
 	return v1beta1.RolloutCoordinationGroup{
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-		Policy:     v1beta1.CoordinationPolicyAtomic,
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
 	}
 }
 
@@ -58,7 +58,7 @@ func createBaselineISVC(name string, groups ...v1beta1.RolloutCoordinationGroup)
 }
 
 // withRunner attaches a Runner block carrying the given image. The
-// validator's PairedMixable lockstep check reads spec.Engine.Runner.Image
+// validator's RollingUpdate lockstep check reads spec.Engine.Runner.Image
 // (not PodSpec.Containers[0].Image), so update tests asserting on
 // lockstep must populate the Runner field.
 func withEngineRunner(isvc *v1beta1.InferenceService, image string) {
@@ -79,13 +79,13 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 
 	ginkgo.BeforeEach(ensureNamespace)
 
-	// WU-1: PairedMixable lockstep is the marquee update rule. Bump
+	// WU-1: RollingUpdate lockstep is the marquee update rule. Bump
 	// engine Runner.Image WITHOUT bumping decoder → rejected with
 	// the dedicated lockstep reason. The validator reads
 	// spec.Engine.Runner.Image (see componentImages in
 	// pkg/validation/coordination.go), so the test seeds Runner on
 	// both Components at v1 then mutates only engine to v2.
-	ginkgo.It("WU-1 rejects PairedMixable image bump on one Component only → PairedMixableLockstepViolation", func() {
+	ginkgo.It("WU-1 rejects RollingUpdate image bump on one Component only → RollingUpdateLockstepViolation", func() {
 		isvc := coordISVC("coord-wu1", pmGroup())
 		withEngineRunner(isvc, "ghcr.io/test/runtime:v1")
 		withDecoderRunner(isvc, "ghcr.io/test/runtime:v1")
@@ -98,27 +98,27 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 		// decoder.Runner.Image stays at v1 → asymmetric
 		err := k8sClient.Update(suiteCtx, got)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring(validation.ReasonPairedMixableLockstepViolation))
+		Expect(err.Error()).To(ContainSubstring(validation.ReasonRollingUpdateLockstepViolation))
 	})
 
-	// WU-1a: PairedMixable lockstep catches image bumps via either
+	// WU-1a: RollingUpdate lockstep catches image bumps via either
 	// Runner.Image OR PodSpec.Containers[0].Image. componentImages
 	// reads Runner first and falls back to PodSpec — both surfaces
 	// produce the same lockstep signal so users can't accidentally
 	// escape the validator by setting the image via PodSpec.
 	//
 	// Closes G11.
-	ginkgo.It("WU-1a catches PairedMixable bump via PodSpec.Containers[0].Image", func() {
+	ginkgo.It("WU-1a catches RollingUpdate bump via PodSpec.Containers[0].Image", func() {
 		got := createBaselineISVC("coord-wu1a", pmGroup())
 		got.Spec.Engine.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
 		err := k8sClient.Update(suiteCtx, got)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring(validation.ReasonPairedMixableLockstepViolation))
+		Expect(err.Error()).To(ContainSubstring(validation.ReasonRollingUpdateLockstepViolation))
 	})
 
-	// WU-2: Atomic has no lockstep restriction. Both Components can
+	// WU-2: BlueGreen has no lockstep restriction. Both Components can
 	// bump together, one at a time, or stay still — all accepted.
-	ginkgo.It("WU-2 accepts Atomic image bump on both Components together", func() {
+	ginkgo.It("WU-2 accepts BlueGreen image bump on both Components together", func() {
 		got := createBaselineISVC("coord-wu2", atomicGroup())
 		got.Spec.Engine.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
 		got.Spec.Decoder.PodSpec.Containers[0].Image = "ghcr.io/test/runtime:v2"
@@ -128,7 +128,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 	// WU-3: Updating the group's Policy mid-rollout: OEP-0007.1
 	// doesn't forbid this — the structural validator just re-runs the
 	// shape rules on the new spec. Pin observed behavior.
-	ginkgo.It("WU-3 accepts policy change Atomic → Independent mid-rollout", func() {
+	ginkgo.It("WU-3 accepts policy change BlueGreen → Independent mid-rollout", func() {
 		got := createBaselineISVC("coord-wu3", atomicGroup())
 		got.Spec.RolloutCoordination.Groups[0].Policy = v1beta1.CoordinationPolicyIndependent
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
@@ -198,22 +198,22 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 	ginkgo.It("WU-8 accepts removing a Component from an existing group", func() {
 		got := createBaselineISVC("coord-wu8", atomicGroup())
 		got.Spec.RolloutCoordination.Groups[0].Components = []v1beta1.ComponentType{v1beta1.EngineComponent}
-		// 1-Component Atomic is a degenerate but accepted shape (W-21).
+		// 1-Component BlueGreen is a degenerate but accepted shape (W-21).
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 	})
 
-	// WU-9: PairedMixable lockstep when Runner field is missing on a
+	// WU-9: RollingUpdate lockstep when Runner field is missing on a
 	// Component. componentImages returns "" for both → "" != ""
 	// evaluates symmetric, so an update that touches the (also nil)
 	// runner side stays accepted as a no-op. Pin so a future
 	// refactor that starts treating nil-runner as a distinct value
 	// gets caught.
-	ginkgo.It("WU-9 PairedMixable with nil Runner on both sides treats image as empty (symmetric)", func() {
+	ginkgo.It("WU-9 RollingUpdate with nil Runner on both sides treats image as empty (symmetric)", func() {
 		// Build without Runner field (componentImages reads
 		// spec.Engine.Runner.Image; PodSpec.Containers[0].Image is a
 		// different path). Coordination tests use PodSpec containers,
 		// so changing the container image WITHOUT a Runner block is
-		// invisible to the PairedMixable lockstep check.
+		// invisible to the RollingUpdate lockstep check.
 		got := createBaselineISVC("coord-wu9", pmGroup())
 		got.Spec.Engine.PodSpec.Containers = append(got.Spec.Engine.PodSpec.Containers, corev1.Container{
 			Name: "sidecar", Image: "ghcr.io/test/sidecar:v1",
@@ -240,7 +240,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
 			Groups: []v1beta1.RolloutCoordinationGroup{{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.RouterComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			}},
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())

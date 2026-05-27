@@ -1,6 +1,8 @@
 package coordination
 
 import (
+	"time"
+
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -11,25 +13,25 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Atomic policy state-machine specs for OEP-0007.1.
+// BlueGreen policy state-machine specs.
 //
-// Atomic is the "gang" policy: every Component in the group surges
+// BlueGreen is the "gang" policy: every Component in the group surges
 // together, waits together, shifts together, drains together. Failure
 // in any Component fails the whole group. The state machine is a pure
 // function — ComputeTransition(GroupObservation) → GroupTransition.
 
-// atomicObs builds a `n`-Component Atomic observation. Defaults: 2
+// blueGreenObs builds an n-Component BlueGreen observation. Defaults: 2
 // replicas per Component, all live + Ready on rev1, no rollout in
 // flight. Specs mutate the returned observation to set up specific
 // scenarios.
-func atomicObs(components ...v1beta1.ComponentType) coordination.GroupObservation {
+func blueGreenObs(components ...v1beta1.ComponentType) coordination.GroupObservation {
 	if len(components) == 0 {
 		components = []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
 	}
 	g := coordination.ResolvedGroup{
 		Name:       "0",
 		Components: components,
-		Policy:     v1beta1.CoordinationPolicyAtomic,
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
 	}
 	obs := coordination.GroupObservation{
 		Group:      g,
@@ -59,7 +61,7 @@ func mutate(obs *coordination.GroupObservation, c v1beta1.ComponentType, f func(
 	obs.Components[c] = o
 }
 
-var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("Coordination BlueGreen state machine", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
 		var err error
@@ -74,8 +76,8 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 	// Pure-function specs (call ComputeTransition directly — no envtest)
 	// ----------------------------------------------------------------
 
-	ginkgo.It("A-1 steady state → Idle on a 2-Component Atomic group", func() {
-		obs := atomicObs() // engine + decoder, no rollout
+	ginkgo.It("A-1 steady state → Idle on a 2-Component BlueGreen group", func() {
+		obs := blueGreenObs() // engine + decoder, no rollout
 		tr := coordination.ComputeTransition(obs)
 		Expect(tr.Phase).To(Equal(v1beta1.CoordinationPhaseIdle))
 		Expect(tr.CompositePhase).To(Equal(string(v1beta1.CoordinationPhaseIdle)))
@@ -83,7 +85,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 	})
 
 	ginkgo.It("A-2 spec bump on both Components → Surging until any surge pod exists", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		// Both Components rolling, neither has surge pods yet.
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
@@ -97,18 +99,18 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 			To(Equal(v1beta1.CoordinationPhaseSurging))
 
 		// Asymmetric: engine has surge pods, decoder hasn't started yet.
-		// Atomic gangs them — group is still Surging (allHaveSurge is false).
+		// BlueGreen gangs them — group is still Surging (allHaveSurge is false).
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.NewRevisionPods = 2
 			o.NewRevisionReadyPods = 0
 		})
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseSurging),
-				"Atomic must NOT advance past Surging until every Component has surge pods")
+				"BlueGreen must NOT advance past Surging until every Component has surge pods")
 	})
 
 	ginkgo.It("A-3 surge pods exist but not all Ready → Waiting", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
 				o.RolloutInFlight = true
@@ -127,7 +129,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 	})
 
 	ginkgo.It("A-4 all surge Ready + old pods still up → Shifting", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
 				o.RolloutInFlight = true
@@ -143,7 +145,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 	})
 
 	ginkgo.It("A-5 old pods drained → ScalingDown; promotion flips to Idle", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
 				o.RolloutInFlight = true
@@ -171,18 +173,18 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 	})
 
 	ginkgo.It("A-6 single Component Ready timeout → whole group Failed", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
 			o.FailureMessage = "Ready timeout"
 		})
 		tr := coordination.ComputeTransition(obs)
 		Expect(tr.Phase).To(Equal(v1beta1.CoordinationPhaseFailed))
-		Expect(tr.Message).To(ContainSubstring("Atomic"))
+		Expect(tr.Message).To(ContainSubstring("BlueGreen"))
 	})
 
-	ginkgo.It("A-11 1-Component Atomic is degenerate: same transitions as 2-Component", func() {
-		obs := atomicObs(v1beta1.EngineComponent)
+	ginkgo.It("A-11 1-Component BlueGreen is degenerate: same transitions as 2-Component", func() {
+		obs := blueGreenObs(v1beta1.EngineComponent)
 		// Idle.
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseIdle))
@@ -207,23 +209,23 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 	})
 
 	ginkgo.It("A-12 ANY Component failed → Failed (current logic: short-circuit on first failure)", func() {
-		// state.go atomicTransition has a variable named `allFailed` but
+		// state.go blueGreenTransition has a variable named `allFailed` but
 		// it short-circuits on the FIRST Failed Component. This codifies
 		// the de-facto behavior. If the policy ever changes to require
 		// all Components Failed, flip this expectation AND fix the
 		// variable name in state.go.
-		obs := atomicObs()
+		obs := blueGreenObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
 		})
 		Expect(obs.Components[v1beta1.DecoderComponent].Failed).To(BeFalse())
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseFailed),
-				"single failed Component must fail the whole Atomic group")
+				"single failed Component must fail the whole BlueGreen group")
 	})
 
 	ginkgo.It("A-13 ANY Component paused → Paused (current logic: short-circuit on first paused)", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.RolloutInFlight = true
 			o.NewRevisionPods = 1
@@ -233,7 +235,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 		})
 		Expect(coordination.ComputeTransition(obs).Phase).
 			To(Equal(v1beta1.CoordinationPhasePaused),
-				"single paused Component must pause the whole Atomic group")
+				"single paused Component must pause the whole BlueGreen group")
 		// Failure takes precedence over Paused.
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
@@ -246,7 +248,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 	ginkgo.It("A-15 multi-replica + asymmetric Components: phase logic uses per-Component pod counts", func() {
 		// 5-replica engine, 3-replica decoder. Both rolling; engine has
 		// all 5 new pods Ready, decoder only has 2 of 3 Ready → Waiting.
-		obs := atomicObs()
+		obs := blueGreenObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.DesiredReplicas = 5
 			o.TotalPods = 10
@@ -274,8 +276,8 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 			To(Equal(v1beta1.CoordinationPhaseShifting))
 	})
 
-	ginkgo.It("A-16 Order pin has no effect on Atomic transitions (Order is Sequential-only)", func() {
-		obs := atomicObs()
+	ginkgo.It("A-16 Order pin has no effect on BlueGreen transitions (Order is Sequential-only)", func() {
+		obs := blueGreenObs()
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
 				o.RolloutInFlight = true
@@ -290,13 +292,13 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 		trWithOrder := coordination.ComputeTransition(obs)
 
 		Expect(trWithOrder).To(Equal(trNoOrder),
-			"Atomic policy ignores Order; transition outputs must match")
+			"BlueGreen policy ignores Order; transition outputs must match")
 	})
 
-	ginkgo.It("A-G7 Atomic Surging populates SurgeBudget from group pacing", func() {
+	ginkgo.It("A-G7 BlueGreen Surging populates SurgeBudget from group pacing", func() {
 		// MaxSurge=2 on a 4-replica engine + 4-replica decoder → 2 surge
 		// pods per Component allowed.
-		obs := atomicObs()
+		obs := blueGreenObs()
 		ms := intstr.FromInt(2)
 		obs.Group.Pacing = v1beta1.CoordinationPacing{
 			Type:     v1beta1.CoordinationPacingPerComponent,
@@ -320,7 +322,7 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 	ginkgo.It("A-G7b SurgeBudget defaults to 25% when MaxSurge unset", func() {
 		// MaxSurge nil → MaxSurgeBudget returns ceil(replicas * 25 / 100).
 		// 4 replicas → 1.
-		obs := atomicObs()
+		obs := blueGreenObs()
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
 				o.RolloutInFlight = true
@@ -338,13 +340,13 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 		// Surge budget is only meaningful when the state machine
 		// authorizes surge. Other phases must leave the field nil so
 		// the caller doesn't accidentally drive surge during drain.
-		obs := atomicObs() // Idle by default
+		obs := blueGreenObs() // Idle by default
 		Expect(coordination.ComputeTransition(obs).SurgeBudget).To(BeNil())
 		Expect(coordination.ComputeTransition(obs).UnavailableBudget).To(BeNil())
 	})
 
 	ginkgo.It("A-18 spec revert mid-Surging → group transitions back toward Idle", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		// Mid-Surging: rolling, no surge pods yet on any Component.
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
@@ -375,11 +377,9 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 
 	ginkgo.It("A-7 CoordinationGroupSurging/Shifting/Failed/Completed events fire on phase boundary", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("a7"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			events := &corev1.EventList{}
@@ -391,17 +391,15 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 				}
 			}
 			g.Expect(sawSurging).To(BeTrue(),
-				"CoordinationGroupSurging event must fire when Atomic group enters Surging")
+				"CoordinationGroupSurging event must fire when BlueGreen group enters Surging")
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
 	ginkgo.It("A-8 Status.RolloutCoordination populated; RolloutCoordinationReady condition stamped", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("a8"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "a8")
@@ -413,23 +411,39 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 
 	ginkgo.It("A-9 LastTransitionTime preserved across same-phase reconciles", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("a9"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
-		// Capture LastTransitionTime once the group is Idle, then poke a
-		// no-op annotation update; the time should NOT advance.
-		var firstTime string
+		// Wait for the group to settle at Idle. Under suite load the
+		// controller may still be transitioning when the status first
+		// appears, so we require Phase=Idle before capturing firstTime.
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "a9")
 			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
 			g.Expect(cur.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
+			g.Expect(cur.Status.RolloutCoordination.Groups[0].Phase).
+				To(Equal(v1beta1.CoordinationPhaseIdle))
+			g.Expect(cur.Status.RolloutCoordination.Groups[0].LastTransitionTime).NotTo(BeNil())
+		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		// Require LTT to be stable across two consecutive polls — proves
+		// the controller has stopped re-stamping it. Without this guard,
+		// a transient transition (e.g., Surging→Idle) racing the capture
+		// gives us a firstTime the controller has already moved past.
+		var firstTime string
+		Consistently(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "a9")
+			g.Expect(cur.Status.RolloutCoordination.Groups[0].Phase).
+				To(Equal(v1beta1.CoordinationPhaseIdle))
 			ltt := cur.Status.RolloutCoordination.Groups[0].LastTransitionTime
 			g.Expect(ltt).NotTo(BeNil())
-			firstTime = ltt.String()
-		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+			if firstTime == "" {
+				firstTime = ltt.String()
+			}
+			g.Expect(ltt.String()).To(Equal(firstTime),
+				"LTT must be stable at Idle steady state before annotation poke")
+		}, 1*time.Second, util.PollInterval).Should(Succeed())
 
 		// Retry on 409 — the controller reconciles the ISVC concurrently,
 		// so the cached object may be stale on the first Update.
@@ -452,16 +466,14 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 
 	ginkgo.It("A-10 ObservedSurge reflects the pacing block's MaxSurge", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("a10"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		ms := intstr.FromInt(2)
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type:     v1beta1.CoordinationPacingPerComponent,
 			MaxSurge: &ms,
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "a10")
@@ -474,14 +486,12 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 	})
 
 	ginkgo.It("A-14 Component count change mid-rollout (group spec mutated) handled gracefully", func() {
-		// Start with 2-Component Atomic, then add router to the group.
+		// Start with 2-Component BlueGreen, then add router to the group.
 		// The controller must not panic; next reconcile observes 3 Components.
 		fix := newCoordFixture(ns.Name, WithISVCName("a14"), WithRouter(),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "a14")
@@ -504,18 +514,16 @@ var _ = ginkgo.Describe("Coordination Atomic state machine (OEP-0007.1)", ginkgo
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("A-17 Atomic group covers engine+decoder; router not in group rolls independently", func() {
+	ginkgo.It("A-17 BlueGreen group covers engine+decoder; router not in group rolls independently", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("a17"), WithRouter(),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "a17")
 			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
-			// Only one group declared, and it's the Atomic engine+decoder
+			// Only one group declared, and it's the BlueGreen engine+decoder
 			// group. Router is not represented in the status.
 			g.Expect(cur.Status.RolloutCoordination.Groups).To(HaveLen(1))
 			g.Expect(cur.Status.RolloutCoordination.Groups[0].Components).

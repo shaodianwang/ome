@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -23,10 +24,23 @@ import (
 // writers). The shared writer lives here so each op only needs one
 // import of status/ rather than depending on whichever op file
 // originally hosted it.
+//
+// NotFound handling: if the ISVC was deleted between the caller pulling
+// the work item and us re-reading, both the Get and the Status().Update
+// return apierrors.IsNotFound. Treat both as "operation succeeded
+// trivially" — there is no status left to mutate — and drop the error.
+// Otherwise controller-runtime retries the whole reconcile until the
+// queue drains, which saturates the work queue and stalls unrelated
+// reconciles (root cause of the buildkite CI flakes that showed up as
+// "patch status Ready (instance=N): re-read ISVC: ... not found"
+// log spam during the load-test windows).
 func MutateInstance(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, mutate func(*v1beta1.OMENativeInstanceStatus) bool) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}
 		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
 			return fmt.Errorf("re-read ISVC: %w", err)
 		}
 
@@ -61,6 +75,9 @@ func MutateInstance(ctx context.Context, c client.Client, isvc *v1beta1.Inferenc
 		fresh.Status.Components[component] = cs
 
 		if err := c.Status().Update(ctx, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
 			return fmt.Errorf("update ISVC status: %w", err)
 		}
 		return nil

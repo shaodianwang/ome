@@ -27,7 +27,7 @@ var _ = ginkgo.Describe("Coordination K8s primitive edges (OEP-0007.1)", ginkgo.
 			Group: coordination.ResolvedGroup{
 				Name:       "0",
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			},
 			Components: map[v1beta1.ComponentType]coordination.ComponentObservation{},
 		}
@@ -37,7 +37,7 @@ var _ = ginkgo.Describe("Coordination K8s primitive edges (OEP-0007.1)", ginkgo.
 	})
 
 	ginkgo.It("EC-10 ComputeTransition with negative DesiredReplicas → no panic, handled as if zero", func() {
-		obs := atomicObs()
+		obs := blueGreenObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.DesiredReplicas = -1
 		})
@@ -53,17 +53,22 @@ var _ = ginkgo.Describe("Coordination K8s primitive edges (OEP-0007.1)", ginkgo.
 		Expect(out[v1beta1.EngineComponent]).To(Equal(int32(1)))
 	})
 
-	ginkgo.It("EC-Pure-Aux EvaluateSurge with empty NewPods → behaves like 'first surge'", func() {
+	ginkgo.It("EC-Pure-Aux EvaluateSurge with empty serving counts → rejected (peer would be zero)", func() {
+		// Serving-ratio semantic: an empty Serving map means
+		// the peer's projected serving count is 0 → undefined ratio →
+		// rejected as a mass-drain guard. This is what protects against
+		// the "everything dropped from rotation at once" failure mode.
 		state := coordination.RatioState{
 			Original: map[v1beta1.ComponentType]int32{
 				v1beta1.EngineComponent:  40,
 				v1beta1.DecoderComponent: 20,
 			},
-			NewPods: map[v1beta1.ComponentType]int32{},
+			Serving: map[v1beta1.ComponentType]int32{},
 		}
 		d := coordination.EvaluateSurge(ratioPacing(int32Ptr(5)), state, v1beta1.EngineComponent, 2)
-		// 2/40 = 5%, decoder unseen treated as 0/20 = 0%. 5pp gap is at-band → allowed.
-		Expect(d.AllowedSurgeDelta).To(Equal(int32(2)))
+		Expect(d.SkewRejected).To(BeTrue(),
+			"empty Serving means peer is 0 → ratio undefined → reject")
+		Expect(d.AllowedSurgeDelta).To(Equal(int32(0)))
 	})
 
 	ginkgo.PIt("EC-1 Service create AlreadyExists — covered by services_test.go unit tests", func() {})
@@ -73,9 +78,7 @@ var _ = ginkgo.Describe("Coordination K8s primitive edges (OEP-0007.1)", ginkgo.
 	ginkgo.It("EC-4 stale EndpointSlice (slice with no live pod backing) → coordination ignores", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("ec4"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			isvc := freshISVC(g, ns.Name, "ec4")
@@ -96,9 +99,7 @@ var _ = ginkgo.Describe("Coordination K8s primitive edges (OEP-0007.1)", ginkgo.
 	ginkgo.It("EC-11 Service with stale Selector → drift-corrected on next reconcile", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("ec11"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		var target corev1.Service
 		Eventually(func(g Gomega) {

@@ -2,15 +2,14 @@ package coordination
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 // RatioState carries the cross-Component replica counts the
 // RatioBalanced pacing math reasons about. Snapshotted at rollout
-// start and refreshed every reconcile while the group is in Surging /
-// Waiting.
+// start (Original) and refreshed every reconcile (Current, NewPods,
+// Serving) while the group is in Surging / Waiting.
 type RatioState struct {
 	// Original maps Component → desired replica count at the moment
 	// the rollout began. Used as the ratio anchor; the tolerance band
@@ -23,7 +22,16 @@ type RatioState struct {
 
 	// NewPods maps Component → number of new-revision pods (i.e.,
 	// pods on the target ControllerRevision) as of this reconcile.
+	// Retained for status reporting / observability; the RatioBalanced
+	// math uses Serving instead.
 	NewPods map[v1beta1.ComponentType]int32
+
+	// Serving maps Component → number of pods CURRENTLY in the load
+	// balancer's rotation (serving gate True AND containers Ready),
+	// counting both revisions together. RatioBalanced math projects
+	// against this — operators care about live traffic capacity, not
+	// rollout progress fractions.
+	Serving map[v1beta1.ComponentType]int32
 }
 
 // RatioDecision is the answer for "may we surge new-revision pods for
@@ -44,20 +52,24 @@ type RatioDecision struct {
 	Reason string
 }
 
-// EvaluateSurge returns the per-Component surge budget that respects
-// the cross-Component ratio. It is a pure function: feed it the
-// pacing block, the snapshot state, the Component being considered,
-// and the proposed delta — get back what the controller may apply.
+// EvaluateSurge returns the per-Component delta budget that respects
+// the cross-Component live-serving ratio. It is a pure function: feed
+// it the pacing block, the snapshot state, the Component being
+// considered, and the proposed delta — get back what the controller
+// may apply.
 //
-// The math: with the original ratio fixed at rollout start, the
-// target new-pod count for each Component is proportional. A
-// candidate surge is accepted only if the projected ratio between
-// the largest Component's new-pod fraction and any peer's new-pod
-// fraction stays within (1 ± tolerance). The check generalizes
-// pairwise — every (a, b) ratio must satisfy the band — so 3-way
-// 40:20:10 topologies don't degenerate to "biggest only."
+// Delta semantic: +N means "the action will INCREASE serving by N
+// pods for `component`" (surge a new ready pod). Negative deltas
+// (drain) go through the same band check via CheckRatioGate with
+// projection = current - 1.
+//
+// Math: the original prefill:decode (or any pair, largest original on
+// top) ratio is anchored at rollout start. After the proposed action,
+// the live serving ratio for every component pair must stay within
+// original_ratio * (1 ± tolerance). Pairwise so 3+-way topologies
+// (engine + decoder + router) are constrained against every pair.
 func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, component v1beta1.ComponentType, proposedDelta int32) RatioDecision {
-	if proposedDelta <= 0 {
+	if proposedDelta == 0 {
 		return RatioDecision{AllowedSurgeDelta: 0, Reason: "no surge requested"}
 	}
 	if pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
@@ -74,8 +86,32 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 	}
 	band := float64(tolerance) / 100.0
 
+	// Project against live Serving counts. Falls back to NewPods for
+	// backward compat with callers that haven't populated Serving yet.
+	baseline := state.Serving
+	if baseline == nil {
+		baseline = state.NewPods
+	}
+	// Drain (proposedDelta < 0): the gate is asked "may I pull one more
+	// pod from rotation right now?" The projection is single-step — no
+	// reduction loop because a partial drain isn't a thing the
+	// dispatcher can act on (the unit of work is one pod).
+	if proposedDelta < 0 {
+		projected := projectedServing(baseline, component, proposedDelta)
+		if respectsBand(state.Original, projected, band) {
+			return RatioDecision{
+				AllowedSurgeDelta: proposedDelta,
+				Reason:            "drain within tolerance",
+			}
+		}
+		return RatioDecision{
+			AllowedSurgeDelta: 0,
+			SkewRejected:      true,
+			Reason:            "drain would skew cross-Component serving ratio past tolerance",
+		}
+	}
 	for delta := proposedDelta; delta > 0; delta-- {
-		projected := projectedNewPods(state.NewPods, component, delta)
+		projected := projectedServing(baseline, component, delta)
 		if respectsBand(state.Original, projected, band) {
 			return RatioDecision{
 				AllowedSurgeDelta: delta,
@@ -86,56 +122,92 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 	return RatioDecision{
 		AllowedSurgeDelta: 0,
 		SkewRejected:      true,
-		Reason:            "surge would skew cross-Component ratio past tolerance",
+		Reason:            "surge would skew cross-Component serving ratio past tolerance",
 	}
 }
 
-// projectedNewPods clones state.NewPods with component += delta.
-func projectedNewPods(in map[v1beta1.ComponentType]int32, component v1beta1.ComponentType, delta int32) map[v1beta1.ComponentType]int32 {
+// projectedServing clones the baseline serving map with component += delta.
+// Negative values are floored at zero — a drain can't take serving
+// below zero, but the band check will reject that projection
+// (zero-serving denominator → undefined ratio → out of band).
+func projectedServing(in map[v1beta1.ComponentType]int32, component v1beta1.ComponentType, delta int32) map[v1beta1.ComponentType]int32 {
 	out := make(map[v1beta1.ComponentType]int32, len(in)+1)
 	for k, v := range in {
 		out[k] = v
 	}
 	out[component] += delta
+	if out[component] < 0 {
+		out[component] = 0
+	}
 	return out
 }
 
-// respectsBand reports whether the projected new-pod counts, taken as a
-// fraction of each Component's original replica count, fall within the
-// pairwise tolerance band against every peer.
+// respectsBand reports whether the projected live serving counts, taken
+// pairwise as larger/smaller ratios, stay within `band` of the original
+// pairwise ratio at rollout start.
 //
-// The band is the operator-supplied "1 ± tolerance" window. The check
-// is pairwise so that asymmetric 3+-way topologies don't degenerate to
-// only comparing the largest pair.
+// Semantic: the "RatioBalanced" name promises the live cross-Component
+// capacity ratio (e.g., prefill:decode) stays in band, not per-Component
+// rollout progress drift. Convention: for each pair, larger original on
+// top so the ratio is always >= 1 and bands are symmetric multiplicatively.
+//
+// For each pair (a, b) with originals OA, OB (assume OA >= OB):
+//
+//	originalRatio = OA / OB
+//	bandLow       = originalRatio * (1 - band)
+//	bandHigh      = originalRatio * (1 + band)
+//	projRatio     = max(proj[a], proj[b]) / min(proj[a], proj[b])
+//	require: bandLow <= projRatio <= bandHigh
+//
+// A component projected to zero serving makes the ratio undefined /
+// infinite → out of band → reject. This is what blocks the mass-drain
+// failure mode at the gate.
+//
+// Pairwise so 3+-way topologies (engine + decoder + router) are
+// constrained against every pair, not just the largest.
 func respectsBand(original, projected map[v1beta1.ComponentType]int32, band float64) bool {
 	if band < 0 {
 		band = 0
 	}
-	frac := make(map[v1beta1.ComponentType]float64, len(original))
-	for c, orig := range original {
-		if orig <= 0 {
-			// Components with zero original replicas can't constrain
-			// ratio. Skip them.
-			continue
-		}
-		newPods := projected[c]
-		frac[c] = float64(newPods) / float64(orig)
-	}
-	if len(frac) <= 1 {
-		return true
-	}
-	// Pairwise check: for every (a, b), |frac[a] - frac[b]| <= band.
 	type entry struct {
 		comp v1beta1.ComponentType
-		f    float64
+		orig int32
+		proj int32
 	}
-	keys := make([]entry, 0, len(frac))
-	for c, f := range frac {
-		keys = append(keys, entry{c, f})
+	items := make([]entry, 0, len(original))
+	for c, orig := range original {
+		if orig <= 0 {
+			// Components with zero original replicas can't constrain ratio.
+			continue
+		}
+		items = append(items, entry{comp: c, orig: orig, proj: projected[c]})
 	}
-	for i := 0; i < len(keys); i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if math.Abs(keys[i].f-keys[j].f) > band {
+	if len(items) <= 1 {
+		return true
+	}
+	for i := 0; i < len(items); i++ {
+		for j := i + 1; j < len(items); j++ {
+			a, b := items[i], items[j]
+			// Larger-original on top → ratio is always >= 1.
+			if a.orig < b.orig {
+				a, b = b, a
+			}
+			origRatio := float64(a.orig) / float64(b.orig)
+			bandLow := origRatio * (1 - band)
+			bandHigh := origRatio * (1 + band)
+			// Project pairwise live serving counts (already after the
+			// proposed action — see EvaluateSurge).
+			pa, pb := a.proj, b.proj
+			if pa < pb {
+				pa, pb = pb, pa
+			}
+			if pb <= 0 {
+				// Smaller side dropped to zero serving → undefined ratio.
+				// This is the mass-drain failure mode the gate must block.
+				return false
+			}
+			projRatio := float64(pa) / float64(pb)
+			if projRatio < bandLow || projRatio > bandHigh {
 				return false
 			}
 		}
@@ -180,7 +252,15 @@ func SnapshotOriginal(replicas map[v1beta1.ComponentType]int32) map[v1beta1.Comp
 //
 // Reads exclusively from isvc.Status — no client/cache hits — so it is
 // safe to call from hot paths.
-func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) (allowed bool, reason string) {
+// CheckRatioGate's `inFlightDelta` is the number of pods the
+// dispatcher has ALREADY pulled from rotation in THIS wake-up for the
+// caller's Component. status.ServingReplicas reflects the prior
+// reconcile pass — without subtracting in-flight, every gate decision
+// in one wake-up shares the same stale snapshot answer and the
+// dispatcher fires past the band before status catches up (the load-
+// scale variant of the mass-outage bug; same shape as the fix the
+// unavailability gate received in OEP-0007.2 commit 12).
+func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
 	if isvc == nil {
 		return true, "nil ISVC"
 	}
@@ -219,6 +299,7 @@ func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentT
 		Original: make(map[v1beta1.ComponentType]int32, len(group.Components)),
 		Current:  make(map[v1beta1.ComponentType]int32, len(group.Components)),
 		NewPods:  make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		Serving:  make(map[v1beta1.ComponentType]int32, len(group.Components)),
 	}
 	var groupStatus *v1beta1.RolloutCoordinationGroupStatus
 	if isvc.Status.RolloutCoordination != nil {
@@ -242,11 +323,32 @@ func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentT
 		if cs, ok := isvc.Status.Components[c]; ok && cs.OMENative != nil {
 			state.Current[c] = cs.OMENative.Replicas
 			state.NewPods[c] = cs.OMENative.UpdatedReplicas
+			// Serving is what the band check projects against — live
+			// traffic capacity, not rollout progress.
+			state.Serving[c] = cs.OMENative.ServingReplicas
+		}
+	}
+	// Account for pods this wake-up has already started pulling out of
+	// rotation but whose status_aggregate write hasn't landed yet. Only
+	// the caller's Component carries in-flight here; peer Components'
+	// in-flight is implicit in their own dispatchers' separate runs and
+	// will be reflected in their next status write.
+	if inFlightDelta > 0 {
+		state.Serving[component] -= inFlightDelta
+		if state.Serving[component] < 0 {
+			state.Serving[component] = 0
 		}
 	}
 
-	decision := EvaluateSurge(group.Pacing, state, component, 1)
-	if decision.AllowedSurgeDelta >= 1 {
+	// Project the drain (–1): the dispatcher is about to pull one more
+	// pod from serving rotation. The redesign's "projection = current –
+	// 1" semantic (ratio.go header comment) applies here. Using +1
+	// (surge) only makes sense once real surge-then-drain ships and the
+	// dispatcher creates a new pod before draining the old; today every
+	// update strategy drains first, so –1 is the immediate transient
+	// the gate must keep in band.
+	decision := EvaluateSurge(group.Pacing, state, component, -1)
+	if decision.AllowedSurgeDelta != 0 {
 		return true, decision.Reason
 	}
 	return false, decision.Reason
@@ -254,30 +356,37 @@ func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentT
 
 // CheckUnavailabilityGate is the consumer side of MaxUnavailable
 // pacing. The OMENative ops dispatcher calls it before kicking off a
-// disruptive operation (Update recreate, Restart) to ask: "given the
-// live pod observation, may this Component take one more pod offline
-// without exceeding the group's MaxUnavailable budget?"
+// disruptive operation (Update recreate, in-place drain, Restart) to
+// ask: "given the live pod observation PLUS the in-flight count from
+// this wake-up, may this Component take one more pod offline without
+// exceeding the group's MaxUnavailable budget?"
+//
+// inFlightDelta is the number of pods the dispatcher has ALREADY
+// flipped to NotServing in this wake-up. Status counters from
+// isvc.Status reflect the prior reconcile pass — they don't see
+// in-wake-up writes — so the dispatcher must thread the running count
+// in or every gate decision in one wake-up shares the same stale
+// snapshot answer (the original mass-outage bug).
 //
 // Returns allowed=true when:
 //   - The Component is not in any coord group,
 //   - The component has no observed status yet (first reconcile),
-//   - OR the projected (currentUnavailable + 1) stays within
+//   - OR (currentUnavailable + inFlightDelta + 1) stays within
 //     MaxUnavailableBudget for the Component.
 //
-// Returns allowed=false when terminating one more pod would push the
-// Component above its MaxUnavailable budget. Caller skips the op
-// and requeues; once existing recreations complete (Ready replicas
-// climbs back), the gate reopens.
+// Counts pods serving traffic (ServingReplicas), NOT pods with merely
+// running containers (ReadyReplicas). The two diverge during in-place
+// updates: kubelet still reports ContainersReady while the controller
+// has flipped the serving gate to False; using ReadyReplicas would
+// mislead the gate into letting every pod get pulled from traffic at
+// once (the original mass-outage bug at scale).
 //
-// Honest semantic: with MaxUnavailable=0 and no surge-then-drain
-// support in OMENative today, this gate will deadlock rollouts.
-// That's the correct response to "literally zero downtime" without
-// the surge capacity to back it up — operators should either allow
-// non-zero MaxUnavailable or wait for surge-then-drain support.
-//
-// Reads exclusively from isvc.Status — no client hits — safe for
-// hot paths.
-func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) (allowed bool, reason string) {
+// Honest semantic: with MaxUnavailable=0 and an update strategy that
+// requires drain-first (in-place, recreate without surge), this gate
+// will deadlock rollouts. SurgeThenDrain side-steps the gate by
+// creating new pods within the surge budget instead of taking old
+// ones offline.
+func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
 	if isvc == nil {
 		return true, "nil ISVC"
 	}
@@ -309,14 +418,22 @@ func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.C
 	if desired <= 0 {
 		desired = 1
 	}
-	currentUnavailable := desired - cs.OMENative.ReadyReplicas
+	// ServingReplicas (in-load-balancer count) NOT ReadyReplicas
+	// (containers-running count) — in-place drain flips serving=False
+	// before kubelet sees a container restart, so ReadyReplicas would
+	// still report all pods Ready while half are actually out of rotation.
+	currentUnavailable := desired - cs.OMENative.ServingReplicas
 	if currentUnavailable < 0 {
 		currentUnavailable = 0
 	}
+	if inFlightDelta < 0 {
+		inFlightDelta = 0
+	}
 	budget := MaxUnavailableBudget(group.Pacing, desired)
-	projected := currentUnavailable + 1
+	projected := currentUnavailable + inFlightDelta + 1
 	if projected > budget {
-		return false, fmt.Sprintf("unavailable budget %d exhausted (current %d, would become %d)", budget, currentUnavailable, projected)
+		return false, fmt.Sprintf("unavailable budget %d exhausted (current %d, in-flight %d, would become %d)",
+			budget, currentUnavailable, inFlightDelta, projected)
 	}
 	return true, "within unavailable budget"
 }

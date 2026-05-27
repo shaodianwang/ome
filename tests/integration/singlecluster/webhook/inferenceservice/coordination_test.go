@@ -155,11 +155,11 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 		isvc := coordISVC("coord-w2",
 			v1beta1.RolloutCoordinationGroup{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			},
 			v1beta1.RolloutCoordinationGroup{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			},
 		)
 		err := k8sClient.Create(suiteCtx, isvc)
@@ -201,7 +201,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
 			Groups: []v1beta1.RolloutCoordinationGroup{{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.RouterComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			}},
 		}
 		err := k8sClient.Create(suiteCtx, isvc)
@@ -214,7 +214,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 	ginkgo.It("W-5 rejects empty components in a group", func() {
 		isvc := coordISVC("coord-w5", v1beta1.RolloutCoordinationGroup{
 			Components: []v1beta1.ComponentType{},
-			Policy:     v1beta1.CoordinationPolicyAtomic,
+			Policy:     v1beta1.CoordinationPolicyBlueGreen,
 		})
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred(), "CRD MinItems=1 or webhook should reject")
@@ -273,17 +273,17 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 		Expect(err.Error()).To(ContainSubstring(validation.ReasonInvalidCoordinationOrder))
 	})
 
-	// W-10: PairedMixable's defining property is the cross-revision
+	// W-10: RollingUpdate's defining property is the cross-revision
 	// pairing. With one Component, there's no peer to pair with — the
 	// policy collapses to Independent.
-	ginkgo.It("W-10 rejects PairedMixable with 1 Component → PairedMixableRequiresMultipleComponents", func() {
+	ginkgo.It("W-10 rejects RollingUpdate with 1 Component → RollingUpdateRequiresMultipleComponents", func() {
 		isvc := coordISVC("coord-w10", v1beta1.RolloutCoordinationGroup{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-			Policy:     v1beta1.CoordinationPolicyPairedMixable,
+			Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 		})
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring(validation.ReasonPairedMixableRequiresMultipleComponents))
+		Expect(err.Error()).To(ContainSubstring(validation.ReasonRollingUpdateRequiresMultipleComponents))
 	})
 
 	// W-11: RatioTolerance above the warning threshold (50%)
@@ -298,7 +298,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
 						Type:           v1beta1.CoordinationPacingRatioBalanced,
 						RatioTolerance: &tol,
@@ -358,7 +358,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 		neg := int32(-5)
 		isvc := coordISVC("coord-w17", v1beta1.RolloutCoordinationGroup{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-			Policy:     v1beta1.CoordinationPolicyAtomic,
+			Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			Pacing: &v1beta1.CoordinationPacing{
 				Type:           v1beta1.CoordinationPacingRatioBalanced,
 				RatioTolerance: &neg,
@@ -374,7 +374,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 		over := int32(150)
 		isvc := coordISVC("coord-w18", v1beta1.RolloutCoordinationGroup{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-			Policy:     v1beta1.CoordinationPolicyAtomic,
+			Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			Pacing: &v1beta1.CoordinationPacing{
 				Type:           v1beta1.CoordinationPacingRatioBalanced,
 				RatioTolerance: &over,
@@ -391,7 +391,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 		bad := intstr.FromString("abc")
 		isvc := coordISVC("coord-w19", v1beta1.RolloutCoordinationGroup{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-			Policy:     v1beta1.CoordinationPolicyAtomic,
+			Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			Pacing:     &v1beta1.CoordinationPacing{MaxSurge: &bad},
 		})
 		err := k8sClient.Create(suiteCtx, isvc)
@@ -407,9 +407,9 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 		}
 	})
 
-	// W-20: a single 3-Component Atomic group is the canonical PD
+	// W-20: a single 3-Component BlueGreen group is the canonical PD
 	// shape (router + engine + decoder rolling as one unit).
-	ginkgo.It("W-20 accepts Atomic group with all 3 Components", func() {
+	ginkgo.It("W-20 accepts BlueGreen group with all 3 Components", func() {
 		isvc := v1beta1testing.MakeInferenceService("coord-w20", "isvc-webhook").
 			Model(coordCBMName).Runtime(coordCSRName).
 			DeploymentMode(constants.OMENative).
@@ -422,16 +422,16 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 				Components: []v1beta1.ComponentType{
 					v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent,
 				},
-				Policy: v1beta1.CoordinationPolicyAtomic,
+				Policy: v1beta1.CoordinationPolicyBlueGreen,
 			}},
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 	})
 
-	// W-21: Atomic with 1 Component is degenerate (no peer to gang
+	// W-21: BlueGreen with 1 Component is degenerate (no peer to gang
 	// with) but not explicitly rejected. Pins current behavior — if
 	// the OEP later tightens this, the test changes.
-	ginkgo.It("W-21 accepts Atomic with 1 Component (degenerate)", func() {
+	ginkgo.It("W-21 accepts BlueGreen with 1 Component (degenerate)", func() {
 		isvc := v1beta1testing.MakeInferenceService("coord-w21", "isvc-webhook").
 			Model(coordCBMName).Runtime(coordCSRName).
 			DeploymentMode(constants.OMENative).
@@ -440,7 +440,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
 			Groups: []v1beta1.RolloutCoordinationGroup{{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			}},
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
@@ -477,7 +477,7 @@ var _ = ginkgo.Describe("validation reason constant stability", func() {
 		Expect(validation.ReasonRatioToleranceTooHigh).To(Equal("RatioToleranceTooHigh"))
 		Expect(validation.ReasonOrphanCoordinationGroup).To(Equal("OrphanCoordinationGroup"))
 		Expect(validation.ReasonInvalidCoordinationOrder).To(Equal("InvalidCoordinationOrder"))
-		Expect(validation.ReasonPairedMixableRequiresMultipleComponents).To(Equal("PairedMixableRequiresMultipleComponents"))
+		Expect(validation.ReasonRollingUpdateRequiresMultipleComponents).To(Equal("RollingUpdateRequiresMultipleComponents"))
 		Expect(validation.ReasonSequentialRequiresOrder).To(Equal("SequentialRequiresOrder"))
 		Expect(validation.ReasonSequentialIncompleteOrder).To(Equal("SequentialIncompleteOrder"))
 		Expect(validation.ReasonSequentialRequiresMultipleComponents).To(Equal("SequentialRequiresMultipleComponents"))

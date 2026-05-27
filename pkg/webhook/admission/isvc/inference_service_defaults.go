@@ -208,7 +208,11 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 		spec.UpdateStrategy = &v1beta1.OMENativeUpdateStrategy{}
 	}
 	if spec.UpdateStrategy.Type == "" {
-		spec.UpdateStrategy.Type = v1beta1.OMENativeUpdateStrategyInPlaceIfPossible
+		// SurgeThenDrain is the default. It currently delegates to
+		// recreate (no zero-downtime surge yet), which is still safer
+		// than in-place because the dispatcher's MaxUnavailable gate
+		// throttles drains.
+		spec.UpdateStrategy.Type = v1beta1.OMENativeUpdateStrategySurgeThenDrain
 	}
 	if spec.UpdateStrategy.InPlaceUpdateStrategy == nil {
 		spec.UpdateStrategy.InPlaceUpdateStrategy = &v1beta1.OMENativeInPlaceUpdateStrategy{}

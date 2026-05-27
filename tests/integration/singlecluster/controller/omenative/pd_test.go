@@ -178,7 +178,7 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation", ginkgo.Ordered,
 
 	// PD-4 — Image bump on Engine only must NOT churn Decoder.
 	// Validates per-component revision/restart isolation. This is the
-	// "Independent" baseline OEP-0007.1's Atomic / PairedMixable /
+	// "Independent" baseline OEP-0007.1's BlueGreen / RollingUpdate /
 	// Sequential policies will compose ON TOP of: if the v1 default
 	// already cascades changes across components, none of the
 	// coordination policies can claim isolation.

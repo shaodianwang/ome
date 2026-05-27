@@ -20,8 +20,8 @@ import (
 // Policy gates the second var:
 //
 //	Independent      → only generic
-//	Atomic           → generic + revision-specific (same-rev only)
-//	PairedMixable    → both populated; runtime picks
+//	BlueGreen        → generic + revision-specific (same-rev only)
+//	RollingUpdate    → both populated; runtime picks
 
 var _ = ginkgo.Describe("Coordination peer-discovery env injection (OEP-0007.1)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
@@ -52,11 +52,9 @@ var _ = ginkgo.Describe("Coordination peer-discovery env injection (OEP-0007.1)"
 
 	ginkgo.PIt("D-1 engine pod has OME_DECODER_ENDPOINT — flaky as first It under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("d1"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			v := envOnRunner(g, "d1", "OME_DECODER_ENDPOINT")
@@ -70,15 +68,13 @@ var _ = ginkgo.Describe("Coordination peer-discovery env injection (OEP-0007.1)"
 
 	ginkgo.PIt("D-2 engine pod has OME_DECODER_REVISION_ENDPOINT with its hash — flaky as first It under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("d2"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			v := envOnRunner(g, "d2", "OME_DECODER_REVISION_ENDPOINT")
-			g.Expect(v).NotTo(BeEmpty(), "OME_DECODER_REVISION_ENDPOINT should be stamped on engine pods in Atomic")
+			g.Expect(v).NotTo(BeEmpty(), "OME_DECODER_REVISION_ENDPOINT should be stamped on engine pods in BlueGreen")
 			g.Expect(v).To(MatchRegexp(`^d2-decoder-rev-[a-z0-9]+\.[a-z0-9-]+\.svc\.cluster\.local$`),
 				"OME_DECODER_REVISION_ENDPOINT must point at per-revision Service")
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
@@ -86,11 +82,9 @@ var _ = ginkgo.Describe("Coordination peer-discovery env injection (OEP-0007.1)"
 
 	ginkgo.PIt("D-3 3-way: router has both engine + decoder peer envs — flaky as first It under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("d3"), WithRouter(),
-			WithAtomicGroup(v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			pods := listOMENativePods(g, ns.Name, "d3")
@@ -121,9 +115,7 @@ var _ = ginkgo.Describe("Coordination peer-discovery env injection (OEP-0007.1)"
 		fix := newCoordFixture(ns.Name, WithISVCName("d4"),
 			WithIndependentGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			generic := envOnRunner(g, "d4", "OME_DECODER_ENDPOINT")
@@ -134,13 +126,11 @@ var _ = ginkgo.Describe("Coordination peer-discovery env injection (OEP-0007.1)"
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("D-5 Atomic group: revision endpoint hash matches own pod's hash — flaky as first It under suite load", func() {
+	ginkgo.PIt("D-5 BlueGreen group: revision endpoint hash matches own pod's hash — flaky as first It under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("d5"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			pods := listOMENativePods(g, ns.Name, "d5")
@@ -159,30 +149,26 @@ var _ = ginkgo.Describe("Coordination peer-discovery env injection (OEP-0007.1)"
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("D-6 PairedMixable: both generic + revision-specific envs set — flaky as first It under suite load", func() {
+	ginkgo.PIt("D-6 RollingUpdate: both generic + revision-specific envs set — flaky as first It under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("d6"),
-			WithPairedMixableGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithRollingUpdateGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			generic := envOnRunner(g, "d6", "OME_DECODER_ENDPOINT")
 			rev := envOnRunner(g, "d6", "OME_DECODER_REVISION_ENDPOINT")
 			g.Expect(generic).NotTo(BeEmpty())
 			g.Expect(rev).NotTo(BeEmpty(),
-				"PairedMixable should stamp both forms — runtime chooses")
+				"RollingUpdate should stamp both forms — runtime chooses")
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
 	ginkgo.PIt("D-7 Single-Component group: no peer envs injected — flaky as first It under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("d7"), WithoutDecoder(),
-			WithAtomicGroup(v1beta1.EngineComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			pods := listOMENativePods(g, ns.Name, "d7")
@@ -202,9 +188,7 @@ var _ = ginkgo.Describe("Coordination peer-discovery env injection (OEP-0007.1)"
 			{Name: "OME_DECODER_ENDPOINT", Value: "user-supplied-junk"},
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			v := envOnRunner(g, "d8", "OME_DECODER_ENDPOINT")
@@ -217,9 +201,7 @@ var _ = ginkgo.Describe("Coordination peer-discovery env injection (OEP-0007.1)"
 	ginkgo.PIt("D-9 Restarted pod preserves peer endpoint envs — flaky as first It under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("d9"))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			v := envOnRunner(g, "d9", "OME_DECODER_ENDPOINT")
@@ -242,11 +224,9 @@ var _ = ginkgo.Describe("Coordination peer-discovery env injection (OEP-0007.1)"
 
 	ginkgo.PIt("D-10 Unknown peer hash: fallback to generic only — flaky as first It under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("d10"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			v := envOnRunner(g, "d10", "OME_DECODER_ENDPOINT")

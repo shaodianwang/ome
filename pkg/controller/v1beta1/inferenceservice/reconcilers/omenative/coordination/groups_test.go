@@ -25,7 +25,7 @@ func TestResolveGroups_AppliesPacingDefaults(t *testing.T) {
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			},
 		},
 	}
@@ -53,7 +53,7 @@ func TestResolveGroups_RatioBalancedDefaultsTolerance(t *testing.T) {
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				Pacing: &v1beta1.CoordinationPacing{
 					Type: v1beta1.CoordinationPacingRatioBalanced,
 				},
@@ -78,7 +78,7 @@ func TestResolveGroups_DedupComponentsWithinGroup(t *testing.T) {
 					v1beta1.EngineComponent,
 					v1beta1.DecoderComponent,
 				},
-				Policy: v1beta1.CoordinationPolicyAtomic,
+				Policy: v1beta1.CoordinationPolicyBlueGreen,
 			},
 		},
 	}
@@ -114,12 +114,12 @@ func TestResolveGroups_PreservesUserSuppliedPacing(t *testing.T) {
 func TestMembershipFor_FindsComponentsAcrossGroups(t *testing.T) {
 	groups := ResolveGroups(&v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
-			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyAtomic},
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
 			{Components: []v1beta1.ComponentType{v1beta1.RouterComponent}, Policy: v1beta1.CoordinationPolicyIndependent},
 		},
 	})
-	if g, ok := MembershipFor(groups, v1beta1.EngineComponent); !ok || g.Policy != v1beta1.CoordinationPolicyAtomic {
-		t.Errorf("engine: got (%+v, %v) want Atomic", g, ok)
+	if g, ok := MembershipFor(groups, v1beta1.EngineComponent); !ok || g.Policy != v1beta1.CoordinationPolicyBlueGreen {
+		t.Errorf("engine: got (%+v, %v) want BlueGreen", g, ok)
 	}
 	if g, ok := MembershipFor(groups, v1beta1.RouterComponent); !ok || g.Policy != v1beta1.CoordinationPolicyIndependent {
 		t.Errorf("router: got (%+v, %v) want Independent", g, ok)
@@ -129,7 +129,7 @@ func TestMembershipFor_FindsComponentsAcrossGroups(t *testing.T) {
 func TestMembershipFor_UnknownComponentReturnsFalse(t *testing.T) {
 	groups := ResolveGroups(&v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
-			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyAtomic},
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
 		},
 	})
 	if _, ok := MembershipFor(groups, v1beta1.DecoderComponent); ok {
@@ -140,12 +140,12 @@ func TestMembershipFor_UnknownComponentReturnsFalse(t *testing.T) {
 func TestIsCoordinated(t *testing.T) {
 	groups := ResolveGroups(&v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
-			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyAtomic},
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
 			{Components: []v1beta1.ComponentType{v1beta1.RouterComponent}, Policy: v1beta1.CoordinationPolicyIndependent},
 		},
 	})
 	if !IsCoordinated(groups, v1beta1.EngineComponent) {
-		t.Errorf("engine should be coordinated (Atomic)")
+		t.Errorf("engine should be coordinated (BlueGreen)")
 	}
 	if IsCoordinated(groups, v1beta1.RouterComponent) {
 		t.Errorf("router under Independent is treated as uncoordinated")
@@ -158,7 +158,7 @@ func TestIsCoordinated(t *testing.T) {
 func TestPeerComponents(t *testing.T) {
 	groups := ResolveGroups(&v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
-			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent}, Policy: v1beta1.CoordinationPolicyAtomic},
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
 		},
 	})
 	peers := PeerComponents(groups, v1beta1.EngineComponent)
@@ -198,7 +198,7 @@ func TestSequentialPosition(t *testing.T) {
 
 func TestSequentialPosition_NotSequentialPolicy(t *testing.T) {
 	g := ResolvedGroup{
-		Policy: v1beta1.CoordinationPolicyAtomic,
+		Policy: v1beta1.CoordinationPolicyBlueGreen,
 		Order:  []v1beta1.ComponentType{v1beta1.EngineComponent},
 	}
 	if _, ok := SequentialPosition(g, v1beta1.EngineComponent); ok {
@@ -232,35 +232,35 @@ func TestSequentialSuccessor(t *testing.T) {
 	}
 }
 
-func TestValidateGroupShape_Atomic(t *testing.T) {
+func TestValidateGroupShape_BlueGreen(t *testing.T) {
 	g := ResolvedGroup{
 		Name:       "0",
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-		Policy:     v1beta1.CoordinationPolicyAtomic,
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
 	}
 	if err := ValidateGroupShape(g); err != nil {
-		t.Errorf("Atomic two-Component: unexpected error: %v", err)
+		t.Errorf("BlueGreen two-Component: unexpected error: %v", err)
 	}
 }
 
 func TestValidateGroupShape_RejectsEmptyComponents(t *testing.T) {
 	g := ResolvedGroup{
 		Name:   "0",
-		Policy: v1beta1.CoordinationPolicyAtomic,
+		Policy: v1beta1.CoordinationPolicyBlueGreen,
 	}
 	if err := ValidateGroupShape(g); err == nil {
 		t.Errorf("empty Components: want error")
 	}
 }
 
-func TestValidateGroupShape_PairedMixableNeedsAtLeastTwo(t *testing.T) {
+func TestValidateGroupShape_RollingUpdateNeedsAtLeastTwo(t *testing.T) {
 	g := ResolvedGroup{
 		Name:       "0",
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-		Policy:     v1beta1.CoordinationPolicyPairedMixable,
+		Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 	}
 	if err := ValidateGroupShape(g); err == nil {
-		t.Errorf("PairedMixable single-Component: want error")
+		t.Errorf("RollingUpdate single-Component: want error")
 	}
 }
 

@@ -21,10 +21,10 @@ var _ = ginkgo.Describe("Coordination multi-entity (OEP-0007.1)", ginkgo.Ordered
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("MULTI-3 two groups (Atomic + Sequential) → independent decisions per ComputeTransition call", func() {
-		atomicObs := atomicObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
-		for _, c := range atomicObs.Group.Components {
-			mutate(&atomicObs, c, func(o *coordination.ComponentObservation) {
+	ginkgo.It("MULTI-3 two groups (BlueGreen + Sequential) → independent decisions per ComputeTransition call", func() {
+		blueGreenLocalObs := blueGreenObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
+		for _, c := range blueGreenLocalObs.Group.Components {
+			mutate(&blueGreenLocalObs, c, func(o *coordination.ComponentObservation) {
 				o.RolloutInFlight = true
 				o.NewRevisionPods = 0
 				o.TargetRevisionHash = "rev2"
@@ -51,14 +51,14 @@ var _ = ginkgo.Describe("Coordination multi-entity (OEP-0007.1)", ginkgo.Ordered
 				},
 			},
 		}
-		trA := coordination.ComputeTransition(atomicObs)
+		trA := coordination.ComputeTransition(blueGreenLocalObs)
 		trS := coordination.ComputeTransition(seqObs)
 		Expect(trA.Phase).To(Equal(v1beta1.CoordinationPhaseSurging))
 		Expect(trS.Phase).To(Equal(v1beta1.CoordinationPhaseIdle))
-		mutate(&atomicObs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
+		mutate(&blueGreenLocalObs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
 		})
-		Expect(coordination.ComputeTransition(atomicObs).Phase).
+		Expect(coordination.ComputeTransition(blueGreenLocalObs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseFailed))
 		Expect(coordination.ComputeTransition(seqObs).Phase).
 			To(Equal(v1beta1.CoordinationPhaseIdle),
@@ -66,19 +66,19 @@ var _ = ginkgo.Describe("Coordination multi-entity (OEP-0007.1)", ginkgo.Ordered
 	})
 
 	ginkgo.It("MULTI-4 one group paused (PausedGlobal effective for it) + other rolling → both reach independent phases", func() {
-		atomicObs := atomicObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
-		for _, c := range atomicObs.Group.Components {
-			mutate(&atomicObs, c, func(o *coordination.ComponentObservation) {
+		blueGreenLocalObs := blueGreenObs(v1beta1.EngineComponent, v1beta1.DecoderComponent)
+		for _, c := range blueGreenLocalObs.Group.Components {
+			mutate(&blueGreenLocalObs, c, func(o *coordination.ComponentObservation) {
 				o.RolloutInFlight = true
 				o.NewRevisionPods = 0
 				o.TargetRevisionHash = "rev2"
 			})
 		}
-		atomicObs.PausedGlobal = true
-		Expect(coordination.ComputeTransition(atomicObs).Phase).
+		blueGreenLocalObs.PausedGlobal = true
+		Expect(coordination.ComputeTransition(blueGreenLocalObs).Phase).
 			To(Equal(v1beta1.CoordinationPhasePaused))
 
-		indepObs := atomicObs
+		indepObs := blueGreenLocalObs
 		indepObs.PausedGlobal = false
 		indepObs.Group.Policy = v1beta1.CoordinationPolicyIndependent
 		Expect(coordination.ComputeTransition(indepObs).Phase).
@@ -87,8 +87,8 @@ var _ = ginkgo.Describe("Coordination multi-entity (OEP-0007.1)", ginkgo.Ordered
 	})
 
 	ginkgo.It("MULTI-5 per-ISVC isolation: distinct observations produce independent decisions", func() {
-		obsA := atomicObs()
-		obsB := atomicObs()
+		obsA := blueGreenObs()
+		obsB := blueGreenObs()
 		mutate(&obsA, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
 		})
@@ -100,11 +100,11 @@ var _ = ginkgo.Describe("Coordination multi-entity (OEP-0007.1)", ginkgo.Ordered
 
 	ginkgo.It("MULTI-9 5-group ISVC: each ComputeTransition call returns independently", func() {
 		policies := []v1beta1.CoordinationPolicy{
-			v1beta1.CoordinationPolicyAtomic,
-			v1beta1.CoordinationPolicyPairedMixable,
+			v1beta1.CoordinationPolicyBlueGreen,
+			v1beta1.CoordinationPolicyRollingUpdate,
 			v1beta1.CoordinationPolicyIndependent,
 			v1beta1.CoordinationPolicySequential,
-			v1beta1.CoordinationPolicyAtomic,
+			v1beta1.CoordinationPolicyBlueGreen,
 		}
 		for i, p := range policies {
 			obs := pausedObs(p)
@@ -117,9 +117,9 @@ var _ = ginkgo.Describe("Coordination multi-entity (OEP-0007.1)", ginkgo.Ordered
 
 	ginkgo.It("MULTI-1 two ISVCs in same namespace with same Component names → Services scoped by inferenceservice label", func() {
 		fixA := newCoordFixture(ns.Name, WithISVCName("multi1a"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fixB := newCoordFixture(ns.Name, WithISVCName("multi1b"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fixA)
 		applyFixture(Default, fixB)
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fixA.ISVC) })
@@ -150,9 +150,9 @@ var _ = ginkgo.Describe("Coordination multi-entity (OEP-0007.1)", ginkgo.Ordered
 		ginkgo.DeferCleanup(func() { _ = util.DeleteNamespace(suiteCtx, k8sClient, nsB.Name) })
 
 		fixA := newCoordFixture(ns.Name, WithISVCName("multi2"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		fixB := newCoordFixture(nsB.Name, WithISVCName("multi2"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		// CBM/CSR are cluster-scoped: reuse the same instances for both ISVCs.
 		fixB.CBM = fixA.CBM
 		fixB.CSR = fixA.CSR
@@ -181,7 +181,7 @@ var _ = ginkgo.Describe("Coordination multi-entity (OEP-0007.1)", ginkgo.Ordered
 
 	ginkgo.It("MULTI-7 BaseModel deletion mid-rollout → ISVC rollout fails gracefully (coord layer does not crash)", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("multi7"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })

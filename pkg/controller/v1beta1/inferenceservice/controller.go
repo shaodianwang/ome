@@ -169,6 +169,16 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if !controllerutil.ContainsFinalizer(isvc, finalizerName) {
 			controllerutil.AddFinalizer(isvc, finalizerName)
 			if err := r.Update(context.Background(), isvc); err != nil {
+				// Race window: between top-of-reconcile Get and this
+				// Update, the ISVC may have been deleted (NotFound) or
+				// transitioned into deletion (Conflict / "Operation
+				// cannot be fulfilled" with a UID precondition
+				// mismatch). Either way we no longer need the
+				// finalizer — drop the work cleanly instead of
+				// returning the error and triggering a retry storm.
+				if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+					return ctrl.Result{}, nil
+				}
 				return ctrl.Result{}, err
 			}
 		}
@@ -178,6 +188,9 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			// remove our finalizer from the list and update it.
 			controllerutil.RemoveFinalizer(isvc, finalizerName)
 			if err := r.Update(context.Background(), isvc); err != nil {
+				if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+					return ctrl.Result{}, nil
+				}
 				return ctrl.Result{}, err
 			}
 		}
@@ -620,6 +633,17 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 	// status write.
 	existingService := &v1beta1.InferenceService{}
 	if err := r.Get(context.TODO(), namespacedName, existingService); err != nil {
+		if apierrors.IsNotFound(err) {
+			// ISVC was deleted between top-of-reconcile and the status
+			// flush. The deletion path has already handled cleanup; an
+			// in-flight reconcile racing the delete has nothing left to
+			// write. Returning nil drops the work item cleanly instead
+			// of triggering controller-runtime retries that saturate the
+			// work queue and stall unrelated tests (see
+			// .claude/specs/2026-05-25-oep-0007.1-api-audit/SHIPPED.md
+			// for the test-stability fallout this used to cause).
+			return nil
+		}
 		return err
 	}
 	wasReady := inferenceServiceReadiness(existingService.Status)
@@ -650,6 +674,12 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 		mergeOMENativeComponentStatus(&latest.Status, preserved)
 		return r.Status().Update(context.TODO(), latest)
 	}); err != nil {
+		// Same race as the top-of-function Get: if the ISVC vanished
+		// during the retry loop, there's nothing to update — drop the
+		// work item silently. Only log + retry on other errors.
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
 		r.Log.Error(err, "Failed to update InferenceService status", "InferenceService", desiredService.Name)
 		r.Recorder.Eventf(desiredService, v1.EventTypeWarning, "UpdateFailed",
 			"Failed to update status for InferenceService %q: %v", desiredService.Name, err)

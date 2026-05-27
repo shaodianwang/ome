@@ -1,11 +1,16 @@
 package coordination
 
 import (
+	"github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // fixtureOptions is the functional-options shape for newCoordFixture.
@@ -144,12 +149,12 @@ func WithCoordinationGroup(g v1beta1.RolloutCoordinationGroup) FixtureOption {
 	return func(o *fixtureOptions) { o.coordGroups = append(o.coordGroups, g) }
 }
 
-// WithAtomicGroup is sugar for WithCoordinationGroup with a fully-formed
-// Atomic group over the given Components. Pacing defaults apply.
-func WithAtomicGroup(components ...v1beta1.ComponentType) FixtureOption {
+// WithBlueGreenGroup is sugar for WithCoordinationGroup with a fully-formed
+// BlueGreen group over the given Components. Pacing defaults apply.
+func WithBlueGreenGroup(components ...v1beta1.ComponentType) FixtureOption {
 	return WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
 		Components: components,
-		Policy:     v1beta1.CoordinationPolicyAtomic,
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
 	})
 }
 
@@ -161,11 +166,11 @@ func WithIndependentGroup(components ...v1beta1.ComponentType) FixtureOption {
 	})
 }
 
-// WithPairedMixableGroup is sugar for a PairedMixable group.
-func WithPairedMixableGroup(components ...v1beta1.ComponentType) FixtureOption {
+// WithRollingUpdateGroup is sugar for a RollingUpdate group.
+func WithRollingUpdateGroup(components ...v1beta1.ComponentType) FixtureOption {
 	return WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
 		Components: components,
-		Policy:     v1beta1.CoordinationPolicyPairedMixable,
+		Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 	})
 }
 
@@ -352,4 +357,48 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	}
 
 	return &coordFixture{CBM: cbm, CSR: csr, ISVC: isvc}
+}
+
+// deferFixtureCleanup registers a single DeferCleanup that tears the
+// coord fixture down in the right order. The naive
+//
+//	ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
+//	ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
+//	ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+//
+// pattern triggers a controller-side retry storm on slower CI runners:
+// DeferCleanup is LIFO so CBM is deleted before the ISVC has been
+// fully purged from the apiserver. The InferenceService reconciler
+// then runs once more, sees the ISVC still present (deletion is
+// async), and falls through to modelConfigReconciler which fails
+// with "ClusterBaseModel not found" — controller-runtime retries with
+// exponential backoff, the work queue saturates, and the NEXT test's
+// reconciles starve. On buildkite envtest this manifests as C-1+C-4
+// and H timing out even though the rollouts themselves are fine.
+//
+// This helper deletes the ISVC first and waits for the apiserver to
+// acknowledge full deletion (after the finalizer drop), then deletes
+// CBM and CSR — no race window.
+func deferFixtureCleanup(fix *coordFixture) {
+	ginkgo.DeferCleanup(func() {
+		if fix == nil {
+			return
+		}
+		if fix.ISVC != nil {
+			_ = k8sClient.Delete(suiteCtx, fix.ISVC)
+			isvcKey := client.ObjectKeyFromObject(fix.ISVC)
+			Eventually(func() bool {
+				fresh := &v1beta1.InferenceService{}
+				err := k8sClient.Get(suiteCtx, isvcKey, fresh)
+				return apierrors.IsNotFound(err)
+			}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(BeTrue(),
+				"ISVC %s/%s should be fully deleted before CBM/CSR cleanup", fix.ISVC.Namespace, fix.ISVC.Name)
+		}
+		if fix.CBM != nil {
+			_ = k8sClient.Delete(suiteCtx, fix.CBM)
+		}
+		if fix.CSR != nil {
+			_ = k8sClient.Delete(suiteCtx, fix.CSR)
+		}
+	})
 }

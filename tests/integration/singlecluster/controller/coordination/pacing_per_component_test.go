@@ -182,16 +182,14 @@ var _ = ginkgo.Describe("Coordination PerComponent pacing (OEP-0007.1)", ginkgo.
 
 	ginkgo.It("PC-E2E-1 ObservedSurge mirrors group Pacing.MaxSurge in RolloutCoordinationStatus", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pc-e2e-1"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		ms := intstr.FromInt(2)
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type:     v1beta1.CoordinationPacingPerComponent,
 			MaxSurge: &ms,
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "pc-e2e-1")
@@ -210,7 +208,7 @@ var _ = ginkgo.Describe("Coordination PerComponent pacing (OEP-0007.1)", ginkgo.
 		// Consistently window. The rollout effectively deadlocks; that's
 		// the documented honest semantic (no surge-then-drain support yet).
 		fix := newCoordFixture(ns.Name, WithISVCName("pc-e2e-2"),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent),
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent),
 			WithEngineReplicas(3))
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type:           v1beta1.CoordinationPacingPerComponent,
@@ -218,9 +216,7 @@ var _ = ginkgo.Describe("Coordination PerComponent pacing (OEP-0007.1)", ginkgo.
 			MaxUnavailable: iosInt(0),
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "pc-e2e-2")

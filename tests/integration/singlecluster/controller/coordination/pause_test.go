@@ -74,8 +74,8 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 
 	ginkgo.It("P-1 PausedGlobal=true on any policy → group Phase=Paused", func() {
 		for _, policy := range []v1beta1.CoordinationPolicy{
-			v1beta1.CoordinationPolicyAtomic,
-			v1beta1.CoordinationPolicyPairedMixable,
+			v1beta1.CoordinationPolicyBlueGreen,
+			v1beta1.CoordinationPolicyRollingUpdate,
 			v1beta1.CoordinationPolicyIndependent,
 			v1beta1.CoordinationPolicySequential,
 		} {
@@ -90,7 +90,7 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 	})
 
 	ginkgo.It("P-2 PausedGlobal=false → group resumes from policy-specific transition", func() {
-		obs := pausedObs(v1beta1.CoordinationPolicyAtomic)
+		obs := pausedObs(v1beta1.CoordinationPolicyBlueGreen)
 		obs.PausedGlobal = false
 		// Make engine roll so we can confirm we get back the underlying
 		// policy phase (Surging in this case), not Paused.
@@ -113,7 +113,7 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 		// Group is mid-Surging (no new pods yet); pause is set. Result
 		// is Paused with no rollback semantics — when unpaused, the
 		// underlying state resumes.
-		obs := pausedObs(v1beta1.CoordinationPolicyAtomic)
+		obs := pausedObs(v1beta1.CoordinationPolicyBlueGreen)
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
 				o.RolloutInFlight = true
@@ -139,7 +139,7 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 			Group: coordination.ResolvedGroup{
 				Name:       "0",
 				Components: []v1beta1.ComponentType{},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			},
 			Components:   map[v1beta1.ComponentType]coordination.ComponentObservation{},
 			PausedGlobal: true,
@@ -149,10 +149,10 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 	})
 
 	ginkgo.It("P-5 PausedGlobal beats per-Component Failed (outer short-circuit precedence)", func() {
-		// Atomic with engine.Failed AND PausedGlobal=true. The outer
-		// short-circuit returns Paused before atomicTransition's Failed
+		// BlueGreen with engine.Failed AND PausedGlobal=true. The outer
+		// short-circuit returns Paused before blueGreenTransition's Failed
 		// check runs.
-		obs := pausedObs(v1beta1.CoordinationPolicyAtomic)
+		obs := pausedObs(v1beta1.CoordinationPolicyBlueGreen)
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
 			o.Failed = true
 			o.FailureMessage = "ready timeout"
@@ -169,11 +169,11 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 	})
 
 	ginkgo.It("P-6 PausedGlobal during ScalingDown → freezes; underlying state preserved when unpaused", func() {
-		// Atomic in ScalingDown shape (rolling, surge ready, old drained,
+		// BlueGreen in ScalingDown shape (rolling, surge ready, old drained,
 		// promotion pending). Pause freezes — when unpaused, the
 		// underlying ScalingDown returns. State machine is pure so we
 		// verify by toggling.
-		obs := pausedObs(v1beta1.CoordinationPolicyAtomic)
+		obs := pausedObs(v1beta1.CoordinationPolicyBlueGreen)
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
 				o.RolloutInFlight = true
@@ -201,9 +201,9 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 		// other field on GroupObservation feeds into the policy
 		// transition. Toggling PausedGlobal in isolation must be the
 		// only way to enter Paused via the outer switch.
-		obs := pausedObs(v1beta1.CoordinationPolicyAtomic)
-		// Set ALL Components to rolling + paused — that's PairedMixable's
-		// allPaused gate, but here policy=Atomic uses anyPaused, so this
+		obs := pausedObs(v1beta1.CoordinationPolicyBlueGreen)
+		// Set ALL Components to rolling + paused — that's RollingUpdate's
+		// allPaused gate, but here policy=BlueGreen uses anyPaused, so this
 		// returns Paused via the INNER atomic branch, NOT the outer
 		// PausedGlobal short-circuit.
 		for _, c := range obs.Group.Components {
@@ -270,11 +270,9 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 
 	ginkgo.It("P-E2E-1 setting ome.io/rollout-paused=true on a live ISVC freezes group transitions", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pause-e2e-1"), WithRolloutPaused(),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "pause-e2e-1")
@@ -287,11 +285,9 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 
 	ginkgo.It("P-E2E-2 removing the pause annotation lets the group resume", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pause-e2e-2"), WithRolloutPaused(),
-			WithAtomicGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		// Wait for Paused — guard against nil deref while the status
 		// is still being populated by the first reconcile.
@@ -327,9 +323,7 @@ var _ = ginkgo.Describe("Coordination pause annotation (OEP-0007.1)", ginkgo.Ord
 		// (no Paused phase to enter — there are no groups).
 		fix := newCoordFixture(ns.Name, WithISVCName("pause-e2e-3"), WithRolloutPaused())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Consistently(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "pause-e2e-3")

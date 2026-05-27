@@ -17,7 +17,7 @@ func TestBuildGroupStatus_PopulatesCoreFields(t *testing.T) {
 	g := ResolvedGroup{
 		Name:       "0",
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-		Policy:     v1beta1.CoordinationPolicyAtomic,
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
 		Pacing:     v1beta1.CoordinationPacing{Type: v1beta1.CoordinationPacingPerComponent, MaxSurge: &maxSurge},
 	}
 	tr := GroupTransition{
@@ -32,8 +32,8 @@ func TestBuildGroupStatus_PopulatesCoreFields(t *testing.T) {
 	if out.Phase != v1beta1.CoordinationPhaseSurging {
 		t.Errorf("Phase: got %q want Surging", out.Phase)
 	}
-	if out.Policy != v1beta1.CoordinationPolicyAtomic {
-		t.Errorf("Policy: got %q want Atomic", out.Policy)
+	if out.Policy != v1beta1.CoordinationPolicyBlueGreen {
+		t.Errorf("Policy: got %q want BlueGreen", out.Policy)
 	}
 	if out.LastTransitionTime == nil || !out.LastTransitionTime.Time.Equal(now) {
 		t.Errorf("LastTransitionTime: got %+v want %v", out.LastTransitionTime, now)
@@ -46,7 +46,7 @@ func TestBuildGroupStatus_PopulatesCoreFields(t *testing.T) {
 func TestBuildGroupStatus_AttachesRatioForRatioBalanced(t *testing.T) {
 	g := ResolvedGroup{
 		Name:   "0",
-		Policy: v1beta1.CoordinationPolicyAtomic,
+		Policy: v1beta1.CoordinationPolicyBlueGreen,
 		Pacing: v1beta1.CoordinationPacing{Type: v1beta1.CoordinationPacingRatioBalanced},
 	}
 	r := &RatioState{
@@ -64,7 +64,7 @@ func TestBuildGroupStatus_AttachesRatioForRatioBalanced(t *testing.T) {
 func TestBuildGroupStatus_OmitsRatioForPerComponent(t *testing.T) {
 	g := ResolvedGroup{
 		Name:   "0",
-		Policy: v1beta1.CoordinationPolicyAtomic,
+		Policy: v1beta1.CoordinationPolicyBlueGreen,
 		Pacing: v1beta1.CoordinationPacing{Type: v1beta1.CoordinationPacingPerComponent},
 	}
 	r := &RatioState{Original: map[v1beta1.ComponentType]int32{v1beta1.EngineComponent: 10}}

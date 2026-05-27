@@ -37,6 +37,18 @@ type OMENativeComponentStatus struct {
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
+	// ServingReplicas is the number of Instances whose every pod is BOTH
+	// ContainersReady AND has serving=True on the controller-managed
+	// readiness gate — i.e., the pod is actually in the load balancer's
+	// rotation. This is the count operators care about for traffic
+	// availability, and the count MaxUnavailable budgets gate against.
+	//
+	// Diverges from ReadyReplicas during in-place updates and any other
+	// scenario where the controller flips the serving gate to False while
+	// containers remain technically Ready.
+	// +optional
+	ServingReplicas int32 `json:"servingReplicas,omitempty"`
+
 	// AvailableReplicas is the number of Instances that have been Ready
 	// continuously for at least MinReadySeconds.
 	// +optional
@@ -111,6 +123,16 @@ type OMENativeInstanceStatus struct {
 	// ReadyPodCount is the number of pods reporting Ready=True.
 	// +optional
 	ReadyPodCount int32 `json:"readyPodCount,omitempty"`
+
+	// ServingPodCount is the number of pods that are BOTH ContainersReady
+	// AND have serving=True on the controller-managed readiness gate —
+	// i.e., pods actually in the load balancer rotation. Diverges from
+	// ReadyPodCount whenever the controller flips the serving gate
+	// (in-place updates, drain steps, etc.). MaxUnavailable budgets are
+	// computed against the serving count, not the ready count, so that
+	// "missing from traffic" reflects reality.
+	// +optional
+	ServingPodCount int32 `json:"servingPodCount,omitempty"`
 
 	// AvailablePodCount is the number of pods ready for at least MinReadySeconds.
 	// +optional
@@ -349,7 +371,8 @@ const (
 // OMENativeUpdateStrategy controls how OMENative rolls template changes
 // across an Instance's pods.
 type OMENativeUpdateStrategy struct {
-	// Type selects the rollout mechanism. Defaults to InPlaceIfPossible.
+	// Type selects the rollout mechanism. Defaults to SurgeThenDrain
+	// for safety — preserves serving capacity throughout the rollout.
 	// +optional
 	Type OMENativeUpdateStrategyType `json:"type,omitempty"`
 
@@ -364,15 +387,20 @@ type OMENativeUpdateStrategy struct {
 }
 
 // OMENativeUpdateStrategyType selects the rollout mechanism.
-// +kubebuilder:validation:Enum=RecreatePod;InPlaceIfPossible;InPlaceOnly
+// +kubebuilder:validation:Enum=SurgeThenDrain;RecreatePod;InPlaceIfPossible;InPlaceOnly
 type OMENativeUpdateStrategyType string
 
 const (
+	// OMENativeUpdateStrategySurgeThenDrain creates a new pod for the
+	// target revision, waits for it to be serving, then drains and
+	// deletes the old pod. Costs +1 pod briefly per replica but
+	// preserves serving capacity throughout the rollout — no traffic gap.
+	// Default strategy.
+	OMENativeUpdateStrategySurgeThenDrain OMENativeUpdateStrategyType = "SurgeThenDrain"
 	// OMENativeUpdateStrategyRecreatePod always deletes pods and recreates them.
 	OMENativeUpdateStrategyRecreatePod OMENativeUpdateStrategyType = "RecreatePod"
 	// OMENativeUpdateStrategyInPlaceIfPossible tries in-place first; falls
 	// back to recreate if the template change is not in-place-capable.
-	// Default.
 	OMENativeUpdateStrategyInPlaceIfPossible OMENativeUpdateStrategyType = "InPlaceIfPossible"
 	// OMENativeUpdateStrategyInPlaceOnly rejects updates that cannot be
 	// applied in-place.

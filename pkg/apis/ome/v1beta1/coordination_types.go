@@ -35,7 +35,7 @@ type RolloutCoordinationGroup struct {
 	Components []ComponentType `json:"components"`
 
 	// Policy selects the coordination semantic for this group.
-	// +kubebuilder:validation:Enum=Atomic;Independent;PairedMixable;Sequential
+	// +kubebuilder:validation:Enum=BlueGreen;RollingUpdate;Independent;Sequential
 	Policy CoordinationPolicy `json:"policy"`
 
 	// Pacing controls how surge / drain pacing is computed within
@@ -44,7 +44,7 @@ type RolloutCoordinationGroup struct {
 	Pacing *CoordinationPacing `json:"pacing,omitempty"`
 
 	// Order has two meanings depending on Policy:
-	//   - Atomic: pins the surge sequence within the single rollout
+	//   - BlueGreen: pins the surge sequence within the single rollout
 	//     unit (decoder surges first, then engine, etc.) but all
 	//     Components traffic-shift together once every set is Ready.
 	//     Optional; default no ordering (parallel surge).
@@ -52,23 +52,35 @@ type RolloutCoordinationGroup struct {
 	//     walk their full state machine. The next Component cannot
 	//     enter Surging until the previous Component is back at Idle
 	//     on the new revision.
-	//   - Independent / PairedMixable: ignored.
+	//   - Independent / RollingUpdate: ignored.
 	// +optional
 	// +listType=atomic
 	Order []ComponentType `json:"order,omitempty"`
+
+	// Soak is the duration the coordination layer waits AFTER a
+	// Sequential Component reaches Idle on the new revision BEFORE
+	// the next Component in Order begins its rollout. Lets operators
+	// validate one Component under live production traffic before
+	// risking the next. Only honored for Policy=Sequential.
+	//
+	// Default: 0 (no wait — the next Component starts immediately).
+	// +optional
+	Soak *metav1.Duration `json:"soak,omitempty"`
 }
 
 // CoordinationPolicy selects the cross-Component coordination semantic
 // applied to a RolloutCoordinationGroup.
-// +kubebuilder:validation:Enum=Atomic;Independent;PairedMixable;Sequential
+// +kubebuilder:validation:Enum=BlueGreen;RollingUpdate;Independent;Sequential
 type CoordinationPolicy string
 
 const (
-	// CoordinationPolicyAtomic ties every Component in the group into a
-	// single rollout unit: surge → wait-ready → shift traffic → drain →
-	// scale down all Components together. If any Component fails to
-	// reach Ready, the entire group enters Failed and rolls back.
-	CoordinationPolicyAtomic CoordinationPolicy = "Atomic"
+	// CoordinationPolicyBlueGreen ties every Component in the group
+	// into a single rollout unit: surge the full new set alongside the
+	// old, wait for every new pod to be serving, then atomically flip
+	// the routing Service selector from the old revision hash to the
+	// new. If any Component fails to reach Ready, the entire group
+	// enters Failed and the new set is torn down (no flip).
+	CoordinationPolicyBlueGreen CoordinationPolicy = "BlueGreen"
 
 	// CoordinationPolicyIndependent rolls each Component on its own. The
 	// group declaration is documentation only; behavior matches the
@@ -76,12 +88,11 @@ const (
 	// operator has considered coordination and decided against it.
 	CoordinationPolicyIndependent CoordinationPolicy = "Independent"
 
-	// CoordinationPolicyPairedMixable rolls Components in lockstep at
-	// the spec generation level, but during the rollout window any vN
-	// pod may talk to any vM pod within the group. Use when the
-	// operator can assert protocol back-compat across the in-flight
-	// revisions.
-	CoordinationPolicyPairedMixable CoordinationPolicy = "PairedMixable"
+	// CoordinationPolicyRollingUpdate rolls Components in parallel
+	// during the rollout window, tolerating mixed revisions (any vN
+	// pod may talk to any vM pod within the group). Pacing knobs
+	// (maxSurge, maxUnavailable, RatioBalanced) apply.
+	CoordinationPolicyRollingUpdate CoordinationPolicy = "RollingUpdate"
 
 	// CoordinationPolicySequential walks each Component's full state
 	// machine in the strict Order declared on the group. The next
@@ -176,7 +187,7 @@ type RolloutCoordinationGroupStatus struct {
 	// +optional
 	Policy CoordinationPolicy `json:"policy,omitempty"`
 
-	// Order mirrors the spec order (Sequential / Atomic-ordered).
+	// Order mirrors the spec order (Sequential / BlueGreen-ordered).
 	// +optional
 	// +listType=atomic
 	Order []ComponentType `json:"order,omitempty"`

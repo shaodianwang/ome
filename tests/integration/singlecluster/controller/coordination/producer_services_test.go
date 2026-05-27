@@ -123,9 +123,7 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 	ginkgo.It("SVC-2 emits <isvc>-<c>-rev-<hash>-headless ClusterIPNone Service", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("svc2"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			hashes := observedRevisionHashes(g, ns.Name)
@@ -146,9 +144,7 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 	ginkgo.It("SVC-3 routing Service selector has the four required keys", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("svc3"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			hashes := observedRevisionHashes(g, ns.Name)
@@ -174,9 +170,7 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 		// sufficient as a regression gate.
 		fix := newCoordFixture(ns.Name, WithISVCName("svc4"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			hashes := observedRevisionHashes(g, ns.Name)
@@ -198,12 +192,23 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 	// SVC-7: per-reconcile idempotency. Two reconciles in a row must
 	// not bump the per-revision Service's ResourceVersion — coordination
 	// patches only when the desired shape differs.
+	//
+	// Requires InPlaceIfPossible: the SurgeThenDrain default delegates
+	// to recreate, which relabels pods with the new revision hash
+	// whenever the CR hash changes (even from an annotation-only ISVC
+	// poke), rotating per-revision Services by design. In-place keeps
+	// the original revision-hash label on the pod, so the per-revision
+	// Service is stable across reconciles — that's the property this
+	// test exercises.
 	ginkgo.It("SVC-7 idempotent: second reconcile doesn't bump ResourceVersion", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("svc7"), WithoutDecoder())
+		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+			UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+				Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+			},
+		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		var svcName string
 		var rvAfterFirst string
@@ -246,9 +251,7 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 	ginkgo.It("SVC-8 drift-corrects a hand-mutated selector", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("svc8"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		var svcName string
 		var origSelector map[string]string
@@ -295,9 +298,7 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 		// No WithCoordinationGroup call → ISVC.Spec.RolloutCoordination is nil.
 		Expect(fix.ISVC.Spec.RolloutCoordination).To(BeNil())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			hashes := observedRevisionHashes(g, ns.Name)
@@ -311,9 +312,7 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 	ginkgo.It("SVC-11 multi-Component ISVC gets per-Component per-revision Services", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("svc11")) // engine + decoder default
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			svcs := listPerRevisionServices(g, ns.Name)
@@ -350,9 +349,7 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 		// to delete Services whose hashes have zero live pods.
 		fix := newCoordFixture(ns.Name, WithISVCName("svc12"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		// Wait for the real per-revision Service to exist for the
 		// observed pod's hash.
@@ -429,9 +426,7 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 	ginkgo.It("SVC-14 per-revision Service selector excludes pods missing revision-hash", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("svc14"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		var hash string
 		Eventually(func(g Gomega) {
@@ -512,9 +507,7 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 	ginkgo.It("SVC-20 routing has ClusterIP set, headless has ClusterIPNone", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("svc20"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			hashes := observedRevisionHashes(g, ns.Name)
@@ -541,9 +534,7 @@ var _ = ginkgo.Describe("Coordination per-revision Services (OEP-0007.1)", ginkg
 		fix := newCoordFixture(ns.Name, WithISVCName("svc22"), WithoutDecoder(),
 			WithEngineImage("ghcr.io/test/runtime:v1"))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		var v1Hash string
 		Eventually(func(g Gomega) {

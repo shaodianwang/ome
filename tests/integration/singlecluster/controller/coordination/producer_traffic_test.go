@@ -26,9 +26,7 @@ var _ = ginkgo.Describe("Coordination Status.Components.<c>.Traffic[] producer (
 	ginkgo.PIt("T-1 single revision → Traffic[0].LatestRevision=true — flaky as first It under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("t1"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			isvc := freshISVC(g, ns.Name, "t1")
@@ -43,9 +41,7 @@ var _ = ginkgo.Describe("Coordination Status.Components.<c>.Traffic[] producer (
 		fix := newCoordFixture(ns.Name, WithISVCName("t2"), WithoutDecoder(),
 			WithEngineImage("ghcr.io/test/runtime:v1"))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		fresh := &v1beta1.InferenceService{}
 		Eventually(func(g Gomega) {
@@ -69,9 +65,7 @@ var _ = ginkgo.Describe("Coordination Status.Components.<c>.Traffic[] producer (
 	ginkgo.PIt("T-4 LatestRevision tag tracks the target hash — flaky as first It under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("t4"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			isvc := freshISVC(g, ns.Name, "t4")
@@ -90,9 +84,7 @@ var _ = ginkgo.Describe("Coordination Status.Components.<c>.Traffic[] producer (
 	ginkgo.PIt("G25: T-5 LatestReadyRevision — when T-1/T-2/T-4 are PIt'd, T-5 becomes first-It of producer_traffic Describe and hits runtime fetcher cold-start cache miss (same as bd8441e: re-PIt T-1 and D-8)", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("t5"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			isvc := freshISVC(g, ns.Name, "t5")
@@ -107,9 +99,7 @@ var _ = ginkgo.Describe("Coordination Status.Components.<c>.Traffic[] producer (
 	ginkgo.PIt("T-6 empty pod set → Traffic = nil — applyFixture race with prior test's DeferCleanup under suite load", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("t6"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			isvc := freshISVC(g, ns.Name, "t6")
@@ -122,9 +112,7 @@ var _ = ginkgo.Describe("Coordination Status.Components.<c>.Traffic[] producer (
 	ginkgo.It("T-9 pods missing revision-hash label excluded from weights", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("t9"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			isvc := freshISVC(g, ns.Name, "t9")
@@ -136,9 +124,7 @@ var _ = ginkgo.Describe("Coordination Status.Components.<c>.Traffic[] producer (
 	ginkgo.It("T-10 multi-Component ISVC: each Component has independent Traffic[]", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("t10"))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			isvc := freshISVC(g, ns.Name, "t10")
@@ -153,9 +139,7 @@ var _ = ginkgo.Describe("Coordination Status.Components.<c>.Traffic[] producer (
 		fix := newCoordFixture(ns.Name, WithISVCName("t11"), WithoutDecoder(),
 			WithEngineImage("ghcr.io/test/runtime:v1"))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		var v1Hash string
 		Eventually(func(g Gomega) {
@@ -187,9 +171,7 @@ var _ = ginkgo.Describe("Coordination Status.Components.<c>.Traffic[] producer (
 	ginkgo.It("T-12 RevisionName matches the per-revision Service name exactly", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("t12"), WithoutDecoder())
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			isvc := freshISVC(g, ns.Name, "t12")

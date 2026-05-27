@@ -93,7 +93,7 @@ var _ = ginkgo.Describe("Coordination Independent state machine (OEP-0007.1)", g
 	ginkgo.It("I-2 explicit Independent group: status reports state but applies no gating", func() {
 		// Independent's job is reporting, not gating. Even with one
 		// Component "Surging-shaped" and one "ScalingDown-shaped"
-		// (which Atomic/PairedMixable would distinguish into sub-phases),
+		// (which BlueGreen/RollingUpdate would distinguish into sub-phases),
 		// Independent reports a single Shifting.
 		obs := indepObs()
 		mutate(&obs, v1beta1.EngineComponent, func(o *coordination.ComponentObservation) {
@@ -156,11 +156,11 @@ var _ = ginkgo.Describe("Coordination Independent state machine (OEP-0007.1)", g
 		Expect(tr.Message).To(ContainSubstring("Independent"))
 	})
 
-	ginkgo.It("I-5 ALL Components paused → group Paused (matches PairedMixable G12 semantics)", func() {
-		// Independent has per-Component independence like PairedMixable,
-		// so the Paused gate uses "ALL paused → Paused" (not Atomic's
+	ginkgo.It("I-5 ALL Components paused → group Paused (matches RollingUpdate G12 semantics)", func() {
+		// Independent has per-Component independence like RollingUpdate,
+		// so the Paused gate uses "ALL paused → Paused" (not BlueGreen's
 		// "ANY paused"). Mirrors the G12 fix shipped for
-		// pairedMixableTransition.
+		// rollingUpdateTransition.
 		obs := indepObs()
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {
@@ -197,17 +197,17 @@ var _ = ginkgo.Describe("Coordination Independent state machine (OEP-0007.1)", g
 
 	ginkgo.It("I-6 Independent never returns Surging/Waiting/ScalingDown — only Idle/Shifting/Failed/Paused", func() {
 		// Exhaustive: walk through observation shapes that would yield
-		// Surging/Waiting/ScalingDown under Atomic/PairedMixable, and
+		// Surging/Waiting/ScalingDown under BlueGreen/RollingUpdate, and
 		// confirm Independent collapses them all to Shifting.
 		shouldBeShifting := []func(*coordination.ComponentObservation){
 			func(o *coordination.ComponentObservation) {
-				// Atomic-Surging shape: rolling, no surge pods yet.
+				// BlueGreen-Surging shape: rolling, no surge pods yet.
 				o.RolloutInFlight = true
 				o.NewRevisionPods = 0
 				o.TargetRevisionHash = "rev2"
 			},
 			func(o *coordination.ComponentObservation) {
-				// Atomic-Waiting shape: surge pods exist but not Ready.
+				// BlueGreen-Waiting shape: surge pods exist but not Ready.
 				o.RolloutInFlight = true
 				o.NewRevisionPods = 2
 				o.NewRevisionReadyPods = 1
@@ -215,7 +215,7 @@ var _ = ginkgo.Describe("Coordination Independent state machine (OEP-0007.1)", g
 				o.TargetRevisionHash = "rev2"
 			},
 			func(o *coordination.ComponentObservation) {
-				// Atomic-Shifting shape: surge ready + old still up.
+				// BlueGreen-Shifting shape: surge ready + old still up.
 				o.RolloutInFlight = true
 				o.NewRevisionPods = 2
 				o.NewRevisionReadyPods = 2
@@ -223,7 +223,7 @@ var _ = ginkgo.Describe("Coordination Independent state machine (OEP-0007.1)", g
 				o.TargetRevisionHash = "rev2"
 			},
 			func(o *coordination.ComponentObservation) {
-				// Atomic-ScalingDown shape: surge ready + old drained.
+				// BlueGreen-ScalingDown shape: surge ready + old drained.
 				o.RolloutInFlight = true
 				o.NewRevisionPods = 2
 				o.NewRevisionReadyPods = 2
@@ -282,7 +282,7 @@ var _ = ginkgo.Describe("Coordination Independent state machine (OEP-0007.1)", g
 				"clearing Failed must allow the group to return to Idle (no sticky failure state)")
 	})
 
-	ginkgo.It("I-Pure-Aux Failed beats Paused in Independent (same precedence as PairedMixable)", func() {
+	ginkgo.It("I-Pure-Aux Failed beats Paused in Independent (same precedence as RollingUpdate)", func() {
 		obs := indepObs()
 		for _, c := range obs.Group.Components {
 			mutate(&obs, c, func(o *coordination.ComponentObservation) {

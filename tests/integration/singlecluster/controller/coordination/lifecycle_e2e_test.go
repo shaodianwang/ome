@@ -21,7 +21,7 @@ var _ = ginkgo.Describe("Coordination lifecycle end-to-end (OEP-0007.1)", ginkgo
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("E2E-1 2-Component Atomic model bump → per-revision Services + Traffic + group status converge", func() {
+	ginkgo.It("E2E-1 2-Component BlueGreen model bump → per-revision Services + Traffic + group status converge", func() {
 		// MaxUnavailable=1 is required here because the G7 unavailability
 		// gate denies any update that would take the Component below its
 		// ReadyReplicas budget. With the default pacing (MaxUnavailable=0)
@@ -32,16 +32,14 @@ var _ = ginkgo.Describe("Coordination lifecycle end-to-end (OEP-0007.1)", ginkgo
 		fix := newCoordFixture(ns.Name, WithISVCName("e2e1"),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyAtomic,
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				Pacing: &v1beta1.CoordinationPacing{
 					MaxUnavailable: &maxUnavail,
 				},
 			}),
 			WithEngineImage("ghcr.io/test/runtime:v1"))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		// First convergence on v1. Gating ONLY on Phase=Idle is racy:
 		// coord runs each reconcile pass with an in-memory copy of the
@@ -96,9 +94,9 @@ var _ = ginkgo.Describe("Coordination lifecycle end-to-end (OEP-0007.1)", ginkgo
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("E2E-2 3-Component Atomic — 3rd Component slows convergence past 90s under suite load", func() {})
+	ginkgo.PIt("E2E-2 3-Component BlueGreen — 3rd Component slows convergence past 90s under suite load", func() {})
 	ginkgo.PIt("E2E-3 Sequential decoder→engine — active-Component timing window narrow in envtest", func() {})
-	ginkgo.PIt("E2E-4 PairedMixable — same brittleness as E2E-3 under suite load", func() {})
+	ginkgo.PIt("E2E-4 RollingUpdate — same brittleness as E2E-3 under suite load", func() {})
 	ginkgo.PIt("E2E-5 Independent baseline — covered structurally by REG-1/REG-4 + I-* pure-function specs", func() {})
 
 	ginkgo.PIt("E2E-6 ISVC delete cascade — duplicates LIFE-1; flakes under suite load", func() {

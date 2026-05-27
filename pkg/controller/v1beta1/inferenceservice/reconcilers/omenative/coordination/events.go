@@ -25,7 +25,7 @@ const (
 	// refused a surge to avoid drifting the cross-Component ratio.
 	EventReasonRatioSkewRejected = "RatioSkewRejected"
 
-	// EventReasonMixedPairingObserved fires when a PairedMixable
+	// EventReasonMixedPairingObserved fires when a RollingUpdate
 	// group sees distinct (vN, vM) revision pairs in flight.
 	// Informational — helps operators audit back-compat assertions.
 	EventReasonMixedPairingObserved = "MixedPairingObserved"

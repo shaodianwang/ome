@@ -65,14 +65,14 @@ discovery, `Status.Components.<c>.Traffic[]` writes) needed to make
 coordinated rollouts safe.
 
 The five scenarios PD operators have asked for:
-1. **Atomic three-way** — router + engine + decoder roll as one unit
+1. **BlueGreen three-way** — router + engine + decoder roll as one unit
 2. **All independent** — each Component rolls on its own (today's v1 default; preserved as v1.1 default for back-compat)
-3. **Paired-mixable** — engine + decoder roll in lockstep but any v2 engine pod can talk to any v1 decoder pod and vice versa (operator asserts protocol back-compat)
+3. **RollingUpdate** — engine + decoder roll in lockstep but any v2 engine pod can talk to any v1 decoder pod and vice versa (operator asserts protocol back-compat)
 4. **Ratio-aware pacing** — orthogonal to 1-3; for asymmetric topologies (e.g., 40 prefill : 20 decode), enforces the original ratio across the rollout so neither side gets starved
 5. **Sequential / phased** — decoder rolls fully to 100% on the new revision, soaks for as long as the operator wants, only then does engine start its own rollout cycle. Useful for staged validation: prove the new decoder under real production traffic before risking the engine.
 
 All five are expressible by combining one of four `policy` enum
-values (Atomic / Independent / PairedMixable / Sequential) with one
+values (BlueGreen / Independent / RollingUpdate / Sequential) with one
 of two `pacing.type` values (PerComponent / RatioBalanced) inside a
 `groups[]` entry.
 
@@ -82,7 +82,7 @@ plans, blue-green semantics). See [Division of Responsibility with
 OEP-0011](#division-of-responsibility-with-oep-0011) and
 [Recipes](#recipes-oep-0011--oep-00071-composition) for how the two
 OEPs compose. Blue-green and multi-step canary are OEP-0011 patterns
-that become PD-safe by adding an Atomic group from this OEP — they're
+that become PD-safe by adding a BlueGreen group from this OEP — they're
 not separate scenarios.
 
 OEP-0007.1 lands **after** OEP-0007 v1. Existing OMENative ISVCs
@@ -140,7 +140,7 @@ decoder" can mean:
 
 The five scenarios operators have asked for:
 
-#### Scenario 1: Atomic three-way rollout
+#### Scenario 1: BlueGreen three-way rollout
 
 Router + engine + decoder roll together. Surge new pods for all
 three. Wait for all three new sets to be Ready. Atomically switch
@@ -161,7 +161,7 @@ Each Component rolls on its own. Fastest. Operator asserts that:
 Risky for PD without back-compat protocol. The default in v1.1 for
 back-compat reasons; explicit `groups[]` is the way to upgrade.
 
-#### Scenario 3: Engine + decoder paired-mixable, router independent
+#### Scenario 3: Engine + decoder RollingUpdate, router independent
 
 Engine and decoder roll in lockstep at the **spec level** (operator
 bumps both image tags as one PR), but during the rollout window any
@@ -174,7 +174,7 @@ Operationally common when:
 - Router is updated on a different cadence (CPU pod, dependency-only
   changes)
 
-The middle-ground policy. Looser than Atomic, safer than fully
+The middle-ground policy. Looser than BlueGreen, safer than fully
 Independent.
 
 #### Scenario 4: Ratio-aware pacing
@@ -187,7 +187,7 @@ can produce momentary 2.5:1 skew if the prefill surge completes first
 
 Ratio-aware pacing computes the original cross-Component ratio at
 rollout start and refuses to let the rollout drift past it. Orthogonal
-to the policy enum: ratio-aware applies to Atomic and PairedMixable
+to the policy enum: ratio-aware applies to BlueGreen and RollingUpdate
 groups (Independent groups by definition don't track cross-Component
 ratios).
 
@@ -201,7 +201,7 @@ Components' rollouts are strictly serialized along the operator-pinned
 
 Operationally this is the staged-validation pattern: PD operator
 wants to prove the new decoder under real production traffic for an
-hour (or a day, or a week) before touching engine. Atomic is too
+hour (or a day, or a week) before touching engine. BlueGreen is too
 coupled — it forces both to complete in the same rollout window;
 Independent is too loose — engine and decoder both start rolling the
 moment the spec bumps and end up mid-rollout simultaneously.
@@ -223,7 +223,7 @@ Sequential is the missing middle ground:
   either roll decoder back to a working state or revert the engine
   spec too
 
-Different from Atomic + `order:` (which pins surge **sequence**
+Different from BlueGreen + `order:` (which pins surge **sequence**
 within a single rollout unit where the whole gang traffic-shifts
 together) — Sequential walks the full lifecycle per Component, with
 a wait at each step for the operator's confidence.
@@ -271,8 +271,8 @@ coordinate the answer, in what order, with what coupling."
 | Per-Component rollout state | `Status.Components.<c>.RolloutPhase: Stable\|Canarying\|BlueGreenStandby\|Paused\|Failed` | — |
 | Step plan + manual approval | `spec.traffic.rollout.promotionPolicy: Manual\|Auto` | — |
 | HTTPRoute weighted backendRefs | Consumer (PR #147, shipped) | — |
-| **Which Components roll together** | OEP-0011 asserts "PD components coupled" (README:138-142) but doesn't implement it | `policy: Atomic` enforces it |
-| **What order Components roll** | — | `order:` (Sequential) or surge order (Atomic) |
+| **Which Components roll together** | OEP-0011 asserts "PD components coupled" (README:138-142) but doesn't implement it | `policy: BlueGreen` enforces it |
+| **What order Components roll** | — | `order:` (Sequential) or surge order (BlueGreen) |
 | **Cross-Component pacing / ratio** | — | `pacing.type: RatioBalanced` |
 | Per-revision pod sets + Services | Explicit out-of-scope (README:1101-1124) | `<isvc>-<c>-rev-<hash>` Services |
 | Generation-scoped peer discovery | Out-of-scope | Env-var injection |
@@ -288,7 +288,7 @@ different percentages, which violates OEP-0011's own design intent.
 **Composition rule:** OEP-0011's surface defines the **step plan**
 (what %, when, with what pauses). OEP-0007.1's `groups[]` defines the
 **Component coupling** (which Components walk the plan together,
-sequentially, paired-mixable, or independently). They're orthogonal:
+sequentially, RollingUpdate, or independently). They're orthogonal:
 any OEP-0011 traffic strategy composes with any OEP-0007.1
 coordination policy. See [Recipes](#recipes-oep-0011--oep-00071-composition)
 for the named operational patterns this produces.
@@ -334,9 +334,9 @@ for the named operational patterns this produces.
    `metadata.labels`, `metadata.annotations`) stays. OEP-0007.1 uses
    the labels-eligible rule to mutate `ome.io/revision-hash` during
    in-place upgrades that change the revision.
-5. **Not auto-defaulting Atomic.** Backwards-compat requirement
+5. **Not auto-defaulting BlueGreen.** Backwards-compat requirement
    (OEP-0007 v1 ships first with Independent default) means OEP-0007.1
-   keeps Independent as the default; Atomic is operator-declared.
+   keeps Independent as the default; BlueGreen is operator-declared.
 6. **Not implementing rollback verbs.** Operator triggers rollback by
    reverting the spec; controller drives the rollback through the
    same state machine in reverse.
@@ -360,7 +360,7 @@ InferenceService
 ├── spec.rolloutCoordination          (NEW — this OEP)
 │   └── groups[]
 │       ├── components: [...]         (which Components are coordinated)
-│       ├── policy: Atomic | Independent | PairedMixable
+│       ├── policy: BlueGreen | Independent | RollingUpdate
 │       └── pacing: { type, maxSurge, maxUnavailable }
 
                   │
@@ -397,29 +397,29 @@ the per-Component reconcilers fire.
 
 | Operator intent | YAML |
 |---|---|
-| (1) Atomic three-way | `groups: [{components: [router, engine, decoder], policy: Atomic}]` |
+| (1) BlueGreen three-way | `groups: [{components: [router, engine, decoder], policy: BlueGreen}]` |
 | (2) All independent | `rolloutCoordination` omitted (default), or `groups: []` (explicit empty) |
-| (3) Engine+decoder paired-mixable, router independent | `groups: [{components: [engine, decoder], policy: PairedMixable}]` (router unlisted → independent) |
+| (3) Engine+decoder RollingUpdate, router independent | `groups: [{components: [engine, decoder], policy: RollingUpdate}]` (router unlisted → independent) |
 | (4) Ratio-aware | Any group with `pacing: { type: RatioBalanced }` |
 | (5) Sequential (decoder fully done before engine) | `groups: [{components: [decoder, engine], policy: Sequential, order: [decoder, engine]}]` |
-| Atomic + ratio-aware | `groups: [{components: [engine, decoder], policy: Atomic, pacing: {type: RatioBalanced, maxSurge: 25%}}]` |
+| BlueGreen + ratio-aware | `groups: [{components: [engine, decoder], policy: BlueGreen, pacing: {type: RatioBalanced, maxSurge: 25%}}]` |
 | Sequential + per-step pacing within each phase | `groups: [{components: [decoder, engine], policy: Sequential, order: [decoder, engine]}]` AND `spec.traffic.rollout.steps: [{trafficWeight: 10, pause: {}}, {trafficWeight: 100}]` (each Component walks the step plan before the next starts) |
-| Multiple groups in one ISVC | `groups: [{components: [engine, decoder], policy: PairedMixable}, {components: [router], policy: Atomic}]` (rare; router-alone Atomic is equivalent to Independent for a 1-Component group, but allowed for symmetry) |
+| Multiple groups in one ISVC | `groups: [{components: [engine, decoder], policy: RollingUpdate}, {components: [router], policy: BlueGreen}]` (rare; router-alone BlueGreen is equivalent to Independent for a 1-Component group, but allowed for symmetry) |
 
 ### User Stories
 
-#### Story 1 — Operator declares Atomic three-way for safety
+#### Story 1 — Operator declares BlueGreen three-way for safety
 
 PD ISVC with router + engine + decoder. Operator hasn't validated
 that engine v2 talks safely to decoder v1, doesn't want to think
-about it. Declares Atomic:
+about it. Declares BlueGreen:
 
 ```yaml
 spec:
   rolloutCoordination:
     groups:
       - components: [router, engine, decoder]
-        policy: Atomic
+        policy: BlueGreen
         pacing: { maxSurge: 25% }
 ```
 
@@ -445,7 +445,7 @@ status:
           newPods:  { router: 0, engine: 10, decoder: 5 }
 ```
 
-#### Story 2 — Operator declares PairedMixable for runtime co-released bumps
+#### Story 2 — Operator declares RollingUpdate for runtime co-released bumps
 
 The runtime team co-releases engine and decoder with guaranteed
 back-compat across minor versions. Router is on a different cadence:
@@ -455,7 +455,7 @@ spec:
   rolloutCoordination:
     groups:
       - components: [engine, decoder]
-        policy: PairedMixable
+        policy: RollingUpdate
         pacing: { type: RatioBalanced, maxSurge: 25% }
     # router not listed → rolls independently
 ```
@@ -537,15 +537,15 @@ failure and revert engine spec too.
 #### Story 4 — Migration verb (Alfred) in a coordinated group
 
 Alfred wants to defragment Node3 by moving one engine Instance to
-another node. Engine is in an Atomic group with decoder.
+another node. Engine is in an BlueGreen group with decoder.
 
 Migration verb (`Migrate(component=engine, instance=0)`) is rejected
 with `MigrationRequiresGroupMigration` because moving one Component's
-Instance independently would break the Atomic invariant. Alfred either:
+Instance independently would break the BlueGreen invariant. Alfred either:
 - Falls back to a different node-drain strategy
 - Triggers a full-group migration (planned for Alfred's next iteration)
 
-For Independent or PairedMixable groups, single-Component migration
+For Independent or RollingUpdate groups, single-Component migration
 proceeds as in OEP-0007 v1.
 
 ### Risks and Mitigations
@@ -557,13 +557,13 @@ coordination — coordination layer constrains them via labels and
 status writes, never reaches into their state. Each layer remains
 unit-testable independently.
 
-**Risk: PairedMixable's "cross-version is safe" assertion may be
-wrong.** Operator declares `policy: PairedMixable` expecting protocol
+**Risk: RollingUpdate's "cross-version is safe" assertion may be
+wrong.** Operator declares `policy: RollingUpdate` expecting protocol
 back-compat; runtime regression breaks it; PD requests silently
 corrupt. Mitigation: log per-Component image hashes and emit a
 `MixedPairingObserved` metric when distinct revision pairs are seen
 in flight, so observability surfaces the assertion at operator review
-time. Operators can flip to Atomic if they don't trust the assertion.
+time. Operators can flip to BlueGreen if they don't trust the assertion.
 
 **Risk: Ratio-aware pacing math is fiddly for non-integer ratios.**
 40:20 = 2:1 is clean. 11:7 is not. Mitigation: ratio is enforced via
@@ -621,13 +621,13 @@ type RolloutCoordinationSpec struct {
 type RolloutCoordinationGroup struct {
     // Components lists the Component names included in this group.
     // Valid values: "router", "engine", "decoder". Order is not
-    // significant unless `order` is set (only meaningful for Atomic).
+    // significant unless `order` is set (only meaningful for BlueGreen).
     // +kubebuilder:validation:MinItems=1
     // +listType=atomic
     Components []ComponentType `json:"components"`
 
     // Policy selects the coordination semantic for this group.
-    // +kubebuilder:validation:Enum=Atomic;Independent;PairedMixable;Sequential
+    // +kubebuilder:validation:Enum=BlueGreen;Independent;RollingUpdate;Sequential
     Policy CoordinationPolicy `json:"policy"`
 
     // Pacing controls how surge / drain pacing is computed within
@@ -637,7 +637,7 @@ type RolloutCoordinationGroup struct {
     Pacing *CoordinationPacing `json:"pacing,omitempty"`
 
     // Order has two meanings depending on Policy:
-    //   - Atomic: pins the surge sequence within the single rollout
+    //   - BlueGreen: pins the surge sequence within the single rollout
     //     unit (decoder surges first, then engine, etc.) but all
     //     Components traffic-shift together once every set is Ready.
     //     Optional; default no ordering (parallel surge).
@@ -645,7 +645,7 @@ type RolloutCoordinationGroup struct {
     //     walk their full state machine. The next Component cannot
     //     enter Surging until the previous Component is back at Idle
     //     on the new revision.
-    //   - Independent / PairedMixable: ignored.
+    //   - Independent / RollingUpdate: ignored.
     // +optional
     // +listType=atomic
     Order []ComponentType `json:"order,omitempty"`
@@ -654,9 +654,9 @@ type RolloutCoordinationGroup struct {
 type CoordinationPolicy string
 
 const (
-    CoordinationPolicyAtomic         CoordinationPolicy = "Atomic"
+    CoordinationPolicyBlueGreen      CoordinationPolicy = "BlueGreen"
     CoordinationPolicyIndependent    CoordinationPolicy = "Independent"
-    CoordinationPolicyPairedMixable  CoordinationPolicy = "PairedMixable"
+    CoordinationPolicyRollingUpdate  CoordinationPolicy = "RollingUpdate"
     CoordinationPolicySequential     CoordinationPolicy = "Sequential"
 )
 
@@ -706,7 +706,7 @@ const (
 
 ### Coordination Policies
 
-**Atomic**
+**BlueGreen**
 
 All Components in the group surge → wait-ready → shift traffic →
 drain → scale down **together**. The controller treats the group as
@@ -723,7 +723,7 @@ a single rollout unit:
   in-flight surges are reverted
 
 `order: [decoder, engine, router]` (optional, default no ordering)
-pins the surge sequence within Atomic: decoder surges first, waits for
+pins the surge sequence within BlueGreen: decoder surges first, waits for
 its new pods to be Ready, then engine surges, then router. Useful when
 upstream peers depend on downstream peers being available in the new
 revision before they're allowed to surge.
@@ -735,7 +735,7 @@ declaration is essentially documentation — it asserts that the
 operator has thought about it and decided coordination isn't needed.
 The controller behavior is identical to omitting the group.
 
-**PairedMixable**
+**RollingUpdate**
 
 Components in the group must be at the same **spec generation**
 (operator bumps engine and decoder image tags in the same PR), but
@@ -753,7 +753,7 @@ the group. The controller:
 - Reports cross-pairing observability (`MixedPairingObserved` metric)
   so operators can audit that their back-compat assertion held
 
-PairedMixable is the operationally common case for runtime co-release
+RollingUpdate is the operationally common case for runtime co-release
 patterns (SGLang/vLLM ship engine + decoder together; protocol is
 back-compat across minor versions).
 
@@ -804,7 +804,7 @@ before the next Component starts its plan. Operators get nested
 gating: per-step manual promotion within each Component, plus
 operator-controlled soak between Components.
 
-Different from Atomic with `order:` (which still treats the gang as
+Different from BlueGreen with `order:` (which still treats the gang as
 one rollout unit and traffic-shifts everything together) —
 Sequential walks the full lifecycle per Component, with an
 operator-controlled wait at each Component boundary.
@@ -814,7 +814,7 @@ Use Sequential when:
 - You want staged validation under real prod traffic before letting
   the next Component touch the new revision
 - The protocol coupling between Components is strong enough that
-  PairedMixable's "any vN talks to any vM" isn't safe
+  RollingUpdate's "any vN talks to any vM" isn't safe
 - The rollout window is allowed to span days, not minutes
 
 ### Pacing
@@ -838,7 +838,7 @@ Use PerComponent pacing when:
 
 - Component replica counts are similar (so independent pacing doesn't
   produce skew)
-- You're using Atomic primarily for gang-readiness, not for ratio
+- You're using BlueGreen primarily for gang-readiness, not for ratio
   enforcement
 
 **RatioBalanced**
@@ -874,10 +874,10 @@ RatioBalanced group.
 - `groups[]` declared with no `pacing`: each group uses
   `pacing.type=PerComponent` with `maxSurge=25%` and
   `maxUnavailable=0`.
-- `policy: Atomic` with no `order`: Components surge in parallel; no
+- `policy: BlueGreen` with no `order`: Components surge in parallel; no
   intra-group sequencing.
 
-No auto-detection. Operators who want Atomic must declare it.
+No auto-detection. Operators who want BlueGreen must declare it.
 Discoverability is via OEP-0007.1's quickstart doc + status
 condition messages that nudge operators toward declaring groups when
 their workload pattern would benefit (e.g., a PD ISVC without any
@@ -932,8 +932,8 @@ pair at pod creation time:
 
 | Env var | Value | Used by |
 |---|---|---|
-| `OME_<PEER>_ENDPOINT` | `<isvc>-<peer>.<ns>.svc.cluster.local` (generic, revision-agnostic) | Runtimes in Independent or PairedMixable groups — cross-revision peer calls are allowed |
-| `OME_<PEER>_REVISION_ENDPOINT` | `<isvc>-<peer>-rev-<this-pod's-revision-hash>.<ns>.svc.cluster.local` (per-revision) | Runtimes in Atomic groups — pod talks only to same-revision peers |
+| `OME_<PEER>_ENDPOINT` | `<isvc>-<peer>.<ns>.svc.cluster.local` (generic, revision-agnostic) | Runtimes in Independent or RollingUpdate groups — cross-revision peer calls are allowed |
+| `OME_<PEER>_REVISION_ENDPOINT` | `<isvc>-<peer>-rev-<this-pod's-revision-hash>.<ns>.svc.cluster.local` (per-revision) | Runtimes in BlueGreen groups — pod talks only to same-revision peers |
 
 The runtime image picks which to honor via a config flag or by
 preferring `OME_<PEER>_REVISION_ENDPOINT` if set. Both env vars are
@@ -953,8 +953,8 @@ OME_DECODER_REVISION_ENDPOINT=llama-70b-decoder-rev-abc123.prod.svc.cluster.loca
 ```
 
 Where `abc123` is **this pod's own revision hash** — the pod is told
-to talk to peers in its own revision (Atomic) or to the generic
-Service (PairedMixable / Independent).
+to talk to peers in its own revision (BlueGreen) or to the generic
+Service (RollingUpdate / Independent).
 
 **Why env vars (vs ConfigMap mount or sidecar)?** Env vars are
 read-once at process startup, which matches the LLM-runtime pattern
@@ -969,7 +969,7 @@ list), the env var stays the same — but the pod's `ome.io/revision`
 label flips, so the pod is now selected by the new per-revision
 Service. The old peer endpoint (in the env var) still resolves
 correctly because either:
-- It points at the generic Service (PairedMixable) → resolves to any
+- It points at the generic Service (RollingUpdate) → resolves to any
   peer pod regardless of revision
 - It points at the per-revision Service for the NEW revision (because
   the env was set based on the new pod's incoming revision, not the
@@ -1034,11 +1034,11 @@ The producer ↔ consumer contract:
 
 For coordinated groups, the Status.Traffic[] writes are also
 coordinated:
-- **Atomic group:** controller writes Traffic[] for all Components in
+- **BlueGreen group:** controller writes Traffic[] for all Components in
   the group simultaneously (at step boundaries), so the HTTPRoute
   weights for every Component shift atomically. `latestRolledoutRevision`
   also advances atomically across the group.
-- **PairedMixable:** controller writes Traffic[] per-Component
+- **RollingUpdate:** controller writes Traffic[] per-Component
   independently, but ensures all Components in the group remain at
   the same spec generation (otherwise admission rejected).
 - **Independent / no group:** writes are per-Component, asynchronous.
@@ -1075,7 +1075,7 @@ Per phase:
 | Phase | What it does | Exit |
 |---|---|---|
 | `Idle` | No rollout in flight. Controller watches for spec generation bumps that affect any Component in the group. | Spec bump → `Surging` |
-| `Surging` | Create new-revision pods up to `pacing.maxSurge`, subject to ratio constraint if `RatioBalanced`. For Atomic, surge all Components in parallel (or per `order:` if set). | All surge targets met → `Waiting` |
+| `Surging` | Create new-revision pods up to `pacing.maxSurge`, subject to ratio constraint if `RatioBalanced`. For BlueGreen, surge all Components in parallel (or per `order:` if set). | All surge targets met → `Waiting` |
 | `Waiting` | Block on `pods.readyCount(rev=new) >= surgeTarget` for every Component. Honor `ome.io/rollout-ready-timeout` annotation. | All Components Ready → `Shifting`. Timeout → `Failed` |
 | `Shifting` | Write `Status.Components.<c>.Traffic[]` with new weights. OEP-0011's HTTPRoute builder picks up; weighted backendRefs shift. Emits `RouteBackendsUpdated` event. | Traffic[] writes succeed → `Draining` |
 | `Draining` | Wait `scaleDownDelaySeconds` (default 30s, per OEP-0011) for in-flight requests to complete on old-revision pods. | Time elapsed → `ScalingDown` |
@@ -1087,7 +1087,7 @@ Per phase:
 For Independent groups (or no group), each Component runs its own
 state machine without coordination — equivalent to OEP-0007 v1.
 
-For PairedMixable, the per-Component state machines run in parallel
+For RollingUpdate, the per-Component state machines run in parallel
 but observe a shared `groupSpecGeneration` invariant: if engine is in
 `Shifting` for generation N, decoder must also be at generation N
 (any spec edit that doesn't bump both is rejected at admission).
@@ -1166,7 +1166,7 @@ transitions are triggered. This matches OEP-0007's semantics
 
 ### Failure Handling
 
-For Atomic groups:
+For BlueGreen groups:
 
 - One Component's pods fail to reach Ready within
   `ome.io/rollout-ready-timeout` → whole group enters `Failed`
@@ -1180,12 +1180,12 @@ For Atomic groups:
   `canaryTrafficPercent: 0` (if using simple form) to drain the new
   revision while keeping the spec intact for re-attempt
 
-For PairedMixable groups:
+For RollingUpdate groups:
 
 - One Component's failure surfaces as that Component's individual
   `Failed` phase (per OEP-0007 v1)
 - Other Components in the group are NOT rolled back automatically
-  (PairedMixable's contract is "mixable" — partial-revision states
+  (RollingUpdate's contract is "mixable" — partial-revision states
   are OK)
 - Operator decides whether to revert the failing Component
   individually or revert the whole spec
@@ -1199,8 +1199,8 @@ OEP-0008) interacts with coordination as follows:
 
 | Group's policy | Migration verb behavior |
 |---|---|
-| Atomic | Single-Component migration **rejected** with `MigrationRequiresGroupMigration`. Alfred falls back to a different defragmentation strategy or initiates full-group migration (planned for Alfred v2). |
-| PairedMixable | Single-Component migration **proceeds** as in OEP-0007 v1. The mixable contract makes single-Component migration safe (peer pods in the other Component are version-mixable). |
+| BlueGreen | Single-Component migration **rejected** with `MigrationRequiresGroupMigration`. Alfred falls back to a different defragmentation strategy or initiates full-group migration (planned for Alfred v2). |
+| RollingUpdate | Single-Component migration **proceeds** as in OEP-0007 v1. The mixable contract makes single-Component migration safe (peer pods in the other Component are version-mixable). |
 | Independent / no group | Single-Component migration proceeds as in OEP-0007 v1. |
 
 Future: a `Migrate(group=<group-name>)` verb that drains and replaces
@@ -1216,14 +1216,14 @@ Admission rules added to the ISVC validator:
 | Each Component appears in at most one `groups[]` entry | `DuplicateComponentInCoordinationGroups` |
 | `groups[].components[]` references only `router`, `engine`, `decoder` (string-typed enum) | `InvalidComponentInCoordinationGroup` |
 | Every Component listed in `groups[]` must have `ome.io/deploymentMode=OMENative` annotation | `CoordinationRequiresOMENative` |
-| `policy: Atomic` with `pacing.type: RatioBalanced` and `pacing.ratioTolerance > 50%` | `RatioToleranceTooHigh` (admission warning) |
+| `policy: BlueGreen` with `pacing.type: RatioBalanced` and `pacing.ratioTolerance > 50%` | `RatioToleranceTooHigh` (admission warning) |
 | `groups[]` non-empty but ISVC has no Components matching any group | `OrphanCoordinationGroup` |
 | `groups[].order[]` references Components not in `groups[].components[]` | `InvalidCoordinationOrder` |
-| `policy: PairedMixable` with only one Component in `components[]` | `PairedMixableRequiresMultipleComponents` |
-| Spec edit bumps one Component's image in a `PairedMixable` group without bumping the others | `PairedMixableLockstepViolation` (rejects the Update) |
+| `policy: RollingUpdate` with only one Component in `components[]` | `RollingUpdateRequiresMultipleComponents` |
+| Spec edit bumps one Component's image in a `RollingUpdate` group without bumping the others | `RollingUpdateLockstepViolation` (rejects the Update) |
 | `policy: Sequential` with `order` empty or omitted | `SequentialRequiresOrder` |
 | `policy: Sequential` with `order` not covering every Component in `components` | `SequentialIncompleteOrder` |
-| `policy: Sequential` with `order` containing Components not in `components` | `InvalidCoordinationOrder` (shared with Atomic) |
+| `policy: Sequential` with `order` containing Components not in `components` | `InvalidCoordinationOrder` (shared with BlueGreen) |
 | `policy: Sequential` with only one Component in `components[]` | `SequentialRequiresMultipleComponents` (one-Component Sequential is equivalent to Independent; admission rejects to force operator to pick a meaningful policy) |
 
 The OEP-0011 `MixedRolloutForms` rule (mutual exclusivity between
@@ -1261,7 +1261,7 @@ The defaulter does:
 - `CoordinationGroupCompleted` — group returned to Idle after a rollout
 - `CoordinationGroupFailed` — group entered Failed phase
 - `RatioSkewRejected` — Surge attempt rejected to avoid ratio drift
-- `MixedPairingObserved` — PairedMixable group observed cross-revision
+- `MixedPairingObserved` — RollingUpdate group observed cross-revision
   peer pairs in flight (informational; helps operators audit
   back-compat assertion)
 - `SequentialComponentCompleted` — Sequential group's active
@@ -1282,7 +1282,7 @@ The defaulter does:
 - `ome_omenative_rollout_group_failure_total{isvc,group,reason}` — failure counter
 - `ome_omenative_ratio_skew_total{isvc,group}` — counter for RatioBalanced rejections
 - `ome_omenative_per_revision_service_total{isvc,component}` — gauge of live per-revision Services
-- `ome_omenative_mixed_pairing_total{isvc,group}` — count of distinct revision-pair combinations observed (PairedMixable diagnostic)
+- `ome_omenative_mixed_pairing_total{isvc,group}` — count of distinct revision-pair combinations observed (RollingUpdate diagnostic)
 
 **Structured logs:** each coordination reconcile emits
 `{isvc, group, phase, components, observedRatio, surgeTarget}`.
@@ -1378,20 +1378,20 @@ spec:
   rolloutCoordination:
     groups:
       - components: [engine, decoder]
-        policy: Atomic
+        policy: BlueGreen
   engine:
     canaryTrafficPercent: 10           # OEP-0011 simple form
   decoder:
-    canaryTrafficPercent: 10           # must match (Atomic enforces)
+    canaryTrafficPercent: 10           # must match (BlueGreen enforces)
 ```
 
-What happens: Atomic ensures both Components surge new-revision
+What happens: BlueGreen ensures both Components surge new-revision
 pods together, traffic-shift to 10% together, and stay there
 together. OEP-0011's per-Component `canaryTrafficPercent: 10`
-defines the weight; OEP-0007.1's Atomic policy enforces that both
+defines the weight; OEP-0007.1's BlueGreen policy enforces that both
 Components apply it in the same reconcile.
 
-Without Atomic (today's v1 behavior): operator could set
+Without BlueGreen (today's v1 behavior): operator could set
 `engine.canaryTrafficPercent: 10` and forget decoder, ending up with
 engine at 10% v2 talking to decoder at 0% v2 — silent PD
 mismatch. OEP-0011 README:138-142 declares "PD components coupled"
@@ -1408,7 +1408,7 @@ spec:
   rolloutCoordination:
     groups:
       - components: [router, engine, decoder]
-        policy: Atomic
+        policy: BlueGreen
         pacing: { maxSurge: "100%" }    # full second copy
   router:
     canaryTrafficPercent: 0            # standby: pods exist, 0% traffic
@@ -1419,7 +1419,7 @@ spec:
 ```
 
 Phase 1 (standby): operator bumps all three Component images, sets
-`canaryTrafficPercent: 0` on each. Atomic ensures the standby pods
+`canaryTrafficPercent: 0` on each. BlueGreen ensures the standby pods
 for all three Components come up together. Decoder rev-`<new>` pods
 ready, engine rev-`<new>` pods ready, router rev-`<new>` pods ready
 — but 0% traffic. Group enters `Shifting` then immediately stops at
@@ -1430,13 +1430,13 @@ Validation phase: operator hits the per-revision Service
 test traffic. Validates v2 is healthy.
 
 Phase 2 (cutover): operator edits `canaryTrafficPercent` from 0 to
-100 on all three Components in one apply. Atomic ensures all three
+100 on all three Components in one apply. BlueGreen ensures all three
 Components flip from 0% to 100% in the same reconcile.
 HTTPRoute weights swap to `0% old, 100% new` atomically. Old pods
 drain after `scaleDownDelaySeconds`. Done.
 
 Rollback (if v2 has a problem): edit `canaryTrafficPercent` back to
-0 on all three. Atomic flips together. Old pods are still alive
+0 on all three. BlueGreen flips together. Old pods are still alive
 (within `scaleDownDelaySeconds`), so revert is instant.
 
 ### Recipe 3: Multi-step canary with PD coupling
@@ -1450,7 +1450,7 @@ spec:
   rolloutCoordination:
     groups:
       - components: [engine, decoder]
-        policy: Atomic
+        policy: BlueGreen
   traffic:
     rollout:
       steps:
@@ -1463,15 +1463,15 @@ spec:
       scaleDownDelaySeconds: 60
 ```
 
-Operator bumps engine + decoder image tags. Atomic ensures both
+Operator bumps engine + decoder image tags. BlueGreen ensures both
 surge together. OEP-0011's step state machine walks: 10% (auto
-30m), 50% (manual pause), 100% (final). At each step, Atomic
+30m), 50% (manual pause), 100% (final). At each step, BlueGreen
 enforces that engine and decoder's HTTPRoute weights advance
 together — operator promotes once, both Components shift.
 
 Mutual exclusivity (OEP-0011's `MixedRolloutForms`) means no
 per-Component `canaryTrafficPercent` is set when using the step
-form; Atomic policy doesn't change that rule.
+form; BlueGreen policy doesn't change that rule.
 
 ### Recipe 4: Staged Sequential validation (cross-day rollout)
 
@@ -1510,7 +1510,7 @@ Composes naturally with the per-Component canary form too (set
 `decoder.canaryTrafficPercent: 10`, observe, set to 100, then bump
 engine spec and repeat).
 
-### Recipe 5: Engine + decoder paired-mixable, router rolls separately
+### Recipe 5: Engine + decoder RollingUpdate, router rolls separately
 
 **Operator intent:** "Engine + decoder are released together by the
 runtime team with guaranteed protocol back-compat across minor
@@ -1521,12 +1521,12 @@ spec:
   rolloutCoordination:
     groups:
       - components: [engine, decoder]
-        policy: PairedMixable
+        policy: RollingUpdate
         pacing: { type: RatioBalanced, ratioTolerance: 5 }
   # router not listed → Independent (today's v1 default)
 ```
 
-Operator co-bumps engine + decoder images. PairedMixable allows
+Operator co-bumps engine + decoder images. RollingUpdate allows
 cross-revision peer talk during the rollout window. RatioBalanced
 keeps the asymmetric topology (e.g., 40:20) from drifting past 5%
 of the original ratio. `MixedPairingObserved` metric exercises;
@@ -1582,17 +1582,17 @@ typed (`corev1.Service`), so no new CRD vendoring.
 
 1. Independent / no group → ISVC with engine + decoder, spec bump
    on engine alone → engine rolls, decoder unchanged.
-2. Atomic two-Component (engine + decoder) → bump engine image →
+2. BlueGreen two-Component (engine + decoder) → bump engine image →
    group enters Surging, blocks until decoder also has new pods
    (i.e., spec bump on decoder is required for the rollout to
    complete; if only engine bumps, group stays in Surging-Waiting
    until decoder bump).
-3. Atomic three-way (router + engine + decoder) → bump all three
+3. BlueGreen three-way (router + engine + decoder) → bump all three
    image tags in one update → group walks Surging → Waiting →
    Shifting → Draining → ScalingDown → Idle. All Components transition
    atomically; HTTPRoute weights for all Components shift in the same
    reconcile.
-4. PairedMixable engine + decoder → bump both in one update →
+4. RollingUpdate engine + decoder → bump both in one update →
    per-Component reconciliation, generic Service for cross-revision
    talk, `MixedPairingObserved` event fires when distinct
    engine-rev × decoder-rev pairs are observed.
@@ -1642,9 +1642,9 @@ typed (`corev1.Service`), so no new CRD vendoring.
 
 **Migration verb (alpha gate):**
 
-11. `Migrate(engine, instance=0)` on an Atomic-grouped ISVC → rejected
+11. `Migrate(engine, instance=0)` on an BlueGreen-grouped ISVC → rejected
     with `MigrationRequiresGroupMigration` reason.
-12. `Migrate(engine, instance=0)` on a PairedMixable ISVC → proceeds
+12. `Migrate(engine, instance=0)` on a RollingUpdate ISVC → proceeds
     per OEP-0007 v1 semantics.
 
 **Webhook (alpha gate):**
@@ -1652,9 +1652,9 @@ typed (`corev1.Service`), so no new CRD vendoring.
 13. Duplicate Component in groups → `DuplicateComponentInCoordinationGroups`
 14. Component listed without OMENative annotation →
     `CoordinationRequiresOMENative`
-15. PairedMixable with one Component → `PairedMixableRequiresMultipleComponents`
-16. Spec edit that bumps only one Component in a PairedMixable group →
-    `PairedMixableLockstepViolation`
+15. RollingUpdate with one Component → `RollingUpdateRequiresMultipleComponents`
+16. Spec edit that bumps only one Component in a RollingUpdate group →
+    `RollingUpdateLockstepViolation`
 16a. Sequential without `order` → `SequentialRequiresOrder`
 16b. Sequential with `order` missing a Component listed in `components` →
      `SequentialIncompleteOrder`
@@ -1662,7 +1662,7 @@ typed (`corev1.Service`), so no new CRD vendoring.
 
 **Failure handling (alpha gate):**
 
-17. Atomic group with a bad image in one Component → all Components
+17. BlueGreen group with a bad image in one Component → all Components
     enter Surging, decoder reaches Ready, engine never does, group
     enters Failed after timeout. HTTPRoute weights unchanged (gateway
     excludes unhealthy backends). `RolloutFailed` event emitted.
@@ -1672,8 +1672,8 @@ typed (`corev1.Service`), so no new CRD vendoring.
 **Coexistence (beta gate):**
 
 19. ISVC with both `spec.traffic.rollout` (step-based) and
-    `groups[]: Atomic` → step state machine walks each step with
-    Atomic group surge applied; per-step pause works as documented
+    `groups[]: BlueGreen` → step state machine walks each step with
+    BlueGreen group surge applied; per-step pause works as documented
     in OEP-0011.
 
 ### End-to-End (beta gate)
@@ -1696,12 +1696,12 @@ typed (`corev1.Service`), so no new CRD vendoring.
 - Documentation: operator quickstart (`quickstart.md`), migration
   from OEP-0007 v1 (`migration.md`), API reference (`api.md`).
 - At least one production-grade PD ISVC running on OMENative with
-  `policy: Atomic` for ≥ 14 days without Sev1/Sev2 incidents.
+  `policy: BlueGreen` for ≥ 14 days without Sev1/Sev2 incidents.
 
 ### Beta
 
 - Integration test 19 passing (coexistence with step-based rollouts).
-- 2+ production PD ISVCs running with `policy: PairedMixable` for
+- 2+ production PD ISVCs running with `policy: RollingUpdate` for
   ≥ 60 days; `MixedPairingObserved` metric exercised in real rollouts
   without operator-reported corruption.
 - 2+ production PD ISVCs running with `pacing.type: RatioBalanced`
@@ -1733,7 +1733,7 @@ typed (`corev1.Service`), so no new CRD vendoring.
    surfaces with different scopes (traffic = data plane, coordination
    = workload). Operators must learn both. Mitigation: cross-link
    from each OEP's quickstart.
-2. **PairedMixable depends on operator-asserted protocol back-compat.**
+2. **RollingUpdate depends on operator-asserted protocol back-compat.**
    Wrong assertion silently corrupts PD requests. Mitigation: emit
    `MixedPairingObserved` event so operators see what was paired;
    document the assertion in the OEP and quickstart.
@@ -1759,10 +1759,10 @@ typed (`corev1.Service`), so no new CRD vendoring.
    half-rolled fleets. Operationally also benign — the active
    Component is fully on its new revision; the inactive Component is
    still on its v1 revision.
-7. **Atomic groups slow down rollouts.** Surging all Components in
+7. **BlueGreen groups slow down rollouts.** Surging all Components in
    parallel + waiting for all to be Ready means rollout time scales
-   with the slowest Component. Mitigation: Atomic is operator-opt-in,
-   not the default. Operators who want speed use PairedMixable or
+   with the slowest Component. Mitigation: BlueGreen is operator-opt-in,
+   not the default. Operators who want speed use RollingUpdate or
    Independent.
 
 ## Alternatives
@@ -1772,16 +1772,16 @@ typed (`corev1.Service`), so no new CRD vendoring.
    for the trade-offs. Summary: no demonstrated need for cross-ISVC
    policy reuse; OEP-0007's "no new CRDs" hard constraint stands.
 2. **Per-Component `coupledWith[]` field instead of ISVC-level
-   `groups[]`.** Rejected: more verbose for 3-way Atomic case (every
+   `groups[]`.** Rejected: more verbose for 3-way BlueGreen case (every
    Component needs to declare its peers); harder admission validation
    (bidirectional consistency must be enforced).
 3. **Single ISVC-level `coordinationPolicy` enum (no groups).**
    Rejected: doesn't generalize to mixed scenarios (e.g., "router
-   atomic with engine, decoder paired-mixable with both"). YAGNI in
+   atomic with engine, decoder RollingUpdate with both"). YAGNI in
    the short term but blocks the door on operationally-real cases.
-4. **Auto-detect Atomic for multi-Component ISVCs.** Rejected:
+4. **Auto-detect BlueGreen for multi-Component ISVCs.** Rejected:
    backwards-incompatible with OEP-0007 v1's Independent default.
-   Operators who want Atomic declare it.
+   Operators who want BlueGreen declare it.
 5. **Per-revision ConfigMap mount for peer discovery.** Rejected: LLM
    runtimes (SGLang, vLLM) read peer addresses once at startup; they
    don't watch mounted files. Env var injection matches the actual
@@ -1793,14 +1793,14 @@ typed (`corev1.Service`), so no new CRD vendoring.
    API for step-based rollouts already exists in OEP-0011
    (`spec.traffic.rollout`). OEP-0007.1's coordination groups apply
    underneath either rollout form.
-8. **Sequential as a flavor of Atomic (with `order:` mandatory).**
-   Rejected during review. Atomic's defining contract is "the gang
+8. **Sequential as a flavor of BlueGreen (with `order:` mandatory).**
+   Rejected during review. BlueGreen's defining contract is "the gang
    traffic-shifts together"; Sequential's defining contract is "one
    Component's full lifecycle, then the next." Trying to overload
-   Atomic with `order: required` + "but actually walk full lifecycle
+   BlueGreen with `order: required` + "but actually walk full lifecycle
    per Component if order is required" produces ambiguous semantics
-   for the partial-Atomic-order case. Sequential as its own policy
-   keeps Atomic's contract clean.
+   for the partial-BlueGreen-order case. Sequential as its own policy
+   keeps BlueGreen's contract clean.
 9. **Blue-green / canary as new OEP-0007.1 policies.** Rejected.
    Blue-green and canary are traffic-policy semantics (% of traffic
    shifted) owned by OEP-0011. OEP-0007.1's role is to enforce that
@@ -1811,8 +1811,8 @@ typed (`corev1.Service`), so no new CRD vendoring.
 ## Open Questions
 
 1. **Full-group migration verb.** Alfred's defragmentation needs a
-   way to move all Components in an Atomic group together. Current
-   workaround: reject single-Component migration in Atomic groups,
+   way to move all Components in an BlueGreen group together. Current
+   workaround: reject single-Component migration in BlueGreen groups,
    force operator to revert spec → wait → re-deploy. Better:
    `Migrate(group=<name>)` verb that drains and replaces atomically.
    Tracked for Alfred v2.
@@ -1825,7 +1825,7 @@ typed (`corev1.Service`), so no new CRD vendoring.
    groups (e.g., `[{router, engine}, {decoder}]`). Each group rolls
    independently of the others. Should there be a cross-group
    ordering knob? Probably not (YAGNI), but worth flagging.
-4. **Generic Service routing under Atomic.** When `policy: Atomic`,
+4. **Generic Service routing under BlueGreen.** When `policy: BlueGreen`,
    the generic Service (`<isvc>-<component>`) still selects all live
    pods regardless of revision. External callers hitting the generic
    Service mid-rollout will see a mix. Is that the right behavior, or
@@ -1833,15 +1833,15 @@ typed (`corev1.Service`), so no new CRD vendoring.
    Probably the former (avoid load drops on the new-revision pods
    while they're Ready but old-revision pods are still draining),
    but worth documenting explicitly.
-5. **PairedMixable revision skew tolerance.** PairedMixable's contract
+5. **RollingUpdate revision skew tolerance.** RollingUpdate's contract
    is "any vN can talk to any vM in the group." If the operator skews
    the spec generation across Components (intentionally or via Git
    conflict), should the controller catch it? Today's webhook rule
-   `PairedMixableLockstepViolation` rejects the spec edit, but doesn't
+   `RollingUpdateLockstepViolation` rejects the spec edit, but doesn't
    detect drift that happens via separate edits to engine.image vs
    decoder.image. Open: add a status condition for `SpecGenerationSkew`?
 6. **DAG / version-pair compatibility (deferred).** Today's policies
-   express coupling (Atomic, Sequential, PairedMixable) but not
+   express coupling (BlueGreen, Sequential, RollingUpdate) but not
    version-pair constraints. A future need: "engine v3 requires
    decoder ≥ v2 (back-compat with v2 and v3); engine v4 requires
    decoder = v4 (lockstep)." Forms a partial-order DAG over revisions
@@ -1850,8 +1850,8 @@ typed (`corev1.Service`), so no new CRD vendoring.
    API shape: `groups[].versionConstraints: [{from: {engine: v3},
    requires: {decoder: ">=v2"}}]`.
 7. **Asymmetric failure policy (deferred).** Today's failure rules
-   are uniform per policy: Atomic fails the whole group, Sequential
-   blocks downstream Components, PairedMixable fails per-Component.
+   are uniform per policy: BlueGreen fails the whole group, Sequential
+   blocks downstream Components, RollingUpdate fails per-Component.
    Operators have asked for asymmetric: "independent going up, atomic
    on failure" (each Component rolls on its own, but if one fails,
    roll all back). Possible API: `groups[].failurePolicy:

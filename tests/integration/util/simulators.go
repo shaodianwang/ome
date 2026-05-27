@@ -170,7 +170,18 @@ func (s *PodKubeletSimulator) advance(ctx context.Context, pod *corev1.Pod) {
 	// Deletion ack: pod is marked for deletion → finish the job by
 	// force-removing via GracePeriodSeconds=0. Mimics what a real
 	// kubelet does after draining containers.
+	//
+	// Exception: an explicit long grace (>30s, above the standard
+	// pod-template default) signals a test that wants to observe the
+	// terminating window — e.g., DRAIN-1 asserting AvailableReplicas
+	// excludes terminating pods. Skip the force-delete in that case so
+	// the EndpointSlice simulator gets a chance to publish
+	// Terminating=true and the status counter can react. The pod stays
+	// in the apiserver until namespace cleanup at AfterEach.
 	if pod.DeletionTimestamp != nil {
+		if pod.DeletionGracePeriodSeconds != nil && *pod.DeletionGracePeriodSeconds > 30 {
+			return
+		}
 		zero := int64(0)
 		_ = s.c.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &zero})
 		return

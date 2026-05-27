@@ -16,11 +16,11 @@ import (
 //
 //   - OME_<PEER>_ENDPOINT carries the generic, revision-agnostic
 //     Service DNS name. Used by runtimes in Independent or
-//     PairedMixable groups where cross-revision peer calls are
+//     RollingUpdate groups where cross-revision peer calls are
 //     allowed.
 //   - OME_<PEER>_REVISION_ENDPOINT carries the per-revision Service
 //     DNS name, scoped to the pod's own revision. Used by runtimes
-//     in Atomic groups where only same-revision peer calls are
+//     in BlueGreen groups where only same-revision peer calls are
 //     allowed.
 //
 // The runtime selects which one to honor based on its own config; both

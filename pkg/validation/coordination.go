@@ -3,7 +3,7 @@
 // Webhook-level admission rules for spec.rolloutCoordination.groups[]:
 // per-group structural checks (duplicate components, order coverage,
 // policy-specific requirements) and cross-spec checks (Components in
-// a group must declare OMENative deployment mode; PairedMixable
+// a group must declare OMENative deployment mode; RollingUpdate
 // lockstep on update).
 package validation
 
@@ -24,8 +24,8 @@ const (
 	ReasonRatioToleranceTooHigh                   = "RatioToleranceTooHigh"
 	ReasonOrphanCoordinationGroup                 = "OrphanCoordinationGroup"
 	ReasonInvalidCoordinationOrder                = "InvalidCoordinationOrder"
-	ReasonPairedMixableRequiresMultipleComponents = "PairedMixableRequiresMultipleComponents"
-	ReasonPairedMixableLockstepViolation          = "PairedMixableLockstepViolation"
+	ReasonRollingUpdateRequiresMultipleComponents = "RollingUpdateRequiresMultipleComponents"
+	ReasonRollingUpdateLockstepViolation          = "RollingUpdateLockstepViolation"
 	ReasonSequentialRequiresOrder                 = "SequentialRequiresOrder"
 	ReasonSequentialIncompleteOrder               = "SequentialIncompleteOrder"
 	ReasonSequentialRequiresMultipleComponents    = "SequentialRequiresMultipleComponents"
@@ -50,7 +50,7 @@ var validComponents = map[v1beta1.ComponentType]struct{}{
 // admission rules. Returns the first error encountered; nil on
 // success.
 //
-// The validator does NOT do cross-update checks (PairedMixable
+// The validator does NOT do cross-update checks (RollingUpdate
 // lockstep) here — those need the prior object to compare against.
 // ValidateCoordinationUpdate is the entry point for those.
 func ValidateCoordination(spec *v1beta1.InferenceServiceSpec) error {
@@ -78,7 +78,7 @@ func ValidateCoordination(spec *v1beta1.InferenceServiceSpec) error {
 }
 
 // ValidateCoordinationUpdate runs the update-time rules that compare
-// old vs new spec — primarily PairedMixable's "all-or-nothing image
+// old vs new spec — primarily RollingUpdate's "all-or-nothing image
 // bump" lockstep. The full structural validation should be invoked
 // separately on the new spec.
 func ValidateCoordinationUpdate(oldSpec, newSpec *v1beta1.InferenceServiceSpec) error {
@@ -86,10 +86,10 @@ func ValidateCoordinationUpdate(oldSpec, newSpec *v1beta1.InferenceServiceSpec) 
 		return nil
 	}
 	for _, g := range newSpec.RolloutCoordination.Groups {
-		if g.Policy != v1beta1.CoordinationPolicyPairedMixable {
+		if g.Policy != v1beta1.CoordinationPolicyRollingUpdate {
 			continue
 		}
-		if err := validatePairedMixableLockstep(oldSpec, newSpec, g); err != nil {
+		if err := validateRollingUpdateLockstep(oldSpec, newSpec, g); err != nil {
 			return err
 		}
 	}
@@ -132,12 +132,12 @@ func validateGroupShapes(groups []v1beta1.RolloutCoordinationGroup) error {
 			if err := validateSequentialGroup(i, g); err != nil {
 				return err
 			}
-		case v1beta1.CoordinationPolicyPairedMixable:
+		case v1beta1.CoordinationPolicyRollingUpdate:
 			if len(g.Components) < 2 {
-				return fmt.Errorf("spec.rolloutCoordination.groups[%d]: PairedMixable requires at least 2 components (%s)",
-					i, ReasonPairedMixableRequiresMultipleComponents)
+				return fmt.Errorf("spec.rolloutCoordination.groups[%d]: RollingUpdate requires at least 2 components (%s)",
+					i, ReasonRollingUpdateRequiresMultipleComponents)
 			}
-		case v1beta1.CoordinationPolicyAtomic:
+		case v1beta1.CoordinationPolicyBlueGreen:
 			if err := validateOrderSubset(i, g.Components, g.Order); err != nil {
 				return err
 			}
@@ -181,7 +181,7 @@ func validateOrderSubset(idx int, components, order []v1beta1.ComponentType) err
 				idx, c, ReasonInvalidCoordinationOrder)
 		}
 		if _, dup := seen[c]; dup {
-			return fmt.Errorf("spec.rolloutCoordination.groups[%d]: order entry %q appears more than once; each Component must walk the Sequential / Atomic order exactly once (%s)",
+			return fmt.Errorf("spec.rolloutCoordination.groups[%d]: order entry %q appears more than once; each Component must walk the Sequential / BlueGreen order exactly once (%s)",
 				idx, c, ReasonSequentialDuplicateOrder)
 		}
 		seen[c] = struct{}{}
@@ -239,7 +239,7 @@ func validateComponentsAreOMENative(spec *v1beta1.InferenceServiceSpec, groups [
 	return nil
 }
 
-func validatePairedMixableLockstep(oldSpec, newSpec *v1beta1.InferenceServiceSpec, g v1beta1.RolloutCoordinationGroup) error {
+func validateRollingUpdateLockstep(oldSpec, newSpec *v1beta1.InferenceServiceSpec, g v1beta1.RolloutCoordinationGroup) error {
 	oldImages := componentImages(oldSpec, g.Components)
 	newImages := componentImages(newSpec, g.Components)
 	anyChanged := false
@@ -253,8 +253,8 @@ func validatePairedMixableLockstep(oldSpec, newSpec *v1beta1.InferenceServiceSpe
 		}
 	}
 	if anyChanged && !allChanged {
-		return fmt.Errorf("spec.rolloutCoordination: PairedMixable group requires all components to bump together (%s)",
-			ReasonPairedMixableLockstepViolation)
+		return fmt.Errorf("spec.rolloutCoordination: RollingUpdate group requires all components to bump together (%s)",
+			ReasonRollingUpdateLockstepViolation)
 	}
 	return nil
 }

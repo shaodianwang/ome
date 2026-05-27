@@ -96,57 +96,88 @@ func TestEvaluateSurge_AlreadySkewedRejectsAnyFurtherSurge(t *testing.T) {
 	}
 }
 
-func TestEvaluateSurge_BacksOffEvenWhenPartiallyAhead(t *testing.T) {
+func TestEvaluateSurge_BacksOffWhenLiveRatioWouldExceedBand(t *testing.T) {
 	tol := int32(5)
 	pacing := v1beta1.CoordinationPacing{
 		Type:           v1beta1.CoordinationPacingRatioBalanced,
 		RatioTolerance: &tol,
 	}
-	// 40 engine : 20 decoder. With 10 new engine + 5 new decoder,
-	// the current ratio is exact (25% : 25%). Asking for 5 more
-	// engine pushes engine to 37.5% vs decoder's 25% — 12.5%
-	// skew, rejected. Back off: delta=2 → engine 30% vs 25% = 5%
-	// skew, which is at the inclusive band boundary, accepted.
+	// Live serving ratio (larger/smaller).
+	// 40 engine : 20 decoder original → orig_ratio = 2.0,
+	// band [1.9, 2.1] at tol=5%.
+	// Serving snapshot: engine=10, decoder=5 → live = 2.0 (in band).
+	// Surge engine +1 → 11/5 = 2.2 → out of band → reject.
+	// Surge decoder +1 → 10/6 = 1.67 → out of band → reject.
+	// All deltas rejected at this tight tolerance.
 	state := RatioState{
 		Original: map[v1beta1.ComponentType]int32{
 			v1beta1.EngineComponent:  40,
 			v1beta1.DecoderComponent: 20,
 		},
-		NewPods: map[v1beta1.ComponentType]int32{
+		Serving: map[v1beta1.ComponentType]int32{
 			v1beta1.EngineComponent:  10,
 			v1beta1.DecoderComponent: 5,
 		},
 	}
 	d := EvaluateSurge(pacing, state, v1beta1.EngineComponent, 5)
-	if d.AllowedSurgeDelta != 2 {
-		t.Errorf("partial back-off: got %d want 2", d.AllowedSurgeDelta)
-	}
-	if d.SkewRejected {
-		t.Errorf("partial back-off should not be flagged as a full rejection: got %+v", d)
+	if d.AllowedSurgeDelta != 0 || !d.SkewRejected {
+		t.Errorf("tight tolerance should reject all engine surges from balanced state: got %+v", d)
 	}
 }
 
-func TestEvaluateSurge_BacksOffToHighestAllowedDelta(t *testing.T) {
-	tol := int32(5)
+func TestEvaluateSurge_AllowsSurgeWhenLiveRatioStaysInBand(t *testing.T) {
+	tol := int32(20)
 	pacing := v1beta1.CoordinationPacing{
 		Type:           v1beta1.CoordinationPacingRatioBalanced,
 		RatioTolerance: &tol,
 	}
-	// 40 engine : 20 decoder. No new pods yet. Propose 5 engine —
-	// 5/40 = 12.5% skew against decoder's 0%, out of the 5% band.
-	// Back off step by step: 2 engine = 5% skew, which is *equal*
-	// to the band and so is allowed (band is inclusive). 3 engine
-	// would be 7.5%, rejected.
+	// 40 engine : 20 decoder original → orig_ratio = 2.0,
+	// band [1.6, 2.4] at tol=20%.
+	// Serving: engine=40, decoder=20 → live = 2.0 (in band).
+	// Surge engine: +1 → 41/20=2.05 in. +2 → 42/20=2.1 in. +8 → 48/20=2.4 boundary in.
+	// +9 → 49/20=2.45 out.
+	// Propose 10 → backs off to 8.
 	state := RatioState{
 		Original: map[v1beta1.ComponentType]int32{
 			v1beta1.EngineComponent:  40,
 			v1beta1.DecoderComponent: 20,
 		},
-		NewPods: map[v1beta1.ComponentType]int32{},
+		Serving: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent:  40,
+			v1beta1.DecoderComponent: 20,
+		},
+	}
+	d := EvaluateSurge(pacing, state, v1beta1.EngineComponent, 10)
+	if d.AllowedSurgeDelta != 8 {
+		t.Errorf("partial back-off to band ceiling: got %d want 8 (49/20=2.45 out, 48/20=2.4 boundary)", d.AllowedSurgeDelta)
+	}
+	if d.SkewRejected {
+		t.Errorf("partial back-off should NOT be flagged as full rejection: got %+v", d)
+	}
+}
+
+func TestEvaluateSurge_RejectsWhenPeerSerivngWouldBeZero(t *testing.T) {
+	tol := int32(50)
+	pacing := v1beta1.CoordinationPacing{
+		Type:           v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerance: &tol,
+	}
+	// Peer's serving count is zero → ratio undefined → any surge of
+	// the other component is rejected. This is the mass-drain
+	// failure mode the gate must block.
+	state := RatioState{
+		Original: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent:  40,
+			v1beta1.DecoderComponent: 20,
+		},
+		Serving: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent:  10,
+			v1beta1.DecoderComponent: 0,
+		},
 	}
 	d := EvaluateSurge(pacing, state, v1beta1.EngineComponent, 5)
-	if d.AllowedSurgeDelta != 2 {
-		t.Errorf("back-off: got %d want 2", d.AllowedSurgeDelta)
+	if !d.SkewRejected || d.AllowedSurgeDelta != 0 {
+		t.Errorf("zero-peer-serving must reject all surges (would compute infinite ratio): got %+v", d)
 	}
 }
 
@@ -217,7 +248,7 @@ func TestSnapshotOriginal(t *testing.T) {
 // =============================================================================
 
 func TestCheckRatioGate_NilISVC(t *testing.T) {
-	allowed, _ := CheckRatioGate(nil, v1beta1.EngineComponent)
+	allowed, _ := CheckRatioGate(nil, v1beta1.EngineComponent, 0)
 	if !allowed {
 		t.Errorf("nil ISVC should be allowed (no-op gate)")
 	}
@@ -225,7 +256,7 @@ func TestCheckRatioGate_NilISVC(t *testing.T) {
 
 func TestCheckRatioGate_NoCoordBlock(t *testing.T) {
 	isvc := &v1beta1.InferenceService{}
-	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent)
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
 	if !allowed {
 		t.Errorf("no coord block should be allowed: %s", reason)
 	}
@@ -237,7 +268,7 @@ func TestCheckRatioGate_PerComponentPacingBypasses(t *testing.T) {
 			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
 						Type: v1beta1.CoordinationPacingPerComponent,
 					},
@@ -245,7 +276,7 @@ func TestCheckRatioGate_PerComponentPacingBypasses(t *testing.T) {
 			},
 		},
 	}
-	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent)
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
 	if !allowed {
 		t.Errorf("PerComponent pacing should bypass the gate: %s", reason)
 	}
@@ -260,7 +291,7 @@ func TestCheckRatioGate_FirstReconcileAllowed(t *testing.T) {
 			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
 						Type:           v1beta1.CoordinationPacingRatioBalanced,
 						RatioTolerance: int32Ptr(5),
@@ -269,7 +300,7 @@ func TestCheckRatioGate_FirstReconcileAllowed(t *testing.T) {
 			},
 		},
 	}
-	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent)
+	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
 	if !allowed {
 		t.Errorf("first reconcile (no ObservedRatio yet) must allow surge")
 	}
@@ -296,7 +327,7 @@ func TestCheckRatioGate_PDScenarioEngineMustWaitForDecoder(t *testing.T) {
 		},
 	}
 
-	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent)
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
 	if allowed {
 		t.Errorf("engine should be gated when decoder hasn't moved (1/20=5%% vs 0/5=0%%, asking for 2/20=10%%): got allowed=true reason=%s", reason)
 	}
@@ -324,7 +355,7 @@ func TestCheckRatioGate_PDScenarioDecoderAllowedToCatchUp(t *testing.T) {
 			},
 		},
 	}
-	allowed, _ := CheckRatioGate(isvc, v1beta1.DecoderComponent)
+	allowed, _ := CheckRatioGate(isvc, v1beta1.DecoderComponent, 0)
 	// At tolerance=5, the discrete granularity prevents decoder from
 	// moving. The test pins this honest deadlock so a reviewer can see
 	// it; widening tolerance fixes it.
@@ -333,27 +364,34 @@ func TestCheckRatioGate_PDScenarioDecoderAllowedToCatchUp(t *testing.T) {
 	}
 }
 
-func TestCheckRatioGate_PDScenarioWiderToleranceAllowsCatchUp(t *testing.T) {
-	// Same PD setup but tolerance=20%. Decoder going 0/5 → 1/5 = 20%
-	// against engine 1/20 = 5% → diff 15pp, within 20pp → allowed.
+func TestCheckRatioGate_PDScenarioWiderToleranceAllowsDrain(t *testing.T) {
+	// Wider tolerance lets an engine drain through that tighter tolerance
+	// would block. Setup: engine 20, decoder 5 → orig_ratio=4.0,
+	// tol=20% → band [3.2, 4.8].
+	// Live state: full capacity (engine=20, decoder=5).
+	// Engine drain –1 → projected (19, 5), ratio = 19/5 = 3.8 → in band.
+	// (Tighter tol=5% → band [3.8, 4.2] → 3.8 sits at boundary, still in;
+	// at tol=2% → band [3.92, 4.08] → 3.8 < 3.92 → out → reject. The
+	// 20% tolerance test pins the "wider band gives more drain headroom"
+	// property the redesign promises.)
 	isvc := mkPDFixture(int32Ptr(20))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
 			OMENative: &v1beta1.OMENativeComponentStatus{
 				Replicas:        20,
-				UpdatedReplicas: 1,
+				ServingReplicas: 20,
 			},
 		},
 		v1beta1.DecoderComponent: {
 			OMENative: &v1beta1.OMENativeComponentStatus{
 				Replicas:        5,
-				UpdatedReplicas: 0,
+				ServingReplicas: 5,
 			},
 		},
 	}
-	allowed, reason := CheckRatioGate(isvc, v1beta1.DecoderComponent)
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
 	if !allowed {
-		t.Errorf("expected decoder allowed at tolerance=20: got reason=%s", reason)
+		t.Errorf("expected engine drain allowed at tolerance=20: projected ratio 19/5=3.8 in band [3.2, 4.8]; got reason=%s", reason)
 	}
 }
 
@@ -363,7 +401,7 @@ func TestCheckRatioGate_SingleComponentGroupBypasses(t *testing.T) {
 			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
 						Type:           v1beta1.CoordinationPacingRatioBalanced,
 						RatioTolerance: int32Ptr(0),
@@ -372,7 +410,7 @@ func TestCheckRatioGate_SingleComponentGroupBypasses(t *testing.T) {
 			},
 		},
 	}
-	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent)
+	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
 	if !allowed {
 		t.Errorf("single-component group must bypass the gate")
 	}
@@ -385,7 +423,7 @@ func TestCheckRatioGate_ComponentNotInAnyGroup(t *testing.T) {
 			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
 						Type: v1beta1.CoordinationPacingRatioBalanced,
 					},
@@ -393,9 +431,83 @@ func TestCheckRatioGate_ComponentNotInAnyGroup(t *testing.T) {
 			},
 		},
 	}
-	allowed, _ := CheckRatioGate(isvc, v1beta1.RouterComponent)
+	allowed, _ := CheckRatioGate(isvc, v1beta1.RouterComponent, 0)
 	if !allowed {
 		t.Errorf("component outside any coord group must bypass the gate")
+	}
+}
+
+// TestCheckRatioGate_InFlightProjectionTightensBand pins the
+// in-wake-up stale-snapshot fix. status.ServingReplicas reports 30
+// (snapshot from the prior reconcile) but the dispatcher has already
+// pulled 3 engine pods from rotation this wake-up — projected serving
+// is 27. Tolerance 10% on a 30:10 fleet → band [2.7, 3.3]. Without
+// the in-flight delta, the gate sees 30/10 = 3.0 → allowed. With
+// inFlightDelta=3, it sees (30-3)/10 = 2.7 → at the boundary. The
+// caller asks for one more drain; gate must REJECT because
+// (27-1)/10 = 2.6 sits outside the band.
+func TestCheckRatioGate_InFlightProjectionTightensBand(t *testing.T) {
+	tol := int32(10)
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:           v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerance: &tol,
+					},
+				}},
+			},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{
+						Replicas:        30,
+						ServingReplicas: 30,
+					},
+				},
+				v1beta1.DecoderComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{
+						Replicas:        10,
+						ServingReplicas: 10,
+					},
+				},
+			},
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name:       "0",
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
+						Original: map[v1beta1.ComponentType]int32{
+							v1beta1.EngineComponent:  30,
+							v1beta1.DecoderComponent: 10,
+						},
+					},
+				}},
+			},
+		},
+	}
+
+	// Baseline: no in-flight → projected serving stays at status (30/10=3.0
+	// → in band) → allowed.
+	if allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0); !allowed {
+		t.Fatalf("baseline (0 in-flight) should be allowed: %s", reason)
+	}
+
+	// At the band boundary: 3 already drained → projected serving 27,
+	// asking for +1 puts us at (27-1)/10 = 2.6 → out of band → MUST reject.
+	if allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 3); allowed {
+		t.Fatalf("with 3 in-flight, one more drain would cross the band; expected reject, got allowed (reason=%s)", reason)
+	}
+
+	// Sanity: at 2 in-flight, (28-1)/10 = 2.7 → exactly the band edge →
+	// still allowed (band is inclusive).
+	if allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 2); !allowed {
+		t.Fatalf("with 2 in-flight, projected 2.7 sits at band edge and should remain allowed: %s", reason)
 	}
 }
 
@@ -408,7 +520,7 @@ func mkPDFixture(tolerance *int32) *v1beta1.InferenceService {
 			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
 						Type:           v1beta1.CoordinationPacingRatioBalanced,
 						RatioTolerance: tolerance,
@@ -421,7 +533,7 @@ func mkPDFixture(tolerance *int32) *v1beta1.InferenceService {
 				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
 					Name:       "0",
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
 						Original: map[v1beta1.ComponentType]int32{
 							v1beta1.EngineComponent:  20,
@@ -441,7 +553,7 @@ func int32Ptr(v int32) *int32 { return &v }
 // =============================================================================
 
 func TestCheckUnavailabilityGate_NilISVC(t *testing.T) {
-	allowed, _ := CheckUnavailabilityGate(nil, v1beta1.EngineComponent)
+	allowed, _ := CheckUnavailabilityGate(nil, v1beta1.EngineComponent, 0)
 	if !allowed {
 		t.Errorf("nil ISVC should bypass the gate")
 	}
@@ -449,7 +561,7 @@ func TestCheckUnavailabilityGate_NilISVC(t *testing.T) {
 
 func TestCheckUnavailabilityGate_NoCoordBlock(t *testing.T) {
 	isvc := &v1beta1.InferenceService{}
-	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent, 0)
 	if !allowed {
 		t.Errorf("no coord block should bypass the gate")
 	}
@@ -465,7 +577,7 @@ func TestCheckUnavailabilityGate_ComponentNotInAnyGroup(t *testing.T) {
 			},
 		},
 	}
-	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.RouterComponent)
+	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.RouterComponent, 0)
 	if !allowed {
 		t.Errorf("component outside any coord group must bypass the gate")
 	}
@@ -474,7 +586,7 @@ func TestCheckUnavailabilityGate_ComponentNotInAnyGroup(t *testing.T) {
 func TestCheckUnavailabilityGate_NoObservationYet(t *testing.T) {
 	isvc := mkUnavailFixture(iosInt(1))
 	// No Status.Components populated.
-	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent, 0)
 	if !allowed {
 		t.Errorf("missing OMENative observation must bypass the gate (first reconcile)")
 	}
@@ -487,12 +599,13 @@ func TestCheckUnavailabilityGate_WithinBudget(t *testing.T) {
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
 			OMENative: &v1beta1.OMENativeComponentStatus{
-				Replicas:      5,
-				ReadyReplicas: 5,
+				Replicas:        5,
+				ReadyReplicas:   5,
+				ServingReplicas: 5,
 			},
 		},
 	}
-	allowed, reason := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	allowed, reason := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent, 0)
 	if !allowed {
 		t.Errorf("0 current unavailable + budget=1 must allow: %s", reason)
 	}
@@ -505,12 +618,13 @@ func TestCheckUnavailabilityGate_BudgetExhausted(t *testing.T) {
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
 			OMENative: &v1beta1.OMENativeComponentStatus{
-				Replicas:      5,
-				ReadyReplicas: 4,
+				Replicas:        5,
+				ReadyReplicas:   4,
+				ServingReplicas: 4,
 			},
 		},
 	}
-	allowed, reason := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	allowed, reason := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent, 0)
 	if allowed {
 		t.Errorf("1 current unavailable + budget=1 must deny next termination: %s", reason)
 	}
@@ -524,12 +638,13 @@ func TestCheckUnavailabilityGate_ZeroBudgetDeadlocks(t *testing.T) {
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
 			OMENative: &v1beta1.OMENativeComponentStatus{
-				Replicas:      5,
-				ReadyReplicas: 5,
+				Replicas:        5,
+				ReadyReplicas:   5,
+				ServingReplicas: 5,
 			},
 		},
 	}
-	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent, 0)
 	if allowed {
 		t.Errorf("MaxUnavailable=0 + all Ready must STILL deny (no surge-then-drain support)")
 	}
@@ -543,14 +658,73 @@ func TestCheckUnavailabilityGate_PercentBudget(t *testing.T) {
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
 			OMENative: &v1beta1.OMENativeComponentStatus{
-				Replicas:      10,
-				ReadyReplicas: 10,
+				Replicas:        10,
+				ReadyReplicas:   10,
+				ServingReplicas: 10,
 			},
 		},
 	}
-	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent)
+	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent, 0)
 	if !allowed {
 		t.Errorf("20%% of 10 = 2 budget; first termination must be allowed")
+	}
+}
+
+func TestCheckUnavailabilityGate_InFlightDeltaCharges(t *testing.T) {
+	// MaxUnavailable=2, 10 replicas, all serving. Budget=2.
+	// inFlightDelta=0 → projected=1 → allowed.
+	// inFlightDelta=1 → projected=2 → allowed (boundary).
+	// inFlightDelta=2 → projected=3 → DENIED.
+	// Proves the wake-up-counter closes the within-pass stale-state hole
+	// that previously let the dispatcher fire every instance at once.
+	pct := intstr.FromString("20%")
+	isvc := mkUnavailFixture(&pct)
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:        10,
+				ReadyReplicas:   10,
+				ServingReplicas: 10,
+			},
+		},
+	}
+	cases := []struct {
+		inFlight int32
+		want     bool
+	}{
+		{0, true},
+		{1, true}, // boundary
+		{2, false},
+		{5, false},
+	}
+	for _, c := range cases {
+		got, reason := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent, c.inFlight)
+		if got != c.want {
+			t.Errorf("inFlight=%d: got allowed=%v want %v (%s)", c.inFlight, got, c.want, reason)
+		}
+	}
+}
+
+func TestCheckUnavailabilityGate_ServingDivergesFromReady(t *testing.T) {
+	// ReadyReplicas=10 but ServingReplicas=7 — simulates the in-place
+	// drain mid-rollout state where containers are still Ready but the
+	// controller has flipped serving=False on 3 pods. The gate must
+	// see 3 currently unavailable (from serving count), not 0 (from
+	// ready count). MaxUnavailable=3 → projected=4 > budget=3 → DENY.
+	// Before the fix, this scenario was the mass-outage bug.
+	isvc := mkUnavailFixture(iosInt(3))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas:        10,
+				ReadyReplicas:   10, // misleading — kubelet sees containers Ready
+				ServingReplicas: 7,  // truth — 3 pods are out of rotation
+			},
+		},
+	}
+	allowed, reason := CheckUnavailabilityGate(isvc, v1beta1.EngineComponent, 0)
+	if allowed {
+		t.Errorf("gate must use ServingReplicas, not ReadyReplicas, so the drained-but-Ready state denies more drains: %s", reason)
 	}
 }
 
@@ -568,7 +742,7 @@ func mkUnavailFixture(maxUnavail *intstr.IntOrString) *v1beta1.InferenceService 
 			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicyAtomic,
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
 						Type:           v1beta1.CoordinationPacingPerComponent,
 						MaxUnavailable: maxUnavail,

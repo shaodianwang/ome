@@ -5,7 +5,7 @@
 // reconciler) and adds:
 //
 //   - group resolution from spec.rolloutCoordination.groups[]
-//   - per-policy state machines (Atomic, Independent, PairedMixable,
+//   - per-policy state machines (BlueGreen, Independent, RollingUpdate,
 //     Sequential)
 //   - RatioBalanced pacing math
 //   - per-revision Services (`<isvc>-<component>-rev-<hash>` and the

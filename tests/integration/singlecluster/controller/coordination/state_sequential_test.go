@@ -394,9 +394,7 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 			WithEngineImage("ghcr.io/test/runtime:v1"),
 			WithSequentialGroup(v1beta1.DecoderComponent, v1beta1.EngineComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "s6")
@@ -489,9 +487,7 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 		fix := newCoordFixture(ns.Name, WithISVCName("s13"),
 			WithSequentialGroup(v1beta1.DecoderComponent, v1beta1.EngineComponent))
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "s13")
@@ -513,25 +509,30 @@ var _ = ginkgo.Describe("Coordination Sequential state machine (OEP-0007.1)", gi
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("S-14 Sequential + RatioBalanced pacing → ObservedRatio populated", func() {
+	// S-14: Sequential + RatioBalanced is rejected by
+	// ValidateGroupShape — RatioBalanced is meaningless when only one
+	// Component rolls at a time. The controller fails reconciliation
+	// with a clear error so the operator sees the conflict at the
+	// status / events surface.
+	ginkgo.It("S-14 Sequential + RatioBalanced is rejected as an invalid combination", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("s14"),
 			WithSequentialGroup(v1beta1.DecoderComponent, v1beta1.EngineComponent))
-		// Override pacing on the group to RatioBalanced so G6 writes
-		// ObservedRatio.
 		fix.ISVC.Spec.RolloutCoordination.Groups[0].Pacing = &v1beta1.CoordinationPacing{
 			Type: v1beta1.CoordinationPacingRatioBalanced,
 		}
 		applyFixture(Default, fix)
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.ISVC) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CBM) })
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix.CSR) })
+		deferFixtureCleanup(fix)
 
-		Eventually(func(g Gomega) {
+		// Coordination should refuse the group. The ISVC's
+		// RolloutCoordination status should NOT populate Groups
+		// because ValidateGroupShape short-circuits the loop.
+		Consistently(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "s14")
-			g.Expect(cur.Status.RolloutCoordination).NotTo(BeNil())
-			g.Expect(cur.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
-			g.Expect(cur.Status.RolloutCoordination.Groups[0].ObservedRatio).NotTo(BeNil(),
-				"RatioBalanced pacing must populate ObservedRatio")
-		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+			if cur.Status.RolloutCoordination == nil {
+				return
+			}
+			g.Expect(cur.Status.RolloutCoordination.Groups).To(BeEmpty(),
+				"invalid Sequential+RatioBalanced combo must not produce a populated group status")
+		}, util.ShortTimeout, util.PollInterval).Should(Succeed())
 	})
 })
