@@ -7,12 +7,15 @@ import (
 	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 )
 
 func TestUpdatePodSpecNodeSelector(t *testing.T) {
@@ -325,4 +328,106 @@ func TestProcessBaseLabels(t *testing.T) {
 	g.Expect(labels).To(gomega.HaveKeyWithValue(constants.InferenceServiceBaseModelSizeLabelKey, "LARGE"))
 	g.Expect(labels).To(gomega.HaveKeyWithValue(constants.BaseModelTypeLabelKey, string(constants.ServingBaseModel)))
 	g.Expect(labels).To(gomega.HaveKeyWithValue(constants.BaseModelVendorLabelKey, "meta"))
+}
+
+// TestUpdateComponentStatusLeanModel verifies that UpdateComponentStatus does
+// NOT touch isvc.Status.ModelStatus when spec.model is nil — the "lean"
+// runtime-only ISVC shape supported by the webhook. Prior to the fix, the
+// model status writer would stamp transitionStatus=InProgress and
+// modelRevisionStates.{activeModelState,targetModelState}=Pending — values
+// that never advanced because no model load was in progress, lying to
+// operators inspecting status.
+//
+// Regression matrix: spec.model present → modelStatus IS populated (pods
+// gate the exact value); spec.model nil → modelStatus left as zero value.
+func TestUpdateComponentStatusLeanModel(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	noopPodLabelInfo := func(_ bool, _ metav1.ObjectMeta, _ v1beta1.ComponentStatusSpec) (string, string) {
+		return constants.InferenceServicePodLabelKey, "test-isvc"
+	}
+
+	tests := []struct {
+		name                       string
+		isvc                       *v1beta1.InferenceService
+		wantModelStatusUntouched   bool
+		wantTransitionStatusActive bool
+	}{
+		{
+			name: "lean ISVC (no spec.model) — modelStatus untouched",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-isvc",
+					Namespace: "default",
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "srt-test"},
+					// Model is nil — lean runtime-only path.
+				},
+			},
+			wantModelStatusUntouched: true,
+		},
+		{
+			name: "with-model ISVC — modelStatus IS populated (Pending, no pods)",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-isvc",
+					Namespace: "default",
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Runtime: &v1beta1.ServingRuntimeRef{Name: "srt-test"},
+					Model:   &v1beta1.ModelRef{Name: "test-model"},
+				},
+			},
+			wantTransitionStatusActive: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
+			b := &BaseComponentFields{
+				Client:         cl,
+				StatusManager:  status.NewStatusReconciler(),
+				DeploymentMode: constants.RawDeployment,
+				Log:            logr.Discard(),
+			}
+
+			err := UpdateComponentStatus(b, tt.isvc, v1beta1.EngineComponent, metav1.ObjectMeta{}, noopPodLabelInfo)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			if tt.wantModelStatusUntouched {
+				// The zero-value ModelStatus must remain — no transitionStatus,
+				// no modelRevisionStates. This is the "doesn't lie" contract.
+				g.Expect(tt.isvc.Status.ModelStatus.TransitionStatus).To(
+					gomega.BeEmpty(),
+					"modelStatus.transitionStatus should NOT be written for lean (no-model) ISVCs",
+				)
+				g.Expect(tt.isvc.Status.ModelStatus.ModelRevisionStates).To(
+					gomega.BeNil(),
+					"modelStatus.modelRevisionStates should NOT be written for lean (no-model) ISVCs",
+				)
+				g.Expect(tt.isvc.Status.ModelStatus.ModelCopies).To(
+					gomega.BeNil(),
+					"modelStatus.modelCopies should NOT be written for lean (no-model) ISVCs",
+				)
+			}
+			if tt.wantTransitionStatusActive {
+				// Regression guard: with-model path still writes the lifecycle.
+				// Zero pods → Pending → InProgress.
+				g.Expect(tt.isvc.Status.ModelStatus.TransitionStatus).To(
+					gomega.Equal(v1beta1.InProgress),
+					"with-model ISVC must still drive the model-loading lifecycle",
+				)
+				g.Expect(tt.isvc.Status.ModelStatus.ModelRevisionStates).NotTo(gomega.BeNil())
+				g.Expect(tt.isvc.Status.ModelStatus.ModelRevisionStates.TargetModelState).To(
+					gomega.Equal(v1beta1.Pending),
+				)
+			}
+		})
+	}
 }

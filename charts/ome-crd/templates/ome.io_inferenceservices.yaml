@@ -28967,7 +28967,6 @@ spec:
                         - activeModelState
                       type: object
                     transitionStatus:
-                      default: UpToDate
                       enum:
                         - ""
                         - UpToDate
@@ -28975,8 +28974,6 @@ spec:
                         - BlockedByFailedLoad
                         - InvalidSpec
                       type: string
-                  required:
-                    - transitionStatus
                   type: object
                 mountedOverlays:
                   items:

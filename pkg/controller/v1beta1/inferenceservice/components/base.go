@@ -543,6 +543,16 @@ func UpdateComponentStatus(b *BaseComponentFields, isvc *v1beta1.InferenceServic
 	// - RawDeployment: Updates when Deployment becomes available
 	b.StatusManager.InitializeComponentCondition(&isvc.Status, componentType)
 
+	// Lean path: with no spec.model there is no model-loading lifecycle to
+	// surface — skip the modelStatus writer so we do not stamp a
+	// transitionStatus/modelRevisionStates block that will never reach
+	// "UpToDate"/"Loaded". The webhook permits omitting spec.model when
+	// spec.runtime is set explicitly; we honor that here by leaving
+	// status.modelStatus untouched.
+	if isvc.Spec.Model == nil {
+		return nil
+	}
+
 	// Update model status for all deployment modes based on actual pod information
 	rawDeployment := b.DeploymentMode == constants.RawDeployment
 	statusSpec := isvc.Status.Components[componentType]

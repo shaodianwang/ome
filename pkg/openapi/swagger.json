@@ -2299,9 +2299,6 @@
     },
     "v1beta1.ModelStatus": {
       "type": "object",
-      "required": [
-        "transitionStatus"
-      ],
       "properties": {
         "lastFailureInfo": {
           "description": "Details of last failure, when load of target model is failed or blocked.",
@@ -2316,9 +2313,8 @@
           "$ref": "#/definitions/v1beta1.ModelRevisionStates"
         },
         "transitionStatus": {
-          "description": "Whether the available predictor endpoints reflect the current Spec or is in transition",
-          "type": "string",
-          "default": ""
+          "description": "Whether the available predictor endpoints reflect the current Spec or is in transition. Empty when the InferenceService is \"lean\" (no spec.model is declared) and no model-loading lifecycle applies; the controller leaves this field unset in that case. Populated as \"InProgress\" → \"UpToDate\" (or \"BlockedByFailedLoad\"/\"InvalidSpec\") by the controller once a model is referenced.",
+          "type": "string"
         }
       }
     },

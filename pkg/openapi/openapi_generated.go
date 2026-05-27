@@ -4091,8 +4091,7 @@ func schema_pkg_apis_ome_v1beta1_ModelStatus(ref common.ReferenceCallback) commo
 				Properties: map[string]spec.Schema{
 					"transitionStatus": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Whether the available predictor endpoints reflect the current Spec or is in transition",
-							Default:     "",
+							Description: "Whether the available predictor endpoints reflect the current Spec or is in transition. Empty when the InferenceService is \"lean\" (no spec.model is declared) and no model-loading lifecycle applies; the controller leaves this field unset in that case. Populated as \"InProgress\" → \"UpToDate\" (or \"BlockedByFailedLoad\"/\"InvalidSpec\") by the controller once a model is referenced.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -4116,7 +4115,6 @@ func schema_pkg_apis_ome_v1beta1_ModelStatus(ref common.ReferenceCallback) commo
 						},
 					},
 				},
-				Required: []string{"transitionStatus"},
 			},
 		},
 		Dependencies: []string{

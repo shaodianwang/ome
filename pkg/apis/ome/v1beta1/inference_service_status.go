@@ -191,9 +191,14 @@ const (
 )
 
 type ModelStatus struct {
-	// Whether the available predictor endpoints reflect the current Spec or is in transition
-	// +kubebuilder:default=UpToDate
-	TransitionStatus TransitionStatus `json:"transitionStatus"`
+	// Whether the available predictor endpoints reflect the current Spec or is in transition.
+	// Empty when the InferenceService is "lean" (no spec.model is declared) and
+	// no model-loading lifecycle applies; the controller leaves this field
+	// unset in that case. Populated as "InProgress" → "UpToDate" (or
+	// "BlockedByFailedLoad"/"InvalidSpec") by the controller once a model
+	// is referenced.
+	// +optional
+	TransitionStatus TransitionStatus `json:"transitionStatus,omitempty"`
 
 	// State information of the predictor's model.
 	// +optional
