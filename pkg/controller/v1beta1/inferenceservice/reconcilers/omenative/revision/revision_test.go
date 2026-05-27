@@ -179,6 +179,30 @@ func TestRevisionHash_MigrationAnnotationDoesNotDriftHash(t *testing.T) {
 	}
 }
 
+func TestRevisionHash_PausedRolloutAnnotationDoesNotDriftHash(t *testing.T) {
+	ps := basicPodSpecForRevision()
+
+	base := &metav1.ObjectMeta{
+		Annotations: map[string]string{
+			"ome.io/base-model-name": "llama-7b",
+			"ome.io/deploymentMode":  "OMENative",
+		},
+	}
+	withPause := &metav1.ObjectMeta{
+		Annotations: map[string]string{
+			"ome.io/base-model-name": "llama-7b",
+			"ome.io/deploymentMode":  "OMENative",
+			"ome.io/rollout-paused":  "true",
+		},
+	}
+
+	hBase, _, _ := Hash(ps, base, nil)
+	hWith, _, _ := Hash(ps, withPause, nil)
+	if hBase != hWith {
+		t.Errorf("rollout-paused annotation must be filtered from revision hash: base=%s withPause=%s", hBase, hWith)
+	}
+}
+
 // User-supplied annotations MUST still contribute to the hash so a
 // legitimate pod-template metadata change triggers a rollout.
 func TestRevisionHash_UserAnnotationStillDriftsHash(t *testing.T) {

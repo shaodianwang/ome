@@ -145,12 +145,23 @@ func hasLifecycleAnnotation(annotations map[string]string) bool {
 	return false
 }
 
+// pausedRolloutAnnotation is the operator-set ISVC annotation that
+// freezes coordination groups at their current phase. Duplicated from
+// coordination.PausedRolloutAnnotation to keep this package a leaf —
+// importing coordination here would close a cycle.
+const pausedRolloutAnnotation = "ome.io/rollout-paused"
+
 // isLifecycleAnnotation reports whether the annotation key is one the
-// controller mutates as part of normal reconcile (e.g., migration
-// requests) and therefore must not feed into the pod-template revision
-// hash. Add new prefixes here when they get introduced.
+// controller reads or writes as part of normal reconcile (migration
+// requests, rollout-paused signal) and therefore must not feed into
+// the pod-template revision hash. Without this filter, adding or
+// removing the annotation would flip the ControllerRevision name and
+// drive a phantom rollout on a spec the user never edited.
 func isLifecycleAnnotation(key string) bool {
-	return strings.HasPrefix(key, audit.MigrationRequestAnnotationPrefix)
+	if strings.HasPrefix(key, audit.MigrationRequestAnnotationPrefix) {
+		return true
+	}
+	return key == pausedRolloutAnnotation
 }
 
 // Name composes the ControllerRevision object name from the parent
