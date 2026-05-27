@@ -160,6 +160,18 @@ type OMENativeInstanceStatus struct {
 	// pod state.
 	// +optional
 	Operation *InstanceOperation `json:"operation,omitempty"`
+
+	// ActiveOrdinal identifies which of two pod-naming slots
+	// (0 or 1) currently holds the canonical pod for this single-pod
+	// Instance. SurgeThenDrain alternates between slots: the surge
+	// creates a new pod at `1 - ActiveOrdinal`, waits Ready, drains
+	// the old pod, then advances ActiveOrdinal to the new slot. Stays
+	// 0 for InPlace and Recreate strategies (those reuse the same
+	// pod name). Defaults to 0 on initial create.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	// +optional
+	ActiveOrdinal int32 `json:"activeOrdinal,omitempty"`
 }
 
 // InstanceOperation is the recovery anchor written before any destructive

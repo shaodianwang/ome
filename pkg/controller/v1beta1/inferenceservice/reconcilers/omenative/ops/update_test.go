@@ -652,8 +652,8 @@ func TestChooseUpdateMode(t *testing.T) {
 		{"InPlaceIfPossible + ineligible = recreate", v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, runningSpec, envTarget, updateModeRecreate, false},
 		{"InPlaceOnly + eligible = in-place", v1beta1.OMENativeUpdateStrategyInPlaceOnly, runningSpec, imageOnlyTarget, updateModeInPlace, false},
 		{"InPlaceOnly + ineligible = error", v1beta1.OMENativeUpdateStrategyInPlaceOnly, runningSpec, envTarget, 0, true},
-		{"empty strategy defaults to recreate (SurgeThenDrain delegates)", "", runningSpec, imageOnlyTarget, updateModeRecreate, false},
-		{"SurgeThenDrain delegates to recreate", v1beta1.OMENativeUpdateStrategySurgeThenDrain, runningSpec, imageOnlyTarget, updateModeRecreate, false},
+		{"empty strategy defaults to surge (matches SurgeThenDrain default)", "", runningSpec, imageOnlyTarget, updateModeSurge, false},
+		{"SurgeThenDrain routes to surge mode", v1beta1.OMENativeUpdateStrategySurgeThenDrain, runningSpec, imageOnlyTarget, updateModeSurge, false},
 		{"unknown strategy = error", v1beta1.OMENativeUpdateStrategyType("Bogus"), runningSpec, imageOnlyTarget, 0, true},
 		{"nil running forces recreate even on image-only diff (no baseline)", v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, nil, imageOnlyTarget, updateModeRecreate, false},
 	}

@@ -134,6 +134,13 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 		// would double-charge the budget and deadlock the in-flight pod
 		// (it'd be denied permission to continue its own update).
 		var inFlightUnavail int32
+		var inFlightSurge int32
+		// SurgeThenDrain doesn't take pods offline — it adds an extra
+		// pod per Instance. Gate selection at the dispatcher level
+		// branches on the strategy in plan.UpdateStrategy.Type so each
+		// strategy is throttled by the budget that actually applies.
+		isSurgeStrategy := plan.UpdateStrategy.Type == v1beta1.OMENativeUpdateStrategySurgeThenDrain ||
+			plan.UpdateStrategy.Type == ""
 		for _, inst := range plan.Instances {
 			needs, derr := detectUpdateTrigger(ctx, p, plan, inst, target, p.PodSpec)
 			if derr != nil {
@@ -154,11 +161,23 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 					anyGated = true
 					continue
 				}
-				// MaxUnavailable gate: don't take another pod offline if
-				// doing so would push the Component above its budget.
-				if allowed, _ := coordination.CheckUnavailabilityGate(p.ISVC, plan.Component, inFlightUnavail); !allowed {
-					anyGated = true
-					continue
+				if isSurgeStrategy {
+					// MaxSurge gate: surge adds an extra pod, doesn't
+					// drop one. Throttle concurrent surges across
+					// Instances so alive never exceeds desired+MaxSurge.
+					if allowed, _ := coordination.CheckSurgeGate(p.ISVC, plan.Component, inFlightSurge); !allowed {
+						anyGated = true
+						continue
+					}
+				} else {
+					// MaxUnavailable gate: don't take another pod offline
+					// if doing so would push the Component above its
+					// budget. Skipped for SurgeThenDrain — surge never
+					// dips serving.
+					if allowed, _ := coordination.CheckUnavailabilityGate(p.ISVC, plan.Component, inFlightUnavail); !allowed {
+						anyGated = true
+						continue
+					}
 				}
 				// Sequential gate: in a Sequential group, only the
 				// active Component (first in Order with RolloutInFlight)
@@ -182,8 +201,12 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 				// Charge the wake-up budget only for fresh starts. The
 				// pod has just been pulled from rotation (or is about
 				// to be); subsequent gate checks in this wake-up must
-				// account for it.
-				inFlightUnavail++
+				// account for it. Strategy decides which budget applies.
+				if isSurgeStrategy {
+					inFlightSurge++
+				} else {
+					inFlightUnavail++
+				}
 			}
 			if !done {
 				anyUpdating = true

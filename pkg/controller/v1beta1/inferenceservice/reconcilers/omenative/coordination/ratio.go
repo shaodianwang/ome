@@ -437,3 +437,83 @@ func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.C
 	}
 	return true, "within unavailable budget"
 }
+
+// CheckSurgeGate is the surge-side dual of CheckUnavailabilityGate.
+// SurgeThenDrain never takes pods OFFLINE (so the unavailability gate
+// is irrelevant) but it temporarily adds an extra pod per Instance
+// (alive = desired + N where N is the number of in-flight surges).
+// This gate enforces the group's MaxSurge budget across the Component.
+//
+// The dispatcher calls this only on `startingFresh` for instances
+// whose UpdateStrategy is SurgeThenDrain (other strategies go through
+// CheckUnavailabilityGate). Mirrors the inFlightDelta pattern from the
+// other gates: status counters can't see in-wake-up writes, so the
+// dispatcher threads its running tally to avoid the stale-snapshot
+// trap.
+//
+// Returns allowed=true when:
+//   - The Component is not in any coord group,
+//   - The component has no observed status yet (first reconcile),
+//   - OR (currentInFlightSurge + inFlightDelta + 1) stays within
+//     MaxSurgeBudget for the Component.
+//
+// currentInFlightSurge = count of Instances whose Operation.Step is
+// the surge step (Surge or SurgeDrain) — those are the Instances that
+// already have an extra pod alive from a prior wake-up.
+func CheckSurgeGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
+	if isvc == nil {
+		return true, "nil ISVC"
+	}
+	if isvc.Spec.RolloutCoordination == nil || len(isvc.Spec.RolloutCoordination.Groups) == 0 {
+		return true, "no coordination block"
+	}
+	groups := ResolveGroups(isvc.Spec.RolloutCoordination)
+	var group *ResolvedGroup
+	for i := range groups {
+		for _, c := range groups[i].Components {
+			if c == component {
+				group = &groups[i]
+				break
+			}
+		}
+		if group != nil {
+			break
+		}
+	}
+	if group == nil {
+		return true, "component not in any coord group"
+	}
+
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.OMENative == nil {
+		return true, "no observation yet"
+	}
+	desired := cs.OMENative.Replicas
+	if desired <= 0 {
+		desired = 1
+	}
+	var currentInFlight int32
+	for _, s := range cs.OMENative.InstanceStatuses {
+		if s.Operation == nil {
+			continue
+		}
+		// Surge mechanism uses two op steps: "Surge" (creating new
+		// pod) and "SurgeDrain" (waiting drain on old). Both contribute
+		// an extra pod alive. Other steps (Drain for recreate, InPlace
+		// for in-place patch) are NOT surge — they don't add pods.
+		switch s.Operation.Step {
+		case "Surge", "SurgeDrain":
+			currentInFlight++
+		}
+	}
+	if inFlightDelta < 0 {
+		inFlightDelta = 0
+	}
+	budget := MaxSurgeBudget(group.Pacing, desired)
+	projected := currentInFlight + inFlightDelta + 1
+	if projected > budget {
+		return false, fmt.Sprintf("surge budget %d exhausted (current %d, in-flight %d, would become %d)",
+			budget, currentInFlight, inFlightDelta, projected)
+	}
+	return true, "within surge budget"
+}

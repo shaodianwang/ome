@@ -12,7 +12,15 @@ const (
 	LabelInstanceIncarnation = "ome.io/instance-incarnation"
 	LabelRunner              = "ome.io/runner"
 	LabelRevisionHash        = "ome.io/revision-hash"
-	ManagedByOMENative       = "OMENative"
+	// LabelPodOrdinal stamps the pod-naming ordinal (0 or 1 for single-pod
+	// SurgeThenDrain alternation; 0..Size-1 for multi-pod gang members).
+	// SurgeThenDrain reads it to partition observed pods into "current"
+	// (ordinal == ActiveOrdinal) and "surge" (ordinal == 1-ActiveOrdinal)
+	// without having to parse pod names (unsafe when isvc names contain
+	// hyphens). Pre-feature pods lack this label and are treated as
+	// ordinal=0 by the parser — matches their actual name suffix.
+	LabelPodOrdinal    = "ome.io/pod-ordinal"
+	ManagedByOMENative = "OMENative"
 )
 
 // RevisionHashFromControllerRevisionName extracts the trailing

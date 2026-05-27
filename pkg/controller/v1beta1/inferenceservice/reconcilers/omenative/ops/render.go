@@ -94,7 +94,7 @@ func RenderWithRevision(
 			lbls[k] = v
 		}
 	}
-	for k, v := range podLabels(isvc.Name, plan.Component, inst.Index, runner.Name, inst.Incarnation) {
+	for k, v := range podLabels(isvc.Name, plan.Component, inst.Index, runner.Name, inst.Incarnation, ordinal) {
 		lbls[k] = v
 	}
 	if revisionHash != "" {
@@ -349,7 +349,7 @@ func hasServingReadinessGate(gates []corev1.PodReadinessGate) bool {
 	return false
 }
 
-func podLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, incarnation int64) map[string]string {
+func podLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, incarnation int64, ordinal int32) map[string]string {
 	return map[string]string{
 		constants.InferenceServicePodLabelKey: isvc,
 		constants.OMEComponentLabel:           string(component),
@@ -357,6 +357,7 @@ func podLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, 
 		query.LabelInstanceIncarnation:        fmt.Sprintf("%d", incarnation),
 		query.LabelRunner:                     runner,
 		query.LabelManagedBy:                  query.ManagedByOMENative,
+		query.LabelPodOrdinal:                 fmt.Sprintf("%d", ordinal),
 	}
 }
 
@@ -382,6 +383,19 @@ func injectOMENativeEnv(pod *corev1.Pod, plan core.ComponentPlan, inst core.Inst
 }
 
 func buildOMENativeEnv(plan core.ComponentPlan, inst core.InstancePlan, runner core.RunnerPlan, ordinal int32, isvcName string) []corev1.EnvVar {
+	// OME_RUNNER_INDEX reports the runner's position within the gang
+	// (0..runner.Size-1), NOT the pod-naming ordinal. For single-pod
+	// runners (Size=1) it's always 0; SurgeThenDrain alternates the pod
+	// name ordinal between 0 and 1 across surges, but the runner is
+	// still gang-member 0 of 1 — runtime code that reads this env to
+	// pick a shard / tp-rank / etc. must see a stable value across the
+	// surge. For multi-pod runners (Size>1) the ordinal IS the gang
+	// position; multi-pod surge will need its own naming dimension when
+	// it lands.
+	gangIndex := ordinal
+	if runner.Size <= 1 {
+		gangIndex = 0
+	}
 	return []corev1.EnvVar{
 		{Name: "OME_INFERENCESERVICE_NAME", Value: isvcName},
 		{Name: "OME_COMPONENT", Value: string(plan.Component)},
@@ -389,7 +403,7 @@ func buildOMENativeEnv(plan core.ComponentPlan, inst core.InstancePlan, runner c
 		{Name: "OME_INSTANCE_INDEX", Value: fmt.Sprintf("%d", inst.Index)},
 		{Name: "OME_RUNNER", Value: runner.Name},
 		{Name: "OME_RUNNER_SIZE", Value: fmt.Sprintf("%d", runner.Size)},
-		{Name: "OME_RUNNER_INDEX", Value: fmt.Sprintf("%d", ordinal)},
+		{Name: "OME_RUNNER_INDEX", Value: fmt.Sprintf("%d", gangIndex)},
 		{Name: "OME_INSTANCE_SUBDOMAIN", Value: query.InstanceSubdomain(isvcName, plan.Component, inst.Index)},
 	}
 	// OME_LEADER_ADDRESS is emitted only for multi-pod Instances (leader

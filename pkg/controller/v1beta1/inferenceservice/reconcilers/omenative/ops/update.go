@@ -104,13 +104,16 @@ func Update(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan
 
 	// Status stamping is per-mode: recreate bumps Incarnation atomically
 	// with the Updating transition; in-place must NOT bump (same
-	// materialization). A generic Updating write here would let recreate's
-	// bump branch idempotency-skip on the second pass.
+	// materialization); surge advances ActiveOrdinal on promote. A
+	// generic Updating write here would let recreate's bump branch
+	// idempotency-skip on the second pass.
 	switch mode {
 	case updateModeInPlace:
 		return inPlaceUpdate(ctx, p, plan, inst, target, targetSpec, pods)
 	case updateModeRecreate:
 		return recreateUpdate(ctx, p, plan, inst, target, pods)
+	case updateModeSurge:
+		return surgeUpdate(ctx, p, plan, inst, target, pods)
 	}
 	return false, fmt.Errorf("update mode unknown (instance=%d)", inst.Index)
 }
@@ -121,26 +124,20 @@ type updateMode int
 const (
 	updateModeRecreate updateMode = iota
 	updateModeInPlace
+	// updateModeSurge runs the SurgeThenDrain rollout — create a new
+	// pod at the other ordinal slot, wait Ready, drain + delete the
+	// old. Zero-downtime per Instance.
+	updateModeSurge
 )
 
 // chooseUpdateMode resolves strategy + eligibility into a mode. nil
 // running spec is treated as ineligible, forcing recreate from a known
 // baseline. InPlaceOnly + ineligible returns an error.
-//
-// SurgeThenDrain currently delegates to recreate. Real surge-then-drain
-// semantics (create new alongside old, wait Ready, drain old) require
-// pod-naming changes or surge-index plumbing similar to Migrate, both
-// substantial architectural moves. Until then, SurgeThenDrain ==
-// RecreatePod, which is safer than in-place because the dispatcher's
-// MaxUnavailable gate throttles one drain at a time.
 func chooseUpdateMode(strategy v1beta1.OMENativeUpdateStrategyType, running, target *corev1.PodSpec) (updateMode, error) {
 	eligible := inPlaceEligible(running, target)
 	switch strategy {
 	case v1beta1.OMENativeUpdateStrategySurgeThenDrain:
-		// TODO: real surge-then-drain with new pod alongside old. For
-		// now route to recreate so the safety guarantee (no in-place
-		// gate bypass) holds, even if we don't yet deliver zero-downtime.
-		return updateModeRecreate, nil
+		return updateModeSurge, nil
 	case v1beta1.OMENativeUpdateStrategyRecreatePod:
 		return updateModeRecreate, nil
 	case v1beta1.OMENativeUpdateStrategyInPlaceOnly:
@@ -155,10 +152,10 @@ func chooseUpdateMode(strategy v1beta1.OMENativeUpdateStrategyType, running, tar
 		return updateModeRecreate, nil
 	case "":
 		// updateStrategyWithDefaults should have filled this in
-		// upstream; this empty-string branch matches the SurgeThenDrain
+		// upstream; the empty-string branch matches the SurgeThenDrain
 		// default so a direct caller (tests, fuzz) gets safe behavior
 		// even if it skips the defaulter.
-		return updateModeRecreate, nil
+		return updateModeSurge, nil
 	default:
 		return 0, fmt.Errorf("unknown UpdateStrategy.Type %q", strategy)
 	}
@@ -634,6 +631,17 @@ func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, targe
 const (
 	updateStepInPlace = "InPlace"
 	updateStepDrain   = "Drain"
+	// updateStepSurge is the SurgeThenDrain entry step: surge pod
+	// being created at the other ordinal slot. Transitions to
+	// updateStepSurgeDrain once the surge pod is Ready and the old
+	// pod's serving gate is being flipped.
+	updateStepSurge = "Surge"
+	// updateStepSurgeDrain is the SurgeThenDrain drain phase. Distinct
+	// from updateStepDrain so the dispatcher's CheckSurgeGate can
+	// recognize in-flight surge operations by step name alone (the
+	// surge contributes an extra pod alive — the unavailability gate
+	// doesn't apply; the surge gate does).
+	updateStepSurgeDrain = "SurgeDrain"
 )
 
 // patchInstanceStatusUpdating idempotently stamps Phase=Updating with the
@@ -716,4 +724,283 @@ func patchInstanceStatusReadyOnRevision(ctx context.Context, p core.ReconcilePar
 		s.Operation = nil
 		return true
 	})
+}
+
+// patchInstanceStatusSurgingForUpdate is the SurgeThenDrain entry
+// point. Stamps Phase=Updating + Op{Step=Surge, TargetRevision} without
+// bumping Incarnation (different pod NAME — ordinal slot — keeps old
+// and new distinct without reusing identity). ActiveOrdinal is not yet
+// advanced; it stays on the old slot until promote completes. The
+// idempotency guard requires Step==Surge so a prior recreate / in-place
+// write at the same target doesn't short-circuit.
+func patchInstanceStatusSurgingForUpdate(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32, targetRev string, timeout time.Duration) error {
+	now := metav1.NewTime(time.Now())
+	return status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
+		if s.Phase == v1beta1.OMENativeInstanceUpdating &&
+			s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationUpdate &&
+			s.Operation.Step == updateStepSurge &&
+			s.TargetRevision == targetRev {
+			return false
+		}
+		s.Phase = v1beta1.OMENativeInstanceUpdating
+		s.TargetRevision = targetRev
+		s.Operation = &v1beta1.InstanceOperation{
+			ID:             fmt.Sprintf("update-%d-%d", idx, now.Unix()),
+			Type:           v1beta1.InstanceOperationUpdate,
+			Step:           updateStepSurge,
+			TargetRevision: targetRev,
+			StartedAt:      now,
+			LastProgressAt: now,
+			Deadline:       metav1.NewTime(now.Add(timeout)),
+		}
+		return true
+	})
+}
+
+// patchInstanceStatusSurgeStepDrain transitions the surge operation
+// from Step=Surge to Step=SurgeDrain once the surge pod is Ready and
+// we're about to flip serving gates. Distinct from updateStepDrain
+// (which recreate uses) so the dispatcher's CheckSurgeGate can
+// identify in-flight surges by step name. Updates LastProgressAt for
+// the stuck-operation timeout machinery. Idempotent — no-op if
+// already on SurgeDrain.
+func patchInstanceStatusSurgeStepDrain(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32) error {
+	now := metav1.NewTime(time.Now())
+	return status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
+		if s.Operation == nil ||
+			s.Operation.Type != v1beta1.InstanceOperationUpdate {
+			return false
+		}
+		if s.Operation.Step == updateStepSurgeDrain {
+			return false
+		}
+		s.Operation.Step = updateStepSurgeDrain
+		s.Operation.LastProgressAt = now
+		return true
+	})
+}
+
+// patchInstanceStatusReadyOnRevisionWithOrdinal is the surge-promote
+// terminator: clears Operation, advances ActiveOrdinal to the new slot,
+// stamps RunningRevision=rev and Phase=Ready. Distinct from
+// patchInstanceStatusReadyOnRevision because surge needs to ALSO bump
+// ActiveOrdinal — the old pod is gone, the surge pod is the new
+// canonical pod, and future restart / scale-up paths must address that
+// slot.
+func patchInstanceStatusReadyOnRevisionWithOrdinal(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32, rev string, newOrdinal int32) error {
+	return status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
+		if s.Phase == v1beta1.OMENativeInstanceReady &&
+			s.Operation == nil &&
+			s.RunningRevision == rev &&
+			s.TargetRevision == "" &&
+			s.ActiveOrdinal == newOrdinal {
+			return false
+		}
+		s.Phase = v1beta1.OMENativeInstanceReady
+		s.RunningRevision = rev
+		s.TargetRevision = ""
+		s.Operation = nil
+		s.ActiveOrdinal = newOrdinal
+		return true
+	})
+}
+
+// surgeDrainKey identifies a SurgeThenDrain drain writer entry on the
+// old pod's ome.io/serving gate. Indexed by (instance, surge ordinal)
+// so a parallel surge across instances doesn't collide. Removed when
+// the old pod is deleted at the end of Phase 2.
+func surgeDrainKey(idx int32, newOrdinal int32) string {
+	return fmt.Sprintf("update-surge-drain-%d-%d", idx, newOrdinal)
+}
+
+// surgeUpdate runs the SurgeThenDrain rollout for one Instance.
+//
+// State machine (per Instance):
+//
+//	Phase 1 (Surge):   Op{Step=Surge}. Create the surge pod at
+//	                   ordinal=1-ActiveOrdinal with target revision.
+//	                   Wait surge pod ContainersReady.
+//	Phase 2 (Drain):   Op.Step=Drain. Mark surge pod serving=True
+//	                   (joins LB rotation). Mark old pod
+//	                   serving=False (leaves rotation). Wait
+//	                   drain.IsPodDrained on per-revision routed
+//	                   Service. Delete old pod.
+//	Phase 3 (Promote): Old pod gone. Advance InstanceStatus.
+//	                   ActiveOrdinal to the new slot, set Phase=Ready,
+//	                   RunningRevision=target, clear Operation.
+//
+// Invariants:
+//   - serving count never dips below desired — surge always rotates IN
+//     before old rotates OUT.
+//   - alive count peaks at desired+1 per Instance during the surge
+//     window. The dispatcher's CheckSurgeGate (added with the
+//     wire-up commit) caps concurrent surges across Instances.
+//   - no in-place patching — different pod NAMES throughout.
+//
+// Single-pod scope (Runner.Size == 1). Multi-pod SurgeThenDrain needs
+// per-gang-member ordinal allocation and is deferred.
+func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan, target *appsv1.ControllerRevision, pods []*corev1.Pod) (bool, error) {
+	// Single-pod guard — multi-pod gangs need a different ordinal
+	// dimension (per-member surge) not yet plumbed.
+	if len(inst.Runners) == 0 || inst.Runners[0].Size != 1 {
+		return false, fmt.Errorf("surgeUpdate: multi-pod not yet supported (instance=%d)", inst.Index)
+	}
+	runner := inst.Runners[0]
+
+	// Where ActiveOrdinal lives today (0 by default). The surge pod
+	// goes to the opposite slot.
+	var oldOrdinal int32
+	if s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil {
+		oldOrdinal = s.ActiveOrdinal
+	}
+	newOrdinal := int32(1) - oldOrdinal
+
+	// Partition observed pods by ordinal slot.
+	oldPods, surgePods, stragglers := partitionPodsBySurgeOrdinal(pods, oldOrdinal, newOrdinal)
+	if len(stragglers) > 0 {
+		// Pods at neither slot — leftover from a future ordinal scheme
+		// or label corruption. Refuse to proceed (same shape recreate
+		// uses for unknownPods).
+		for _, pod := range stragglers {
+			status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonFoundOrphan,
+				"OMENative %s found pod %s/%s with unexpected ordinal label; refusing to surge-update",
+				status.InstanceKey(plan.Component, inst.Index), pod.Namespace, pod.Name)
+		}
+		return false, nil
+	}
+
+	// Phase 1 entry: stamp Phase=Updating + Op.Step=Surge if not
+	// already there. Idempotent on the second pass.
+	wasNotSurging := true
+	if s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil &&
+		s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationUpdate &&
+		(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) {
+		wasNotSurging = false
+	}
+	if err := patchInstanceStatusSurgingForUpdate(ctx, p, plan.Component, inst.Index, target.Name, plan.InstanceReadyTimeout); err != nil {
+		return false, fmt.Errorf("stamp surge step (instance=%d): %w", inst.Index, err)
+	}
+	if wasNotSurging {
+		status.RecordNormal(p.Recorder, p.ISVC, status.EventReasonRecreateUpdateStarted,
+			"OMENative %s surge to revision %s (newOrdinal=%d)",
+			status.InstanceKey(plan.Component, inst.Index), target.Name, newOrdinal)
+	}
+
+	// Phase 1: create surge pod if missing.
+	if len(surgePods) == 0 {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+			return false, nil
+		}
+		targets := []podTarget{{
+			Name:    query.PodName(p.ISVC.Name, plan.Component, inst.Index, runner.Name, newOrdinal),
+			Runner:  runner,
+			Ordinal: newOrdinal,
+		}}
+		if _, err := createMissingPods(ctx, p, plan, inst, inst.Index, targets, revisionHashFromTarget(target)); err != nil {
+			return false, fmt.Errorf("create surge pod (instance=%d, ordinal=%d): %w", inst.Index, newOrdinal, err)
+		}
+		return false, nil
+	}
+
+	// Phase 1 (cont): wait surge pod ContainersReady. Don't flip serving
+	// or touch the old pod until the surge has containers up — that's the
+	// no-downtime guarantee.
+	if !query.AllPodsRuntimeReady(surgePods) {
+		return false, nil
+	}
+
+	// Phase 2: surge is Ready. Promote it to serving (joins rotation),
+	// then drain the old pod.
+	for _, pod := range surgePods {
+		if podreadiness.IsServing(pod) {
+			continue
+		}
+		if err := podreadiness.MarkPodServing(ctx, p.Client, pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
+			return false, fmt.Errorf("mark surge serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+		}
+	}
+
+	if len(oldPods) > 0 {
+		// Transition Step Surge → Drain once. Subsequent passes idempotency-
+		// skip inside the helper.
+		if err := patchInstanceStatusSurgeStepDrain(ctx, p, plan.Component, inst.Index); err != nil {
+			return false, fmt.Errorf("transition surge step to drain (instance=%d): %w", inst.Index, err)
+		}
+		for _, pod := range oldPods {
+			if !podreadiness.IsServing(pod) {
+				continue
+			}
+			if err := podreadiness.MarkPodNotServing(ctx, p.Client, pod, podreadiness.WriterUpdateSurgeDrain, surgeDrainKey(inst.Index, newOrdinal)); err != nil {
+				return false, fmt.Errorf("mark old not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+			}
+		}
+		// Live drain check via per-revision routed Service (PR #230 fix
+		// — see drain.IsPodDrained semantics; headless slice would lie
+		// because of PublishNotReadyAddresses).
+		for _, pod := range oldPods {
+			serviceName := drainServiceForPod(p.ISVC.Name, plan.Component, pod)
+			if serviceName == "" {
+				continue
+			}
+			drained, err := drain.IsPodDrained(ctx, p.Reader(), p.ISVC.Namespace, serviceName, pod)
+			if err != nil {
+				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+			}
+			if !drained {
+				return false, nil
+			}
+		}
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+			return false, nil
+		}
+		// EXPECT-ORDER: per-pod ExpectDelete BEFORE Delete, rollback via
+		// ObservedDelete on error — matches recreateUpdate's contract.
+		for _, pod := range oldPods {
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
+			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, 1)
+			if err := p.Client.Delete(ctx, pod); err != nil {
+				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index)
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return false, fmt.Errorf("delete old pod %s/%s: %w", pod.Namespace, pod.Name, err)
+			}
+		}
+		return false, nil
+	}
+
+	// Phase 3: old gone, surge is canonical. Advance ActiveOrdinal,
+	// promote to Ready on the target revision.
+	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(ctx, p, plan.Component, inst.Index, target.Name, newOrdinal); err != nil {
+		return false, fmt.Errorf("promote surge (instance=%d): %w", inst.Index, err)
+	}
+	status.RecordNormal(p.Recorder, p.ISVC, status.EventReasonRecreateUpdateCompleted,
+		"OMENative %s surge to revision %s complete (activeOrdinal=%d)",
+		status.InstanceKey(plan.Component, inst.Index), target.Name, newOrdinal)
+	return true, nil
+}
+
+// partitionPodsBySurgeOrdinal buckets pods by the LabelPodOrdinal label
+// for SurgeThenDrain's three-way decision (old/surge/stragglers).
+// Stragglers are pods at neither slot — should never happen in normal
+// operation; bailing out is safer than risking a wrong action.
+func partitionPodsBySurgeOrdinal(pods []*corev1.Pod, oldOrdinal, newOrdinal int32) (old, surge, stragglers []*corev1.Pod) {
+	for _, pod := range pods {
+		ord, ok := query.PodOrdinalFromLabels(pod)
+		if !ok {
+			stragglers = append(stragglers, pod)
+			continue
+		}
+		switch ord {
+		case oldOrdinal:
+			old = append(old, pod)
+		case newOrdinal:
+			surge = append(surge, pod)
+		default:
+			stragglers = append(stragglers, pod)
+		}
+	}
+	return
 }

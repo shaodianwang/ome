@@ -87,6 +87,7 @@ func TestRender_Labels(t *testing.T) {
 		query.LabelInstanceIncarnation:        "1",
 		query.LabelRunner:                     "default",
 		query.LabelManagedBy:                  query.ManagedByOMENative,
+		query.LabelPodOrdinal:                 "0",
 	}
 	if diff := cmp.Diff(want, pod.Labels); diff != "" {
 		t.Fatalf("labels mismatch (-want +got):\n%s", diff)

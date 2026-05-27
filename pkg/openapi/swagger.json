@@ -2539,6 +2539,11 @@
         "phase"
       ],
       "properties": {
+        "activeOrdinal": {
+          "description": "ActiveOrdinal identifies which of two pod-naming slots (0 or 1) currently holds the canonical pod for this single-pod Instance. SurgeThenDrain alternates between slots: the surge creates a new pod at `1 - ActiveOrdinal`, waits Ready, drains the old pod, then advances ActiveOrdinal to the new slot. Stays 0 for InPlace and Recreate strategies (those reuse the same pod name). Defaults to 0 on initial create.",
+          "type": "integer",
+          "format": "int32"
+        },
         "availablePodCount": {
           "description": "AvailablePodCount is the number of pods ready for at least MinReadySeconds.",
           "type": "integer",

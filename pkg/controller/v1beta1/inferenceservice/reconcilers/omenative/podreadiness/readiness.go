@@ -241,6 +241,12 @@ const (
 	// migration. The key is removed by virtue of the source pods being
 	// deleted at the end of the migration.
 	WriterMigrateSourceDrain = "Migrate-source-drain"
+
+	// WriterUpdateSurgeDrain drains the OLD pod during a SurgeThenDrain
+	// rollout — after the surge pod (at the other ordinal slot) reaches
+	// Ready, the old pod is drained via this writer then deleted. The
+	// surge pod is fresh and goes through WriterLifecycle.
+	WriterUpdateSurgeDrain = "Update-surge-drain"
 )
 
 // KeyLifecycleInstanceReady is the universal Lifecycle key. Matches

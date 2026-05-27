@@ -294,7 +294,7 @@ func TestCreate_IdempotentOnAlreadyExists(t *testing.T) {
 // exactly what the controller is about to write. Synthesizing PodReady
 // in tests would mask the real ordering.
 func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, serving bool) *corev1.Pod {
-	labels := podLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1)
+	labels := podLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1, 0)
 	// Production Render stamps ome.io/revision-hash so per-revision
 	// Service selectors match. Test pods must carry it too — the drain
 	// path computes the per-revision routed Service from this label.

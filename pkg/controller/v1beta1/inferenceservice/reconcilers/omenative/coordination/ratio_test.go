@@ -752,3 +752,156 @@ func mkUnavailFixture(maxUnavail *intstr.IntOrString) *v1beta1.InferenceService 
 		},
 	}
 }
+
+// ----------------------------------------------------------------------
+// CheckSurgeGate tests — parallel of CheckUnavailabilityGate, but
+// counts in-flight surge operations against the MaxSurge budget rather
+// than offline pods against the MaxUnavailable budget.
+// ----------------------------------------------------------------------
+
+// mkSurgeFixture is the surge analog of mkUnavailFixture: PerComponent
+// pacing + specified MaxSurge. Caller sets Status.Components.
+func mkSurgeFixture(maxSurge *intstr.IntOrString) *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:     v1beta1.CoordinationPacingPerComponent,
+						MaxSurge: maxSurge,
+					},
+				}},
+			},
+		},
+	}
+}
+
+func TestCheckSurgeGate_NilISVC(t *testing.T) {
+	allowed, _ := CheckSurgeGate(nil, v1beta1.EngineComponent, 0)
+	if !allowed {
+		t.Errorf("nil ISVC: allow (bypass)")
+	}
+}
+
+func TestCheckSurgeGate_NoCoordBlock(t *testing.T) {
+	isvc := &v1beta1.InferenceService{}
+	allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+	if !allowed {
+		t.Errorf("no coord: allow (bypass)")
+	}
+}
+
+func TestCheckSurgeGate_NoObservationYet(t *testing.T) {
+	isvc := mkSurgeFixture(iosInt(1))
+	allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+	if !allowed {
+		t.Errorf("first reconcile (no status): allow")
+	}
+}
+
+func TestCheckSurgeGate_NoInFlight_WithinBudget(t *testing.T) {
+	// MaxSurge=1, 5 replicas, no in-flight surge → projected=1, budget=1
+	// → ALLOWED.
+	isvc := mkSurgeFixture(iosInt(1))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 5}},
+	}
+	allowed, reason := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+	if !allowed {
+		t.Errorf("no in-flight + budget=1: allow; got reason=%s", reason)
+	}
+}
+
+func TestCheckSurgeGate_OneInFlight_BudgetExhausted(t *testing.T) {
+	// MaxSurge=1, 5 replicas, ONE instance already on Step=Surge → projected=2 > budget=1
+	// → DENIED.
+	isvc := mkSurgeFixture(iosInt(1))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{
+			Replicas: 5,
+			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
+				Index:     0,
+				Phase:     v1beta1.OMENativeInstanceUpdating,
+				Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: "Surge"},
+			}},
+		}},
+	}
+	allowed, reason := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+	if allowed {
+		t.Errorf("1 in-flight Surge + budget=1: deny; got allow reason=%s", reason)
+	}
+}
+
+func TestCheckSurgeGate_SurgeDrainStepAlsoCounts(t *testing.T) {
+	// SurgeDrain is the Phase 2 step (surge ready, draining old). Pod
+	// still counts as in-flight surge for budget purposes — the extra
+	// pod is alive until old is deleted.
+	isvc := mkSurgeFixture(iosInt(1))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{
+			Replicas: 5,
+			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
+				Index:     0,
+				Phase:     v1beta1.OMENativeInstanceUpdating,
+				Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: "SurgeDrain"},
+			}},
+		}},
+	}
+	allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+	if allowed {
+		t.Errorf("SurgeDrain step must count toward in-flight surge budget")
+	}
+}
+
+func TestCheckSurgeGate_OtherStepsDoNotCount(t *testing.T) {
+	// Step=Drain (recreate) and Step=InPlace are NOT surge — they don't
+	// add an extra pod. Gate must not count them.
+	for _, step := range []string{"Drain", "InPlace"} {
+		isvc := mkSurgeFixture(iosInt(1))
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+			v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{
+				Replicas: 5,
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
+					Index:     0,
+					Phase:     v1beta1.OMENativeInstanceUpdating,
+					Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: step},
+				}},
+			}},
+		}
+		allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
+		if !allowed {
+			t.Errorf("step=%s (not surge) must not consume surge budget", step)
+		}
+	}
+}
+
+func TestCheckSurgeGate_InFlightDeltaProjection(t *testing.T) {
+	// No status in-flight, but dispatcher's wake-up tally says we already
+	// kicked off 1 surge this wake-up. With MaxSurge=1, projected=2 → DENIED.
+	isvc := mkSurgeFixture(iosInt(1))
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 5}},
+	}
+	allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 1)
+	if allowed {
+		t.Errorf("inFlightDelta=1 + budget=1 must deny the next surge")
+	}
+}
+
+func TestCheckSurgeGate_PercentBudget(t *testing.T) {
+	// MaxSurge=25%, 8 replicas → ceil(8*0.25)=2 budget. 0 in-flight,
+	// projected=1 → ALLOWED. inFlightDelta=2 would project=3 → DENIED.
+	pct := intstr.FromString("25%")
+	isvc := mkSurgeFixture(&pct)
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 8}},
+	}
+	if allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0); !allowed {
+		t.Errorf("25%% of 8 = 2, 0 in-flight, projected=1: allow")
+	}
+	if allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 2); allowed {
+		t.Errorf("25%% of 8 = 2, in-flight=2, projected=3: deny")
+	}
+}

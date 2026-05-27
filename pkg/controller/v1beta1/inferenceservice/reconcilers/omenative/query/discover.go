@@ -133,6 +133,26 @@ func InstanceIncarnationFromLabels(pod *corev1.Pod) (int64, bool) {
 	return n, true
 }
 
+// PodOrdinalFromLabels returns the pod-naming ordinal stamped via
+// LabelPodOrdinal. Pre-feature pods lack the label and fall back to 0
+// — matches their actual ordinal suffix in the pod name. Returns
+// (0, false) only on malformed values so callers can distinguish
+// "legacy pod, ordinal 0" from a parse error.
+func PodOrdinalFromLabels(pod *corev1.Pod) (int32, bool) {
+	if pod == nil {
+		return 0, false
+	}
+	raw, ok := pod.Labels[LabelPodOrdinal]
+	if !ok {
+		return 0, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return int32(n), true
+}
+
 // PartitionPodsByIncarnation splits pods by the ome.io/instance-incarnation
 // label:
 //   - old: value < current — safe to delete (prior materialization).

@@ -28612,6 +28612,11 @@ spec:
                           instanceStatuses:
                             items:
                               properties:
+                                activeOrdinal:
+                                  format: int32
+                                  maximum: 1
+                                  minimum: 0
+                                  type: integer
                                 availablePodCount:
                                   format: int32
                                   type: integer

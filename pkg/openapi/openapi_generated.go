@@ -4613,6 +4613,13 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation"),
 						},
 					},
+					"activeOrdinal": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ActiveOrdinal identifies which of two pod-naming slots (0 or 1) currently holds the canonical pod for this single-pod Instance. SurgeThenDrain alternates between slots: the surge creates a new pod at `1 - ActiveOrdinal`, waits Ready, drains the old pod, then advances ActiveOrdinal to the new slot. Stays 0 for InPlace and Recreate strategies (those reuse the same pod name). Defaults to 0 on initial create.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 				},
 				Required: []string{"index", "phase"},
 			},
