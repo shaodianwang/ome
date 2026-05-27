@@ -44,7 +44,12 @@ func TestCoordinationKindController(t *testing.T) {
 
 	state := kindutil.RunKindSuite(t, kindutil.SuiteOpts{
 		ClusterName: "ome-coord-kind",
-		Workers:     0,
+		// 1 worker = 2 total nodes. Migration tests (PD-5, PDA-1, INT-*)
+		// move a pod OFF its source node, so the controller needs at
+		// least one OTHER node to schedule the surge pod onto. With
+		// Workers=0 (single-node) the surge pod stays Pending forever
+		// because NodeAffinity can't satisfy "not this node".
+		Workers: 1,
 		BuildImages: []kindutil.ImageBuildSpec{
 			{
 				ContextDir: "tests/integration/kindutil/fake-serving",

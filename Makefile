@@ -637,11 +637,14 @@ test-kind: xet-build ## 🧪 Run KIND-backed integration tests (real kubelet —
 	@# KIND_KEEP_CLUSTER=true keeps the cluster between runs for fast
 	@# iteration. Set KIND_RECREATE=true to force a fresh cluster.
 	@# GINKGO_FOCUS='regex' narrows to specific specs (e.g. 'PD per-Component').
+	@# 90m timeout: 94 specs in the suite with per-spec timeouts up to
+	@# kindLongTimeout=5m. Headroom for the long tail without masking a
+	@# genuine deadlock.
 	@LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
 		DYLD_LIBRARY_PATH="$(XET_LIB_PATH):$$DYLD_LIBRARY_PATH" \
 		KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
 		go test ./tests/integration/singlecluster/controller/coordination_kind/... \
-		-v -timeout 30m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
+		-v -timeout 90m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
 	@echo "✅ KIND integration tests passed"
 
 .PHONY: test-kind-clean
