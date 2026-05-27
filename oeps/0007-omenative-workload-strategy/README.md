@@ -3,637 +3,385 @@
 <!-- toc -->
 - [Summary](#summary)
 - [Motivation](#motivation)
-  - [Context](#context)
-  - [Problem 1: LWS Restart Semantics Are Unsuitable for Defragmentation](#problem-1-lws-restart-semantics-are-unsuitable-for-defragmentation)
-  - [Problem 2: Downstream Alternatives Multiply User-Visible CRDs](#problem-2-downstream-alternatives-multiply-user-visible-crds)
-  - [Problem 3: No Native Migration Primitive Exists](#problem-3-no-native-migration-primitive-exists)
-  - [Problem 4: External Dependency Drift and LLM-Specific Primitives](#problem-4-external-dependency-drift-and-llm-specific-primitives)
+  - [Why a New Workload Type](#why-a-new-workload-type)
+  - [Why Not LWS or RBG](#why-not-lws-or-rbg)
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
-  - [What OMENative Is, Conceptually](#what-omenative-is-conceptually)
-  - [Terminology and Core Concepts](#terminology-and-core-concepts)
+  - [Core Concepts](#core-concepts)
+  - [How Operators Opt In](#how-operators-opt-in)
   - [User Stories](#user-stories)
   - [Risks and Mitigations](#risks-and-mitigations)
 - [Design Details](#design-details)
   - [Architecture Overview](#architecture-overview)
-  - [Internal Data Model](#internal-data-model)
-  - [Pod Topology Model](#pod-topology-model)
+  - [Pod Topology](#pod-topology)
   - [Restart Policy](#restart-policy)
-  - [Update Strategy (In-Place and Recreate)](#update-strategy-in-place-and-recreate)
-  - [Coordinated Cross-Component Rollout](#coordinated-cross-component-rollout)
+  - [Update Strategy](#update-strategy)
   - [Service Discovery](#service-discovery)
   - [Readiness and Warmup](#readiness-and-warmup)
   - [Port Allocation](#port-allocation)
-  - [Migration API and Mechanics](#migration-api-and-mechanics)
-  - [Strategy Migration Procedure (LWS → OMENative)](#strategy-migration-procedure-lws--omenative)
-  - [Model Availability Preconditions](#model-availability-preconditions)
+  - [Migration](#migration)
+  - [Strategy Migration from LWS](#strategy-migration-from-lws)
+  - [Model Availability](#model-availability)
   - [Gang Scheduling](#gang-scheduling)
   - [Webhook Interaction](#webhook-interaction)
   - [Status Propagation](#status-propagation)
+  - [Coordinated Rollout](#coordinated-rollout)
   - [RBAC](#rbac)
   - [Observability](#observability)
 - [Coexistence with LWS-Backed Modes](#coexistence-with-lws-backed-modes)
-  - [Component Strategy Selection Rules](#component-strategy-selection-rules)
-  - [Deprecation Plan](#deprecation-plan)
 - [Feature Gating and Rollout](#feature-gating-and-rollout)
 - [Test Plan](#test-plan)
 - [Graduation Criteria](#graduation-criteria)
-- [Implementation History](#implementation-history)
 - [Drawbacks](#drawbacks)
 - [Alternatives](#alternatives)
+- [Future Work](#future-work)
+- [Open Issues](#open-issues)
 - [Open Questions](#open-questions)
+- [Implementation History](#implementation-history)
 <!-- /toc -->
 
 ## Summary
 
-OMENative is a new workload strategy for OME's `InferenceService` that
-manages inference workload pods directly using native Kubernetes
-primitives (`Pod`, `Service`, `PodDisruptionBudget`,
-`ControllerRevision`, and optional scheduler-plugins `PodGroup`)
-without depending on `sigs.k8s.io/lws` (LeaderWorkerSet) or
-`sigs.k8s.io/rbgs` (RoleBasedGroup). The strategy introduces a
-four-level internal hierarchy — `InferenceService` → `Component` →
-`Instance` → `Runner` — and provides first-class primitives for:
+OMENative is a workload strategy for OME's `InferenceService` that
+manages inference pods directly using native Kubernetes primitives —
+`Pod`, `Service`, `PodDisruptionBudget`, `ControllerRevision`, and an
+optional `PodGroup` from scheduler-plugins — without depending on
+`sigs.k8s.io/lws` (LeaderWorkerSet) or `sigs.k8s.io/rbgs`
+(RoleBasedGroup).
 
-1. **Atomic group semantics** — Instance-level gang scheduling,
-   restart policies, and readiness aggregation.
-2. **In-place pod updates** — image-only changes use a predeclared
-   controller-owned readiness gate (`ome.io/serving`) plus endpoint
-   drain observation so EmptyDir-backed model weights survive a
-   container restart.
-3. **Native migration verb** — a first-class migration API on
-   `InferenceService` that Alfred consumes to surge a replacement
-   Instance, wait for readiness, drain the old one, and delete it.
+The strategy promises three things the existing LWS-backed paths
+cannot deliver:
 
-Cross-Component coordinated rollout and OMENative-specific autoscaling
-are explicitly deferred from v1 mechanics.
+1. **An Instance is the atomic unit of identity.** Every replica
+   (called an Instance) has a stable name and survives pod recreation.
+   Multi-pod Instances come up as a gang and die as a gang. The
+   controller never has to reason about partial groups.
+2. **In-place updates preserve model weights.** Image-only changes
+   restart the container without recreating the pod, so EmptyDir-backed
+   model weights survive. Operators avoid 10-minute reload cycles when
+   bumping a runtime image.
+3. **Migration is a first-class verb.** External controllers (notably
+   the Alfred defragmenter, OEP-0008) request migration via an
+   annotation; OMENative surges a replacement Instance, waits for it
+   to be ready, drains the old one, and deletes it. Service capacity
+   never drops below the Component minimum.
+
+OMENative introduces **no new user-visible CRDs**. `InferenceService`
+remains the only workload-facing API. Every internal concept —
+Instance, Runner, migration request, coordination policy — surfaces on
+the existing `InferenceService` spec/status or materializes as
+standard Kubernetes resources operators already recognize.
 
 OMENative coexists with the existing LWS-backed `MultiNode` and
-`PDDisaggregated` deployment modes through a six-release deprecation
-window. Users opt into OMENative per-Component at their own pace.
-Eventually the LWS-backed paths are removed and `sigs.k8s.io/lws`
-leaves OME's module graph.
+`PDDisaggregated` modes through a six-release deprecation window.
+Users opt in per-Component at their own pace. Eventually the LWS-backed
+paths are removed and `sigs.k8s.io/lws` leaves OME's module graph.
 
 `RawDeployment` remains the default for simple single-pod components.
-OMENative is primarily the successor to the LWS-backed multi-pod paths,
-and an opt-in for single-pod workloads only when Alfred needs
-OMENative's migration and drain lifecycle.
-
-The strategy introduces **no new user-visible CRDs**. `InferenceService`
-remains the sole user-facing workload API. Every internal concept
-(`Instance`, `Runner`, migration request, coordination policy) is
-either surfaced on the existing InferenceService spec/status or
-materializes as standard K8s resources that users already understand.
+OMENative is the successor to the LWS-backed multi-pod paths, and an
+opt-in for single-pod workloads only when Alfred needs OMENative's
+migration and drain lifecycle.
 
 A related design, [OEP-0008 (Alfred GPU
 Defragmenter)](../0008-alfred-gpu-defragmenter/README.md), depends on
-OMENative's migration verb to safely move Instance-scoped workloads
-during cluster defragmentation. The two designs land and ship
-independently.
+the migration verb. The two designs ship independently.
+Cross-Component rollout coordination is the topic of
+[OEP-0007.1](../0007.1-omenative-coordinated-rollout/README.md),
+landing as an additive layer once the single-Component kernel is
+proven.
 
 ## Motivation
 
-### Context
+### Why a New Workload Type
 
-OME defines eight CRDs in the `ome.io/v1beta1` API group and runs
-four controllers. The workload-facing CRD is `InferenceService`, which
-today supports four deployment modes defined in
-`pkg/constants/constants.go:453-459`:
+LWS's restart semantics drop traffic when a single pod is lost. OME
+configures every LWS with `RestartPolicy=RecreateGroupOnPodRestart`,
+which deletes the leader pod with foreground propagation whenever any
+group member dies. The leader deletion cascades through the worker
+StatefulSet: the group goes to zero replicas before coming back. LWS's
+`RollingUpdate` with `MaxSurge=1, MaxUnavailable=1` only fires on
+spec change, not pod deletion — an eviction flows through restart
+handling, not the rollout controller, so no surge replica is ever
+created during eviction.
 
-| Mode | Primary resource | Multi-pod Instance | Multi-Component | Uses LWS? |
-|------|------------------|--------------------|-----------------|-----------|
-| `RawDeployment` | `Deployment` | No | Router+Engine via separate Deployments | No |
-| `MultiNode` | `LeaderWorkerSet` | Yes (leader + workers) | No | **Yes** |
-| `PDDisaggregated` | `LeaderWorkerSet` × 2 + Deployment | Yes per component | Yes (router + engine + decoder) | **Yes** |
-| `VirtualDeployment` | (none) | N/A | N/A | No |
+The consequence for defragmentation: a defragmenter wanting to
+migrate a workload by evicting a pod sees the entire group torn down
+with no surge. The scheduler attempts to place `N` replacement pods
+simultaneously; if any fails, the LWS replica is not Ready and the
+service is down; no rollback is possible because the evicted pods and
+their GPU allocations are gone.
 
-`Serverless` (Knative Service) was removed in PR #174; this OEP no
-longer enumerates it.
+LWS 0.7 and 0.8 do not change this. Their gang-scheduling work
+(KEP#407) addresses initial placement, not post-loss restart.
 
-LWS is therefore the backbone for OME's multi-node tensor-parallel
-engines and for prefill-decode disaggregated serving. An audit of OME
-against its LWS usage (see
-`pkg/controller/v1beta1/inferenceservice/reconcilers/lws/lws_reconciler.go`,
-~130 lines of construction + reconciliation, plus peripheral reads in
-status propagation) confirmed:
+LLM inference also needs primitives general-purpose workload
+controllers don't prioritize: in-place image updates that preserve
+model weights, migration with explicit surge semantics and model
+availability preconditions, and (in OEP-0007.1) cross-Component
+rollout coordination for prefill-decode topologies.
 
-- LWS usage is localized. Only 5 Go files import
-  `sigs.k8s.io/lws/api/leaderworkerset/v1`. All LWS-specific logic is
-  in `lws_reconciler.go`.
-- OME's public API (`InferenceService` spec) does not reference LWS
-  types. The `Leader` / `Worker` / `Size` fields are semantic names.
-- OME does not consume LWS-specific pod labels. Status propagation
-  treats LWS as opaque (reads `Conditions`, `Generation`,
-  `Annotations["resourceVersion"]`).
-- Replacement scope estimate: refactor the `lws/` reconciler to emit
-  direct `Pod` sets + `Service` + `PodDisruptionBudget` +
-  `ControllerRevision`; update status readers. The mechanics are
-  materially larger than the current LWS adapter because OMENative
-  owns instance lifecycle directly rather than delegating it to
-  StatefulSet.
+### Why Not LWS or RBG
 
-LWS is pinned at `sigs.k8s.io/lws v0.5.1` in `go.mod` (upstream at
-v0.8.0 as of 2026-04). Upstream has added useful features (KEP#407
-Gang Scheduling in v0.7.0, KEP#552 size updates,
-`RecreateGroupAfterStart` annotation in v0.8.0), but none address the
-core problems documented below.
-
-OEP-0006 introduced the `WorkloadStrategy` abstraction. PR #506 ships
-the framework with a `SingleComponentStrategy` preserving the existing
-reconciler paths. OMENative is a new strategy that registers alongside
-it.
-
-### Problem 1: LWS Restart Semantics Are Unsuitable for Defragmentation
-
-OME configures every LWS it creates with
-`Spec.LeaderWorkerTemplate.RestartPolicy = RecreateGroupOnPodRestart`
-(`lws_reconciler.go:98`). Verified in LWS source
-(`sigs.k8s.io/lws@v0.6.2/pkg/controllers/pod_controller.go:192-229`),
-this policy causes the LWS controller to **delete the leader pod with
-foreground propagation** whenever any pod in the group is deleted.
-Leader deletion cascades through the worker StatefulSet; the group
-goes to zero replicas before beginning to come back.
-
-The LWS `RolloutStrategy.RollingUpdate` with `MaxSurge=1,
-MaxUnavailable=1` (`lws_reconciler.go:78-93`) is triggered only by a
-spec change, not by pod deletion. An eviction flows through
-`handleRestartPolicy`, not through the rollout controller, so
-`MaxSurge` never creates a surge replica during eviction.
-
-Consequence for a defragmenter (Alfred) wanting to migrate a workload
-by evicting a pod: the entire group is torn down (no surge); the
-scheduler attempts to place `N` replacement pods simultaneously; if
-any fails, the LWS replica is not Ready and the service is down; no
-rollback is possible because the evicted pods and their GPU
-allocations are gone.
-
-LWS 0.7/0.8 do not change this. KEP#407 gang scheduling addresses
-**initial** placement, not post-loss restart. `RecreateGroupAfterStart`
-controls start-phase behavior, orthogonal to the defragmentation
-case.
-
-Any multi-Instance workload deployed through LWS cannot be safely
-migrated via eviction. For OMENative-managed workloads, migration
-becomes a first-class operation with explicit surge semantics (see
-[Migration API and Mechanics](#migration-api-and-mechanics)).
-
-### Problem 2: Downstream Alternatives Multiply User-Visible CRDs
-
-RBG (RoleBasedGroup, `sigs.k8s.io/rbgs`, sibling to OME in the
-sgl-project org) is a natural candidate to replace LWS — it has
-native multi-role coordination and richer restart policies. RBG
+`sigs.k8s.io/rbgs` (RoleBasedGroup) is a sibling project in the
+sgl-project org that addresses many of the same concerns. RBG's
 KEP-30 (InstanceSet) explicitly proposes replacing LWS inside RBG for
-the same dependency-drift reasons this OEP cites.
+the same dependency-drift reasons cited here.
 
-Adopting RBG directly in OME would, however, install the following
-user-visible CRDs:
+Adopting RBG directly in OME would, however, install four user-visible
+CRDs between `InferenceService` and a `Pod`:
 
 - `RoleBasedGroup` (`workloads.sgl.ai/v1alpha2`)
 - `RoleInstanceSet` (`workloads.sgl.ai/v1alpha2`)
 - `RoleInstance` / `Instance` (`workloads.sgl.ai/v1alpha1|v1alpha2`)
 - `CoordinatedPolicy`, `RoleBasedGroupScalingAdapter`
 
-Four layers of CRDs between `InferenceService` and a `Pod`, each
-observable to operators via `kubectl api-resources` and `kubectl
-describe`. For operators debugging a failing workload this is a
-significant mental-load increase.
+Each layer is observable to operators via `kubectl api-resources` and
+`kubectl describe`. For an operator debugging a failing workload the
+cognitive load grows quickly.
 
-OMENative borrows RBG's **design patterns** (Instance-as-atomic-unit,
-predeclared readiness gates, revision history, gang adapters) while
-emitting **only native K8s resources**. Users see `InferenceService`
-plus vanilla `Pod`, `Service`, `PodDisruptionBudget`,
-`ControllerRevision`, and optional scheduler-plugins `PodGroup`.
+OMENative borrows RBG's **design patterns** — Instance-as-atomic-unit,
+predeclared readiness gates, revision history, gang adapters — while
+emitting **only native Kubernetes resources**. Users see
+`InferenceService` plus vanilla `Pod`, `Service`,
+`PodDisruptionBudget`, `ControllerRevision`, and the optional
+`PodGroup`.
 
-### Problem 3: No Native Migration Primitive Exists
-
-Neither LWS nor RBG exposes a first-class "migrate this Instance from
-here to there" verb. Both require spec modification to trigger a
-rolling update with affinity changes. A defragmenter that follows
-"alfred does not write to the workload's reconciliation state" cannot
-invoke this path; it must delegate to the workload controller, and
-the workload controller must have a migration verb to delegate to.
-
-OMENative makes migration a first-class operation:
-
-- A migration request is an annotation on InferenceService
-  (`ome.io/migration-request-v1-<uuid>`) with a versioned JSON payload.
-- OMENative's controller consumes the request, executes surge
-  migration (the only supported v1 mechanism), and tracks progress
-  in `Status.MigrationHistory`.
-- Alfred writes only this annotation; OMENative handles everything
-  else.
-
-### Problem 4: External Dependency Drift and LLM-Specific Primitives
-
-LWS and RBG evolve on schedules independent of OME's release cadence.
-OME is three minor versions behind LWS upstream. Upgrading requires
-validating multiple new features (gang scheduling, partition updates,
-size changes), integrating with controller changes, coordinating
-CRD upgrades in user clusters. This drift is a continuous tax.
-
-Separately, LLM serving needs primitives that general workload
-controllers don't prioritize:
-
-- **In-place image update preserving model weights.** LWS has no
-  native in-place update. RBG added it (KEP-30 InstanceSet) as a new
-  feature. OMENative gets this for free in its design.
-- **Migration-time model availability preconditions.** OMENative
-  inherits OME's existing per-node model labels
-  (`models.ome.io/{ns}.basemodel.{name}=Ready`) and uses them
-  directly in pod affinity — no new primitive needed.
-- **Coordinated rollout for PD workloads.** Prefill/decode roles
-  update in proportion. RBG's `CoordinatedPolicy` design is
-  proven; OMENative may adopt a similar semantic later, but v1 keeps
-  rollout correctness scoped to one Component at a time.
-- **KV cache handoff hooks, RDMA fabric awareness.** Future
-  directions; OMENative's internal hierarchy accommodates them.
+LWS and RBG also evolve on schedules independent of OME's release
+cadence. OME is already three minor versions behind LWS upstream;
+keeping current would mean continuously validating new features,
+integrating controller changes, and coordinating CRD upgrades in user
+clusters. OMENative replaces that ongoing cost with one fixed
+implementation cost.
 
 ### Goals
 
 1. **Replace LWS** as the underlying primitive for OME's multi-node
-   and PD paths. Users can opt into OMENative per-Component;
-   eventually LWS-backed paths are removed and `sigs.k8s.io/lws` is
-   dropped from `go.mod`.
+   and prefill-decode paths. Users opt in per-Component; eventually
+   LWS-backed paths are removed and `sigs.k8s.io/lws` is dropped from
+   `go.mod`.
 2. **Zero new user-visible CRDs.** `InferenceService` remains the
-   sole user-facing workload resource. Every internal concept is
-   surfaced through the existing spec/status or materializes as
-   standard K8s resources.
+   sole workload API.
 3. **Unified handling** of single-pod, single-Component multi-node,
-   and multi-Component PD workloads under one strategy implementation.
-4. **First-class migration verb** on InferenceService, with
-   surge-only semantics in v1.
-5. **In-place updates** as default. Container image and metadata
-   changes preserve EmptyDir-backed model state and avoid full
-   model-weight reload when the runtime tolerates a container restart.
-6. **Keep the controller kernel narrow and implementable.**
-   Single-Component correctness ships first; richer cross-Component
-   coordination can layer on later.
+   and multi-Component prefill-decode workloads under one strategy
+   implementation.
+4. **A migration verb** on `InferenceService`, surge-only in v1.
+5. **In-place updates by default.** Image and metadata changes
+   preserve EmptyDir-backed model state and avoid full model-weight
+   reload when the runtime tolerates a container restart.
+6. **A narrow, implementable controller kernel.** Single-Component
+   correctness ships first; richer cross-Component coordination layers
+   on top (OEP-0007.1).
 7. **Coexist with LWS-backed modes** during a six-release deprecation
    window. No breaking changes; users migrate at their own pace.
 
 ### Non-Goals
 
-1. **Not becoming a general-purpose workload controller.** OMENative
-   is specialized for LLM inference.
-2. **Not implementing a scheduler.** OMENative relies on the K8s
-   scheduler. It supplies scheduling hints and gates; it does not
-   replace scheduler logic.
-3. **Not shipping OMENative-managed HPA in v1.** Existing modes keep
-   their current scaling paths; OMENative v1 reconciles replica count
-   from `InferenceService` spec and does not emit an HPA.
-4. **Not owning cluster-wide defragmentation decisions.** That is
-   Alfred's job (OEP-0008). OMENative provides the migration verb;
-   Alfred decides when and why to call it.
-5. **Not solving GPU health observation.** Standard K8s node
-   conditions and AcceleratorClass status are consumed; OMENative
-   adds no new telemetry collection.
-6. **Not exposing any new CRDs.** Hard constraint.
-7. **Not supporting cross-cluster InferenceService.** Explicit
-   non-goal; if needed later, a separate OEP.
-8. **Not shipping a user-facing rollback verb in v1.** Internal
-   `ControllerRevision` is emitted for in-place update decisioning,
-   but the user-facing rollback mechanism (replay revision N) is
-   deferred to a follow-up.
+1. Not a general-purpose workload controller. OMENative is
+   specialized for LLM inference.
+2. Not a scheduler. OMENative supplies hints and gates; the
+   Kubernetes scheduler still places pods.
+3. Not shipping an OMENative-managed HPA in v1. Existing modes keep
+   their scaling paths.
+4. Not owning cluster-wide defragmentation decisions. That is
+   Alfred's job (OEP-0008).
+5. Not solving GPU health observation.
+6. Not exposing any new CRDs.
+7. Not supporting cross-cluster `InferenceService`.
+8. Not shipping a user-facing rollback verb in v1. Internal
+   `ControllerRevision`s are emitted; the rollback API is deferred to
+   a follow-up.
 
 ## Proposal
 
-### What OMENative Is, Conceptually
+### Core Concepts
 
-OMENative is a new `WorkloadStrategy` for OME's InferenceService
-controller. Operators select the strategy per-Component via the
-existing `ome.io/deploymentMode` annotation on each Component's
-metadata — the same annotation OME already uses today
-(the `DeploymentMode` key in `pkg/constants/constants.go`,
-`pkg/controller/v1beta1/inferenceservice/utils/deployment.go:18`):
+The following concepts live inside OMENative's controller or on
+existing `InferenceService` fields. None are expressed as CRDs.
+
+- **Component** (existing OME term). A top-level role within an
+  `InferenceService`: `router`, `engine`, or `decoder`.
+- **Instance** (new). One replica of a Component — the atomic unit
+  for gang scheduling, restart policy, migration, and readiness
+  aggregation. A Component with `MinReplicas=3` has three Instances,
+  indexed 0, 1, 2.
+- **Runner** (extends existing OME concept). A kind of pod within an
+  Instance. Named `leader`, `worker`, or `default` (for single-pod
+  Instances). A Runner has a size (pod count) and a template.
+- **Pod.** Standard Kubernetes pod running a Runner's container spec.
+
+Example — a prefill-decode `InferenceService` `llama-70b` with router
+(2 replicas), engine (2 Instances of 4 pods each), decoder (1
+Instance of 2 pods):
+
+```
+InferenceService llama-70b
+├── Component router (2 Instances)
+│   ├── Instance 0: 1 default Runner (size 1)
+│   └── Instance 1: 1 default Runner (size 1)
+├── Component engine (2 Instances)
+│   ├── Instance 0: 1 leader Runner + 1 worker Runner (size 3)
+│   └── Instance 1: same shape
+└── Component decoder (1 Instance)
+    └── Instance 0: 1 leader Runner + 1 worker Runner (size 1)
+
+Total: 5 Instances, 12 Pods
+```
+
+### How Operators Opt In
+
+Operators select OMENative per-Component via the existing
+`ome.io/deploymentMode` annotation on each Component's metadata:
 
 ```yaml
 spec:
   router:
     metadata:
       annotations:
-        ome.io/deploymentMode: RawDeployment # router is free to pick any mode
+        ome.io/deploymentMode: RawDeployment
   engine:
     metadata:
       annotations:
-        ome.io/deploymentMode: OMENative     # NEW mode introduced by this OEP
+        ome.io/deploymentMode: OMENative
   decoder:
     metadata:
       annotations:
-        ome.io/deploymentMode: OMENative     # must match engine in PD mode
+        ome.io/deploymentMode: OMENative
 ```
 
-OMENative deliberately reuses the existing per-Component annotation
-rather than introducing a typed `deploymentMode` field on
-`EngineSpec`/`DecoderSpec`/`RouterSpec`. The reasoning is two-sided:
-
-- The annotation contract already works today: `DetermineEngineDeploymentMode`
-  reads `engine.Annotations` first and falls back to inference. Adding
-  `OMENative` to that resolution table is a one-line change.
-- Promoting the annotation to a typed field is an additive CRD change
-  that can land at beta or GA once the surface has stabilized. Going
-  the other way (typed field first, then realising you wanted to
-  describe it differently) is a breaking change.
+OMENative reuses the existing per-Component annotation rather than
+introducing a typed `deploymentMode` field on EngineSpec / DecoderSpec
+/ RouterSpec. The annotation already works today: `DetermineEngineDeploymentMode`
+reads `engine.Annotations` first and falls back to inference. Adding
+`OMENative` is a one-line change to the resolution table. Promoting
+the annotation to a typed field is an additive CRD change that can
+land at beta or GA once the surface has stabilized; going the other
+way would be a breaking change.
 
 Engine and decoder deployment modes **must match** when both are
 present — they are coupled through coordinated rollout and shared
 migration semantics. Router's mode is independent (it is stateless,
-CPU-only, decoupled via Service discovery). See [Component Strategy
-Selection Rules](#component-strategy-selection-rules).
+CPU-only, decoupled via Service discovery).
 
-When selected, OMENative takes over reconciliation downstream of
-"rendered Component specs":
-
-```
-InferenceService spec + ServingRuntime template + BaseModel metadata
-        │
-        ▼  (existing OME spec-merging code)
-        │
-        ▼
-Rendered Component specs (engine, decoder, router)
-        │
-        ▼
-OMENative strategy (THIS OEP)
-        │
-        ▼
-Pod(s), Services, PDB, ControllerRevision, ConfigMap, RBAC,
-optional PodGroup
-```
-
-The strategy emits:
-
-- Directly managed pods with stable names per
-  `(Component, Instance, Runner, ordinal)` (see [Pod Topology
-  Model](#pod-topology-model)).
-- Three `Service`s per Component: external (`<isvc>`),
-  component-routing (`<isvc>-<component>`), and peer-DNS headless
-  (`<isvc>-<component>-headless`). See [Service
-  Discovery](#service-discovery).
-- A `PodDisruptionBudget` per Component.
-- A `ConfigMap` with runtime configuration.
-- `ControllerRevision` per-Component for update-decisioning history.
-- A scheduler-plugins `PodGroup` per multi-pod Instance when gang
-  scheduling is enabled.
-- `Role` / `RoleBinding` / `ServiceAccount` as needed.
-
-### Terminology and Core Concepts
-
-The following concepts live **inside OMENative's controller** or on
-existing InferenceService fields. None are expressed as CRDs.
-
-- **Component** (existing OME term). A top-level role within
-  an inference service: `router`, `engine`, or `decoder`. Already
-  defined in `InferenceService.Spec`.
-- **Instance** (new). One replica of a Component — the atomic unit
-  for gang scheduling, restart policy, migration, and readiness
-  aggregation. A Component with `MinReplicas=3` has three Instances
-  (indexed 0, 1, 2).
-- **Runner** (extends existing OME concept). A kind of pod within
-  an Instance. Named `leader`, `worker`, or `default` (for
-  single-pod Instances). A Runner has a `size` (pod count) and a
-  template (`RunnerSpec`, the existing container-level config type).
-- **Pod.** Standard K8s Pod running a Runner's container spec.
-
-Example — PD InferenceService `llama-70b` with router (2 replicas),
-engine (2 Instances × 4 pods each), decoder (1 Instance × 2 pods):
-
-```
-InferenceService llama-70b
-├── Component router (2 Instances)
-│   ├── Instance 0: 1 Default Runner (size 1)
-│   └── Instance 1: 1 Default Runner (size 1)
-├── Component engine (2 Instances)
-│   ├── Instance 0: 1 Leader Runner + 1 Worker Runner (size 3)
-│   └── Instance 1: same shape
-└── Component decoder (1 Instance)
-    └── Instance 0: 1 Leader Runner + 1 Worker Runner (size 1)
-
-Total: 5 Instances, 12 Pods
-```
-
-**Deployment Plan.** An internal reconciler type computed each
-reconcile from `InferenceService` + `ServingRuntime` + `BaseModel`.
-Drives creation of pods, Services, PDBs, revisions, and optional
-PodGroups. Not persisted, not a CRD.
-
-**Migration Request.** An external ask — "migrate Instance X off
-Node Y, with optional target hints." Delivered via a temporary
-annotation on InferenceService; tracked through `Status.MigrationHistory`.
+OMENative does not ship behind a Kubernetes feature gate. The trade-off
+is no single cluster-wide kill switch; the only rollback during alpha
+is annotation removal or controller revert. A real feature gate may
+be introduced at beta or GA based on operational experience.
 
 ### User Stories
 
-#### Story 1: Operator upgrades an InferenceService to multi-node tensor parallelism
+**Story 1 — Upgrade to multi-node tensor parallelism.** An operator
+has a 7B model on `RawDeployment` and wants to move to a 70B model
+needing tensor parallelism across two nodes (1 leader, 1 worker).
+They add `leader` and `worker` sections under `spec.engine` with
+`worker.size: 1`, plus `ome.io/deploymentMode: OMENative` on
+`spec.engine.metadata.annotations`. OMENative creates a headless
+Service, two pods (`-engine-0-leader-0`, `-engine-0-worker-0`), and
+one PodGroup. Pods come up; runtime readiness and the controller-owned
+serving gate make the Instance Ready only when both pods are Ready.
+`kubectl get pods,services,podgroups` shows everything — no LWS CRD
+vocabulary to learn.
 
-Operator has a 7B model on `RawDeployment`. Upgrade to a 70B model
-requiring tensor parallelism across 2 nodes (1 leader + 1 worker).
+**Story 2 — Alfred migrates an Instance for defragmentation.** Alfred
+sees that engine Instance 0 sits alone on Node1, contributing to GPU
+fragmentation. It writes a migration-request annotation on the
+InferenceService with `{component: engine, instance: 0, from_node:
+node1, hint_target_nodes: [node3, node7]}`. OMENative reads the
+annotation, clears it within 30 seconds, creates a surge Instance
+with a fresh index whose affinity excludes Node1 and prefers Node3
+and Node7, waits for it to be Ready, drains the old Instance, and
+deletes it. The other Instance handles traffic throughout; the
+Component never drops below its minimum availability.
 
-Operator changes `InferenceService.spec.engine` to add `leader` and
-`worker` sections with `worker.size: 1`, and sets the
-`ome.io/deploymentMode: OMENative` annotation on `spec.engine.metadata.annotations`.
-OMENative's controller creates a
-headless Service, two pods (`-engine-0-leader-0`,
-`-engine-0-worker-0`), and one PodGroup. Pods come up; runtime
-readiness and `ome.io/serving` gate them; Instance 0 is Ready only
-when both are Ready.
-
-Operator sees `kubectl get pods,services,podgroups` and recognizes
-everything — no LWS CRD vocabulary to learn.
-
-#### Story 2: Alfred migrates an engine Instance for defragmentation
-
-Alfred observes that Instance 0 of an OMENative engine sits alone on
-Node1 contributing to GPU fragmentation. Alfred writes annotation
-`ome.io/migration-request-v1-<uuid>` on the InferenceService with
-`{schemaVersion: "v1", component: engine, instance: 0, from_node:
-node1, hint_target_nodes: [node3, node7], reason: fragmentation}`.
-
-OMENative reads the annotation, clears it within 30s, creates a new
-surge Instance with a fresh instance index and affinity excluding
-Node1 while preferring Node3/Node7. The scheduler places the surge pod
-on Node3. When the surge Instance is runtime-ready, OMENative sets
-`ome.io/serving=True` on the surge pods, waits for ready endpoints,
-then drains the old Instance by flipping `ome.io/serving=False`,
-waiting for EndpointSlice convergence, and deleting the old pods.
-Migration is marked Complete in `Status.MigrationHistory`.
-
-Service never drops below the Component's minimum availability
-(throughout migration, the other Instance handles traffic).
-
-#### Story 3: Model version upgrade via in-place update
-
-Operator bumps `ServingRuntime` image tag for a PD workload.
+**Story 3 — In-place runtime upgrade.** An operator bumps a
+`ServingRuntime` image tag for a prefill-decode workload.
 `InferenceService` generation increments. OMENative compares old and
-new `ControllerRevision`s per-Component:
+new `ControllerRevision`s per Component:
 
-- Router: only image changed → in-place eligible. Pods get
-  `ome.io/serving=False` first (traffic drains after endpoint
-  convergence), image is patched, kubelet restarts the container, Pod
-  returns to Ready. Model reload is zero (router has no model).
-- Engine: same — in-place. 70B model weights sit in EmptyDir; they
-  survive the container restart. Warmup time ≈ seconds (just the
-  inference runtime re-attaching), not 10+ minutes of re-download.
-- Decoder: same.
+- Router: only the image changed; in-place eligible. Pods get the
+  serving gate flipped False (traffic drains after endpoint
+  convergence), the image is patched, kubelet restarts the container,
+  the pod returns to Ready. Router has no model, so reload is zero.
+- Engine, decoder: same. The 70B model weights sit in EmptyDir and
+  survive the container restart. Warmup is seconds rather than ten
+  minutes of re-download.
 
-Each Component rolls independently in v1. Cross-Component coordinated
-rollout is explicitly deferred until the single-Component controller
-kernel is proven.
+Each Component rolls independently in v1. OEP-0007.1 covers
+cross-Component coordination.
 
-#### Story 4: Evacuate a node for maintenance
+**Story 4 — Node evacuation.** An operator drains Node5 for a GPU
+driver update. For each `InferenceService` with an Instance on Node5,
+they call Alfred's evacuate endpoint (or write migration-request
+annotations directly). OMENative executes surge migration. Simple
+`RawDeployment` workloads continue to be evicted as before.
 
-Operator drains Node5 for GPU driver update. For each InferenceService
-with an Instance on Node5, the operator calls Alfred's "evacuate node"
-endpoint (or directly writes migration-request annotations). OMENative
-executes surge migration for OMENative-managed Instances. For simple
-single-pod `RawDeployment` workloads, Alfred can continue using
-eviction instead of OMENative. Operator then cordons and drains Node5
-once no protected pods remain.
-
-#### Story 5: Single-pod engine stays on RawDeployment unless migration semantics are needed
-
-Operator runs an engine-only `InferenceService` where one pod is the
-entire serving unit. The default remains `RawDeployment`, because
-Alfred can safely evict and reschedule that pod without group
-semantics. If the operator later needs OMENative's controller-owned
-drain or surge migration semantics, they opt the Component into
-OMENative explicitly by setting the `ome.io/deploymentMode: OMENative`
-annotation on `spec.engine.metadata.annotations`.
+**Story 5 — Single-pod engine.** An operator runs an engine-only
+`InferenceService` where one pod is the entire serving unit. The
+default remains `RawDeployment`, because Alfred can safely evict and
+reschedule that pod without group semantics. The operator opts the
+Component into OMENative explicitly only if they later need
+controller-owned drain or surge migration.
 
 ### Risks and Mitigations
 
-**Risk: Implementing LWS-equivalent semantics introduces bugs that LWS
-has already fixed.**
-
-*Mitigation:* Implementation is greenfield but informed by LWS's and
-RBG's public source — patterns studied, not code-copied. Test plan
-specifically covers known group-lifecycle edge cases (pod loss,
-drain races, controller restart mid-operation). Beta graduation gates
-on a fixed list of chaos-test scenarios passing.
-
-**Risk: Divergence from sgl-project ecosystem (RBG).**
-
-*Mitigation:* Accepted trade-off. RBG's CRD surface is a non-starter
-for OME's UX. OMENative scopes narrowly to OME needs, not a general
-LLM workload abstraction. Patterns (not code) are shared. If a shared
-library of Go helpers emerges organically, it can be extracted later.
-
-**Risk: Feature gap vs. LWS for niche features.**
-
-*Mitigation:* Per-feature classification in Q-012 / [Coexistence
-with LWS-Backed Modes](#coexistence-with-lws-backed-modes): subgroup
-policies out of scope; exclusive placement via standard K8s
-`topologySpreadConstraints`; partition rollouts adopted; mutable
-`size` out of scope (document immutability). Coexistence with LWS is
-long enough for users needing unsupported features.
-
-**Risk: Migration-induced service disruption.**
-
-*Mitigation:* Migration API enforces cluster-wide rate limits (default
-3 in-flight, 10/hour). Every migration emits events and status
-updates. `InferenceService.Spec.MigrationPolicy.mode: never` lets
-operators opt specific workloads out. Alfred has its own rate
-limiting and per-workload gates.
-
-**Risk: Annotation-based migration-request surface is fragile.**
-
-*Mitigation:* Annotation is idempotent via UUID. Lifecycle semantics
-(30s clear, 5m retry, 1h stale) are precise. OMENative's clear is
-best-effort; alfred's retry handles contention. If operator UX
-demands a cleaner interface later, annotation-as-shim behind a
-subresource is straightforward.
-
-**Risk: Operators confuse OMENative errors with native K8s errors.**
-
-*Mitigation:* Owner references from InferenceService flow through to
-Pods and other emitted resources. OMENative emits its own event stream
-on InferenceService
-summarizing lower-level events with explicit OMENative references.
-Errors clearly distinguish OMENative-issued vs. K8s-native.
-
-**Risk: Engine/decoder coupling rule surprises users.**
-
-*Mitigation:* Admission webhook rejects mismatched
-`ome.io/deploymentMode` annotation values between `spec.engine` and
-`spec.decoder` with `InvalidDeploymentModeCombination` and a clear
-error message. Users see the rejection at `kubectl apply` time, not
-in production.
+| Risk | Mitigation |
+|---|---|
+| Reimplementing LWS-equivalent semantics introduces bugs LWS already fixed | Greenfield implementation informed by LWS and RBG source — patterns studied, not code-copied. Beta graduation gates on chaos tests covering known group-lifecycle edge cases. |
+| Divergence from the sgl-project ecosystem (RBG) | Accepted trade-off. RBG's CRD surface is a non-starter for OME's UX. Shared patterns (not code) are sufficient; a Go helper library can be extracted later if it emerges. |
+| Feature gaps versus LWS | Per-feature classification: subgroup policies out of scope; exclusive placement via standard `topologySpreadConstraints`; partition rollouts adopted; mutable `size` out of scope. Coexistence with LWS is long enough for users needing unsupported features. |
+| Migration-induced service disruption | Cluster-wide rate limits (default 3 in-flight, 10/hour). Every migration emits events and status updates. `spec.<component>.omenative.migrationPolicy.mode: never` opts specific workloads out. Alfred has its own rate limiting. |
+| Annotation-based migration-request surface is fragile | Annotation is idempotent via UUID. Lifecycle semantics (30s clear, 5m retry, 1h stale) are precise. OMENative's clear is best-effort; Alfred's retry handles contention. A subresource shim is straightforward if operator UX demands one later. |
+| Operators confuse OMENative errors with native Kubernetes errors | Owner references flow from `InferenceService` to pods. OMENative emits its own event stream on the `InferenceService` summarizing lower-level events. Errors clearly distinguish OMENative-issued from native. |
+| Engine/decoder coupling rule surprises users | Admission webhook rejects mismatched `ome.io/deploymentMode` between engine and decoder with `InvalidDeploymentModeCombination`. Users see the rejection at `kubectl apply` time. |
 
 ## Design Details
 
 ### Architecture Overview
 
-OMENative is **not** a parallel controller. It plugs into the existing
-`InferenceService` controller as a new deployment backend.
+OMENative is not a parallel controller. It plugs into the existing
+`InferenceService` controller as a new deployment backend. The
+addition is:
 
-At a high level, implementation adds:
-
-- a new `DeploymentModeType` value: `OMENative`
-- a new backend package:
+- a new `DeploymentModeType` value, `OMENative`
+- a new backend package
   `pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/`
 - one new `case constants.OMENative` branch in
   `components/engine.go`, `decoder.go`, and `router.go`
-- additional watches in `SetupWithManager()` for:
-  - Pods
-  - `ControllerRevision`
-  - `EndpointSlice`
-  - optional scheduler-plugins `PodGroup`
+- additional watches in `SetupWithManager()` for `Pod`,
+  `ControllerRevision`, `EndpointSlice`, and the optional `PodGroup`
 
-OMENative reuses OME's existing shared reconcilers for:
+OMENative reuses OME's existing shared reconcilers for ClusterIP and
+external Services, `PodDisruptionBudget`, RBAC, the model ConfigMap,
+ingress and gateway integration, and the top-level
+`InferenceService.Status` aggregation.
 
-- ClusterIP and external Services
-- `PodDisruptionBudget`
-- RBAC
-- model ConfigMap
-- ingress / gateway integration
-- top-level `InferenceService.Status` aggregation
+OMENative does not use the current HPA reconciler in v1. That code
+targets one `Deployment`; OMENative manages Instance-scoped direct
+pod sets.
 
-OMENative does **not** use the current HPA reconciler in v1. The
-current HPA code targets one `Deployment`, while OMENative manages
-Instance-scoped direct pod sets.
+Detailed reconcile-loop mechanics, file layout, and watch mapping
+live in [controller-mechanics.md](./controller-mechanics.md). This
+README stays at the design-contract level.
 
-Detailed reconcile-loop mechanics, file layout, and watch mapping live
-in [controller-mechanics.md](./controller-mechanics.md), especially
-sections 12 and 13. This README stays at the design-contract level and
-intentionally avoids duplicating line-by-line controller flow.
+The plan computed each reconcile from `InferenceService` +
+`ServingRuntime` + `BaseModel` is in-memory only — never persisted,
+never a CRD. Persistent state lives on `InferenceService.Status`
+(top-level conditions, per-Component status, per-Instance status,
+migration history), the emitted Kubernetes objects, and
+`ControllerRevision` objects per Component.
 
-### Internal Data Model
-
-OMENative recomputes an in-memory plan every reconcile. The plan tracks:
-
-- Components (`router`, `engine`, `decoder`)
-- desired Instance count per Component
-- Runner layout per Instance (`leader`, `worker`, `default`)
-- rendered pod templates
-- restart / update / drain policy
-- active revision metadata
-- migration intent
-
-Persistent state lives on:
-
-- `InferenceService.Status`:
-  - top-level conditions
-  - per-Component OMENative status
-  - per-Instance status
-  - migration history
-- emitted Pods, Services, `PodDisruptionBudget`, and optional
-  scheduler-plugins `PodGroup`
-- `ControllerRevision` objects per Component
-- optional controller-owned audit ConfigMap for durable migration UUID
-  dedup
-
-There is no StatefulSet state in OMENative v1.
-
-### Pod Topology Model
+### Pod Topology
 
 OMENative maps each `(Component, Instance, Runner, ordinal)` tuple to
-exactly one directly managed `Pod`. Names are derived deterministically:
+exactly one directly managed pod. Names are derived deterministically:
 
 ```
-Pod name:            <isvc>-<component>-<instance-idx>-<runner-name>-<ordinal>
-Hostname:            same as pod name
-Subdomain:           <isvc>-<component>-headless
+Pod name:   <isvc>-<component>-<instance-idx>-<runner-name>-<ordinal>
+Hostname:   same as pod name
+Subdomain:  <isvc>-<component>-headless
 ```
 
-Example for our PD workload:
+For the prefill-decode workload above:
 
 ```
 llama-70b-router-0-default-0
@@ -643,28 +391,25 @@ llama-70b-engine-0-worker-0
 llama-70b-engine-0-worker-1
 llama-70b-engine-0-worker-2
 llama-70b-engine-1-leader-0
-llama-70b-engine-1-worker-0
-llama-70b-engine-1-worker-1
-llama-70b-engine-1-worker-2
+...
 llama-70b-decoder-0-leader-0
 llama-70b-decoder-0-worker-0
 ```
 
-Twelve Pods total. User sees `InferenceService` plus vanilla K8s
-objects.
+Twelve pods total. The user sees `InferenceService` plus vanilla
+Kubernetes objects.
 
-**Why direct Pods** (not one StatefulSet per `(Instance, Runner)`):
+**Why direct pods, not one StatefulSet per `(Instance, Runner)`:** v1
+surge migration needs one full replacement Instance without relying
+on StatefulSet naming tricks or unsupported `MaxSurge`. OMENative owns
+Instance atomicity directly, so the full pod set is created, drained,
+and deleted together. Stable pod names plus explicit owner references
+keep debugging and garbage collection straightforward. Headless-Service
+DNS still works because OMENative sets `hostname`/`subdomain`
+directly on each pod.
 
-- v1 surge migration needs one full replacement Instance without
-  relying on StatefulSet naming tricks or unsupported `MaxSurge`.
-- OMENative owns Instance atomicity directly, so the full pod set is
-  created, drained, and deleted together.
-- Stable pod names plus explicit owner references keep debugging and GC
-  straightforward.
-- Headless-Service DNS still works because OMENative sets pod
-  `hostname`/`subdomain` directly.
-
-**Common labels on every Pod**:
+Every OMENative-managed pod carries common labels for the pod watcher,
+status aggregation, and Alfred observation:
 
 ```
 ome.io/inferenceservice:   <isvc>
@@ -674,17 +419,32 @@ ome.io/runner:             <leader|worker|default>
 ome.io/managed-by:         OMENative
 ```
 
-These labels enable OMENative's pod watcher, status aggregation, and
-alfred's observation logic.
-
 **Single-pod Instances** still use one Runner named `default`. For
 simple single-pod workloads, `RawDeployment` remains the default mode;
-single-pod OMENative is an explicit opt-in when Alfred needs
-controller-owned drain or surge migration semantics.
+single-pod OMENative is opt-in only when Alfred needs controller-owned
+drain or surge migration.
+
+**Multi-pod Instances.** When the rendered Component has both leader
+and worker sections, the planner emits the canonical multi-pod layout:
+
+```
+Runners: [
+  {Name: "leader", Size: 1},
+  {Name: "worker", Size: <WorkerSize>},
+]
+```
+
+Pod naming follows the same scheme
+(`<isvc>-<component>-<inst>-leader-0`,
+`<isvc>-<component>-<inst>-worker-0..N-1`). Pods carry the
+`ome.io/runner` label set accordingly, and a single shared subdomain
+per Component so any pod's FQDN resolves under the Component's headless
+Service. The revision-hash computation folds in the worker `PodSpec`
+so worker-only changes correctly trigger a new `ControllerRevision`.
 
 ### Restart Policy
 
-A typed enum field on each Component's `omenative:` sub-block:
+A typed enum nested under each Component's `omenative` sub-block:
 
 ```yaml
 spec:
@@ -693,255 +453,266 @@ spec:
       restartPolicy: RecreateInstanceOnPodRestart
 ```
 
-> **Why nested under `omenative:`?** `EngineSpec` / `DecoderSpec` /
-> `RouterSpec` already inline `corev1.PodSpec` via Go's `json:",inline"`,
-> which exposes the kubelet-facing `restartPolicy` (values
-> `Always`/`OnFailure`/`Never`) at the same level. Adding the OMENative
-> Instance-group restart policy as a flat sibling would shadow that
-> field. The two policies have different scopes (container-restart vs.
-> Instance-group-restart) and legitimately need to coexist on the same
-> EngineSpec, so OMENative spec fields are nested under a single
-> `omenative:` sub-block. The nesting also mirrors the status side
-> (`status.components.<component>.omenative.{...}`) and signals
-> "applies only when `ome.io/deploymentMode: OMENative`".
+OMENative spec fields nest under `omenative` because `EngineSpec` /
+`DecoderSpec` / `RouterSpec` already inline `corev1.PodSpec` via
+`json:",inline"`, exposing the kubelet-facing `restartPolicy`
+(`Always`/`OnFailure`/`Never`) at the same level. Adding the
+Instance-group restart policy as a flat sibling would shadow that
+field. The two policies have different scopes (container restart vs.
+Instance-group restart) and legitimately coexist on the same spec, so
+all OMENative-specific fields live under a single sub-block. The
+nesting also mirrors the status side
+(`status.components.<component>.omenative.{...}`) and signals "applies
+only when `ome.io/deploymentMode: OMENative`".
 
 Three values:
 
-- `None` — a pod failure restarts only that pod. OMENative does not
-  trigger cross-pod coordination.
-- `RecreateInstanceOnPodRestart` — if any pod in an Instance fails,
-  all pods in that Instance are drained, deleted, and recreated.
-  Default for multi-pod Instances. Analog of LWS's
-  `RecreateGroupOnPodRestart` but scoped to the Instance, not a whole
-  LWS.
-- `RecreateISVCOnPodRestart` — a pod failure cascades through the
-  whole InferenceService. Rare; reserved for workloads with
-  cross-Component state coupling.
+- **`None`** — a pod failure restarts only that pod.
+- **`RecreateInstanceOnPodRestart`** — if any pod in an Instance
+  fails, all pods in that Instance are drained, deleted, and
+  recreated. Default for multi-pod Instances; the OMENative analog of
+  LWS's `RecreateGroupOnPodRestart`, scoped to the Instance.
+- **`RecreateISVCOnPodRestart`** — a pod failure cascades through the
+  whole `InferenceService`. Rare; reserved for cross-Component state
+  coupling.
 
-**Defaults**:
-- `RecreateInstanceOnPodRestart` when the Component has any Runner
-  with `size > 1` (multi-pod Instance).
-- `None` when all Runners have `size == 1`.
+Defaults: `RecreateInstanceOnPodRestart` when the Component has any
+multi-pod Runner; `None` when all Runners have `size == 1`.
 
-**Implementation**: the OMENative pod watch watches pods with
-`ome.io/managed-by: OMENative`. On a pod failure event:
+The pod watcher watches pods with `ome.io/managed-by: OMENative`. On
+a pod failure it reads the Component's restart policy and applies the
+configured cascade (none, Instance-wide, or `InferenceService`-wide).
+During an in-flight migration the watcher suppresses Instance
+recreation for the migrating Instance; the migrator owns pod
+lifecycle in that window.
 
-- Read the Component's `omenative.restartPolicy` from InferenceService spec.
-- If `RecreateInstanceOnPodRestart`: enumerate all live pods with the
-  same `ome.io/instance-index`, patch `ome.io/serving=False` on the
-  still-live siblings, wait for drain, then delete and recreate the
-  whole set.
-- If `RecreateISVCOnPodRestart`: apply the same pattern to every
-  OMENative-managed pod in the InferenceService.
-- If `None`: no controller action.
+### Update Strategy
 
-**Suppression during migration**: during an in-flight migration, the
-pod watcher suppresses `RecreateInstance` triggers for the target
-Instance. The migrator explicitly controls pod lifecycle during its
-window.
-
-### Update Strategy (In-Place and Recreate)
-
-Per-Component field nested under `omenative:`. Default `InPlaceIfPossible`.
+Per-Component field nested under `omenative`. Default
+`InPlaceIfPossible`.
 
 ```yaml
 spec:
   engine:
     omenative:
       updateStrategy:
-        type: InPlaceIfPossible       # RecreatePod / InPlaceIfPossible / InPlaceOnly
+        type: InPlaceIfPossible
         rollingUpdate:
-          partition: 0                 # 0 = update all; N = canary hold-back
-          maxUnavailable: 1            # concurrent Instances not-Ready during rollout
+          partition: 0
+          maxUnavailable: 1
         inPlaceUpdateStrategy:
           gracePeriodSeconds: 30
           markNotReadyDuringLifecycle: true
 ```
 
-**Three modes:**
+Update strategy is about operator risk appetite — what to do when a
+spec change requires bringing pods down:
 
-| Mode | Behavior |
-|------|----------|
-| `RecreatePod` | Always delete pods and recreate. Preserves today's behavior. Use when in-place is untrusted. |
-| `InPlaceIfPossible` | Try in-place first; fall back to recreate if the template change is not in-place-capable. **Default.** |
-| `InPlaceOnly` | Try in-place; if the change is not in-place-capable, **fail the update**. Safety net. |
+| Strategy | When to use |
+|---|---|
+| `RecreatePod` | Cheap, brief outage. Use when in-place is untrusted. |
+| `InPlaceIfPossible` | Preserve sessions when safe; fall back to recreate if the change isn't in-place-capable. Default. |
+| `InPlaceOnly` | Sessions are precious; prefer to fail the update than break them. Safety net. |
+| `SurgeThenDrain` | Always seamless, at the cost of an extra pod's worth of capacity during the window. Default for single-pod Components. |
 
-**In-place-capable changes** (template fields that OMENative treats
-as in-place eligible):
+**SurgeThenDrain.** Each single-pod Instance carries an
+`ActiveOrdinal` field on its status (`0` or `1`) identifying which of
+two naming slots holds the canonical pod. The update walks three
+phases:
+
+1. **Surge** — render a pod at the alternate slot (`1 - ActiveOrdinal`)
+   with the new revision; create it.
+2. **Drain** — once the surge pod is Ready, flip the old pod's
+   serving gate to False and wait for the per-revision routed
+   Service's EndpointSlice to drop it.
+3. **Promote** — delete the old pod; advance `ActiveOrdinal` to point
+   at the surge slot.
+
+`InPlace` and `RecreatePod` leave `ActiveOrdinal` at `0`; they reuse
+the same pod name. The pod-name computation for single-pod Runners
+consults `ActiveOrdinal`, so the dispatcher does not resurrect a pod
+at the drained slot.
+
+Status counters classify an Instance as Serving / Ready / Available
+based on `observed >= desired` rather than equality, because
+SurgeThenDrain transiently runs one extra pod and the equality check
+wrongly marked mid-surge Instances as not-Serving.
+
+The status writer mirrors every successful per-Instance commit back
+onto the caller's in-memory `InferenceService` snapshot. The
+dispatcher drives multiple per-Instance operations off one snapshot
+per reconcile pass; without the mirror, the second operation reads
+pre-write state for fields the first just mutated. The same pattern
+applies for any per-Instance status writer.
+
+**Multi-pod fallback.** Multi-pod Instances under `SurgeThenDrain`,
+`InPlaceIfPossible`, or `InPlaceOnly` currently route to recreate.
+Per-gang-member ordinal allocation for multi-pod surge is deferred
+(see [Future Work](#future-work)). A one-time `MultiPodSurgeFallback`
+event is logged so operators see the gap between intent and behavior.
+
+**Revision-hash filtering.** Lifecycle annotations the controller
+mutates do not enter the `ControllerRevision` spec hash, so toggling
+them does not produce a phantom rollout. The current filter covers
+`ome.io/rollout-paused` and the `ome.io/migration-request-v1-*`
+prefix. The filter list lives in `revision/revision.go::isLifecycleAnnotation`;
+extend it when adding new controller-mutated annotations.
+
+**In-place-capable fields** — the template fields OMENative treats as
+in-place eligible:
 
 - `spec.containers[].image`
 - `spec.containers[].imagePullPolicy`
 - `metadata.labels`, `metadata.annotations`
 
-**Not in-place-capable** (forces recreate under `InPlaceIfPossible`,
-rejects under `InPlaceOnly`):
+**Not in-place-capable** — forces recreate under `InPlaceIfPossible`,
+rejects under `InPlaceOnly`:
 
 - `spec.containers[].command`, `args`, `env`, `envFrom`,
   `volumeMounts`, `volumeDevices`, `ports`, `securityContext`,
-  `lifecycle`.
-- `spec.initContainers[]` (any change).
-- `spec.volumes[]`.
-- `spec.nodeSelector`, `spec.affinity`, `spec.tolerations`.
-- `spec.serviceAccountName`, `spec.imagePullSecrets`.
-- `spec.runtimeClassName`, `spec.schedulerName`.
-- any future field that would require OMENative to change pod identity
-  or regenerate storage wiring.
+  `lifecycle`
+- `spec.initContainers[]` (any change)
+- `spec.volumes[]`
+- `spec.nodeSelector`, `spec.affinity`, `spec.tolerations`
+- `spec.serviceAccountName`, `spec.imagePullSecrets`
+- `spec.runtimeClassName`, `spec.schedulerName`
 
-**Decision logic** (in `updater.go`):
+Any future field that would change pod identity or storage wiring
+falls in the second list by default.
+
+Decision logic, in pseudocode:
 
 ```
-func decideUpdate(oldRev, newRev *ControllerRevision, policy UpdateStrategy) Decision {
-    if policy.Type == RecreatePod {
-        return Decision{Action: Recreate}
-    }
+func decideUpdate(oldRev, newRev, policy):
+    if policy.Type == RecreatePod:
+        return Recreate
     diffs := compareTemplate(oldRev, newRev)
     inPlaceEligible := allDiffsIn(diffs, inPlaceCapableFields)
-    switch policy.Type {
-    case InPlaceIfPossible:
-        if inPlaceEligible { return Decision{Action: InPlace} }
-        return Decision{Action: Recreate}
-    case InPlaceOnly:
-        if inPlaceEligible { return Decision{Action: InPlace} }
-        return Decision{Action: Reject, Reason: "InPlaceUpdateNotPossible"}
-    }
-}
+    if policy.Type == InPlaceIfPossible:
+        return InPlace if inPlaceEligible else Recreate
+    if policy.Type == InPlaceOnly:
+        return InPlace if inPlaceEligible else Reject
 ```
 
-**Execution of an in-place update on an Instance**:
+In-place execution on an Instance: emit an `InPlaceUpdateStarted`
+event; if `markNotReadyDuringLifecycle` is true, flip the serving
+gate to False and wait for EndpointSlice convergence; patch the
+container image (and eligible metadata); kubelet restarts the
+container in place and the pod re-runs its readiness probe; flip the
+gate back to True and wait for ready endpoints; emit
+`InPlaceUpdateCompleted`. The serving gate is added at pod creation
+time, never mutated on a running pod's `readinessGates` list.
 
-1. OMENative emits K8s event `InPlaceUpdateStarted`.
-2. `ome.io/serving` is already present on every OMENative pod at pod
-   creation time; OMENative never mutates the readiness-gate list on a
-   running Pod.
-3. If `markNotReadyDuringLifecycle: true`, OMENative patches
-   `ome.io/serving=False` on every pod in the Instance and waits until
-   EndpointSlices no longer publish those endpoints as ready.
-4. Patch the pod container image (and metadata changes if eligible).
-5. Kubelet observes the image change, restarts the container in place,
-   and the pod re-runs its normal readiness probe. EmptyDir-backed
-   model weights survive the container restart.
-6. OMENative patches `ome.io/serving=True`, waits for ready endpoints,
-   then emits `InPlaceUpdateCompleted`.
+Rollout pacing across Instances respects
+`rollingUpdate.partition` and `rollingUpdate.maxUnavailable`.
+Migration (movement between nodes) always triggers recreate because
+node-affinity change is not in-place capable, regardless of
+`updateStrategy.type`.
 
-If the diff is not in-place-capable, `InPlaceIfPossible` falls back to
-recreate and `InPlaceOnly` rejects the update.
-
-**Rollout pacing across Instances**: OMENative updates complete
-Instances while respecting `rollingUpdate.partition` and
-`rollingUpdate.maxUnavailable`.
-
-**Migration vs update**: migration (movement between nodes) always
-triggers recreate because node-affinity change is not in-place
-capable. This is independent of `updateStrategy.type`.
-
-**Internal ControllerRevision usage**: every InferenceService
-generation produces per-Component `ControllerRevision`s capturing
-the rendered `PodTemplateSpec`. These are compared across generations
-to compute `diffs` for the in-place decision. A retention limit
-(default 10 revisions per Component) caps object count.
-
-### Coordinated Cross-Component Rollout
-
-Coordinated engine/decoder rollout is **deferred from OMENative v1**.
-
-This OEP keeps the concept because it remains a plausible future
-extension, but the v1 controller contract is intentionally narrower:
-single-Component correctness first, cross-Component skew coordination
-later.
-
-In v1:
-
-- each OMENative-managed Component rolls independently
-- Alfred migration targets one Component Instance at a time
-- no `CoordinationPaused` condition or coordination-specific metrics are
-  required
+A retention limit (default 10 revisions per Component) caps
+`ControllerRevision` object count.
 
 ### Service Discovery
 
-**Three Services per Component**, each with a distinct name:
+Three Services per Component, each with a distinct name and purpose:
 
 | Service | Name | Type | Purpose |
-|---------|------|------|---------|
-| External | `<isvc>` | ClusterIP / LoadBalancer / via Ingress | Top-level external entry (existing `PredictorServiceName`) |
-| Component routing | `<isvc>-<component>` | ClusterIP | Component-level entry (existing `RouterServiceName` / `EngineServiceName` / `DecoderServiceName`) |
-| Component peer DNS | `<isvc>-<component>-headless` | Headless (`ClusterIP: None`) | Stable pod subdomain for peer DNS |
+|---|---|---|---|
+| External | `<isvc>` | ClusterIP / LoadBalancer | Top-level external entry |
+| Component routing | `<isvc>-<component>` | ClusterIP | Component-level entry |
+| Peer DNS | `<isvc>-<component>-headless` | Headless (`ClusterIP: None`) | Stable pod subdomain for peer DNS |
 
-The external and component-routing Services are the **existing**
-Services OME's controllers create today. Behavior unchanged; ingress
-and VirtualService consumers keep working.
+The external and component-routing Services are the same Services
+OME's controllers create today, so ingress and VirtualService
+consumers keep working. OMENative also reconciles its own per-Component
+stable Service, the ingress factory branch, and the PodMonitor — at
+parity with `RawDeployment` and `MultiNode`.
 
-The **peer-DNS headless Service is new**. OMENative sets each pod's
-`hostname` and `subdomain` directly, which gives each pod a stable DNS
-name:
+The peer-DNS headless Service is new for OMENative. OMENative sets
+each pod's `hostname` and `subdomain` directly, giving each pod a
+stable DNS name:
 
 ```
 <pod-name>.<isvc>-<component>-headless.<ns>.svc.<cluster-domain>
 ```
 
-Concrete example:
+For example:
+
 ```
 llama-70b-engine-0-worker-1.llama-70b-engine-headless.prod.svc.cluster.local
 ```
 
-**Pod-level env vars** injected into every OMENative-managed pod:
+The headless Service has `PublishNotReadyAddresses=true` so peer DNS
+resolves before pods are Ready. As a side effect, drain checks must
+**not** use this Service — it would report a pod as ready forever.
+Drain checks instead consult the per-revision routed Service created
+by the coordination layer (`<isvc>-<component>-rev-<hash>`, with
+`PublishNotReadyAddresses=false`), which correctly reflects the
+controller-owned serving gate. When a pod has no `ome.io/revision-hash`
+label (a pre-revision pod, rare), the drain gate is skipped and the
+controller proceeds straight to delete.
+
+**Pod-level environment variables** injected into every
+OMENative-managed pod at pod-template render time:
 
 | Variable | Example | Meaning |
-|----------|---------|---------|
-| `OME_INFERENCESERVICE_NAME` | `llama-70b` | parent InferenceService |
+|---|---|---|
+| `OME_INFERENCESERVICE_NAME` | `llama-70b` | parent `InferenceService` |
 | `OME_COMPONENT` | `engine` | router / engine / decoder |
 | `OME_COMPONENT_REPLICAS` | `2` | total Instances of this Component |
 | `OME_INSTANCE_INDEX` | `0` | this Instance's ordinal |
 | `OME_RUNNER` | `worker` | leader / worker / default |
 | `OME_RUNNER_SIZE` | `3` | pod count in this Runner |
 | `OME_RUNNER_INDEX` | `1` | ordinal within this Runner |
-| `OME_LEADER_ADDRESS` | `llama-70b-engine-0-leader-0.llama-70b-engine-headless.prod.svc.cluster.local` | FQDN of this Instance's Leader pod |
+| `OME_LEADER_ADDRESS` | `llama-70b-engine-0-leader-0.llama-70b-engine-headless` | DNS name of this Instance's leader pod (multi-pod Instances only) |
 | `OME_INSTANCE_SUBDOMAIN` | `llama-70b-engine-0` | prefix for building peer DNS |
 
-Injected via `spec.containers[].env` at pod template rendering. Runtimes
-declaring additional env via `RunnerSpec.Env` are merged.
+Runtime-declared env via `RunnerSpec.Env` is merged with these.
+
+`OME_LEADER_ADDRESS` ships in **short form** — without the trailing
+`<ns>.svc.<cluster-domain>` suffix. The controller has no reliable way
+to discover the cluster's actual DNS suffix; the Kubernetes search-path
+resolution makes the short form work everywhere `getaddrinfo` semantics
+are used. The variable is set only on multi-pod Instances (skipped
+when the Runner is `default`); the leader pod sees its own DNS name
+so the leader code path can self-identify.
+
+A controller-manager flag (`--cluster-domain`) for runtimes needing
+strict-FQDN lookups (NCCL, Ray) is plausible if a real-world runtime
+trips on the short form; see [Open Questions](#open-questions).
 
 ### Readiness and Warmup
 
-Per-Component fields nested under `omenative:`:
+Per-Component fields nested under `omenative`:
 
 ```yaml
 spec:
   engine:
     omenative:
-      readyPolicy: AllPodReady         # AllPodReady | None
-      instanceReadyTimeout: 30m        # OMENative's wait ceiling
+      readyPolicy: AllPodReady       # AllPodReady | None
+      instanceReadyTimeout: 30m
 ```
 
-**Runtime-native readiness probe is authoritative**. The inference
-runtime declares a readiness probe in its PodTemplate (via
-ServingRuntime). When the probe passes, the pod's `Ready` condition
-is true. OMENative observes via `Pod.Status.Conditions`.
+The inference runtime's readiness probe (declared in the
+ServingRuntime) is authoritative. When it passes, the pod's `Ready`
+condition is true. OMENative observes via `Pod.Status.Conditions`.
 
-**Instance readiness aggregation**:
+`readyPolicy: AllPodReady` (default for multi-pod Instances) makes an
+Instance Ready only when every pod in the Instance has `Ready=True`.
+`readyPolicy: None` reports pods individually with no Instance-level
+aggregation.
 
-- `readyPolicy: AllPodReady` (default for multi-pod Instances): Instance
-  is Ready ⇔ every pod in the Instance has `Ready=True`.
-- `readyPolicy: None`: Instance-level readiness is not aggregated;
-  pods are reported individually.
+`instanceReadyTimeout` (default 30 minutes; large enough for big-model
+loading) bounds OMENative's wait on a newly-created Instance during
+migration, rollout, or initial creation. On timeout the operation
+fails with reason `InstanceReadyTimeout`; surge migrations roll back.
 
-**`instanceReadyTimeout`**: OMENative's upper bound for waiting on a
-newly-created Instance to become Ready (during migration, rollout, or
-initial creation). Default 30 minutes (accommodates large-model
-loading). On timeout, the operation (e.g., migration) is marked failed
-with reason `InstanceReadyTimeout`; surge rollback where applicable.
-
-**Controller-owned readiness gate**: OMENative appends one readiness
-gate to every managed pod at pod creation time:
-
-```text
-ome.io/serving
-```
-
-The gate is per-pod and uses a **multi-writer protocol** ported from
-RBG (`sigs.k8s.io/rbgs/pkg/inplace/pod/readiness`). The condition's
-`Message` field carries a JSON list of `{userAgent, key}` entries,
-one per writer that wants the pod NotReady. The condition `Status`
-is `True` only when the list is empty AND `ContainersReady=True`.
+**The controller-owned readiness gate.** OMENative appends one
+readiness gate, `ome.io/serving`, to every managed pod at creation
+time. The gate uses a multi-writer protocol ported from RBG: the
+condition's `Message` field carries a JSON list of `{userAgent, key}`
+entries, one per writer wanting the pod NotReady. The condition is
+True only when the list is empty AND `ContainersReady=True`.
 
 Writers and their keys:
 
@@ -951,28 +722,25 @@ Writers and their keys:
 - `Restart-drain` / key=restart operation ID
 - `Delete-drain` / key=instance index
 - `Lifecycle-instance-gang` / key=`<instance-idx>` — added on each
-  pod that is `ContainersReady` but whose Instance siblings are
-  not; removed once every sibling reaches `ContainersReady`. This
-  is what enforces Instance-level gang readiness (§7.1) without
-  making the gate itself Instance-scoped.
+  pod that is `ContainersReady` but whose Instance siblings are not;
+  removed once every sibling reaches `ContainersReady`. This enforces
+  Instance-level gang readiness without making the gate itself
+  Instance-scoped.
 
 Each writer adds or removes only its own key; multiple writers can
-overlap (e.g., a migration drain and an in-place update drain can
-both be active on the same pod) without overwriting each other.
+overlap (e.g., a migration drain and an in-place update drain on the
+same pod) without overwriting each other. Every write uses
+`retry.RetryOnConflict` and patches only the single condition, so it
+does not clobber kubelet's concurrent writes to `PodScheduled`,
+`ContainersReady`, etc.
 
-Every write to the pod status uses `retry.RetryOnConflict` and
-patches only the single condition so it does not clobber kubelet's
-concurrent writes to `PodScheduled`, `ContainersReady`, etc.
+PodSpec-level `readinessGates` from the runtime or user spec are
+preserved. OMENative appends its gate; it does not replace or remove
+existing gates. If a user template already declares `ome.io/serving`,
+OMENative reuses it rather than duplicating.
 
-**Custom readiness gates**: PodSpec-level `readinessGates` from the
-runtime or user spec are still respected. OMENative appends its
-gate; it does not replace or remove existing readiness gates. If a
-user template already declares `ome.io/serving`, OMENative reuses it
-rather than duplicating.
-
-**Relation to migration**: migration surge pods must reach `Ready`
-before OMENative proceeds to terminate the old pods. Bounded by
-`instanceReadyTimeout`.
+Migration surge pods must reach Ready before OMENative proceeds to
+terminate the old pods, bounded by `instanceReadyTimeout`.
 
 ### Port Allocation
 
@@ -985,9 +753,9 @@ metadata:
     ome.io/port-allocations: |
       {
         "allocations": [
-          {"name": "grpc",        "env": "GRPC_PORT",        "scope": "PodScoped"},
-          {"name": "nccl",        "env": "NCCL_PORT",        "scope": "InstanceScoped"},
-          {"name": "prom",        "env": "PROM_PORT",        "scope": "ComponentScoped"}
+          {"name": "grpc",  "env": "GRPC_PORT", "scope": "PodScoped"},
+          {"name": "nccl",  "env": "NCCL_PORT", "scope": "InstanceScoped"},
+          {"name": "prom",  "env": "PROM_PORT", "scope": "ComponentScoped"}
         ],
         "references": [
           {"env": "LEADER_PORT_REF", "from": "engine.leader.grpc"}
@@ -995,29 +763,27 @@ metadata:
       }
 ```
 
-**Scopes**:
+Three scopes:
 
-- `PodScoped` — unique port per pod. OMENative allocates a distinct
-  port for each pod.
-- `InstanceScoped` — shared port across pods within the same Instance
-  (useful for NCCL within a tensor-parallel group).
-- `ComponentScoped` — shared port across all pods of a Component
-  (useful for well-known service ports).
+- **`PodScoped`** — unique port per pod.
+- **`InstanceScoped`** — shared port across pods within the same
+  Instance (e.g., NCCL within a tensor-parallel group).
+- **`ComponentScoped`** — shared port across all pods of a Component
+  (well-known service ports).
 
-**Cross-Component references**: the `references` block pulls another
-Component/Runner/port-name's allocated value into the current pod's
-env. Used by routers needing the leader's gRPC port.
+The `references` block pulls another Component/Runner/port-name's
+allocated value into the current pod's env. Used by routers needing
+the leader's gRPC port.
 
-**Implementation**: an allocator interface with a default
-random-allocator chooses unallocated ports in a configurable range
-(default 30000–65000). Allocation state must persist in controller-owned
-status or revision metadata; it must not depend on StatefulSet
-annotations because OMENative v1 manages Pods directly.
+A default random allocator chooses unallocated ports in a configurable
+range (default 30000–65000). Allocation state must persist in
+controller-owned status or revision metadata; it must not depend on
+StatefulSet annotations, because OMENative manages pods directly.
 
-### Migration API and Mechanics
+### Migration
 
-**Request surface**: annotation on InferenceService. Alfred (or any
-authorized caller) writes:
+Migration is requested via an annotation on the `InferenceService`.
+Alfred (or any authorized caller) writes:
 
 ```yaml
 metadata:
@@ -1035,27 +801,32 @@ metadata:
       }
 ```
 
-**Lifecycle**:
+Request lifecycle:
 
-1. OMENative observes the annotation. Within 30s, it validates and
-   accepts (clearing the annotation) or rejects.
-2. On accept: entry added to `Status.MigrationHistory` with
-   `phase: Pending`. The annotation is removed. The request UUID is
-   recorded in the history entry for idempotency.
-3. Caller (alfred) observes the status update, knows the request is
+1. OMENative observes the annotation. Within 30 seconds, it validates
+   and either accepts (clearing the annotation) or rejects.
+2. On accept, an entry is added to `Status.MigrationHistory` with
+   `phase: Pending`. The request UUID is recorded for idempotency.
+3. The caller observes the status update and knows the request is
    accepted.
 4. If OMENative has not cleared the annotation after 5 minutes,
-   alfred may retry by writing the same UUID. OMENative dedupes via
+   Alfred may retry by writing the same UUID. OMENative dedupes via
    the UUID.
 5. Annotations older than 1 hour without acknowledgment are stale;
    OMENative clears them with event `MigrationRequestStale`.
 
-These `30s / 5m / 1h` values are the **Alfred-facing request lifecycle
-contract only**. Controller-internal step deadlines and retry policy
-are defined canonically in
+These 30s / 5m / 1h values are the **Alfred-facing** request lifecycle
+contract only. Controller-internal step deadlines and retry policy
+are defined in
 [controller-mechanics.md](./controller-mechanics.md#54-operation-timeouts-and-backoff).
 
-**Status.MigrationHistory**:
+**Status.MigrationHistory** is a rolling window (20 entries per
+`InferenceService` by default). When the window is full and a new
+entry is added, the oldest is dropped. If durable archiving is
+enabled, dropped entries are appended to an OMENative-owned audit
+ConfigMap (one per `InferenceService`). The
+`omenative_migration_history_truncated_total` metric counts every
+truncation event regardless of whether it was archived.
 
 ```yaml
 status:
@@ -1077,216 +848,195 @@ status:
       outcomeReason: ""
 ```
 
-Rolling window of 20 entries per InferenceService. When the window
-is full and a new entry is added, the oldest entry is dropped by
-default. If durable archiving is enabled, dropped entries are appended
-to an OMENative-owned audit ConfigMap (one ConfigMap per
-InferenceService). Metric
-`omenative_migration_history_truncated_total` counts every
-truncation event regardless of whether it was archived.
+Version skew rule: an unsupported `schemaVersion` is rejected with
+`UnsupportedSchemaVersion`; a supported `schemaVersion` with unknown
+additive fields silently ignores them; behavioral changes require a
+new schema version and annotation key prefix.
 
-Version-skew rule:
-
-- unsupported `schemaVersion` -> reject with
-  `UnsupportedSchemaVersion`
-- supported `schemaVersion` with unknown additive fields -> ignore
-  those fields
-- behavioral changes require a new schema version and annotation key
-  prefix
-
-**Mode selection (auto-picker)**:
+**Mode selection** in v1 is surge or rejection — there is no rolling
+per-pod migration path:
 
 ```
 if cluster_has_capacity_for_one_extra_instance:
     use Surge
 else:
-    reject             (Reason: InsufficientCapacity)
+    reject (Reason: InsufficientCapacity)
 ```
 
 Override via `InferenceService.Spec.<component>.omenative.migrationPolicy.mode`:
-`auto` (default), `surge`, `never`.
+`auto` (default), `surge`, or `never`.
 
-In v1, `auto` resolves to `surge` or rejection. There is no rolling
-per-pod migration path.
-
-**Surge migration mechanics**:
+**Surge migration mechanics:**
 
 1. Validate cluster has capacity for one extra Instance of this
    Component.
-2. Allocate a fresh surge Instance index. Create a full replacement pod
-   set for that new Instance using stable names:
-   `<isvc>-<component>-<new-instance>-<runner>-<ordinal>`.
-   Pod template has hard anti-affinity excluding `from_node`, plus
+2. Allocate a fresh surge Instance index. Create a full replacement
+   pod set with stable names
+   (`<isvc>-<component>-<new-instance>-<runner>-<ordinal>`). The pod
+   template has hard anti-affinity excluding `from_node`, plus
    optional preferred affinity toward `hint_target_nodes`.
-3. Wait for all surge pods to reach runtime `Ready` (bounded by
-   `instanceReadyTimeout`). Respects model warmup via runtime
-   readiness probe.
-4. Patch `ome.io/serving=True` on the surge Instance and wait until
+3. Wait for all surge pods to reach runtime Ready (bounded by
+   `instanceReadyTimeout`).
+4. Flip the surge Instance's serving gate to True and wait until
    EndpointSlices show it ready and `minReadySeconds` is satisfied.
-5. Drain the old Instance by patching `ome.io/serving=False` on its
-   pods and waiting for EndpointSlice convergence.
+5. Drain the old Instance by flipping its serving gate to False and
+   waiting for EndpointSlice convergence.
 6. Delete the old Instance pods and old PodGroup.
 7. Remove the old `InstanceStatus`, keep the surge `InstanceStatus`,
-   and mark migration Completed.
+   and mark the migration Completed.
 
-V1 accepts sparse live instance indices after migration. Example:
-migrating Instance `0` may leave the Component with live indices
-`{1,2}`. OMENative does not attempt in-place renumbering.
+V1 accepts sparse live instance indices after migration. Migrating
+Instance 0 may leave the Component with live indices `{1, 2}`.
+OMENative does not attempt in-place renumbering.
 
-**Concurrent migration prevention**:
+**Multi-pod migration is deferred.** When the source Instance is
+multi-pod (any Runner has `Size > 1`), the migrator rejects the
+request up-front with reason `MultiPodMigrationNotYetSupported` and
+writes a `Failed` audit row. A future release will specify the
+per-gang-member surge slot layout; see [Future Work](#future-work).
+Without this guard the migrator would silently allocate a single-pod
+surge that the multi-pod readiness gate would never accept.
 
-- One migration in progress per Instance at a time. Second request
-  for the same Instance while pending is rejected
-  `Reason: MigrationInProgress`.
-- Cluster-wide cap: `omeNativeConfig.inFlightMigrationCap` (default
-  3). Excess rejected `Reason: RateLimited`.
-- Per-hour cap: `omeNativeConfig.maxMigrationsPerHour` (default 10).
+**Concurrency:** one migration in progress per Instance at a time; a
+second request for the same Instance is rejected with
+`MigrationInProgress`. Cluster-wide cap is
+`omeNativeConfig.inFlightMigrationCap` (default 3); excess rejected
+with `RateLimited`. Per-hour cap is `omeNativeConfig.maxMigrationsPerHour`
+(default 10). These defaults align with
+[controller-mechanics.md](./controller-mechanics.md#54-operation-timeouts-and-backoff).
 
-These controller defaults are defined in
-[controller-mechanics.md](./controller-mechanics.md#54-operation-timeouts-and-backoff)
-and must stay aligned there.
+**Timeout and rollback:** the per-migration timeout is
+`instanceReadyTimeout + 5m`. On timeout in surge mode the surge
+Instance pod set is deleted (best-effort rollback) and the migration
+is marked Failed.
 
-**Timeout and rollback**:
+### Strategy Migration from LWS
 
-- Per-migration timeout = `instanceReadyTimeout + 5m` (overhead).
-- On timeout:
-  - Surge mode: delete the surge Instance pod set (best-effort
-    rollback). Migration marked Failed.
-
-### Strategy Migration Procedure (LWS → OMENative)
-
-Users with running InferenceServices on the LWS-backed `MultiNode` /
-`PDDisaggregated` modes may migrate to OMENative, but **zero-downtime
+Users with running `InferenceService`s on the LWS-backed `MultiNode`
+or `PDDisaggregated` modes may migrate to OMENative, but **zero-downtime
 cutover is not universal**. Procedure:
 
-1. User annotates InferenceService with
+1. The user annotates the `InferenceService` with
    `ome.io/migrate-strategy-to: OMENative` (or changes the per-Component
-   `ome.io/deploymentMode` annotation values — the migrate-strategy
-   annotation is a declarative hint to the controller for intermediate
-   phased migration).
-2. OMENative's controller detects the annotation and classifies the
-   target Component's cutover as either overlap-safe or not.
-3. **Safety boundary**:
-   - For stateless or explicitly overlap-safe runtimes, the controller
-     may create OMENative-managed resources in parallel with the
-     existing LWS-backed ones, consuming ~2× capacity briefly, and may
-     widen the Component Service selector briefly so both populations
-     can serve during cutover.
-   - For stateful engine/decoder runtimes, OMENative must **not**
-     assume that old and new populations may safely co-serve behind one
-     selector. Split-brain, duplicate membership, and cache incoherence
-     are real risks.
-4. Therefore, zero-downtime strategy migration is supported only for
+   `ome.io/deploymentMode` annotation values directly — the
+   migrate-strategy annotation is a declarative hint to the controller
+   for intermediate phased migration).
+2. OMENative's controller classifies the target Component's cutover
+   as overlap-safe or not.
+3. **Safety boundary.** For stateless or explicitly overlap-safe
+   runtimes, the controller may create OMENative-managed resources in
+   parallel with the existing LWS-backed ones, consuming roughly 2×
+   capacity briefly, and may widen the Component Service selector
+   briefly so both populations serve during cutover. For stateful
+   engine and decoder runtimes, OMENative must not assume that old
+   and new populations can safely co-serve behind one selector —
+   split-brain, duplicate membership, and cache incoherence are real
+   risks.
+4. Zero-downtime strategy migration is therefore supported only for
    Components whose runtime contract explicitly declares overlap-safe
-   cutover. For engine/decoder Components without that proof, the safe
-   v1 strategy migration path is controlled drain-to-zero of the LWS
-   population, then recreate under OMENative, which may require a
-   maintenance window.
-5. After the old LWS path is drained and removed, or after an
-   overlap-safe cutover completes, the controller removes the old
-   LWS-managed resources and Services/PDB no longer needed.
-6. Annotation is cleared. InferenceService's per-Component
-   `ome.io/deploymentMode` annotation is settled at `OMENative`.
-7. Migration history entry is recorded.
+   cutover. For engine and decoder Components without that proof, the
+   safe v1 path is controlled drain-to-zero of the LWS population,
+   then recreate under OMENative, which may require a maintenance
+   window.
+5. After the old LWS path is drained and removed (or an overlap-safe
+   cutover completes), the controller removes the old LWS-managed
+   resources, Services, and PDB no longer needed.
+6. The annotation is cleared. The per-Component `ome.io/deploymentMode`
+   annotation settles at `OMENative`.
+7. A migration history entry is recorded.
 
-**Requirements**:
+Requirements: roughly 2× the Component's capacity during the migration
+window; a ServingRuntime whose pod template works under both
+strategies; for overlap-safe cutover, a runtime that explicitly
+tolerates simultaneous old+new populations behind one Service
+selector.
 
-- Cluster has ~2× the Component's capacity available during the
-  migration window.
-- ServingRuntime is compatible with OMENative (same pod template
-  semantics work for both strategies).
-- If the migration plan expects overlap-safe cutover, the runtime must
-  explicitly tolerate simultaneous old+new populations behind one
-  Service selector.
+Limitations: if the ServingRuntime requires LWS-specific labels or
+features, the automatic procedure fails — the user must adjust the
+runtime first. Single-replica `InferenceService`s without 2× capacity
+must either accept a managed-recreate restart or wait for capacity.
 
-**Limitations**:
+**Operational runbooks.**
 
-- If the ServingRuntime requires LWS-specific labels or features, the
-  automatic procedure fails; user must manually adjust the runtime
-  first.
-- Single-replica InferenceServices without 2× capacity available
-  must either accept a restart (managed recreate) or wait for
-  capacity.
-
-### Operational Runbooks
-
-**Sparse instance index inspection**
-
-When migration leaves live indices non-dense, operators should inspect
-both the live set and the replacement history:
+*Sparse instance index inspection.* When migration leaves live indices
+non-dense, inspect both the live set and the replacement history:
 
 ```bash
 kubectl get isvc <name> -o jsonpath='{range .status.components.engine.omenative.instanceStatuses[*]}{.index}{"\t"}{.phase}{"\t"}{.runningRevision}{"\n"}{end}'
 kubectl get isvc <name> -o jsonpath='{range .status.migrationHistory[*]}{.instance}{"->"}{.replacementInstance}{"\t"}{.phase}{"\n"}{end}'
 ```
 
-`instanceStatuses[*].index` shows the current live Instances.
+`instanceStatuses[*].index` shows the current live Instances;
 `migrationHistory[*].replacementInstance` records which live index
-replaced which original index during surge migration.
+replaced which original during surge migration.
 
-**LWS → OMENative cutover abort**
+*LWS → OMENative cutover abort.* There is no dedicated rollback verb
+in v1. Operator guidance, in order of how far the cutover has
+progressed:
 
-There is no dedicated rollback verb for strategy migration in v1.
-Operator guidance:
-
-- Before the old LWS population has begun draining:
-  - clear `ome.io/migrate-strategy-to`
-  - remove any OMENative candidate resources
-    (`ome.io/managed-by=OMENative`)
-  - keep the existing LWS population serving
+- Before the old LWS population has begun draining: clear
+  `ome.io/migrate-strategy-to`, remove any OMENative candidate
+  resources (`ome.io/managed-by=OMENative`), keep the existing LWS
+  population serving.
 - After overlap-safe selector widening but before old LWS drain:
-  - restore the selector to the old LWS-serving population only
-  - clear `ome.io/migrate-strategy-to`
-  - remove OMENative candidate resources
-- After old LWS drain has begun:
-  - rollback is not supported
-  - do **not** re-widen the selector to include both populations again
-  - force the cutover forward to one surviving serving population, then
-    reattempt migration later if needed
+  restore the selector to the old LWS-serving population only, clear
+  the annotation, remove OMENative candidate resources.
+- After old LWS drain has begun: rollback is not supported. Do not
+  re-widen the selector to include both populations again. Force the
+  cutover forward to one surviving population, then reattempt
+  migration later if needed.
 
-### Model Availability Preconditions
+### Model Availability
 
-OME's existing mechanism is reused unchanged:
+OME's existing mechanism is reused unchanged: `pkg/constants/constants.go`
+defines label constructors that produce labels like
+`models.ome.io/{ns}.basemodel.{name}` or
+`models.ome.io/clusterbasemodel.{name}` with value `Ready`. The
+model-agent sets these labels on nodes once the model is ready. OME's
+existing util layer injects `NodeSelector` / `NodeAffinity` on pod
+specs based on referenced models, and OMENative-emitted pods inherit
+this injection.
 
-- `pkg/constants/constants.go` defines label constructors
-  `GetBaseModelLabel()` and `GetClusterBaseModelLabel()` producing
-  labels like `models.ome.io/{ns}.basemodel.{name}` or
-  `models.ome.io/clusterbasemodel.{name}` with value `Ready`.
-- Model-agent sets these labels on nodes when the model is ready.
-- OME's ISVC-controller util layer already injects
-  `NodeSelector`/`NodeAffinity` on pod specs based on referenced
-  models. OMENative-emitted pods inherit this injection unchanged.
+The consequence for migration: when OMENative creates a surge pod,
+the pod already has node affinity requiring the model-ready label on
+the target node. If no feasible node matches (e.g., the model has not
+been distributed there), the pod stays Pending and the migration
+times out per `instanceReadyTimeout`. Alfred consumes the same labels
+when filtering `hint_target_nodes` (see OEP-0008 §Execution).
 
-**Consequence for migration**: when OMENative creates a surge pod,
-the pod already has `NodeAffinity` requiring the model-ready label on
-the target node. If no feasible node matches (perhaps because model
-hasn't been distributed there yet), the pod stays Pending; migration
-times out per `instanceReadyTimeout`; marked failed.
-
-Alfred consumes the same labels when filtering `hint_target_nodes`
-(see OEP-0008 §Execution).
-
-No new API surface. No auto-download in v1 — operator pre-provisions
-the model via BaseModel/ClusterBaseModel before the migration is
-expected.
+No new API surface. No auto-download in v1 — operators pre-provision
+the model via `BaseModel` / `ClusterBaseModel`.
 
 ### Gang Scheduling
 
 Multi-pod Instances need gang scheduling: all pods of the Instance
-schedule together or none.
-
-**Supported scheduler in v1**: Kubernetes `scheduler-plugins`
-Coscheduling only.
+schedule together or none. The supported scheduler in v1 is
+Kubernetes `scheduler-plugins` Coscheduling.
 
 For each multi-pod Instance, OMENative creates one
-`scheduling.x-k8s.io/v1alpha1` `PodGroup` and stamps the corresponding
-pod-group label on every pod in the Instance.
+`scheduling.x-k8s.io/v1alpha1 PodGroup` with
+`MinMember == TotalPodsForInstance(inst)` and
+`ScheduleTimeoutSeconds == plan.InstanceReadyTimeout`. Each pod in
+the Instance carries `scheduling.x-k8s.io/pod-group=<podgroup-name>`.
+The PodGroup is owner-ref'd to the parent `InferenceService` so
+scale-down and delete reap for free. Single-pod Instances do not
+carry the pod-group label and do not need a PodGroup.
 
-**What happens without a gang scheduler**: multi-pod Instance
-creation may succeed partially — leader scheduled, some workers
-Pending. LLM runtime will hang waiting for worker connections. This
-is observable via `instanceReadyTimeout`; OMENative marks the
-Instance failed and emits an event.
+**Soft-fail when the CRD is missing.** The controller manager probes
+for the PodGroup CRD once at startup and caches the result as
+`GangSchedulingAvailable`, threaded through every reconcile. When the
+CRD is absent and the Component has any multi-pod Instance, OMENative
+still creates the pods (gang scheduling is a soft requirement) and
+stamps a `GangSchedulingUnavailable=True` Component condition with
+reason `PodGroupCRDNotInstalled`. Pods may schedule partially and the
+runtime may hang waiting for missing peers; the symptom surfaces
+through `instanceReadyTimeout`.
+
+| Multi-pod Instance? | CRD installed? | `GangSchedulingUnavailable` |
+|---|---|---|
+| No | either | `False` (not required) |
+| Yes | Yes | `False` (available) |
+| Yes | No | `True` (`PodGroupCRDNotInstalled`) |
 
 Volcano and Yunikorn are explicit deferrals.
 
@@ -1339,52 +1089,47 @@ OME's pod admission webhook at `pkg/webhook/admission/pod/` runs
 seven injectors (metrics aggregator, fine-tuned adapter, serving
 sidecar, RDMA, shared memory, probe, observability). OMENative pods
 do **not** go through that webhook — they are exempted via the
-`ome.io/managed-by=OMENative` label that OMENative's render stamps
-on every pod.
+`ome.io/managed-by=OMENative` label.
 
 Instead, OMENative calls the same injector functions directly during
-rendering. The injector logic lives in a shared package
-(`pkg/podinjection/`) that both the webhook (for non-OMENative
-deployment modes) and OMENative's render path invoke. Per-injector
-behavior is identical regardless of caller.
+rendering. The injector logic lives in a shared `pkg/podinjection/`
+package that both the webhook (for non-OMENative modes) and OMENative's
+render path invoke. Per-injector behavior is identical regardless of
+caller.
 
-Rationale: capturing the post-injection PodSpec in OMENative's
-revision hash is necessary for accurate in-place eligibility checks
-and for OEP-0014 (pinned ServingRuntime revisions) consistency. With
-the webhook running after `client.Create(pod)`, the controller would
-have no way to hash what kubelet actually sees. Routing through
-direct calls eliminates the divergence.
+Capturing the post-injection `PodSpec` in OMENative's revision hash
+is necessary for accurate in-place eligibility checks and for OEP-0014
+(pinned ServingRuntime revisions). With the webhook running after
+`client.Create(pod)`, the controller would have no way to hash what
+kubelet actually sees. Routing through direct calls eliminates the
+divergence. This pattern matches RBG, which has no pod admission
+webhook at all and renders entirely from the controller. OMENative
+cannot remove OME's webhook outright because non-OMENative modes
+still depend on it, but the shared package keeps both call sites in
+sync.
 
-This pattern matches RBG (`sigs.k8s.io/rbgs`), which has no pod
-admission webhook at all and renders pods entirely from the
-controller. OMENative cannot remove OME's webhook entirely because
-non-OMENative modes (`RawDeployment`, `MultiNode`,
-`PDDisaggregated`) still depend on it, but the shared injector
-package lets both call sites stay in sync.
-
-**External admission webhooks (out of scope)**. Cluster operators
-may install other mutating admission webhooks (Istio, Linkerd, Vault
-Agent, Cilium, custom org webhooks) that mutate pods at Create time.
-Their mutations are not part of OMENative's revision payload.
-Changes to those webhooks' configuration do not trigger OMENative
-rollouts. Operators wanting to pick up such changes must trigger a
-rollout via spec edit on the InferenceService. This is the same
-limitation RBG and every other controller has, and the same workaround.
-
-Integration tests cover: for a Component annotated with
-`ome.io/deploymentMode: OMENative`, emitted pods have correct RDMA
-injection, sidecar containers, model-init container, OMENative's env
-vars, controller-assigned hostname/subdomain, and a revision hash
-that matches the post-injection PodSpec.
+**External admission webhooks (out of scope).** Cluster operators may
+install other mutating webhooks (Istio, Linkerd, Vault Agent, Cilium,
+custom org webhooks) that mutate pods at Create time. Their mutations
+are not part of OMENative's revision payload, and changes to those
+webhooks' configuration do not trigger OMENative rollouts. To pick up
+such changes, operators trigger a rollout via spec edit. This is the
+same limitation RBG and every other controller has.
 
 ### Status Propagation
 
-OMENative updates `InferenceService.Status`:
+OMENative writes to `InferenceService.Status`:
 
 ```yaml
 status:
   conditions:
     - type: Ready
+      status: "True"
+    - type: EngineReady
+      status: "True"
+    - type: DecoderReady
+      status: "True"
+    - type: RouterReady
       status: "True"
     - type: Progressing
       status: "False"
@@ -1401,12 +1146,19 @@ status:
         replicas: 4
         readyReplicas: 4
         availableReplicas: 4
+        conditions:
+          - type: Available
+            status: "True"
+          - type: GangSchedulingUnavailable
+            status: "False"
+            reason: GangSchedulingAvailable
         instanceStatuses:
           - index: 0
             incarnation: 3
             phase: Ready
             runningRevision: llama-70b-engine-rev-abc123
             targetRevision: llama-70b-engine-rev-abc123
+            activeOrdinal: 0
             podCount: 4
             readyPodCount: 4
             availablePodCount: 4
@@ -1422,19 +1174,69 @@ status:
       ...
 ```
 
-The nested `components[*].omenative` field is additive and optional in
-CRD terms. Older clients ignore it, and Components not annotated with
+The nested `components[*].omenative` field is additive and optional
+in CRD terms. Older clients ignore it; Components not annotated with
 `ome.io/deploymentMode: OMENative` leave it `nil`.
 
-After upgrade, OMENative reconstructs this status from live Pods,
-Services, `ControllerRevision`, PodGroups, and EndpointSlices, so no
-storage migration is required just to add the field. OMENative does
-not ship behind a Kubernetes feature gate; opt-in is per-Component via
-the `ome.io/deploymentMode` annotation.
+**Top-level component-ready conditions.** `AggregateAndWriteStatus`
+derives `EngineReady` / `DecoderReady` / `RouterReady` from the
+OMENative counters (Ready = True iff `ReadyReplicas == Replicas > 0`)
+and stamps them onto `InferenceService.Status.Conditions` — the same
+contract `PropagateRawStatus` / `PropagateMultiNodeStatus` apply for
+the LWS-backed modes. Without this, the ingress reconciler, the
+aggregate `Ready` rollup, and `kubectl wait --for=condition=Ready`
+all mis-classify OMENative `InferenceService`s as not-Ready forever.
+The fresh condition is also mirrored onto the cached `InferenceService`
+the outer reconciler holds, so the parent's `updateStatus` flush does
+not clobber what `AggregateAndWriteStatus` just committed.
 
-Per-runner counters are intentionally **not** persisted in
-`InstanceStatus` in v1. Runner-level debugging comes from live pod
-labels (`ome.io/runner`) rather than a second aggregated status layer.
+**Per-Instance failures escalate to the Component.** When the
+per-Instance deadline lapses for an Instance and the Instance moves
+to `Phase=Failed`, the coordination layer rolls that failure up to
+`Component.Failed` with a `FailureMessage` naming the stuck Instance
+indices. Without this rollup, a rollout sits at `Surging` or
+`Waiting` indefinitely after a per-Instance deadline lapses. Every
+coordination policy translates `Component.Failed` into the group's
+own `Failed` phase.
+
+**Lean (no-model) `InferenceService`s.** When `spec.Model == nil`,
+the status writer skips the model-loading lifecycle block, so no
+`modelStatus` surfaces. The `+kubebuilder:default=UpToDate` on
+`TransitionStatus` was dropped in favor of `omitempty` + `+optional`.
+Runtime-only `InferenceService`s are now a first-class supported
+configuration; no surrogate `UpToDate` model state appears for
+`InferenceService`s that never declared a model. This applies to
+every deployment mode, not just OMENative.
+
+After an upgrade, OMENative reconstructs this status from live pods,
+Services, `ControllerRevision`s, PodGroups, and EndpointSlices, so no
+storage migration is required. Per-Runner counters are intentionally
+**not** persisted in `InstanceStatus` in v1 — runner-level debugging
+comes from live pod labels (`ome.io/runner`) rather than a second
+aggregated status layer.
+
+### Coordinated Rollout
+
+Coordinated engine/decoder rollout was deferred from OMENative v1 and
+ships as a separate, additive design —
+[OEP-0007.1 (OMENative Coordinated Rollout)](../0007.1-omenative-coordinated-rollout/README.md).
+OEP-0007.1 introduces `spec.rolloutCoordination.groups[]` (declarative
+opt-in), per-revision Services, generation-scoped peer discovery, and
+the `Status.Components.<c>.Traffic[]` producer that closes the OEP-0011
+Part 2 contract.
+
+In OEP-0007 v1 (unchanged):
+
+- Each OMENative-managed Component rolls independently when no group
+  is declared (preserved for back-compat).
+- Alfred migration targets one Component Instance at a time.
+- No `CoordinationPaused` condition is required at this layer.
+
+OEP-0007.1's coordination layer also reads `Component.Failed` (rolled
+up from any Instance that hit `Phase=Failed`) so a stuck per-Instance
+deadline lifts the group to its `Failed` phase rather than sitting at
+`Surging` or `Waiting` indefinitely. Operators see a `Component.Failed`
+with a precise message identifying the stuck Instance indices.
 
 ### RBAC
 
@@ -1482,7 +1284,7 @@ LWS-related RBAC remains until the deprecation window closes.
 
 ### Observability
 
-**Prometheus metrics**:
+**Prometheus metrics:**
 
 - `omenative_reconcile_duration_seconds{isvc,component,outcome}` (histogram)
 - `omenative_instance_count{isvc,component,state}` (gauge; state: Running, Pending, Failed, Migrating)
@@ -1495,111 +1297,92 @@ LWS-related RBAC remains until the deprecation window closes.
 - `omenative_group_restart_total{isvc,component,reason}` (counter)
 - `ome_deprecated_deploymentmode_total{namespace,isvc,mode}` (counter)
 
-**Events** on InferenceService:
+**Events** on `InferenceService`:
 
 - `OMENativeReconcileSucceeded`, `OMENativeReconcileFailed`
 - `InstanceCreated`, `InstanceReady`, `InstanceFailed`
 - `InPlaceUpdateStarted`, `InPlaceUpdateCompleted`, `InPlaceUpdateFailed`, `InPlaceUpdateRejected`
 - `MigrationRequestAccepted`, `MigrationRequestRejected`, `MigrationCompleted`, `MigrationFailed`, `MigrationRequestStale`
 - `GroupRestartTriggered`
-- `DeprecatedDeploymentMode` (for LWS-mode ISVCs)
+- `DeprecatedDeploymentMode` (for LWS-mode `InferenceService`s)
 
-**Logs**: structured JSON; every multi-step operation carries a
-correlation ID (request UUID for migrations; revision hash for
+**Logs:** structured JSON; every multi-step operation carries a
+correlation ID (request UUID for migrations, revision hash for
 updates).
 
 ## Coexistence with LWS-Backed Modes
 
-### Component Strategy Selection Rules
+OMENative is selected per-Component by setting
+`ome.io/deploymentMode: OMENative`. Other Components can use any
+other strategy by setting (or not setting) the same annotation.
 
-OMENative is selected per-Component by setting the
-`ome.io/deploymentMode: OMENative` annotation on the Component's
-metadata. Other Components can use any other strategy by setting (or
-not setting) the same annotation.
+- **Router:** free. Typically `RawDeployment` or `OMENative`.
+  Decoupled from engine/decoder via Service discovery.
+- **Engine and decoder:** when both are present (prefill-decode
+  mode), they must share the same `ome.io/deploymentMode` annotation
+  value. The admission webhook rejects mismatches with
+  `InvalidDeploymentModeCombination`. Coordinated rollout, shared
+  migration semantics, and restart-policy coupling all require a
+  single controller watching both.
+- **Engine alone** (single-Component serving, no prefill-decode):
+  picks any mode independently.
 
-**Router**: free. Typically `RawDeployment` or `OMENative`.
-Decoupled from engine/decoder via Service discovery.
+For a simple single-pod engine, the default remains `RawDeployment`.
+OMENative is the better choice only when the workload needs
+Instance-scoped migration or drain semantics for Alfred.
 
-**Engine and Decoder**: when both are present (PD mode), they **must
-share the same `ome.io/deploymentMode` annotation value**. Enforced at
-admission:
-
-```
-Admission webhook:
-    if engine.metadata.annotations["ome.io/deploymentMode"] !=
-       decoder.metadata.annotations["ome.io/deploymentMode"]:
-        reject: "InvalidDeploymentModeCombination: engine and decoder must use the same deployment mode"
-```
-
-Rationale: coordinated rollout, shared migration semantics, and
-restart-policy coupling all require a single controller watching
-both.
-
-If only `engine` is present (single-Component serving, no PD),
-`engine` picks any mode independently.
-
-For a simple single-pod engine, the default should remain
-`RawDeployment`. OMENative is the better choice only when the workload
-needs Instance-scoped migration or drain semantics for Alfred.
-
-### Deprecation Plan
-
-Six-release deprecation window for LWS-backed paths.
+**Deprecation plan — six-release window:**
 
 | Phase | OME version | LWS-backed modes | OMENative | Communication |
 |-------|-------------|------------------|-----------|---------------|
 | 0 | current | Supported (default) | Does not exist | none |
 | 1 | +1 minor | Supported | Alpha, annotation-driven opt-in | none |
-| 2 | +2 minor | Supported | Beta | Controller logs + K8s Events on ISVC |
-| 3 | +3 minor | Supported | Beta (default for new multi-node ISVCs) | + Admission warnings (`kubectl apply` stderr) |
-| 4 | +4 minor | Frozen (bug fixes only) | GA, recommended | + Admission warnings escalated (multi-line, removal date) |
+| 2 | +2 minor | Supported | Beta | Controller logs + K8s Events |
+| 3 | +3 minor | Supported | Beta (default for new multi-node) | + Admission warnings |
+| 4 | +4 minor | Frozen (bug fixes only) | GA, recommended | + Escalated warnings (multi-line, removal date) |
 | 5 | +5 minor | Marked for removal | GA | + Announcement |
-| 6 | +6 minor | Removed; `sigs.k8s.io/lws` removed from go.mod | GA (sole multi-node path) | Admission **rejects** LWS-mode |
+| 6 | +6 minor | Removed; `sigs.k8s.io/lws` removed from go.mod | GA (sole multi-node path) | Admission rejects LWS-mode |
 
-Warning text at phase 3+ (exact `<URL>` and `vX.Y` values are
-populated when OMENative reaches GA and the migration guide is
-published):
+Warning text at phase 3+ (exact URL and `vX.Y` populated when OMENative
+reaches GA and the migration guide is published):
+
 ```
-InferenceService Component <name> has annotation ome.io/deploymentMode=MultiNode,
-which uses the deprecated LWS-backed strategy. Migrate to
-ome.io/deploymentMode=OMENative. See migration guide: <URL>.
-This path will be removed in OME vX.Y.
+InferenceService Component <name> has annotation
+ome.io/deploymentMode=MultiNode, which uses the deprecated LWS-backed
+strategy. Migrate to ome.io/deploymentMode=OMENative. See migration
+guide: <URL>. This path will be removed in OME vX.Y.
 ```
 
-Supplementary signals:
-- Metric `ome_deprecated_deploymentmode_total` — alertable.
-- K8s Event `DeprecatedDeploymentMode` on transition into the
-  deprecated-mode state, not on every reconcile.
-- Controller logs WARN.
+Supplementary signals: the `ome_deprecated_deploymentmode_total`
+metric is alertable; the `DeprecatedDeploymentMode` event fires on
+transition into the deprecated-mode state (not every reconcile);
+controller logs emit WARN.
 
-## Opt-In and Rollout
+## Feature Gating and Rollout
 
-OMENative does **not** ship behind a Kubernetes feature gate. Selection
-is per-Component via the existing `ome.io/deploymentMode` annotation
-(the `DeploymentMode` key in `pkg/constants/constants.go`).
-Operators opt in by adding
-`ome.io/deploymentMode: OMENative` to a Component's metadata
-annotations; absence (or any other supported value) means the existing
-mode for that Component continues to apply.
+OMENative does not ship behind a Kubernetes feature gate. Selection
+is per-Component via the existing `ome.io/deploymentMode` annotation.
+Operators opt in by adding `ome.io/deploymentMode: OMENative` to a
+Component's metadata annotations; absence (or any other supported
+value) means the existing mode for that Component continues to apply.
 
-This deliberately keeps the alpha rollout minimally invasive — no
-controller-wide flag, no global toggle, no admission gating beyond the
-enum validation OME already performs on `DeploymentModeType`. The
-trade-off is that there is no single "kill switch" to stop all
-OMENative behavior cluster-wide; if a fleet-wide rollback is needed
-during alpha, operators remove the annotation from each Component
-(or revert OME to the previous version).
+This keeps the alpha rollout minimally invasive — no controller-wide
+flag, no global toggle, no admission gating beyond the enum validation
+OME already performs on `DeploymentModeType`. The trade-off is no
+single cluster-wide kill switch; for fleet-wide rollback during alpha,
+operators remove the annotation from each Component (or revert OME
+to the previous version).
 
-A typed `deploymentMode` field on `EngineSpec`/`DecoderSpec`/`RouterSpec`
+A typed `deploymentMode` field on EngineSpec / DecoderSpec / RouterSpec
 and/or a real Kubernetes feature gate may be introduced at beta or GA
-based on operational experience. Both are additive changes that do not
-break the alpha annotation contract.
+based on operational experience. Both are additive changes that do
+not break the alpha annotation contract.
 
-When OMENative is not yet implemented for a given build (e.g., on a
-controller version predating PR-N), an InferenceService Component
-annotated with `ome.io/deploymentMode: OMENative` falls through the
-existing `IsValid()` enum check and is rejected at admission with the
-standard "unsupported deployment mode" error.
+When OMENative is not yet implemented for a given build, an
+`InferenceService` Component annotated with `ome.io/deploymentMode:
+OMENative` falls through the existing `IsValid()` enum check and is
+rejected at admission with the standard "unsupported deployment mode"
+error.
 
 ## Test Plan
 
@@ -1619,65 +1402,64 @@ Target coverage per package:
 
 ### Integration Tests
 
-Deployed in kind clusters with scheduler-plugins Coscheduling for
-gang scheduling. Fake GPU device plugin for resource accounting.
+Deployed in KIND clusters with scheduler-plugins Coscheduling for
+gang scheduling. A fake GPU device plugin handles resource accounting.
 
-**Core scenarios:**
+Core scenarios:
 
-1. Single-pod RawDeployment-equivalent: InferenceService with
-   `engine.minReplicas=1` and the `ome.io/deploymentMode: OMENative`
-   annotation on `spec.engine`, no leader/worker. Verify one direct
-   Pod with stable name, headless Service, and env vars.
-2. Single-Component multi-node: leader + 3 workers. Verify 2
+1. **Single-pod RawDeployment-equivalent.** `InferenceService` with
+   `engine.minReplicas=1` and `ome.io/deploymentMode: OMENative` on
+   `spec.engine`, no leader/worker. Verify one direct pod with stable
+   name, headless Service, and env vars.
+2. **Single-Component multi-node.** Leader + 3 workers. Verify two
    Runner pod sets (leader=1, worker=3), DNS resolution correct, one
-   PodGroup created, pods gang-scheduled.
-3. Multi-Component single-Instance PD: router + engine + decoder,
-   each with 1 Instance. Verify Service topology, cross-Component
-   discovery.
-4. Multi-Component multi-Instance PD: engine (2 Instances) + decoder
-   (3 Instances) + router (2). Verify correct Pod and PodGroup count.
-5. Spec rollout with image change, `InPlaceIfPossible`. Verify pods
+   PodGroup, pods gang-scheduled.
+3. **Multi-Component single-Instance prefill-decode.** Router +
+   engine + decoder, each with 1 Instance. Verify Service topology
+   and cross-Component discovery.
+4. **Multi-Component multi-Instance prefill-decode.** Engine (2) +
+   decoder (3) + router (2). Verify correct pod and PodGroup count.
+5. **Rollout with image change, `InPlaceIfPossible`.** Verify pods
    stay, container restarts in place, EmptyDir preserved (drop a
    sentinel file in EmptyDir before update; verify it survives).
-6. Spec rollout with volume change, `InPlaceIfPossible`. Verify fall
+6. **Rollout with volume change, `InPlaceIfPossible`.** Verify fall
    back to recreate.
-7. Spec rollout with volume change, `InPlaceOnly`. Verify rejected
+7. **Rollout with volume change, `InPlaceOnly`.** Verify rejected
    with status condition.
-8. Scale up/down: change MinReplicas. Verify new Instance pod sets
-   created/deleted.
-9. Group restart on pod failure: kill a worker pod with
-   `omenative.restartPolicy: RecreateInstanceOnPodRestart`. Verify all
-   pods of the Instance are restarted.
-10. Migration (surge mode). Verify surge Instance with fresh index is
+8. **Scale up/down.** Change MinReplicas; verify new Instance pod
+   sets created/deleted.
+9. **Group restart on pod failure.** Kill a worker pod with
+   `restartPolicy: RecreateInstanceOnPodRestart`. Verify all pods of
+   the Instance are restarted.
+10. **Migration (surge).** Verify surge Instance with fresh index is
     created, Ready, old Instance drained and terminated, sparse
-    indices are tolerated, and `migrationHistory` records
+    indices tolerated, and `migrationHistory` records
     `instance -> replacementInstance`.
-11. EndpointSlice drain. Verify `ome.io/serving=False` is observed
-    before image patch or pod deletion.
-12. Migration rejection (insufficient capacity). Verify rejection
+11. **EndpointSlice drain.** Verify the serving gate False is
+    observed before image patch or pod deletion.
+12. **Migration rejection (insufficient capacity).** Verify rejection
     with correct reason.
-13. Migration timeout. Verify surge rollback and Failed status.
-14. Concurrent migration protection. Two requests for same Instance;
-    second rejected.
-15. Rate limiting. 10 requests rapidly; only 3 in-flight.
-16. User readiness gates preserved. Verify OMENative appends
-    `ome.io/serving` without clobbering existing readiness gates.
-17. Deprecation warnings at phase 3. Verify webhook emits warning
-    on `ome.io/deploymentMode: MultiNode` Component apply.
-18. Unknown deployment-mode rejection. Verify a Component annotated
-    with `ome.io/deploymentMode: OMENative` on a controller build that
-    does not yet support OMENative is rejected at admission with the
-    standard "unsupported deployment mode" error.
-19. Coexistence: OMENative ISVC and LWS-mode ISVC in same namespace.
-    No interference.
-20. LWS → OMENative strategy migration procedure. Verify dual-write,
-    drain, completion.
-21. Engine/decoder deployment-mode mismatch. Verify admission rejects
-    the case where `engine.metadata.annotations["ome.io/deploymentMode"]`
-    differs from the same annotation on `decoder`.
-22. Port allocation: PodScoped, InstanceScoped, ComponentScoped.
-    Verify correct env var values.
-23. Unsupported schema version. Write a migration request with
+13. **Migration timeout.** Verify surge rollback and Failed status.
+14. **Concurrent migration protection.** Two requests for the same
+    Instance; second rejected.
+15. **Rate limiting.** 10 requests rapidly; only 3 in-flight.
+16. **User readiness gates preserved.** Verify OMENative appends
+    `ome.io/serving` without clobbering existing gates.
+17. **Deprecation warnings at phase 3.** Verify webhook emits warning
+    on `ome.io/deploymentMode: MultiNode` apply.
+18. **Unknown deployment-mode rejection.** Verify a Component
+    annotated with `ome.io/deploymentMode: OMENative` on a controller
+    build that does not yet support OMENative is rejected at
+    admission.
+19. **Coexistence.** An OMENative `InferenceService` and an LWS-mode
+    `InferenceService` in the same namespace. No interference.
+20. **LWS → OMENative strategy migration.** Verify dual-write, drain,
+    completion.
+21. **Engine/decoder deployment-mode mismatch.** Verify admission
+    rejects mismatched annotations.
+22. **Port allocation.** PodScoped, InstanceScoped, ComponentScoped;
+    verify correct env values.
+23. **Unsupported schema version.** Write a migration request with
     unknown `schemaVersion`; verify rejection with
     `UnsupportedSchemaVersion`.
 
@@ -1691,8 +1473,9 @@ gang scheduling. Fake GPU device plugin for resource accounting.
 ### Simulation / CI Environment
 
 - Unit and planner tests use synthetic cluster snapshots (no real
-  K8s).
-- Integration tests use kind with fake GPUs via a stub device plugin.
+  Kubernetes).
+- Integration tests run on KIND with fake GPUs via a stub device
+  plugin.
 - End-to-end tests with real GPUs run on dedicated CI runners.
 
 ## Graduation Criteria
@@ -1701,8 +1484,8 @@ gang scheduling. Fake GPU device plugin for resource accounting.
 
 - All unit tests passing.
 - Integration tests 1–9 passing.
-- Opt-in is per-Component via the `ome.io/deploymentMode: OMENative`
-  annotation; OMENative is invoked only on Components carrying it.
+- Opt-in is per-Component via `ome.io/deploymentMode: OMENative`;
+  OMENative is invoked only on Components carrying it.
 - Documentation covers: annotation-based opt-in, known limitations,
   the alpha contract that no feature gate is shipped (the only
   rollback is annotation removal or controller revert).
@@ -1716,9 +1499,8 @@ gang scheduling. Fake GPU device plugin for resource accounting.
 - Dashboard published.
 - Migration guide published.
 - Decision recorded on whether to promote the annotation contract to
-  a typed `deploymentMode` field on EngineSpec/DecoderSpec/RouterSpec
-  and/or to introduce a Kubernetes feature gate. Either, both, or
-  neither is acceptable; the OEP is intentionally agnostic.
+  a typed `deploymentMode` field and/or to introduce a Kubernetes
+  feature gate. Either, both, or neither is acceptable.
 - API surface (status fields, annotation contract) frozen except for
   bug fixes.
 
@@ -1727,125 +1509,178 @@ gang scheduling. Fake GPU device plugin for resource accounting.
 - 3 months of Beta with no regressions.
 - Deprecation plan reaches phase 3 (admission warnings).
 - If a feature gate was introduced at beta, it is removed (or
-  promoted to permanently-on); if no feature gate was introduced,
-  the annotation contract is the GA surface.
+  promoted to permanently-on); if no feature gate was introduced, the
+  annotation contract is the GA surface.
 - Test coverage ≥ 85% across all OMENative packages.
 - Post-mortem process for any OMENative-attributed production
   incidents.
 
-## Implementation History
-
-- 2026-01-15: OEP-0006 authored (@bcfre, approved @slin1237).
-- 2026-03-27: PR #506 (Workload Strategy framework) opened.
-- 2026-04-16: OEP-0007 initial draft.
-- 2026-04-16: Design questions consolidated; 37 decisions locked.
-- 2026-04-16: OEP-0007 updated to reflect locked decisions (this
-  document).
-- 2026-05-15 through 2026-05-21: PRs #107 → #193 land the
-  single-pod alpha core (status surface,
-  {create,update,restart,delete,migrate}.go, revision.go, drain.go,
-  services.go builder, timeouts.go).
-- 2026-05-20: PR #174 removed `Serverless` deployment mode from
-  OME; OEP references updated accordingly.
-- 2026-05-21: Pre-alpha design lock based on combined review:
-  - **D1**: adopt RBG multi-writer readiness gate pattern for
-    `ome.io/serving` (Appendix B.3 resolved).
-  - **D2**: Loop A fan-out deferred post-alpha; serial reconcile is
-    not a PD correctness blocker (Appendix B.1 deferred).
-  - **D3**: extract OME pod webhook injectors into shared
-    `pkg/podinjection/` package; OMENative pods bypass the webhook
-    and call extracted injectors directly via render. Third-party
-    admission webhooks remain out of scope, matching RBG's stance.
-- TBD: PR #506 merged.
-- TBD: OMENative Alpha implementation.
-- TBD: Alpha release.
-- TBD: Beta release.
-- TBD: GA.
-- TBD: LWS removal from go.mod.
-
 ## Drawbacks
 
-1. **Implementation cost.** ~2000+ lines of new code plus extensive
-   tests and documentation. 1–2 engineer-quarters to alpha quality;
-   sustained ownership forever.
+1. **Implementation cost.** Roughly 2000+ lines of new code plus
+   extensive tests and documentation. One to two engineer-quarters
+   to alpha quality; sustained ownership thereafter.
 2. **Reinventing LWS patterns.** LWS has years of bug-fix history
-   that OMENative restarts without. Mitigated by test plan covering
+   OMENative restarts without. Mitigated by a test plan covering
    known LWS edge cases.
-3. **Divergence from sgl-project ecosystem (RBG).** RBG is
-   sgl-project's official multi-role workload CRD. This OEP
-   deliberately diverges. Accepted trade-off for UX win.
+3. **Divergence from the sgl-project ecosystem (RBG).** Accepted
+   trade-off for the UX win.
 4. **No benefit for users satisfied with LWS.** Deprecation will
    eventually force them to migrate; some may resist.
-5. **Migration verb opens new failure modes.** Migration is
-   privileged and disruptive. Bugs could cause outages. Blast radius
-   bounded to one Instance; severity per incident can still be high.
+5. **The migration verb opens new failure modes.** Migration is
+   privileged and disruptive; bugs could cause outages. Blast radius
+   is bounded to one Instance.
 6. **Documentation burden.** New concepts (Instance, Runner,
-   migration modes, coordination) must be documented. Operators who
+   migration modes, coordination) must be documented; operators who
    know LWS must re-learn.
 7. **LWS coexistence increases cognitive load during deprecation.**
-   Two code paths active for ~6 releases.
+   Two code paths active for six releases.
 
 ## Alternatives
 
-Four alternatives were considered. Brief summary:
+Four alternatives were considered:
 
 - **Continue with LWS, contribute upstream.** LWS charter is
-  general-purpose; LLM-specific primitives unlikely to be accepted.
-  Upstream release cadence unaligned with OME's.
-- **Adopt RBG via RBGStrategy.** Multiplies user-visible CRDs (4+
+  general-purpose; LLM-specific primitives are unlikely to be accepted.
+  Upstream release cadence is unaligned with OME's.
+- **Adopt RBG via RBGStrategy.** Multiplies user-visible CRDs (four
   sgl-project CRDs visible). Velocity coupled to RBG's roadmap.
 - **Fork RBG InstanceSet code into OME.** Forked code diverges
-  quickly. `InstanceSet` API designed for RBG's context, imperfect
-  for OME. Effectively greenfield with legacy baggage.
-- **OMENative** (chosen): greenfield design inside OME, emitting
-  only K8s-native resources, with LLM-specific primitives as
-  first-class features. One CRD for users (InferenceService).
+  quickly; `InstanceSet`'s API is designed for RBG's context.
+  Effectively greenfield with legacy baggage.
+- **OMENative** (chosen): greenfield inside OME, emitting only
+  Kubernetes-native resources, with LLM-specific primitives as
+  first-class features. One CRD for users (`InferenceService`).
+
+## Future Work
+
+- **`InferenceReplica` CRD extraction.** Phase 1 (CRD scaffold +
+  scheme + RBAC + webhook stubs) has landed; no behavioral use yet.
+  The design lives in
+  `.claude/specs/2026-05-27-inference-workload-crd/README.md` and is
+  the long-term direction for status ownership: per-Component status
+  currently aggregated by the OMENative reconciler into
+  `InferenceService.status.components[<c>].omenative` moves into one
+  `InferenceReplica` per `(InferenceService, Component)` tuple,
+  mirroring how Deployment → ReplicaSet → Pod compose. The
+  `InferenceService` controller becomes a thin orchestrator that
+  watches the children it owns and aggregates only the top-level
+  rollup (`EngineReady` / `DecoderReady` / `RouterReady` +
+  `Status.Components.<c>.Traffic[]`). Cross-Component coordination
+  stays at the `InferenceService` layer because it is inherently
+  `InferenceService`-scoped. `InferenceReplica` is controller-only —
+  users never write to it; a validating admission webhook enforces
+  that. Tracked for a follow-up OEP once the remaining extraction
+  PRs land.
+- **Multi-pod SurgeThenDrain.** Per-gang-member ordinal allocation
+  for multi-pod surge. Multi-pod under `SurgeThenDrain` currently
+  routes to recreate; a future amendment would specify the gang-surge
+  ordinal scheme (likely `<runner>-<ord>-A` vs `<runner>-<ord>-B`
+  suffix) once the basic multi-node path has soaked.
+- **Multi-pod migration.** Same gating story: deferred until the
+  multi-pod plumbing is proven and a per-gang surge slot layout is
+  agreed.
+
+## Open Issues
+
+Live bugs and incomplete work that the alpha has surfaced. Distinct
+from the research-level Open Questions below.
+
+1. **Bumping spec while a SurgeThenDrain rollout is in flight does
+   not consistently retarget.** A new revision targeted while an
+   earlier-target surge pod is still surging or draining: the latest
+   target is sometimes ignored, an extra pod can land, and `Ready`
+   may flip True prematurely. Likely the same family as the in-memory
+   snapshot drift the status mirror closed for the single-bump case.
+   Tracked internally; a future patch may need to chain a status
+   mirror through the target-revision retarget path as well.
+2. **Multi-pod SurgeThenDrain routes to recreate.** Real surge for
+   multi-pod gangs is deferred (see Future Work above); flagged here
+   so the gap is discoverable from the body of the OEP.
 
 ## Open Questions
 
-Remaining genuinely-open questions. These are research-level, not
-blocking design completeness:
+Research-level questions that do not block design completeness.
 
 1. **KV cache handoff protocol during migration.** Future primitive
-   for transferring in-flight KV cache between old and new Instance
-   during migration. Requires runtime cooperation. Research.
-
-2. **RDMA fabric topology data source.** How does OMENative / alfred
-   know which nodes have full RDMA mesh connectivity? Sources:
-   gpu-feature-discovery labels, operator config, runtime discovery.
-   No clear standard yet.
-
-3. **GPU topology within a node (NVLink, PCIe).** Selecting the
-   right GPUs for an 8-GPU workload inside a node. Deferred; v1
-   treats intra-node GPUs as fungible.
-
+   for transferring in-flight KV cache between old and new Instance.
+   Requires runtime cooperation.
+2. **RDMA fabric topology data source.** How OMENative or Alfred
+   knows which nodes have full RDMA mesh connectivity. Candidate
+   sources: GPU feature discovery labels, operator config, runtime
+   discovery. No clear standard yet.
+3. **GPU topology within a node (NVLink, PCIe).** Selecting the right
+   GPUs for an 8-GPU workload inside a node. Deferred; v1 treats
+   intra-node GPUs as fungible.
 4. **DRA (Dynamic Resource Allocation) integration.** Migrate from
-   `Resources.Limits["nvidia.com/gpu"]` to `ResourceClaims`.
-   Revisit when DRA matures.
-
+   `Resources.Limits["nvidia.com/gpu"]` to `ResourceClaims`. Revisit
+   when DRA matures.
 5. **User-facing rollback mechanism.** Internal `ControllerRevision`
-   is emitted; a rollback verb (`ome.io/rollback-to-revision: <N>`
-   or subresource) is future work.
-
+   is emitted; a rollback verb (`ome.io/rollback-to-revision: <N>` or
+   subresource) is future work.
 6. **Component dependencies.** Explicit `dependencies` field on
-   Component spec for cases requiring orderly restart cascades
-   (e.g., Mooncake-style KV master). Not required in v1 because
-   router uses Service discovery; add when a concrete need surfaces.
-
+   Component spec for cases requiring orderly restart cascades (e.g.,
+   Mooncake-style KV master). Not required in v1 because router uses
+   Service discovery; add when a concrete need surfaces.
 7. **Gang scheduling fallback.** OMENative-managed pod scheduling
    gates for clusters without a gang-aware scheduler. Substantial
-   work; deferred; separate OEP if demand emerges.
-
+   work; deferred to a separate OEP if demand emerges.
 8. **Final name.** Candidates for consideration before GA:
    `OMENative` (default), `Native`, `NativeGroup`, `OMECore`,
    `Bundle`. Pin before any code lands — every label, env var,
    metric, and package path embeds the name.
+9. **Resource resize in place (Kubernetes 1.33+).** When
+   `resizePolicy: RestartNotRequired` is set on a 1.33+ cluster,
+   resource requests/limits could be classified as in-place capable.
+   Follow-up addendum.
+10. **Historical migration learning.** Alfred-side, but OMENative
+    could consume feedback. Adjust migration timeouts and retry
+    policy based on past outcomes. A v2+ feature.
+11. **Cluster-domain resolution for `OME_LEADER_ADDRESS`.** Today the
+    env var ships in short form and relies on the DNS search path.
+    Some multi-node runtimes (NCCL, Ray under certain configurations)
+    perform strict-FQDN lookups; if a real-world runtime trips on the
+    short form, the planned escape hatch is a controller-manager flag
+    (`--cluster-domain`) that fully qualifies the address.
 
-9. **Resource resize in place (K8s 1.33+).** When
-   `resizePolicy: RestartNotRequired` is set and the cluster is ≥
-   1.33, resource requests/limits could be classified as in-place
-   capable. Follow-up addendum.
+## Implementation History
 
-10. **Historical migration learning** (alfred-side, but OMENative
-    could consume feedback). Adjust migration timeouts and retry
-    policy based on past outcomes. v2+ feature.
+- **2026-01-15** — OEP-0006 authored (@bcfre, approved @slin1237).
+- **2026-03-27** — Workload Strategy framework PR opened.
+- **2026-04-16** — OEP-0007 initial draft; 37 design questions
+  consolidated and locked.
+- **2026-05-15 → 2026-05-21** — Single-pod alpha core lands: status
+  surface, create / update / restart / delete / migrate paths,
+  revision computation, drain, Services builder, timeouts.
+- **2026-05-20** — `Serverless` deployment mode removed from OME;
+  OEP references updated.
+- **2026-05-21** — Pre-alpha design lock:
+  - Adopt the RBG multi-writer readiness gate pattern for
+    `ome.io/serving`.
+  - Defer Loop A fan-out post-alpha; serial reconcile is not a
+    prefill-decode correctness blocker.
+  - Extract OME pod webhook injectors into a shared
+    `pkg/podinjection/` package; OMENative pods bypass the webhook
+    and call extracted injectors directly via render.
+- **2026-05-21 → 2026-05-26** — OEP-0007.1 (coordinated rollout)
+  lands as a follow-up: `spec.rolloutCoordination.groups[]` API,
+  Independent / RollingUpdate / BlueGreen / Sequential policies,
+  per-revision Services, generation-scoped env injection,
+  `Status.Components.<c>.Traffic[]` producer for OEP-0011.
+- **2026-05-26 → 2026-05-27** — Stabilisation pass: top-level
+  component-ready conditions, rollout-paused filter in the revision
+  hash, drain checks moved to the per-revision routed Service,
+  per-Component Service / ingress / PodMonitor parity, per-Instance
+  failure rolls up to `Component.Failed`, real SurgeThenDrain state
+  machine with `ActiveOrdinal`, status threshold widened to
+  `observed >= desired`, post-commit in-memory status mirror,
+  Sequential RequeueAfter preservation in outer reconcilers,
+  lean-spec status writer.
+- **2026-05-27** — Multi-node Phase 1 (plan + render + revision hash
+  for worker `PodSpec`) and Phase 2 (PodGroup gang scheduling +
+  `GangSchedulingUnavailable` Component condition).
+- **2026-05-27** — `InferenceReplica` CRD scaffold lands as Phase 1
+  of the per-Component-CRD extraction series; see Future Work.
+- **TBD** — Workload Strategy framework PR merged; OMENative alpha
+  implementation; Alpha release; Beta release; GA; LWS removal from
+  `go.mod`.
