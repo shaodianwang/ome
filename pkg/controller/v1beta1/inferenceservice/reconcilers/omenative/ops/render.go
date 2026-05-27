@@ -26,7 +26,7 @@ func Render(
 	runner core.RunnerPlan,
 	ordinal int32,
 ) (*corev1.Pod, error) {
-	return RenderWithRevision(isvc, podSpec, plan, inst, runner, ordinal, "")
+	return RenderWithRevision(isvc, podSpec, nil, plan, inst, runner, ordinal, "")
 }
 
 // RenderWithRevision builds the corev1.Pod for one ordinal of one
@@ -44,14 +44,28 @@ func Render(
 //   - the OMENative labels (inferenceservice / component /
 //     instance-index / instance-incarnation / runner / managed-by),
 //     plus ome.io/revision-hash when revisionHash is non-empty
+//   - pod-template annotations from componentObjectMeta — that's the
+//     merged ServingRuntime engineConfig.annotations +
+//     ISVC.spec.{engine,decoder,router}.annotations the upstream
+//     component builder already produced. Without this, OMENative
+//     drops critical annotations like
+//     k8s.v1.cni.cncf.io/networks (multus IB attachments needed by
+//     PD runtimes) and other ones lower runtime stack expects.
+//     OME-controlled labels live on a different field (Labels) and
+//     are not affected.
 //   - controller-owned `ome.io/serving` readiness gate appended after
 //     any user-declared gates
 //   - OME_* environment variables injected into every container
 //     (OMENative values override user-supplied ones with the same Name)
 //   - one OwnerReference back to the parent InferenceService
+//
+// componentObjectMeta may be nil for back-compat tests that don't
+// have a fully-built ObjectMeta in scope; annotations are skipped in
+// that case.
 func RenderWithRevision(
 	isvc *v1beta1.InferenceService,
 	podSpec *corev1.PodSpec,
+	componentObjectMeta *metav1.ObjectMeta,
 	plan core.ComponentPlan,
 	inst core.InstancePlan,
 	runner core.RunnerPlan,
@@ -68,15 +82,37 @@ func RenderWithRevision(
 	name := query.PodName(isvc.Name, plan.Component, inst.Index, runner.Name, ordinal)
 	subdomain := query.HeadlessServiceName(isvc.Name, plan.Component)
 
-	lbls := podLabels(isvc.Name, plan.Component, inst.Index, runner.Name, inst.Incarnation)
+	// Start from the upstream-merged CSR + ISVC labels so user-declared
+	// labels (e.g. fb.metric.schema) land on the pod, then overlay the
+	// OMENative-mandatory labels last so selectors keep working even if
+	// the user tried to set the same key. Same merge shape for
+	// annotations below; both were previously dropped, which crashed
+	// runtimes that needed multus/network annotations to spin up.
+	lbls := make(map[string]string)
+	if componentObjectMeta != nil {
+		for k, v := range componentObjectMeta.Labels {
+			lbls[k] = v
+		}
+	}
+	for k, v := range podLabels(isvc.Name, plan.Component, inst.Index, runner.Name, inst.Incarnation) {
+		lbls[k] = v
+	}
 	if revisionHash != "" {
 		lbls[query.LabelRevisionHash] = revisionHash
 	}
+	var anns map[string]string
+	if componentObjectMeta != nil && len(componentObjectMeta.Annotations) > 0 {
+		anns = make(map[string]string, len(componentObjectMeta.Annotations))
+		for k, v := range componentObjectMeta.Annotations {
+			anns[k] = v
+		}
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: isvc.Namespace,
-			Labels:    lbls,
+			Name:        name,
+			Namespace:   isvc.Namespace,
+			Labels:      lbls,
+			Annotations: anns,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(isvc, isvcGroupVersionKind),
 			},

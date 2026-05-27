@@ -178,7 +178,7 @@ func createMissingPods(ctx context.Context, p core.ReconcileParams, plan core.Co
 			template = p.WorkerPodSpec
 		}
 
-		pod, err := RenderWithRevision(p.ISVC, template, plan, inst, t.Runner, t.Ordinal, revisionHash)
+		pod, err := RenderWithRevision(p.ISVC, template, &p.ObjectMeta, plan, inst, t.Runner, t.Ordinal, revisionHash)
 		if err != nil {
 			return created, fmt.Errorf("render pod %s: %w", t.Name, err)
 		}

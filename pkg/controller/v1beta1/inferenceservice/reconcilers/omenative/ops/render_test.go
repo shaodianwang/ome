@@ -95,7 +95,7 @@ func TestRender_Labels(t *testing.T) {
 
 func TestRenderWithRevision_StampsRevisionHashLabel(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
-	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), plan, inst, runner, 0, "abc12345")
+	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), nil, plan, inst, runner, 0, "abc12345")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestRenderWithRevision_StampsRevisionHashLabel(t *testing.T) {
 
 func TestRenderWithRevision_EmptyHashOmitsRevisionLabel(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
-	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), plan, inst, runner, 0, "")
+	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), nil, plan, inst, runner, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -125,6 +125,42 @@ func TestRender_DelegatesToRenderWithRevisionEmptyHash(t *testing.T) {
 	}
 	if _, present := pod.Labels[query.LabelRevisionHash]; present {
 		t.Errorf("Render() must omit %s; got pod labels: %+v", query.LabelRevisionHash, pod.Labels)
+	}
+}
+
+// TestRenderWithRevision_PropagatesComponentMetaAnnotationsAndLabels pins
+// the merge from the upstream-built componentObjectMeta onto the rendered
+// pod. Before this fix the renderer dropped both, breaking PD runtimes
+// that need multus IB annotations (k8s.v1.cni.cncf.io/networks) to spin
+// up. OME-mandatory labels still win on collision so selectors keep
+// working.
+func TestRenderWithRevision_PropagatesComponentMetaAnnotationsAndLabels(t *testing.T) {
+	plan, inst, runner := singlePodPlan()
+	meta := &metav1.ObjectMeta{
+		Annotations: map[string]string{
+			"k8s.v1.cni.cncf.io/networks": "[{\"name\":\"ibs0p0-macvlan\",\"namespace\":\"cw-multus\"}]",
+			"fb.metric.schema":            "sglang_metrics",
+		},
+		Labels: map[string]string{
+			"team":                                "ml-infra",
+			constants.InferenceServicePodLabelKey: "should-be-overwritten-by-OMENative",
+		},
+	}
+	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), meta, plan, inst, runner, 0, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := pod.Annotations["k8s.v1.cni.cncf.io/networks"]; got == "" {
+		t.Errorf("multus networks annotation missing: %+v", pod.Annotations)
+	}
+	if got := pod.Annotations["fb.metric.schema"]; got != "sglang_metrics" {
+		t.Errorf("fb.metric.schema annotation: got %q want %q", got, "sglang_metrics")
+	}
+	if got := pod.Labels["team"]; got != "ml-infra" {
+		t.Errorf("user-declared label dropped: %+v", pod.Labels)
+	}
+	if got := pod.Labels[constants.InferenceServicePodLabelKey]; got == "should-be-overwritten-by-OMENative" {
+		t.Errorf("OMENative selector label was clobbered by user label; got %q (must be the ISVC name)", got)
 	}
 }
 
