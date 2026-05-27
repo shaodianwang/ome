@@ -160,6 +160,19 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 					anyGated = true
 					continue
 				}
+				// Sequential gate: in a Sequential group, only the
+				// active Component (first in Order with RolloutInFlight)
+				// is allowed to fire a fresh Update this reconcile. The
+				// state machine emits decoder.* / engine.* composite
+				// phases in lock-step; without this gate, the dispatcher
+				// would fire Update on every Instance whose update
+				// trigger is true, recreating both Components
+				// concurrently and skipping the Sequential.Awaiting
+				// composite phase entirely.
+				if allowed, _ := coordination.CheckSequentialGate(p.ISVC, plan.Component); !allowed {
+					anyGated = true
+					continue
+				}
 			}
 			done, uerr := Update(ctx, p, plan, inst, target, p.PodSpec)
 			if uerr != nil {

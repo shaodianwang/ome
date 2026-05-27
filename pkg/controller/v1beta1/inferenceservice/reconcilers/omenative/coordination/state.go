@@ -465,11 +465,8 @@ func sequentialTransition(obs GroupObservation) GroupTransition {
 
 	// Pick the Component in the Order that's currently rolling, if any.
 	// Sequential's invariant: at most one Component rolls at a time.
-	for _, c := range obs.Group.Order {
-		comp, ok := obs.Components[c]
-		if !ok || !comp.RolloutInFlight {
-			continue
-		}
+	if c, ok := activeSequentialComponent(obs.Group.Order, obs.Components); ok {
+		comp := obs.Components[c]
 		// Soak gate: if a previous Component just completed and the
 		// group is still inside its operator-configured soak window,
 		// hold this Component at Sequential.Awaiting until the wait
@@ -540,6 +537,23 @@ func sequentialTransition(obs GroupObservation) GroupTransition {
 		PreviousComponent: prev,
 		Message:           "Sequential group in soak window between Components",
 	}
+}
+
+// activeSequentialComponent returns the first Component in `order`
+// whose observation has RolloutInFlight=true. The state machine routes
+// Sequential's "which Component is currently rolling" decision off
+// this; the dispatcher's CheckSequentialGate consumes the same helper
+// so the two surfaces never disagree on what's active. Returns ok=false
+// when no Component in `order` is rolling (Sequential is idle).
+func activeSequentialComponent(order []v1beta1.ComponentType, components map[v1beta1.ComponentType]ComponentObservation) (v1beta1.ComponentType, bool) {
+	for _, c := range order {
+		comp, ok := components[c]
+		if !ok || !comp.RolloutInFlight {
+			continue
+		}
+		return c, true
+	}
+	return "", false
 }
 
 // completedSequentialComponents counts the number of leading Components
