@@ -143,6 +143,34 @@ func CheckSequentialGate(isvc *v1beta1.InferenceService, component v1beta1.Compo
 // Components with no status block get a zero-valued observation
 // (RolloutInFlight=false), which is exactly what the active-selector
 // needs.
+//
+// RolloutInFlight is derived from TWO independent signals:
+//
+//  1. Revision-hash skew: `UpdateRevision != CurrentRevision` — the
+//     classic "spec changed and status caught up enough to record the
+//     new target name" signal. This is what fires once the deferred
+//     AggregateAndWriteStatus has stamped UpdateRevision=target.Name on
+//     the Component being reconciled.
+//
+//  2. Generation skew: `ObservedGeneration < isvc.Generation` — fires
+//     at the *moment of bump*, BEFORE any deferred status write has
+//     run. The top-level reconciler computes `target` via
+//     ensureRevisionWithCollisionRetry and defers
+//     AggregateAndWriteStatus until after the op chain returns; the
+//     dispatcher's gate check is invoked between those two points. At
+//     that instant UpdateRevision still names the OLD CR (so signal #1
+//     is silent), but every per-Component status block is one
+//     reconcile behind isvc.Generation. The generation skew turns
+//     RolloutInFlight on for every Component whose status hasn't
+//     caught up to the bump — and the active-selector then routes the
+//     dispatcher to the first one in Order, denying the rest.
+//
+// Over-detection from signal #2 is harmless. A Component whose target
+// PodSpec didn't actually change still gets observed as in-flight here,
+// but detectUpdateTrigger in the dispatcher returns needs=false for
+// that Component (its pods' RunningRevision already matches target.Name)
+// and the gate is never consulted. Once AggregateAndWriteStatus runs
+// and bumps ObservedGeneration, the noise clears.
 func observeSequentialComponentsForGate(isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) map[v1beta1.ComponentType]ComponentObservation {
 	out := make(map[v1beta1.ComponentType]ComponentObservation, len(components))
 	for _, c := range components {
@@ -152,7 +180,9 @@ func observeSequentialComponentsForGate(isvc *v1beta1.InferenceService, componen
 			targetHash := revisionHashFromName(isvc.Name, c, cs.OMENative.UpdateRevision)
 			obs.CurrentRevisionHash = currentHash
 			obs.TargetRevisionHash = targetHash
-			obs.RolloutInFlight = targetHash != "" && targetHash != currentHash
+			revisionSkew := targetHash != "" && targetHash != currentHash
+			generationSkew := cs.OMENative.ObservedGeneration < isvc.Generation
+			obs.RolloutInFlight = revisionSkew || generationSkew
 		}
 		out[c] = obs
 	}

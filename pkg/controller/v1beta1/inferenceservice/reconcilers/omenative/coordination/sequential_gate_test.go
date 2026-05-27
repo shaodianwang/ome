@@ -112,6 +112,24 @@ func setComponentRevisions(isvc *v1beta1.InferenceService, c v1beta1.ComponentTy
 	isvc.Status.Components[c] = cs
 }
 
+// setComponentObservedGeneration stamps
+// Status.Components[c].OMENative.ObservedGeneration with `gen`. The
+// AggregateAndWriteStatus deferred write copies isvc.Generation onto
+// every Component's ObservedGeneration at the end of each reconcile,
+// so simulating a moment-of-bump means setting Status.* to N while
+// leaving isvc.Generation at N+1.
+func setComponentObservedGeneration(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, gen int64) {
+	if isvc.Status.Components == nil {
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+	}
+	cs := isvc.Status.Components[c]
+	if cs.OMENative == nil {
+		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	}
+	cs.OMENative.ObservedGeneration = gen
+	isvc.Status.Components[c] = cs
+}
+
 // setComponentAvailableAt stamps Status.Components[c].OMENative with
 // an Available=True condition whose LastTransitionTime is `at` — the
 // timestamp shape the Sequential soak gate now consumes. Mirrors what
@@ -325,6 +343,99 @@ func TestCheckSequentialGate_SoakWithPriorAvailableFalseBypasses(t *testing.T) {
 	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("Available=False must not arm soak clock: %s", reason)
+	}
+}
+
+func TestCheckSequentialGate_MomentOfBump(t *testing.T) {
+	// Reproduces the bug observed on the dev cluster (image fb0bb7e2,
+	// gap=0s between decoder/engine creationTimestamps when both spec
+	// annotations are bumped in the same operator action):
+	//
+	// At the moment of bump, isvc.Generation has incremented (N → N+1)
+	// but no Component's deferred AggregateAndWriteStatus has run yet,
+	// so:
+	//   - UpdateRevision still names the OLD ControllerRevision for
+	//     BOTH Components (the new target.Name lives only in the
+	//     reconciler's local `target` variable, not in status).
+	//   - ObservedGeneration is still N on every Component's status
+	//     block.
+	//
+	// Pre-fix: revision-hash skew is silent (UpdateRevision ==
+	// CurrentRevision == OLD) for both Components → activeSequentialComponent
+	// sees nothing rolling → gate falls through to "Sequential group
+	// idle" → both Components dispatch concurrently, blowing the
+	// Sequential invariant.
+	//
+	// Post-fix: generation skew (ObservedGeneration=N <
+	// isvc.Generation=N+1) flips RolloutInFlight=true on every
+	// Component whose status hasn't caught up. activeSequentialComponent
+	// picks decoder (first in Order); engine is correctly denied.
+	isvc := mkSequentialFixture("seq-isvc", 0)
+	isvc.Generation = 2 // operator's spec bump just landed
+	// Both Components carry stale status: UpdateRevision points at the
+	// pre-bump CR, ObservedGeneration is one behind isvc.Generation.
+	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev1", "rev1")
+	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev1")
+	setComponentObservedGeneration(isvc, v1beta1.DecoderComponent, 1)
+	setComponentObservedGeneration(isvc, v1beta1.EngineComponent, 1)
+
+	// Engine must wait — decoder is first in Order and the gen-skew
+	// signal pins decoder as the active Sequential Component.
+	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	if allowed {
+		t.Errorf("engine must be gated at moment-of-bump: %s", reason)
+	}
+	if !strings.Contains(reason, "decoder") {
+		t.Errorf("denial reason should name the active Component (decoder): %s", reason)
+	}
+	if !strings.Contains(reason, "Sequential waiting") {
+		t.Errorf("denial reason should say 'Sequential waiting': %s", reason)
+	}
+
+	// Decoder is the active Sequential Component — gate must allow.
+	if allowed, reason := CheckSequentialGate(isvc, v1beta1.DecoderComponent); !allowed {
+		t.Errorf("decoder is the active Component at moment-of-bump: %s", reason)
+	}
+}
+
+func TestCheckSequentialGate_GenerationSkewOnlyOneComponent(t *testing.T) {
+	// Defensive: only decoder's status is stale (engine already
+	// caught up in a prior reconcile, e.g. a partial bump on a
+	// previously-converged group). Decoder's gen-skew alone is enough
+	// to pin it as the active Sequential Component; engine must defer.
+	isvc := mkSequentialFixture("seq-isvc", 0)
+	isvc.Generation = 5
+	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev1", "rev1")
+	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev1")
+	setComponentObservedGeneration(isvc, v1beta1.DecoderComponent, 4) // stale
+	setComponentObservedGeneration(isvc, v1beta1.EngineComponent, 5)  // caught up
+
+	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
+	if allowed {
+		t.Errorf("engine must wait while decoder has gen-skew: %s", reason)
+	}
+	if !strings.Contains(reason, "decoder") {
+		t.Errorf("denial reason should name decoder: %s", reason)
+	}
+}
+
+func TestCheckSequentialGate_GenerationCaughtUpAndIdleBypasses(t *testing.T) {
+	// Once every Component's ObservedGeneration matches isvc.Generation
+	// AND revisions are converged, the gate must bypass (no rollout in
+	// flight anywhere). This is the steady-state read; without it the
+	// fix would wedge the gate on a converged ISVC.
+	isvc := mkSequentialFixture("seq-isvc", 0)
+	isvc.Generation = 7
+	setComponentRevisions(isvc, v1beta1.DecoderComponent, "rev2", "rev2")
+	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev2", "rev2")
+	setComponentObservedGeneration(isvc, v1beta1.DecoderComponent, 7)
+	setComponentObservedGeneration(isvc, v1beta1.EngineComponent, 7)
+
+	if allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent); !allowed {
+		t.Errorf("converged group must bypass gate: %s", reason)
+	}
+	if allowed, reason := CheckSequentialGate(isvc, v1beta1.DecoderComponent); !allowed {
+		t.Errorf("converged group must bypass gate: %s", reason)
 	}
 }
 
