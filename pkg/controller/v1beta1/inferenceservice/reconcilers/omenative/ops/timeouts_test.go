@@ -91,10 +91,15 @@ func TestExpireOperationsIfDeadlinePassed_InPlaceFallsBackToRecreate(t *testing.
 	}
 }
 
-func TestExpireOperationsIfDeadlinePassed_RecreateUpdateStampsStuck(t *testing.T) {
-	// Recreate-mode Update past Deadline -> mark stuck, do NOT clear.
-	// (Drain/Recreate steps may have committed pod-delete side effects;
-	// force-progress would risk worse states.)
+func TestExpireOperationsIfDeadlinePassed_RecreateUpdateStampsStuckAndEscalatesPhase(t *testing.T) {
+	// Recreate-mode Update past Deadline -> mark stuck (Operation
+	// preserved with Reason=DeadlineExceeded) AND escalate Phase to
+	// Failed so the coordination layer's per-Component Failed flag
+	// flips. Drain/Recreate steps may have committed pod-delete side
+	// effects; the controller refuses to force-progress them, but the
+	// per-Instance Phase=Failed marker is what lifts the wedge into
+	// Component.Failed so the BlueGreen/Sequential state machines can
+	// transition to Phase=Failed instead of sitting at Surging forever.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
@@ -126,8 +131,47 @@ func TestExpireOperationsIfDeadlinePassed_RecreateUpdateStampsStuck(t *testing.T
 	if s.Operation.Reason != status.ReasonDeadlineExceeded {
 		t.Errorf("Operation.Reason: got %q want %q", s.Operation.Reason, status.ReasonDeadlineExceeded)
 	}
-	if s.Phase != v1beta1.OMENativeInstanceUpdating {
-		t.Errorf("Phase: must stay Updating; got %q", s.Phase)
+	if s.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Errorf("Phase: must escalate to Failed (so coord layer fails the group); got %q", s.Phase)
+	}
+}
+
+// TestExpireOperationsIfDeadlinePassed_MirrorsPhaseToInMemoryISVC pins
+// the in-memory mirror added to keep the escalation from racing the
+// rest of the same reconcile pass. dispatch.go's Update / Restart
+// passes read `p.ISVC.Status` (the reconcile-start snapshot), so an
+// apiserver-only write to Phase=Failed leaves them seeing
+// Phase=Updating, firing recreate, and immediately clobbering the
+// escalation. The mirror keeps the snapshot in sync.
+func TestExpireOperationsIfDeadlinePassed_MirrorsPhaseToInMemoryISVC(t *testing.T) {
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Incarnation:     2,
+		Phase:           v1beta1.OMENativeInstanceUpdating,
+		RunningRevision: "old-rev",
+		TargetRevision:  "new-rev",
+		Operation: &v1beta1.InstanceOperation{
+			Type:     v1beta1.InstanceOperationUpdate,
+			Step:     updateStepDrain,
+			Deadline: pastDeadline(),
+		},
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+
+	if err := ExpireOperationsIfDeadlinePassed(context.Background(), p, plan); err != nil {
+		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	}
+
+	// Read from the in-memory ISVC pointer, NOT a fresh client.Get.
+	// The whole point of the mirror is that the rest of the reconcile
+	// pass sees the new Phase without needing a re-read.
+	got := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Phase
+	if got != v1beta1.OMENativeInstanceFailed {
+		t.Errorf("in-memory ISVC Phase: must mirror the just-committed Phase=Failed; got %q", got)
 	}
 }
 
@@ -426,5 +470,181 @@ func TestTryAbandonStuckMigration_SourceWithoutSurgeIndexNoOp(t *testing.T) {
 	}
 	if abandoned {
 		t.Errorf("abandon must not run without SurgeIndex pointer")
+	}
+}
+
+// --- stampInstanceFailed (Phase escalation helper) ---
+
+func TestIsEscalatablePhase(t *testing.T) {
+	cases := []struct {
+		phase v1beta1.OMENativeInstancePhase
+		want  bool
+	}{
+		{v1beta1.OMENativeInstancePending, false}, // never observed yet — nothing to escalate
+		{v1beta1.OMENativeInstanceCreating, true},
+		{v1beta1.OMENativeInstanceReady, false}, // settled, healthy
+		{v1beta1.OMENativeInstanceUpdating, true},
+		{v1beta1.OMENativeInstanceRestarting, true},
+		{v1beta1.OMENativeInstanceMigrating, true},
+		{v1beta1.OMENativeInstanceFailed, false},   // already terminal
+		{v1beta1.OMENativeInstanceDeleting, false}, // tearing down
+	}
+	for _, c := range cases {
+		if got := isEscalatablePhase(c.phase); got != c.want {
+			t.Errorf("phase %q: got %v want %v", c.phase, got, c.want)
+		}
+	}
+}
+
+func TestStampInstanceFailed_EscalatesPhase(t *testing.T) {
+	// Phase=Updating + Operation present -> Phase=Failed.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+		Index: 0,
+		Phase: v1beta1.OMENativeInstanceUpdating,
+		Operation: &v1beta1.InstanceOperation{
+			Type:     v1beta1.InstanceOperationUpdate,
+			Step:     updateStepDrain,
+			Reason:   status.ReasonDeadlineExceeded,
+			Deadline: pastDeadline(),
+		},
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+
+	if err := stampInstanceFailed(context.Background(), p, v1beta1.EngineComponent, 0); err != nil {
+		t.Fatalf("stampInstanceFailed: %v", err)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Errorf("Phase: got %q want Failed", s.Phase)
+	}
+	if s.Operation == nil {
+		t.Errorf("Operation must be preserved as breadcrumb; got nil")
+	}
+}
+
+func TestStampInstanceFailed_AlreadyFailedIsNoop(t *testing.T) {
+	// Phase already Failed -> mutate returns false, no churn.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+		Index: 0,
+		Phase: v1beta1.OMENativeInstanceFailed,
+		Operation: &v1beta1.InstanceOperation{
+			Type:     v1beta1.InstanceOperationUpdate,
+			Reason:   status.ReasonDeadlineExceeded,
+			Deadline: pastDeadline(),
+		},
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+
+	if err := stampInstanceFailed(context.Background(), p, v1beta1.EngineComponent, 0); err != nil {
+		t.Fatalf("stampInstanceFailed (already-failed): %v", err)
+	}
+}
+
+func TestStampInstanceFailed_DoesNotResurrectRemovedInstance(t *testing.T) {
+	// The (component, idx) pair has been removed from status (the
+	// migrate-abandon path's surge cleanup). MutateInstance will
+	// re-append an empty slot — stampInstanceFailed MUST bail when
+	// Operation is nil rather than stamping Failed on a fresh slot.
+	// Otherwise the abandoned surge would resurrect as Phase=Failed.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	// Remove the existing InstanceStatus to simulate post-abandon state.
+	cs := isvc.Status.Components[v1beta1.EngineComponent]
+	cs.OMENative.InstanceStatuses = nil
+	isvc.Status.Components[v1beta1.EngineComponent] = cs
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+
+	if err := stampInstanceFailed(context.Background(), p, v1beta1.EngineComponent, 99); err != nil {
+		t.Fatalf("stampInstanceFailed (missing instance): %v", err)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	for _, s := range fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses {
+		if s.Index == 99 {
+			t.Errorf("removed instance must not be resurrected; got %+v", s)
+		}
+	}
+}
+
+func TestExpireOperationsIfDeadlinePassed_PhaseEscalationIsIdempotent(t *testing.T) {
+	// Already-stuck + already-Failed: neither stamp should churn the
+	// status on subsequent reconciles. Guards against LastTransitionTime
+	// thrash on the Component-level Failed surface.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Incarnation:     2,
+		Phase:           v1beta1.OMENativeInstanceFailed,
+		RunningRevision: "old-rev",
+		TargetRevision:  "new-rev",
+		Operation: &v1beta1.InstanceOperation{
+			Type:     v1beta1.InstanceOperationUpdate,
+			Step:     updateStepDrain,
+			Reason:   status.ReasonDeadlineExceeded,
+			Deadline: pastDeadline(),
+		},
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+
+	for i := 0; i < 3; i++ {
+		if err := ExpireOperationsIfDeadlinePassed(context.Background(), p, plan); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Errorf("Phase: got %q want Failed", s.Phase)
+	}
+	if s.Operation == nil {
+		t.Errorf("Operation must remain preserved across repeated passes")
+	}
+}
+
+func TestExpireOperationsIfDeadlinePassed_InPlaceFallbackDoesNotEscalate(t *testing.T) {
+	// In-place updates have a recovery path (fall back to recreate).
+	// Phase is reset to Ready, NOT escalated to Failed — the rollout
+	// continues on the next reconcile.
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Phase:           v1beta1.OMENativeInstanceUpdating,
+		RunningRevision: "old-rev",
+		TargetRevision:  "new-rev",
+		Operation: &v1beta1.InstanceOperation{
+			Type:     v1beta1.InstanceOperationUpdate,
+			Step:     updateStepInPlace,
+			Deadline: pastDeadline(),
+		},
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+
+	if err := ExpireOperationsIfDeadlinePassed(context.Background(), p, plan); err != nil {
+		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Phase != v1beta1.OMENativeInstanceReady {
+		t.Errorf("Phase: got %q want Ready (in-place fallback is recoverable)", s.Phase)
 	}
 }

@@ -85,8 +85,77 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p core.ReconcileParam
 				"OMENative %s operation %s/%s exceeded deadline; operator intervention required",
 				status.InstanceKey(plan.Component, s.Index), s.Operation.Type, s.Operation.Step)
 		}
+		// Phase escalation: stamping OperationStuck leaves the Instance
+		// in its transient Phase (Creating / Updating / Restarting /
+		// Migrating). That's the right signal at the Component-level
+		// OperationStuck condition, but the coordination state machine
+		// reads `c.Failed` to decide whether to fail the whole group —
+		// without a per-Instance terminal marker the group sits at
+		// Surging / Waiting forever even though the operator can no
+		// longer make progress. Escalate the Phase to Failed so
+		// buildComponentObservation can lift the signal into
+		// Component.Failed.
+		alreadyFailed := s.Phase == v1beta1.OMENativeInstanceFailed
+		if !alreadyFailed && isEscalatablePhase(s.Phase) {
+			if err := stampInstanceFailed(ctx, p, plan.Component, s.Index); err != nil {
+				return fmt.Errorf("stamp failed (instance=%d): %w", s.Index, err)
+			}
+			// Mirror the just-committed Phase onto the in-memory ISVC
+			// the rest of this reconcile pass reads. dispatch.go's
+			// Update / Restart passes read `p.ISVC.Status` (the
+			// snapshot at reconcile start), so without this mirror
+			// detectUpdateTrigger keeps seeing Phase=Updating, fires
+			// recreate, and recreate's patchInstanceStatusRecreatingFor
+			// Update clobbers the Phase=Failed back to Updating in the
+			// apiserver — the escalation never sticks and the
+			// InstanceFailed event fires on every reconcile until the
+			// test times out.
+			mirrorInstancePhase(p.ISVC, plan.Component, s.Index, v1beta1.OMENativeInstanceFailed)
+			status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonInstanceFailed,
+				"OMENative %s escalated to Phase=Failed after deadline; coordination layer will fail the group",
+				status.InstanceKey(plan.Component, s.Index))
+		}
 	}
 	return nil
+}
+
+// mirrorInstancePhase updates the in-memory InstanceStatus.Phase on the
+// reconcile-start ISVC snapshot so downstream passes in the SAME
+// reconcile (Restart / Update / Create) read the just-escalated value
+// instead of the stale pre-escalation phase. Without this, the
+// dispatcher's detector + patch sequence races itself: Update reads
+// Phase=Updating from the snapshot, fires recreate, and recreate
+// rewrites Phase=Updating in the apiserver — undoing the escalation
+// the same reconcile just committed.
+func mirrorInstancePhase(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, idx int32, phase v1beta1.OMENativeInstancePhase) {
+	if isvc == nil {
+		return
+	}
+	cs, ok := isvc.Status.Components[c]
+	if !ok || cs.OMENative == nil {
+		return
+	}
+	for i := range cs.OMENative.InstanceStatuses {
+		if cs.OMENative.InstanceStatuses[i].Index == idx {
+			cs.OMENative.InstanceStatuses[i].Phase = phase
+			return
+		}
+	}
+}
+
+// isEscalatablePhase reports whether the Instance is currently in a
+// transient phase that ExpireOperationsIfDeadlinePassed may escalate
+// to Failed. The terminal phases (Ready / Failed / Deleting) are
+// already settled, so escalation isn't meaningful.
+func isEscalatablePhase(p v1beta1.OMENativeInstancePhase) bool {
+	switch p {
+	case v1beta1.OMENativeInstanceCreating,
+		v1beta1.OMENativeInstanceUpdating,
+		v1beta1.OMENativeInstanceRestarting,
+		v1beta1.OMENativeInstanceMigrating:
+		return true
+	}
+	return false
 }
 
 // isMigrate identifies any Type=Migrate operation. Both source and surge
@@ -279,6 +348,39 @@ func stampOperationStuck(ctx context.Context, p core.ReconcileParams, component 
 			return false
 		}
 		s.Operation.Reason = status.ReasonDeadlineExceeded
+		return true
+	})
+}
+
+// stampInstanceFailed escalates the Instance's Phase to Failed while
+// preserving the Operation breadcrumb. Idempotent: a second call when
+// the Phase is already Failed is a no-op (no status churn). The
+// coordination layer's buildComponentObservation reads Phase==Failed
+// to mark the Component as Failed, which fails the whole group on
+// BlueGreen / RollingUpdate / Sequential.
+//
+// Per-Instance Phase=Failed is the operator-facing "we've given up
+// trying to converge this Instance" signal. The Operation is kept so
+// the OperationStuck condition + the per-Instance trace still tell
+// operators what was in flight when the deadline elapsed.
+//
+// Guards against re-creating an InstanceStatus that was deliberately
+// removed earlier in the same ExpireOperationsIfDeadlinePassed pass:
+// MutateInstance re-fetches and appends an empty slot when the
+// (component, idx) entry is gone (e.g., the migrate-abandon path's
+// surge cleanup), so a missing Operation here is the unambiguous
+// signal that the upstream rollback won and we must NOT resurrect
+// the entry. Matches stampOperationStuck's `if s.Operation == nil`
+// guard for the same reason.
+func stampInstanceFailed(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32) error {
+	return status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
+		if s.Operation == nil {
+			return false
+		}
+		if s.Phase == v1beta1.OMENativeInstanceFailed {
+			return false
+		}
+		s.Phase = v1beta1.OMENativeInstanceFailed
 		return true
 	})
 }

@@ -395,7 +395,45 @@ func buildComponentObservation(isvc *v1beta1.InferenceService, c v1beta1.Compone
 	out.CurrentRevisionHash = currentHash
 	out.TargetRevisionHash = targetHash
 	out.RolloutInFlight = targetHash != "" && targetHash != currentHash
+
+	// Per-Instance failure rollup: any Instance escalated to
+	// Phase=Failed by ExpireOperationsIfDeadlinePassed (or any other
+	// terminal-failure path) marks the whole Component Failed. The
+	// per-policy state machines (BlueGreen, RollingUpdate, Sequential,
+	// Independent) all read Component.Failed and translate it into the
+	// group's Failed phase — operators see Phase=Failed instead of the
+	// rollout sitting at Surging / Waiting indefinitely after a per-
+	// Instance deadline blew past.
+	failedInstances := collectFailedInstanceIndices(cs.OMENative.InstanceStatuses)
+	if len(failedInstances) > 0 {
+		out.Failed = true
+		out.FailureMessage = formatFailedInstancesMessage(c, failedInstances)
+	}
 	return out
+}
+
+// collectFailedInstanceIndices returns the indices of every Instance
+// currently in Phase=Failed. Order matches the InstanceStatuses slice;
+// callers that need a sorted list can sort the result.
+func collectFailedInstanceIndices(instances []v1beta1.OMENativeInstanceStatus) []int32 {
+	var out []int32
+	for _, s := range instances {
+		if s.Phase == v1beta1.OMENativeInstanceFailed {
+			out = append(out, s.Index)
+		}
+	}
+	return out
+}
+
+// formatFailedInstancesMessage builds the operator-facing summary the
+// coordination state machine carries on Component.FailureMessage. Stays
+// short — the per-Instance breadcrumb (Operation.Reason +
+// OperationStuck condition) carries the full detail.
+func formatFailedInstancesMessage(c v1beta1.ComponentType, indices []int32) string {
+	if len(indices) == 1 {
+		return fmt.Sprintf("%s instance %d in Phase=Failed", c, indices[0])
+	}
+	return fmt.Sprintf("%s instances %v in Phase=Failed", c, indices)
 }
 
 // sumPodCounts sums all values in a per-revision pod count map.

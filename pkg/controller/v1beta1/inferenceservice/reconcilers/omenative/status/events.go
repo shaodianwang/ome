@@ -36,6 +36,13 @@ const (
 	// Operation timeout / stuck.
 	EventReasonOperationDeadlineExceeded = "OperationDeadlineExceeded"
 
+	// EventReasonInstanceFailed fires when an Instance has been escalated
+	// from a transient phase (Creating / Updating / Restarting / Migrating)
+	// to Phase=Failed because its in-flight Operation exceeded its
+	// Deadline and the controller has given up trying to converge it.
+	// Operator intervention required.
+	EventReasonInstanceFailed = "InstanceFailed"
+
 	// Migration request lifecycle.
 	EventReasonMigrationRequestAccepted = "MigrationRequestAccepted"
 	EventReasonMigrationRequestRejected = "MigrationRequestRejected"

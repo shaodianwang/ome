@@ -343,3 +343,144 @@ func TestReconcile_ConsiderCoordinationGroupEventNotFiredWhenGroupDeclared(t *te
 		}
 	}
 }
+
+// --- buildComponentObservation per-Instance failure rollup ---
+
+// withInstanceStatus builds an ISVC carrying the given InstanceStatus
+// slice on Components.<c>.OMENative. Used by the propagation tests.
+func withInstanceStatus(c v1beta1.ComponentType, instances []v1beta1.OMENativeInstanceStatus) *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-test"},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				c: {OMENative: &v1beta1.OMENativeComponentStatus{
+					InstanceStatuses: instances,
+				}},
+			},
+		},
+	}
+}
+
+func TestBuildComponentObservation_NoStatusReturnsZero(t *testing.T) {
+	// No status block populated for the Component — observation must
+	// report zero values, NOT Failed (otherwise a brand-new ISVC would
+	// flip the group to Failed).
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "isvc-test"}}
+	obs := buildComponentObservation(isvc, v1beta1.EngineComponent, nil)
+	if obs.Failed {
+		t.Errorf("missing status must not report Failed; got %+v", obs)
+	}
+	if obs.FailureMessage != "" {
+		t.Errorf("missing status must not carry a FailureMessage; got %q", obs.FailureMessage)
+	}
+}
+
+func TestBuildComponentObservation_NoFailedInstancesIsNotFailed(t *testing.T) {
+	// All Instances Ready/Updating/etc., none Failed — observation
+	// reports Failed=false. Pins that the rollup only fires on the
+	// explicit Failed phase, not on transient states.
+	isvc := withInstanceStatus(v1beta1.EngineComponent, []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating},
+	})
+	obs := buildComponentObservation(isvc, v1beta1.EngineComponent, nil)
+	if obs.Failed {
+		t.Errorf("no Failed Instances should not flip Failed; got %+v", obs)
+	}
+}
+
+func TestBuildComponentObservation_AnyFailedInstanceMarksComponentFailed(t *testing.T) {
+	// One Instance in Phase=Failed — the rollup must mark the
+	// Component Failed so the BlueGreen / Sequential / RollingUpdate
+	// state machines transition the group to Failed.
+	isvc := withInstanceStatus(v1beta1.EngineComponent, []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceFailed},
+	})
+	obs := buildComponentObservation(isvc, v1beta1.EngineComponent, nil)
+	if !obs.Failed {
+		t.Errorf("any Failed Instance must mark Component Failed; got %+v", obs)
+	}
+	if obs.FailureMessage == "" {
+		t.Errorf("Failed Component must carry a FailureMessage; got empty")
+	}
+	if !contains(obs.FailureMessage, "1") {
+		t.Errorf("FailureMessage should name the failed Instance index; got %q", obs.FailureMessage)
+	}
+}
+
+func TestBuildComponentObservation_MultipleFailedInstancesListedInMessage(t *testing.T) {
+	// Two Instances in Phase=Failed — message names both.
+	isvc := withInstanceStatus(v1beta1.EngineComponent, []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceFailed},
+		{Index: 2, Phase: v1beta1.OMENativeInstanceFailed},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceReady},
+	})
+	obs := buildComponentObservation(isvc, v1beta1.EngineComponent, nil)
+	if !obs.Failed {
+		t.Errorf("two Failed Instances must mark Component Failed; got %+v", obs)
+	}
+	if !contains(obs.FailureMessage, "0") || !contains(obs.FailureMessage, "2") {
+		t.Errorf("FailureMessage should name both failed indices (0, 2); got %q", obs.FailureMessage)
+	}
+}
+
+func TestBuildComponentObservation_FailedPropagatesThroughBlueGreen(t *testing.T) {
+	// End-to-end: a Failed Instance flows through buildComponentObservation
+	// into the BlueGreen state machine, which returns Phase=Failed for
+	// the group. This is the bug the X-1 KIND regression pins.
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+	}
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "isvc-test"},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{
+					InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+						{Index: 0, Phase: v1beta1.OMENativeInstanceFailed},
+					},
+				}},
+				v1beta1.DecoderComponent: {OMENative: &v1beta1.OMENativeComponentStatus{
+					InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+						{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+					},
+				}},
+			},
+		},
+	}
+	obs := buildGroupObservation(isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	tr := ComputeTransition(obs)
+	if tr.Phase != v1beta1.CoordinationPhaseFailed {
+		t.Errorf("BlueGreen with any Failed Component must report Failed; got %q", tr.Phase)
+	}
+}
+
+func TestCollectFailedInstanceIndices_PreservesOrder(t *testing.T) {
+	out := collectFailedInstanceIndices([]v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+		{Index: 2, Phase: v1beta1.OMENativeInstanceFailed},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceFailed},
+		{Index: 3, Phase: v1beta1.OMENativeInstanceUpdating},
+	})
+	if len(out) != 2 {
+		t.Fatalf("got %d failed indices want 2: %v", len(out), out)
+	}
+	// Slice order matches the input order (the InstanceStatuses
+	// iteration order). This is intentional — the formatter doesn't
+	// sort either, so operators see indices as they appear in status.
+	if out[0] != 2 || out[1] != 1 {
+		t.Errorf("collect order: got %v want [2 1] (slice order, not sorted)", out)
+	}
+}
+
+func TestCollectFailedInstanceIndices_EmptyOnNoFailures(t *testing.T) {
+	out := collectFailedInstanceIndices([]v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
+	})
+	if len(out) != 0 {
+		t.Errorf("no failures should return nil/empty; got %v", out)
+	}
+}
