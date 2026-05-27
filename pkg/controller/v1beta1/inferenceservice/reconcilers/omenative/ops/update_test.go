@@ -1146,3 +1146,336 @@ func TestPodRuntimeImagesMatch_RegistryNormalization(t *testing.T) {
 // remove their string-formatted assertions.
 var _ = fmt.Sprint
 var _ = metav1.NewTime
+
+// ensureTargetCRWithMeta is ensureTargetCR's PodMeta-aware sibling. It
+// captures the user-intent annotations the operator wrote on
+// spec.{engine,decoder,router} via the meta parameter so the Bug #51
+// regression tests can verify those values reach the live pod after
+// an in-place rollout. nil meta degrades to the no-meta behavior of
+// ensureTargetCR (i.e., revision is hashed without a PodMeta block).
+func ensureTargetCRWithMeta(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, spec *corev1.PodSpec, meta *metav1.ObjectMeta) *appsv1.ControllerRevision {
+	t.Helper()
+	cr, _, err := revision.EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, meta, nil)
+	if err != nil {
+		t.Fatalf("revision.EnsureControllerRevision: %v", err)
+	}
+	return cr
+}
+
+// seedRunningRevisionWithMeta seeds a running revision (PodSpec +
+// PodMeta) and writes its CR name onto InstanceStatus.RunningRevision.
+// This is the Bug #51 baseline: the previous revision encoded the
+// pod's existing annotation set; the test then dispatches an in-place
+// update toward a target revision with a different annotation set and
+// asserts the live pod's metadata.annotations is reconciled.
+func seedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, spec *corev1.PodSpec, meta *metav1.ObjectMeta) {
+	t.Helper()
+	cr, _, err := revision.EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, meta, nil)
+	if err != nil {
+		t.Fatalf("seedRunningRevisionWithMeta: %v", err)
+	}
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read ISVC: %v", err)
+	}
+	if fresh.Status.Components == nil {
+		fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+	}
+	cs := fresh.Status.Components[component]
+	if cs.OMENative == nil {
+		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	}
+	for i := range cs.OMENative.InstanceStatuses {
+		if cs.OMENative.InstanceStatuses[i].Index == idx {
+			cs.OMENative.InstanceStatuses[i].RunningRevision = cr.Name
+			fresh.Status.Components[component] = cs
+			if err := c.Status().Update(context.Background(), fresh); err != nil {
+				t.Fatalf("set RunningRevision: %v", err)
+			}
+			if isvc.Status.Components == nil {
+				isvc.Status.Components = fresh.Status.Components
+			} else {
+				isvc.Status.Components[component] = fresh.Status.Components[component]
+			}
+			return
+		}
+	}
+	t.Fatalf("no InstanceStatus for idx=%d to attach RunningRevision", idx)
+}
+
+// TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod is the primary
+// regression test for Bug #51. Setup:
+//
+//  1. ISVC at incarnation 1, Ready on revision A which encoded
+//     annotation set {a:"1"}. The live pod carries {a:"1"} as it was
+//     rendered by Create at the previous revision.
+//  2. Operator edits spec.engine.annotations to {a:"1", b:"2"}. The
+//     reconciler builds the new ObjectMeta and EnsureControllerRevision
+//     produces revision B whose PodMeta carries the new set.
+//  3. The image is unchanged — only annotations diverged. In-place
+//     dispatch fires (PodSpec is identical so inPlaceEligible returns
+//     true; the trigger fires because the revision name changed).
+//
+// Expected: after the in-place pass the pod's metadata.annotations
+// contains BOTH {a:"1", b:"2"}. The pre-fix behavior left b:"2" stuck
+// on the ControllerRevision but never on the pod.
+func TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod(t *testing.T) {
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
+		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+			// markNotReady=false so we don't need to wire EndpointSlice
+			// drain fixtures — annotation propagation is orthogonal to
+			// the drain semantics.
+			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+				MarkNotReadyDuringLifecycle: boolPtr(false),
+			},
+		},
+	}
+	// Pod carries the previous-revision annotation set, plus a foreign
+	// annotation injected by a hypothetical webhook. The webhook
+	// annotation MUST survive — we explicitly DO NOT clobber non-
+	// OMENative annotations.
+	spec := targetSpecImage("llama:v1")
+	pod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	pod.Annotations = map[string]string{
+		"a":                 "1",
+		"linkerd.io/inject": "enabled", // webhook-set, foreign
+	}
+	c := newFakeClientWithDiscovery(t, isvc, pod)
+	// Running revision encodes the OMENative-owned annotation set {a:1}.
+	seedRunningRevisionWithMeta(t, c, isvc, v1beta1.EngineComponent, 0, spec,
+		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1"}})
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+	// Target revision: identical spec, new annotation set {a:1, b:2}.
+	target := ensureTargetCRWithMeta(t, c, isvc, v1beta1.EngineComponent, spec,
+		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1", "b": "2"}})
+
+	done, err := Update(context.Background(), p, plan, plan.Instances[0], target, spec)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	// done can be true (no image patch + annotation patch applied + already
+	// runtime-ready) or false (annotation patch is a no-op gate doesn't
+	// flip done). Either is acceptable — the focus is on the patch.
+	_ = done
+
+	got := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), got); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if v := got.Annotations["a"]; v != "1" {
+		t.Errorf("annotation 'a': got %q want \"1\" (preserved across in-place)", v)
+	}
+	if v := got.Annotations["b"]; v != "2" {
+		t.Errorf("annotation 'b': got %q want \"2\" — Bug #51 regressed: new spec annotation never reached pod", v)
+	}
+	if v := got.Annotations["linkerd.io/inject"]; v != "enabled" {
+		t.Errorf("foreign annotation linkerd.io/inject: got %q want \"enabled\" (must NOT be clobbered by in-place patch)", v)
+	}
+}
+
+// TestUpdate_InPlaceUpdate_RemovesAnnotationDroppedFromSpec pins the
+// removal half of Bug #51's design choice (a). When the operator
+// removes a key from spec.{component}.annotations that the previous
+// revision authored, the in-place patch removes it from the pod too.
+// The scoping rule — "only delete keys the previous revision once
+// authored" — protects foreign annotations from being collateral
+// damage on every spec edit.
+func TestUpdate_InPlaceUpdate_RemovesAnnotationDroppedFromSpec(t *testing.T) {
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
+		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+				MarkNotReadyDuringLifecycle: boolPtr(false),
+			},
+		},
+	}
+	spec := targetSpecImage("llama:v1")
+	pod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	pod.Annotations = map[string]string{
+		"a":                 "1",
+		"b":                 "2",
+		"linkerd.io/inject": "enabled",
+	}
+	c := newFakeClientWithDiscovery(t, isvc, pod)
+	// Previous revision authored {a, b}.
+	seedRunningRevisionWithMeta(t, c, isvc, v1beta1.EngineComponent, 0, spec,
+		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1", "b": "2"}})
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+	// Target revision: user removed 'b' from spec.
+	target := ensureTargetCRWithMeta(t, c, isvc, v1beta1.EngineComponent, spec,
+		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1"}})
+
+	if _, err := Update(context.Background(), p, plan, plan.Instances[0], target, spec); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), got); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if v := got.Annotations["a"]; v != "1" {
+		t.Errorf("annotation 'a': got %q want \"1\" (kept across in-place)", v)
+	}
+	if _, present := got.Annotations["b"]; present {
+		t.Errorf("annotation 'b' still on pod (got %q); user removed it from spec — in-place should drop it", got.Annotations["b"])
+	}
+	if v := got.Annotations["linkerd.io/inject"]; v != "enabled" {
+		t.Errorf("foreign annotation linkerd.io/inject: got %q want \"enabled\" (must NOT be deleted)", v)
+	}
+}
+
+// TestUpdate_InPlaceUpdate_LifecycleAnnotationFilterStillWorks is the
+// regression guard for the existing isLifecycleAnnotation filter in
+// revision.TemplateMeta. The filter must keep working so an in-flight
+// rollout-paused annotation or migration-request annotation does NOT
+// participate in the revision hash AND does not get clobbered by the
+// in-place annotation patch. (The PodMeta on a CR never carries
+// lifecycle annotations because TemplateMeta strips them at hash
+// time; therefore annotationsDiff never sees them as either previous
+// or target keys, and the live pod's value rides through unchanged.)
+func TestUpdate_InPlaceUpdate_LifecycleAnnotationFilterStillWorks(t *testing.T) {
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	// Operator wrote a rollout-paused annotation on the ISVC AND a real
+	// spec.engine.annotations edit. The rollout-paused must be filtered
+	// out of the CR's PodMeta (so the hash is stable across pause/unpause)
+	// and must NOT show up on the live pod even though the user wrote
+	// it onto the ISVC.
+	isvc.Annotations = map[string]string{
+		"ome.io/rollout-paused": "true",
+	}
+	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
+		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+				MarkNotReadyDuringLifecycle: boolPtr(false),
+			},
+		},
+	}
+	spec := targetSpecImage("llama:v1")
+	pod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	pod.Annotations = map[string]string{"a": "1"}
+	c := newFakeClientWithDiscovery(t, isvc, pod)
+	// Running revision's PodMeta has {a:1}; the lifecycle annotation
+	// "ome.io/rollout-paused" is intentionally NOT included here because
+	// the production reconciler calls revision.TemplateMeta which strips
+	// it. Simulate the same in the fixture.
+	seedRunningRevisionWithMeta(t, c, isvc, v1beta1.EngineComponent, 0, spec,
+		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1"}})
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+	// Target adds {b:2}; lifecycle annotation is again stripped from PodMeta.
+	target := ensureTargetCRWithMeta(t, c, isvc, v1beta1.EngineComponent, spec,
+		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1", "b": "2"}})
+
+	if _, err := Update(context.Background(), p, plan, plan.Instances[0], target, spec); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), got); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if v := got.Annotations["b"]; v != "2" {
+		t.Errorf("annotation 'b': got %q want \"2\" (in-place propagation regressed)", v)
+	}
+	if _, present := got.Annotations["ome.io/rollout-paused"]; present {
+		t.Errorf("lifecycle annotation 'ome.io/rollout-paused' leaked onto pod (got %q); the TemplateMeta filter must keep it out of the CR's PodMeta and therefore off the pod", got.Annotations["ome.io/rollout-paused"])
+	}
+}
+
+// TestAnnotationsDiff_Cases exercises the helper directly to pin
+// each branch of the (add | update | delete | leave-alone) decision
+// matrix. These cases compose into the per-pod patches but are easier
+// to reason about in isolation than via the full Update fixture.
+func TestAnnotationsDiff_Cases(t *testing.T) {
+	cases := []struct {
+		name                string
+		pod, previous, want map[string]string
+		expect              map[string]any
+	}{
+		{
+			name:     "no diff: nothing to patch",
+			pod:      map[string]string{"a": "1"},
+			previous: map[string]string{"a": "1"},
+			want:     map[string]string{"a": "1"},
+			expect:   map[string]any{},
+		},
+		{
+			name:     "add new key from target",
+			pod:      map[string]string{"a": "1"},
+			previous: map[string]string{"a": "1"},
+			want:     map[string]string{"a": "1", "b": "2"},
+			expect:   map[string]any{"b": "2"},
+		},
+		{
+			name:     "update existing target key with new value",
+			pod:      map[string]string{"a": "1"},
+			previous: map[string]string{"a": "1"},
+			want:     map[string]string{"a": "2"},
+			expect:   map[string]any{"a": "2"},
+		},
+		{
+			name:     "delete key the user removed (previous owned it)",
+			pod:      map[string]string{"a": "1", "b": "2"},
+			previous: map[string]string{"a": "1", "b": "2"},
+			want:     map[string]string{"a": "1"},
+			expect:   map[string]any{"b": nil},
+		},
+		{
+			name:     "leave foreign key alone (in pod, not in previous or target)",
+			pod:      map[string]string{"a": "1", "linkerd.io/inject": "enabled"},
+			previous: map[string]string{"a": "1"},
+			want:     map[string]string{"a": "1"},
+			expect:   map[string]any{},
+		},
+		{
+			name:     "delete only if pod actually has the key (no spurious null patch)",
+			pod:      map[string]string{"a": "1"},
+			previous: map[string]string{"a": "1", "b": "2"},
+			want:     map[string]string{"a": "1"},
+			expect:   map[string]any{},
+		},
+		{
+			name:     "nil-as-empty across all inputs",
+			pod:      nil,
+			previous: nil,
+			want:     nil,
+			expect:   map[string]any{},
+		},
+		{
+			name:     "first revision: previous nil, target adds key, pod empty",
+			pod:      nil,
+			previous: nil,
+			want:     map[string]string{"a": "1"},
+			expect:   map[string]any{"a": "1"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := annotationsDiff(tc.pod, tc.previous, tc.want)
+			if len(got) != len(tc.expect) {
+				t.Fatalf("diff length: got %d (%+v) want %d (%+v)", len(got), got, len(tc.expect), tc.expect)
+			}
+			for k, want := range tc.expect {
+				gv, ok := got[k]
+				if !ok {
+					t.Errorf("missing key %q in diff", k)
+					continue
+				}
+				if want == nil && gv != nil {
+					t.Errorf("key %q: got %+v want nil", k, gv)
+				}
+				if want != nil && gv != want {
+					t.Errorf("key %q: got %+v want %+v", k, gv, want)
+				}
+			}
+		})
+	}
+}

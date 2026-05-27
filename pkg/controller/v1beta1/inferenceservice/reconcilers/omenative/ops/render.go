@@ -140,11 +140,43 @@ func RenderWithRevision(
 		})
 	}
 
+	// Last-line container-name backfill: apiserver rejects Pod creates
+	// when any container has Name="" with
+	// `spec.containers[N].name: Required value`. The upstream merge
+	// (utils.MergeRuntimeContainers / utils.restoreRunnerName) already
+	// stamps constants.MainContainerName when neither the ServingRuntime
+	// nor the ISVC sets a runner name, but a caller that builds a PodSpec
+	// directly (back-compat tests, future direct callers) can still hand
+	// us an unnamed container. Stamp the canonical default here so the
+	// render path is the single source of truth at apply time. See Bug #42.
+	backfillEmptyContainerNames(&pod.Spec)
+
 	injectOMENativeEnv(pod, plan, inst, runner, ordinal, isvc.Name)
 	injectPeerEndpointEnv(pod, isvc, plan.Component, revisionHash)
 	applyMigrationOverlay(pod, inst.MigrationOverlay)
 
 	return pod, nil
+}
+
+// backfillEmptyContainerNames stamps constants.MainContainerName on any
+// regular or init container whose Name is the empty string. Mirrors the
+// final fallback in utils.MergeRuntimeContainers so the apply-time pod
+// is always nameable regardless of which upstream path produced its
+// PodSpec. Idempotent — already-named containers round-trip unchanged.
+func backfillEmptyContainerNames(spec *corev1.PodSpec) {
+	if spec == nil {
+		return
+	}
+	for i := range spec.Containers {
+		if spec.Containers[i].Name == "" {
+			spec.Containers[i].Name = constants.MainContainerName
+		}
+	}
+	for i := range spec.InitContainers {
+		if spec.InitContainers[i].Name == "" {
+			spec.InitContainers[i].Name = constants.MainContainerName
+		}
+	}
 }
 
 // injectPeerEndpointEnv stamps OME_<PEER>_ENDPOINT and

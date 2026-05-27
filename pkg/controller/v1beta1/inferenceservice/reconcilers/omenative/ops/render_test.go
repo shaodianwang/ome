@@ -746,3 +746,113 @@ func TestWouldOverlayConflictWithNodeAffinity_NilOverlayOrEmptyFromNode(t *testi
 		t.Errorf("empty FromNode must not conflict")
 	}
 }
+
+// TestRender_ContainerName_FallbackPrecedence pins the precedence walk
+// for rendered container names when the upstream merge layer hasn't
+// stamped a name. Render is the apply-time chokepoint that talks to the
+// apiserver; an empty container Name produces a Pod-create rejection
+// (`spec.containers[N].name: Required value`) that deadlocks OMENative
+// rollouts (see Bug #42).
+//
+// The precedence under test:
+//
+//  1. Container name set on the PodSpec we receive → preserved as-is.
+//     Upstream merge ran or the user template explicitly named the
+//     container; either way we don't overwrite.
+//  2. Container name empty AND we have a PodSpec → backfill to the
+//     canonical "ome-container". Single source of truth at apply time
+//     so the bug surfaces neither at Pod-create nor at runtime.
+//  3. Multiple containers with mixed empty/non-empty names → only the
+//     empty ones get the default; named siblings are untouched.
+//  4. Init containers get the same treatment as regular containers.
+//
+// Note: cases where upstream merge correctly picks the ServingRuntime's
+// engineConfig.runner.name are covered by utils.MergeRuntimeContainers
+// tests (since the merge happens upstream of render); this test focuses
+// on the render-layer last-line backfill that catches direct callers.
+func TestRender_ContainerName_FallbackPrecedence(t *testing.T) {
+	plan, inst, runner := singlePodPlan()
+
+	// Case (a): caller set a name explicitly → preserved.
+	t.Run("explicit name is preserved", func(t *testing.T) {
+		spec := &corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "my-runner", Image: "img:v1"}},
+		}
+		pod, err := Render(basicISVC(), spec, plan, inst, runner, 0)
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		if got := pod.Spec.Containers[0].Name; got != "my-runner" {
+			t.Errorf("Containers[0].Name: got %q want my-runner", got)
+		}
+	})
+
+	// Case (b): caller left the container unnamed (e.g., neither ISVC
+	// nor runtime stamped one and the merge produced "") → backfill to
+	// the canonical default.
+	t.Run("empty name falls back to ome-container", func(t *testing.T) {
+		spec := &corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "", Image: "img:v1"}},
+		}
+		pod, err := Render(basicISVC(), spec, plan, inst, runner, 0)
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		if got := pod.Spec.Containers[0].Name; got != constants.MainContainerName {
+			t.Errorf("Containers[0].Name: got %q want %q", got, constants.MainContainerName)
+		}
+	})
+
+	// Case (c): mixed slice — empty names get the default; named
+	// siblings are untouched.
+	t.Run("only empty names are backfilled", func(t *testing.T) {
+		spec := &corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "sidecar", Image: "sc:v1"},
+				{Name: "", Image: "main:v1"},
+			},
+		}
+		pod, err := Render(basicISVC(), spec, plan, inst, runner, 0)
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		if got := pod.Spec.Containers[0].Name; got != "sidecar" {
+			t.Errorf("Containers[0].Name (sidecar): got %q want sidecar", got)
+		}
+		if got := pod.Spec.Containers[1].Name; got != constants.MainContainerName {
+			t.Errorf("Containers[1].Name (was empty): got %q want %q", got, constants.MainContainerName)
+		}
+	})
+
+	// Case (d): init containers get the same treatment; an unnamed init
+	// container is just as fatal at apply-time as an unnamed regular one.
+	t.Run("init containers backfilled too", func(t *testing.T) {
+		spec := &corev1.PodSpec{
+			InitContainers: []corev1.Container{{Name: "", Image: "init:v1"}},
+			Containers:     []corev1.Container{{Name: "main", Image: "main:v1"}},
+		}
+		pod, err := Render(basicISVC(), spec, plan, inst, runner, 0)
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		if got := pod.Spec.InitContainers[0].Name; got != constants.MainContainerName {
+			t.Errorf("InitContainers[0].Name: got %q want %q", got, constants.MainContainerName)
+		}
+	})
+}
+
+// TestBackfillEmptyContainerNames pins the helper's nil-and-zero
+// semantics directly — Render's wrapper test above exercises the
+// "with-Render" path; this one isolates the helper for documentation.
+func TestBackfillEmptyContainerNames(t *testing.T) {
+	t.Run("nil spec is a no-op", func(t *testing.T) {
+		backfillEmptyContainerNames(nil) // must not panic
+	})
+	t.Run("zero containers is a no-op", func(t *testing.T) {
+		spec := &corev1.PodSpec{}
+		backfillEmptyContainerNames(spec)
+		if len(spec.Containers) != 0 || len(spec.InitContainers) != 0 {
+			t.Errorf("must not invent containers; got %+v", spec)
+		}
+	})
+}

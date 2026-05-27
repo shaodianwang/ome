@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // MergeRuntimeContainers Merge the predictor Container struct with the runtime Container struct, allowing users
@@ -43,8 +44,18 @@ func MergeRuntimeContainers(runtimeContainer *v1.Container, predictorContainer *
 		return nil, err
 	}
 
+	// Container name precedence walk: predictor (post-merge) wins, then
+	// fall back to the runtime's pre-merge name, then to the canonical
+	// "ome-container" default. The final default prevents the apiserver
+	// "spec.containers[0].name: Required value" rejection when neither
+	// the ServingRuntime's runner nor the ISVC's runner sets a container
+	// name (the previous behavior left mergedContainer.Name="", which
+	// deadlocked OMENative rollouts at Pod create time; see Bug #42).
 	if mergedContainer.Name == "" {
 		mergedContainer.Name = runtimeContainerName
+	}
+	if mergedContainer.Name == "" {
+		mergedContainer.Name = constants.MainContainerName
 	}
 
 	// Strategic merge patch will replace args but more useful behaviour here is to concatenate
@@ -116,15 +127,23 @@ func MergeRouterSpec(isvcRouter, runtimeRouter *v1beta1.RouterSpec) (*v1beta1.Ro
 // OMENative rollouts. Same shape as the post-merge fixup
 // MergeRuntimeContainers applies at the v1.Container level.
 //
-// Both pointers may be nil — guard accordingly. We only restore from
-// runtime when merged Name is empty; an explicit user-set name is
-// preserved.
+// Precedence walk: (1) preserve the merged name when set, (2) fall back
+// to the runtime RunnerSpec's name, (3) fall back to the canonical
+// "ome-container" default when neither side names the container — same
+// final default MergeRuntimeContainers applies, kept in sync so the two
+// merge paths produce identical Pod-name behavior. The merged pointer
+// may be nil — guard accordingly. The runtime pointer is allowed to be
+// nil too; in that case we still apply the canonical default if merged
+// is non-nil with an empty name.
 func restoreRunnerName(merged, runtime *v1beta1.RunnerSpec) {
-	if merged == nil || runtime == nil {
+	if merged == nil {
 		return
 	}
-	if merged.Name == "" {
+	if merged.Name == "" && runtime != nil {
 		merged.Name = runtime.Name
+	}
+	if merged.Name == "" {
+		merged.Name = constants.MainContainerName
 	}
 }
 

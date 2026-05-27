@@ -246,6 +246,21 @@ func inPlaceEligible(running, target *corev1.PodSpec) bool {
 // exists, no RunningRevision is recorded, or the CR is gone — callers
 // treat that as no baseline and route to recreate.
 func loadRunningRevisionPodSpec(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) (*corev1.PodSpec, error) {
+	payload, err := loadRunningRevisionPayload(ctx, reads, isvc, component, idx)
+	if err != nil || payload == nil {
+		return nil, err
+	}
+	return payload.PodSpec, nil
+}
+
+// loadRunningRevisionPayload is loadRunningRevisionPodSpec's superset
+// that returns the full revision.DataPayload (PodSpec + PodMeta +
+// WorkerPodSpec). Used by inPlaceUpdate's annotation-reconciliation
+// pass to compute the diff between the running PodMeta (annotations
+// owned by the previous revision) and the target PodMeta (annotations
+// the user just edited). Returns (nil, nil) on the same not-found /
+// no-status edge cases as loadRunningRevisionPodSpec.
+func loadRunningRevisionPayload(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) (*revision.DataPayload, error) {
 	s := query.FindInstanceStatus(isvc, component, idx)
 	if s == nil || s.RunningRevision == "" {
 		return nil, nil
@@ -262,7 +277,25 @@ func loadRunningRevisionPodSpec(ctx context.Context, reads client.Reader, isvc *
 	if err := json.Unmarshal(cr.Data.Raw, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal running CR %s data: %w", s.RunningRevision, err)
 	}
-	return payload.PodSpec, nil
+	return &payload, nil
+}
+
+// loadControllerRevisionPayload unmarshals a CR's raw data into a
+// revision.DataPayload. The CR is the source of truth for the
+// per-revision pod-template metadata; in-place rollouts read PodMeta
+// from here to reconcile the live pod's annotations against the new
+// revision. Returns (nil, nil) when the CR is nil or its data is
+// empty so callers can fall through without erroring on benign
+// edge cases (e.g., a freshly-created CR observed mid-write).
+func loadControllerRevisionPayload(cr *appsv1.ControllerRevision) (*revision.DataPayload, error) {
+	if cr == nil || len(cr.Data.Raw) == 0 {
+		return nil, nil
+	}
+	var payload revision.DataPayload
+	if err := json.Unmarshal(cr.Data.Raw, &payload); err != nil {
+		return nil, fmt.Errorf("unmarshal CR %s data: %w", cr.Name, err)
+	}
+	return &payload, nil
 }
 
 // podSpecWithoutImages returns the JSON form with regular-container
@@ -277,8 +310,28 @@ func podSpecWithoutImages(spec *corev1.PodSpec) ([]byte, error) {
 }
 
 // inPlaceUpdate runs the in-place rollout: drain (optional), patch
-// container images, wait for runtime ready on the target image, flip
+// container images, propagate pod-template annotations from the
+// target revision, wait for runtime ready on the target image, flip
 // serving back, promote Ready. Multi-pass; idempotent.
+//
+// Annotation propagation (Bug #51): the previous behavior patched
+// only container images, leaving pod.metadata.annotations stuck at
+// the value the pod was created with. Operators editing
+// spec.{engine,decoder,router}.annotations during an
+// in-place-eligible rollout saw the new annotation surface on the
+// ControllerRevision but never on the live Pod, breaking observability
+// hints (linkerd.io/inject, prometheus.io/* etc.) that users
+// reasonably expect to apply without bouncing pods.
+//
+// Design choice (a): in-place rolls now reconcile pod annotations
+// against the new revision's PodMeta. Add/update keys present in the
+// new spec, delete keys the user removed (scoped to keys the previous
+// revision once authored — third-party annotations stay), leave
+// foreign keys alone. (b) "force recreate on any annotation change"
+// was considered and rejected: annotations are not load-bearing for
+// runtime image semantics and the recreate would defeat the
+// zero-downtime contract operators expect from
+// InPlaceIfPossible / InPlaceOnly.
 func inPlaceUpdate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, pods []*corev1.Pod) (bool, error) {
 	// In-place keeps the same Incarnation — only the container image rolls.
 	wasNotUpdating := true
@@ -326,6 +379,30 @@ func inPlaceUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compon
 		}
 	}
 
+	// Pre-load the target + running revision metadata once, before the
+	// per-pod patch loop. The CR's PodMeta is the source of truth for the
+	// annotation set the new revision authored; the running revision's
+	// PodMeta tells us which keys the previous spec owned (so we can
+	// delete the ones the user just removed without clobbering keys set
+	// by other controllers / pod-mutating webhooks). Both can be nil on
+	// edge cases (CR with no PodMeta yet, first in-place update with no
+	// recorded running CR) — annotationsDiff handles nil-as-empty.
+	targetPayload, err := loadControllerRevisionPayload(target)
+	if err != nil {
+		return false, fmt.Errorf("load target CR data (instance=%d): %w", inst.Index, err)
+	}
+	runningPayload, err := loadRunningRevisionPayload(ctx, p.Reader(), p.ISVC, plan.Component, inst.Index)
+	if err != nil {
+		return false, fmt.Errorf("load running CR data (instance=%d): %w", inst.Index, err)
+	}
+	var targetAnnotations, previousAnnotations map[string]string
+	if targetPayload != nil && targetPayload.PodMeta != nil {
+		targetAnnotations = targetPayload.PodMeta.Annotations
+	}
+	if runningPayload != nil && runningPayload.PodMeta != nil {
+		previousAnnotations = runningPayload.PodMeta.Annotations
+	}
+
 	// Image patch. When markNotReady=true, re-read each pod and re-check
 	// podreadiness.IsServing immediately before patching — a concurrent writer (another
 	// controller, a pod-mutating webhook re-injecting a sidecar) could flip
@@ -333,12 +410,16 @@ func inPlaceUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compon
 	// serving pod violates the always-drain-first invariant. On detection,
 	// re-mark NotServing and requeue. Live reader so a stale serving=False
 	// view doesn't fail the recheck open.
+	//
+	// The annotation patch piggybacks on this loop: per-pod, after a
+	// successful (or no-op) image patch, reconcile annotations toward
+	// the target. Annotations apply immediately (no kubelet roll needed),
+	// so we don't need to gate convergence on them — but they MUST land
+	// before we mark Ready or operators see an out-of-date pod.
 	patched := false
 	for _, pod := range pods {
-		if podImagesMatch(pod, targetSpec) {
-			continue
-		}
-		if markNotReady {
+		needsImagePatch := !podImagesMatch(pod, targetSpec)
+		if markNotReady && needsImagePatch {
 			fresh := &corev1.Pod{}
 			if gerr := p.Reader().Get(ctx, client.ObjectKeyFromObject(pod), fresh); gerr != nil {
 				if apierrors.IsNotFound(gerr) {
@@ -354,10 +435,15 @@ func inPlaceUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compon
 			}
 			pod = fresh
 		}
-		if err := patchPodImages(ctx, p.Client, pod, targetSpec); err != nil {
-			return false, fmt.Errorf("patch images (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+		if needsImagePatch {
+			if err := patchPodImages(ctx, p.Client, pod, targetSpec); err != nil {
+				return false, fmt.Errorf("patch images (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+			}
+			patched = true
 		}
-		patched = true
+		if err := patchPodAnnotations(ctx, p.Client, pod, previousAnnotations, targetAnnotations); err != nil {
+			return false, fmt.Errorf("patch annotations (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+		}
 	}
 	if patched {
 		// Kubelet needs another pass to roll the containers.
@@ -699,6 +785,80 @@ func patchPodImages(ctx context.Context, c client.Client, pod *corev1.Pod, targe
 	}
 	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
 		return fmt.Errorf("patch pod %s/%s images: %w", pod.Namespace, pod.Name, err)
+	}
+	return nil
+}
+
+// annotationsDiff computes the patch values that reconcile a pod's
+// metadata.annotations toward the target revision's PodMeta:
+//
+//   - keys in target that are missing or have a different value on pod
+//     map to their target value (add/update).
+//   - keys that existed on the previous revision's PodMeta but are gone
+//     from target map to nil (delete via strategic-merge JSON null).
+//   - keys on pod that are foreign to both previous and target (sidecar
+//     webhook injections, CNI attachments, kubelet-stamped values) are
+//     left alone — they are not OMENative-owned.
+//
+// Returns an empty map when nothing needs to change. Order of map
+// iteration doesn't affect the patch payload.
+//
+// Why we don't blindly replace the whole annotation set: third-party
+// controllers (linkerd, istio, the Pod mutator webhook) routinely add
+// annotations that aren't on any ControllerRevision. Erasing them on
+// every in-place pass would break those integrations on every spec
+// edit. The previous-CR diff lets OMENative remove ONLY keys it once
+// authored that the user has since deleted from spec.
+func annotationsDiff(podAnnotations, previousTargetAnnotations, newTargetAnnotations map[string]string) map[string]any {
+	out := map[string]any{}
+	// Add/update: every key in the new target whose pod value differs.
+	for k, want := range newTargetAnnotations {
+		if got, ok := podAnnotations[k]; !ok || got != want {
+			out[k] = want
+		}
+	}
+	// Delete: keys that were OMENative-owned in the previous revision
+	// but the user removed from spec. Skip keys that already-don't-exist
+	// on the pod (no need to issue a delete for a no-op) and skip keys
+	// still present in the new target (they were handled by the
+	// add/update loop above).
+	for k := range previousTargetAnnotations {
+		if _, stillTarget := newTargetAnnotations[k]; stillTarget {
+			continue
+		}
+		if _, onPod := podAnnotations[k]; !onPod {
+			continue
+		}
+		out[k] = nil
+	}
+	return out
+}
+
+// patchPodAnnotations applies a strategic-merge patch on the pod's
+// metadata.annotations to reconcile it toward the target revision's
+// PodMeta. previousTargetAnnotations is the running revision's PodMeta
+// (used to compute which keys OMENative owns and is allowed to
+// delete). Idempotent — no patch is issued when the diff is empty
+// (closes Bug #51: in-place updates previously left
+// pod.metadata.annotations stuck at the value the pod was created with,
+// so spec.{component}.annotations edits during an in-place-eligible
+// rollout never reached the pod).
+func patchPodAnnotations(ctx context.Context, c client.Client, pod *corev1.Pod, previousTargetAnnotations, newTargetAnnotations map[string]string) error {
+	if pod == nil {
+		return fmt.Errorf("patchPodAnnotations: nil pod")
+	}
+	diff := annotationsDiff(pod.Annotations, previousTargetAnnotations, newTargetAnnotations)
+	if len(diff) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"annotations": diff},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal annotation patch for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
+		return fmt.Errorf("patch pod %s/%s annotations: %w", pod.Namespace, pod.Name, err)
 	}
 	return nil
 }

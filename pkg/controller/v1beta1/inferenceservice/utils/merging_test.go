@@ -4,6 +4,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/core/v1"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 func TestMergeArgs(t *testing.T) {
@@ -556,4 +560,81 @@ func TestOverrideKeyValueInSlice(t *testing.T) {
 			assert.Equal(t, tt.expectedArgs, result)
 		})
 	}
+}
+
+// TestMergeRuntimeContainers_NamePrecedence pins the three-step
+// container-name fallback walk MergeRuntimeContainers applies after the
+// strategic-merge patch. (Bug #42: an empty merged Name deadlocks
+// OMENative rollouts at Pod create time with
+// `spec.containers[0].name: Required value`.)
+//
+//	(a) predictor name set → predictor name wins (post-merge).
+//	(b) predictor name empty + runtime name set → runtime name wins.
+//	(c) both empty → "ome-container" canonical default.
+func TestMergeRuntimeContainers_NamePrecedence(t *testing.T) {
+	t.Run("(a) predictor wins", func(t *testing.T) {
+		merged, err := MergeRuntimeContainers(
+			&v1.Container{Name: "rt-name", Image: "rt:v1"},
+			&v1.Container{Name: "user-name", Image: "user:v1"},
+		)
+		assert.NoError(t, err)
+		assert.Equal(t, "user-name", merged.Name)
+	})
+
+	t.Run("(b) predictor empty falls back to runtime", func(t *testing.T) {
+		merged, err := MergeRuntimeContainers(
+			&v1.Container{Name: "rt-name", Image: "rt:v1"},
+			&v1.Container{Name: "", Image: "user:v1"},
+		)
+		assert.NoError(t, err)
+		assert.Equal(t, "rt-name", merged.Name)
+	})
+
+	t.Run("(c) both empty falls back to ome-container", func(t *testing.T) {
+		merged, err := MergeRuntimeContainers(
+			&v1.Container{Name: "", Image: "rt:v1"},
+			&v1.Container{Name: "", Image: "user:v1"},
+		)
+		assert.NoError(t, err)
+		assert.Equal(t, constants.MainContainerName, merged.Name)
+	})
+}
+
+// TestRestoreRunnerName_FallbackPrecedence pins the precedence walk
+// restoreRunnerName performs on the v1beta1.RunnerSpec layer (sibling
+// of the v1.Container layer in MergeRuntimeContainers). The two paths
+// must produce identical final names so the rendered Pod is consistent
+// regardless of which merger ran last upstream.
+func TestRestoreRunnerName_FallbackPrecedence(t *testing.T) {
+	t.Run("(a) merged name preserved", func(t *testing.T) {
+		merged := &v1beta1.RunnerSpec{Container: v1.Container{Name: "user-name"}}
+		runtime := &v1beta1.RunnerSpec{Container: v1.Container{Name: "rt-name"}}
+		restoreRunnerName(merged, runtime)
+		assert.Equal(t, "user-name", merged.Name)
+	})
+
+	t.Run("(b) merged empty falls back to runtime name", func(t *testing.T) {
+		merged := &v1beta1.RunnerSpec{Container: v1.Container{Name: ""}}
+		runtime := &v1beta1.RunnerSpec{Container: v1.Container{Name: "rt-name"}}
+		restoreRunnerName(merged, runtime)
+		assert.Equal(t, "rt-name", merged.Name)
+	})
+
+	t.Run("(c) both empty falls back to ome-container", func(t *testing.T) {
+		merged := &v1beta1.RunnerSpec{Container: v1.Container{Name: ""}}
+		runtime := &v1beta1.RunnerSpec{Container: v1.Container{Name: ""}}
+		restoreRunnerName(merged, runtime)
+		assert.Equal(t, constants.MainContainerName, merged.Name)
+	})
+
+	t.Run("nil runtime + empty merged falls back to default", func(t *testing.T) {
+		merged := &v1beta1.RunnerSpec{Container: v1.Container{Name: ""}}
+		restoreRunnerName(merged, nil)
+		assert.Equal(t, constants.MainContainerName, merged.Name)
+	})
+
+	t.Run("nil merged is a no-op", func(t *testing.T) {
+		// must not panic
+		restoreRunnerName(nil, &v1beta1.RunnerSpec{Container: v1.Container{Name: "x"}})
+	})
 }
