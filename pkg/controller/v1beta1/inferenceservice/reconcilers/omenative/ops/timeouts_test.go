@@ -616,6 +616,61 @@ func TestExpireOperationsIfDeadlinePassed_PhaseEscalationIsIdempotent(t *testing
 	}
 }
 
+// TestExpireOperationsIfDeadlinePassed_SurgeStepEscalatesPhase pins the
+// slow-path equivalent of the fast-path status_aggregate
+// stuck-pod-failure escalation: a SurgeThenDrain Op{Step=Surge} whose
+// Deadline elapsed (default InstanceReadyTimeout 30 min) must escalate
+// the Instance to Phase=Failed so the coordination layer's per-Component
+// rollup can flip the group's phase to Failed.
+//
+// The fast-path (status_aggregate.escalateStuckPodFailures) catches
+// ImagePullBackOff / ErrImagePull within ~60s; this slow-path catches
+// every OTHER wedge mode (drain races, runtime hangs, slow registries
+// where the pull succeeds but the container never reports Ready) where
+// no kubelet signal is available to fast-fail on. Locks in the
+// behavior the X-1 reproduction needs as a backstop independent of pod
+// state.
+func TestExpireOperationsIfDeadlinePassed_SurgeStepEscalatesPhase(t *testing.T) {
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Incarnation:     1,
+		Phase:           v1beta1.OMENativeInstanceUpdating,
+		RunningRevision: "old-rev",
+		TargetRevision:  "new-rev",
+		ActiveOrdinal:   0,
+		Operation: &v1beta1.InstanceOperation{
+			Type:     v1beta1.InstanceOperationUpdate,
+			Step:     updateStepSurge,
+			Deadline: pastDeadline(),
+		},
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, _ := core.BuildPlan(p)
+
+	if err := ExpireOperationsIfDeadlinePassed(context.Background(), p, plan); err != nil {
+		t.Fatalf("ExpireOperationsIfDeadlinePassed: %v", err)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Operation == nil {
+		t.Fatalf("Operation must be preserved on surge timeout; got nil")
+	}
+	if s.Operation.Reason != status.ReasonDeadlineExceeded {
+		t.Errorf("Operation.Reason: got %q want %q", s.Operation.Reason, status.ReasonDeadlineExceeded)
+	}
+	if s.Operation.Step != updateStepSurge {
+		t.Errorf("Operation.Step: got %q want Surge (preserved as breadcrumb)", s.Operation.Step)
+	}
+	if s.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Errorf("Phase: must escalate to Failed (coord layer fails the group); got %q", s.Phase)
+	}
+}
+
 func TestExpireOperationsIfDeadlinePassed_InPlaceFallbackDoesNotEscalate(t *testing.T) {
 	// In-place updates have a recovery path (fall back to recreate).
 	// Phase is reset to Ready, NOT escalated to Failed — the rollout

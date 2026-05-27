@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -164,6 +165,24 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		return err
 	}
 
+	// Fast-failure escalation: any Instance currently in a transient
+	// phase (Creating / Updating / Restarting / Migrating) whose pods
+	// have been stuck in a non-recoverable kubelet waiting state
+	// (ImagePullBackOff / ErrImagePull / InvalidImageName /
+	// CreateContainerError) past the stuck-pod grace window gets
+	// escalated to Phase=Failed immediately, without waiting for the
+	// (default 30 min) per-Instance Operation deadline. This is the
+	// operator-visible fix for the SurgeThenDrain bad-image scenario
+	// — bumping a Component to a missing image tag now surfaces
+	// Component.Failed within seconds of the kubelet stabilizing on
+	// ImagePullBackOff, not 30+ minutes later. The slow Deadline path
+	// in ops/timeouts.go is the backstop for other op-step wedges
+	// (drain races, runtime hangs, etc.) where there's no kubelet
+	// signal to act on early.
+	if eerr := escalateStuckPodFailures(ctx, p, plan, byIndex); eerr != nil {
+		return fmt.Errorf("status: escalate stuck pod failures: %w", eerr)
+	}
+
 	// Retention runs post-commit. The liveNames union ensures in-flight
 	// migrations whose RunningRevision points to an older CR aren't
 	// retention-deleted out from under them.
@@ -179,6 +198,145 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		return fmt.Errorf("status: retain revisions: %w", rerr)
 	}
 	return nil
+}
+
+// StuckPodFailureGracePeriod is the wait window after a pod's
+// CreationTimestamp before a terminal kubelet waiting state
+// (ImagePullBackOff, ErrImagePull, InvalidImageName,
+// CreateContainerConfigError, CreateContainerError) escalates the owning
+// Instance to Phase=Failed. Tuned to debounce the transient
+// ContainerCreating / ImagePulling states that a real kubelet briefly
+// passes through on initial pod placement — 60 seconds is comfortable
+// headroom for a 5–10 second pull cycle on a healthy node before
+// committing to "this is genuinely stuck."
+//
+// Exported so tests can lower the value to keep test runtime sane while
+// still exercising the real escalation path (a hardcoded constant would
+// force tests to spin for 60+ seconds per case, gating the suite on a
+// wall-clock that adds nothing to coverage).
+var StuckPodFailureGracePeriod = 60 * time.Second
+
+// escalateStuckPodFailures walks every InstanceStatus whose Operation
+// is in flight and whose Phase is a transient one (Creating / Updating /
+// Restarting / Migrating). For each such Instance, if any of its pods
+// has been in a terminal kubelet waiting state past
+// StuckPodFailureGracePeriod, escalate the Instance to Phase=Failed
+// and emit a Warning event naming the stuck pod + reason.
+//
+// Idempotent: a second pass on an already-Failed Instance is a no-op
+// (no status write, no event). The coordination layer's
+// buildComponentObservation sees the Phase=Failed flip on the next
+// read and lifts it to Component.Failed → group Phase=Failed.
+//
+// Reads byIndex (the per-Instance live pod buckets the caller already
+// computed for counters) so we don't re-list pods. Walks
+// p.ISVC.Status.Components after the AggregateAndWriteStatus retry has
+// committed, so the InstanceStatus.Phase we read is the post-counters
+// version (no pre-commit / post-commit race).
+func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan ComponentPlan, byIndex map[int32][]*corev1.Pod) error {
+	if p.ISVC == nil {
+		return nil
+	}
+	cs, ok := p.ISVC.Status.Components[plan.Component]
+	if !ok || cs.OMENative == nil {
+		return nil
+	}
+	now := time.Now()
+	for _, s := range cs.OMENative.InstanceStatuses {
+		if !shouldCheckForStuckPods(&s) {
+			continue
+		}
+		stuckPod, reason := firstStuckPodForInstance(byIndex[s.Index], now)
+		if stuckPod == nil {
+			continue
+		}
+		// Idempotent: skip the mutate when already at Phase=Failed so
+		// the operator-facing event fires exactly once per escalation.
+		if s.Phase == v1beta1.OMENativeInstanceFailed {
+			continue
+		}
+		if err := stampInstanceFailedForStuckPod(ctx, p, plan.Component, s.Index); err != nil {
+			return fmt.Errorf("stamp Phase=Failed (instance=%d): %w", s.Index, err)
+		}
+		status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonInstanceFailed,
+			"OMENative %s escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)",
+			status.InstanceKey(plan.Component, s.Index), stuckPod.Name, reason)
+	}
+	return nil
+}
+
+// shouldCheckForStuckPods reports whether s qualifies for the
+// fast-failure check. Only Instances with an in-flight Operation in a
+// transient phase are candidates: a Ready Instance has no in-flight
+// failure to escalate, a Failed Instance is already done, and Deleting
+// is owned by the Delete pass (which has its own deadline). Instances
+// with no Operation at all (steady-state Ready / freshly-created)
+// also have nothing to escalate.
+func shouldCheckForStuckPods(s *v1beta1.OMENativeInstanceStatus) bool {
+	if s == nil || s.Operation == nil {
+		return false
+	}
+	switch s.Phase {
+	case v1beta1.OMENativeInstanceCreating,
+		v1beta1.OMENativeInstanceUpdating,
+		v1beta1.OMENativeInstanceRestarting,
+		v1beta1.OMENativeInstanceMigrating:
+		return true
+	}
+	return false
+}
+
+// firstStuckPodForInstance returns the first pod in pods that is stuck
+// in a terminal kubelet waiting state past the grace window, plus the
+// kubelet reason string. Returns (nil, "") when no pod is stuck —
+// caller skips escalation.
+//
+// "First" is order-deterministic by the input slice; callers that need
+// a stable index should sort pods before calling. For event emission
+// the order doesn't matter (the message names the specific pod).
+func firstStuckPodForInstance(pods []*corev1.Pod, now time.Time) (*corev1.Pod, string) {
+	for _, pod := range pods {
+		if pod == nil {
+			continue
+		}
+		// Skip pods marked for deletion — kubelet may be tearing them
+		// down, and "ImagePullBackOff on a deleting pod" is not an
+		// escalation signal (the pod is about to be gone anyway).
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		if stuck, reason := status.PodStuckPullFailure(pod, now, StuckPodFailureGracePeriod); stuck {
+			return pod, reason
+		}
+	}
+	return nil, ""
+}
+
+// stampInstanceFailedForStuckPod is the status-side counterpart to
+// ops/timeouts.go's stampInstanceFailed — escalates Phase to Failed
+// when a stuck pod past grace forces the controller to give up on
+// converging the Instance. Mirrors the Operation guard
+// (`if s.Operation == nil` returns false) so a removed-then-readded
+// InstanceStatus race in the same reconcile pass doesn't accidentally
+// resurrect a deliberately-deleted Instance.
+//
+// The Operation is preserved — operators want to see WHAT was in flight
+// when the kubelet wedge surfaced. The OperationStuck condition stays
+// False here (only the Deadline path stamps OperationStuck=True via
+// Operation.Reason=DeadlineExceeded — the stuck-pod path is a different
+// failure mode and gets its own surface via the InstanceFailed event +
+// Phase=Failed alone).
+func stampInstanceFailedForStuckPod(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32) error {
+	return status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
+		if s.Operation == nil {
+			return false
+		}
+		if s.Phase == v1beta1.OMENativeInstanceFailed {
+			return false
+		}
+		s.Phase = v1beta1.OMENativeInstanceFailed
+		return true
+	})
 }
 
 // defaultRevisionRetention caps non-live ControllerRevisions per
