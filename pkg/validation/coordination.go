@@ -10,6 +10,8 @@ package validation
 import (
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/util/intstr"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 )
@@ -72,6 +74,12 @@ func ValidateCoordination(spec *v1beta1.InferenceServiceSpec) error {
 		return err
 	}
 	if err := validateComponentsAreOMENative(spec, groups); err != nil {
+		return err
+	}
+	if err := validatePacingCompatibility(groups); err != nil {
+		return err
+	}
+	if err := validatePacingNotZeroBudget(groups); err != nil {
 		return err
 	}
 	return nil
@@ -237,6 +245,79 @@ func validateComponentsAreOMENative(spec *v1beta1.InferenceServiceSpec, groups [
 		}
 	}
 	return nil
+}
+
+// validatePacingCompatibility rejects coordination groups whose policy
+// is incompatible with the declared pacing.type. The only invalid
+// combination today is Sequential + RatioBalanced — Sequential
+// serializes the rollout so only one Component is in flight at a time,
+// leaving the cross-Component ratio that RatioBalanced is supposed to
+// enforce undefined. Mirrors the runtime safety net in
+// pkg/.../coordination/groups.go:251 (ValidateGroupShape).
+//
+// Reproduces W-1 in .claude/specs/2026-05-25-real-cluster-tests/README.md.
+func validatePacingCompatibility(groups []v1beta1.RolloutCoordinationGroup) error {
+	for i, g := range groups {
+		if g.Policy != v1beta1.CoordinationPolicySequential {
+			continue
+		}
+		if g.Pacing == nil {
+			continue
+		}
+		if g.Pacing.Type == v1beta1.CoordinationPacingRatioBalanced {
+			return fmt.Errorf("spec.rolloutCoordination.groups[%d]: Sequential cannot use RatioBalanced pacing — only one Component rolls at a time, so the cross-Component ratio is undefined (%s)",
+				i, ReasonSequentialIncompatibleWithRatioBalanced)
+		}
+	}
+	return nil
+}
+
+// validatePacingNotZeroBudget rejects PerComponent pacing blocks that
+// explicitly set BOTH maxSurge=0 AND maxUnavailable=0. With both
+// budgets at literal zero there is no surge headroom (no pod can be
+// added) AND no drain headroom (no pod can be taken offline), so the
+// rollout cannot make progress. Mirrors the runtime safety net in
+// pkg/.../coordination/groups.go:266 (ValidateGroupShape).
+//
+// Only fires when BOTH values are explicitly set to literal 0 — nil
+// (defaulted) values resolve to 25% via pacingWithDefaults and are not
+// treated as zero here. The runtime defaulter check treats nil
+// MaxUnavailable as zero because it post-dates this check; the webhook
+// inspects the literal user input.
+//
+// Reproduces W-2 in .claude/specs/2026-05-25-real-cluster-tests/README.md.
+func validatePacingNotZeroBudget(groups []v1beta1.RolloutCoordinationGroup) error {
+	for i, g := range groups {
+		if g.Pacing == nil {
+			continue
+		}
+		// Only PerComponent pacing uses MaxSurge / MaxUnavailable as
+		// per-Component budgets. RatioBalanced has its own ratio
+		// tolerance knob. Type defaults to PerComponent when unset,
+		// so empty Type counts as PerComponent here too.
+		if g.Pacing.Type != "" && g.Pacing.Type != v1beta1.CoordinationPacingPerComponent {
+			continue
+		}
+		if !explicitZeroIntOrString(g.Pacing.MaxSurge) || !explicitZeroIntOrString(g.Pacing.MaxUnavailable) {
+			continue
+		}
+		return fmt.Errorf("spec.rolloutCoordination.groups[%d]: maxSurge=0 AND maxUnavailable=0 deadlocks rollouts — set at least one non-zero (%s)",
+			i, ReasonZeroBudgetPacingUnstartable)
+	}
+	return nil
+}
+
+// explicitZeroIntOrString reports whether the user explicitly set the
+// IntOrString to a zero value (literal 0 or "0" or "0%"). Nil is not
+// zero — nil means "use default" and the defaulter fills in 25%.
+func explicitZeroIntOrString(v *intstr.IntOrString) bool {
+	if v == nil {
+		return false
+	}
+	if v.Type == intstr.Int {
+		return v.IntValue() == 0
+	}
+	return v.StrVal == "0" || v.StrVal == "0%"
 }
 
 func validateRollingUpdateLockstep(oldSpec, newSpec *v1beta1.InferenceServiceSpec, g v1beta1.RolloutCoordinationGroup) error {

@@ -814,4 +814,121 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 	})
+
+	// =========================================================================
+	// task #36 — webhook coordination validation gap fixes.
+	// Reproduces W-1 / W-2 from
+	// .claude/specs/2026-05-25-real-cluster-tests/README.md, which the
+	// real-cluster test runs in May 2026 caught failing. Runtime
+	// ValidateGroupShape in pkg/.../coordination/groups.go:213 already
+	// rejects these shapes, but the admission webhook was letting them
+	// through. These specs assert the webhook now rejects them at
+	// admission time so operators see the conflict before the object
+	// lands in apiserver.
+	// =========================================================================
+
+	// real-cluster W-1: Sequential + RatioBalanced is meaningless —
+	// Sequential serializes Components, so the cross-Component ratio
+	// RatioBalanced is supposed to enforce is undefined. Mirror of the
+	// YAML at .claude/specs/2026-05-25-real-cluster-tests/yamls/
+	// w1-invalid-sequential-ratiobalanced.yaml.
+	ginkgo.It("task #36: rejects Sequential + RatioBalanced pacing (SequentialIncompatibleWithRatioBalanced / real-cluster W-1)", func() {
+		isvc := v1beta1testing.MakeInferenceService("task36-w1-seq-ratio", "isvc-webhook").
+			Runtime("any-runtime").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+				},
+			}).
+			Decoder(&v1beta1.DecoderSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+				},
+			}).Obj()
+		tol := int32(10)
+		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+			Groups: []v1beta1.RolloutCoordinationGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+				Policy:     v1beta1.CoordinationPolicySequential,
+				Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+				Pacing: &v1beta1.CoordinationPacing{
+					Type:           v1beta1.CoordinationPacingRatioBalanced,
+					RatioTolerance: &tol,
+				},
+			}},
+		}
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("SequentialIncompatibleWithRatioBalanced"))
+	})
+
+	// real-cluster W-2: maxSurge=0 AND maxUnavailable=0 deadlocks any
+	// rollout — no surge headroom, no drain headroom. Mirror of the YAML
+	// at .claude/specs/2026-05-25-real-cluster-tests/yamls/
+	// w2-invalid-zero-budget.yaml.
+	ginkgo.It("task #36: rejects PerComponent pacing with maxSurge=0 and maxUnavailable=0 (ZeroBudgetPacingUnstartable / real-cluster W-2)", func() {
+		zero := intstr.FromInt(0)
+		isvc := v1beta1testing.MakeInferenceService("task36-w2-zero-budget", "isvc-webhook").
+			Runtime("any-runtime").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+				},
+			}).
+			Decoder(&v1beta1.DecoderSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+				},
+			}).Obj()
+		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+			Groups: []v1beta1.RolloutCoordinationGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+				Pacing: &v1beta1.CoordinationPacing{
+					Type:           v1beta1.CoordinationPacingPerComponent,
+					MaxSurge:       &zero,
+					MaxUnavailable: &zero,
+				},
+			}},
+		}
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("ZeroBudgetPacingUnstartable"))
+	})
+
+	// Positive: Sequential + PerComponent pacing is the canonical
+	// combination and must be accepted (no over-rejection from the new
+	// pacing/policy compatibility check).
+	ginkgo.It("task #36: accepts Sequential + PerComponent pacing (no over-rejection)", func() {
+		isvc := v1beta1testing.MakeInferenceService("task36-seq-ok", "isvc-webhook").
+			Runtime("any-runtime").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+				},
+			}).
+			Decoder(&v1beta1.DecoderSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+				},
+			}).Obj()
+		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+			Groups: []v1beta1.RolloutCoordinationGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+				Policy:     v1beta1.CoordinationPolicySequential,
+				Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+				Pacing: &v1beta1.CoordinationPacing{
+					Type: v1beta1.CoordinationPacingPerComponent,
+				},
+			}},
+		}
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+	})
 })

@@ -60,6 +60,30 @@ const (
 	// (no runtime) or model parsing (no model), so the operator must
 	// supply images explicitly.
 	ReasonMultiPodLeanModelNeedsRunner = "MultiPodLeanModelNeedsRunner"
+
+	// ReasonSequentialIncompatibleWithRatioBalanced rejects Sequential
+	// coordination groups that also declare RatioBalanced pacing. The
+	// two concepts are mutually exclusive: Sequential serializes the
+	// rollout so only one Component is in flight at a time, leaving the
+	// cross-Component ratio that RatioBalanced is supposed to enforce
+	// undefined. The runtime ValidateGroupShape catches it as a safety
+	// net (see pkg/.../coordination/groups.go:251), this webhook reason
+	// surfaces the conflict at admission so operators don't get silent
+	// pacing downgrades after the object lands. Reproduces W-1 in
+	// .claude/specs/2026-05-25-real-cluster-tests/README.md.
+	ReasonSequentialIncompatibleWithRatioBalanced = "SequentialIncompatibleWithRatioBalanced"
+
+	// ReasonZeroBudgetPacingUnstartable rejects PerComponent pacing
+	// blocks that set BOTH maxSurge=0 AND maxUnavailable=0. With both
+	// budgets at literal zero there is no surge headroom (no pod can be
+	// added) AND no drain headroom (no pod can be taken offline), so
+	// the rollout has no way to make progress and the Component will
+	// never finish reconciling. Defaulted nil values are not zero —
+	// the defaulter fills 25% for both — so this reason only fires when
+	// the operator has explicitly set both to 0. Mirrored as a runtime
+	// safety net in pkg/.../coordination/groups.go:266. Reproduces W-2
+	// in .claude/specs/2026-05-25-real-cluster-tests/README.md.
+	ReasonZeroBudgetPacingUnstartable = "ZeroBudgetPacingUnstartable"
 )
 
 func ValidateInferenceServiceName(name string) error {

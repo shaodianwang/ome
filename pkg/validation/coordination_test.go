@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -201,6 +202,231 @@ func TestValidateCoordination_HappyPath_Sequential(t *testing.T) {
 	}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("happy sequential: unexpected error %v", err)
+	}
+}
+
+// W-1 reproducer: Sequential + RatioBalanced is meaningless. Sequential
+// serializes Components so the cross-Component ratio is undefined.
+func TestValidateCoordination_SequentialWithRatioBalancedRejected(t *testing.T) {
+	spec := omeNativePDSpec()
+	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+				Policy:     v1beta1.CoordinationPolicySequential,
+				Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+				Pacing: &v1beta1.CoordinationPacing{
+					Type: v1beta1.CoordinationPacingRatioBalanced,
+				},
+			},
+		},
+	}
+	err := ValidateCoordination(spec)
+	if err == nil || !strings.Contains(err.Error(), ReasonSequentialIncompatibleWithRatioBalanced) {
+		t.Errorf("Sequential+RatioBalanced: got %v want error with %s", err, ReasonSequentialIncompatibleWithRatioBalanced)
+	}
+}
+
+// Positive case: Sequential without RatioBalanced pacing is accepted.
+// Sequential + PerComponent is the canonical combination; the
+// validator must not over-reject.
+func TestValidateCoordination_SequentialWithPerComponentPacingAccepted(t *testing.T) {
+	spec := omeNativePDSpec()
+	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+				Policy:     v1beta1.CoordinationPolicySequential,
+				Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+				Pacing: &v1beta1.CoordinationPacing{
+					Type: v1beta1.CoordinationPacingPerComponent,
+				},
+			},
+		},
+	}
+	if err := ValidateCoordination(spec); err != nil {
+		t.Errorf("Sequential+PerComponent: unexpected error %v", err)
+	}
+}
+
+// Positive case: RatioBalanced under a non-Sequential policy
+// (BlueGreen) is accepted. The pacing/policy incompatibility check
+// only fires for Sequential.
+func TestValidateCoordination_RatioBalancedWithBlueGreenAccepted(t *testing.T) {
+	spec := omeNativePDSpec()
+	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
+				Pacing: &v1beta1.CoordinationPacing{
+					Type: v1beta1.CoordinationPacingRatioBalanced,
+				},
+			},
+		},
+	}
+	if err := ValidateCoordination(spec); err != nil {
+		t.Errorf("BlueGreen+RatioBalanced: unexpected error %v", err)
+	}
+}
+
+// W-2 reproducer: maxSurge=0 AND maxUnavailable=0 (both explicit zero)
+// is unstartable — no surge, no drain.
+func TestValidateCoordination_ZeroBudgetPacingRejected(t *testing.T) {
+	zero := intstr.FromInt(0)
+	spec := omeNativePDSpec()
+	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+				Pacing: &v1beta1.CoordinationPacing{
+					Type:           v1beta1.CoordinationPacingPerComponent,
+					MaxSurge:       &zero,
+					MaxUnavailable: &zero,
+				},
+			},
+		},
+	}
+	err := ValidateCoordination(spec)
+	if err == nil || !strings.Contains(err.Error(), ReasonZeroBudgetPacingUnstartable) {
+		t.Errorf("zero-budget pacing: got %v want error with %s", err, ReasonZeroBudgetPacingUnstartable)
+	}
+}
+
+// W-2 reproducer with string "0%" values — equivalent to literal 0
+// and must produce the same rejection.
+func TestValidateCoordination_ZeroBudgetPacingRejectedStringForm(t *testing.T) {
+	zeroPct := intstr.FromString("0%")
+	zeroInt := intstr.FromInt(0)
+	spec := omeNativePDSpec()
+	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
+				Pacing: &v1beta1.CoordinationPacing{
+					Type:           v1beta1.CoordinationPacingPerComponent,
+					MaxSurge:       &zeroPct,
+					MaxUnavailable: &zeroInt,
+				},
+			},
+		},
+	}
+	err := ValidateCoordination(spec)
+	if err == nil || !strings.Contains(err.Error(), ReasonZeroBudgetPacingUnstartable) {
+		t.Errorf("zero-budget (str/int mix): got %v want error with %s", err, ReasonZeroBudgetPacingUnstartable)
+	}
+}
+
+// Positive case: pacing with non-zero MaxSurge is accepted even when
+// MaxUnavailable=0 — the rollout still has surge headroom.
+func TestValidateCoordination_NonZeroSurgePacingAccepted(t *testing.T) {
+	surge := intstr.FromInt(2)
+	zero := intstr.FromInt(0)
+	spec := omeNativePDSpec()
+	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+				Pacing: &v1beta1.CoordinationPacing{
+					Type:           v1beta1.CoordinationPacingPerComponent,
+					MaxSurge:       &surge,
+					MaxUnavailable: &zero,
+				},
+			},
+		},
+	}
+	if err := ValidateCoordination(spec); err != nil {
+		t.Errorf("non-zero surge + zero unavailable: unexpected error %v", err)
+	}
+}
+
+// Positive case: pacing with non-zero MaxUnavailable is accepted even
+// when MaxSurge=0 — the rollout still has drain headroom.
+func TestValidateCoordination_NonZeroUnavailablePacingAccepted(t *testing.T) {
+	zero := intstr.FromInt(0)
+	pct := intstr.FromString("25%")
+	spec := omeNativePDSpec()
+	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+				Pacing: &v1beta1.CoordinationPacing{
+					Type:           v1beta1.CoordinationPacingPerComponent,
+					MaxSurge:       &zero,
+					MaxUnavailable: &pct,
+				},
+			},
+		},
+	}
+	if err := ValidateCoordination(spec); err != nil {
+		t.Errorf("zero surge + non-zero unavailable: unexpected error %v", err)
+	}
+}
+
+// Positive case: nil pacing values (no explicit zero) are accepted —
+// the defaulter fills 25% for both MaxSurge and MaxUnavailable. The
+// zero-budget check only fires when both are explicitly set to 0.
+func TestValidateCoordination_NilPacingAccepted(t *testing.T) {
+	spec := omeNativePDSpec()
+	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+				Pacing:     &v1beta1.CoordinationPacing{Type: v1beta1.CoordinationPacingPerComponent},
+				// MaxSurge / MaxUnavailable nil — defaulter fills 25%.
+			},
+		},
+	}
+	if err := ValidateCoordination(spec); err != nil {
+		t.Errorf("nil pacing values: unexpected error %v", err)
+	}
+}
+
+// Positive case: omitted Pacing block entirely is accepted —
+// the defaulter fills a complete pacing block.
+func TestValidateCoordination_OmittedPacingAccepted(t *testing.T) {
+	spec := omeNativePDSpec()
+	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
+				// Pacing entirely absent.
+			},
+		},
+	}
+	if err := ValidateCoordination(spec); err != nil {
+		t.Errorf("omitted pacing: unexpected error %v", err)
+	}
+}
+
+// The zero-budget check only fires for PerComponent pacing (or empty,
+// which defaults to PerComponent). RatioBalanced has its own knob
+// (ratioTolerance) and the maxSurge/maxUnavailable fields are
+// interpreted differently — don't reject on the same shape.
+func TestValidateCoordination_RatioBalancedWithZeroBudgetNotRejected(t *testing.T) {
+	zero := intstr.FromInt(0)
+	spec := omeNativePDSpec()
+	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				Policy:     v1beta1.CoordinationPolicyBlueGreen,
+				Pacing: &v1beta1.CoordinationPacing{
+					Type:           v1beta1.CoordinationPacingRatioBalanced,
+					MaxSurge:       &zero,
+					MaxUnavailable: &zero,
+				},
+			},
+		},
+	}
+	if err := ValidateCoordination(spec); err != nil {
+		t.Errorf("RatioBalanced + zero surge/unavailable: unexpected error %v (zero-budget check is PerComponent-only)", err)
 	}
 }
 
