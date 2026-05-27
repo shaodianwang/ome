@@ -814,6 +814,327 @@ func TestMutateInstance_MirrorsCommittedStateOntoInMemoryISVC(t *testing.T) {
 	}
 }
 
+// TestSurgeUpdate_BumpDuringBump_ConvergesToFinalRev pins the X-2
+// regression (SRT real-cluster suite): a second spec bump landing while
+// a first surge cycle is still mid-flight must NOT silently re-target
+// the in-flight surge to the newer revision. The in-flight surge is
+// committed to its recorded TargetRevision (rev2). When it promotes,
+// the next reconcile observes RunningRevision=rev2 != target.Name=rev3
+// and fires a fresh surge cycle that drives the pod to rev3.
+//
+// Without the fix (the production bug shape): the in-flight surge pod
+// (labeled rev2-hash) is promoted with status saying RunningRevision=
+// rev3, so detectUpdateTrigger's fast-path sees s.RunningRevision ==
+// target.Name and short-circuits. The pod stays on rev2 forever; the
+// cluster shows pods on rev1+rev2 with status claiming rev3 — the
+// "5 engine pods, none on v3" symptom from the X-2 capture.
+func TestSurgeUpdate_BumpDuringBump_ConvergesToFinalRev(t *testing.T) {
+	resetExpectations(t)
+	isvc := surgeISVCWithStrategy("llama-70b", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, err := core.BuildPlan(p)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Steady state: one pod at ord=0 on rev1.
+	oldPod := surgePodAtOrdinal(isvc, 0, 1, 0, true, true)
+	if err := c.Create(context.Background(), oldPod); err != nil {
+		t.Fatalf("seed old pod: %v", err)
+	}
+
+	// Bump 1: rev2 becomes the target. Run surgeUpdate's first pass
+	// (Phase 1 entry + create surge pod at ord=1 stamped rev2-hash).
+	rev2 := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpecImage("llama:v2"))
+	if _, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev2, []*corev1.Pod{oldPod}); err != nil {
+		t.Fatalf("first surge cycle: %v", err)
+	}
+
+	// Sanity: surge pod for rev2 exists at ord=1, status shows
+	// TargetRevision=rev2-name, Step=Surge.
+	rev2SurgeName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 1)
+	rev2Surge := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev2SurgeName}, rev2Surge); err != nil {
+		t.Fatalf("rev2 surge pod missing after first cycle: %v", err)
+	}
+	if got := rev2Surge.Labels[query.LabelRevisionHash]; got != query.RevisionHashFromControllerRevisionName(rev2.Name) {
+		t.Fatalf("rev2 surge pod hash label: got %q want %q",
+			got, query.RevisionHashFromControllerRevisionName(rev2.Name))
+	}
+	s := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Operation == nil || s.Operation.TargetRevision != rev2.Name {
+		t.Fatalf("after bump 1: TargetRevision should be rev2 (%q), got %+v", rev2.Name, s.Operation)
+	}
+
+	// Bump 2 arrives BEFORE the surge has progressed past Step=Surge.
+	// The dispatcher's next call to surgeUpdate is given a fresh target
+	// (rev3) and the same in-flight surge pod (rev2-hash). The fix
+	// keeps the surge committed to rev2 — the pod is on rev2, the
+	// recorded TargetRevision stays rev2, and the eventual promote
+	// writes RunningRevision=rev2 (not rev3).
+	rev3 := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpecImage("llama:v3"))
+	// Make the surge pod ContainersReady so Phase 1 advances to Phase 2.
+	rev2Surge.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionFalse},
+	}
+	if err := c.Status().Update(context.Background(), rev2Surge); err != nil {
+		t.Fatalf("flip rev2 surge to ContainersReady: %v", err)
+	}
+
+	// Cycle 2 with rev3 as the parameter target. The fix should keep
+	// surgeTargetName pinned to rev2 (from Op.TargetRevision).
+	if _, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev3,
+		[]*corev1.Pod{oldPod, rev2Surge}); err != nil {
+		t.Fatalf("second surge cycle: %v", err)
+	}
+
+	// Recorded TargetRevision must still be rev2 (NOT rev3). This is
+	// the load-bearing assertion: without the fix, the helper
+	// overwrites TargetRevision to rev3 because the parameter target
+	// changed, and the next promote writes RunningRevision=rev3 with
+	// the pod still on rev2.
+	s = isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Operation == nil || s.Operation.TargetRevision != rev2.Name {
+		t.Fatalf("after bump 2 mid-surge: TargetRevision must stay rev2 (%q), got %+v",
+			rev2.Name, s.Operation)
+	}
+	if s.TargetRevision != rev2.Name {
+		t.Errorf("InstanceStatus.TargetRevision: got %q want %q (pinned to in-flight surge)",
+			s.TargetRevision, rev2.Name)
+	}
+
+	// CRITICAL: no second surge pod was created for rev3 (would be a
+	// second pod at ord=1, which is impossible — single slot). Pod
+	// count must remain 2 (old at ord=0, surge at ord=1 on rev2).
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 2 {
+		names := make([]string, 0, len(pods.Items))
+		for _, p := range pods.Items {
+			names = append(names, p.Name)
+		}
+		t.Fatalf("mid-bump-during-bump pod count: got %d (%v) want 2 (old@0 + surge@1)",
+			len(pods.Items), names)
+	}
+
+	// Simulate the surge cycle for rev2 completing: surge pod is now
+	// serving, old is drained and deleted.
+	if err := c.Delete(context.Background(), oldPod); err != nil {
+		t.Fatalf("delete old pod (drain complete): %v", err)
+	}
+	// Re-fetch to get the freshest RV before mutating status — prior
+	// surgeUpdate passes may have written serving=False on the pod.
+	rev2SurgeFresh := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev2SurgeName}, rev2SurgeFresh); err != nil {
+		t.Fatalf("re-read rev2 surge before flip Serving: %v", err)
+	}
+	rev2SurgeFresh.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
+	}
+	if err := c.Status().Update(context.Background(), rev2SurgeFresh); err != nil {
+		t.Fatalf("flip rev2 surge to Serving: %v", err)
+	}
+
+	// Cycle 3 — Phase 3 promote. Must write RunningRevision=rev2 (NOT
+	// rev3). Even though target=rev3, the pinned surge target is rev2.
+	if _, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev3,
+		[]*corev1.Pod{rev2SurgeFresh}); err != nil {
+		t.Fatalf("third surge cycle (promote): %v", err)
+	}
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read after promote: %v", err)
+	}
+	s = fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.RunningRevision != rev2.Name {
+		t.Errorf("post-promote RunningRevision: got %q want %q (must match the pod's actual rev)",
+			s.RunningRevision, rev2.Name)
+	}
+	if s.ActiveOrdinal != 1 {
+		t.Errorf("post-promote ActiveOrdinal: got %d want 1", s.ActiveOrdinal)
+	}
+	// Mirror should reflect the promote so the next reconcile's
+	// detectUpdateTrigger sees RunningRevision=rev2 != target=rev3 and
+	// fires a fresh surge for rev3.
+	s = isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.RunningRevision != rev2.Name {
+		t.Errorf("in-memory mirror RunningRevision: got %q want %q",
+			s.RunningRevision, rev2.Name)
+	}
+}
+
+// TestSurgeUpdate_SingleBump_DoesNotShiftTarget pins the A-2 invariant:
+// for a single bump (no mid-surge bump-2), the recorded
+// TargetRevision and Operation.TargetRevision must remain stable
+// across every reconcile pass of the surge cycle. The recorded values
+// must match the parameter target.Name throughout — no drift, no
+// stale-pointer corruption.
+//
+// Guards against the symptom seen in the A-2 capture: "UpdateRevision
+// != CurrentRevision, both post-bump but different, one of UR/CR
+// points at a hash with no backing CR". The fix's pinning logic must
+// not mis-attribute the parameter target as drift on the very first
+// reconcile (where there's no in-flight Op yet); subsequent passes
+// must continue to use the same target (which equals what was stamped
+// on the first pass).
+func TestSurgeUpdate_SingleBump_DoesNotShiftTarget(t *testing.T) {
+	resetExpectations(t)
+	isvc := surgeISVCWithStrategy("llama-70b", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, err := core.BuildPlan(p)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	oldPod := surgePodAtOrdinal(isvc, 0, 1, 0, true, true)
+	if err := c.Create(context.Background(), oldPod); err != nil {
+		t.Fatalf("seed old pod: %v", err)
+	}
+
+	// Single bump: rev2 is the only target across all passes.
+	rev2 := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpecImage("llama:v2"))
+
+	// Pass 1: Phase 1 entry — creates surge pod.
+	if _, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev2,
+		[]*corev1.Pod{oldPod}); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	s := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Operation == nil || s.Operation.TargetRevision != rev2.Name {
+		t.Fatalf("pass 1 TargetRevision: got %+v want rev2 (%q)", s.Operation, rev2.Name)
+	}
+	if s.TargetRevision != rev2.Name {
+		t.Errorf("pass 1 InstanceStatus.TargetRevision: got %q want %q", s.TargetRevision, rev2.Name)
+	}
+
+	// Pass 2: surge pod is ContainersReady but not yet serving — Phase
+	// 2 transition (Step=Surge → SurgeDrain). Re-read the rev2 surge
+	// pod from the client and seed ContainersReady.
+	rev2SurgeName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 1)
+	rev2Surge := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev2SurgeName}, rev2Surge); err != nil {
+		t.Fatalf("get rev2 surge after pass 1: %v", err)
+	}
+	rev2Surge.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionFalse},
+	}
+	if err := c.Status().Update(context.Background(), rev2Surge); err != nil {
+		t.Fatalf("flip rev2 surge ContainersReady: %v", err)
+	}
+	if _, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev2,
+		[]*corev1.Pod{oldPod, rev2Surge}); err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+	s = isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Operation == nil || s.Operation.TargetRevision != rev2.Name {
+		t.Fatalf("pass 2 TargetRevision drift: got %+v want rev2 (%q)", s.Operation, rev2.Name)
+	}
+
+	// Pass 3: drain complete, old gone, surge serving — Phase 3
+	// promote. RunningRevision must be rev2 (the only target this
+	// cycle ever saw).
+	if err := c.Delete(context.Background(), oldPod); err != nil {
+		t.Fatalf("delete old: %v", err)
+	}
+	rev2SurgeFresh := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev2SurgeName}, rev2SurgeFresh); err != nil {
+		t.Fatalf("re-read rev2 surge before flip Serving: %v", err)
+	}
+	rev2SurgeFresh.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
+	}
+	if err := c.Status().Update(context.Background(), rev2SurgeFresh); err != nil {
+		t.Fatalf("flip rev2 surge Serving: %v", err)
+	}
+	done, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev2,
+		[]*corev1.Pod{rev2SurgeFresh})
+	if err != nil {
+		t.Fatalf("pass 3: %v", err)
+	}
+	if !done {
+		t.Fatalf("pass 3 should return done=true after promote")
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read after promote: %v", err)
+	}
+	s = fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.RunningRevision != rev2.Name {
+		t.Errorf("post-promote RunningRevision: got %q want %q (single bump must land exactly on rev2)",
+			s.RunningRevision, rev2.Name)
+	}
+	// Pod count exactly 1 (the promoted surge pod). No extras.
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		names := make([]string, 0, len(pods.Items))
+		for _, p := range pods.Items {
+			names = append(names, p.Name)
+		}
+		t.Errorf("post-promote pod count: got %d (%v) want 1", len(pods.Items), names)
+	}
+}
+
+// TestPatchInstanceStatusSurgingForUpdate_IdempotentOnSurgeDrainStep
+// pins the helper's idempotency for the SurgeDrain phase. Re-invoking
+// with the same target on an instance already at Step=SurgeDrain must
+// NOT regress the Step back to Surge — that would lose track of which
+// half of the surge cycle is in flight and let the dispatcher fire a
+// fresh drain after the previous drain had already started.
+//
+// The bug shape it guards against: surgeUpdate calls
+// patchInstanceStatusSurgingForUpdate at the top of every pass. If the
+// helper only idempotency-skipped on Step==Surge, the second pass
+// (after the previous pass had transitioned to SurgeDrain) would
+// overwrite the Operation with a fresh Step=Surge stamp — corrupting
+// the state machine.
+func TestPatchInstanceStatusSurgingForUpdate_IdempotentOnSurgeDrainStep(t *testing.T) {
+	resetExpectations(t)
+	isvc := surgeISVCWithStrategy("llama-70b", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+
+	// Stamp Step=Surge first, then transition to Step=SurgeDrain.
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), p, v1beta1.EngineComponent, 0, "rev-x", 30*time.Second); err != nil {
+		t.Fatalf("stamp Surge: %v", err)
+	}
+	if err := patchInstanceStatusSurgeStepDrain(context.Background(), p, v1beta1.EngineComponent, 0); err != nil {
+		t.Fatalf("stamp SurgeDrain: %v", err)
+	}
+	beforeRV := readRV(t, c, isvc)
+	beforeOpID := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Operation.ID
+
+	// Re-invoke with the same target — must be a no-op.
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), p, v1beta1.EngineComponent, 0, "rev-x", 30*time.Second); err != nil {
+		t.Fatalf("re-stamp Surge (idempotency check): %v", err)
+	}
+	afterRV := readRV(t, c, isvc)
+	if beforeRV != afterRV {
+		t.Errorf("idempotent re-invoke bumped RV: %s -> %s", beforeRV, afterRV)
+	}
+	s := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Operation == nil {
+		t.Fatalf("Operation cleared by idempotent re-invoke")
+	}
+	if s.Operation.Step != updateStepSurgeDrain {
+		t.Errorf("Step regressed to %q on idempotent re-invoke; want SurgeDrain", s.Operation.Step)
+	}
+	if s.Operation.ID != beforeOpID {
+		t.Errorf("Operation.ID changed across idempotent re-invoke: %q -> %q (would lose timing baselines)",
+			beforeOpID, s.Operation.ID)
+	}
+}
+
 // Compile-time sanity: ensure the test file uses the metav1 import (the
 // linter complains otherwise on imports added defensively).
 var _ = metav1.NewTime

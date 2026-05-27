@@ -970,14 +970,18 @@ func patchInstanceStatusReadyOnRevision(ctx context.Context, p core.ReconcilePar
 // bumping Incarnation (different pod NAME — ordinal slot — keeps old
 // and new distinct without reusing identity). ActiveOrdinal is not yet
 // advanced; it stays on the old slot until promote completes. The
-// idempotency guard requires Step==Surge so a prior recreate / in-place
-// write at the same target doesn't short-circuit.
+// idempotency guard requires Step in {Surge, SurgeDrain} so the
+// helper does not regress an in-flight SurgeDrain back to Surge when
+// surgeUpdate re-runs the entry stamp on a subsequent pass; it does
+// require Type==Update so a prior recreate / in-place write at the
+// same target doesn't short-circuit (those writes use the same
+// TargetRevision but a different Step namespace).
 func patchInstanceStatusSurgingForUpdate(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32, targetRev string, timeout time.Duration) error {
 	now := metav1.NewTime(time.Now())
 	return status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
 		if s.Phase == v1beta1.OMENativeInstanceUpdating &&
 			s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationUpdate &&
-			s.Operation.Step == updateStepSurge &&
+			(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) &&
 			s.TargetRevision == targetRev {
 			return false
 		}
@@ -1075,6 +1079,16 @@ func surgeDrainKey(idx int32, newOrdinal int32) string {
 //     window. The dispatcher's CheckSurgeGate (added with the
 //     wire-up commit) caps concurrent surges across Instances.
 //   - no in-place patching — different pod NAMES throughout.
+//   - target stability across reconciles: once an Operation is recorded
+//     with Step=Surge / SurgeDrain and TargetRevision=X, the in-flight
+//     surge is committed to driving to X. Spec bumps mid-surge (a fresh
+//     `target` parameter pointing at Y) are picked up by the NEXT
+//     reconcile after this surge promotes — detectUpdateTrigger fires
+//     because RunningRevision=X != target.Name=Y. Without this pinning
+//     the surge would silently drift the in-flight pod (still on X) to
+//     "RunningRevision=Y" in status, leaving pods on the stale rev with
+//     status claiming the new rev. See PR #246's MutateInstance mirror
+//     for the parallel fix in the post-promote ord-resurrection space.
 //
 // Single-pod scope (Runner.Size == 1). Multi-pod SurgeThenDrain needs
 // per-gang-member ordinal allocation and is deferred.
@@ -1108,24 +1122,50 @@ func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.Componen
 		return false, nil
 	}
 
+	// surgeTargetName pins the revision this surge is committed to
+	// driving to. On the FIRST pass (no in-flight Op) it equals
+	// target.Name — the rev the dispatcher just decided to roll to. On
+	// SUBSEQUENT passes (Op.Step in {Surge, SurgeDrain} from a prior
+	// reconcile) it is the rev that was recorded when the surge was
+	// stamped — even if `target` has since moved because of a fresh
+	// spec bump. Pinning prevents the state machine from declaring the
+	// in-flight pod "on the new target" when it is actually on the
+	// previous target, which is the bump-during-bump corruption mode
+	// (X-2 in the SRT suite: 5 engine pods, status says vN but pods are
+	// still on vN-1). The next surge cycle for the newer target fires
+	// naturally after this surge promotes, because detectUpdateTrigger
+	// observes RunningRevision != target.Name.
+	surgeTargetName := target.Name
+	if s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil &&
+		s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationUpdate &&
+		(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) &&
+		s.Operation.TargetRevision != "" {
+		surgeTargetName = s.Operation.TargetRevision
+	}
+
 	// Phase 1 entry: stamp Phase=Updating + Op.Step=Surge if not
-	// already there. Idempotent on the second pass.
+	// already there. Idempotent on the second pass. Writes
+	// surgeTargetName so the recorded TargetRevision stays pinned to
+	// the in-flight surge's commitment, not the latest target.
 	wasNotSurging := true
 	if s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil &&
 		s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationUpdate &&
 		(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) {
 		wasNotSurging = false
 	}
-	if err := patchInstanceStatusSurgingForUpdate(ctx, p, plan.Component, inst.Index, target.Name, plan.InstanceReadyTimeout); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(ctx, p, plan.Component, inst.Index, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
 		return false, fmt.Errorf("stamp surge step (instance=%d): %w", inst.Index, err)
 	}
 	if wasNotSurging {
 		status.RecordNormal(p.Recorder, p.ISVC, status.EventReasonRecreateUpdateStarted,
 			"OMENative %s surge to revision %s (newOrdinal=%d)",
-			status.InstanceKey(plan.Component, inst.Index), target.Name, newOrdinal)
+			status.InstanceKey(plan.Component, inst.Index), surgeTargetName, newOrdinal)
 	}
 
-	// Phase 1: create surge pod if missing.
+	// Phase 1: create surge pod if missing. The created pod's
+	// ome.io/revision-hash label is stamped from surgeTargetName so it
+	// matches the in-flight commitment. revisionHashFromName is the
+	// pinned-target equivalent of revisionHashFromTarget.
 	if len(surgePods) == 0 {
 		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
@@ -1135,7 +1175,7 @@ func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.Componen
 			Runner:  runner,
 			Ordinal: newOrdinal,
 		}}
-		if _, err := createMissingPods(ctx, p, plan, inst, inst.Index, targets, revisionHashFromTarget(target)); err != nil {
+		if _, err := createMissingPods(ctx, p, plan, inst, inst.Index, targets, query.RevisionHashFromControllerRevisionName(surgeTargetName)); err != nil {
 			return false, fmt.Errorf("create surge pod (instance=%d, ordinal=%d): %w", inst.Index, newOrdinal, err)
 		}
 		return false, nil
@@ -1211,13 +1251,18 @@ func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.Componen
 	}
 
 	// Phase 3: old gone, surge is canonical. Advance ActiveOrdinal,
-	// promote to Ready on the target revision.
-	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(ctx, p, plan.Component, inst.Index, target.Name, newOrdinal); err != nil {
+	// promote to Ready on the pinned target revision (the rev the
+	// surge actually drove the pod to — NOT the latest target if a
+	// mid-surge bump moved it). Using target.Name here would write
+	// "RunningRevision=<latest-target>" while the pod is on the prior
+	// rev — the X-2 corruption mode. detectUpdateTrigger picks up the
+	// drift on the next reconcile and fires a fresh surge cycle.
+	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(ctx, p, plan.Component, inst.Index, surgeTargetName, newOrdinal); err != nil {
 		return false, fmt.Errorf("promote surge (instance=%d): %w", inst.Index, err)
 	}
 	status.RecordNormal(p.Recorder, p.ISVC, status.EventReasonRecreateUpdateCompleted,
 		"OMENative %s surge to revision %s complete (activeOrdinal=%d)",
-		status.InstanceKey(plan.Component, inst.Index), target.Name, newOrdinal)
+		status.InstanceKey(plan.Component, inst.Index), surgeTargetName, newOrdinal)
 	return true, nil
 }
 
