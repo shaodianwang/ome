@@ -208,6 +208,108 @@ func TestAggregateAndWriteStatus_PreservesLifecycleFields(t *testing.T) {
 	}
 }
 
+// TestAggregateAndWriteStatus_SurgeMidFlightHoldsServingReplicas pins
+// the secondary SurgeThenDrain serving-dip fix: while a surge is in
+// flight, an Instance briefly hosts TWO pods (the old canonical pod
+// still serving and the new surge pod not yet ready). The
+// observed-pod ratio (ServingPodCount == PodCount) would mis-classify
+// the Instance as non-serving and drop ServingReplicas — even though
+// the instance is still serving traffic the entire time.
+//
+// The fix: classify "instance is serving" as
+// `ServingPodCount >= desiredPodCount`, where desired comes from the
+// plan (Runner.Size), not from the live pod count.
+//
+// Reproduction shape (mirrors the cluster repro):
+//   - Instance 0: old pod at ord=0 (Ready + Serving) + surge pod at
+//     ord=1 (NOT Ready, NOT Serving). The instance must still count
+//     as serving.
+func TestAggregateAndWriteStatus_SurgeMidFlightHoldsServingReplicas(t *testing.T) {
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	// Old canonical pod at ordinal 0 — still serving and Ready.
+	oldPod := podAtIncarnation(isvc, 0, 1, true /* ready */, true /* serving */)
+	oldPod.Spec.NodeName = "node-old"
+	oldPod.Labels[query.LabelPodOrdinal] = "0"
+	// Surge pod at ordinal 1 — created, scheduled, but not yet
+	// ContainersReady (kubelet still starting). NOT serving.
+	surgePod := podAtIncarnation(isvc, 0, 1, false /* not ready */, false /* not serving */)
+	surgePod.Name = query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 1)
+	surgePod.Spec.NodeName = "node-new"
+	surgePod.Labels[query.LabelPodOrdinal] = "1"
+	slice := sliceWithEndpoint("prod", "engine-1",
+		query.HeadlessServiceName(isvc.Name, v1beta1.EngineComponent), oldPod, true)
+	c := newFakeClientWithDiscovery(t, isvc, oldPod, surgePod, slice)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	if err := AggregateAndWriteStatus(context.Background(), p, plan, nil); err != nil {
+		t.Fatalf("AggregateAndWriteStatus: %v", err)
+	}
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	s := cs.InstanceStatuses[0]
+
+	// Per-pod observed counters reflect the live state — 2 pods total,
+	// 1 ready, 1 serving. These are NOT being changed by the fix.
+	if s.PodCount != 2 {
+		t.Errorf("PodCount: got %d want 2 (old + surge)", s.PodCount)
+	}
+	if s.ReadyPodCount != 1 {
+		t.Errorf("ReadyPodCount: got %d want 1 (only old is ready)", s.ReadyPodCount)
+	}
+	if s.ServingPodCount != 1 {
+		t.Errorf("ServingPodCount: got %d want 1 (only old is serving)", s.ServingPodCount)
+	}
+
+	// Component-level counters MUST reflect the canonical truth:
+	// the instance is still serving traffic. Without the fix,
+	// ServingReplicas would drop to 0 (1 != 2) — the user-visible dip.
+	if cs.ServingReplicas != 1 {
+		t.Errorf("ServingReplicas dipped during surge: got %d want 1 (instance still serving via old pod)",
+			cs.ServingReplicas)
+	}
+	if cs.ReadyReplicas != 1 {
+		t.Errorf("ReadyReplicas dipped during surge: got %d want 1 (instance still ready)",
+			cs.ReadyReplicas)
+	}
+	if cs.AvailableReplicas != 1 {
+		t.Errorf("AvailableReplicas dipped during surge: got %d want 1 (old pod still in EP rotation)",
+			cs.AvailableReplicas)
+	}
+}
+
+// TestAggregateAndWriteStatus_SurgeWithFewerCanonicalPodsNotServing
+// pins the negative case: when even the canonical (desired-count)
+// pods are not all serving, the Instance is NOT counted. Differs from
+// the happy-path above by drainin the old pod too — now zero pods
+// are serving and ServingReplicas should drop.
+func TestAggregateAndWriteStatus_SurgeWithFewerCanonicalPodsNotServing(t *testing.T) {
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	// Old pod at ord=0 — drained (NOT serving), still Ready.
+	oldPod := podAtIncarnation(isvc, 0, 1, true /* ready */, false /* drained */)
+	oldPod.Labels[query.LabelPodOrdinal] = "0"
+	// Surge pod at ord=1 — not yet Ready.
+	surgePod := podAtIncarnation(isvc, 0, 1, false, false)
+	surgePod.Name = query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 1)
+	surgePod.Labels[query.LabelPodOrdinal] = "1"
+	c := newFakeClientWithDiscovery(t, isvc, oldPod, surgePod)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	if err := AggregateAndWriteStatus(context.Background(), p, plan, nil); err != nil {
+		t.Fatalf("AggregateAndWriteStatus: %v", err)
+	}
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	if cs.ServingReplicas != 0 {
+		t.Errorf("ServingReplicas: got %d want 0 (no pod is serving anymore)", cs.ServingReplicas)
+	}
+}
+
 func TestUniqueNodes(t *testing.T) {
 	pods := []*corev1.Pod{
 		{Spec: corev1.PodSpec{NodeName: "a"}},

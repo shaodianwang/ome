@@ -190,7 +190,7 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 		return failMigration(ctx, p, ledger, req, requestUUID, reason)
 	}
 
-	desired := expectedPodNamesForInstance(p.ISVC.Name, plan.Component, surgeInst)
+	desired := expectedPodNamesForInstance(p.ISVC, plan.Component, surgeInst)
 	existingByName := query.IndexPodsByName(surgePods)
 	missing := make([]podTarget, 0, len(desired))
 	for _, t := range desired {

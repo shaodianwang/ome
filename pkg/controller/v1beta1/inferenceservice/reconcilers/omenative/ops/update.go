@@ -435,7 +435,7 @@ func recreateUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compo
 	newInst := inst
 	newInst.Incarnation = newInc
 
-	desired := expectedPodNamesForInstance(p.ISVC.Name, plan.Component, newInst)
+	desired := expectedPodNamesForInstance(p.ISVC, plan.Component, newInst)
 	existingByName := query.IndexPodsByName(newPods)
 	missing := make([]podTarget, 0, len(desired))
 	for _, t := range desired {

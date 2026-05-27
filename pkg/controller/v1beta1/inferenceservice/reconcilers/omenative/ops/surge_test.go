@@ -285,6 +285,183 @@ func readRV(t *testing.T, c client.Client, isvc *v1beta1.InferenceService) strin
 	return fresh.ResourceVersion
 }
 
+// TestExpectedPodNamesForInstance_RespectsActiveOrdinal pins the
+// primary SurgeThenDrain drain-incomplete fix: when a single-pod
+// Instance has a status entry whose ActiveOrdinal has been advanced
+// by a prior surge promote (e.g., from 0 → 1), the function must
+// emit a single target at THAT ordinal — NOT hard-code ordinal 0.
+//
+// The bug: hard-coding ordinal 0 means the next steady-state Create
+// pass after surge promote sees "ordinal 0 is missing" and creates a
+// duplicate pod, leaving the Instance with 2 alive pods forever.
+//
+// Cases covered:
+//   - No status (initial create) → ordinal 0 (default).
+//   - status.ActiveOrdinal=0 (post-recreate / steady-state) → ordinal 0.
+//   - status.ActiveOrdinal=1 (post-surge promote) → ordinal 1.
+func TestExpectedPodNamesForInstance_RespectsActiveOrdinal(t *testing.T) {
+	cases := []struct {
+		name          string
+		activeOrdinal int32
+		withStatus    bool
+		wantOrdinal   int32
+		wantName      string
+	}{
+		{
+			name:        "no status entry defaults to ordinal 0",
+			withStatus:  false,
+			wantOrdinal: 0,
+			wantName:    "llama-70b-engine-0-default-0",
+		},
+		{
+			name:          "ActiveOrdinal=0 emits target at ordinal 0",
+			activeOrdinal: 0,
+			withStatus:    true,
+			wantOrdinal:   0,
+			wantName:      "llama-70b-engine-0-default-0",
+		},
+		{
+			name:          "ActiveOrdinal=1 (post-surge promote) emits target at ordinal 1",
+			activeOrdinal: 1,
+			withStatus:    true,
+			wantOrdinal:   1,
+			wantName:      "llama-70b-engine-0-default-1",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isvc := minimalISVC("llama-70b", "prod", 1)
+			if tc.withStatus {
+				isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+					v1beta1.EngineComponent: {
+						OMENative: &v1beta1.OMENativeComponentStatus{
+							InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+								{Index: 0, ActiveOrdinal: tc.activeOrdinal, Phase: v1beta1.OMENativeInstanceReady},
+							},
+						},
+					},
+				}
+			}
+			inst := core.InstancePlan{
+				Index:       0,
+				Incarnation: 1,
+				Runners:     []core.RunnerPlan{{Name: "default", Size: 1}},
+			}
+			got := expectedPodNamesForInstance(isvc, v1beta1.EngineComponent, inst)
+			if len(got) != 1 {
+				t.Fatalf("len(targets): got %d want 1", len(got))
+			}
+			if got[0].Ordinal != tc.wantOrdinal {
+				t.Errorf("Ordinal: got %d want %d", got[0].Ordinal, tc.wantOrdinal)
+			}
+			if got[0].Name != tc.wantName {
+				t.Errorf("Name: got %q want %q", got[0].Name, tc.wantName)
+			}
+		})
+	}
+}
+
+// TestExpectedPodNamesForInstance_MultiPodPreservesAllOrdinals pins
+// that the ActiveOrdinal handling is a single-pod-only branch; gang
+// Runners (Size > 1) keep emitting every 0..Size-1 ordinal so the
+// multi-pod scale-out path that future work will enable doesn't
+// regress. ActiveOrdinal applies only to single-pod surge — multi-pod
+// surge needs per-gang-member ordinal allocation not yet plumbed.
+func TestExpectedPodNamesForInstance_MultiPodPreservesAllOrdinals(t *testing.T) {
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	// Even with ActiveOrdinal set, multi-pod must not skew the enumeration.
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+					{Index: 0, ActiveOrdinal: 1, Phase: v1beta1.OMENativeInstanceReady},
+				},
+			},
+		},
+	}
+	inst := core.InstancePlan{
+		Index:       0,
+		Incarnation: 1,
+		Runners:     []core.RunnerPlan{{Name: "default", Size: 4}},
+	}
+	got := expectedPodNamesForInstance(isvc, v1beta1.EngineComponent, inst)
+	if len(got) != 4 {
+		t.Fatalf("len(targets): got %d want 4 (Size=4 must enumerate all ordinals)", len(got))
+	}
+	wantOrdinals := map[int32]bool{0: true, 1: true, 2: true, 3: true}
+	for _, target := range got {
+		if !wantOrdinals[target.Ordinal] {
+			t.Errorf("unexpected ordinal: %d (want one of 0..3)", target.Ordinal)
+		}
+		delete(wantOrdinals, target.Ordinal)
+	}
+	if len(wantOrdinals) > 0 {
+		t.Errorf("missing ordinals: %v", wantOrdinals)
+	}
+}
+
+// TestSurgeUpdate_PostPromoteCreateDoesNotResurrectDrainedOrdinal pins
+// the integration-shaped surge-cycle invariant: after surge has
+// completed (drain + promote), the next reconcile pass that lands in
+// Create must NOT recreate a pod at the now-drained ordinal slot.
+//
+// This is the user-visible bug: dispatcher's Update pass returns
+// done=true on promote, then falls through to Create on the same
+// reconcile. With ActiveOrdinal=1 and Runner.Size=1, expectedPodNames
+// must say "ordinal 1 is the canonical slot, and that pod exists" —
+// not "ordinal 0 is missing, create it".
+func TestSurgeUpdate_PostPromoteCreateDoesNotResurrectDrainedOrdinal(t *testing.T) {
+	resetExpectations(t)
+	// Simulate the post-promote state directly: Phase=Ready,
+	// ActiveOrdinal=1, RunningRevision=target, one pod alive at ordinal 1.
+	isvc := surgeISVCWithStrategy("llama-70b", "prod", 1)
+	target := targetSpecImage("llama:v2")
+	c := newFakeClientWithDiscovery(t, isvc)
+	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, target)
+	// Promote the surge: bumps ActiveOrdinal to 1 and stamps RunningRevision.
+	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), minimalParams(t, isvc, c), v1beta1.EngineComponent, 0, tcr.Name, 1); err != nil {
+		t.Fatalf("patch promote: %v", err)
+	}
+	// Surge pod at ordinal 1, runtime-ready and serving — what survives the drain.
+	surgePod := surgePodAtOrdinal(isvc, 0, 1, 1, true, true)
+	if err := c.Create(context.Background(), surgePod); err != nil {
+		t.Fatalf("seed surge pod: %v", err)
+	}
+
+	// Re-read ISVC so the params have the promoted status (ActiveOrdinal=1).
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read ISVC: %v", err)
+	}
+	p := minimalParams(t, fresh, c)
+	plan, err := core.BuildPlan(p)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Drive Create as the dispatcher would after Update returns done=true.
+	if _, err := Create(context.Background(), p, plan, tcr); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// CRITICAL: there must STILL be only one pod for instance 0 — at ordinal 1.
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		names := make([]string, 0, len(pods.Items))
+		for _, p := range pods.Items {
+			names = append(names, p.Name)
+		}
+		t.Fatalf("Create resurrected a stale ordinal! got %d pods (%v), want 1 (the surge pod at ord=1)", len(pods.Items), names)
+	}
+	if pods.Items[0].Name != surgePod.Name {
+		t.Errorf("unexpected pod survived: got %q want %q", pods.Items[0].Name, surgePod.Name)
+	}
+}
+
 // Compile-time sanity: ensure the test file uses the metav1 import (the
 // linter complains otherwise on imports added defensively).
 var _ = metav1.NewTime

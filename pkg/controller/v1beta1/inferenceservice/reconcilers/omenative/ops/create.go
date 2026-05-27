@@ -68,7 +68,7 @@ func Create(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan
 // only when every pod is runtime-ready and ome.io/serving=True. target has
 // the same nil-OK semantics as Create.
 func reconcileInstance(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan, existing []*corev1.Pod, target *appsv1.ControllerRevision) (bool, error) {
-	desired := expectedPodNamesForInstance(p.ISVC.Name, plan.Component, inst)
+	desired := expectedPodNamesForInstance(p.ISVC, plan.Component, inst)
 	existingByName := query.IndexPodsByName(existing)
 
 	missing := make([]podTarget, 0)
@@ -150,18 +150,58 @@ type podTarget struct {
 
 // expectedPodNamesForInstance enumerates every (Runner, ordinal) tuple
 // the Instance plan asks for and returns the targets in stable order.
-func expectedPodNamesForInstance(isvc string, component v1beta1.ComponentType, inst core.InstancePlan) []podTarget {
+//
+// For single-pod Runners (Size == 1) the ordinal slot is read from the
+// Instance's recorded ActiveOrdinal in status — SurgeThenDrain
+// alternates between slots 0 and 1 across rollouts and the new slot
+// becomes canonical on promote. Without this lookup the next
+// steady-state Create pass after a surge cycle would hard-code
+// ordinal 0, see the canonical pod (now at ordinal 1) as "missing
+// ordinal 0", and create a duplicate pod — leaving the Instance with
+// 2 alive pods and no drain convergence.
+//
+// Multi-pod Runners (Size > 1) keep enumerating every 0..Size-1
+// ordinal; per-gang-member surge allocation is not yet plumbed, so
+// the ActiveOrdinal bit applies only to the single-pod branch.
+//
+// Instances without a status entry (initial create) default to
+// ordinal 0 — matches FindInstanceStatus returning nil and preserves
+// the pre-fix behavior of every Create-from-empty path.
+func expectedPodNamesForInstance(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inst core.InstancePlan) []podTarget {
+	if isvc == nil {
+		return nil
+	}
 	var targets []podTarget
 	for _, runner := range inst.Runners {
+		if runner.Size == 1 {
+			ordinal := activeOrdinalForInstance(isvc, component, inst.Index)
+			targets = append(targets, podTarget{
+				Name:    query.PodName(isvc.Name, component, inst.Index, runner.Name, ordinal),
+				Runner:  runner,
+				Ordinal: ordinal,
+			})
+			continue
+		}
 		for o := int32(0); o < runner.Size; o++ {
 			targets = append(targets, podTarget{
-				Name:    query.PodName(isvc, component, inst.Index, runner.Name, o),
+				Name:    query.PodName(isvc.Name, component, inst.Index, runner.Name, o),
 				Runner:  runner,
 				Ordinal: o,
 			})
 		}
 	}
 	return targets
+}
+
+// activeOrdinalForInstance returns the InstanceStatus.ActiveOrdinal
+// for (component, idx), or 0 when no status exists yet. Single-pod
+// Create / Restart / recreateUpdate paths consult this to address the
+// post-surge canonical slot (which may be 1, not 0).
+func activeOrdinalForInstance(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) int32 {
+	if s := query.FindInstanceStatus(isvc, component, idx); s != nil {
+		return s.ActiveOrdinal
+	}
+	return 0
 }
 
 // createMissingPods renders and creates targets, owning the per-pod

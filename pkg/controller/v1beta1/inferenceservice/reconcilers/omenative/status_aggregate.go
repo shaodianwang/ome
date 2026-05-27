@@ -86,13 +86,25 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		}
 
 		// Component-level counters.
+		//
+		// desiredByIdx maps each Instance index to the desired number of
+		// canonical pods (the plan's Runner Size sum, NOT the observed
+		// pod count). Surge transiently adds an extra pod per Instance —
+		// the observed PodCount briefly equals desired+1. Counting
+		// "instance is serving when ServingPodCount == PodCount" would
+		// mis-classify mid-surge Instances as not-serving and drop
+		// ServingReplicas / ReadyReplicas / AvailableReplicas, even
+		// though the canonical pod is still in rotation. The fix:
+		// classify an Instance based on whether desiredPodCount-many
+		// pods meet the condition.
+		desiredByIdx := desiredPodCountByInstance(plan)
 		cs.OMENative.Replicas = int32(len(cs.OMENative.InstanceStatuses))
-		cs.OMENative.ReadyReplicas = countReadyInstances(cs.OMENative.InstanceStatuses)
-		cs.OMENative.ServingReplicas = countServingInstances(cs.OMENative.InstanceStatuses)
-		cs.OMENative.AvailableReplicas = countAvailableInstances(cs.OMENative.InstanceStatuses)
+		cs.OMENative.ReadyReplicas = countReadyInstances(cs.OMENative.InstanceStatuses, desiredByIdx)
+		cs.OMENative.ServingReplicas = countServingInstances(cs.OMENative.InstanceStatuses, desiredByIdx)
+		cs.OMENative.AvailableReplicas = countAvailableInstances(cs.OMENative.InstanceStatuses, desiredByIdx)
 		if target != nil {
 			cs.OMENative.UpdatedReplicas, cs.OMENative.UpdatedReadyReplicas =
-				countUpdatedInstances(cs.OMENative.InstanceStatuses, target.Name)
+				countUpdatedInstances(cs.OMENative.InstanceStatuses, target.Name, desiredByIdx)
 			cs.OMENative.UpdateRevision = target.Name
 			if rolloutComplete(cs.OMENative.InstanceStatuses, target.Name) {
 				cs.OMENative.CurrentRevision = target.Name
@@ -267,39 +279,95 @@ func uniqueNodes(pods []*corev1.Pod) []string {
 	return out
 }
 
-// countReadyInstances counts Instances whose every pod is
-// ContainersReady=True (PodCount > 0).
-func countReadyInstances(insts []v1beta1.OMENativeInstanceStatus) int32 {
+// desiredPodCountByInstance maps each planned Instance index to its
+// desired canonical pod count (sum of Runner sizes). Returns nil for
+// an empty plan so callers fall back to the observed PodCount
+// comparison (pre-existing behavior for Instances absent from the
+// plan — e.g., during scale-down with stale status entries).
+func desiredPodCountByInstance(plan ComponentPlan) map[int32]int32 {
+	if len(plan.Instances) == 0 {
+		return nil
+	}
+	out := make(map[int32]int32, len(plan.Instances))
+	for _, inst := range plan.Instances {
+		out[inst.Index] = query.TotalPodsForInstance(inst)
+	}
+	return out
+}
+
+// desiredFor returns the desired pod count for idx — the plan entry's
+// value when present, otherwise the observed PodCount (no plan info ⇒
+// use the observed count, matching pre-fix behavior for stale-status
+// scale-down Instances).
+func desiredFor(desiredByIdx map[int32]int32, idx int32, observedPodCount int32) int32 {
+	if desiredByIdx == nil {
+		return observedPodCount
+	}
+	if d, ok := desiredByIdx[idx]; ok {
+		return d
+	}
+	return observedPodCount
+}
+
+// instanceMeetsThreshold is the shared classifier the count*Instances
+// helpers share: an Instance "counts" when at least its desired pod
+// count of pods satisfy the relevant predicate (Ready / Serving /
+// Available). Differs from the pre-fix `observed == PodCount`
+// comparison: SurgeThenDrain transiently puts an extra pod alive on
+// the Instance, lifting PodCount above desired. The old comparison
+// would mis-classify mid-surge Instances as not-Ready / not-Serving
+// the whole time the surge pod is starting up — that's the user-
+// visible serving dip seen in PR #238 sampler runs.
+//
+// The desired value falls back to observedPodCount when the plan
+// has no entry for this index (scale-down with stale status).
+func instanceMeetsThreshold(observedPodCount, observedSatisfying, desired int32) bool {
+	if observedPodCount == 0 {
+		return false
+	}
+	if desired <= 0 {
+		return observedSatisfying == observedPodCount
+	}
+	return observedSatisfying >= desired
+}
+
+// countReadyInstances counts Instances whose desired-many pods are
+// ContainersReady=True. See instanceMeetsThreshold for the
+// surge-tolerant semantic.
+func countReadyInstances(insts []v1beta1.OMENativeInstanceStatus, desiredByIdx map[int32]int32) int32 {
 	var n int32
 	for _, s := range insts {
-		if s.PodCount > 0 && s.ReadyPodCount == s.PodCount {
+		desired := desiredFor(desiredByIdx, s.Index, s.PodCount)
+		if instanceMeetsThreshold(s.PodCount, s.ReadyPodCount, desired) {
 			n++
 		}
 	}
 	return n
 }
 
-// countServingInstances counts Instances whose every pod is BOTH
-// ContainersReady AND serving=True. This is the count
+// countServingInstances counts Instances whose desired-many pods are
+// BOTH ContainersReady AND serving=True. This is the count
 // CheckUnavailabilityGate uses — "instances actually in the load
 // balancer rotation right now."
-func countServingInstances(insts []v1beta1.OMENativeInstanceStatus) int32 {
+func countServingInstances(insts []v1beta1.OMENativeInstanceStatus, desiredByIdx map[int32]int32) int32 {
 	var n int32
 	for _, s := range insts {
-		if s.PodCount > 0 && s.ServingPodCount == s.PodCount {
+		desired := desiredFor(desiredByIdx, s.Index, s.PodCount)
+		if instanceMeetsThreshold(s.PodCount, s.ServingPodCount, desired) {
 			n++
 		}
 	}
 	return n
 }
 
-// countAvailableInstances counts Instances whose every pod is in
-// EndpointSlice rotation. Strict sub-condition of Ready — kube-proxy
-// only publishes Ready pods.
-func countAvailableInstances(insts []v1beta1.OMENativeInstanceStatus) int32 {
+// countAvailableInstances counts Instances whose desired-many pods
+// are in EndpointSlice rotation. Strict sub-condition of Ready —
+// kube-proxy only publishes Ready pods.
+func countAvailableInstances(insts []v1beta1.OMENativeInstanceStatus, desiredByIdx map[int32]int32) int32 {
 	var n int32
 	for _, s := range insts {
-		if s.PodCount > 0 && s.AvailablePodCount == s.PodCount {
+		desired := desiredFor(desiredByIdx, s.Index, s.PodCount)
+		if instanceMeetsThreshold(s.PodCount, s.AvailablePodCount, desired) {
 			n++
 		}
 	}
@@ -308,14 +376,16 @@ func countAvailableInstances(insts []v1beta1.OMENativeInstanceStatus) int32 {
 
 // countUpdatedInstances returns (UpdatedReplicas, UpdatedReadyReplicas)
 // for Instances on targetRevName. UpdatedReadyReplicas adds the Ready
-// gate — what HPA's scale-aware rollout pacing reads.
-func countUpdatedInstances(insts []v1beta1.OMENativeInstanceStatus, targetRevName string) (updated, updatedReady int32) {
+// gate — what HPA's scale-aware rollout pacing reads. The Ready check
+// shares the same surge-tolerant classifier as countReadyInstances.
+func countUpdatedInstances(insts []v1beta1.OMENativeInstanceStatus, targetRevName string, desiredByIdx map[int32]int32) (updated, updatedReady int32) {
 	for _, s := range insts {
 		if s.RunningRevision != targetRevName {
 			continue
 		}
 		updated++
-		if s.PodCount > 0 && s.ReadyPodCount == s.PodCount {
+		desired := desiredFor(desiredByIdx, s.Index, s.PodCount)
+		if instanceMeetsThreshold(s.PodCount, s.ReadyPodCount, desired) {
 			updatedReady++
 		}
 	}
