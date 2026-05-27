@@ -919,6 +919,38 @@ func TestPatchInstanceStatusReadyOnRevision_SkipsWriteWhenIdempotent(t *testing.
 	}
 }
 
+// drainServiceForPod must derive the per-revision *routed* Service name
+// from the pod's ome.io/revision-hash label, NOT the per-Component
+// headless Service. The headless Service sets PublishNotReadyAddresses
+// =true, which makes kube-proxy publish Ready=true on its EndpointSlice
+// regardless of the pod's actual Ready — so drain.IsPodDrained against
+// the headless Service waits forever and stalls every recreate /
+// in-place update / scale-down / migrate-source drain. Pin the contract.
+func TestDrainServiceForPod_UsesPerRevisionRoutedService(t *testing.T) {
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "llama-70b-engine-0-default-0",
+		Namespace: "prod",
+		Labels:    map[string]string{"ome.io/revision-hash": "abcd1234"},
+	}}
+	got := drainServiceForPod(isvc.Name, v1beta1.EngineComponent, pod)
+	if got != "llama-70b-engine-rev-abcd1234" {
+		t.Errorf("got %q want llama-70b-engine-rev-abcd1234", got)
+	}
+}
+
+// Pods that predate the revision-hash label (e.g. legacy LWS pods that
+// got adopted, fuzz inputs, future label-renaming migrations) return
+// empty — caller skips the drain rather than blocking on a service it
+// cannot identify.
+func TestDrainServiceForPod_EmptyWhenLabelMissing(t *testing.T) {
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-0-default-0", Namespace: "prod"}}
+	if got := drainServiceForPod(isvc.Name, v1beta1.EngineComponent, pod); got != "" {
+		t.Errorf("got %q want empty", got)
+	}
+}
+
 // Ensure types still compose — keeps `fmt` import live when test bodies
 // remove their string-formatted assertions.
 var _ = fmt.Sprint

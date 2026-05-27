@@ -14,6 +14,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
@@ -698,16 +699,33 @@ func synthesizeContainersReady(t *testing.T, c client.Client, pod *corev1.Pod) {
 	}
 }
 
+// ensureDrainedSlice mimics kube-proxy publishing the pod as drained
+// (Ready=false) on both the per-revision routed Service (which the
+// drain path reads after the headless-drain-hang fix) and the headless
+// Service (which status_aggregate's availability rollup still reads).
+// A real cluster has the same pod appearing in both slices.
 func ensureDrainedSlice(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, pod *corev1.Pod) {
 	t.Helper()
-	slice := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-drained", pod.Name), query.HeadlessServiceName(isvc.Name, v1beta1.EngineComponent), pod, false)
-	_ = c.Create(context.Background(), slice)
+	hash := pod.Labels[query.LabelRevisionHash]
+	if hash == "" {
+		t.Fatalf("ensureDrainedSlice: pod %s missing ome.io/revision-hash label", pod.Name)
+	}
+	perRev := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-drained-rev", pod.Name), coordination.PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, hash), pod, false)
+	_ = c.Create(context.Background(), perRev)
+	headless := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-drained-hd", pod.Name), query.HeadlessServiceName(isvc.Name, v1beta1.EngineComponent), pod, false)
+	_ = c.Create(context.Background(), headless)
 }
 
 func ensureInRotationSlice(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, pod *corev1.Pod) {
 	t.Helper()
-	slice := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-rotation", pod.Name), query.HeadlessServiceName(isvc.Name, v1beta1.EngineComponent), pod, true)
-	_ = c.Create(context.Background(), slice)
+	hash := pod.Labels[query.LabelRevisionHash]
+	if hash == "" {
+		t.Fatalf("ensureInRotationSlice: pod %s missing ome.io/revision-hash label", pod.Name)
+	}
+	perRev := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-rotation-rev", pod.Name), coordination.PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, hash), pod, true)
+	_ = c.Create(context.Background(), perRev)
+	headless := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-rotation-hd", pod.Name), query.HeadlessServiceName(isvc.Name, v1beta1.EngineComponent), pod, true)
+	_ = c.Create(context.Background(), headless)
 }
 
 func podListNames(pods []corev1.Pod) []string {

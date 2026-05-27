@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
@@ -22,6 +23,31 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/revision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 )
+
+// drainServiceForPod returns the per-revision *routed* Service name to
+// gate drain against for pod. Read from the pod's ome.io/revision-hash
+// label (stamped by Render). Empty string when the label is missing —
+// caller treats that as "no routed Service to check" and proceeds
+// straight to delete.
+//
+// We deliberately do NOT use the Component's headless Service here.
+// That Service sets PublishNotReadyAddresses=true so peer-discovery DNS
+// resolves before pods are Ready; kube-proxy then publishes the
+// endpoint with Conditions.Ready=true regardless of the pod's actual
+// Ready state, which would make drain.IsPodDrained wait forever. The
+// per-revision routed Service (created by the coordination layer with
+// PublishNotReadyAddresses=false) reflects the controller-owned
+// ome.io/serving gate correctly.
+func drainServiceForPod(isvcName string, component v1beta1.ComponentType, pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	hash := pod.Labels[query.LabelRevisionHash]
+	if hash == "" {
+		return ""
+	}
+	return coordination.PerRevisionServiceName(isvcName, component, hash)
+}
 
 // updateDrainKey identifies an in-place or recreate Update writer
 // against a specific Instance materialization. Same key on Add and
@@ -228,8 +254,11 @@ func inPlaceUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compon
 			}
 		}
 		// Live reader on drain check so kube-proxy isn't still routing.
-		serviceName := query.HeadlessServiceName(p.ISVC.Name, plan.Component)
 		for _, pod := range pods {
+			serviceName := drainServiceForPod(p.ISVC.Name, plan.Component, pod)
+			if serviceName == "" {
+				continue
+			}
 			drained, err := drain.IsPodDrained(ctx, p.Reader(), p.ISVC.Namespace, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
@@ -360,8 +389,11 @@ func recreateUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compo
 			}
 		}
 		// Live reader on drain check so kube-proxy isn't still routing.
-		serviceName := query.HeadlessServiceName(p.ISVC.Name, plan.Component)
 		for _, pod := range oldPods {
+			serviceName := drainServiceForPod(p.ISVC.Name, plan.Component, pod)
+			if serviceName == "" {
+				continue
+			}
 			drained, err := drain.IsPodDrained(ctx, p.Reader(), p.ISVC.Namespace, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)

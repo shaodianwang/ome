@@ -66,6 +66,12 @@ func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 	}
 }
 
+// testRevisionHash is the synthetic revision hash stamped on test
+// pods (matches what production Render emits via ome.io/revision-hash).
+// Per-revision Service fixtures in drain tests name themselves after
+// this constant via coordination.PerRevisionServiceName.
+const testRevisionHash = "testrev1"
+
 // minimalParams builds a core.ReconcileParams in the single-pod / engine shape.
 func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client) core.ReconcileParams {
 	t.Helper()
@@ -288,11 +294,16 @@ func TestCreate_IdempotentOnAlreadyExists(t *testing.T) {
 // exactly what the controller is about to write. Synthesizing PodReady
 // in tests would mask the real ordering.
 func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, serving bool) *corev1.Pod {
+	labels := podLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1)
+	// Production Render stamps ome.io/revision-hash so per-revision
+	// Service selectors match. Test pods must carry it too — the drain
+	// path computes the per-revision routed Service from this label.
+	labels[query.LabelRevisionHash] = testRevisionHash
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      query.PodName(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 0),
 			Namespace: isvc.Namespace,
-			Labels:    podLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1),
+			Labels:    labels,
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "main", Image: "test:v1"}},

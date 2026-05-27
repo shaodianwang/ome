@@ -139,7 +139,7 @@ func TestDelete_FlipsServingFalseAndRequeuesWhileDraining(t *testing.T) {
 	isvc := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
 	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
 	// EndpointSlice still publishes the pod with Ready=true — drain not converged.
-	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, true)
+	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, true)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	p := minimalParams(t, isvc, c)
 	plan, _ := core.BuildPlan(p)
@@ -178,7 +178,7 @@ func TestDelete_DrainedPodIsDeleted(t *testing.T) {
 	isvc := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
 	// Pod already not serving; EndpointSlice publishes it with Ready=false → drained.
 	pod := podForInstance(isvc, 0, true, false)
-	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, false)
+	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	p := minimalParams(t, isvc, c)
 	plan, _ := core.BuildPlan(p)
@@ -212,7 +212,7 @@ func TestDelete_ConvergesAcrossPasses(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
 	pod := podForInstance(isvc, 0, true, false)
-	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, false)
+	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	p := minimalParams(t, isvc, c)
 	plan, _ := core.BuildPlan(p)
@@ -257,7 +257,7 @@ func TestDelete_PodAlreadyTerminatingIsSkipped(t *testing.T) {
 	// fake client requires a finalizer when DeletionTimestamp is set,
 	// otherwise it rejects the object.
 	pod.Finalizers = []string{"omenative.test/keep-around"}
-	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, false)
+	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	p := minimalParams(t, isvc, c)
 	plan, _ := core.BuildPlan(p)

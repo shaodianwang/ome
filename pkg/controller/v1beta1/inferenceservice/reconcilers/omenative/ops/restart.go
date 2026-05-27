@@ -91,8 +91,11 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 		}
 
 		// Live reader on drain check so kube-proxy isn't still routing.
-		serviceName := query.HeadlessServiceName(p.ISVC.Name, plan.Component)
 		for _, pod := range oldPods {
+			serviceName := drainServiceForPod(p.ISVC.Name, plan.Component, pod)
+			if serviceName == "" {
+				continue
+			}
 			drained, err := drain.IsPodDrained(ctx, p.Reader(), p.ISVC.Namespace, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)

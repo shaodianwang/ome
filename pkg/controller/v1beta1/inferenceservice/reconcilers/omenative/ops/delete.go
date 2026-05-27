@@ -81,8 +81,11 @@ func Delete(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan
 	}
 
 	// Drain check needs live reader so kube-proxy isn't still routing.
-	serviceName := query.HeadlessServiceName(p.ISVC.Name, plan.Component)
 	for _, pod := range pods {
+		serviceName := drainServiceForPod(p.ISVC.Name, plan.Component, pod)
+		if serviceName == "" {
+			continue
+		}
 		drained, err := drain.IsPodDrained(ctx, p.Reader(), p.ISVC.Namespace, serviceName, pod)
 		if err != nil {
 			return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", idx, pod.Name, err)

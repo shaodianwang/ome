@@ -228,8 +228,11 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 	// Wait for surge endpoints in rotation before draining source — without
 	// this gate the swap can hit a zero-routable-endpoint window. Live
 	// reader so a cold informer doesn't falsely report zero slices.
-	serviceName := query.HeadlessServiceName(p.ISVC.Name, plan.Component)
 	for _, pod := range surgePods {
+		serviceName := drainServiceForPod(p.ISVC.Name, plan.Component, pod)
+		if serviceName == "" {
+			continue
+		}
 		inRotation, rerr := drain.IsPodInRotation(ctx, p.Reader(), p.ISVC.Namespace, serviceName, pod)
 		if rerr != nil {
 			return false, fmt.Errorf("Migrate: check rotation on surge pod %s: %w", pod.Name, rerr)
@@ -258,6 +261,10 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 		}
 	}
 	for _, pod := range sourcePods {
+		serviceName := drainServiceForPod(p.ISVC.Name, plan.Component, pod)
+		if serviceName == "" {
+			continue
+		}
 		drained, derr := drain.IsPodDrained(ctx, p.Reader(), p.ISVC.Namespace, serviceName, pod)
 		if derr != nil {
 			return false, fmt.Errorf("Migrate: check drain on source pod %s: %w", pod.Name, derr)
