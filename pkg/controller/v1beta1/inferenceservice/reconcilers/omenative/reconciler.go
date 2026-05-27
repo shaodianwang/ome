@@ -108,6 +108,16 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 		return ctrl.Result{}, err
 	}
 
+	// PodGroups must exist BEFORE the first pod in any multi-pod Instance
+	// is created — otherwise the scheduler-plugins coscheduler may place
+	// pods individually before the gang is announced. Also stamps the
+	// GangSchedulingUnavailable Component condition: True when multi-pod
+	// Instances are requested but the CRD is not installed, False
+	// otherwise. No-op for single-pod Components.
+	if err := ensurePodGroups(ctx, p, plan); err != nil {
+		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: ensure pod groups (component=%s): %w", plan.Component, err)
+	}
+
 	// target is computed early so the tail status write can stamp
 	// UpdateRevision / CurrentRevision even if the op chain returned
 	// without reaching the update branch.

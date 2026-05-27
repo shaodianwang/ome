@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -131,6 +132,15 @@ type InferenceServiceReconciler struct {
 	// active translator is selected by traffic/factory.New based on
 	// installed Gateway-implementation CRDs.
 	TrafficReconciler *traffic.Reconciler
+	// GangSchedulingAvailable is the cluster-discovery boolean — true
+	// when the scheduler-plugins `scheduling.x-k8s.io/v1alpha1/PodGroup`
+	// CRD is installed at controller startup. Threaded through the
+	// component builder factory to OMENative's reconciler so the gang-
+	// scheduling code path runs only when the CRD is actually present.
+	// When false, multi-pod OMENative Instances still create pods but
+	// the controller stamps a `GangSchedulingUnavailable=True`
+	// Component condition (soft-fail per OEP-0007 §"Gang Scheduling").
+	GangSchedulingAvailable bool
 }
 
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -226,7 +236,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Initialize ComponentBuilderFactory
 	// Note: isvcConfig is created a few lines above inside the Reconcile function
 	// for NewInferenceServicesConfig. We will use that existing isvcConfig.
-	componentBuilderFactory := components.NewComponentBuilderFactory(r.Client, r.Clientset, r.APIReader, r.Expectations, r.Recorder, r.Scheme, isvcConfig)
+	componentBuilderFactory := components.NewComponentBuilderFactory(r.Client, r.Clientset, r.APIReader, r.Expectations, r.Recorder, r.Scheme, isvcConfig).
+		WithGangSchedulingAvailable(r.GangSchedulingAvailable)
 
 	// Determine which components to reconcile based on the spec
 	var reconcilers []components.Component
@@ -792,6 +803,17 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		return err
 	}
 
+	// scheduler-plugins PodGroup detection. Optional CRD; absence is a
+	// degradation surface, not a hard fail. OMENative's reconciler reads
+	// the cached flag via ReconcileParams.GangSchedulingAvailable and
+	// stamps a `GangSchedulingUnavailable=True` Component Condition when
+	// a multi-pod Component is requested without the CRD.
+	podGroupFound, err := utils.IsCrdAvailable(r.ClientConfig, schedulingv1alpha1.SchemeGroupVersion.String(), constants.PodGroupKind)
+	if err != nil {
+		return err
+	}
+	r.GangSchedulingAvailable = podGroupFound
+
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.InferenceService{}).
 		Owns(&appsv1.Deployment{}).
@@ -841,6 +863,15 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		ctrlBuilder = ctrlBuilder.Owns(&lws.LeaderWorkerSet{})
 	} else {
 		r.Log.Info("The InferenceService controller won't watch leaderworkerset.x-k8s.io/v1/LeaderWorkerSet resources because the CRD is not available.")
+	}
+
+	if podGroupFound {
+		// OMENative-emitted PodGroups carry the ISVC as controller-owner;
+		// owner-ref-based enqueue re-reconciles the ISVC when a PodGroup
+		// is modified or deleted out from under us.
+		ctrlBuilder = ctrlBuilder.Owns(&schedulingv1alpha1.PodGroup{})
+	} else {
+		r.Log.Info("The InferenceService controller won't watch scheduling.x-k8s.io/v1alpha1/PodGroup resources because the CRD is not available; OMENative multi-pod Instances will degrade to non-gang scheduling.")
 	}
 
 	// OEP-0011: register an Owns() watch on the backend policy

@@ -172,18 +172,19 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 		// the only valid multi-pod shape has both fields set.
 		multiPod := d.decoderSpec.Leader != nil && d.decoderSpec.Worker != nil
 		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
-			ISVC:          isvc,
-			ObjectMeta:    objectMeta,
-			PodSpec:       podSpec,
-			Component:     v1beta1.DecoderComponent,
-			ComponentExt:  &d.decoderSpec.ComponentExtensionSpec,
-			WorkerSize:    workerSize,
-			WorkerPodSpec: workerPodSpec,
-			MultiPod:      multiPod,
-			Client:        d.Client,
-			APIReader:     d.APIReader,
-			Expectations:  d.Expectations,
-			Recorder:      d.Recorder,
+			ISVC:                    isvc,
+			ObjectMeta:              objectMeta,
+			PodSpec:                 podSpec,
+			Component:               v1beta1.DecoderComponent,
+			ComponentExt:            &d.decoderSpec.ComponentExtensionSpec,
+			WorkerSize:              workerSize,
+			WorkerPodSpec:           workerPodSpec,
+			MultiPod:                multiPod,
+			GangSchedulingAvailable: d.GangSchedulingAvailable,
+			Client:                  d.Client,
+			APIReader:               d.APIReader,
+			Expectations:            d.Expectations,
+			Recorder:                d.Recorder,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for decoder")

@@ -284,3 +284,110 @@ func TestComputeInstanceConditions_NilStatusIsSafe(t *testing.T) {
 		t.Errorf("expected nil for nil status, got %v", got)
 	}
 }
+
+// TestGangSchedulingUnavailableCondition_Matrix covers the 4 input
+// combinations of (crdPresent, anyMultiPodInstance) the helper accepts.
+// Only the (crdMissing AND multi-pod) cell yields Status=True with
+// reason `PodGroupCRDNotInstalled`; the other three are False with
+// reason `GangSchedulingAvailable`.
+func TestGangSchedulingUnavailableCondition_Matrix(t *testing.T) {
+	cases := []struct {
+		name           string
+		crdPresent     bool
+		anyMultiPod    bool
+		wantStatus     metav1.ConditionStatus
+		wantReason     string
+		messageContain string
+	}{
+		{
+			name:           "no CRD + multi-pod -> True (degraded)",
+			crdPresent:     false,
+			anyMultiPod:    true,
+			wantStatus:     metav1.ConditionTrue,
+			wantReason:     ReasonPodGroupCRDNotInstalled,
+			messageContain: "PodGroup CRD is not installed",
+		},
+		{
+			name:           "CRD present + multi-pod -> False (gang available)",
+			crdPresent:     true,
+			anyMultiPod:    true,
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     ReasonGangSchedulingAvailable,
+			messageContain: "available or not required",
+		},
+		{
+			name:           "no CRD + single-pod -> False (not required)",
+			crdPresent:     false,
+			anyMultiPod:    false,
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     ReasonGangSchedulingAvailable,
+			messageContain: "available or not required",
+		},
+		{
+			name:           "CRD present + single-pod -> False (not required)",
+			crdPresent:     true,
+			anyMultiPod:    false,
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     ReasonGangSchedulingAvailable,
+			messageContain: "available or not required",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cond := GangSchedulingUnavailableCondition(tc.crdPresent, tc.anyMultiPod, 42)
+			if cond.Type != ConditionGangSchedulingUnavailable {
+				t.Errorf("Type: got %q want %q", cond.Type, ConditionGangSchedulingUnavailable)
+			}
+			if cond.Status != tc.wantStatus {
+				t.Errorf("Status: got %s want %s", cond.Status, tc.wantStatus)
+			}
+			if cond.Reason != tc.wantReason {
+				t.Errorf("Reason: got %q want %q", cond.Reason, tc.wantReason)
+			}
+			if cond.ObservedGeneration != 42 {
+				t.Errorf("ObservedGeneration: got %d want 42", cond.ObservedGeneration)
+			}
+			if !contains(cond.Message, tc.messageContain) {
+				t.Errorf("Message: got %q want substring %q", cond.Message, tc.messageContain)
+			}
+		})
+	}
+}
+
+// TestGangSchedulingUnavailableCondition_Idempotent — applying the
+// same condition twice via ApplyComponentConditions does not bump
+// LastTransitionTime (only real status transitions do, per
+// apimeta.SetStatusCondition semantics).
+func TestGangSchedulingUnavailableCondition_Idempotent(t *testing.T) {
+	cs := &v1beta1.OMENativeComponentStatus{}
+	first := GangSchedulingUnavailableCondition(false, true, 1)
+	ApplyComponentConditions(cs, []metav1.Condition{first})
+	beforeTime := apimeta.FindStatusCondition(cs.Conditions, ConditionGangSchedulingUnavailable).LastTransitionTime
+
+	// Second pass with identical inputs (same generation pair) — the
+	// helper always builds a fresh metav1.Now(), so the
+	// LastTransitionTime in the desired-condition is newer, but
+	// ApplyComponentConditions' SetStatusCondition only stamps it onto
+	// the live status when Status / Reason / Message changed.
+	second := GangSchedulingUnavailableCondition(false, true, 1)
+	ApplyComponentConditions(cs, []metav1.Condition{second})
+	afterTime := apimeta.FindStatusCondition(cs.Conditions, ConditionGangSchedulingUnavailable).LastTransitionTime
+
+	if !afterTime.Equal(&beforeTime) {
+		t.Errorf("LastTransitionTime should NOT bump on no-op apply; before=%v after=%v", beforeTime, afterTime)
+	}
+}
+
+// contains is a tiny substring check; avoids importing strings just
+// for this file.
+func contains(haystack, needle string) bool {
+	if needle == "" {
+		return true
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}

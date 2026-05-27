@@ -100,6 +100,14 @@ func RenderWithRevision(
 	if revisionHash != "" {
 		lbls[query.LabelRevisionHash] = revisionHash
 	}
+	// Multi-pod Instances stamp the scheduler-plugins pod-group label so
+	// the gang-aware scheduler co-schedules every pod in the Instance.
+	// Single-pod Instances skip the label — no PodGroup, no gang. The
+	// PodGroup itself is created by gang.ensurePodGroups before the
+	// first pod is created; this label is the pod-side correlator.
+	if query.TotalPodsForInstance(inst) > 1 {
+		lbls[query.LabelPodGroup] = query.PodGroupName(isvc.Name, plan.Component, inst.Index)
+	}
 	var anns map[string]string
 	if componentObjectMeta != nil && len(componentObjectMeta.Annotations) > 0 {
 		anns = make(map[string]string, len(componentObjectMeta.Annotations))

@@ -501,6 +501,12 @@ const (
 	GatewayKind          = "Gateway"
 	ServiceKind          = "Service"
 	PodMonitorKind       = "PodMonitor"
+	// PodGroupKind is the scheduler-plugins coscheduling PodGroup
+	// (`scheduling.x-k8s.io/v1alpha1`). Optional — OMENative degrades
+	// gracefully when the CRD is absent (sets the
+	// `GangSchedulingUnavailable=True` Component Condition) per
+	// OEP-0007 §"Gang Scheduling".
+	PodGroupKind = "PodGroup"
 )
 
 // Volcano Job Labels

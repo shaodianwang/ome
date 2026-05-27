@@ -19,7 +19,18 @@ const (
 	// without having to parse pod names (unsafe when isvc names contain
 	// hyphens). Pre-feature pods lack this label and are treated as
 	// ordinal=0 by the parser — matches their actual name suffix.
-	LabelPodOrdinal    = "ome.io/pod-ordinal"
+	LabelPodOrdinal = "ome.io/pod-ordinal"
+	// LabelPodGroup is the scheduler-plugins coscheduling pod-group label
+	// (`scheduling.x-k8s.io/pod-group`). Multi-pod Instances stamp it on
+	// every pod so the gang-aware scheduler co-schedules the whole gang —
+	// without this, the coscheduler treats each pod independently and
+	// partial placement is possible.
+	//
+	// Matches the upstream constant `schedulingv1alpha1.PodGroupLabel` at
+	// the byte level (we don't import the type here to keep the query
+	// package dep-free of the optional scheduler-plugins API).
+	// Single-pod Instances do NOT carry this label — no PodGroup, no gang.
+	LabelPodGroup      = "scheduling.x-k8s.io/pod-group"
 	ManagedByOMENative = "OMENative"
 )
 

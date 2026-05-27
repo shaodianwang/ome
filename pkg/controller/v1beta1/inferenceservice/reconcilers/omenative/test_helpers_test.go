@@ -15,6 +15,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -70,8 +71,9 @@ func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client
 
 // newFakeClientWithDiscovery builds a controller-runtime fake client
 // pre-populated with the schemes the omenative reconciler exercises:
-// corev1, appsv1, discoveryv1 (for EndpointSlice), and v1beta1 (with
-// status subresource wired).
+// corev1, appsv1, discoveryv1 (for EndpointSlice), v1beta1 (with
+// status subresource wired), and scheduler-plugins
+// scheduling.x-k8s.io/v1alpha1 (for PodGroup).
 func newFakeClientWithDiscovery(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -92,6 +94,13 @@ func newFakeClientWithDiscovery(t *testing.T, initObjs ...client.Object) client.
 	// monitoring scheme registered so CreateOrUpdate can serialize it.
 	if err := monitoringv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add monitoringv1: %v", err)
+	}
+	// scheduler-plugins PodGroup scheme — registered so tests that flip
+	// p.GangSchedulingAvailable=true can exercise the EnsurePodGroup
+	// path. Tests that leave GangSchedulingAvailable=false simply skip
+	// the PodGroup ops, so registration is harmless either way.
+	if err := schedulingv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add schedulingv1alpha1: %v", err)
 	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).

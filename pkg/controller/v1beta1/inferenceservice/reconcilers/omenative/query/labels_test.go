@@ -23,3 +23,14 @@ func TestRevisionHashFromControllerRevisionName(t *testing.T) {
 		})
 	}
 }
+
+// TestLabelPodGroup_MatchesUpstream pins the exact label key the
+// scheduler-plugins coscheduler reads. The constant must match
+// `scheduling.x-k8s.io/pod-group` byte-for-byte — drift here means
+// the scheduler will silently NOT enforce gang placement.
+func TestLabelPodGroup_MatchesUpstream(t *testing.T) {
+	const want = "scheduling.x-k8s.io/pod-group"
+	if LabelPodGroup != want {
+		t.Errorf("LabelPodGroup: got %q want %q", LabelPodGroup, want)
+	}
+}

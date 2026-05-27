@@ -45,7 +45,15 @@ type BaseComponentFields struct {
 	// Recorder is the parent controller's event recorder. Threaded
 	// through ReconcileParams so OMENative ops emit K8s Events against
 	// the parent ISVC at lifecycle transitions.
-	Recorder                          record.EventRecorder
+	Recorder record.EventRecorder
+	// GangSchedulingAvailable is the cluster-discovery boolean threaded
+	// from the InferenceServiceReconciler — true when the cluster has
+	// the scheduler-plugins `scheduling.x-k8s.io/v1alpha1/PodGroup` CRD
+	// installed. OMENative's reconciler reads this via
+	// ReconcileParams.GangSchedulingAvailable to decide whether to call
+	// podgroup.EnsurePodGroup for each multi-pod Instance. Other
+	// deployment modes (Raw / MultiNode / PD) ignore this field.
+	GangSchedulingAvailable           bool
 	Scheme                            *runtime.Scheme
 	InferenceServiceConfig            *controllerconfig.InferenceServicesConfig
 	DeploymentMode                    constants.DeploymentModeType

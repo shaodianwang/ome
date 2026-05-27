@@ -178,18 +178,19 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		// the only valid multi-pod shape has both fields set.
 		multiPod := e.engineSpec.Leader != nil && e.engineSpec.Worker != nil
 		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
-			ISVC:          isvc,
-			ObjectMeta:    objectMeta,
-			PodSpec:       podSpec,
-			Component:     v1beta1.EngineComponent,
-			ComponentExt:  &e.engineSpec.ComponentExtensionSpec,
-			WorkerSize:    workerSize,
-			WorkerPodSpec: workerPodSpec,
-			MultiPod:      multiPod,
-			Client:        e.Client,
-			APIReader:     e.APIReader,
-			Expectations:  e.Expectations,
-			Recorder:      e.Recorder,
+			ISVC:                    isvc,
+			ObjectMeta:              objectMeta,
+			PodSpec:                 podSpec,
+			Component:               v1beta1.EngineComponent,
+			ComponentExt:            &e.engineSpec.ComponentExtensionSpec,
+			WorkerSize:              workerSize,
+			WorkerPodSpec:           workerPodSpec,
+			MultiPod:                multiPod,
+			GangSchedulingAvailable: e.GangSchedulingAvailable,
+			Client:                  e.Client,
+			APIReader:               e.APIReader,
+			Expectations:            e.Expectations,
+			Recorder:                e.Recorder,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for engine")

@@ -47,6 +47,19 @@ type ReconcileParams struct {
 	// EngineSpec/DecoderSpec/RouterSpec aren't carried through this bag.
 	MultiPod bool
 
+	// GangSchedulingAvailable is a cluster-discovery boolean threaded
+	// through from the InferenceServiceReconciler — true when the
+	// scheduler-plugins `scheduling.x-k8s.io/v1alpha1/PodGroup` CRD is
+	// installed at controller startup. The OMENative reconciler reads
+	// this to decide whether to call podgroup.EnsurePodGroup for each
+	// multi-pod Instance. When false AND the plan has a multi-pod
+	// Instance, the reconciler still creates pods but stamps the
+	// `GangSchedulingUnavailable=True` Component condition (per
+	// OEP-0007's soft-fail contract: gang scheduling is recommended,
+	// not required). Tests / single-pod Components / pre-wiring
+	// callers leave it false.
+	GangSchedulingAvailable bool
+
 	// Client is the controller-runtime client used to materialize pods,
 	// patch status, and observe cluster state. Set at the dispatch site
 	// from BaseComponentFields.Client.

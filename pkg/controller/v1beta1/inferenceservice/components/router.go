@@ -150,15 +150,16 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		return r.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
 	case constants.OMENative:
 		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
-			ISVC:         isvc,
-			ObjectMeta:   objectMeta,
-			PodSpec:      podSpec,
-			Component:    v1beta1.RouterComponent,
-			ComponentExt: &r.routerSpec.ComponentExtensionSpec,
-			Client:       r.Client,
-			APIReader:    r.APIReader,
-			Expectations: r.Expectations,
-			Recorder:     r.Recorder,
+			ISVC:                    isvc,
+			ObjectMeta:              objectMeta,
+			PodSpec:                 podSpec,
+			Component:               v1beta1.RouterComponent,
+			ComponentExt:            &r.routerSpec.ComponentExtensionSpec,
+			GangSchedulingAvailable: r.GangSchedulingAvailable,
+			Client:                  r.Client,
+			APIReader:               r.APIReader,
+			Expectations:            r.Expectations,
+			Recorder:                r.Recorder,
 		})
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for router")

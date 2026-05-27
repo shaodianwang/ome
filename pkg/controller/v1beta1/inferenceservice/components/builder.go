@@ -19,21 +19,22 @@ import (
 
 // ComponentBuilder helps build components with common configuration
 type ComponentBuilder struct {
-	client                 client.Client
-	clientset              kubernetes.Interface
-	apiReader              client.Reader
-	expectations           *omenative.Expectations
-	recorder               record.EventRecorder
-	scheme                 *runtime.Scheme
-	inferenceServiceConfig *controllerconfig.InferenceServicesConfig
-	deploymentMode         constants.DeploymentModeType
-	baseModel              *v1beta1.BaseModelSpec
-	baseModelMeta          *metav1.ObjectMeta
-	runtime                *v1beta1.ServingRuntimeSpec
-	runtimeName            string
-	supportedModelFormat   *v1beta1.SupportedModelFormat
-	overlays               []isvcutils.ResolvedOverlay
-	logger                 logr.Logger
+	client                  client.Client
+	clientset               kubernetes.Interface
+	apiReader               client.Reader
+	expectations            *omenative.Expectations
+	recorder                record.EventRecorder
+	scheme                  *runtime.Scheme
+	inferenceServiceConfig  *controllerconfig.InferenceServicesConfig
+	deploymentMode          constants.DeploymentModeType
+	baseModel               *v1beta1.BaseModelSpec
+	baseModelMeta           *metav1.ObjectMeta
+	runtime                 *v1beta1.ServingRuntimeSpec
+	runtimeName             string
+	supportedModelFormat    *v1beta1.SupportedModelFormat
+	overlays                []isvcutils.ResolvedOverlay
+	logger                  logr.Logger
+	gangSchedulingAvailable bool
 }
 
 // NewComponentBuilder creates a new component builder. apiReader is the
@@ -104,6 +105,17 @@ func (b *ComponentBuilder) WithOverlays(overlays []isvcutils.ResolvedOverlay) *C
 	return b
 }
 
+// WithGangSchedulingAvailable threads the cluster-discovery boolean
+// (true when scheduler-plugins PodGroup CRD is installed) onto the
+// built component's BaseComponentFields. OMENative's reconciler reads
+// it via ReconcileParams.GangSchedulingAvailable to decide whether to
+// emit PodGroups for multi-pod Instances; other deployment modes
+// ignore the field.
+func (b *ComponentBuilder) WithGangSchedulingAvailable(available bool) *ComponentBuilder {
+	b.gangSchedulingAvailable = available
+	return b
+}
+
 // buildBaseFields creates the common base fields
 func (b *ComponentBuilder) buildBaseFields() BaseComponentFields {
 	return BaseComponentFields{
@@ -127,7 +139,7 @@ func (b *ComponentBuilder) buildBaseFields() BaseComponentFields {
 
 // BuildEngine creates an Engine component
 func (b *ComponentBuilder) BuildEngine(spec *v1beta1.EngineSpec) Component {
-	return NewEngine(
+	comp := NewEngine(
 		b.client,
 		b.clientset,
 		b.apiReader,
@@ -144,11 +156,19 @@ func (b *ComponentBuilder) BuildEngine(spec *v1beta1.EngineSpec) Component {
 		b.supportedModelFormat,
 		b.overlays,
 	)
+	// Stamp the gang-scheduling availability flag after construction.
+	// NewEngine keeps its positional-arg signature (test stability);
+	// the field is exported on BaseComponentFields so the builder
+	// fills it in post-construction with no signature churn.
+	if e, ok := comp.(*Engine); ok {
+		e.BaseComponentFields.GangSchedulingAvailable = b.gangSchedulingAvailable
+	}
+	return comp
 }
 
 // BuildDecoder creates a Decoder component
 func (b *ComponentBuilder) BuildDecoder(spec *v1beta1.DecoderSpec) Component {
-	return NewDecoder(
+	comp := NewDecoder(
 		b.client,
 		b.clientset,
 		b.apiReader,
@@ -165,11 +185,15 @@ func (b *ComponentBuilder) BuildDecoder(spec *v1beta1.DecoderSpec) Component {
 		b.supportedModelFormat,
 		b.overlays,
 	)
+	if d, ok := comp.(*Decoder); ok {
+		d.BaseComponentFields.GangSchedulingAvailable = b.gangSchedulingAvailable
+	}
+	return comp
 }
 
 // BuildRouter creates a Router component
 func (b *ComponentBuilder) BuildRouter(spec *v1beta1.RouterSpec) Component {
-	return NewRouter(
+	comp := NewRouter(
 		b.client,
 		b.clientset,
 		b.apiReader,
@@ -185,6 +209,12 @@ func (b *ComponentBuilder) BuildRouter(spec *v1beta1.RouterSpec) Component {
 		b.runtimeName,
 		b.overlays,
 	)
+	// Router is always single-pod (no Leader/Worker on RouterSpec)
+	// so the gang flag is informational only — set for consistency.
+	if r, ok := comp.(*Router); ok {
+		r.BaseComponentFields.GangSchedulingAvailable = b.gangSchedulingAvailable
+	}
+	return comp
 }
 
 // BuildCustomComponent creates a custom component with a strategy
@@ -199,13 +229,14 @@ func (b *ComponentBuilder) BuildCustomComponent(componentType v1beta1.ComponentT
 
 // ComponentBuilderFactory provides a factory for creating builders
 type ComponentBuilderFactory struct {
-	client                 client.Client
-	clientset              kubernetes.Interface
-	apiReader              client.Reader
-	expectations           *omenative.Expectations
-	recorder               record.EventRecorder
-	scheme                 *runtime.Scheme
-	inferenceServiceConfig *controllerconfig.InferenceServicesConfig
+	client                  client.Client
+	clientset               kubernetes.Interface
+	apiReader               client.Reader
+	expectations            *omenative.Expectations
+	recorder                record.EventRecorder
+	scheme                  *runtime.Scheme
+	inferenceServiceConfig  *controllerconfig.InferenceServicesConfig
+	gangSchedulingAvailable bool
 }
 
 // NewComponentBuilderFactory creates a new factory. apiReader is the
@@ -234,9 +265,19 @@ func NewComponentBuilderFactory(
 	}
 }
 
+// WithGangSchedulingAvailable updates the factory's persistent gang-
+// scheduling-availability boolean. Every builder spawned afterwards
+// receives the new value. Wired from InferenceServiceReconciler at
+// reconcile time so the value reflects the cluster-discovery cache.
+func (f *ComponentBuilderFactory) WithGangSchedulingAvailable(available bool) *ComponentBuilderFactory {
+	f.gangSchedulingAvailable = available
+	return f
+}
+
 // NewBuilder creates a new component builder
 func (f *ComponentBuilderFactory) NewBuilder() *ComponentBuilder {
-	return NewComponentBuilder(f.client, f.clientset, f.apiReader, f.expectations, f.recorder, f.scheme, f.inferenceServiceConfig)
+	return NewComponentBuilder(f.client, f.clientset, f.apiReader, f.expectations, f.recorder, f.scheme, f.inferenceServiceConfig).
+		WithGangSchedulingAvailable(f.gangSchedulingAvailable)
 }
 
 // CreateEngineComponent is a convenience method to create an engine component

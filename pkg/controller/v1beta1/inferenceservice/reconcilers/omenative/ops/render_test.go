@@ -110,6 +110,100 @@ func TestRender_Labels(t *testing.T) {
 	}
 }
 
+// TestRender_SinglePod_OmitsPodGroupLabel pins that single-pod
+// Instances do NOT carry the scheduler-plugins pod-group label. The
+// OEP-0007 contract is clear: no PodGroup, no gang — and stamping the
+// label without a matching PodGroup would put the scheduler-plugins
+// coscheduler into a wait-for-non-existent-gang state.
+func TestRender_SinglePod_OmitsPodGroupLabel(t *testing.T) {
+	plan, inst, runner := singlePodPlan()
+	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, present := pod.Labels[query.LabelPodGroup]; present {
+		t.Errorf("%s must be absent on single-pod Instance, got %q", query.LabelPodGroup, got)
+	}
+}
+
+// TestRender_MultiPod_StampsPodGroupLabel pins that every pod in a
+// multi-pod Instance carries the scheduler-plugins pod-group label
+// (`scheduling.x-k8s.io/pod-group=<isvc>-<comp>-<idx>`). The leader
+// and every worker must agree on the same PodGroup name so the
+// coscheduler treats them as one gang.
+func TestRender_MultiPod_StampsPodGroupLabel(t *testing.T) {
+	plan, inst, runners := multiPodPlan(2)
+	leader := runners[0]
+	worker := runners[1]
+
+	leaderPod, err := Render(basicISVC(), basicPodSpec(), plan, inst, leader, 0)
+	if err != nil {
+		t.Fatalf("leader: %v", err)
+	}
+	worker0, err := Render(basicISVC(), basicPodSpec(), plan, inst, worker, 0)
+	if err != nil {
+		t.Fatalf("worker 0: %v", err)
+	}
+	worker1, err := Render(basicISVC(), basicPodSpec(), plan, inst, worker, 1)
+	if err != nil {
+		t.Fatalf("worker 1: %v", err)
+	}
+
+	const wantPodGroup = "llama-70b-engine-0"
+	for _, p := range []*corev1.Pod{leaderPod, worker0, worker1} {
+		got, present := p.Labels[query.LabelPodGroup]
+		if !present {
+			t.Errorf("%s: pod %s missing %s label, labels=%+v",
+				p.Name, p.Name, query.LabelPodGroup, p.Labels)
+			continue
+		}
+		if got != wantPodGroup {
+			t.Errorf("%s %s: got %q want %q", p.Name, query.LabelPodGroup, got, wantPodGroup)
+		}
+	}
+}
+
+// TestRender_MultiPod_PodGroupLabelPerInstance pins that the
+// pod-group label is per-Instance: Instance 0's pods carry one
+// pod-group name, Instance 1's pods carry a different name. Otherwise
+// the coscheduler would treat both Instances as one mega-gang and
+// hang both until every member of both is schedulable.
+func TestRender_MultiPod_PodGroupLabelPerInstance(t *testing.T) {
+	runners := []core.RunnerPlan{
+		{Name: "leader", Size: 1},
+		{Name: "worker", Size: 1},
+	}
+	inst0 := core.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
+	inst1 := core.InstancePlan{Index: 1, Incarnation: 1, Runners: runners}
+	plan := core.ComponentPlan{
+		Component: v1beta1.EngineComponent,
+		Replicas:  2,
+		Instances: []core.InstancePlan{inst0, inst1},
+	}
+
+	inst0Pod, err := Render(basicISVC(), basicPodSpec(), plan, inst0, runners[1], 0)
+	if err != nil {
+		t.Fatalf("inst0 worker: %v", err)
+	}
+	inst1Pod, err := Render(basicISVC(), basicPodSpec(), plan, inst1, runners[1], 0)
+	if err != nil {
+		t.Fatalf("inst1 worker: %v", err)
+	}
+
+	if inst0Pod.Labels[query.LabelPodGroup] != "llama-70b-engine-0" {
+		t.Errorf("inst0 %s: got %q want llama-70b-engine-0",
+			query.LabelPodGroup, inst0Pod.Labels[query.LabelPodGroup])
+	}
+	if inst1Pod.Labels[query.LabelPodGroup] != "llama-70b-engine-1" {
+		t.Errorf("inst1 %s: got %q want llama-70b-engine-1",
+			query.LabelPodGroup, inst1Pod.Labels[query.LabelPodGroup])
+	}
+	if inst0Pod.Labels[query.LabelPodGroup] == inst1Pod.Labels[query.LabelPodGroup] {
+		t.Errorf("inst0 and inst1 must carry distinct pod-group names; both got %q",
+			inst0Pod.Labels[query.LabelPodGroup])
+	}
+}
+
 func TestRenderWithRevision_StampsRevisionHashLabel(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
 	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), nil, plan, inst, runner, 0, "abc12345")

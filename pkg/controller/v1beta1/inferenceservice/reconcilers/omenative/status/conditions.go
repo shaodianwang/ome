@@ -17,6 +17,15 @@ const (
 	ConditionAvailable      = "Available"
 	ConditionProgressing    = "Progressing"
 	ConditionOperationStuck = "OperationStuck"
+	// ConditionGangSchedulingUnavailable is True when the Component has
+	// at least one multi-pod Instance but the cluster does not have the
+	// scheduler-plugins `scheduling.x-k8s.io/v1alpha1` PodGroup CRD
+	// installed. The controller still creates pods — gang scheduling is
+	// a soft requirement per OEP-0007 §"Gang Scheduling" — but
+	// partial-gang placement is possible and the runtime may hang
+	// waiting for missing peer pods. False when the CRD is present or
+	// the Component is single-pod.
+	ConditionGangSchedulingUnavailable = "GangSchedulingUnavailable"
 
 	// Instance-level.
 	ConditionAllPodsScheduled      = "AllPodsScheduled"
@@ -47,6 +56,16 @@ const (
 	// operationStuckCondition lifts it into the Component-level
 	// OperationStuck condition.
 	ReasonDeadlineExceeded = "DeadlineExceeded"
+
+	// ReasonPodGroupCRDNotInstalled stamps the GangSchedulingUnavailable
+	// condition with a precise diagnostic — the cluster does not have
+	// the scheduler-plugins `scheduling.x-k8s.io/v1alpha1` PodGroup CRD
+	// installed.
+	ReasonPodGroupCRDNotInstalled = "PodGroupCRDNotInstalled"
+	// ReasonGangSchedulingAvailable stamps the condition Status=False
+	// (the controller has gang scheduling and is using it, OR the
+	// Component is single-pod and doesn't need it).
+	ReasonGangSchedulingAvailable = "GangSchedulingAvailable"
 )
 
 // ComputeComponentConditions derives the Component-level condition
@@ -297,6 +316,41 @@ func ApplyComponentConditions(cs *v1beta1.OMENativeComponentStatus, desired []me
 	}
 	for i := range desired {
 		apimeta.SetStatusCondition(&cs.Conditions, desired[i])
+	}
+}
+
+// GangSchedulingUnavailableCondition builds the
+// `GangSchedulingUnavailable` Component-level condition with the
+// canonical reason / message pair the OEP specifies. Set True when the
+// Component has at least one multi-pod Instance but the cluster lacks
+// the scheduler-plugins PodGroup CRD; False otherwise.
+//
+// Kept separate from ComputeComponentConditions because the input is
+// cluster-discovery state (caller's `crdPresent` boolean), not the
+// per-Component status counters. ApplyComponentConditions merges the
+// returned condition idempotently — no transition-time churn when
+// state is unchanged.
+func GangSchedulingUnavailableCondition(crdPresent, anyMultiPodInstance bool, generation int64) metav1.Condition {
+	now := metav1.Now()
+	if !anyMultiPodInstance || crdPresent {
+		// Single-pod-only Component OR the gang scheduler is available
+		// — either way, no degradation to flag.
+		return metav1.Condition{
+			Type:               ConditionGangSchedulingUnavailable,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonGangSchedulingAvailable,
+			Message:            "Gang scheduling is available or not required",
+			LastTransitionTime: now,
+			ObservedGeneration: generation,
+		}
+	}
+	return metav1.Condition{
+		Type:               ConditionGangSchedulingUnavailable,
+		Status:             metav1.ConditionTrue,
+		Reason:             ReasonPodGroupCRDNotInstalled,
+		Message:            "scheduler-plugins scheduling.x-k8s.io/v1alpha1 PodGroup CRD is not installed; multi-pod Instances may schedule partially",
+		LastTransitionTime: now,
+		ObservedGeneration: generation,
 	}
 }
 
