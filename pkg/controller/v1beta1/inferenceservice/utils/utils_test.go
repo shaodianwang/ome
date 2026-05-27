@@ -1097,6 +1097,53 @@ func TestMergeEngineSpec(t *testing.T) {
 	}
 }
 
+// TestMergeRunnerName_RestoresFromRuntimeWhenISVCNameEmpty pins the
+// fix for real-cluster G-2: when a user patches only the runner image
+// (kubectl-defaulted zero values for unmentioned fields produce
+// `runner: {image: ..., name: "", resources: {}}` on the ISVC), the
+// merged runner MUST keep the runtime's container name. Otherwise the
+// rendered pod has `spec.containers[0].name = ""` and apiserver
+// rejects the create with `spec.containers[0].name: Required value`,
+// deadlocking the OMENative rollout in step=Drain.
+//
+// Covers all three component paths (engine/decoder/router) so the
+// fix can't regress for any single one.
+func TestMergeRunnerName_RestoresFromRuntimeWhenISVCNameEmpty(t *testing.T) {
+	t.Run("engine", func(t *testing.T) {
+		runtime := &v1beta1.EngineSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Name: "ome-container", Image: "runtime:v1"}}}
+		isvc := &v1beta1.EngineSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Image: "user:v2"}}}
+		merged, err := MergeEngineSpec(runtime, isvc)
+		assert.NoError(t, err)
+		assert.Equal(t, "ome-container", merged.Runner.Name, "container name must come from runtime when ISVC didn't set it")
+		assert.Equal(t, "user:v2", merged.Runner.Image, "user's image override must still apply")
+	})
+	t.Run("decoder", func(t *testing.T) {
+		runtime := &v1beta1.DecoderSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Name: "decoder-runner", Image: "runtime:v1"}}}
+		isvc := &v1beta1.DecoderSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Image: "user:v2"}}}
+		merged, err := MergeDecoderSpec(runtime, isvc)
+		assert.NoError(t, err)
+		assert.Equal(t, "decoder-runner", merged.Runner.Name)
+		assert.Equal(t, "user:v2", merged.Runner.Image)
+	})
+	t.Run("router", func(t *testing.T) {
+		runtime := &v1beta1.RouterSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Name: "router-runner", Image: "runtime:v1"}}}
+		isvc := &v1beta1.RouterSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Image: "user:v2"}}}
+		merged, err := MergeRouterSpec(isvc, runtime)
+		assert.NoError(t, err)
+		assert.Equal(t, "router-runner", merged.Runner.Name)
+		assert.Equal(t, "user:v2", merged.Runner.Image)
+	})
+	t.Run("explicit-name-still-wins", func(t *testing.T) {
+		// Defensive: if the user DID set a non-empty name, the merge
+		// must honor it (no surprise restore).
+		runtime := &v1beta1.EngineSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Name: "runtime-name", Image: "runtime:v1"}}}
+		isvc := &v1beta1.EngineSpec{Runner: &v1beta1.RunnerSpec{Container: v1.Container{Name: "user-name", Image: "user:v2"}}}
+		merged, err := MergeEngineSpec(runtime, isvc)
+		assert.NoError(t, err)
+		assert.Equal(t, "user-name", merged.Runner.Name, "explicit user name must override runtime name")
+	})
+}
+
 func TestMergeDecoderSpec(t *testing.T) {
 	intPtr := func(i int) *int { return &i }
 	strPtr := func(s string) *string { return &s }
@@ -1391,6 +1438,15 @@ func TestMergeDecoderSpec(t *testing.T) {
 			expectedDecoder: &v1beta1.DecoderSpec{
 				Runner: &v1beta1.RunnerSpec{
 					Container: v1.Container{
+						// Name restored from runtime — ISVC RunnerSpec
+						// omitted Name (kubectl-defaulted zero value
+						// because the patch only set image-adjacent
+						// fields), which would otherwise wipe the
+						// runtime's name and produce a pod apiserver
+						// rejects with `spec.containers[0].name:
+						// Required value`. See restoreRunnerName in
+						// merging.go.
+						Name:    "decoder-runner",
 						Image:   "runtime-decoder:v1",
 						Command: []string{"/bin/decode"},
 						Args:    []string{"--mode", "batch", "--batch-size", "64"},

@@ -92,12 +92,40 @@ func MergeRouterSpec(isvcRouter, runtimeRouter *v1beta1.RouterSpec) (*v1beta1.Ro
 		return isvcRouter.DeepCopy(), nil
 	}
 
-	return mergeSpec(v1beta1.RouterSpec{
+	merged, err := mergeSpec(v1beta1.RouterSpec{
 		ComponentExtensionSpec: runtimeRouter.ComponentExtensionSpec,
 		PodSpec:                runtimeRouter.PodSpec,
 		Runner:                 runtimeRouter.Runner,
 		Config:                 runtimeRouter.Config,
 	}, *isvcRouter)
+	if err != nil {
+		return nil, err
+	}
+	restoreRunnerName(merged.Runner, runtimeRouter.Runner)
+	return merged, nil
+}
+
+// restoreRunnerName fixes the strategic-merge-patch blind spot where
+// the user-provided RunnerSpec sets `name: ""` (the common case when
+// only an image override is supplied — kubectl-defaulted zero value for
+// fields the patch didn't mention). v1.Container.Name has no
+// `omitempty` struct tag, so the empty string round-trips through
+// JSON and overwrites the runtime's name during merge, producing a
+// pod whose container has no name. apiserver then rejects pod creates
+// with `spec.containers[0].name: Required value`, deadlocking
+// OMENative rollouts. Same shape as the post-merge fixup
+// MergeRuntimeContainers applies at the v1.Container level.
+//
+// Both pointers may be nil — guard accordingly. We only restore from
+// runtime when merged Name is empty; an explicit user-set name is
+// preserved.
+func restoreRunnerName(merged, runtime *v1beta1.RunnerSpec) {
+	if merged == nil || runtime == nil {
+		return
+	}
+	if merged.Name == "" {
+		merged.Name = runtime.Name
+	}
 }
 
 // MergeEngineSpec merges a runtime-provided EngineSpec with a user-provided EngineSpec from InferenceService.
@@ -112,13 +140,18 @@ func MergeEngineSpec(runtimeEngine, isvcEngine *v1beta1.EngineSpec) (*v1beta1.En
 		return isvcEngine.DeepCopy(), nil
 	}
 
-	return mergeSpec(v1beta1.EngineSpec{
+	merged, err := mergeSpec(v1beta1.EngineSpec{
 		ComponentExtensionSpec: runtimeEngine.ComponentExtensionSpec,
 		PodSpec:                runtimeEngine.PodSpec,
 		Runner:                 runtimeEngine.Runner,
 		Leader:                 runtimeEngine.Leader,
 		Worker:                 runtimeEngine.Worker,
 	}, *isvcEngine)
+	if err != nil {
+		return nil, err
+	}
+	restoreRunnerName(merged.Runner, runtimeEngine.Runner)
+	return merged, nil
 }
 
 // MergeDecoderSpec merges a runtime-provided DecoderSpec with a user-provided DecoderSpec from InferenceService.
@@ -133,13 +166,18 @@ func MergeDecoderSpec(runtimeDecoder, isvcDecoder *v1beta1.DecoderSpec) (*v1beta
 		return isvcDecoder.DeepCopy(), nil
 	}
 
-	return mergeSpec(v1beta1.DecoderSpec{
+	merged, err := mergeSpec(v1beta1.DecoderSpec{
 		ComponentExtensionSpec: runtimeDecoder.ComponentExtensionSpec,
 		PodSpec:                runtimeDecoder.PodSpec,
 		Runner:                 runtimeDecoder.Runner,
 		Leader:                 runtimeDecoder.Leader,
 		Worker:                 runtimeDecoder.Worker,
 	}, *isvcDecoder)
+	if err != nil {
+		return nil, err
+	}
+	restoreRunnerName(merged.Runner, runtimeDecoder.Runner)
+	return merged, nil
 }
 
 // ConvertPodSpec converts v1beta1.PodSpec to v1.PodSpec
