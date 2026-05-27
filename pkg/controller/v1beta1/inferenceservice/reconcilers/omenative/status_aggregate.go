@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
+	"knative.dev/pkg/apis"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -106,6 +107,22 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		status.ApplyComponentConditions(cs.OMENative, status.ComputeComponentConditions(cs.OMENative, fresh.Generation))
 
 		fresh.Status.Components[plan.Component] = cs
+
+		// Top-level component-ready condition (EngineReady /
+		// DecoderReady / RouterReady). Mirrors the contract
+		// PropagateRawStatus / PropagateMultiNodeStatus apply for
+		// Deployment / LWS so the ingress reconciler, aggregate Ready
+		// rollup, and `kubectl wait --for=condition=Ready` treat
+		// OMENative the same as those modes. Without it, the cluster
+		// status carries Component-internal OMENative.* counters but
+		// never flips the top-level condition past InitializeComponent
+		// Condition's False/Initializing — and the outer reconciler's
+		// updateStatus flush stamps Ready=False forever.
+		topCond := topLevelComponentReadyFromOMENative(plan.Component, cs.OMENative)
+		if topCond != nil {
+			fresh.Status.SetCondition(topCond.Type, topCond)
+		}
+
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				isvcGone = true
@@ -116,6 +133,16 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// Capture after a successful Update so a retry replays the names
 		// off the post-conflict re-read.
 		liveRevisionNames = revision.CollectLiveRevisionNames(cs.OMENative)
+
+		// Mirror the top-level component-ready condition onto the
+		// cached ISVC the parent reconciler is holding. The outer
+		// updateStatus flush copies p.ISVC.Status onto a fresh re-read
+		// of the cluster — without this mirror, the value we just
+		// committed to the cluster gets clobbered next time the parent
+		// flushes (which it does every reconcile).
+		if topCond != nil {
+			p.ISVC.Status.SetCondition(topCond.Type, topCond)
+		}
 		return nil
 	})
 	if isvcGone {
@@ -320,4 +347,45 @@ func componentLabelSelectorString(isvc string, component v1beta1.ComponentType) 
 		constants.OMEComponentLabel:           string(component),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
 	}).String()
+}
+
+// topLevelComponentReadyFromOMENative derives the standard top-level
+// component-ready condition (EngineReady / DecoderReady / RouterReady)
+// from OMENative counters. Returns nil for unknown Component types so
+// callers leave the condition surface untouched.
+//
+// Ready=True iff ReadyReplicas == Replicas > 0 — i.e., every desired
+// Instance has all its pods ContainersReady. Mirrors the contract
+// PropagateRawStatus uses (Deployment.Available) so the ingress
+// reconciler, aggregate Ready rollup, and `kubectl wait
+// --for=condition=Ready` treat OMENative the same as RawDeployment /
+// MultiNode.
+func topLevelComponentReadyFromOMENative(component v1beta1.ComponentType, cs *v1beta1.OMENativeComponentStatus) *apis.Condition {
+	var readyType apis.ConditionType
+	switch component {
+	case v1beta1.EngineComponent:
+		readyType = v1beta1.EngineReady
+	case v1beta1.DecoderComponent:
+		readyType = v1beta1.DecoderReady
+	case v1beta1.RouterComponent:
+		readyType = v1beta1.RouterReady
+	default:
+		return nil
+	}
+	cond := &apis.Condition{Type: readyType}
+	switch {
+	case cs == nil || cs.Replicas == 0:
+		cond.Status = corev1.ConditionFalse
+		cond.Reason = "NoReplicas"
+		cond.Message = "Component has no desired Instances"
+	case cs.ReadyReplicas == cs.Replicas:
+		cond.Status = corev1.ConditionTrue
+		cond.Reason = "Ready"
+		cond.Message = "All Instances are Ready"
+	default:
+		cond.Status = corev1.ConditionFalse
+		cond.Reason = "NotAllReady"
+		cond.Message = fmt.Sprintf("%d/%d Instances ready", cs.ReadyReplicas, cs.Replicas)
+	}
+	return cond
 }
