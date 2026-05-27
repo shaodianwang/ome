@@ -22,6 +22,21 @@ func HeadlessServiceName(isvc string, component v1beta1.ComponentType) string {
 	return fmt.Sprintf("%s-%s-headless", isvc, component)
 }
 
+// StableServiceName returns the per-Component stable (non-headless,
+// non-revision-scoped) Service name — <isvc>-<comp>. Matches the
+// Service-name convention RawDeployment / MultiNode use (see
+// constants.{Engine,Decoder,Router}ServiceName) so the existing ingress
+// strategies — which point HTTPRoute / Ingress backendRefs at
+// <isvc>-<comp> — work for OMENative without a per-mode strategy.
+//
+// The Service selects all OMENative pods for the Component regardless
+// of revision; it is the cross-revision aggregate ingress target. The
+// per-revision Services (PerRevisionServiceName) remain available for
+// the OEP-0011 weighted-routing path.
+func StableServiceName(isvc string, component v1beta1.ComponentType) string {
+	return fmt.Sprintf("%s-%s", isvc, component)
+}
+
 // InstanceSubdomain returns the per-Instance DNS subdomain stamped
 // into the OME_INSTANCE_SUBDOMAIN env var. Format is
 // <isvc>-<component>-<instance-idx>; today this is metadata-only — the

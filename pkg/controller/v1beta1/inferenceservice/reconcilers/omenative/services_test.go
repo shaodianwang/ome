@@ -297,3 +297,209 @@ func TestReconcileHeadlessService_NilISVCRejected(t *testing.T) {
 		t.Fatalf("expected error on nil ISVC")
 	}
 }
+
+// ---------------------------------------------------------------------
+// BuildStableService — pure-compute shape assertions.
+// ---------------------------------------------------------------------
+
+func TestBuildStableService_NilISVC(t *testing.T) {
+	if _, err := BuildStableService(nil, v1beta1.EngineComponent); err == nil {
+		t.Fatal("expected error for nil ISVC")
+	}
+}
+
+func TestBuildStableService_Engine(t *testing.T) {
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: types.UID("uid-1")},
+	}
+	svc, err := BuildStableService(isvc, v1beta1.EngineComponent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Name must match what RawDeployment / MultiNode use so the ingress
+	// strategies — which target <isvc>-<comp> — find OMENative's
+	// Service the same way.
+	if svc.Name != "llama-70b-engine" {
+		t.Errorf("Name: got %q want llama-70b-engine", svc.Name)
+	}
+	if svc.Spec.ClusterIP == corev1.ClusterIPNone {
+		t.Errorf("ClusterIP should not be None (stable Service must be load-balanceable)")
+	}
+	if svc.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Errorf("Type: got %q want ClusterIP", svc.Spec.Type)
+	}
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != 8080 {
+		t.Errorf("Ports: got %+v want single 8080/http", svc.Spec.Ports)
+	}
+}
+
+func TestBuildStableService_SelectorMatchesHeadless(t *testing.T) {
+	// The stable Service must select the same pod set as the headless
+	// Service — both publish every OMENative pod for the Component
+	// regardless of revision. Drift between the two selectors would
+	// make ingress routing inconsistent with peer-DNS discovery.
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod"},
+	}
+	stable, err := BuildStableService(isvc, v1beta1.DecoderComponent)
+	if err != nil {
+		t.Fatalf("stable: %v", err)
+	}
+	headless, err := BuildHeadlessService(isvc, v1beta1.DecoderComponent)
+	if err != nil {
+		t.Fatalf("headless: %v", err)
+	}
+	if diff := cmp.Diff(headless.Spec.Selector, stable.Spec.Selector); diff != "" {
+		t.Errorf("selector divergence between stable and headless Services (-headless +stable):\n%s", diff)
+	}
+}
+
+func TestBuildStableService_NameVariesWithComponent(t *testing.T) {
+	tests := []struct {
+		component v1beta1.ComponentType
+		wantName  string
+	}{
+		{v1beta1.EngineComponent, "fleet-engine"},
+		{v1beta1.DecoderComponent, "fleet-decoder"},
+		{v1beta1.RouterComponent, "fleet-router"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.component), func(t *testing.T) {
+			svc, err := BuildStableService(&v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "fleet", Namespace: "prod"},
+			}, tt.component)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if svc.Name != tt.wantName {
+				t.Errorf("got %q want %q", svc.Name, tt.wantName)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------
+// reconcileStableService — wired-through CreateOrUpdate behavior.
+// ---------------------------------------------------------------------
+
+func TestReconcileStableService_FreshCreate(t *testing.T) {
+	isvc := newServiceReconcilerISVC("prod", "llama-70b")
+	c := newServiceReconcilerTestClient(t, isvc)
+	p := ReconcileParams{ISVC: isvc, Component: v1beta1.EngineComponent, Client: c}
+
+	if err := reconcileStableService(context.Background(), p); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	got := &corev1.Service{}
+	key := client.ObjectKey{Namespace: "prod", Name: "llama-70b-engine"}
+	if err := c.Get(context.Background(), key, got); err != nil {
+		t.Fatalf("get service after reconcile: %v", err)
+	}
+
+	if got.Spec.ClusterIP == corev1.ClusterIPNone {
+		t.Errorf("ClusterIP should not be None")
+	}
+	if got.Spec.Selector[query.LabelManagedBy] != query.ManagedByOMENative {
+		t.Errorf("managed-by selector missing or wrong: %v", got.Spec.Selector)
+	}
+	if len(got.Spec.Ports) != 1 || got.Spec.Ports[0].Port != 8080 {
+		t.Errorf("Ports: got %+v want single 8080", got.Spec.Ports)
+	}
+	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].UID != isvc.UID {
+		t.Errorf("owner reference not stamped against ISVC: %v", got.OwnerReferences)
+	}
+}
+
+func TestReconcileStableService_Idempotent(t *testing.T) {
+	isvc := newServiceReconcilerISVC("prod", "llama-70b")
+	c := newServiceReconcilerTestClient(t, isvc)
+	p := ReconcileParams{ISVC: isvc, Component: v1beta1.EngineComponent, Client: c}
+
+	if err := reconcileStableService(context.Background(), p); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	first := &corev1.Service{}
+	key := client.ObjectKey{Namespace: "prod", Name: "llama-70b-engine"}
+	if err := c.Get(context.Background(), key, first); err != nil {
+		t.Fatalf("get after first reconcile: %v", err)
+	}
+	firstRV := first.ResourceVersion
+
+	if err := reconcileStableService(context.Background(), p); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	second := &corev1.Service{}
+	if err := c.Get(context.Background(), key, second); err != nil {
+		t.Fatalf("get after second reconcile: %v", err)
+	}
+	if second.ResourceVersion != firstRV {
+		t.Errorf("Service was updated on second idempotent reconcile (RV %s -> %s)", firstRV, second.ResourceVersion)
+	}
+}
+
+func TestReconcileStableService_DriftCorrection(t *testing.T) {
+	isvc := newServiceReconcilerISVC("prod", "llama-70b")
+	c := newServiceReconcilerTestClient(t, isvc)
+	p := ReconcileParams{ISVC: isvc, Component: v1beta1.EngineComponent, Client: c}
+
+	if err := reconcileStableService(context.Background(), p); err != nil {
+		t.Fatalf("seed reconcile: %v", err)
+	}
+	key := client.ObjectKey{Namespace: "prod", Name: "llama-70b-engine"}
+	svc := &corev1.Service{}
+	if err := c.Get(context.Background(), key, svc); err != nil {
+		t.Fatalf("get before mutation: %v", err)
+	}
+	svc.Spec.Selector = map[string]string{"hacked": "true"}
+	if err := c.Update(context.Background(), svc); err != nil {
+		t.Fatalf("mutate service: %v", err)
+	}
+
+	if err := reconcileStableService(context.Background(), p); err != nil {
+		t.Fatalf("drift-correcting reconcile: %v", err)
+	}
+	fixed := &corev1.Service{}
+	if err := c.Get(context.Background(), key, fixed); err != nil {
+		t.Fatalf("get after drift correction: %v", err)
+	}
+	if fixed.Spec.Selector[query.LabelManagedBy] != query.ManagedByOMENative {
+		t.Errorf("drift not corrected: selector still %v", fixed.Spec.Selector)
+	}
+}
+
+func TestReconcileStableService_NilClientRejected(t *testing.T) {
+	p := ReconcileParams{ISVC: newServiceReconcilerISVC("ns", "x")}
+	if err := reconcileStableService(context.Background(), p); err == nil {
+		t.Fatalf("expected error on nil client")
+	}
+}
+
+func TestReconcileStableService_NilISVCRejected(t *testing.T) {
+	c := newServiceReconcilerTestClient(t)
+	p := ReconcileParams{Client: c}
+	if err := reconcileStableService(context.Background(), p); err == nil {
+		t.Fatalf("expected error on nil ISVC")
+	}
+}
+
+// ---------------------------------------------------------------------
+// ensureHeadlessService — covers both Services in one call.
+// ---------------------------------------------------------------------
+
+func TestEnsureHeadlessService_CreatesBothServices(t *testing.T) {
+	isvc := newServiceReconcilerISVC("prod", "llama-70b")
+	c := newServiceReconcilerTestClient(t, isvc)
+	p := ReconcileParams{ISVC: isvc, Component: v1beta1.EngineComponent, Client: c}
+
+	if err := ensureHeadlessService(context.Background(), p); err != nil {
+		t.Fatalf("ensureHeadlessService: %v", err)
+	}
+
+	for _, name := range []string{"llama-70b-engine-headless", "llama-70b-engine"} {
+		got := &corev1.Service{}
+		if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: name}, got); err != nil {
+			t.Errorf("missing Service %q: %v", name, err)
+		}
+	}
+}

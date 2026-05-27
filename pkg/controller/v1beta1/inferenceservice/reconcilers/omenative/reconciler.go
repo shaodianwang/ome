@@ -104,6 +104,13 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 		return ctrl.Result{}, err
 	}
 
+	// PodMonitor lives alongside the headless / stable Services so the
+	// supporting-resource surface OMENative emits matches Raw / MultiNode.
+	// No-op when PodSpec is nil (MinReplicas=0 — nothing to scrape yet).
+	if err := EnsurePodMonitor(ctx, p); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// target is computed early so the tail status write can stamp
 	// UpdateRevision / CurrentRevision even if the op chain returned
 	// without reaching the update branch.

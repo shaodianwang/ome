@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -85,6 +86,12 @@ func newFakeClientWithDiscovery(t *testing.T, initObjs ...client.Object) client.
 	}
 	if err := discoveryv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add discoveryv1: %v", err)
+	}
+	// ReconcileComponent now emits a PodMonitor alongside the headless +
+	// stable Services (see podmonitor.go); the fake client needs the
+	// monitoring scheme registered so CreateOrUpdate can serialize it.
+	if err := monitoringv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add monitoringv1: %v", err)
 	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
