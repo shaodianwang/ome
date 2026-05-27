@@ -16,12 +16,8 @@ import (
 // fixtureOptions is the functional-options shape for newCoordFixture.
 // Defaults are tuned to "minimum viable OMENative ISVC the controller
 // can reconcile to Ready" — single-replica engine + decoder, no router,
-// no rolloutCoordination block.
-//
-// Mirrors the omenative suite's fixtureOptions but adds coordination
-// knobs: a slice of RolloutCoordinationGroup the test wants applied to
-// spec.rolloutCoordination.groups[], plus per-Component options for
-// PD-style 3-way scenarios.
+// no rolloutCoordination block. Specs opt into coordination groups,
+// pacing, PD 3-way, etc. via the With* options.
 type fixtureOptions struct {
 	cbmName  string
 	csrName  string
@@ -262,10 +258,8 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 		WithLastFormatArchitecture("LlamaForCausalLM").
 		Obj()
 
-	// Engine. Matches the working pattern in
-	// tests/integration/singlecluster/controller/omenative/lifecycle_test.go:
-	// minimum-viable spec with deploymentMode annotation only — no
-	// OMENative subspec and no explicit MinReplicas. The defaulter
+	// Engine. Minimum-viable spec with deploymentMode annotation only
+	// — no OMENative subspec and no explicit MinReplicas. The defaulter
 	// fills in OMENative defaults during reconciliation; an explicit
 	// subspec in the fixture appeared to interfere with runtime
 	// resolution in early experiments. Tests that need a non-default
@@ -373,8 +367,8 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 // async), and falls through to modelConfigReconciler which fails
 // with "ClusterBaseModel not found" — controller-runtime retries with
 // exponential backoff, the work queue saturates, and the NEXT test's
-// reconciles starve. On buildkite envtest this manifests as C-1+C-4
-// and H timing out even though the rollouts themselves are fine.
+// reconciles starve. Under load this manifests as later C-* and H-*
+// tests timing out even though the rollouts themselves are fine.
 //
 // This helper deletes the ISVC first and waits for the apiserver to
 // acknowledge full deletion (after the finalizer drop), then deletes

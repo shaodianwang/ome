@@ -12,15 +12,13 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Real-cluster D-7 — pause/resume MID-ROLLOUT (not Idle-pause).
+// D-7 — pause/resume MID-ROLLOUT (not Idle-pause).
 //
 // G (the Idle-pause spec) verifies the annotation drives a converged
 // group to Paused. D-7 verifies the same annotation freezes a group
 // that's IN the middle of a rollout — the case operators actually
 // care about ("hit pause if a bad bump is in progress"). Real
-// kubelet's seconds-long rollout window makes this case observable;
-// envtest's instant-Ready sim collapses the rollout into one tick
-// and there's no mid-rollout state to pause.
+// kubelet's seconds-long rollout window makes this case observable.
 var _ = ginkgo.Describe("behavior — pause mid-rollout", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

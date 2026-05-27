@@ -56,28 +56,59 @@ Without the exports, prefix each invocation manually:
 
 #### Integration Tests (detailed)
 
-Integration suites live under `tests/integration/`. Each leaf directory is its own Ginkgo suite with a single `TestXxx(t)` entry that calls `util.RunSuite`. Current layout:
+Integration suites live under `tests/integration/` and split into two halves:
 
 ```
 tests/integration/
 ├── dep-crds/                              # vendored optional-CRD YAMLs (LWS, KEDA, Gateway API, Envoy Gateway, Prometheus)
-├── framework/                             # shared test scaffolding
+├── framework/                             # shared test scaffolding (envtest)
+├── kindutil/                              # shared test scaffolding (KIND) + fake-serving image source
 ├── components/, util/                     # helpers
 └── singlecluster/
     ├── webhook/{inferenceservice,inferenceservice_defaulter,basemodel,servingruntime,pod,runtimepreset,runtimerevision}
-    ├── controller/{inferenceservice,basemodel,servingruntime}
+    ├── controller/{inferenceservice,basemodel,servingruntime,runtimerevision,coordination_kind}
     ├── clustercache/
     └── agents/metadata/
 ```
 
-`make integration-test` runs the full set (it depends on `manifests`, `envtest`, and `dep-crds`). To iterate on one suite:
+Each leaf directory is its own Ginkgo suite with a single `TestXxx(t)` entry that calls `util.RunSuite` (envtest) or `kindutil.RunKindSuite` (KIND).
+
+**envtest suites** — fast, hermetic, run by `make integration-test`. Use them for: webhooks, CRD/RBAC defaulters, BaseModel/ServingRuntime/RuntimeRevision reconcilers, ClusterCache, agent-side metadata. NOT used for OMENative reconciler behavior — that's KIND territory now (the envtest `coordination/` + `omenative/` suites were deleted because PodKubeletSimulator races made them chronically flaky).
 
 ```sh
+make integration-test                               # full envtest suite
 KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)" \
-  go test ./tests/integration/singlecluster/webhook/inferenceservice/... -v
+  go test ./tests/integration/singlecluster/webhook/inferenceservice/... -v   # focused
 ```
 
-Set `KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true` to forward the envtest kube-apiserver/etcd stdout+stderr into the test log when debugging control-plane startup failures.
+`KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true` forwards the envtest kube-apiserver/etcd stdout+stderr into test logs when debugging control-plane startup failures.
+
+**KIND suite** (`coordination_kind/`) — real kubelet + scheduler + containerd via Docker. Authoritative for: cross-Component rollout coordination, pod-lifecycle timing (drain races, recreate ordering, in-place patch convergence), per-revision Service convergence, Sequential handoff timing, RatioBalanced gate at scale, ImagePullBackOff failure escalation, pod-UID rotation, migration, PD-disaggregated topologies. ~30 spec files, ~5 min/file wall-clock.
+
+```sh
+make test-kind                                       # full suite (~30-60 min)
+GINKGO_FOCUS='PD per-Component' make test-kind       # narrow to specific specs (~5-10 min)
+GINKGO_FOCUS='RP-' make test-kind                    # by spec ID prefix
+make test-kind-clean                                 # delete leftover KIND clusters
+```
+
+Requirements:
+- Docker daemon running on the host (KIND brings up the cluster as a Docker container).
+- `kind` binary on PATH: `go install sigs.k8s.io/kind@v0.27.0`.
+
+`KIND_KEEP_CLUSTER=true` is on by default in `make test-kind` — the cluster persists between runs for fast iteration. Set `KIND_RECREATE=true` to force a fresh cluster (use after suspected dirty state).
+
+Direct `go test` (when you need extra flags):
+
+```sh
+KIND_KEEP_CLUSTER=true \
+  go test ./tests/integration/singlecluster/controller/coordination_kind/... \
+  -v -timeout 30m -ginkgo.v -ginkgo.focus 'D-5'
+```
+
+KIND specs use generous timeouts (`kindShortTimeout=30s`, `kindMediumTimeout=2m`, `kindLongTimeout=5m`) and a 100ms poll interval — tuned for real kubelet latency, not envtest microseconds.
+
+CI runs `make test-kind` as a soft-fail step (mks-cpu agents don't expose a Docker daemon). It's a developer/maintainer signal until the queue gets Docker support; until then, run it locally before merging changes that touch the OMENative reconciler or coordination layer.
 
 ### Lint & Format
 ```bash

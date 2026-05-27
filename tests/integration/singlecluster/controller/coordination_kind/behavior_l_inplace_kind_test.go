@@ -15,9 +15,8 @@ import (
 
 // Behavior test L — in-place opt-in respects MaxUnavailable.
 //
-// KIND mirror of the envtest L spec. The in-place patch path keeps the
-// same Pod object (image-only patch via strategic-merge); the assertions
-// here under real kubelet exercise:
+// The in-place patch path keeps the same Pod object (image-only patch
+// via strategic-merge); the assertions here under real kubelet exercise:
 //   - L-1: at-least-2-of-3 serving during the rollout (MaxUnavailable=1)
 //   - L-2: no surge (alive count <= replicas)
 //   - L-3: pod UID is preserved across the bump (proves in-place, not
@@ -125,5 +124,6 @@ var _ = ginkgo.Describe("behavior — in-place opt-in respects MaxUnavailable", 
 		}
 	})
 
-	ginkgo.PIt("L-4 rollout converges — covered by the convergence wait in L-1+L-2+L-3", func() {})
+	// PIt: covered by the convergence wait in L-1+L-2+L-3.
+	ginkgo.PIt("L-4 rollout converges", func() {})
 })

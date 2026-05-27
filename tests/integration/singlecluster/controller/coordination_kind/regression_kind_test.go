@@ -9,25 +9,14 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Regression contracts ported from the envtest regression_test.go.
-//
-// Most envtest REG-* specs are either pure-function tests (REG-Pure-Aux,
-// REG-9, REG-10 — covered by pkg/.../coordination/{groups,reconciler}_test.go)
-// or PIt'd hedges against features outside this suite (REG-2/3/5/6/7/8).
-// REG-1 is already structurally pinned by baseline_no_coord_kind A-6
-// ("status.rolloutCoordination must stay nil when spec omits it").
-//
-// What remains worth a KIND mirror is the negative-condition assertion
-// REG-1 / REG-10 both touch: when an ISVC has no rolloutCoordination
-// block, the controller must NOT stamp a `RolloutCoordinationReady`
-// status condition. That's distinct from REG-1's "Status.RolloutCoordination
-// is nil" (the struct field) and from A-6's reachability check — a future
-// regression where the controller defaults the condition to True / False
-// for OEP-0011 ingress synergy could silently break operators that key
+// Regression contracts. baseline_no_coord_kind A-6 already pins the
+// struct-field shape ("status.rolloutCoordination must stay nil when
+// spec omits it"). This file adds the negative-condition assertion:
+// when an ISVC has no rolloutCoordination block, the controller must
+// NOT stamp a `RolloutCoordinationReady` status condition. A future
+// regression where the controller defaults the condition to True /
+// False for ingress synergy could silently break operators that key
 // dashboards on this condition.
-//
-// One spec covers the contract; the PIts are dropped as redundant /
-// out-of-scope per the envtest sibling's own annotations.
 var _ = ginkgo.Describe("REG — coordination regression contracts", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

@@ -17,10 +17,8 @@ import (
 //
 // Config: 15 prefill + 5 decode, RollingUpdate + RatioBalanced (tol
 // 20%), MaxUnavailable=3. Original ratio 15/5 = 3.0, band [2.4, 3.6].
-// The same "3 parallel drains gated by RatioBalanced" property the
-// envtest sibling exercises, against real kubelet so the gate's
-// in-flight projection actually matters (envtest's instant-Ready
-// transitions complete each cycle in microseconds).
+// Exercises "3 parallel drains gated by RatioBalanced" against real
+// kubelet so the gate's in-flight projection actually matters.
 //
 // Why this is the heaviest spec in the suite: 20 pods on a single-node
 // KIND cluster takes minutes to schedule + reach ContainersReady, and

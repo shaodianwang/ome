@@ -16,12 +16,11 @@ import (
 )
 
 // Per-revision Service emission + drift correction under a real
-// reconciler. KIND mirror of the envtest producer_services SVC-* suite.
+// reconciler.
 //
 // The pure-function naming tests (PerRevisionServiceName math,
-// PerRevisionHeadlessServiceName math, the long-name regression
-// SVC-13) are already covered by pkg/.../coordination/services_test.go.
-// What KIND adds is:
+// PerRevisionHeadlessServiceName math, the long-name regression) are
+// covered by pkg/.../coordination/services_test.go. This file pins:
 //
 //   - SVC-1 routing pair emission with `PublishNotReadyAddresses=false`
 //     (routing) + `PublishNotReadyAddresses=true` (headless) under a
@@ -29,12 +28,6 @@ import (
 //   - SVC-2 drift correction: hand-mutate the routing Service's
 //     selector to a bogus value; coordination must restore the four-
 //     key selector on the next reconcile.
-//
-// envtest's SVC-1/SVC-2 hold the same shape — but the drift case
-// PIt-ed under load there, and the routing/headless pair distinction
-// in envtest is observationally fine but doesn't exercise the real
-// Service controller (no kube-proxy / EndpointSlices). KIND closes
-// that gap.
 var _ = ginkgo.Describe("SVC — per-revision Service emission + drift correction", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

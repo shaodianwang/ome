@@ -15,15 +15,14 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// PD-isolation contracts ported from the envtest pd_test.go suite.
-// Each Component (engine, decoder) owns its own revision stream and
-// its own headless Service; an image bump on one Component must not
-// churn the other; scaling one Component must not move the other.
-// These contracts underpin every coordination policy — if the
-// per-Component isolation breaks, BlueGreen / RollingUpdate /
-// Sequential / Independent all break with it.
+// PD-isolation contracts. Each Component (engine, decoder) owns its
+// own revision stream and its own headless Service; an image bump on
+// one Component must not churn the other; scaling one Component must
+// not move the other. These contracts underpin every coordination
+// policy — if the per-Component isolation breaks, BlueGreen /
+// RollingUpdate / Sequential / Independent all break with it.
 //
-// KIND specs use the basic newCoordFixture (no WithCoordinationGroup)
+// Specs use the basic newCoordFixture (no WithCoordinationGroup)
 // because PD isolation is orthogonal to the coord state machine.
 var _ = ginkgo.Describe("PD per-Component isolation", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace

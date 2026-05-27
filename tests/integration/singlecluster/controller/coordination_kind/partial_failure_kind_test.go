@@ -27,13 +27,11 @@ func foregroundDeletion() *metav1.DeletionPropagation {
 	return &p
 }
 
-// Partial-failure specs ported from envtest partial_failure_test.go.
-// The envtest sibling fakes failure by writing pod.Status.Phase=Failed
-// via the apiserver (kubelet doesn't fight the simulator). On real
-// kubelet under KIND that write wouldn't stick — kubelet owns status.
-// Instead we delete the pod outright: the Restart trigger fires on
-// "live pod count below desired" (see ops/restart.go::detectRestartTrigger
-// line 219), so the controller-side recovery path is the same.
+// Partial-failure specs. To provoke a failure on real kubelet (which
+// owns pod status), we delete the pod outright: the Restart trigger
+// fires on "live pod count below desired" (see
+// ops/restart.go::detectRestartTrigger), driving the controller-side
+// recovery path.
 //
 // Disabling the Restart path (RestartPolicy=None) flips the contract:
 // a deleted pod must NOT be brought back; siblings must be untouched.

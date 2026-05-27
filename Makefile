@@ -606,12 +606,6 @@ integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tes
 	@#     — KIND-backed suite (real kubelet via Docker). Run locally
 	@#     with `make test-kind`; not wired into envtest CI because
 	@#     mks-cpu agents don't expose a Docker daemon.
-	@#   - tests/integration/singlecluster/controller/omenative — sim-
-	@#     driven OMENative reconciler suite. PodKubeletSimulator races
-	@#     with the reconciler under suite contention (typical: 5-15 of
-	@#     ~100 specs fail per run, never the same set). Run locally via
-	@#     `make test-omenative` for maintainer diagnosis; behavior
-	@#     contracts have KIND counterparts under coordination_kind/.
 	@#
 	@# Verbosity policy: -ginkgo.v is OFF by default. With it on, Ginkgo
 	@# flushes the per-spec GinkgoWriter for every passing spec, which
@@ -625,19 +619,9 @@ integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tes
 	@# Timeout: go test defaults to 10m PER PACKAGE. 20m gives headroom
 	@# without masking a genuine deadlock — any real loop bug would
 	@# still hang past 20m.
-	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|/coordination_kind$$|/omenative$$') ; \
+	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|/coordination_kind$$') ; \
 	$(TEST_ENV) go test -v -timeout=20m $$PKGS $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@echo "✅ Integration tests passed"
-
-.PHONY: test-omenative
-test-omenative: fmt vet manifests envtest dep-crds ## 🧪 Run the (flaky) OMENative envtest suite — for maintainer diagnosis only
-	@echo "🧪 Running OMENative envtest suite (flaky — for diagnosis)..."
-	@# Excluded from `make integration-test` because PodKubeletSimulator
-	@# races with the reconciler under suite contention. Run on demand
-	@# when investigating a regression; behavior contracts are owned by
-	@# coordination_kind/ in CI (`make test-kind`).
-	@$(TEST_ENV) go test -v -timeout=20m ./tests/integration/singlecluster/controller/omenative/... $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
-	@echo "✅ OMENative tests passed"
 
 .PHONY: test-kind
 test-kind: xet-build ## 🧪 Run KIND-backed integration tests (real kubelet — needs docker + kind locally)

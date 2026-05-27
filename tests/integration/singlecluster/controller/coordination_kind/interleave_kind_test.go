@@ -16,12 +16,10 @@ import (
 // INT-5 — rapid spec bumps must converge to the final value and
 // retention must cap CR count.
 //
-// Envtest version drives 5 image tags (v1..v5); KIND only builds
-// fake-serving:v1 and :v2, so we use a synthetic env-var to drive
-// per-bump PodSpec drift (which produces a distinct ControllerRevision
-// hash without needing a 5-tag image build matrix). Same observable
-// contract: the controller must converge on the final spec and the
-// non-live CRs must be GC'd under defaultRevisionRetention.
+// Uses a synthetic env-var to drive per-bump PodSpec drift (which
+// produces a distinct ControllerRevision hash without needing a 5-tag
+// image build matrix). The controller must converge on the final spec
+// and the non-live CRs must be GC'd under defaultRevisionRetention.
 var _ = ginkgo.Describe("OMENative: rapid spec bumps", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

@@ -16,18 +16,10 @@ import (
 
 // PEER-DNS — per-pod DNS subdomain pin.
 //
-// KIND mirror of the envtest peer_discovery suite. The envtest D-1..D-10
-// specs all PIt'd on the "flaky as first It under suite load" pattern:
-// the pure-function tests (D-Pure-1..7) are already covered by
-// pure-Go unit tests in pkg/.../coordination/discovery_test.go, so the
-// envtest mirrors added no signal beyond duplicating that coverage.
-//
-// What only KIND can observe: kube-controller-manager populates the
-// EndpointSlice with each pod's `hostname` field, which combined with
-// the headless Service's `subdomain` is what makes the per-pod DNS
-// record `<pod>.<isvc>-<comp>-headless.<ns>.svc.cluster.local` resolve
-// in a real cluster. envtest doesn't run the EndpointSlice controller,
-// so the contract isn't observable there.
+// Asserts the controller plus kube-controller-manager produce the
+// data plane state that lets `<pod>.<isvc>-<comp>-headless.<ns>.svc.cluster.local`
+// resolve in a real cluster. The pure-function naming math is covered
+// by pure-Go unit tests in pkg/.../coordination/discovery_test.go.
 //
 // This spec pins:
 //
@@ -39,8 +31,6 @@ import (
 //	   hostname — which is what kube-DNS reads when answering the
 //	   per-pod A record query.
 //
-// (c) is the kube-controller-manager contract a real cluster needs;
-// envtest can't observe it because no EndpointSlice controller runs.
 // Asserting on the EndpointSlice is a stronger pin than spawning a
 // debug pod + nslookup: it removes the network-from-pod variability
 // while still proving the data plane has everything DNS needs.

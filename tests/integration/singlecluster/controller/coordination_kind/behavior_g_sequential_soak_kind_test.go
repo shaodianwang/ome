@@ -12,11 +12,10 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Real-cluster G-4 — Sequential.Soak as a real wall-clock gate.
+// G-4 — Sequential.Soak as a real wall-clock gate.
 //
-// Pins OEP-0007.2 commit 16 + the PR #235 Sequential dispatcher
-// gate: when Sequential is paired with Soak, the controller must hold
-// the next Component at Sequential.Awaiting for the full configured
+// When Sequential is paired with Soak, the controller must hold the
+// next Component at Sequential.Awaiting for the full configured
 // duration after the previous Component reaches Idle.
 //
 // Implementation note: we time the contract from wall-clock elapsed
@@ -39,23 +38,15 @@ var _ = ginkgo.Describe("behavior — Sequential.Soak wall-clock", ginkgo.Ordere
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// BUG (KIND, 2026-05-27, post #235): the Sequential gate's soak
-	// branch uses `previousPhaseEnteredAtFor` which reads
-	// `gs.LastTransitionTime` — the timestamp the group's PHASE
-	// (not CompositePhase) last changed. Phase stays at Idle the
-	// whole time during Sequential.Awaiting (only CompositePhase
-	// transitions Sequential.Awaiting → engine.Surging), so
+	// PIt: the Sequential gate's soak branch reads gs.LastTransitionTime
+	// — the timestamp the group's PHASE (not CompositePhase) last changed.
+	// Phase stays at Idle the whole time during Sequential.Awaiting (only
+	// CompositePhase transitions Sequential.Awaiting → engine.Surging), so
 	// LastTransitionTime points back at the initial setup. The gate
-	// computes `time.Since(entered)` against that stale moment, sees
-	// it's well past soakDuration, and lets engine through immediately.
-	//
-	// Repro on KIND: rollout converges in ~6s when soak is 15s.
-	//
-	// Fix path: the gate should read a timestamp tied to the
-	// previous Component's completion (e.g., update LastTransitionTime
-	// on CompositePhase transitions too, or store a dedicated
-	// `lastComponentCompletedAt` field on the group status).
-	ginkgo.PIt("G-4 Sequential.Soak holds the next Component for the configured duration [BLOCKED: gate uses Phase-LastTransitionTime, but Phase doesn't change during Sequential.Awaiting]", func() {
+	// computes time.Since(entered) against that stale moment, sees it's
+	// well past soakDuration, and lets engine through immediately. Repro
+	// on KIND: rollout converges in ~6s when soak is 15s.
+	ginkgo.PIt("G-4 Sequential.Soak holds the next Component for the configured duration", func() {
 		const soakDuration = 15 * time.Second
 		fix := newCoordFixture(ns.Name, WithISVCName("soak-g4"),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{

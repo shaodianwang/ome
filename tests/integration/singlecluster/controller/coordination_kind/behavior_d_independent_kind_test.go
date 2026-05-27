@@ -10,7 +10,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Real-cluster D-4 — Independent coordination policy.
+// D-4 — Independent coordination policy.
 //
 // Independent skips the gang gates entirely: each Component reconciles
 // on its own. Phase only ever walks Idle / Shifting / Failed —

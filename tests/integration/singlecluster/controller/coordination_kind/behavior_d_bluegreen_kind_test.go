@@ -12,10 +12,9 @@ import (
 
 // Behavior test D — BlueGreen convergence.
 //
-// KIND mirror of the envtest D-5 spec. D-1/D-2/D-3/D-4 stay PIt for
-// the same reasons as the envtest sibling — they require real surge
-// or controller-owned Service selector flips (OEP-0011 territory),
-// neither of which kubelet changes anything about.
+// D-1/D-2/D-3/D-4 stay PIt because they require real surge or
+// controller-owned Service selector flips (HTTPRoute weighted cutover
+// territory).
 var _ = ginkgo.Describe("behavior — BlueGreen", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -27,10 +26,14 @@ var _ = ginkgo.Describe("behavior — BlueGreen", ginkgo.Ordered, func() {
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.PIt("D-1 full surge observed — requires real SurgeThenDrain (current code path delegates to recreate, same as envtest sibling)", func() {})
-	ginkgo.PIt("D-2 v1 drain ordering — requires real SurgeThenDrain so v1 + v2 can coexist", func() {})
-	ginkgo.PIt("D-3 traffic stays on v1 until all v2 serving — OEP-0011 owns cutover via HTTPRoute weights, not a controller-owned Service selector flip", func() {})
-	ginkgo.PIt("D-4 atomic flip is single-tick observable — same OEP-0011 ownership argument as D-3", func() {})
+	// PIt: requires real SurgeThenDrain (current code path delegates to recreate).
+	ginkgo.PIt("D-1 full surge observed", func() {})
+	// PIt: requires real SurgeThenDrain so v1 + v2 can coexist.
+	ginkgo.PIt("D-2 v1 drain ordering", func() {})
+	// PIt: HTTPRoute weighted cutover owns traffic flips, not a controller-owned Service selector flip.
+	ginkgo.PIt("D-3 traffic stays on v1 until all v2 serving", func() {})
+	// PIt: same HTTPRoute cutover ownership as D-3.
+	ginkgo.PIt("D-4 atomic flip is single-tick observable", func() {})
 
 	ginkgo.It("D-5 rollout converges to all pods on v2", func() {
 		// Config: 4 prefill + 2 decode, BlueGreen group.
@@ -87,7 +90,10 @@ var _ = ginkgo.Describe("behavior — BlueGreen", ginkgo.Ordered, func() {
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("F-1 group marked Failed when a v2 pod can't reach Ready — needs simulator failure-injection or real-cluster bad-image hook (TODO: unlock in a follow-up KIND port using a bogus image)", func() {})
-	ginkgo.PIt("F-2 no traffic flip on failure — same OEP-0011 ownership as D-3/D-4", func() {})
-	ginkgo.PIt("F-3 v1 capacity preserved during failure — depends on F-1 unlock", func() {})
+	// PIt: covered by behavior_x_bad_image X-1 which uses a real bad image tag.
+	ginkgo.PIt("F-1 group marked Failed when a v2 pod can't reach Ready", func() {})
+	// PIt: HTTPRoute weighted cutover ownership, same as D-3/D-4.
+	ginkgo.PIt("F-2 no traffic flip on failure", func() {})
+	// PIt: depends on F-1 unlock.
+	ginkgo.PIt("F-3 v1 capacity preserved during failure", func() {})
 })

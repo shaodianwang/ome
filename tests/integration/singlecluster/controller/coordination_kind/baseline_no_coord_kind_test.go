@@ -9,7 +9,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// A-6 mirror — PD baseline without a rolloutCoordination block.
+// A-6 — PD baseline without a rolloutCoordination block.
 //
 // Asserts the OMENative reconciler runs to convergence WITHOUT a
 // coordination spec: per-Instance status populates, OMENative-level

@@ -13,14 +13,12 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Real-cluster D-2 — Sequential coordination policy.
+// D-2 — Sequential coordination policy.
 //
 // Bumps BOTH images simultaneously. Sequential must roll them in
 // declared Order (decoder first, then engine here). Real kubelet's
 // seconds-long rollout window makes the active-Component window
-// observable; envtest's PodKubeletSimulator brings every pod Ready
-// in microseconds and collapses the hand-off into a single tick,
-// which is why the envtest E-1/E-2 specs stay PIt.
+// observable.
 var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

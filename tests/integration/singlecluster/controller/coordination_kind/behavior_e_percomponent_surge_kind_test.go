@@ -12,7 +12,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Real-cluster E-1 — PerComponent pacing, maxSurge>0 upper bound.
+// E-1 — PerComponent pacing, maxSurge>0 upper bound.
 //
 // Companion to B (which pins maxSurge=0). Asserts that during the
 // rollout, the alive pod count for engine never exceeds

@@ -14,11 +14,10 @@ import (
 
 // Behavior test C — BlueGreen + RatioBalanced pacing.
 //
-// KIND mirror of the envtest spec. The serving-ratio semantic
-// (OEP-0007.2) says the live engine:decoder ratio must stay within
-// the original ratio × (1 ± tolerance). On real kubelet the
-// pod-lifecycle window is long enough that the sampler actually
-// observes the gate at work — not the microsecond envtest fakes.
+// The serving-ratio semantic says the live engine:decoder ratio must
+// stay within the original ratio × (1 ± tolerance). On real kubelet
+// the pod-lifecycle window is long enough that the sampler actually
+// observes the gate at work.
 var _ = ginkgo.Describe("behavior — BlueGreen + RatioBalanced", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -120,7 +119,9 @@ var _ = ginkgo.Describe("behavior — BlueGreen + RatioBalanced", ginkgo.Ordered
 		stop()
 	})
 
-	ginkgo.PIt("C-2 mass-drain blocked — covered by unit test TestEvaluateSurge_RejectsWhenPeerSerivngWouldBeZero plus C-1 sampler invariant", func() {})
+	// PIt: covered by unit test TestEvaluateSurge_RejectsWhenPeerSerivngWouldBeZero plus C-1 sampler invariant.
+	ginkgo.PIt("C-2 mass-drain blocked", func() {})
 
-	ginkgo.PIt("C-3 leading side pauses while peer catches up — narrow timing window; covered structurally by unit-level back-off tests in ratio_test.go", func() {})
+	// PIt: narrow timing window; covered structurally by unit-level back-off tests in ratio_test.go.
+	ginkgo.PIt("C-3 leading side pauses while peer catches up", func() {})
 })

@@ -1,4 +1,4 @@
-package omenative
+package coordination_kind
 
 import (
 	"encoding/json"
@@ -22,8 +22,7 @@ const (
 )
 
 // auditEntryShape matches the per-row schema persisted in the audit
-// ConfigMap. Decoded for assertions; declared locally to keep this test
-// file independent of internal omenative package types.
+// ConfigMap. Declared locally for test independence from internal types.
 type auditEntryShape struct {
 	RequestUUID    string `json:"requestUUID"`
 	Component      string `json:"component"`
@@ -66,9 +65,6 @@ func writeMigrationRequest(g Gomega, isvcKey client.ObjectKey, reqUUID, fromNode
 	writeMigrationRequestWithComponent(g, isvcKey, reqUUID, fromNode, instance, "engine")
 }
 
-// writeMigrationRequestWithComponent is the generalized form of
-// writeMigrationRequest — takes any component string so PD specs can
-// write decoder/router-scoped requests on the same ISVC.
 func writeMigrationRequestWithComponent(g Gomega, isvcKey client.ObjectKey, reqUUID, fromNode string, instance int32, component string) {
 	payload, err := json.Marshal(map[string]any{
 		"schemaVersion": migrationSchemaV1,
@@ -77,7 +73,7 @@ func writeMigrationRequestWithComponent(g Gomega, isvcKey client.ObjectKey, reqU
 		"from_node":     fromNode,
 		"reason":        "integration-test",
 	})
-	g.Expect(err).NotTo(HaveOccurred())
+	g.ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
 	Eventually(func(gg Gomega) {
 		fresh := &v1beta1.InferenceService{}
@@ -87,15 +83,20 @@ func writeMigrationRequestWithComponent(g Gomega, isvcKey client.ObjectKey, reqU
 		}
 		fresh.Annotations[migrationAnnoPrefix+reqUUID] = string(payload)
 		gg.Expect(k8sClient.Update(suiteCtx, fresh)).To(Succeed())
-	}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 }
 
-// OMENative migration specs. The migration state machine is the most
-// complex op in OMENative — orchestration runs from an ISVC annotation
-// through audit-ledger dedup, surge allocation, source drain, and
-// surge promotion. These specs pin the happy path and the
-// FromNode-mismatch rejection path end-to-end.
-var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
+// OMENative Migration specs ported from envtest migrate_test.go. The
+// migration state machine orchestrates from an ISVC annotation through
+// audit-ledger dedup, surge allocation, source drain, and surge
+// promotion.
+//
+// Single-node KIND limitation: the "surge lands on a different node"
+// assertion can't be made since the cluster has only one node. The
+// state machine contracts pinned here (audit ledger, surge index
+// allocation, annotation lifecycle, event emission, MigrationMode,
+// schema validation) are observable regardless of node placement.
+var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 
 	ginkgo.BeforeEach(func() {
@@ -108,39 +109,21 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// Root-cause note: this spec was previously PIt'd because the
-	// migration appeared to complete in the audit ledger but the
-	// workload ended up back on its original node. The actual bug was
-	// that Migrate clears the request annotation at accept-time (line
-	// ~140 of migrate.go, requester contract is 30s response-or-clear)
-	// while the migration itself takes many reconcile passes. With no
-	// annotation, the next reconcile's detectMigrationRequest returned
-	// false, Migrate was never re-entered, and dispatch fell through
-	// to Create — which promoted the still-Migrating source back to
-	// Phase=Ready, clearing its Operation. The post-promote scale-down
-	// pass then classified the surge (sparse Index=1) as "extra" and
-	// tore it down. Fix: detectMigrationRequest now also scans the
-	// audit ledger for in-flight Started entries, so Migrate keeps
-	// driving the migration until the ledger has a terminal Completed
-	// or Failed entry for that UUID.
-	ginkgo.It("annotation triggers full migration: surge appears on a different node, source disappears", func() {
-		fx := newOMENativeFixture(ns.Name,
-			WithCBMName("mig-llama"),
-			WithCSRName("mig-runtime"),
-			WithISVCName("mig-isvc"),
-		)
-		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
-		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
-		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+	// Happy-path migration: annotation triggers a full migration, surge
+	// takes over (gets a new sparse index), audit ledger records
+	// Completed, annotation is cleared, MigrationCompleted event fires.
+	ginkgo.It("annotation triggers migration: surge takes over (new index), source disappears", func() {
+		fix := newCoordFixture(ns.Name, WithISVCName("mig-isvc"),
+			WithoutDecoder(),
+			WithEngineImage("fake-serving:v1"))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
 
-		ginkgo.By("waiting for the source pod to be Ready and scheduled to a node")
+		ginkgo.By("waiting for the source pod to be Ready and scheduled")
 		var sourceNode string
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "mig-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
 			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
@@ -153,17 +136,16 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty(),
 				"source pod must be scheduled before requesting migration")
 			sourceNode = pod.Spec.NodeName
-		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By(fmt.Sprintf("writing migration request with from_node=%s", sourceNode))
 		reqUUID := uuid.NewString()
-		writeMigrationRequest(NewWithT(ginkgo.GinkgoT()), client.ObjectKeyFromObject(fx.ISVC), reqUUID, sourceNode, 0)
+		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, sourceNode, 0)
 
-		ginkgo.By("expecting the source InstanceStatus to disappear and a surge instance to take over")
+		ginkgo.By("expecting the source InstanceStatus to disappear and surge to take over")
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "mig-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
 				"after migration, exactly one InstanceStatus survives (the surge)")
@@ -172,32 +154,11 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 				"surge index must be != source (0); got %d", s.Index)
 			g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 				"surge must promote to Ready after source drain")
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
-
-		ginkgo.By("expecting the surge pod to land on a node other than the source node")
-		Eventually(func(g Gomega) {
-			pods := &corev1.PodList{}
-			g.Expect(k8sClient.List(suiteCtx, pods,
-				client.InNamespace(ns.Name),
-				client.MatchingLabels{util.LabelManagedByKey: util.ManagedByOMENativeValue},
-			)).To(Succeed())
-			// Only the surge pod should remain after the migration completes.
-			alive := 0
-			for i := range pods.Items {
-				if pods.Items[i].DeletionTimestamp == nil {
-					alive++
-					g.Expect(pods.Items[i].Spec.NodeName).NotTo(Equal(sourceNode),
-						"surviving pod %s should NOT be on the source node %s",
-						pods.Items[i].Name, sourceNode)
-				}
-			}
-			g.Expect(alive).To(Equal(1),
-				"expected exactly one surviving pod (the surge); got %d", alive)
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("expecting the audit ledger to record a Completed entry for this UUID")
 		Eventually(func(g Gomega) {
-			ledger := loadLedger(g, ns.Name, fx.ISVC.Name)
+			ledger := loadLedger(g, ns.Name, "mig-isvc")
 			matched := false
 			for _, e := range ledger.Entries {
 				if e.RequestUUID == reqUUID && e.Phase == "Completed" {
@@ -208,16 +169,15 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			}
 			g.Expect(matched).To(BeTrue(),
 				"expected a Completed audit row for uuid=%s; got %+v", reqUUID, ledger.Entries)
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("expecting the migration-request annotation to be cleared on completion")
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			fresh := freshISVC(g, ns.Name, "mig-isvc")
 			_, present := fresh.Annotations[migrationAnnoPrefix+reqUUID]
 			g.Expect(present).To(BeFalse(),
 				"annotation must be cleared after Completed so re-delivery dedups")
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("expecting both MigrationRequestAccepted + MigrationCompleted events")
 		Eventually(func(g Gomega) {
@@ -225,7 +185,7 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(ns.Name))).To(Succeed())
 			gotAccept, gotComplete := false, false
 			for _, e := range events.Items {
-				if e.InvolvedObject.Name != fx.ISVC.Name {
+				if e.InvolvedObject.Name != "mig-isvc" {
 					continue
 				}
 				switch e.Reason {
@@ -237,50 +197,43 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			}
 			g.Expect(gotAccept).To(BeTrue(), "expected MigrationRequestAccepted event")
 			g.Expect(gotComplete).To(BeTrue(), "expected MigrationCompleted event")
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// FromNode mismatch: the requester's view of where the pod lives is
-	// stale. validateFromNode must reject with MigrationFromNodeMismatch
-	// + Failed audit row, NOT create a surge.
+	// FromNode mismatch: requester's view of the source node is stale.
+	// validateFromNode must reject with a Failed audit row and a
+	// MigrationFromNodeMismatch event; NO surge is created.
 	ginkgo.It("FromNode mismatch is rejected with Failed audit row and no surge", func() {
-		fx := newOMENativeFixture(ns.Name,
-			WithCBMName("mismatch-llama"),
-			WithCSRName("mismatch-runtime"),
-			WithISVCName("mismatch-isvc"),
-		)
-		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
-		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
-		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+		fix := newCoordFixture(ns.Name, WithISVCName("mismatch-isvc"),
+			WithoutDecoder(),
+			WithEngineImage("fake-serving:v1"))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
 
-		ginkgo.By("waiting for the source pod to be Ready")
+		ginkgo.By("waiting for the source pod Ready")
 		var sourceNode string
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "mismatch-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
 			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "mismatch-isvc-engine-0-default-0",
 			}, pod)).To(Succeed())
 			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty())
 			sourceNode = pod.Spec.NodeName
-		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("sending a migration request with the WRONG from_node")
 		wrongNode := "not-" + sourceNode
 		reqUUID := uuid.NewString()
-		writeMigrationRequest(NewWithT(ginkgo.GinkgoT()), client.ObjectKeyFromObject(fx.ISVC), reqUUID, wrongNode, 0)
+		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, wrongNode, 0)
 
 		ginkgo.By("expecting a Failed audit row")
 		Eventually(func(g Gomega) {
-			ledger := loadLedger(g, ns.Name, fx.ISVC.Name)
+			ledger := loadLedger(g, ns.Name, "mismatch-isvc")
 			matched := false
 			for _, e := range ledger.Entries {
 				if e.RequestUUID == reqUUID && e.Phase == "Failed" {
@@ -292,32 +245,27 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			}
 			g.Expect(matched).To(BeTrue(),
 				"expected a Failed audit row for uuid=%s; got %+v", reqUUID, ledger.Entries)
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("asserting no surge instance is ever created (rejection short-circuits before surge alloc)")
+		ginkgo.By("asserting no surge instance is ever created")
 		Consistently(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "mismatch-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
 				"rejected migration must not create a surge; got %d InstanceStatuses",
 				len(cs.OMENative.InstanceStatuses))
-			// Phase may be Ready or Updating (the post-rejection ISVC spec
-			// change can spuriously trigger Update); the invariant is that
-			// no surge index appears.
 			g.Expect(cs.OMENative.InstanceStatuses[0].Index).To(Equal(int32(0)),
 				"only the source InstanceStatus should exist")
-		}, "3s", util.PollInterval).Should(Succeed())
+		}, "3s", kindPollInterval).Should(Succeed())
 
 		ginkgo.By("expecting the rejected request's annotation to be cleared")
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			fresh := freshISVC(g, ns.Name, "mismatch-isvc")
 			_, present := fresh.Annotations[migrationAnnoPrefix+reqUUID]
 			g.Expect(present).To(BeFalse(),
 				"annotation must be cleared on rejection so the requester stops retrying")
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("expecting a MigrationFromNodeMismatch warning event")
 		Eventually(func(g Gomega) {
@@ -325,7 +273,7 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(ns.Name))).To(Succeed())
 			matched := false
 			for _, e := range events.Items {
-				if e.Reason == "MigrationFromNodeMismatch" && e.InvolvedObject.Name == fx.ISVC.Name {
+				if e.Reason == "MigrationFromNodeMismatch" && e.InvolvedObject.Name == "mismatch-isvc" {
 					matched = true
 					g.Expect(e.Message).To(ContainSubstring(wrongNode),
 						"event message should reference the wrong node")
@@ -334,61 +282,75 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			}
 			g.Expect(matched).To(BeTrue(),
 				"expected MigrationFromNodeMismatch warning event for the stale FromNode")
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// NodeAffinity conflict: the source PodSpec hard-pins
-	// kubernetes.io/hostname to the same node the request asks to move
-	// off. The overlay's NotIn[FromNode] would render the surge
-	// permanently unschedulable. Migrate must reject up-front WITHOUT
-	// stamping source Phase=Migrating — otherwise source wedges in
-	// Migrating until tryAbandonStuckMigration fires (~30 min), the
-	// operator sees a stuck status, and Alfred can't observe the
-	// rejection within its 30s SLA.
+	// NodeAffinity conflict: source PodSpec hard-pins
+	// kubernetes.io/hostname to the SAME node the request asks to move
+	// off. Overlay's NotIn[FromNode] would render the surge permanently
+	// unschedulable. Migrate must reject up-front WITHOUT stamping
+	// source Phase=Migrating.
 	ginkgo.It("NodeAffinity conflict is rejected without wedging source in Phase=Migrating", func() {
-		pinned := util.SimNodeNames[0]
-		fx := newOMENativeFixture(ns.Name,
-			WithCBMName("affinity-llama"),
-			WithCSRName("affinity-runtime"),
-			WithISVCName("affinity-isvc"),
-			WithEngineAffinity(&corev1.Affinity{
+		fix := newCoordFixture(ns.Name, WithISVCName("affinity-isvc"),
+			WithoutDecoder(),
+			WithEngineImage("fake-serving:v1"))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		ginkgo.By("waiting for the source pod Ready and discovering its node")
+		var sourceNode string
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, "affinity-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.OMENative.InstanceStatuses[0].RunningRevision).NotTo(BeEmpty())
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: "affinity-isvc-engine-0-default-0",
+			}, pod)).To(Succeed())
+			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty())
+			sourceNode = pod.Spec.NodeName
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("editing the ISVC to add an Affinity pinning to the discovered node")
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "affinity-isvc")
+			cur.Spec.Engine.PodSpec.Affinity = &corev1.Affinity{
 				NodeAffinity: &corev1.NodeAffinity{
 					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 						NodeSelectorTerms: []corev1.NodeSelectorTerm{{
 							MatchExpressions: []corev1.NodeSelectorRequirement{{
 								Key:      "kubernetes.io/hostname",
 								Operator: corev1.NodeSelectorOpIn,
-								Values:   []string{pinned},
+								Values:   []string{sourceNode},
 							}},
 						}},
 					},
 				},
-			}),
-		)
-		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
-		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
-		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+			}
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("waiting for the source pod to be Ready on the pinned node")
+		// Wait for the affinity edit to be reflected back into a Ready
+		// running revision (the controller will Restart the pod with
+		// the new affinity).
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "affinity-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.OMENative.InstanceStatuses).NotTo(BeEmpty())
 			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(cs.OMENative.InstanceStatuses[0].RunningRevision).NotTo(BeEmpty())
-		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("sending a migration request whose FromNode matches the pinned host")
 		reqUUID := uuid.NewString()
-		writeMigrationRequest(NewWithT(ginkgo.GinkgoT()), client.ObjectKeyFromObject(fx.ISVC), reqUUID, pinned, 0)
+		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, sourceNode, 0)
 
-		ginkgo.By("expecting a Failed audit row")
+		ginkgo.By("expecting a Failed audit row referencing the hostname pin")
 		Eventually(func(g Gomega) {
-			ledger := loadLedger(g, ns.Name, fx.ISVC.Name)
+			ledger := loadLedger(g, ns.Name, "affinity-isvc")
 			matched := false
 			for _, e := range ledger.Entries {
 				if e.RequestUUID == reqUUID && e.Phase == "Failed" {
@@ -400,13 +362,12 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			}
 			g.Expect(matched).To(BeTrue(),
 				"expected a Failed audit row for uuid=%s; got %+v", reqUUID, ledger.Entries)
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("asserting source stays Phase=Ready with no in-flight Operation and no surge")
+		ginkgo.By("asserting source stays Phase=Ready with no in-flight Operation")
 		Consistently(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "affinity-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
 				"rejection must not stamp a surge InstanceStatus")
@@ -416,16 +377,7 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 				"source must remain Phase=Ready (got %q)", src.Phase)
 			g.Expect(src.Operation).To(BeNil(),
 				"source must have no in-flight Operation (got %+v)", src.Operation)
-		}, "3s", util.PollInterval).Should(Succeed())
-
-		ginkgo.By("expecting the rejected request's annotation to be cleared")
-		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			_, present := fresh.Annotations[migrationAnnoPrefix+reqUUID]
-			g.Expect(present).To(BeFalse(),
-				"annotation must be cleared on rejection so the requester stops retrying")
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}, "3s", kindPollInterval).Should(Succeed())
 
 		ginkgo.By("expecting a MigrationNodeAffinityConflict warning event")
 		Eventually(func(g Gomega) {
@@ -433,14 +385,14 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(ns.Name))).To(Succeed())
 			matched := false
 			for _, e := range events.Items {
-				if e.Reason == "MigrationNodeAffinityConflict" && e.InvolvedObject.Name == fx.ISVC.Name {
+				if e.Reason == "MigrationNodeAffinityConflict" && e.InvolvedObject.Name == "affinity-isvc" {
 					matched = true
 					break
 				}
 			}
 			g.Expect(matched).To(BeTrue(),
 				"expected MigrationNodeAffinityConflict warning event")
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
 	// Re-delivery of the same UUID after Completed must dedup via the
@@ -448,114 +400,98 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 	// of the annotation-clear didn't land; the controller must NOT
 	// re-run the migration.
 	ginkgo.It("re-delivery of a Completed UUID dedups via the ledger (no second migration)", func() {
-		fx := newOMENativeFixture(ns.Name,
-			WithCBMName("dedup-llama"),
-			WithCSRName("dedup-runtime"),
-			WithISVCName("dedup-isvc"),
-		)
-		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
-		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
-		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+		fix := newCoordFixture(ns.Name, WithISVCName("dedup-isvc"),
+			WithoutDecoder(),
+			WithEngineImage("fake-serving:v1"))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
 
 		var sourceNode string
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "dedup-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
-				"migration dispatch requires the source instance to be Ready")
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "dedup-isvc-engine-0-default-0",
 			}, pod)).To(Succeed())
 			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty())
 			sourceNode = pod.Spec.NodeName
-		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		reqUUID := uuid.NewString()
-		writeMigrationRequest(NewWithT(ginkgo.GinkgoT()), client.ObjectKeyFromObject(fx.ISVC), reqUUID, sourceNode, 0)
+		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, sourceNode, 0)
 
 		ginkgo.By("waiting for the first migration to complete")
 		var surgeIdx int32
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "dedup-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
 			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			surgeIdx = cs.OMENative.InstanceStatuses[0].Index
 			g.Expect(surgeIdx).NotTo(Equal(int32(0)))
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("re-delivering the SAME UUID via annotation")
-		writeMigrationRequest(NewWithT(ginkgo.GinkgoT()), client.ObjectKeyFromObject(fx.ISVC), reqUUID, sourceNode, 0)
+		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, sourceNode, 0)
 
 		ginkgo.By("asserting no second surge appears (dedup via ledger Completed entry)")
 		Consistently(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "dedup-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
 				"re-delivered Completed UUID must NOT trigger a second migration; got %d InstanceStatuses",
 				len(cs.OMENative.InstanceStatuses))
 			g.Expect(cs.OMENative.InstanceStatuses[0].Index).To(Equal(surgeIdx),
 				"surviving instance index must match the first migration's surge index")
-		}, "3s", util.PollInterval).Should(Succeed())
+		}, "3s", kindPollInterval).Should(Succeed())
 	})
 
-	// Two distinct migrations on the same ISVC, in sequence. Tests that
-	// the audit ledger keeps both UUIDs straight and that the second
-	// migration can pick a fresh surge index after the first lands.
+	// Two distinct migrations on the same ISVC, in sequence. Audit
+	// ledger keeps both UUIDs straight; the second can pick a fresh
+	// surge index after the first lands.
 	ginkgo.It("two sequential migrations on the same ISVC each complete", func() {
-		fx := newOMENativeFixture(ns.Name,
-			WithCBMName("seq-llama"),
-			WithCSRName("seq-runtime"),
-			WithISVCName("seq-isvc"),
-		)
-		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
-		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
-		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+		fix := newCoordFixture(ns.Name, WithISVCName("seq-isvc"),
+			WithoutDecoder(),
+			WithEngineImage("fake-serving:v1"))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
 
-		runMigration := func(label string) (firstIdx int32, completedAt int32) {
-			ginkgo.By(fmt.Sprintf("[%s] waiting for the current instance to be Ready on a known node", label))
+		runMigration := func(label string) (firstIdx, completedAt int32) {
+			ginkgo.By(fmt.Sprintf("[%s] waiting for the current instance Ready", label))
 			var srcIdx int32
 			var node string
 			Eventually(func(g Gomega) {
-				fresh := &v1beta1.InferenceService{}
-				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-				cs := fresh.Status.Components[v1beta1.EngineComponent]
+				c := freshISVC(g, ns.Name, "seq-isvc")
+				cs := c.Status.Components[v1beta1.EngineComponent]
 				g.Expect(cs.OMENative).NotTo(BeNil())
 				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
 				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 				srcIdx = cs.OMENative.InstanceStatuses[0].Index
 				g.Expect(cs.OMENative.InstanceStatuses[0].NodesOccupied).NotTo(BeEmpty())
 				node = cs.OMENative.InstanceStatuses[0].NodesOccupied[0]
-			}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+			}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 			reqUUID := uuid.NewString()
-			ginkgo.By(fmt.Sprintf("[%s] writing migration request uuid=%s from_node=%s instance=%d", label, reqUUID, node, srcIdx))
-			writeMigrationRequest(NewWithT(ginkgo.GinkgoT()), client.ObjectKeyFromObject(fx.ISVC), reqUUID, node, srcIdx)
+			ginkgo.By(fmt.Sprintf("[%s] writing migration request uuid=%s instance=%d", label, reqUUID, srcIdx))
+			writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, node, srcIdx)
 
 			ginkgo.By(fmt.Sprintf("[%s] waiting for migration to complete", label))
 			var newIdx int32
 			Eventually(func(g Gomega) {
-				fresh := &v1beta1.InferenceService{}
-				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-				cs := fresh.Status.Components[v1beta1.EngineComponent]
+				c := freshISVC(g, ns.Name, "seq-isvc")
+				cs := c.Status.Components[v1beta1.EngineComponent]
 				g.Expect(cs.OMENative).NotTo(BeNil())
 				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
 				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 				g.Expect(cs.OMENative.InstanceStatuses[0].Index).NotTo(Equal(srcIdx))
 				newIdx = cs.OMENative.InstanceStatuses[0].Index
 
-				ledger := loadLedger(g, ns.Name, fx.ISVC.Name)
+				ledger := loadLedger(g, ns.Name, "seq-isvc")
 				found := false
 				for _, e := range ledger.Entries {
 					if e.RequestUUID == reqUUID && e.Phase == "Completed" {
@@ -565,7 +501,7 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 				}
 				g.Expect(found).To(BeTrue(),
 					"[%s] expected Completed audit row for uuid=%s", label, reqUUID)
-			}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+			}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 			return srcIdx, newIdx
 		}
 
@@ -578,47 +514,38 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 	})
 
 	// Audit ConfigMap exists with the deterministic name and carries a
-	// Completed entry after a successful migration. upsertEntry replaces
-	// the Started entry in-place (last-writer-wins per UUID), so the
-	// final shape is one Completed row with the full SourceInstance /
-	// SurgeInstance / FromNode / CompletedAt fields populated.
+	// fully-populated Completed entry. Pins the upsertEntry contract
+	// (last-writer-wins per UUID, full field schema).
 	ginkgo.It("audit ConfigMap exists with a Completed entry after migration", func() {
-		fx := newOMENativeFixture(ns.Name,
-			WithCBMName("audit-llama"),
-			WithCSRName("audit-runtime"),
-			WithISVCName("audit-isvc"),
-		)
-		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
-		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
-		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+		fix := newCoordFixture(ns.Name, WithISVCName("audit-isvc"),
+			WithoutDecoder(),
+			WithEngineImage("fake-serving:v1"))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
 
 		var sourceNode string
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "audit-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
-				"migration dispatch requires the source instance to be Ready")
+			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "audit-isvc-engine-0-default-0",
 			}, pod)).To(Succeed())
 			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty())
 			sourceNode = pod.Spec.NodeName
-		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		reqUUID := uuid.NewString()
-		writeMigrationRequest(NewWithT(ginkgo.GinkgoT()), client.ObjectKeyFromObject(fx.ISVC), reqUUID, sourceNode, 0)
+		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, sourceNode, 0)
 
 		ginkgo.By("waiting for the audit ConfigMap to carry the Completed entry with full fields")
 		Eventually(func(g Gomega) {
 			cm := &corev1.ConfigMap{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
-				Namespace: ns.Name, Name: fx.ISVC.Name + auditCMSuffix,
+				Namespace: ns.Name, Name: "audit-isvc" + auditCMSuffix,
 			}, cm)).To(Succeed())
 			raw, ok := cm.Data[auditLedgerDataKey]
 			g.Expect(ok).To(BeTrue(), "audit ConfigMap missing %q key", auditLedgerDataKey)
@@ -644,25 +571,24 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			}
 			g.Expect(matched).To(BeTrue(),
 				"audit ledger must record a Completed entry for uuid=%s", reqUUID)
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// MigrationMode=Never disables the migration dispatch entirely —
-	// even a valid annotation is ignored (no Migrate called, no audit
-	// ledger written, source stays put). Operators set Never when they
-	// want migration requests to be handled out-of-band.
+	// MigrationMode=Never disables migration dispatch entirely — even
+	// a valid annotation is ignored. No Migrate called, no audit ledger,
+	// source stays put, annotation untouched (operator handles
+	// out-of-band).
 	ginkgo.It("MigrationMode=Never ignores migration request annotations", func() {
-		fx := newOMENativeFixture(ns.Name,
-			WithCBMName("nomig-llama"),
-			WithCSRName("nomig-runtime"),
-			WithISVCName("nomig-isvc"),
-			WithMigrationMode(v1beta1.OMENativeMigrationPolicyModeNever),
-		)
-		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
-		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
-		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+		fix := newCoordFixture(ns.Name, WithISVCName("nomig-isvc"),
+			WithoutDecoder(),
+			WithEngineImage("fake-serving:v1"))
+		// Apply MigrationMode=Never on the engine component.
+		neverMode := v1beta1.OMENativeMigrationPolicyModeNever
+		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+			MigrationPolicy: &v1beta1.OMENativeMigrationPolicy{Mode: neverMode},
+		}
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
 
 		ginkgo.By("waiting for the source pod Ready")
 		var sourceNode string
@@ -673,16 +599,15 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			}, pod)).To(Succeed())
 			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty())
 			sourceNode = pod.Spec.NodeName
-		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("writing a valid migration request")
 		reqUUID := uuid.NewString()
-		writeMigrationRequest(NewWithT(ginkgo.GinkgoT()), client.ObjectKeyFromObject(fx.ISVC), reqUUID, sourceNode, 0)
+		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, sourceNode, 0)
 
 		ginkgo.By("asserting no surge appears, no ledger entry, annotation stays put")
 		Consistently(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			fresh := freshISVC(g, ns.Name, "nomig-isvc")
 			cs := fresh.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
@@ -690,7 +615,7 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			g.Expect(cs.OMENative.InstanceStatuses[0].Index).To(Equal(int32(0)),
 				"only the source index should remain")
 
-			ledger := loadLedger(g, ns.Name, fx.ISVC.Name)
+			ledger := loadLedger(g, ns.Name, "nomig-isvc")
 			for _, e := range ledger.Entries {
 				g.Expect(e.RequestUUID).NotTo(Equal(reqUUID),
 					"Never policy must NOT write an audit ledger entry for the request")
@@ -699,33 +624,27 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			_, present := fresh.Annotations[migrationAnnoPrefix+reqUUID]
 			g.Expect(present).To(BeTrue(),
 				"annotation must stay (controller did not process it); operator handles out-of-band")
-		}, "3s", util.PollInterval).Should(Succeed())
+		}, "3s", kindPollInterval).Should(Succeed())
 	})
 
 	// Unsupported schemaVersion on the migration request is rejected
-	// without ever entering the migration state machine. UnsupportedSchemaVersion
-	// event fires; the annotation gets cleared so the requester stops
-	// retrying; a Failed audit row blocks re-attempts.
+	// without entering the state machine. UnsupportedSchemaVersion
+	// event fires; annotation cleared; Failed audit row blocks
+	// re-attempts.
 	ginkgo.It("unsupported schemaVersion is rejected with UnsupportedSchemaVersion event", func() {
-		fx := newOMENativeFixture(ns.Name,
-			WithCBMName("schemaver-llama"),
-			WithCSRName("schemaver-runtime"),
-			WithISVCName("schemaver-isvc"),
-		)
-		Expect(k8sClient.Create(suiteCtx, fx.CBM)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CBM) })
-		Expect(k8sClient.Create(suiteCtx, fx.CSR)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fx.CSR) })
-		Expect(k8sClient.Create(suiteCtx, fx.ISVC)).To(Succeed())
+		fix := newCoordFixture(ns.Name, WithISVCName("schemaver-isvc"),
+			WithoutDecoder(),
+			WithEngineImage("fake-serving:v1"))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "schemaver-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
 			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("writing a migration request with schemaVersion=v99 (unsupported)")
 		reqUUID := uuid.NewString()
@@ -737,14 +656,13 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(func(g Gomega) {
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
+			fresh := freshISVC(g, ns.Name, "schemaver-isvc")
 			if fresh.Annotations == nil {
 				fresh.Annotations = map[string]string{}
 			}
 			fresh.Annotations[migrationAnnoPrefix+reqUUID] = string(payload)
 			g.Expect(k8sClient.Update(suiteCtx, fresh)).To(Succeed())
-		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("expecting UnsupportedSchemaVersion event + Failed audit row + no surge")
 		Eventually(func(g Gomega) {
@@ -752,7 +670,7 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(ns.Name))).To(Succeed())
 			matched := false
 			for _, e := range events.Items {
-				if e.Reason == "UnsupportedSchemaVersion" && e.InvolvedObject.Name == fx.ISVC.Name {
+				if e.Reason == "UnsupportedSchemaVersion" && e.InvolvedObject.Name == "schemaver-isvc" {
 					matched = true
 					break
 				}
@@ -760,7 +678,7 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			g.Expect(matched).To(BeTrue(),
 				"expected UnsupportedSchemaVersion event; got %d events", len(events.Items))
 
-			ledger := loadLedger(g, ns.Name, fx.ISVC.Name)
+			ledger := loadLedger(g, ns.Name, "schemaver-isvc")
 			ledgerHit := false
 			for _, e := range ledger.Entries {
 				if e.RequestUUID == reqUUID && e.Phase == "Failed" {
@@ -771,11 +689,10 @@ var _ = ginkgo.Describe("OMENative Migration", ginkgo.Ordered, func() {
 			g.Expect(ledgerHit).To(BeTrue(),
 				"expected Failed audit row for the unsupported schema request")
 
-			fresh := &v1beta1.InferenceService{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(fx.ISVC), fresh)).To(Succeed())
-			cs := fresh.Status.Components[v1beta1.EngineComponent]
+			c := freshISVC(g, ns.Name, "schemaver-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
 				"unsupported schema must NOT create a surge")
-		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

@@ -11,9 +11,9 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// OMENative status-surface specs ported from envtest status_test.go.
-// Pin the parts of AggregateAndWriteStatus downstream tooling depends
-// on: ObservedGeneration tracking, per-Instance AllPods* condition
+// OMENative status-surface specs. Pin the parts of
+// AggregateAndWriteStatus downstream tooling depends on:
+// ObservedGeneration tracking, per-Instance AllPods* condition
 // triad, and per-Instance counters at MinReplicas>1.
 var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace

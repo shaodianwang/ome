@@ -13,15 +13,9 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// RecreatePod end-to-end coverage. The envtest B-* specs cover
-// RollingUpdate + RecreatePod with the sampler invariants; this file
-// covers the contracts those tests don't pin explicitly + adds the
-// BlueGreen + RecreatePod combination that's not exercised elsewhere.
-//
-// Real-cluster runs surfaced cases where RecreatePod looked OK in
-// envtest (simulator brings pods Ready instantly) but stalled / drained
-// too aggressively / lost identity under real-kubelet timing. Every
-// assertion here is on-real-kubelet so the failure modes are observable.
+// RecreatePod end-to-end coverage. The B-* specs cover RollingUpdate
+// + RecreatePod with the sampler invariants; this file adds the
+// BlueGreen + RecreatePod combination not exercised elsewhere.
 //
 // Specs:
 //   - RP-1 BlueGreen + RecreatePod: 3 engine, MaxUnavailable=1,
@@ -29,8 +23,8 @@ import (
 //     Convergence asserts engine + decoder reach v2.
 //   - RP-2 pod identity: every engine pod UID after the rollout MUST
 //     differ from the pre-rollout UID — proves RecreatePod is recreate
-//     (not in-place patch). The envtest L-3 spec asserts the OPPOSITE
-//     for in-place; this spec is its negation under RecreatePod.
+//     (not in-place patch). This is the negation of L-3 (in-place
+//     preserves UID).
 //   - RP-3 maxSurge=0 + maxUnavailable=1 alive cap at replicas:
 //     companion to B-2's same assertion under RollingUpdate, here under
 //     BlueGreen so both group policies are covered.

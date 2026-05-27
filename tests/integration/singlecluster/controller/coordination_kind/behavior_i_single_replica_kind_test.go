@@ -76,5 +76,6 @@ var _ = ginkgo.Describe("behavior — single-replica safe default", ginkgo.Order
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	ginkgo.PIt("I-2 serving stays >= 1 throughout — requires full SurgeThenDrain (currently delegates to recreate which has a brief gap per pod)", func() {})
+	// PIt: requires full SurgeThenDrain; currently delegates to recreate which has a brief gap per pod.
+	ginkgo.PIt("I-2 serving stays >= 1 throughout", func() {})
 })

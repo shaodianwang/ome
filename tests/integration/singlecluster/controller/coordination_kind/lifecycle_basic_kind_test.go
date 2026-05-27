@@ -13,10 +13,6 @@ import (
 // decoder BlueGreen-coordinated ISVC and waits for the group to reach
 // Idle. Pre-requisite for every coordination test; if this fails the
 // foundation isn't ready for more complex specs.
-//
-// Distinct from behavior_g_pause's first assertion only in that this
-// spec runs alone so a failure isolates the "can we even bring up an
-// ISVC under KIND" question from the pause/resume cycle.
 var _ = ginkgo.Describe("LIFE-BASIC — ISVC converges to Idle on KIND", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

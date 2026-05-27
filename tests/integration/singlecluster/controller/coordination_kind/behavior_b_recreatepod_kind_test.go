@@ -14,16 +14,13 @@ import (
 
 // Behavior test B — RollingUpdate + RecreatePod.
 //
-// KIND mirror of the envtest spec. Runs against real kubelet so the
-// MaxUnavailable + no-surge invariants are observed with the real
-// pod-lifecycle timing window — not the microsecond instant-Ready
-// transitions the envtest PodKubeletSimulator fakes.
+// Runs against real kubelet so the MaxUnavailable + no-surge invariants
+// are observed with the real pod-lifecycle timing window.
 //
-// Default pacing in OEP-0007.2 is SurgeThenDrain; this spec opts
-// engine into the explicit RecreatePod path so B-2's no-surge
-// invariant is exercised against the recreate dispatcher (not the
-// surge-then-drain placeholder that currently delegates to recreate
-// anyway).
+// Default pacing is SurgeThenDrain; this spec opts engine into the
+// explicit RecreatePod path so B-2's no-surge invariant is exercised
+// against the recreate dispatcher (not the surge-then-drain
+// placeholder that currently delegates to recreate anyway).
 var _ = ginkgo.Describe("behavior — RollingUpdate + RecreatePod", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

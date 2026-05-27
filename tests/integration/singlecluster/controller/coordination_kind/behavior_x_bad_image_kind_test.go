@@ -13,20 +13,14 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Real-cluster X-1 — bad-image failure → Phase=Failed, v1 capacity
-// preserved.
+// X-1 — bad-image failure → Phase=Failed, v1 capacity preserved.
 //
-// Operators rely on OEP-0007.2's "no auto-rollback" principle: a
-// failed rollout freezes; v1 keeps serving; the operator decides what
-// to do next. Real kubelet handles the failure naturally —
-// non-existent image tags hit ErrImagePull / ImagePullBackOff, the
-// pod never reaches ContainersReady, the controller's
-// InstanceReadyTimeout fires, and the coordination layer transitions
-// to Failed.
-//
-// envtest's E_1/F-* are PIt because the PodKubeletSimulator brings
-// every pod Ready regardless of image (no failure-injection hook).
-// KIND with real containerd exposes the failure path.
+// Operators rely on the "no auto-rollback" principle: a failed
+// rollout freezes; v1 keeps serving; the operator decides what to do
+// next. Real kubelet handles the failure naturally — non-existent
+// image tags hit ErrImagePull / ImagePullBackOff, the pod never
+// reaches ContainersReady, the controller's InstanceReadyTimeout
+// fires, and the coordination layer transitions to Failed.
 //
 // InstanceReadyTimeout is set short (45s) so the test fits the suite
 // budget; the invariant (Phase=Failed, v1 serving preserved) is

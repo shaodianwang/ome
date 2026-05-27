@@ -2,7 +2,6 @@ package coordination_kind
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -11,27 +10,9 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
 	"github.com/ome-projects/ome/tests/integration/util"
-)
-
-// Polling cadence + timeout knobs shared across the suite. Tuned to
-// give the kubelet + EndpointSlice simulators (poll at 100ms) enough
-// ticks to converge a 2-Component coordination scenario.
-//
-// Several specs across the upcoming commit plan reference these
-// constants directly (state-machine timing thresholds, drain wait
-// budgets) rather than the wider util.* values; keep them defined here
-// even though the producer commits don't reference them yet.
-//
-//nolint:unused // referenced by upcoming state-machine + pacing specs
-const (
-	pollInterval = 200 * time.Millisecond
-	shortTimeout = 10 * time.Second
-	medTimeout   = 60 * time.Second
-	longTimeout  = 180 * time.Second
 )
 
 // =========================================================================
@@ -84,11 +65,7 @@ func applyFixture(g gomega.Gomega, f *coordFixture) {
 // =========================================================================
 
 // listPerRevisionServices returns every Service in namespace tagged
-// with the per-revision selector key `ome.io/revision-hash`. Used by
-// SVC-* and CLEAN-* tests to assert which Services coordination has
-// materialized.
-//
-//nolint:unused // referenced by upcoming SVC-* + CLEAN-* specs (P3 follow-up)
+// with the per-revision selector key `ome.io/revision-hash`.
 func listPerRevisionServices(g gomega.Gomega, namespace string) []corev1.Service {
 	svcs := &corev1.ServiceList{}
 	g.ExpectWithOffset(1, k8sClient.List(suiteCtx, svcs,
@@ -103,19 +80,6 @@ func listPerRevisionServices(g gomega.Gomega, namespace string) []corev1.Service
 	return out
 }
 
-// perRevisionServiceFor returns the routing Service for
-// (isvc, component, revisionHash), or fails the assertion via g if
-// absent. Tests reading specific fields off a Service use this rather
-// than digging through the full list.
-//
-//nolint:unused // referenced by upcoming state-machine specs (A-*, PM-*, S-*)
-func perRevisionServiceFor(g gomega.Gomega, namespace, isvc string, component v1beta1.ComponentType, revHash string) corev1.Service {
-	svc := &corev1.Service{}
-	name := coordination.PerRevisionServiceName(isvc, component, revHash)
-	g.ExpectWithOffset(1, k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: namespace, Name: name}, svc)).To(gomega.Succeed())
-	return *svc
-}
-
 // =========================================================================
 // Coordination status assertions
 // =========================================================================
@@ -128,30 +92,8 @@ func freshISVC(g gomega.Gomega, namespace, name string) *v1beta1.InferenceServic
 	return out
 }
 
-// groupStatusByName returns the named RolloutCoordinationGroupStatus
-// from the ISVC's coordination status, or nil when absent. The name is
-// the stringified group index ("0", "1", ...) the coordination layer
-// derives from the spec.
-//
-//nolint:unused // referenced by upcoming state-machine specs (A-*, PM-*, S-*, I-*, R-*)
-func groupStatusByName(isvc *v1beta1.InferenceService, name string) *v1beta1.RolloutCoordinationGroupStatus {
-	if isvc.Status.RolloutCoordination == nil {
-		return nil
-	}
-	for i := range isvc.Status.RolloutCoordination.Groups {
-		g := &isvc.Status.RolloutCoordination.Groups[i]
-		if g.Name == name {
-			return g
-		}
-	}
-	return nil
-}
-
 // trafficForComponent returns the per-Component Traffic[] from the
-// ISVC's component status, or nil when the entry is missing. Used by
-// T-* assertions that check the producer-side write.
-//
-//nolint:unused // referenced by upcoming T-* specs (P3 follow-up)
+// ISVC's component status, or nil when the entry is missing.
 func trafficForComponent(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) []v1beta1.ComponentTrafficTarget {
 	if isvc.Status.Components == nil {
 		return nil
@@ -170,8 +112,6 @@ func trafficForComponent(isvc *v1beta1.InferenceService, component v1beta1.Compo
 // listOMENativePods returns every OMENative-owned pod in namespace.
 // Selector keys mirror what the production code uses (managed-by +
 // inferenceservice).
-//
-//nolint:unused // referenced by upcoming peer-discovery (D-*) + state-machine specs
 func listOMENativePods(g gomega.Gomega, namespace, isvcName string) []corev1.Pod {
 	pods := &corev1.PodList{}
 	g.ExpectWithOffset(1, k8sClient.List(suiteCtx, pods,
@@ -187,8 +127,6 @@ func listOMENativePods(g gomega.Gomega, namespace, isvcName string) []corev1.Pod
 // listOMENativeCRs returns every ControllerRevision in namespace tagged
 // with the OMENative managed-by label. Used by tests that assert on
 // revision history alongside per-revision Service materialization.
-//
-//nolint:unused // referenced by upcoming cleanup (CLEAN-*) + lifecycle specs
 func listOMENativeCRs(g gomega.Gomega, namespace string) []appsv1.ControllerRevision {
 	crs := &appsv1.ControllerRevisionList{}
 	g.ExpectWithOffset(1, k8sClient.List(suiteCtx, crs,
@@ -203,10 +141,7 @@ func listOMENativeCRs(g gomega.Gomega, namespace string) []appsv1.ControllerRevi
 // =========================================================================
 
 // describeTraffic renders a Traffic[] slice in compact form for
-// assertion-failure messages. Mirrors the envtest sibling's helper of
-// the same name so spec diffs read consistently.
-//
-//nolint:unused // referenced by TRAFFIC-* specs
+// assertion-failure messages.
 func describeTraffic(t []v1beta1.ComponentTrafficTarget) string {
 	if len(t) == 0 {
 		return "(none)"

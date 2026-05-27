@@ -14,9 +14,8 @@ import (
 
 // Behavior test G — pause / resume.
 //
-// Pause is implemented today (ome.io/rollout-paused annotation).
-// These tests pin the contract so the redesign work doesn't regress
-// it.
+// The ome.io/rollout-paused annotation drives a group's phase to
+// Paused, and removing it lets the group resume.
 var _ = ginkgo.Describe("behavior — pause / resume", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

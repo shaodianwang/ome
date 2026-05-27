@@ -14,18 +14,11 @@ import (
 // LIFE-DEL — ISVC delete → owned children (pods, per-revision Services,
 // ControllerRevisions) reach DeletionTimestamp / get garbage-collected.
 //
-// KIND mirror of the envtest LIFE-1 spec. The envtest version was PIt'd
-// because envtest doesn't run the kube-controller-manager garbage
-// collector (only apiserver+etcd), so cascade-delete via OwnerReference
-// only fires under a real cluster. KIND brings the GC in scope, so this
-// spec asserts the actual cascade — not just the OwnerRef shape that
-// SVC-4 already pins.
-//
-// PIts in the envtest sibling (LIFE-2..6) are dropped: cascade behavior
-// is identical regardless of group policy / Sequential mid-flight / paused
-// state — all that varies is which sub-resources exist at delete time.
-// One spec covering the common cascade is the meaningful contract; the
-// rest were envtest hedges against the GC absence.
+// Asserts the actual kube-GC cascade via OwnerReference. Cascade
+// behavior is identical regardless of group policy / Sequential
+// mid-flight / paused state — all that varies is which sub-resources
+// exist at delete time, so one spec covering the common cascade
+// pins the meaningful contract.
 var _ = ginkgo.Describe("LIFE-DEL — ISVC delete cascades owned children", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

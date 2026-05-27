@@ -13,25 +13,20 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Status.Components.<c>.Traffic[] population — KIND mirror of the
-// envtest producer_traffic suite.
+// Status.Components.<c>.Traffic[] population.
 //
-// Pure-function tests (T-3 SortedWeights, T-7 TrafficDiffersMeaningfully,
-// T-8 NormalizeWeights, T-16..T-20 ComputeWeightsFromPods) are already
-// covered by pkg/.../coordination/traffic_test.go. The envtest mirrors
-// added no signal beyond duplicating that coverage.
-//
-// What only KIND can observe is what the producer actually writes to
-// Status during steady state and mid-rollout:
+// Pure-function tests (SortedWeights, TrafficDiffersMeaningfully,
+// NormalizeWeights, ComputeWeightsFromPods) are covered by
+// pkg/.../coordination/traffic_test.go. This file pins what the
+// producer actually writes to Status during steady state and
+// mid-rollout:
 //
 //   - TRAFFIC-1 steady: single revision → one entry, Percent=100,
 //     LatestRevision=true, RevisionName matches the per-revision
 //     Service name format.
 //   - TRAFFIC-2 mid-bump: image v1 → v2 produces a window where
-//     Traffic[] carries TWO entries (v1 dropping, v2 rising). The
-//     envtest sibling T-2/T-11 PIt-ed on this because envtest's image
-//     bump doesn't reliably rotate the revision hash; under KIND the
-//     fake-serving v1/v2 images have distinct content hashes, so the
+//     Traffic[] carries TWO entries (v1 dropping, v2 rising). KIND's
+//     fake-serving v1/v2 images have distinct content hashes so the
 //     revision rolls cleanly and the two-entry window is observable.
 var _ = ginkgo.Describe("TRAFFIC — Status.Components.<c>.Traffic[] producer", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
@@ -189,8 +184,7 @@ var _ = ginkgo.Describe("TRAFFIC — Status.Components.<c>.Traffic[] producer", 
 })
 
 // namespacedName is a small adapter so the sampler can read by key
-// without importing types.NamespacedName everywhere. Kept here rather
-// than in helpers_test.go because only TRAFFIC-2 uses it.
+// without importing types.NamespacedName everywhere.
 func namespacedName(ns, name string) client.ObjectKey {
 	return client.ObjectKey{Namespace: ns, Name: name}
 }

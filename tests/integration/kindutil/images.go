@@ -49,7 +49,7 @@ type ImageBuildSpec struct {
 }
 
 // buildCache memoizes per-process which content-hashes we've already
-// built. Re-using the same KindSuiteOpts across multiple suites in the
+// built. Reusing the same KindSuiteOpts across multiple suites in the
 // same test binary doesn't redo the work.
 var (
 	buildCacheMu sync.Mutex
@@ -146,6 +146,10 @@ func buildArgsCacheKey(args map[string]string) string {
 }
 
 // dockerBuild runs `docker build -t <tag> [--build-arg KEY=VAL ...] <contextDir>`.
+// Forces DOCKER_BUILDKIT=0 so we use the legacy builder — fake-serving's
+// Dockerfile is plain multi-stage with no BuildKit-only syntax, and forcing
+// buildx would require users to install the buildx component, which not
+// every Docker install ships with (notably colima + docker.io upstream).
 func dockerBuild(ctx context.Context, contextDir, tag string, buildArgs map[string]string) error {
 	args := []string{"build", "-t", tag}
 	keys := make([]string, 0, len(buildArgs))
@@ -158,6 +162,7 @@ func dockerBuild(ctx context.Context, contextDir, tag string, buildArgs map[stri
 	}
 	args = append(args, contextDir)
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=0")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
