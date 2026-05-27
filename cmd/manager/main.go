@@ -41,6 +41,7 @@ import (
 	v1beta1basemodelcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	v1beta1inferencereplicacontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	trafficfactory "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/factory"
@@ -50,6 +51,7 @@ import (
 	"github.com/ome-projects/ome/pkg/utils"
 	"github.com/ome-projects/ome/pkg/version"
 	basemodelwebhook "github.com/ome-projects/ome/pkg/webhook/admission/basemodel"
+	inferencereplicawebhook "github.com/ome-projects/ome/pkg/webhook/admission/inferencereplica"
 	"github.com/ome-projects/ome/pkg/webhook/admission/isvc"
 	"github.com/ome-projects/ome/pkg/webhook/admission/pod"
 	"github.com/ome-projects/ome/pkg/webhook/admission/runtimepreset"
@@ -102,6 +104,7 @@ type Options struct {
 	leaderElectionNamespace    string
 	runtimeRevisionRetention   int
 	runtimeRevisionGracePeriod time.Duration
+	enableInferenceReplicaCtrl bool
 	zapOpts                    zap.Options
 }
 
@@ -118,6 +121,11 @@ func DefaultOptions() Options {
 		leaderElectionNamespace:    LeaderElectionNamespace,
 		runtimeRevisionRetention:   10,
 		runtimeRevisionGracePeriod: 24 * time.Hour,
+		// The InferenceReplica controller defaults ON. In this PR the
+		// reconciler is a no-op skeleton (only stamps observedGeneration)
+		// so leaving it enabled is safe. The flag exists so operators
+		// can disable it if PR 2's lifecycle code ships a regression.
+		enableInferenceReplicaCtrl: true,
 		zapOpts: zap.Options{
 			TimeEncoder: zapcore.RFC3339TimeEncoder,
 			ZapOpts:     []zaplog.Option{zaplog.AddCaller()},
@@ -145,6 +153,9 @@ func GetOptions() Options {
 		"Max OME-owned ControllerRevisions to keep per source runtime (older ones GC after the grace period if unreferenced).")
 	flag.DurationVar(&opts.runtimeRevisionGracePeriod, "runtime-revision-grace-period", opts.runtimeRevisionGracePeriod,
 		"How long an OME-owned ControllerRevision stays after first being observed unreferenced + over retention.")
+	flag.BoolVar(&opts.enableInferenceReplicaCtrl, "enable-inferencereplica-controller", opts.enableInferenceReplicaCtrl,
+		"Run the InferenceReplica controller. Defaults true; flip to false to disable when PR 2's lifecycle code ships a regression. "+
+			"In this PR the reconciler is a no-op skeleton that only stamps observedGeneration.")
 	opts.zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	return opts
@@ -352,6 +363,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	if options.enableInferenceReplicaCtrl {
+		setupLog.Info("Setting up InferenceReplica controller (skeleton)")
+		if err = (&v1beta1inferencereplicacontroller.Reconciler{
+			Client: mgr.GetClient(),
+			Log:    ctrl.Log.WithName("InferenceReplica"),
+			Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create InferenceReplica controller")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("InferenceReplica controller disabled via --enable-inferencereplica-controller=false")
+	}
+
 	if options.enableWebhook {
 		setupLog.Info("Configuring webhook server", "port", options.webhookPort)
 		hookServer := mgr.GetWebhookServer()
@@ -392,6 +417,11 @@ func main() {
 		setupLog.Info("Registering ClusterBaseModel validator webhook to the webhook server")
 		hookServer.Register("/validate-ome-io-v1beta1-clusterbasemodel", &webhook.Admission{
 			Handler: &basemodelwebhook.ClusterBaseModelValidator{Decoder: admission.NewDecoder(mgr.GetScheme())},
+		})
+
+		setupLog.Info("Registering InferenceReplica validator webhook to the webhook server")
+		hookServer.Register("/validate-ome-io-v1beta1-inferencereplica", &webhook.Admission{
+			Handler: &inferencereplicawebhook.Validator{Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
 		runtimeSelectorConfig := runtimeselector.NewConfig(mgr.GetClient())

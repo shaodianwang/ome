@@ -36,6 +36,11 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":            schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                     schema_pkg_apis_ome_v1beta1_HashCookie(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                     schema_pkg_apis_ome_v1beta1_HashHeader(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplica":               schema_pkg_apis_ome_v1beta1_InferenceReplica(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaList":           schema_pkg_apis_ome_v1beta1_InferenceReplicaList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing":         schema_pkg_apis_ome_v1beta1_InferenceReplicaPacing(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaSpec":           schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaStatus":         schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceService":               schema_pkg_apis_ome_v1beta1_InferenceService(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceList":           schema_pkg_apis_ome_v1beta1_InferenceServiceList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceSpec":           schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref),
@@ -65,6 +70,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeRollingUpdate":         schema_pkg_apis_ome_v1beta1_OMENativeRollingUpdate(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeUpdateStrategy":        schema_pkg_apis_ome_v1beta1_OMENativeUpdateStrategy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":                schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                schema_pkg_apis_ome_v1beta1_ParentReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                        schema_pkg_apis_ome_v1beta1_PodSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus": schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref),
@@ -75,6 +81,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                    schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep":                    schema_pkg_apis_ome_v1beta1_RolloutStep(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                     schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner":                         schema_pkg_apis_ome_v1beta1_Runner(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                     schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalerAuthenticationRef":        schema_pkg_apis_ome_v1beta1_ScalerAuthenticationRef(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntime":                 schema_pkg_apis_ome_v1beta1_ServingRuntime(ref),
@@ -2595,6 +2602,381 @@ func schema_pkg_apis_ome_v1beta1_HashHeader(ref common.ReferenceCallback) common
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_InferenceReplica(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InferenceReplica is the per-Component workload abstraction for OMENative-managed InferenceService Components. One InferenceReplica exists per (ISVC, Component) tuple. The ISVC controller writes the spec; the InferenceReplica controller writes the status.\n\nThe scale subresource lets HPA/KEDA target the InferenceReplica directly rather than indirecting through the parent ISVC.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaSpec"),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaStatus"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_InferenceReplicaList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InferenceReplicaList contains a list of InferenceReplica objects.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplica"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplica", "k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_InferenceReplicaPacing(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InferenceReplicaPacing is the per-replica projection of the active RolloutCoordinationGroup pacing. Mirrors the corresponding OMENativeRollingUpdate subset so the projection is a verbatim copy.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"partition": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Partition holds back updates for Instances whose index is less than Partition. Mirrors OMENativeRollingUpdate.Partition. 0 (the default) updates all Instances. Used for canary holds.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"maxUnavailable": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxUnavailable caps in-rollout disruption. Accepts either a raw count or a percent string. When nil, the InferenceReplica controller falls back to its own default (currently 25%).",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InferenceReplicaSpec is the desired state of one (ISVC, Component) workload. The InferenceService controller is the sole writer; the admission webhook rejects writes from other actors that lack the ome.io/controller-write annotation.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"parentRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ParentRef names the InferenceService that owns this replica. Set by the ISVC controller at create time; immutable thereafter.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference"),
+						},
+					},
+					"component": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Component is one of engine | decoder | router. Immutable; moving a workload between Component slots requires recreating the InferenceReplica.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"replicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Replicas is the desired Instance count. The HPA / KEDA scale subresource writes this field. Defaults to 1 when omitted.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"minReadySeconds": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MinReadySeconds is propagated from the ISVC spec.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"runners": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"name",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Runners is the fully-rendered set of pod templates per Instance. MUST be non-empty. Single-pod Instances have one Runner with Name=\"default\" and Size=1; multi-node Instances typically have Name=\"leader\" (Size=1) plus Name=\"worker\" (Size=N). See design doc §2.6 for the multi-node layout.\n\nThe InferenceService controller is the sole writer of this field. The InferenceReplica controller treats each Runner.Template as opaque input (same contract appsv1.Deployment.spec.template uses).",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner"),
+									},
+								},
+							},
+						},
+					},
+					"lifecycle": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Lifecycle holds the OMENative lifecycle policies (RestartPolicy, UpdateStrategy, ReadyPolicy, InstanceReadyTimeout, MigrationPolicy). Reuses the existing OMENativeComponentSpec type so the projection from ISVC.spec.<component>.omenative is a verbatim copy.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec"),
+						},
+					},
+					"pacing": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Pacing is the InferenceService controller's projection of the active RolloutCoordinationGroup pacing for this replica. Written by the ISVC controller; read by the InferenceReplica controller. Includes Partition (canary hold) and MaxUnavailable (rollout budget). Nil means independent rollout.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing"),
+						},
+					},
+					"paused": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Paused, when true, stops the InferenceReplica controller from initiating any new Update / Restart / Create operations. In-flight operations resume on unpause.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"parentRef", "component", "runners"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InferenceReplicaStatus is the observed state of one InferenceReplica. The InferenceReplica controller is the sole writer. Fields mirror the legacy OMENativeComponentStatus shape so the dual-write window can byte-compare the two.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"observedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedGeneration is the InferenceReplica.metadata.generation the most recent status flush reflects.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"replicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Replicas is the total Instance count (any phase).",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"readyReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReadyReplicas is the number of Instances whose every pod is Ready.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"servingReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServingReplicas is the number of Instances whose every pod is both ContainersReady AND has serving=True on the controller-managed readiness gate (i.e., actually in the load balancer rotation). MaxUnavailable budgets are computed against this count, not ReadyReplicas, so \"missing from traffic\" reflects reality during in-place updates.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"availableReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AvailableReplicas is the number of Instances that have been Ready for at least MinReadySeconds.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"updatedReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdatedReplicas is the number of Instances on UpdateRevision.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"updatedReadyReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdatedReadyReplicas is the number of Instances on UpdateRevision that are fully Ready. UpdatedReadyReplicas / Replicas drives MaxUnavailable rollout pacing.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"currentRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CurrentRevision names the ControllerRevision currently serving traffic. Set by the InferenceReplica controller.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"updateRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdateRevision names the ControllerRevision being rolled out.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"collisionCount": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CollisionCount is the salt folded into ControllerRevision hash input after a name collision is observed, so retries produce a different revision name. Same pattern as StatefulSet.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"labelSelector": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LabelSelector identifies pods of this InferenceReplica for the HPA scale subresource. Must match the legacy componentLabelSelectorString formula so existing HPAs continue to resolve unchanged.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"instanceStatuses": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"index",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "InstanceStatuses reports per-Instance state. Reuses the existing OMENativeInstanceStatus type to enable byte-equality diffs against the legacy ISVC.status subtree during the migration window.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus"),
+									},
+								},
+							},
+						},
+					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions reports InferenceReplica-level conditions. Defined types include Available, Progressing, FailedScale, FailedUpdate, GangSchedulingUnavailable, OperationStuck.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+					"traffic": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"revisionName",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Traffic reports per-revision traffic weights for this InferenceReplica. Each entry corresponds to one revision currently receiving traffic. The ISVC controller mirrors this onto ISVC.status.components[c].traffic[] for OEP-0011's HTTPRoute builder.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget"),
+									},
+								},
+							},
+						},
+					},
+					"coordinationGroupRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CoordinationGroupRef back-references the RolloutCoordinationGroup this replica is currently bound into (if any). Lets operators find the owning coord group from the child without parsing the ISVC spec.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_InferenceService(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -4735,6 +5117,36 @@ func schema_pkg_apis_ome_v1beta1_ObjectReference(ref common.ReferenceCallback) c
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_ParentReference(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ParentReference holds the InferenceService owner reference info. Distinct from the OwnerReference list because the InferenceReplica controller also consumes the parent's UID for label/selector composition without re-reading the metadata field.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is the name of the parent InferenceService.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"uid": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UID is the UID of the parent InferenceService. Stamped at create time so the controller can detect the parent has been recreated under the same name without consulting the live ISVC object.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"name", "uid"},
+			},
+		},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_PodSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -6261,6 +6673,45 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_Runner(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "Runner is one logical pod role within an Instance.\n\nSingle-pod Instances declare one Runner named \"default\" with Size=1. Multi-node Instances declare \"leader\" (Size=1) + \"worker\" (Size>=1).\n\nThe revision hash includes every Runner's Template; a worker-only image bump still triggers a coordinated rollout across the whole Instance because tensor-parallel weights require leader+workers to move together.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is the Runner role within the Instance.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"size": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Size is the pod count for this Runner per Instance. Constraints:\n  - \"default\" Size MUST equal 1\n  - \"leader\" Size MUST equal 1\n  - \"worker\" Size MUST be >= 1",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"template": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Template is the fully-rendered pod template for this Runner. Labels include ome.io/runner=<name>. The InferenceReplica controller stamps OME_RUNNER (leader|worker|default) and, for non-leader pods, OME_LEADER_ADDRESS (short-form DNS, matching LWS conventions) onto the rendered pod at create.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("k8s.io/api/core/v1.PodTemplateSpec"),
+						},
+					},
+				},
+				Required: []string{"name", "size", "template"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/api/core/v1.PodTemplateSpec"},
 	}
 }
 
