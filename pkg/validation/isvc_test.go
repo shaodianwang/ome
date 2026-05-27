@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -399,6 +400,378 @@ func TestValidateAutoscalerConfig(t *testing.T) {
 				t.Fatalf("expected error, got nil")
 			}
 			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateLeaderWorkerPairing_ReasonConstants confirms the
+// OEP-0007 Phase-3 reason constants appear in the error strings the
+// validator emits. Operators and the M-E webhook test suite grep for
+// these exact tokens.
+func TestValidateLeaderWorkerPairing_ReasonConstants(t *testing.T) {
+	sizePtr := func(v int) *int { return &v }
+
+	tests := []struct {
+		name           string
+		spec           *v1beta1.InferenceServiceSpec
+		wantReasons    []string
+		notWantReasons []string
+	}{
+		{
+			name: "leader without worker — LeaderRequiresWorker",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{Leader: &v1beta1.LeaderSpec{}},
+			},
+			wantReasons: []string{ReasonInvalidLeaderWorkerPairing, ReasonLeaderRequiresWorker},
+		},
+		{
+			name: "worker without leader — WorkerRequiresLeader",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{Worker: &v1beta1.WorkerSpec{Size: sizePtr(3)}},
+			},
+			wantReasons: []string{ReasonInvalidLeaderWorkerPairing, ReasonWorkerRequiresLeader},
+		},
+		{
+			name: "leader + worker(size=0) — WorkerSizeMustBePositive",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: &v1beta1.WorkerSpec{Size: sizePtr(0)},
+				},
+			},
+			wantReasons: []string{ReasonInvalidLeaderWorkerPairing, ReasonWorkerSizeMustBePositive},
+		},
+		{
+			name: "leader + worker(nil size) — WorkerSizeMustBePositive",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: &v1beta1.WorkerSpec{},
+				},
+			},
+			wantReasons: []string{ReasonInvalidLeaderWorkerPairing, ReasonWorkerSizeMustBePositive},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateLeaderWorkerPairing(tc.spec)
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			for _, want := range tc.wantReasons {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("expected error to contain %q, got %v", want, err)
+				}
+			}
+			for _, notWant := range tc.notWantReasons {
+				if strings.Contains(err.Error(), notWant) {
+					t.Errorf("expected error to NOT contain %q, got %v", notWant, err)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateLeaderSize is structurally a no-op against the current
+// API surface (LeaderSpec has no Size field; see ValidateLeaderSize
+// doc). The test pins the reason constant + entry point so any
+// future API evolution that adds a leader Size field surfaces a test
+// failure rather than silently passing.
+func TestValidateLeaderSize(t *testing.T) {
+	sizePtr := func(v int) *int { return &v }
+
+	tests := []struct {
+		name    string
+		spec    *v1beta1.InferenceServiceSpec
+		wantErr bool
+	}{
+		{name: "nil spec", spec: nil},
+		{name: "empty spec", spec: &v1beta1.InferenceServiceSpec{}},
+		{name: "single-pod engine", spec: &v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{}}},
+		{
+			name: "multi-pod engine — leader implicitly size=1 by type",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: &v1beta1.WorkerSpec{Size: sizePtr(3)},
+				},
+			},
+		},
+		{
+			name: "multi-pod decoder — leader implicitly size=1 by type",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{},
+				Decoder: &v1beta1.DecoderSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: &v1beta1.WorkerSpec{Size: sizePtr(2)},
+				},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateLeaderSize(tc.spec)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), ReasonLeaderSizeMustBeOne) {
+					t.Errorf("expected reason %q, got %v", ReasonLeaderSizeMustBeOne, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateSequentialMultiPodOrder covers the OEP-0007 Phase-3
+// rule that a Sequential coordination group containing a multi-pod
+// Component must declare explicit Order over its Components.
+func TestValidateSequentialMultiPodOrder(t *testing.T) {
+	sizePtr := func(v int) *int { return &v }
+	multiPodEngine := &v1beta1.EngineSpec{
+		Leader: &v1beta1.LeaderSpec{},
+		Worker: &v1beta1.WorkerSpec{Size: sizePtr(3)},
+	}
+	multiPodDecoder := &v1beta1.DecoderSpec{
+		Leader: &v1beta1.LeaderSpec{},
+		Worker: &v1beta1.WorkerSpec{Size: sizePtr(2)},
+	}
+
+	tests := []struct {
+		name    string
+		spec    *v1beta1.InferenceServiceSpec
+		wantErr bool
+	}{
+		{name: "nil spec", spec: nil},
+		{
+			name: "no rolloutCoordination",
+			spec: &v1beta1.InferenceServiceSpec{Engine: multiPodEngine, Decoder: multiPodDecoder},
+		},
+		{
+			name: "BlueGreen with multi-pod components, no order — allowed",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  multiPodEngine,
+				Decoder: multiPodDecoder,
+				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+					Groups: []v1beta1.RolloutCoordinationGroup{
+						{
+							Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+							Policy:     v1beta1.CoordinationPolicyBlueGreen,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Sequential with single-pod components, no order — rule does not fire (other validator catches)",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  &v1beta1.EngineSpec{},
+				Decoder: &v1beta1.DecoderSpec{},
+				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+					Groups: []v1beta1.RolloutCoordinationGroup{
+						{
+							Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+							Policy:     v1beta1.CoordinationPolicySequential,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Sequential with multi-pod engine, no order — REJECT",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  multiPodEngine,
+				Decoder: &v1beta1.DecoderSpec{},
+				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+					Groups: []v1beta1.RolloutCoordinationGroup{
+						{
+							Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+							Policy:     v1beta1.CoordinationPolicySequential,
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "Sequential with multi-pod decoder, no order — REJECT",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  &v1beta1.EngineSpec{},
+				Decoder: multiPodDecoder,
+				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+					Groups: []v1beta1.RolloutCoordinationGroup{
+						{
+							Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+							Policy:     v1beta1.CoordinationPolicySequential,
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "Sequential with multi-pod components, order set — allowed",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine:  multiPodEngine,
+				Decoder: multiPodDecoder,
+				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+					Groups: []v1beta1.RolloutCoordinationGroup{
+						{
+							Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+							Policy:     v1beta1.CoordinationPolicySequential,
+							Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+						},
+					},
+				},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateSequentialMultiPodOrder(tc.spec)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), ReasonSequentialMultiPodRequiresOrder) {
+					t.Errorf("expected reason %q in error, got %v", ReasonSequentialMultiPodRequiresOrder, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateMultiPodLeanRunner covers the OEP-0007 Phase-3 rule
+// that a lean (no spec.model, no spec.runtime) multi-pod ISVC must
+// declare both leader.runner.image and worker.runner.image. The
+// controller has no defaulting source for those images.
+func TestValidateMultiPodLeanRunner(t *testing.T) {
+	sizePtr := func(v int) *int { return &v }
+	withRunner := func(img string) *v1beta1.RunnerSpec {
+		if img == "" {
+			return &v1beta1.RunnerSpec{}
+		}
+		return &v1beta1.RunnerSpec{Container: corev1.Container{Image: img}}
+	}
+	modelRef := &v1beta1.ModelRef{Name: "llama"}
+	runtimeRef := &v1beta1.ServingRuntimeRef{Name: "vllm"}
+
+	tests := []struct {
+		name    string
+		spec    *v1beta1.InferenceServiceSpec
+		wantErr bool
+	}{
+		{name: "nil spec", spec: nil},
+		{
+			name: "model set, no leader/worker images — allowed (controller resolves)",
+			spec: &v1beta1.InferenceServiceSpec{
+				Model: modelRef,
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: &v1beta1.WorkerSpec{Size: sizePtr(2)},
+				},
+			},
+		},
+		{
+			name: "runtime set, no leader/worker images — allowed (runtime resolves)",
+			spec: &v1beta1.InferenceServiceSpec{
+				Runtime: runtimeRef,
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: &v1beta1.WorkerSpec{Size: sizePtr(2)},
+				},
+			},
+		},
+		{
+			name: "lean single-pod engine — rule does not fire (no multi-pod)",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{},
+			},
+		},
+		{
+			name: "lean multi-pod engine, both images set — allowed",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{Runner: withRunner("leader:1")},
+					Worker: &v1beta1.WorkerSpec{
+						Size:   sizePtr(2),
+						Runner: withRunner("worker:1"),
+					},
+				},
+			},
+		},
+		{
+			name: "lean multi-pod engine, leader image missing — REJECT",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: &v1beta1.WorkerSpec{
+						Size:   sizePtr(2),
+						Runner: withRunner("worker:1"),
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "lean multi-pod engine, worker image missing — REJECT",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{Runner: withRunner("leader:1")},
+					Worker: &v1beta1.WorkerSpec{Size: sizePtr(2)},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "lean multi-pod engine, both runner specs but empty images — REJECT",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					Leader: &v1beta1.LeaderSpec{Runner: withRunner("")},
+					Worker: &v1beta1.WorkerSpec{
+						Size:   sizePtr(2),
+						Runner: withRunner(""),
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "lean multi-pod decoder, missing images — REJECT",
+			spec: &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{},
+				Decoder: &v1beta1.DecoderSpec{
+					Leader: &v1beta1.LeaderSpec{},
+					Worker: &v1beta1.WorkerSpec{Size: sizePtr(2)},
+				},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateMultiPodLeanRunner(tc.spec)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), ReasonMultiPodLeanModelNeedsRunner) {
+					t.Errorf("expected reason %q in error, got %v", ReasonMultiPodLeanModelNeedsRunner, err)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})

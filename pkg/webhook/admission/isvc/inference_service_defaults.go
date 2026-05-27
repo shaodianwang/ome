@@ -118,6 +118,12 @@ func defaultEngine(engine *v1beta1.EngineSpec) {
 		engine.MaxReplicas = 3
 	}
 
+	// OEP-0007 multi-node Phase 3: when Worker is declared alongside
+	// Leader but no Size is set, default Size to 1 (minimum-viable
+	// multi-pod). The user can override; the validator
+	// (ValidateLeaderWorkerPairing) still rejects Size <= 0.
+	defaultWorkerSize(engine.Leader, engine.Worker)
+
 	defaultOMENativeComponent(&engine.ComponentExtensionSpec, engineIsMultiPod(engine))
 }
 
@@ -134,7 +140,38 @@ func defaultDecoder(decoder *v1beta1.DecoderSpec) {
 		decoder.MaxReplicas = 3
 	}
 
+	// OEP-0007 multi-node Phase 3: see defaultEngine comment.
+	defaultWorkerSize(decoder.Leader, decoder.Worker)
+
 	defaultOMENativeComponent(&decoder.ComponentExtensionSpec, decoderIsMultiPod(decoder))
+}
+
+// defaultWorkerSize fills Worker.Size=1 when a multi-pod pairing is
+// declared (Leader set AND Worker set) but Worker.Size is nil. Acts
+// only when both halves of the pairing are present — pure
+// leader-without-worker or worker-without-leader specs are left
+// untouched (the validator rejects them later with the appropriate
+// reason).
+//
+// Treats nil Size as the operator-friendly "minimum-viable
+// multi-pod" default; if the operator wants more workers they set
+// Size explicitly. A Size of 0 is preserved (and rejected at
+// validation as WorkerSizeMustBePositive) so we don't quietly turn
+// the operator's "no workers, please" mistake into a 2-pod gang.
+//
+// Must run BEFORE engineIsMultiPod / decoderIsMultiPod so the
+// downstream multi-pod detection sees the defaulted Size and stamps
+// the gang lifecycle policies (RecreateInstance restart, AllPodReady
+// readiness, SurgeThenDrain update).
+func defaultWorkerSize(leader *v1beta1.LeaderSpec, worker *v1beta1.WorkerSpec) {
+	if leader == nil || worker == nil {
+		return
+	}
+	if worker.Size != nil {
+		return
+	}
+	size := 1
+	worker.Size = &size
 }
 
 // defaultRouter sets default values for the Router component
@@ -184,6 +221,18 @@ func decoderIsMultiPod(decoder *v1beta1.DecoderSpec) bool {
 // left untouched. multiPod toggles the restart/ready policy defaults: a
 // multi-pod Instance defaults to group restart + AllPodReady aggregation;
 // a single-pod Instance defaults to None for both.
+//
+// OEP-0007 multi-node Phase 3 multi-pod defaults (re-stated for
+// documentation; the rules below were already in place but Phase 3
+// pins them by explicit test):
+//
+//   - RestartPolicy = RecreateInstanceOnPodRestart (gang restart;
+//     OEP-0007 §"Restart Policy")
+//   - ReadyPolicy = AllPodReady (Instance Ready iff every pod Ready)
+//   - UpdateStrategy.Type = SurgeThenDrain (same default as single-pod;
+//     the execution falls back to recreate for multi-pod per Phase-1
+//     sign-off in #242, and lights up automatically when Phase 5
+//     multi-pod surge ships — no operator spec churn needed)
 func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod bool) {
 	if ext == nil {
 		return

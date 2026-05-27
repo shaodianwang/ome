@@ -469,6 +469,152 @@ func TestDefaultRouter_OMENativeAlwaysSinglePod(t *testing.T) {
 	assert.Equal(t, v1beta1.OMENativeRestartPolicyNone, *router.OMENative.RestartPolicy)
 }
 
+// TestDefaultWorkerSize_MultiPodWithoutSize covers the OEP-0007
+// Phase-3 defaulter rule that Worker.Size = nil with Leader set is
+// treated as "minimum-viable multi-pod" (Size=1). The downstream
+// engineIsMultiPod / decoderIsMultiPod detection sees the defaulted
+// Size and the gang lifecycle policies kick in.
+func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
+	t.Run("engine leader + worker without size — defaults Size=1", func(t *testing.T) {
+		engine := &v1beta1.EngineSpec{
+			ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+				Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+			},
+			Leader: &v1beta1.LeaderSpec{},
+			Worker: &v1beta1.WorkerSpec{},
+		}
+		defaultEngine(engine)
+		require.NotNil(t, engine.Worker.Size)
+		assert.Equal(t, 1, *engine.Worker.Size)
+		// downstream multi-pod detection should kick in:
+		require.NotNil(t, engine.OMENative)
+		require.NotNil(t, engine.OMENative.RestartPolicy)
+		assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *engine.OMENative.RestartPolicy)
+		require.NotNil(t, engine.OMENative.ReadyPolicy)
+		assert.Equal(t, v1beta1.OMENativeReadyPolicyAllPodReady, *engine.OMENative.ReadyPolicy)
+	})
+
+	t.Run("engine leader + worker with size=3 — preserved", func(t *testing.T) {
+		engine := &v1beta1.EngineSpec{
+			Leader: &v1beta1.LeaderSpec{},
+			Worker: &v1beta1.WorkerSpec{Size: intPtr(3)},
+		}
+		defaultEngine(engine)
+		require.NotNil(t, engine.Worker.Size)
+		assert.Equal(t, 3, *engine.Worker.Size)
+	})
+
+	t.Run("engine leader + worker with size=0 — preserved (validator rejects)", func(t *testing.T) {
+		// The defaulter must NOT silently turn a 0 into a 1; that
+		// would erase a clear operator mistake. Validator rejects
+		// Size <= 0 with WorkerSizeMustBePositive.
+		engine := &v1beta1.EngineSpec{
+			Leader: &v1beta1.LeaderSpec{},
+			Worker: &v1beta1.WorkerSpec{Size: intPtr(0)},
+		}
+		defaultEngine(engine)
+		require.NotNil(t, engine.Worker.Size)
+		assert.Equal(t, 0, *engine.Worker.Size)
+	})
+
+	t.Run("engine leader-only — no worker created (validator rejects)", func(t *testing.T) {
+		// Pure leader-without-worker is not the multi-pod pairing the
+		// defaulter handles. The validator catches it with
+		// LeaderRequiresWorker.
+		engine := &v1beta1.EngineSpec{Leader: &v1beta1.LeaderSpec{}}
+		defaultEngine(engine)
+		assert.Nil(t, engine.Worker)
+	})
+
+	t.Run("engine worker-only — Size left untouched (validator rejects)", func(t *testing.T) {
+		// Pure worker-without-leader: the defaulter sees no pairing
+		// to fill. The validator catches it with
+		// WorkerRequiresLeader; the malformed Size remains for the
+		// error message to surface.
+		engine := &v1beta1.EngineSpec{Worker: &v1beta1.WorkerSpec{}}
+		defaultEngine(engine)
+		assert.Nil(t, engine.Worker.Size)
+	})
+
+	t.Run("decoder leader + worker without size — defaults Size=1", func(t *testing.T) {
+		decoder := &v1beta1.DecoderSpec{
+			ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+				Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+			},
+			Leader: &v1beta1.LeaderSpec{},
+			Worker: &v1beta1.WorkerSpec{},
+		}
+		defaultDecoder(decoder)
+		require.NotNil(t, decoder.Worker.Size)
+		assert.Equal(t, 1, *decoder.Worker.Size)
+		require.NotNil(t, decoder.OMENative)
+		require.NotNil(t, decoder.OMENative.RestartPolicy)
+		assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *decoder.OMENative.RestartPolicy)
+	})
+
+	t.Run("single-pod engine — Worker field unset, no panic", func(t *testing.T) {
+		engine := &v1beta1.EngineSpec{}
+		defaultEngine(engine)
+		assert.Nil(t, engine.Worker)
+		assert.Nil(t, engine.Leader)
+	})
+}
+
+// TestDefaultOMENativeComponent_MultiPodPhase3 pins the OEP-0007
+// Phase-3 multi-pod defaulter rules as a single explicit before/after
+// test, complementing TestDefaultOMENativeComponent which already
+// covers the underlying mechanic.
+//
+// Rules pinned:
+//   - RestartPolicy → RecreateInstanceOnPodRestart
+//   - ReadyPolicy   → AllPodReady
+//   - UpdateStrategy.Type → SurgeThenDrain (same as single-pod;
+//     execution falls back to recreate per Phase-1 sign-off)
+func TestDefaultOMENativeComponent_MultiPodPhase3(t *testing.T) {
+	ext := &v1beta1.ComponentExtensionSpec{
+		Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+	}
+
+	// before
+	assert.Nil(t, ext.OMENative)
+
+	defaultOMENativeComponent(ext, true /* multiPod */)
+
+	// after
+	require.NotNil(t, ext.OMENative)
+	require.NotNil(t, ext.OMENative.RestartPolicy)
+	assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *ext.OMENative.RestartPolicy,
+		"multi-pod must default to RecreateInstanceOnPodRestart per OEP-0007 §Restart Policy")
+
+	require.NotNil(t, ext.OMENative.ReadyPolicy)
+	assert.Equal(t, v1beta1.OMENativeReadyPolicyAllPodReady, *ext.OMENative.ReadyPolicy,
+		"multi-pod must default to AllPodReady so Instance Ready iff every gang pod Ready")
+
+	require.NotNil(t, ext.OMENative.UpdateStrategy)
+	assert.Equal(t, v1beta1.OMENativeUpdateStrategySurgeThenDrain, ext.OMENative.UpdateStrategy.Type,
+		"multi-pod must default to SurgeThenDrain — same as single-pod — so Phase 5 lights up auto")
+}
+
+// TestDefaultOMENativeComponent_SinglePodPhase3 confirms the
+// Phase-3 rules do NOT affect single-pod defaulting.
+func TestDefaultOMENativeComponent_SinglePodPhase3(t *testing.T) {
+	ext := &v1beta1.ComponentExtensionSpec{
+		Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+	}
+	defaultOMENativeComponent(ext, false /* singlePod */)
+
+	require.NotNil(t, ext.OMENative)
+	require.NotNil(t, ext.OMENative.RestartPolicy)
+	assert.Equal(t, v1beta1.OMENativeRestartPolicyNone, *ext.OMENative.RestartPolicy,
+		"single-pod must keep RestartPolicy=None — no gang restart needed for one pod")
+	require.NotNil(t, ext.OMENative.ReadyPolicy)
+	assert.Equal(t, v1beta1.OMENativeReadyPolicyNone, *ext.OMENative.ReadyPolicy,
+		"single-pod must keep ReadyPolicy=None — no aggregation needed for one pod")
+	require.NotNil(t, ext.OMENative.UpdateStrategy)
+	assert.Equal(t, v1beta1.OMENativeUpdateStrategySurgeThenDrain, ext.OMENative.UpdateStrategy.Type,
+		"single-pod UpdateStrategy unchanged — Phase 3 must not regress this")
+}
+
 // silence unused-helper lint if int32Ptr isn't referenced elsewhere
 var _ = int32Ptr
 

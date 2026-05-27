@@ -126,6 +126,21 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
+	// OEP-0007 multi-node Phase 3: forward-looking guard that the
+	// leader Runner stays at size=1 (today enforced structurally by
+	// LeaderSpec having no Size field; see ValidateLeaderSize).
+	if err := validation.ValidateLeaderSize(&isvc.Spec); err != nil {
+		return allWarnings, err
+	}
+
+	// OEP-0007 multi-node Phase 3: lean (no-model, no-runtime)
+	// multi-pod specs must declare both leader.runner.image and
+	// worker.runner.image — the controller has no way to fill them
+	// in without a runtime or model.
+	if err := validation.ValidateMultiPodLeanRunner(&isvc.Spec); err != nil {
+		return allWarnings, err
+	}
+
 	if err := validation.ValidateEngineDecoderDeploymentMode(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
@@ -168,6 +183,13 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	}
 	if warning := validation.CoordinationRatioToleranceWarning(&isvc.Spec); warning != "" {
 		allWarnings = append(allWarnings, warning)
+	}
+
+	// OEP-0007.1 + OEP-0007 multi-node Phase 3: louder rejection when
+	// a Sequential group contains a multi-pod Component without Order
+	// — the controller cannot pick a default gang sequencing.
+	if err := validation.ValidateSequentialMultiPodOrder(&isvc.Spec); err != nil {
+		return allWarnings, err
 	}
 
 	// At least one of spec.model or spec.runtime must be set. When

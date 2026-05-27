@@ -10,6 +10,58 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
+// OEP-0007 multi-node validation reason constants. Operators and the
+// test plan (.claude/specs/2026-05-27-multi-node-real-cluster-tests
+// §M-E) reference these by name, so they're exported and stable.
+const (
+	// ReasonInvalidLeaderWorkerPairing is the legacy umbrella reason
+	// for any leader/worker shape mismatch. Retained for back-compat
+	// with operators scraping the error string; new errors also embed
+	// the more-specific reason below.
+	ReasonInvalidLeaderWorkerPairing = "InvalidLeaderWorkerPairing"
+
+	// ReasonWorkerSizeMustBePositive rejects worker.size=0 (or nil)
+	// when a leader is declared. The "default 0 means single-pod"
+	// fallback is ambiguous — force the operator to either omit
+	// Worker entirely (single-pod with default Runner) or set Size >= 1.
+	ReasonWorkerSizeMustBePositive = "WorkerSizeMustBePositive"
+
+	// ReasonLeaderRequiresWorker rejects leader-only configs. A leader
+	// without a worker has no gang to lead and is meaningless for
+	// tensor parallelism.
+	ReasonLeaderRequiresWorker = "LeaderRequiresWorker"
+
+	// ReasonWorkerRequiresLeader rejects worker-only configs.
+	// Symmetric to LeaderRequiresWorker; covered by the same
+	// validator function.
+	ReasonWorkerRequiresLeader = "WorkerRequiresLeader"
+
+	// ReasonLeaderSizeMustBeOne rejects user attempts to scale the
+	// leader Runner above 1. OEP-0007 fixes leader at size=1: the
+	// OME_LEADER_ADDRESS contract resolves to a single
+	// <isvc>-<comp>-<inst>-leader-0 FQDN, so multiple leaders would
+	// produce ambiguous DNS. LeaderSpec has no explicit Size field
+	// today (enforced by type); this validator is a forward-looking
+	// guard in case the API surface evolves.
+	ReasonLeaderSizeMustBeOne = "LeaderSizeMustBeOne"
+
+	// ReasonSequentialMultiPodRequiresOrder rejects Sequential
+	// coordination groups containing a multi-pod Component without an
+	// Order pin. Order is REQUIRED for Sequential semantics per
+	// OEP-0007.1, but easy to forget for multi-pod variants where the
+	// operator might assume the controller picks an order.
+	ReasonSequentialMultiPodRequiresOrder = "SequentialMultiPodRequiresOrder"
+
+	// ReasonMultiPodLeanModelNeedsRunner rejects lean (no spec.model,
+	// no spec.runtime) ISVCs that declare a multi-pod Component
+	// without populating both leader.runner.image and
+	// worker.runner.image. The lean path is supported per #249, but
+	// multi-pod lean specs cannot be filled in by runtime selection
+	// (no runtime) or model parsing (no model), so the operator must
+	// supply images explicitly.
+	ReasonMultiPodLeanModelNeedsRunner = "MultiPodLeanModelNeedsRunner"
+)
+
 func ValidateInferenceServiceName(name string) error {
 	if !IsvcNameRegex.MatchString(name) {
 		return fmt.Errorf("invalid InferenceService name %q, must match %q", name, IsvcNameFmt)
@@ -29,6 +81,10 @@ func ValidateEngineDecoderConfig(spec *v1beta1.InferenceServiceSpec) error {
 // either both are absent (single-pod) or both are present with
 // Worker.Size > 0 (multi-pod). Rejects orphan-leader, orphan-worker, and
 // declared-worker-with-no-positive-size configurations.
+//
+// Error strings embed both the legacy "InvalidLeaderWorkerPairing"
+// reason (for back-compat with operators / tests grepping for it) and
+// a more-specific reason from the OEP-0007 reason constants.
 func ValidateLeaderWorkerPairing(spec *v1beta1.InferenceServiceSpec) error {
 	if spec.Engine != nil {
 		if err := validateLeaderWorkerPairing("engine", spec.Engine.Leader, spec.Engine.Worker); err != nil {
@@ -49,23 +105,222 @@ func validateLeaderWorkerPairing(component string, leader *v1beta1.LeaderSpec, w
 	}
 	if leader != nil && worker == nil {
 		return fmt.Errorf(
-			"InvalidLeaderWorkerPairing: %s.leader is set but %s.worker is not; multi-pod configurations require both",
-			component, component,
+			"%s: %s.leader is set but %s.worker is not; multi-pod configurations require both (%s)",
+			ReasonInvalidLeaderWorkerPairing, component, component, ReasonLeaderRequiresWorker,
 		)
 	}
 	if leader == nil && worker != nil {
 		return fmt.Errorf(
-			"InvalidLeaderWorkerPairing: %s.worker is set but %s.leader is not; multi-pod configurations require both",
-			component, component,
+			"%s: %s.worker is set but %s.leader is not; multi-pod configurations require both (%s)",
+			ReasonInvalidLeaderWorkerPairing, component, component, ReasonWorkerRequiresLeader,
 		)
 	}
 	if worker.Size == nil || *worker.Size <= 0 {
 		return fmt.Errorf(
-			"InvalidLeaderWorkerPairing: %s.worker is set but worker.size is not a positive integer; multi-pod configurations require worker.size > 0",
-			component,
+			"%s: %s.worker is set but worker.size is not a positive integer; multi-pod configurations require worker.size > 0 (%s)",
+			ReasonInvalidLeaderWorkerPairing, component, ReasonWorkerSizeMustBePositive,
 		)
 	}
 	return nil
+}
+
+// ValidateLeaderSize enforces that no Component sets a leader Runner
+// size greater than 1. OEP-0007 fixes the leader at size=1: the
+// OME_LEADER_ADDRESS env var that workers (and the leader itself)
+// consult resolves to <isvc>-<comp>-<inst>-leader-0; a second leader
+// pod would shadow the DNS contract and break tensor-parallel
+// initialization.
+//
+// LeaderSpec has no explicit Size field today, so this validator is
+// structurally a no-op against the current API. It exists as a
+// forward-looking guard so that any future API evolution adding such
+// a field automatically inherits the rejection, with the stable
+// reason string (%s) already in place for operators and tests.
+//
+// Implementation note: when LeaderSpec gains a Size field, replace
+// the per-component no-op with a check that returns the formatted
+// error using ReasonLeaderSizeMustBeOne.
+func ValidateLeaderSize(spec *v1beta1.InferenceServiceSpec) error {
+	if spec == nil {
+		return nil
+	}
+	// Engine leader: structurally fixed at size=1 — no field to inspect.
+	if err := validateLeaderSize("engine", spec.Engine); err != nil {
+		return err
+	}
+	// Decoder leader: same.
+	if err := validateLeaderSize("decoder", spec.Decoder); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateLeaderSize is the per-Component shape check. LeaderSpec has
+// no Size field today; the function is a no-op placeholder so the
+// public ValidateLeaderSize entry point exists and tests can pin the
+// reason constant. See ValidateLeaderSize doc for the upgrade plan.
+func validateLeaderSize(component string, spec interface{}) error {
+	// No-op against the current API surface. See the doc comment on
+	// ValidateLeaderSize.
+	_ = component
+	_ = spec
+	return nil
+}
+
+// ValidateSequentialMultiPodOrder enforces that any Sequential
+// coordination group containing a multi-pod Component declares an
+// explicit Order over its Components. OEP-0007.1 already mandates
+// Order for Sequential groups (covered by validateSequentialGroup in
+// coordination.go), but this validator adds a louder reason for the
+// multi-pod variant where the controller's gang semantics make the
+// missing Order especially dangerous: without it, the rollout would
+// have no deterministic boundary between gang rollouts.
+//
+// This is layered on top of (not in place of) the existing
+// SequentialRequiresOrder check — the latter already rejects the
+// missing-Order case; this validator surfaces the multi-pod-specific
+// reason so operators see the relevant OEP context in the error.
+//
+// Returns nil when:
+//   - spec.rolloutCoordination is absent or has no groups
+//   - no Sequential group contains a multi-pod Component
+//   - every multi-pod-containing Sequential group has Order set
+func ValidateSequentialMultiPodOrder(spec *v1beta1.InferenceServiceSpec) error {
+	if spec == nil || spec.RolloutCoordination == nil {
+		return nil
+	}
+	multiPod := multiPodComponents(spec)
+	for i, g := range spec.RolloutCoordination.Groups {
+		if g.Policy != v1beta1.CoordinationPolicySequential {
+			continue
+		}
+		if len(g.Order) > 0 {
+			continue
+		}
+		// Sequential with no Order — flag if any member Component is multi-pod.
+		for _, c := range g.Components {
+			if _, ok := multiPod[c]; !ok {
+				continue
+			}
+			return fmt.Errorf(
+				"spec.rolloutCoordination.groups[%d]: Sequential policy with multi-pod component %q requires explicit Order; the controller has no default gang-rollout sequencing for multi-pod components (%s)",
+				i, c, ReasonSequentialMultiPodRequiresOrder,
+			)
+		}
+	}
+	return nil
+}
+
+// ValidateMultiPodLeanRunner enforces that a lean (no spec.model AND
+// no spec.runtime) InferenceService declaring a multi-pod Component
+// (Engine or Decoder) populates both leader.runner.image and
+// worker.runner.image. Per #249, lean ISVCs are supported for the
+// single-pod path because the operator supplies a single Runner
+// image. For multi-pod the controller renders distinct PodSpecs for
+// leader and worker — without a runtime or model to fill in defaults,
+// both Runner images must be explicit.
+//
+// Single-pod lean ISVCs continue to use the existing
+// hasFullRunnerConfig path (runner.image satisfies the requirement).
+// This validator only fires when MultiPod is true.
+func ValidateMultiPodLeanRunner(spec *v1beta1.InferenceServiceSpec) error {
+	if spec == nil {
+		return nil
+	}
+	modelSet := spec.Model != nil && spec.Model.Name != ""
+	runtimeSet := spec.Runtime != nil && spec.Runtime.Name != ""
+	if modelSet || runtimeSet {
+		return nil
+	}
+	// Lean path: at least one of model/runtime must end up set per
+	// ValidateInferenceService elsewhere; if both are absent the user
+	// is in the "spec.engine carries the runner config end-to-end"
+	// path. Multi-pod variants in that path need both leader and
+	// worker runner images present.
+	if err := validateMultiPodLeanRunnerImages(
+		"engine",
+		engineLeader(spec.Engine), engineWorker(spec.Engine),
+	); err != nil {
+		return err
+	}
+	if err := validateMultiPodLeanRunnerImages(
+		"decoder",
+		decoderLeader(spec.Decoder), decoderWorker(spec.Decoder),
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateMultiPodLeanRunnerImages(component string, leader *v1beta1.LeaderSpec, worker *v1beta1.WorkerSpec) error {
+	if leader == nil || worker == nil {
+		// Single-pod or invalid pair (covered by
+		// ValidateLeaderWorkerPairing).
+		return nil
+	}
+	leaderImg := ""
+	if leader.Runner != nil {
+		leaderImg = leader.Runner.Image
+	}
+	workerImg := ""
+	if worker.Runner != nil {
+		workerImg = worker.Runner.Image
+	}
+	if leaderImg != "" && workerImg != "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s: %s is multi-pod with no spec.model and no spec.runtime, but %s.leader.runner.image (%q) or %s.worker.runner.image (%q) is empty; multi-pod lean specs must declare both runner images",
+		ReasonMultiPodLeanModelNeedsRunner,
+		component, component, leaderImg, component, workerImg,
+	)
+}
+
+func engineLeader(e *v1beta1.EngineSpec) *v1beta1.LeaderSpec {
+	if e == nil {
+		return nil
+	}
+	return e.Leader
+}
+
+func engineWorker(e *v1beta1.EngineSpec) *v1beta1.WorkerSpec {
+	if e == nil {
+		return nil
+	}
+	return e.Worker
+}
+
+func decoderLeader(d *v1beta1.DecoderSpec) *v1beta1.LeaderSpec {
+	if d == nil {
+		return nil
+	}
+	return d.Leader
+}
+
+func decoderWorker(d *v1beta1.DecoderSpec) *v1beta1.WorkerSpec {
+	if d == nil {
+		return nil
+	}
+	return d.Worker
+}
+
+// multiPodComponents returns the set of Components declared as multi-pod
+// (leader + worker with worker.size > 0). Mirrors the controller-side
+// MultiPod detection in pkg/controller/v1beta1/inferenceservice/components.
+func multiPodComponents(spec *v1beta1.InferenceServiceSpec) map[v1beta1.ComponentType]struct{} {
+	out := map[v1beta1.ComponentType]struct{}{}
+	if spec == nil {
+		return out
+	}
+	if spec.Engine != nil && spec.Engine.Leader != nil && spec.Engine.Worker != nil &&
+		spec.Engine.Worker.Size != nil && *spec.Engine.Worker.Size > 0 {
+		out[v1beta1.EngineComponent] = struct{}{}
+	}
+	if spec.Decoder != nil && spec.Decoder.Leader != nil && spec.Decoder.Worker != nil &&
+		spec.Decoder.Worker.Size != nil && *spec.Decoder.Worker.Size > 0 {
+		out[v1beta1.DecoderComponent] = struct{}{}
+	}
+	return out
 }
 
 // ValidateEngineDecoderDeploymentMode enforces that when both Engine and
