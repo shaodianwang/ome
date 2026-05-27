@@ -28,6 +28,12 @@ ome:
     options: {}
   controller:
     replicaCount: 3
+    # Additional annotations applied to the controller pod template.
+    # Merged after the chart's default annotations (prometheus.io/scrape, etc.).
+    # Typical use: metric-pipeline schema tagging, e.g.
+    #   podAnnotations:
+    #     fb_metric_schema: ome_controller
+    podAnnotations: {}
     deploymentMode: "RawDeployment"
     ingressGateway:
       domain: svc.cluster.local
@@ -99,6 +105,9 @@ modelAgent:
   # Disabled by default — this fork consumes upstream-published
   # model-agent images rather than building/deploying locally.
   enabled: false
+  # Additional annotations applied to the model-agent pod template.
+  # Same shape and intent as ome.controller.podAnnotations above.
+  podAnnotations: {}
   hostPath: /mnt/data/models
   priorityClassName: system-node-critical
   serviceAccountName: ome-model-agent

@@ -26,6 +26,9 @@ spec:
         prometheus.io/scrape: 'true'
         prometheus.io/path: '/metrics'
         prometheus.io/port: '8080'
+        {{- with .Values.ome.controller.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: ome-controller-manager
       {{- with .Values.ome.controller.nodeSelector }}
