@@ -19,6 +19,37 @@
 // list (patch-merge-key=type), so kubelet's concurrent writes to
 // PodScheduled / ContainersReady / PodReady are preserved. All
 // writes are wrapped in retry.RetryOnConflict.
+//
+// # Gang readiness equivalence (multi-pod)
+//
+// OEP-0007 §"Readiness and Warmup" describes a "Lifecycle-instance-gang"
+// keyed writer that holds serving=False on each pod until every sibling
+// in the Instance reaches ContainersReady. v1 of the multi-pod path does
+// NOT implement a separately-keyed writer; instead, the equivalent
+// gang-readiness contract is enforced by the Create flow in
+// ops/create.go: the controller calls MarkPodServing on the Instance's
+// pods ONLY after query.AllPodsRuntimeReady(existing) returns true for
+// the WHOLE Instance (every leader + every worker has
+// ContainersReady=True). Before that gate, no pod in the gang has
+// serving=True, so none receives traffic.
+//
+// The two designs are observably equivalent:
+//   - A new pod's WriterLifecycle/KeyLifecycleInstanceReady stays in
+//     the message list until the controller writes the MarkPodServing
+//     removal in Create's Ready promotion. (The condition starts
+//     non-existent on a fresh pod, which is treated as "writer is
+//     implicitly holding"; the first MarkPodServing creates it with
+//     Status=True.)
+//   - Create's gate is on the WHOLE Instance — AllPodsRuntimeReady — so
+//     the flip happens atomically across leader + workers. No partial
+//     "leader serving, workers still warming" window.
+//
+// If a future use case needs per-pod gang holds (e.g., a partial
+// in-place update on a multi-pod gang), a separately-keyed writer can
+// be added without re-architecting; the multi-writer protocol already
+// supports it. For now, the spec field's "intent" semantic (gang
+// readiness mandatory) and the controller's Create-time gate
+// (AllPodsRuntimeReady) cover the OEP contract.
 package podreadiness
 
 import (

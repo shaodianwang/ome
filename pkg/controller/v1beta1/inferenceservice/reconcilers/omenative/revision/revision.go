@@ -49,19 +49,34 @@ import (
 // excluded so an in-flight operation cannot manufacture a fresh
 // revision just by stamping a temporary annotation on a pod.
 //
+// PodSpec carries the leader / single-pod template.
+//
 // PodMeta carries the pod-template-level labels and annotations the
 // user can edit independently of PodSpec. The field is part of the JSON
 // shape from day one (no omitempty) so adding non-nil values later
 // doesn't invalidate every previously-recorded revision name.
+//
+// WorkerPodSpec carries the multi-pod Component's worker template (set
+// only when the Component declares both Leader and Worker). It uses
+// `omitempty` so single-pod revisions — which have never carried a
+// worker — keep their pre-multi-node JSON shape and hash. Without
+// omitempty, every single-pod ISVC would see a phantom rollout on the
+// first reconcile after the multi-pod field landed.
 type DataPayload struct {
-	PodSpec *corev1.PodSpec    `json:"podSpec"`
-	PodMeta *metav1.ObjectMeta `json:"podMeta"`
+	PodSpec       *corev1.PodSpec    `json:"podSpec"`
+	PodMeta       *metav1.ObjectMeta `json:"podMeta"`
+	WorkerPodSpec *corev1.PodSpec    `json:"workerPodSpec,omitempty"`
 }
 
 // Hash returns the deterministic hash that becomes the
 // ControllerRevision name suffix, plus the canonical serialized bytes
 // stored in CR.Data.Raw. collisionCount is folded into the hash so a
 // retry after a same-name collision produces a different name.
+//
+// Single-pod variant — does not include a worker template. Multi-pod
+// Components must use HashWithWorker so worker-only spec changes trigger
+// a new revision. See HashWithWorker for the multi-pod path; this
+// function is the single-pod / no-worker shorthand.
 //
 // nil collisionCount is normalized to 0 before folding — the status
 // field is *int32 and callers may legitimately pass either nil or
@@ -74,12 +89,28 @@ type DataPayload struct {
 // revision and a rollout. nil hashes the same as empty ObjectMeta —
 // both serialize to the same `podMeta` JSON shape.
 func Hash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCount *int32) (string, []byte, error) {
+	return HashWithWorker(template, nil, templateMeta, collisionCount)
+}
+
+// HashWithWorker is Hash with an explicit worker PodSpec slot. Use for
+// multi-pod Components (Leader + Worker); pass workerSpec=nil for
+// single-pod / no-worker Components, in which case the canonical bytes
+// and hash are identical to Hash(template, templateMeta, collisionCount).
+//
+// The worker template participates in the revision hash so a worker-only
+// image / env / resource bump triggers a new revision and a rollout. The
+// alternative — rendering the worker payload at create time without
+// hashing it — leaves worker-only spec changes silently un-rolled,
+// which is exactly the split-brain failure OEP-0007 §"Update Strategy"
+// requires the revision pipeline to prevent.
+func HashWithWorker(template, workerSpec *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCount *int32) (string, []byte, error) {
 	if template == nil {
 		return "", nil, fmt.Errorf("nil pod template")
 	}
 	raw, err := json.Marshal(DataPayload{
-		PodSpec: template,
-		PodMeta: TemplateMeta(templateMeta),
+		PodSpec:       template,
+		PodMeta:       TemplateMeta(templateMeta),
+		WorkerPodSpec: workerSpec,
 	})
 	if err != nil {
 		return "", nil, fmt.Errorf("marshal revision payload: %w", err)
@@ -208,6 +239,10 @@ func Labels(isvcName string, component v1beta1.ComponentType) map[string]string 
 // New CRs are stamped with Labels() and a controller OwnerReference
 // for the parent ISVC; existing CRs keep whatever labels/owners they
 // already have.
+//
+// Single-pod variant — does not hash a worker template. Multi-pod
+// callers use EnsureControllerRevisionWithWorker so worker-only spec
+// changes trigger a new CR.
 func EnsureControllerRevision(
 	ctx context.Context,
 	c client.Client,
@@ -215,6 +250,25 @@ func EnsureControllerRevision(
 	isvc *v1beta1.InferenceService,
 	component v1beta1.ComponentType,
 	template *corev1.PodSpec,
+	templateMeta *metav1.ObjectMeta,
+	collisionCount *int32,
+) (cr *appsv1.ControllerRevision, collision bool, err error) {
+	return EnsureControllerRevisionWithWorker(ctx, c, reads, isvc, component, template, nil, templateMeta, collisionCount)
+}
+
+// EnsureControllerRevisionWithWorker is the multi-pod-aware sibling of
+// EnsureControllerRevision: it folds workerSpec into the revision hash
+// so a worker-only spec change produces a new CR and triggers a rollout.
+// Pass workerSpec=nil to get behavior identical to
+// EnsureControllerRevision (same name, same Data.Raw).
+func EnsureControllerRevisionWithWorker(
+	ctx context.Context,
+	c client.Client,
+	reads client.Reader,
+	isvc *v1beta1.InferenceService,
+	component v1beta1.ComponentType,
+	template *corev1.PodSpec,
+	workerSpec *corev1.PodSpec,
 	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
 ) (cr *appsv1.ControllerRevision, collision bool, err error) {
@@ -228,7 +282,7 @@ func EnsureControllerRevision(
 		return nil, false, fmt.Errorf("EnsureControllerRevision: nil reader")
 	}
 
-	hash, raw, err := Hash(template, templateMeta, collisionCount)
+	hash, raw, err := HashWithWorker(template, workerSpec, templateMeta, collisionCount)
 	if err != nil {
 		return nil, false, err
 	}

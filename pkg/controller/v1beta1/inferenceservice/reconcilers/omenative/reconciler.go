@@ -44,9 +44,8 @@ type (
 // used by core/params.go's ExpectationsCache fallback. Callers that
 // need the singleton import core directly.
 var (
-	BuildPlan                  = core.BuildPlan
-	NewExpectations            = core.NewExpectations
-	ErrMultiPodNotYetSupported = core.ErrMultiPodNotYetSupported
+	BuildPlan       = core.BuildPlan
+	NewExpectations = core.NewExpectations
 )
 
 // derefInt32 is a small helper for event messages where we want to
@@ -98,8 +97,6 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 	// op runs. Every drain check downstream (drain.IsPodDrained /
 	// drain.IsPodInRotation) reads the EndpointSlices owned by this Service;
 	// without it, drain would fail-loud rather than silently complete.
-	// Done after BuildPlan so multi-pod's ErrMultiPodNotYetSupported
-	// short-circuits without leaving an orphan Service behind.
 	if err := ensureHeadlessService(ctx, p); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -154,7 +151,16 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	if cs, ok := p.ISVC.Status.Components[component]; ok && cs.OMENative != nil {
 		collisionCount = cs.OMENative.CollisionCount
 	}
-	target, collision, err := revision.EnsureControllerRevision(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, &p.ObjectMeta, collisionCount)
+	// Multi-pod Components fold the worker template into the revision
+	// hash so a worker-only image / env bump triggers a new revision
+	// and a rollout. Single-pod Components pass nil, which produces the
+	// same hash + bytes as the pre-multi-node Hash form, so existing
+	// single-pod revisions stay valid.
+	workerSpec := p.WorkerPodSpec
+	if !p.MultiPod {
+		workerSpec = nil
+	}
+	target, collision, err := revision.EnsureControllerRevisionWithWorker(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, workerSpec, &p.ObjectMeta, collisionCount)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +175,7 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonRevisionCollision,
 		"OMENative component=%s ControllerRevision hash collision; CollisionCount bumped to %d",
 		component, derefInt32(bumped))
-	target, collision, err = revision.EnsureControllerRevision(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, &p.ObjectMeta, bumped)
+	target, collision, err = revision.EnsureControllerRevisionWithWorker(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, workerSpec, &p.ObjectMeta, bumped)
 	if err != nil {
 		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)
 	}

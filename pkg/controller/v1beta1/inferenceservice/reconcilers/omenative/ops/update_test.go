@@ -570,6 +570,151 @@ func TestUpdate_RecreatePod_BumpsIncarnationAndDrainsOld(t *testing.T) {
 	}
 }
 
+// TestUpdate_MultiPodSurgeFallsBackToRecreate pins that an Instance with
+// >1 desired pod under SurgeThenDrain routes to recreateUpdate instead of
+// surgeUpdate. The single-pod surge implementation requires a per-gang-
+// member ordinal scheme that the OEP defers; recreate is the safe
+// fallback that still respects the dispatcher's MaxUnavailable budget.
+// The user's spec field stays "SurgeThenDrain" — this is execution
+// best-effort, not a defaulter rewrite. When multi-pod surge lands
+// (future OEP-0007 amendment), the fallback path goes away with zero
+// user-facing churn.
+func TestUpdate_MultiPodSurgeFallsBackToRecreate(t *testing.T) {
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	// Stamp SurgeThenDrain on the ISVC; multi-pod is signaled via
+	// ReconcileParams.MultiPod below (so this test does not depend on
+	// the dispatch site reading Leader/Worker from the spec).
+	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
+		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+			Type: v1beta1.OMENativeUpdateStrategySurgeThenDrain,
+		},
+	}
+
+	pod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	target := targetSpecImage("llama:v2")
+	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, true)
+	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
+
+	// Use a multi-pod params explicitly so this test does not depend on the
+	// dispatch site picking up Leader/Worker from the ISVC.
+	p := minimalParams(t, isvc, c)
+	p.MultiPod = true
+	p.WorkerSize = 1
+	p.WorkerPodSpec = &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "worker", Image: "llama:v1"}},
+	}
+	plan, err := core.BuildPlan(p)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if plan.UpdateStrategy.Type != v1beta1.OMENativeUpdateStrategySurgeThenDrain {
+		t.Fatalf("test setup: expected SurgeThenDrain strategy, got %q", plan.UpdateStrategy.Type)
+	}
+	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, target)
+
+	// Update must NOT error with the pre-multi-node "multi-pod not yet
+	// supported" message from surgeUpdate. It must dispatch to recreate.
+	done, err := Update(context.Background(), p, plan, plan.Instances[0], tcr, target)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if done {
+		t.Fatalf("expected done=false: recreate is multi-pass")
+	}
+
+	// Recreate stamps Phase=Updating with TargetRevision and bumps the
+	// Incarnation, exactly like RecreatePod. If the dispatcher had picked
+	// surge, the InstanceStatus would still be Phase=Ready (surge stamps
+	// Updating but recreates Phase=Updating-with-Incarnation-bump).
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Phase != v1beta1.OMENativeInstanceUpdating {
+		t.Errorf("Phase: got %q want Updating", s.Phase)
+	}
+	if s.Incarnation != 2 {
+		t.Errorf("Incarnation: got %d want 2 (recreate bumps)", s.Incarnation)
+	}
+}
+
+// TestChooseUpdateMode_MultiPodSurgeFallsBackToRecreate is the chooser's
+// per-mode contract: when multiPod=true and strategy=SurgeThenDrain, the
+// returned mode is recreate. Tested separately from the higher-level
+// Update path because chooseUpdateMode is the single source of truth that
+// every Update call routes through.
+func TestChooseUpdateMode_MultiPodSurgeFallsBackToRecreate(t *testing.T) {
+	running := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v1"}}}
+	target := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v2"}}}
+
+	mode, err := chooseUpdateModeForInstance(v1beta1.OMENativeUpdateStrategySurgeThenDrain, running, target, true /* multiPod */)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != updateModeRecreate {
+		t.Errorf("multi-pod surge: got mode %v want recreate", mode)
+	}
+
+	// Sanity: single-pod path keeps surge mode.
+	mode, err = chooseUpdateModeForInstance(v1beta1.OMENativeUpdateStrategySurgeThenDrain, running, target, false /* multiPod */)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != updateModeSurge {
+		t.Errorf("single-pod surge: got mode %v want surge", mode)
+	}
+}
+
+// TestChooseUpdateMode_MultiPodInPlaceFallsBackToRecreate pins that
+// in-place modes route to recreate for multi-pod Components. inPlaceEligible
+// compares only the leader's PodSpec, so an in-place patch on a worker-
+// only spec change would leave the workers on the old image — split-brain.
+func TestChooseUpdateMode_MultiPodInPlaceFallsBackToRecreate(t *testing.T) {
+	running := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v1"}}}
+	imageOnlyTarget := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v2"}}}
+	envTarget := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v2", Env: []corev1.EnvVar{{Name: "X"}}}}}
+
+	// InPlaceIfPossible — eligible diff still goes recreate when multi-pod.
+	mode, err := chooseUpdateModeForInstance(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, running, imageOnlyTarget, true)
+	if err != nil {
+		t.Fatalf("InPlaceIfPossible multipod eligible: %v", err)
+	}
+	if mode != updateModeRecreate {
+		t.Errorf("InPlaceIfPossible multipod: got %v want recreate", mode)
+	}
+
+	// InPlaceOnly + eligible — still recreate for multi-pod, no error.
+	mode, err = chooseUpdateModeForInstance(v1beta1.OMENativeUpdateStrategyInPlaceOnly, running, imageOnlyTarget, true)
+	if err != nil {
+		t.Fatalf("InPlaceOnly multipod eligible: %v", err)
+	}
+	if mode != updateModeRecreate {
+		t.Errorf("InPlaceOnly multipod eligible: got %v want recreate", mode)
+	}
+
+	// InPlaceOnly + ineligible — single-pod errors, multi-pod recreates.
+	if _, err := chooseUpdateModeForInstance(v1beta1.OMENativeUpdateStrategyInPlaceOnly, running, envTarget, false); err == nil {
+		t.Errorf("single-pod InPlaceOnly ineligible: want error")
+	}
+	mode, err = chooseUpdateModeForInstance(v1beta1.OMENativeUpdateStrategyInPlaceOnly, running, envTarget, true)
+	if err != nil {
+		t.Fatalf("multi-pod InPlaceOnly ineligible: want recreate, got error: %v", err)
+	}
+	if mode != updateModeRecreate {
+		t.Errorf("multi-pod InPlaceOnly ineligible: got %v want recreate", mode)
+	}
+
+	// Single-pod eligible path still in-places (the multi-pod override is
+	// scoped — single-pod keeps full in-place semantics).
+	mode, err = chooseUpdateModeForInstance(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, running, imageOnlyTarget, false)
+	if err != nil {
+		t.Fatalf("single-pod InPlaceIfPossible: %v", err)
+	}
+	if mode != updateModeInPlace {
+		t.Errorf("single-pod InPlaceIfPossible: got %v want in-place", mode)
+	}
+}
+
 func TestInPlaceEligible_OnlyImageDiff(t *testing.T) {
 	running := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "llama:v1"}}}
 	target := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "llama:v2"}}}

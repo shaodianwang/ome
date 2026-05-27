@@ -353,6 +353,83 @@ func TestMigrate_MissingSourceMarksFailed(t *testing.T) {
 	}
 }
 
+// TestMigrate_MultiPodRejectedWithAuditEntry pins that Migrate refuses a
+// multi-pod Instance migration with a Failed audit row. Multi-pod migration
+// requires per-Runner surge ordinal allocation that the OEP defers; without
+// this guard a multi-pod ISVC's migration would silently create a single-pod
+// surge that can never satisfy the gang readiness gate, leaving the
+// migration wedged until the deadline.
+func TestMigrate_MultiPodRejectedWithAuditEntry(t *testing.T) {
+	resetExpectations(t)
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	sourceSpec := targetSpecImage("llama:v1")
+	sourcePod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
+	sourcePod.Spec.NodeName = "node5"
+	c := newFakeClientWithDiscovery(t, isvc, sourcePod)
+	seedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, sourceSpec)
+
+	// Multi-pod plan: leader + 1 worker. Use BuildPlan with MultiPod=true
+	// so the source Instance's Runners reflect a real multi-pod layout.
+	p := minimalParams(t, isvc, c)
+	p.MultiPod = true
+	p.WorkerSize = 1
+	p.WorkerPodSpec = &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "worker", Image: "llama:v1"}},
+	}
+	plan, err := core.BuildPlan(p)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	req := &audit.MigrationRequest{
+		SchemaVersion: audit.SchemaV1,
+		Component:     "engine",
+		Instance:      0,
+		FromNode:      "node5",
+	}
+
+	done, err := Migrate(context.Background(), p, plan, 0, "req-multipod", req)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if !done {
+		t.Errorf("expected done=true (rejection is terminal)")
+	}
+
+	// Source InstanceStatus must NOT be stamped Phase=Migrating — the
+	// rejection happened up-front, before any status mutation.
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Phase == v1beta1.OMENativeInstanceMigrating {
+		t.Errorf("source must NOT be stamped Migrating for multi-pod rejection; got %q", s.Phase)
+	}
+
+	// Audit ledger must carry the Failed entry naming the reason.
+	ledger, _ := audit.LoadLedger(context.Background(), c, isvc)
+	if !ledger.HasCompletedOrFailedRequest("req-multipod") {
+		t.Fatalf("ledger should record Failed entry for the multi-pod request")
+	}
+	failed := false
+	for _, e := range ledger.Entries {
+		if e.RequestUUID == "req-multipod" && e.Phase == audit.PhaseFailed {
+			failed = true
+			if e.Outcome == "" {
+				t.Errorf("Failed entry should carry a non-empty Outcome reason")
+			}
+		}
+	}
+	if !failed {
+		t.Errorf("expected a Failed entry for req-multipod; got %+v", ledger.Entries)
+	}
+
+	// No surge InstanceStatus should be allocated.
+	if len(fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses) != 1 {
+		t.Errorf("no surge should be allocated; got %+v",
+			fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses)
+	}
+}
+
 func TestMigrate_FirstPassAllocatesSurgeAndStampsBothStatuses(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)

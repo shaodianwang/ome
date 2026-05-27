@@ -396,7 +396,7 @@ func buildOMENativeEnv(plan core.ComponentPlan, inst core.InstancePlan, runner c
 	if runner.Size <= 1 {
 		gangIndex = 0
 	}
-	return []corev1.EnvVar{
+	env := []corev1.EnvVar{
 		{Name: "OME_INFERENCESERVICE_NAME", Value: isvcName},
 		{Name: "OME_COMPONENT", Value: string(plan.Component)},
 		{Name: "OME_COMPONENT_REPLICAS", Value: fmt.Sprintf("%d", plan.Replicas)},
@@ -406,7 +406,39 @@ func buildOMENativeEnv(plan core.ComponentPlan, inst core.InstancePlan, runner c
 		{Name: "OME_RUNNER_INDEX", Value: fmt.Sprintf("%d", gangIndex)},
 		{Name: "OME_INSTANCE_SUBDOMAIN", Value: query.InstanceSubdomain(isvcName, plan.Component, inst.Index)},
 	}
-	// OME_LEADER_ADDRESS is emitted only for multi-pod Instances (leader
-	// + worker). Single-pod Instances have one "default" runner with no
-	// leader, so the variable is omitted.
+	// OME_LEADER_ADDRESS is emitted only for multi-pod Instances (the
+	// Instance has a "leader" Runner). Single-pod Instances have one
+	// "default" Runner with no leader, so the variable is omitted —
+	// runtimes branch on its presence to detect a multi-pod environment.
+	if addr := leaderAddressForInstance(isvcName, plan.Component, inst); addr != "" {
+		env = append(env, corev1.EnvVar{Name: "OME_LEADER_ADDRESS", Value: addr})
+	}
+	return env
+}
+
+// leaderAddressForInstance returns the peer-DNS address of the Instance's
+// leader pod, or "" when the Instance has no "leader" Runner (single-pod
+// "default" layout). The address is the SHORT form
+// `<leader-pod-name>.<headless-service-name>` — the pod's DNS search
+// path appends `.<ns>.svc.<cluster-domain>` at resolution time, so this
+// resolves the same as the fully-qualified
+// `<pod>.<headless>.<ns>.svc.cluster.local` form without the controller
+// needing to discover the cluster's actual DNS domain. Matches LWS
+// behavior (LWS also leaves cluster-domain qualification to the search
+// path). Documented in OEP-0007.2 §"Service Discovery" sign-off answer.
+//
+// Both the leader pod and every worker pod in the same Instance carry
+// the same value: the leader sees its own address (so code paths that
+// branch on `getenv("OME_LEADER_ADDRESS") == self_hostname` can identify
+// the leader role) and workers see where to dial back to the gang head.
+func leaderAddressForInstance(isvcName string, component v1beta1.ComponentType, inst core.InstancePlan) string {
+	for _, r := range inst.Runners {
+		if r.Name == "leader" {
+			return fmt.Sprintf("%s.%s",
+				query.PodName(isvcName, component, inst.Index, "leader", 0),
+				query.HeadlessServiceName(isvcName, component),
+			)
+		}
+	}
+	return ""
 }

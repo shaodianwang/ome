@@ -2,11 +2,11 @@ package omenative
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,21 +30,31 @@ func TestReconcileComponent_NilClientRejected(t *testing.T) {
 	}
 }
 
-// TestReconcileComponent_MultiPodPropagatesPlanError pins that a multi-pod
-// dispatch surfaces ErrMultiPodNotYetSupported wrapped in a build-plan
-// error.
-func TestReconcileComponent_MultiPodPropagatesPlanError(t *testing.T) {
+// TestReconcileComponent_MultiPodDispatchesToCreate pins the multi-pod
+// path: with a leader+worker plan, ReconcileComponent must reach Create
+// and request a requeue (multi-pass) rather than failing with the
+// pre-multi-node ErrMultiPodNotYetSupported short-circuit.
+func TestReconcileComponent_MultiPodDispatchesToCreate(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClientWithDiscovery(t, isvc)
-	_, err := ReconcileComponent(context.Background(), ReconcileParams{
-		Component:    v1beta1.EngineComponent,
-		ComponentExt: &v1beta1.ComponentExtensionSpec{},
-		MultiPod:     true,
-		Client:       c,
-	})
-	if !errors.Is(err, ErrMultiPodNotYetSupported) {
-		t.Fatalf("expected ErrMultiPodNotYetSupported in chain, got %v", err)
+	p := minimalParams(t, isvc, c)
+	// Multi-pod is leader + worker with WorkerSize > 0. The Engine spec
+	// drives this at the dispatch site (components/engine.go); here we
+	// just set MultiPod / WorkerSize / WorkerPodSpec directly because the
+	// reconciler is the unit under test.
+	p.MultiPod = true
+	p.WorkerSize = 1
+	p.WorkerPodSpec = &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "worker", Image: "llama-worker:v1"}},
+	}
+
+	result, err := ReconcileComponent(context.Background(), p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Errorf("expected Requeue (Create is multi-pass), got %+v", result)
 	}
 }
 

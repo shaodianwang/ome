@@ -1,7 +1,6 @@
 package core
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -101,20 +100,19 @@ type RunnerPlan struct {
 	Size int32
 }
 
-// ErrMultiPodNotYetSupported is returned by BuildPlan when the Component
-// declares Leader or Worker (multi-pod Instances). The single-pod runner
-// layout is what this PR implements; multi-pod (leader + worker per
-// Instance) is deferred to a follow-up.
-var ErrMultiPodNotYetSupported = errors.New("OMENative multi-pod Instances not yet supported")
-
 // BuildPlan computes the desired ComponentPlan from a ReconcileParams.
 //
 // The function is pure: it inspects p (ISVC + ComponentExt + MultiPod
 // flag + replica counts) and produces the plan the rest of the reconciler
 // will drive toward. No I/O, no controller-runtime calls.
 //
-// Scope: single-pod Instances only. If p.MultiPod is true, returns
-// ErrMultiPodNotYetSupported without partially populating ComponentPlan.
+// Runner layout:
+//   - Single-pod Instances (p.MultiPod=false): one Runner named "default"
+//     of size 1 per Instance. Used by Router and any Engine/Decoder
+//     without Leader+Worker declared.
+//   - Multi-pod Instances (p.MultiPod=true): one "leader" Runner of size 1
+//     plus one "worker" Runner of size p.WorkerSize per Instance. Matches
+//     OEP-0007 Story 1 and the Pod Topology Model in §"Internal Data Model".
 //
 // Defaulting: the mutating webhook fills in `omenative.*` for OMENative-
 // annotated Components, so in production the fields are non-nil. For
@@ -124,9 +122,6 @@ var ErrMultiPodNotYetSupported = errors.New("OMENative multi-pod Instances not y
 func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
 	if p.ComponentExt == nil {
 		return ComponentPlan{}, fmt.Errorf("nil ComponentExtensionSpec for component=%s", p.Component)
-	}
-	if p.MultiPod {
-		return ComponentPlan{}, ErrMultiPodNotYetSupported
 	}
 
 	replicas := int32(1)
@@ -142,13 +137,12 @@ func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
 	// for picking the right deletion target after that surge resolves.
 	indices := instancePlanIndices(p.ISVC, p.Component, replicas)
 	instances := make([]InstancePlan, len(indices))
+	runners := runnersForInstance(p.MultiPod, int32(p.WorkerSize))
 	for i, idx := range indices {
 		instances[i] = InstancePlan{
 			Index:       idx,
 			Incarnation: incarnationForIndex(p.ISVC, p.Component, idx),
-			Runners: []RunnerPlan{
-				{Name: "default", Size: 1},
-			},
+			Runners:     append([]RunnerPlan(nil), runners...),
 		}
 	}
 
@@ -167,6 +161,31 @@ func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
 		InstanceReadyTimeout: instanceReadyTimeoutOrDefault(omenative.InstanceReadyTimeout),
 		MigrationMode:        migrationModeOrDefault(omenative.MigrationPolicy),
 	}, nil
+}
+
+// runnersForInstance returns the Runner layout for one Instance based on
+// the Component's multi-pod flag and worker size.
+//
+// Single-pod (multiPod=false): one "default" Runner of size 1.
+// Multi-pod  (multiPod=true):  one "leader" Runner of size 1 plus one
+//
+//	"worker" Runner of size workerSize. The OEP fixes
+//	leader at size=1; the worker size is the user-set
+//	`Worker.Size` from the Component spec.
+//
+// The "worker" runner is emitted even when workerSize=0 so the layout shape
+// is consistent across reconciles (downstream code keys on Runner.Name).
+// Admission rejects `Worker.Size <= 0` at the webhook
+// (ValidateLeaderWorkerPairing), so a real workerSize=0 multi-pod request
+// never reaches this function in production.
+func runnersForInstance(multiPod bool, workerSize int32) []RunnerPlan {
+	if !multiPod {
+		return []RunnerPlan{{Name: "default", Size: 1}}
+	}
+	return []RunnerPlan{
+		{Name: "leader", Size: 1},
+		{Name: "worker", Size: workerSize},
+	}
 }
 
 func restartPolicyOrDefault(p *v1beta1.OMENativeRestartPolicy, multiPod bool) v1beta1.OMENativeRestartPolicy {

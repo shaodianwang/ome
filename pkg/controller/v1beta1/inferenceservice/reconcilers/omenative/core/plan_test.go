@@ -1,7 +1,6 @@
 package core
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -28,14 +27,84 @@ func TestBuildPlan_NilComponentExt(t *testing.T) {
 	}
 }
 
-func TestBuildPlan_MultiPodRejected(t *testing.T) {
-	_, err := BuildPlan(ReconcileParams{
+// TestBuildPlan_MultiPodEmitsLeaderWorkerRunners pins the multi-pod layout:
+// one leader runner of size 1 plus one worker runner of size WorkerSize.
+// Replaces the previous TestBuildPlan_MultiPodRejected, which guarded the
+// pre-multi-node ErrMultiPodNotYetSupported short-circuit.
+func TestBuildPlan_MultiPodEmitsLeaderWorkerRunners(t *testing.T) {
+	plan, err := BuildPlan(ReconcileParams{
 		Component:    v1beta1.EngineComponent,
-		ComponentExt: &v1beta1.ComponentExtensionSpec{},
+		ComponentExt: &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(2)},
 		MultiPod:     true,
+		WorkerSize:   3,
 	})
-	if !errors.Is(err, ErrMultiPodNotYetSupported) {
-		t.Fatalf("expected ErrMultiPodNotYetSupported, got %v", err)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := plan.Replicas, int32(2); got != want {
+		t.Errorf("Replicas: got %d want %d", got, want)
+	}
+	if got, want := len(plan.Instances), 2; got != want {
+		t.Fatalf("len(Instances): got %d want %d", got, want)
+	}
+	for i, inst := range plan.Instances {
+		if int(inst.Index) != i {
+			t.Errorf("Instances[%d].Index: got %d want %d", i, inst.Index, i)
+		}
+		want := []RunnerPlan{
+			{Name: "leader", Size: 1},
+			{Name: "worker", Size: 3},
+		}
+		if diff := cmp.Diff(want, inst.Runners); diff != "" {
+			t.Errorf("Instances[%d].Runners mismatch (-want +got):\n%s", i, diff)
+		}
+	}
+}
+
+// TestBuildPlan_MultiPodDefaultsMatchOEP pins the OEP-mandated defaults for
+// multi-pod Instances: RestartPolicy=RecreateInstance, ReadyPolicy=AllPodReady.
+// Single-pod defaults stay None for both (verified elsewhere).
+func TestBuildPlan_MultiPodDefaultsMatchOEP(t *testing.T) {
+	plan, err := BuildPlan(ReconcileParams{
+		Component:    v1beta1.EngineComponent,
+		ComponentExt: &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(1)},
+		MultiPod:     true,
+		WorkerSize:   1,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.RestartPolicy != v1beta1.OMENativeRestartPolicyRecreateInstance {
+		t.Errorf("RestartPolicy: got %q want RecreateInstanceOnPodRestart", plan.RestartPolicy)
+	}
+	if plan.ReadyPolicy != v1beta1.OMENativeReadyPolicyAllPodReady {
+		t.Errorf("ReadyPolicy: got %q want AllPodReady", plan.ReadyPolicy)
+	}
+}
+
+// TestBuildPlan_MultiPodWithZeroWorkerSize confirms WorkerSize=0 still
+// produces leader+worker entries; the webhook validator rejects orphan
+// leader without worker.size>0, but BuildPlan stays defensive — it would
+// produce a leader-only Instance (worker runner of size 0). Multi-pod
+// without worker is a misconfiguration callers should never reach.
+func TestBuildPlan_MultiPodWithZeroWorkerSize(t *testing.T) {
+	plan, err := BuildPlan(ReconcileParams{
+		Component:    v1beta1.EngineComponent,
+		ComponentExt: &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(1)},
+		MultiPod:     true,
+		WorkerSize:   0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := len(plan.Instances[0].Runners), 2; got != want {
+		t.Fatalf("Runners length: got %d want %d (leader + worker even if size=0)", got, want)
+	}
+	if plan.Instances[0].Runners[0].Size != 1 || plan.Instances[0].Runners[0].Name != "leader" {
+		t.Errorf("leader runner shape: got %+v", plan.Instances[0].Runners[0])
+	}
+	if plan.Instances[0].Runners[1].Size != 0 || plan.Instances[0].Runners[1].Name != "worker" {
+		t.Errorf("worker runner shape: got %+v", plan.Instances[0].Runners[1])
 	}
 }
 

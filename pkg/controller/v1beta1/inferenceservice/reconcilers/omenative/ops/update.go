@@ -93,13 +93,27 @@ func Update(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan
 		return false, fmt.Errorf("Update: load running revision (instance=%d): %w", inst.Index, err)
 	}
 
-	mode, err := chooseUpdateMode(plan.UpdateStrategy.Type, runningSpec, targetSpec)
+	multiPod := query.TotalPodsForInstance(inst) > 1
+	mode, err := chooseUpdateModeForInstance(plan.UpdateStrategy.Type, runningSpec, targetSpec, multiPod)
 	if err != nil {
 		// InPlaceOnly + ineligible diff is the only error path here.
 		status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonInPlaceUpdateNotPossible,
 			"OMENative %s rejected update: %v",
 			status.InstanceKey(plan.Component, inst.Index), err)
 		return false, fmt.Errorf("choose update mode (instance=%d): %w", inst.Index, err)
+	}
+	// Surfaces the fallback once per dispatch so operators can correlate a
+	// recreate-flavored rollout with the SurgeThenDrain spec they wrote.
+	// Multi-pod SurgeThenDrain needs per-gang-member ordinal allocation
+	// (a separate OEP amendment, listed as Phase 5 / "future" in
+	// the OMENative multi-node plan); until that lands, recreate is the
+	// safe execution. The spec field stays "SurgeThenDrain" — when the
+	// real implementation lands, this fallback goes away with zero
+	// user-facing churn.
+	if multiPod && plan.UpdateStrategy.Type == v1beta1.OMENativeUpdateStrategySurgeThenDrain && mode == updateModeRecreate {
+		status.RecordNormal(p.Recorder, p.ISVC, status.EventReasonRecreateUpdateStarted,
+			"OMENative %s: multi-pod SurgeThenDrain falls back to recreate (per-gang-member surge deferred)",
+			status.InstanceKey(plan.Component, inst.Index))
 	}
 
 	// Status stamping is per-mode: recreate bumps Incarnation atomically
@@ -130,9 +144,55 @@ const (
 	updateModeSurge
 )
 
+// chooseUpdateModeForInstance is chooseUpdateMode with the multi-pod
+// fallback layered on top.
+//
+// Multi-pod adjustments:
+//   - SurgeThenDrain → recreate, because the per-gang-member surge
+//     ordinal scheme is not yet implemented (deferred per OEP-0007 §
+//     "Multi-pod SurgeThenDrain is a separate phase"). The defaulter
+//     still stamps SurgeThenDrain on the user's spec; this is the
+//     execution-side adapter that picks the safe mode at dispatch time.
+//   - In-place modes (InPlaceIfPossible / InPlaceOnly) → recreate when
+//     multi-pod, because inPlaceEligible compares only the leader's
+//     PodSpec. A worker-only image bump would otherwise produce an
+//     in-place rollout that patches the leader (no-op for the worker
+//     image change) and leaves workers on the old image — split-brain.
+//     The revision hash includes WorkerPodSpec (see HashWithWorker), so
+//     the trigger fires; the chooser routes to recreate so every member
+//     of the gang is replaced.
+//
+// RecreatePod is already recreate; multiPod has no additional effect.
+func chooseUpdateModeForInstance(strategy v1beta1.OMENativeUpdateStrategyType, running, target *corev1.PodSpec, multiPod bool) (updateMode, error) {
+	mode, err := chooseUpdateMode(strategy, running, target)
+	if err != nil {
+		// InPlaceOnly + ineligible diff is the only error path. For
+		// multi-pod we fall back to recreate even on this error: the
+		// in-place pipeline cannot safely roll a worker-only change, so
+		// even if the user pinned InPlaceOnly, the realistic execution
+		// is recreate. Without this branch a multi-pod InPlaceOnly diff
+		// that is image-only-on-leader-and-something-else-on-worker would
+		// fail loudly when the more useful behavior is to roll the whole
+		// gang. Single-pod keeps the strict semantic — surface the error.
+		if multiPod && strategy == v1beta1.OMENativeUpdateStrategyInPlaceOnly {
+			return updateModeRecreate, nil
+		}
+		return mode, err
+	}
+	if multiPod && (mode == updateModeSurge || mode == updateModeInPlace) {
+		return updateModeRecreate, nil
+	}
+	return mode, nil
+}
+
 // chooseUpdateMode resolves strategy + eligibility into a mode. nil
 // running spec is treated as ineligible, forcing recreate from a known
 // baseline. InPlaceOnly + ineligible returns an error.
+//
+// Pod-count-agnostic; callers in production should route through
+// chooseUpdateModeForInstance which layers the multi-pod surge fallback
+// on top. The bare chooser is preserved for tests and direct callers
+// that don't have an Instance in scope.
 func chooseUpdateMode(strategy v1beta1.OMENativeUpdateStrategyType, running, target *corev1.PodSpec) (updateMode, error) {
 	eligible := inPlaceEligible(running, target)
 	switch strategy {

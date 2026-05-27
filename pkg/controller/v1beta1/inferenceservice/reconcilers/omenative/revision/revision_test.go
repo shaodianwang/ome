@@ -145,6 +145,65 @@ func TestRevisionHash_DifferentTemplateDifferentHash(t *testing.T) {
 	}
 }
 
+// TestRevisionHash_WorkerPodSpecAffectsHash pins that a multi-pod
+// Component's worker PodSpec contributes to the revision hash, so a
+// worker-only image / env / spec bump triggers a rollout. Without this
+// the controller would silently keep workers on the old image while the
+// leader picked up the new one — exactly the kind of split-brain failure
+// OEP-0007 §"Update Strategy" requires the revision pipeline to prevent.
+func TestRevisionHash_WorkerPodSpecAffectsHash(t *testing.T) {
+	leader := basicPodSpecForRevision()
+	workerA := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama-worker:v1"}}}
+	workerB := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama-worker:v2"}}}
+
+	hA, _, err := HashWithWorker(leader, workerA, nil, nil)
+	if err != nil {
+		t.Fatalf("HashWithWorker A: %v", err)
+	}
+	hB, _, err := HashWithWorker(leader, workerB, nil, nil)
+	if err != nil {
+		t.Fatalf("HashWithWorker B: %v", err)
+	}
+	if hA == hB {
+		t.Errorf("worker-only image bump must change hash: hA=%q hB=%q", hA, hB)
+	}
+}
+
+// TestRevisionHash_NilWorkerSpecBackwardCompat pins that
+// HashWithWorker(.., nil) hashes identically to Hash(..), so existing
+// single-pod revisions stay valid after the multi-pod field is
+// introduced. A different value would invalidate every previously-recorded
+// CR and force a fleet-wide phantom rollout on the next reconcile.
+func TestRevisionHash_NilWorkerSpecBackwardCompat(t *testing.T) {
+	leader := basicPodSpecForRevision()
+	meta := &metav1.ObjectMeta{Labels: map[string]string{"k": "v"}}
+
+	hSinglePod, rawSinglePod, _ := Hash(leader, meta, nil)
+	hWithNilWorker, rawWithNilWorker, _ := HashWithWorker(leader, nil, meta, nil)
+	if hSinglePod != hWithNilWorker {
+		t.Errorf("Hash and HashWithWorker(nil) must match: %q vs %q", hSinglePod, hWithNilWorker)
+	}
+	if !bytes.Equal(rawSinglePod, rawWithNilWorker) {
+		t.Errorf("canonical bytes must match: %s vs %s", rawSinglePod, rawWithNilWorker)
+	}
+}
+
+// TestRevisionHash_WorkerPodSpecPresentChangesShape pins that adding a
+// (non-nil) WorkerPodSpec changes the hash compared to nil, which is the
+// correct behavior for a single-pod-to-multi-pod migration. The legacy
+// single-pod hash must remain stable for ISVCs that never declared a
+// worker (covered by NilWorkerSpecBackwardCompat above).
+func TestRevisionHash_WorkerPodSpecPresentChangesShape(t *testing.T) {
+	leader := basicPodSpecForRevision()
+	worker := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama-worker:v1"}}}
+
+	hNoWorker, _, _ := HashWithWorker(leader, nil, nil, nil)
+	hWithWorker, _, _ := HashWithWorker(leader, worker, nil, nil)
+	if hNoWorker == hWithWorker {
+		t.Errorf("introducing a worker must change the hash; both got %q", hNoWorker)
+	}
+}
+
 func TestRevisionHash_NilTemplateRejected(t *testing.T) {
 	if _, _, err := Hash(nil, nil, nil); err == nil {
 		t.Fatal("expected error for nil template")

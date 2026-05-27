@@ -26,6 +26,22 @@ func singlePodPlan() (core.ComponentPlan, core.InstancePlan, core.RunnerPlan) {
 	return plan, inst, runner
 }
 
+// multiPodPlan returns a 2-Runner Instance shape: 1 leader + workerSize
+// workers. Used by the multi-pod render tests.
+func multiPodPlan(workerSize int32) (core.ComponentPlan, core.InstancePlan, []core.RunnerPlan) {
+	runners := []core.RunnerPlan{
+		{Name: "leader", Size: 1},
+		{Name: "worker", Size: workerSize},
+	}
+	inst := core.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
+	plan := core.ComponentPlan{
+		Component: v1beta1.EngineComponent,
+		Replicas:  1,
+		Instances: []core.InstancePlan{inst},
+	}
+	return plan, inst, runners
+}
+
 func basicISVC() *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{
@@ -271,6 +287,129 @@ func TestRender_OMEEnvVarsInEveryContainer(t *testing.T) {
 		if _, ok := got["OME_LEADER_ADDRESS"]; ok {
 			t.Errorf("container[%d].env: OME_LEADER_ADDRESS should not be set for single-pod", ci)
 		}
+	}
+}
+
+// TestRender_MultiPod_LeaderEnvVarsForLeader pins the leader pod's
+// OME_RUNNER / OME_RUNNER_SIZE / OME_LEADER_ADDRESS env vars. The leader's
+// OME_LEADER_ADDRESS points at itself so leader-side code that reads the
+// var to identify the gang head sees the same value as workers.
+//
+// Address shape per OEP-0007 §"Service Discovery" + sign-off answer #1:
+// short form <pod-name>.<headless-service>; cluster DNS search path
+// resolves it the same as the fully qualified <pod>.<headless>.<ns>.svc.<cluster-domain>.
+func TestRender_MultiPod_LeaderEnvVarsForLeader(t *testing.T) {
+	plan, inst, runners := multiPodPlan(2)
+	leader := runners[0]
+	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, leader, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := envByName(pod.Spec.Containers[0].Env)
+	want := map[string]string{
+		"OME_RUNNER":             "leader",
+		"OME_RUNNER_SIZE":        "1",
+		"OME_RUNNER_INDEX":       "0",
+		"OME_LEADER_ADDRESS":     "llama-70b-engine-0-leader-0.llama-70b-engine-headless",
+		"OME_INSTANCE_INDEX":     "0",
+		"OME_COMPONENT":          "engine",
+		"OME_INSTANCE_SUBDOMAIN": "llama-70b-engine-0",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("env[%s]: got %q want %q", k, got[k], v)
+		}
+	}
+}
+
+// TestRender_MultiPod_LeaderAddressOnWorker pins that every worker pod
+// in a multi-pod Instance gets OME_LEADER_ADDRESS pointing at the leader
+// pod of the SAME Instance. Worker's own OME_RUNNER_INDEX is its ordinal
+// (NCCL rank position), not the leader's 0.
+func TestRender_MultiPod_LeaderAddressOnWorker(t *testing.T) {
+	plan, inst, runners := multiPodPlan(2)
+	worker := runners[1]
+
+	pod0, err := Render(basicISVC(), basicPodSpec(), plan, inst, worker, 0)
+	if err != nil {
+		t.Fatalf("worker 0: %v", err)
+	}
+	pod1, err := Render(basicISVC(), basicPodSpec(), plan, inst, worker, 1)
+	if err != nil {
+		t.Fatalf("worker 1: %v", err)
+	}
+
+	for i, pod := range []*corev1.Pod{pod0, pod1} {
+		got := envByName(pod.Spec.Containers[0].Env)
+		if got["OME_LEADER_ADDRESS"] != "llama-70b-engine-0-leader-0.llama-70b-engine-headless" {
+			t.Errorf("worker %d OME_LEADER_ADDRESS: got %q", i, got["OME_LEADER_ADDRESS"])
+		}
+		if got["OME_RUNNER"] != "worker" {
+			t.Errorf("worker %d OME_RUNNER: got %q want worker", i, got["OME_RUNNER"])
+		}
+		if got["OME_RUNNER_SIZE"] != "2" {
+			t.Errorf("worker %d OME_RUNNER_SIZE: got %q want 2", i, got["OME_RUNNER_SIZE"])
+		}
+	}
+	if envByName(pod0.Spec.Containers[0].Env)["OME_RUNNER_INDEX"] != "0" {
+		t.Errorf("worker 0 OME_RUNNER_INDEX: got %q want 0", envByName(pod0.Spec.Containers[0].Env)["OME_RUNNER_INDEX"])
+	}
+	if envByName(pod1.Spec.Containers[0].Env)["OME_RUNNER_INDEX"] != "1" {
+		t.Errorf("worker 1 OME_RUNNER_INDEX: got %q want 1", envByName(pod1.Spec.Containers[0].Env)["OME_RUNNER_INDEX"])
+	}
+}
+
+// TestRender_MultiPod_LeaderAddressPerInstance pins that the leader
+// address is per-Instance: Instance 0's workers point at the Instance 0
+// leader; Instance 1's workers point at the Instance 1 leader. Cross-talk
+// would be a sharding bug.
+func TestRender_MultiPod_LeaderAddressPerInstance(t *testing.T) {
+	runners := []core.RunnerPlan{
+		{Name: "leader", Size: 1},
+		{Name: "worker", Size: 1},
+	}
+	inst0 := core.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
+	inst1 := core.InstancePlan{Index: 1, Incarnation: 1, Runners: runners}
+	plan := core.ComponentPlan{
+		Component: v1beta1.EngineComponent,
+		Replicas:  2,
+		Instances: []core.InstancePlan{inst0, inst1},
+	}
+
+	pod0Worker, err := Render(basicISVC(), basicPodSpec(), plan, inst0, runners[1], 0)
+	if err != nil {
+		t.Fatalf("inst0 worker: %v", err)
+	}
+	pod1Worker, err := Render(basicISVC(), basicPodSpec(), plan, inst1, runners[1], 0)
+	if err != nil {
+		t.Fatalf("inst1 worker: %v", err)
+	}
+
+	got0 := envByName(pod0Worker.Spec.Containers[0].Env)["OME_LEADER_ADDRESS"]
+	got1 := envByName(pod1Worker.Spec.Containers[0].Env)["OME_LEADER_ADDRESS"]
+	want0 := "llama-70b-engine-0-leader-0.llama-70b-engine-headless"
+	want1 := "llama-70b-engine-1-leader-0.llama-70b-engine-headless"
+	if got0 != want0 {
+		t.Errorf("inst0 worker OME_LEADER_ADDRESS: got %q want %q", got0, want0)
+	}
+	if got1 != want1 {
+		t.Errorf("inst1 worker OME_LEADER_ADDRESS: got %q want %q", got1, want1)
+	}
+}
+
+// TestRender_SinglePod_OmitsLeaderAddress pins the negative: single-pod
+// "default" runner does NOT carry OME_LEADER_ADDRESS. Routers and any
+// non-multi-pod Engine/Decoder must not see this variable; runtimes that
+// branch on it would interpret its presence as a multi-pod environment.
+func TestRender_SinglePod_OmitsLeaderAddress(t *testing.T) {
+	plan, inst, runner := singlePodPlan()
+	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := envByName(pod.Spec.Containers[0].Env)
+	if _, present := got["OME_LEADER_ADDRESS"]; present {
+		t.Errorf("single-pod must not set OME_LEADER_ADDRESS; got %q", got["OME_LEADER_ADDRESS"])
 	}
 }
 

@@ -60,6 +60,21 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 		return true, nil
 	}
 
+	// Multi-pod migration is OEP-deferred: surge sizing must mirror the
+	// source's full Runner layout (1 leader + N workers), and the surge
+	// must satisfy the gang readiness gate before drain proceeds. The
+	// single-pod surge path the rest of this function implements would
+	// create a single "default" surge pod that can never satisfy a
+	// multi-pod gang, leaving the migration stuck until the deadline. We
+	// reject up-front with a Failed audit row so Alfred can observe the
+	// rejection within its 30s SLA. When multi-pod migration lands
+	// (future OEP-0007 amendment), drop this guard and extend the surge
+	// path to emit the full Runner layout.
+	if isMultiPodInstance(plan, sourceIdx) {
+		return failMigration(ctx, p, ledger, req, requestUUID,
+			"multi-pod Instance migration not yet supported (single-pod surge cannot satisfy a multi-pod gang)")
+	}
+
 	// Recover surge index from source status (post-stamp) or ledger
 	// (post-Started, pre-stamp crash); allocate on a fresh request.
 	source := query.FindInstanceStatus(p.ISVC, plan.Component, sourceIdx)
@@ -392,6 +407,24 @@ func failMigration(ctx context.Context, p core.ReconcileParams, ledger *audit.Le
 	status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonMigrationRequestRejected,
 		"OMENative migration uuid=%s rejected: %s", uuid, reason)
 	return true, nil
+}
+
+// isMultiPodInstance reports whether the Instance at sourceIdx in plan is
+// multi-pod (TotalPodsForInstance > 1). Used by Migrate to reject a
+// multi-pod migration with a Failed audit row up-front; the rest of the
+// Migrate state machine assumes single-pod surge semantics.
+//
+// Returns false when no Instance with that index exists in the plan —
+// the rest of Migrate handles missing-source via failMigration("source
+// InstanceStatus missing"). Either way, this guard short-circuits ONLY
+// when the Component is actively multi-pod.
+func isMultiPodInstance(plan core.ComponentPlan, sourceIdx int32) bool {
+	for _, inst := range plan.Instances {
+		if inst.Index == sourceIdx {
+			return query.TotalPodsForInstance(inst) > 1
+		}
+	}
+	return false
 }
 
 // clearMigrationRequestAnnotation removes the
