@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -459,6 +460,357 @@ func TestSurgeUpdate_PostPromoteCreateDoesNotResurrectDrainedOrdinal(t *testing.
 	}
 	if pods.Items[0].Name != surgePod.Name {
 		t.Errorf("unexpected pod survived: got %q want %q", pods.Items[0].Name, surgePod.Name)
+	}
+}
+
+// surgeISVCMultiInstance builds a 2-replica ISVC with SurgeThenDrain
+// configured and an InstanceStatus for each (Phase=Ready,
+// ActiveOrdinal=0). This is the steady-state from which a multi-instance
+// SurgeThenDrain rollout fires.
+func surgeISVCMultiInstance(name, ns string, incarnation int64) *v1beta1.InferenceService {
+	isvc := minimalISVC(name, ns, 2)
+	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
+		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+			Type: v1beta1.OMENativeUpdateStrategySurgeThenDrain,
+		},
+	}
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+					{Index: 0, Incarnation: incarnation, Phase: v1beta1.OMENativeInstanceReady},
+					{Index: 1, Incarnation: incarnation, Phase: v1beta1.OMENativeInstanceReady},
+				},
+			},
+		},
+	}
+	return isvc
+}
+
+// TestSurgeUpdate_MultiInstance_NoOrdResurrectionAfterPromote pins the
+// multi-instance follow-up to PR #243. Even when BOTH instances have
+// been promoted to ActiveOrdinal=1 (surge cycle complete), the next
+// Create pass must not see "ordinal 0 is missing" for either instance
+// and resurrect a drained slot.
+//
+// Reproduces the user-visible bug observed on the dev cluster
+// (msl-cw-use2-dev-2): instance 1's ord-0 was re-created 36 seconds
+// after promote because the in-memory ISVC snapshot still showed
+// ActiveOrdinal=0. The fix (MutateInstance mirror) ensures the
+// post-promote ActiveOrdinal=1 is visible to the tail Create pass.
+func TestSurgeUpdate_MultiInstance_NoOrdResurrectionAfterPromote(t *testing.T) {
+	resetExpectations(t)
+	isvc := surgeISVCMultiInstance("llama-70b", "prod", 1)
+	target := targetSpecImage("llama:v2")
+	c := newFakeClientWithDiscovery(t, isvc)
+	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, target)
+
+	// Simulate post-promote state for BOTH instances: ActiveOrdinal=1,
+	// surge pod alive at ord=1 for each, old pod at ord=0 gone.
+	p := minimalParams(t, isvc, c)
+	for _, idx := range []int32{0, 1} {
+		if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), p, v1beta1.EngineComponent, idx, tcr.Name, 1); err != nil {
+			t.Fatalf("patch promote instance %d: %v", idx, err)
+		}
+		surgePod := surgePodAtOrdinal(isvc, idx, 1, 1, true, true)
+		if err := c.Create(context.Background(), surgePod); err != nil {
+			t.Fatalf("seed surge pod for instance %d: %v", idx, err)
+		}
+	}
+
+	// Verify the in-memory mirror landed: both instances should reflect
+	// ActiveOrdinal=1 without any explicit re-read.
+	for _, idx := range []int32{0, 1} {
+		s := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[idx]
+		if s.ActiveOrdinal != 1 {
+			t.Fatalf("in-memory mirror missed instance %d: got ActiveOrdinal=%d, want 1", idx, s.ActiveOrdinal)
+		}
+	}
+
+	plan, err := core.BuildPlan(p)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Drive Create as the dispatcher would after Update returns done=true
+	// for both instances. Without the mirror this resurrects ord-0 on
+	// the second instance (the bug); with the mirror it sees ord-1 is
+	// canonical and skips creation.
+	if _, err := Create(context.Background(), p, plan, tcr); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 2 {
+		names := make([]string, 0, len(pods.Items))
+		for _, p := range pods.Items {
+			names = append(names, p.Name)
+		}
+		t.Fatalf("Create resurrected a stale ordinal! got %d pods (%v), want 2 (one per instance, both at ord=1)", len(pods.Items), names)
+	}
+	// Both surviving pods should be at ordinal 1 (the post-promote slot).
+	for _, pod := range pods.Items {
+		if got := pod.Labels[query.LabelPodOrdinal]; got != "1" {
+			t.Errorf("pod %s should be at ordinal 1, got %q", pod.Name, got)
+		}
+	}
+}
+
+// TestSurgeUpdate_MultiInstance_InterleavedPromotes pins the timing
+// where inst-0 promotes earlier than inst-1 within the SAME reconcile
+// (or across reconciles): when the dispatcher's Update loop completes
+// the second instance's Phase 3 promote and falls through to Create,
+// the tail Create must not resurrect EITHER instance's drained
+// ordinal — even though inst-0 was promoted earlier (and thus its
+// in-memory state already had to be mirrored once during the loop).
+//
+// This is the exact failure mode the sample log captured at
+// /tmp/policy-samples/v-std.log sample 12, where `pods_e` went from
+// `OLD,NEW,OLD` to `NEW,OLD,NEW` after inst-1 promoted.
+func TestSurgeUpdate_MultiInstance_InterleavedPromotes(t *testing.T) {
+	resetExpectations(t)
+	isvc := surgeISVCMultiInstance("llama-70b", "prod", 1)
+	target := targetSpecImage("llama:v2")
+	c := newFakeClientWithDiscovery(t, isvc)
+	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, target)
+	p := minimalParams(t, isvc, c)
+
+	// Cycle A: inst-0 just completed its Phase 3 promote. inst-1 is
+	// still mid-surge (surge pod created but old pod not yet drained).
+	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), p, v1beta1.EngineComponent, 0, tcr.Name, 1); err != nil {
+		t.Fatalf("patch inst-0 promote: %v", err)
+	}
+	inst0SurgePod := surgePodAtOrdinal(isvc, 0, 1, 1, true, true)
+	if err := c.Create(context.Background(), inst0SurgePod); err != nil {
+		t.Fatalf("seed inst-0 surge pod: %v", err)
+	}
+	// inst-1 mid-surge: BOTH ord-0 (old) and ord-1 (surge) alive.
+	inst1OldPod := surgePodAtOrdinal(isvc, 1, 1, 0, true, true)
+	inst1SurgePod := surgePodAtOrdinal(isvc, 1, 1, 1, true, true)
+	if err := c.Create(context.Background(), inst1OldPod); err != nil {
+		t.Fatalf("seed inst-1 old pod: %v", err)
+	}
+	if err := c.Create(context.Background(), inst1SurgePod); err != nil {
+		t.Fatalf("seed inst-1 surge pod: %v", err)
+	}
+
+	// Cycle B starts here. The Update pass for inst-1 advances through
+	// Phase 3 promote (simulated by directly invoking
+	// patchInstanceStatusReadyOnRevisionWithOrdinal — this is the
+	// status mutation surgeUpdate's Phase 3 does on the dispatcher's
+	// behalf). At THIS point in cycle B the in-memory `isvc` has been
+	// mutated TWICE: once for inst-0 in a prior cycle, once for inst-1
+	// just now. The dispatcher then falls through to Create at the
+	// tail of cycle B.
+	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), p, v1beta1.EngineComponent, 1, tcr.Name, 1); err != nil {
+		t.Fatalf("patch inst-1 promote: %v", err)
+	}
+	// Simulate the post-drain delete: inst-1's old ord-0 pod is gone.
+	if err := c.Delete(context.Background(), inst1OldPod); err != nil {
+		t.Fatalf("delete inst-1 old pod: %v", err)
+	}
+
+	// Pre-check: in-memory ISVC reflects both promotes WITHOUT re-read.
+	// This is the contract MutateInstance's mirror provides.
+	for _, idx := range []int32{0, 1} {
+		s := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[idx]
+		if s.ActiveOrdinal != 1 {
+			t.Fatalf("in-memory mirror missed instance %d post-promote: got ActiveOrdinal=%d, want 1", idx, s.ActiveOrdinal)
+		}
+	}
+
+	// Tail Create: must not resurrect inst-0's ord-0 (the older
+	// promote) nor inst-1's ord-0 (the just-deleted one).
+	plan, err := core.BuildPlan(p)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if _, err := Create(context.Background(), p, plan, tcr); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 2 {
+		names := make([]string, 0, len(pods.Items))
+		for _, p := range pods.Items {
+			names = append(names, p.Name)
+		}
+		t.Fatalf("interleaved-promote tail Create resurrected an ordinal! got %d pods (%v), want 2 (one per instance, both at ord=1)", len(pods.Items), names)
+	}
+	for _, pod := range pods.Items {
+		if got := pod.Labels[query.LabelPodOrdinal]; got != "1" {
+			t.Errorf("pod %s should be at ordinal 1 post-interleaved-promote, got %q", pod.Name, got)
+		}
+	}
+}
+
+// TestExpectedPodNamesForInstance_StaleActiveOrdinalDoesNotResurrect
+// pins the per-Instance contract that backs the multi-instance
+// fix: after MutateInstance commits an ActiveOrdinal advancement for
+// any instance, expectedPodNamesForInstance reading the same
+// in-memory ISVC for ANY OTHER instance must return the correct
+// per-instance ordinal — neither inheriting nor mis-attributing the
+// advanced ordinal.
+//
+// Cases covered:
+//   - inst-0 freshly promoted (ActiveOrdinal=1), inst-1 still at the
+//     default (ActiveOrdinal=0) → inst-0 emits ord=1, inst-1 emits ord=0.
+//   - both instances promoted (ActiveOrdinal=1) → both emit ord=1.
+//   - both instances at default (ActiveOrdinal=0) → both emit ord=0.
+//
+// The bug shape it guards against: the prior implementation read a
+// stale ActiveOrdinal that didn't reflect the apiserver commit,
+// causing the function to emit ord=0 for a just-promoted instance
+// and resurrect the drained slot.
+func TestExpectedPodNamesForInstance_StaleActiveOrdinalDoesNotResurrect(t *testing.T) {
+	cases := []struct {
+		name          string
+		promoteIdx    []int32 // indices to mutate to ActiveOrdinal=1 via MutateInstance
+		wantOrdByIdx  map[int32]int32
+		wantNameByIdx map[int32]string
+	}{
+		{
+			name:       "inst-0 promoted, inst-1 at default — per-instance ordinals stay distinct",
+			promoteIdx: []int32{0},
+			wantOrdByIdx: map[int32]int32{
+				0: 1,
+				1: 0,
+			},
+			wantNameByIdx: map[int32]string{
+				0: "llama-70b-engine-0-default-1",
+				1: "llama-70b-engine-1-default-0",
+			},
+		},
+		{
+			name:       "both promoted — both emit ord=1",
+			promoteIdx: []int32{0, 1},
+			wantOrdByIdx: map[int32]int32{
+				0: 1,
+				1: 1,
+			},
+			wantNameByIdx: map[int32]string{
+				0: "llama-70b-engine-0-default-1",
+				1: "llama-70b-engine-1-default-1",
+			},
+		},
+		{
+			name:       "neither promoted — both emit ord=0 (default)",
+			promoteIdx: nil,
+			wantOrdByIdx: map[int32]int32{
+				0: 0,
+				1: 0,
+			},
+			wantNameByIdx: map[int32]string{
+				0: "llama-70b-engine-0-default-0",
+				1: "llama-70b-engine-1-default-0",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExpectations(t)
+			isvc := surgeISVCMultiInstance("llama-70b", "prod", 1)
+			c := newFakeClientWithDiscovery(t, isvc)
+			p := minimalParams(t, isvc, c)
+
+			for _, idx := range tc.promoteIdx {
+				if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), p, v1beta1.EngineComponent, idx, "rev-x", 1); err != nil {
+					t.Fatalf("promote instance %d: %v", idx, err)
+				}
+			}
+
+			// Build per-Instance plans and exercise expectedPodNamesForInstance
+			// against the in-memory ISVC (the same isvc pointer that
+			// MutateInstance mirrored to).
+			for _, idx := range []int32{0, 1} {
+				inst := core.InstancePlan{
+					Index:       idx,
+					Incarnation: 1,
+					Runners:     []core.RunnerPlan{{Name: "default", Size: 1}},
+				}
+				got := expectedPodNamesForInstance(isvc, v1beta1.EngineComponent, inst)
+				if len(got) != 1 {
+					t.Fatalf("instance %d: len(targets)=%d want 1", idx, len(got))
+				}
+				if got[0].Ordinal != tc.wantOrdByIdx[idx] {
+					t.Errorf("instance %d: Ordinal=%d want %d", idx, got[0].Ordinal, tc.wantOrdByIdx[idx])
+				}
+				if got[0].Name != tc.wantNameByIdx[idx] {
+					t.Errorf("instance %d: Name=%q want %q", idx, got[0].Name, tc.wantNameByIdx[idx])
+				}
+			}
+		})
+	}
+}
+
+// TestMutateInstance_MirrorsCommittedStateOntoInMemoryISVC pins the
+// fix mechanism: any MutateInstance write must also stamp the
+// committed InstanceStatus onto the caller's in-memory `isvc`
+// snapshot. Without the mirror, callers that don't re-read between
+// MutateInstance calls (e.g. the dispatcher's tail Create pass)
+// observe stale state for fields that were just committed.
+//
+// Verifies for two fields that matter post-fix:
+//   - ActiveOrdinal (the SurgeThenDrain post-promote slot) — the
+//     field whose staleness triggered the production bug.
+//   - Phase + Operation (any other field) — confirms the mirror is
+//     general, not ActiveOrdinal-specific.
+//
+// Also asserts mirror semantics:
+//   - First MutateInstance for a missing slot APPENDS to the in-
+//     memory slice (matches the apiserver-side behavior).
+//   - Subsequent MutateInstance for an existing slot UPDATES it in
+//     place (no duplicate).
+func TestMutateInstance_MirrorsCommittedStateOntoInMemoryISVC(t *testing.T) {
+	resetExpectations(t)
+	// Empty status — first MutateInstance must create the slot in the
+	// mirror, not crash.
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+
+	// Patch Phase=Updating with Op{Step=Surge} via the helper.
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), p, v1beta1.EngineComponent, 0, "rev-1", 30*time.Second); err != nil {
+		t.Fatalf("first MutateInstance: %v", err)
+	}
+	// Mirror should now contain the slot.
+	cs, ok := isvc.Status.Components[v1beta1.EngineComponent]
+	if !ok || cs.OMENative == nil {
+		t.Fatalf("mirror missed OMENative substatus")
+	}
+	if len(cs.OMENative.InstanceStatuses) != 1 {
+		t.Fatalf("InstanceStatuses len=%d want 1 (mirror should APPEND on first create)", len(cs.OMENative.InstanceStatuses))
+	}
+	if got := cs.OMENative.InstanceStatuses[0].Phase; got != v1beta1.OMENativeInstanceUpdating {
+		t.Errorf("Phase mirror: got %q want Updating", got)
+	}
+	if op := cs.OMENative.InstanceStatuses[0].Operation; op == nil || op.Step != updateStepSurge {
+		t.Errorf("Operation mirror: got %+v, want Step=Surge", op)
+	}
+
+	// Subsequent MutateInstance must UPDATE in place — no duplicate slot.
+	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), p, v1beta1.EngineComponent, 0, "rev-1", 1); err != nil {
+		t.Fatalf("second MutateInstance: %v", err)
+	}
+	cs = isvc.Status.Components[v1beta1.EngineComponent]
+	if len(cs.OMENative.InstanceStatuses) != 1 {
+		t.Fatalf("InstanceStatuses len=%d want 1 (mirror should UPDATE in place, not append)", len(cs.OMENative.InstanceStatuses))
+	}
+	if got := cs.OMENative.InstanceStatuses[0].ActiveOrdinal; got != 1 {
+		t.Errorf("ActiveOrdinal mirror: got %d want 1", got)
+	}
+	if got := cs.OMENative.InstanceStatuses[0].Phase; got != v1beta1.OMENativeInstanceReady {
+		t.Errorf("Phase mirror after promote: got %q want Ready", got)
+	}
+	if op := cs.OMENative.InstanceStatuses[0].Operation; op != nil {
+		t.Errorf("Operation should be cleared in mirror: got %+v", op)
 	}
 }
 

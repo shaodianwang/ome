@@ -25,6 +25,23 @@ import (
 // import of status/ rather than depending on whichever op file
 // originally hosted it.
 //
+// In-memory mirror: after a successful commit MutateInstance mirrors
+// the post-write (component, idx) InstanceStatus onto the caller's
+// `isvc` snapshot. The dispatcher (ops.ReconcileComponentOps) drives
+// multiple per-Instance operations off a single in-memory ISVC bag
+// (ReconcileParams.ISVC) during one reconcile pass — without the
+// mirror, the second operation reads pre-write state for every field
+// the first operation just mutated. The user-visible symptom that
+// motivated this is the SurgeThenDrain multi-instance ord-0
+// resurrection (PR #243 follow-up): inst-0 promotes (Phase 3 advances
+// ActiveOrdinal to 1), Update returns done=true, dispatcher falls
+// through to Create on the same reconcile, and Create's
+// expectedPodNamesForInstance reads the stale ActiveOrdinal=0 from
+// `isvc` and re-creates a pod at the drained slot. The mirror keeps
+// `isvc.Status` aligned with what was just committed so the rest of
+// the reconcile sees fresh state. Same shape as the
+// bumpCollisionCount precedent in reconciler.go.
+//
 // NotFound handling: if the ISVC was deleted between the caller pulling
 // the work item and us re-reading, both the Get and the Status().Update
 // return apierrors.IsNotFound. Treat both as "operation succeeded
@@ -35,7 +52,12 @@ import (
 // "patch status Ready (instance=N): re-read ISVC: ... not found"
 // log spam during the load-test windows).
 func MutateInstance(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, mutate func(*v1beta1.OMENativeInstanceStatus) bool) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	// committed captures the (component, idx) InstanceStatus that
+	// successfully landed at the apiserver on the final retry attempt,
+	// for the post-commit in-memory mirror below.
+	var committed *v1beta1.OMENativeInstanceStatus
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		committed = nil
 		fresh := &v1beta1.InferenceService{}
 		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -80,6 +102,46 @@ func MutateInstance(ctx context.Context, c client.Client, isvc *v1beta1.Inferenc
 			}
 			return fmt.Errorf("update ISVC status: %w", err)
 		}
+		committed = slot.DeepCopy()
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if committed != nil {
+		mirrorInstanceStatus(isvc, component, *committed)
+	}
+	return nil
+}
+
+// mirrorInstanceStatus copies the just-committed InstanceStatus onto
+// the caller's in-memory ISVC snapshot so subsequent operations in the
+// same reconcile pass observe the post-write state rather than the
+// stale pre-reconcile snapshot. Creates the Components map / OMENative
+// sub-status / InstanceStatuses slice / target slot on demand so the
+// dispatcher doesn't need to pre-allocate any of those fields.
+func mirrorInstanceStatus(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, src v1beta1.OMENativeInstanceStatus) {
+	if isvc == nil {
+		return
+	}
+	if isvc.Status.Components == nil {
+		isvc.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
+	}
+	cs := isvc.Status.Components[component]
+	if cs.OMENative == nil {
+		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	}
+	pos := -1
+	for i, s := range cs.OMENative.InstanceStatuses {
+		if s.Index == src.Index {
+			pos = i
+			break
+		}
+	}
+	if pos == -1 {
+		cs.OMENative.InstanceStatuses = append(cs.OMENative.InstanceStatuses, src)
+	} else {
+		cs.OMENative.InstanceStatuses[pos] = src
+	}
+	isvc.Status.Components[component] = cs
 }
