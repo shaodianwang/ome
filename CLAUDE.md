@@ -19,9 +19,18 @@ make xet-build            # Build the Rust xet native library (required before o
 ```bash
 make test                 # Run all unit tests (builds xet first)
 make test-no-xet          # Run tests excluding ome-agent (no Rust dependency needed)
-make integration-test     # Run Ginkgo integration tests from tests/ directory
+make integration-test     # Run Ginkgo integration tests from tests/ directory (envtest)
+make test-kind            # Run KIND-backed integration tests (real kubelet — needs docker + kind locally)
+make test-kind-clean      # Delete leftover KIND clusters from prior test-kind runs
 make coverage             # Show coverage summary (48% threshold enforced)
 ```
+
+`make test-kind` runs only the coordination suite under
+`tests/integration/singlecluster/controller/coordination_kind/`. It
+needs Docker on the host and a `kind` binary on PATH (install with
+`go install sigs.k8s.io/kind@v0.27.0`). `KIND_KEEP_CLUSTER=true` is
+on by default so re-runs are fast; set `KIND_RECREATE=true` to force
+a fresh cluster. Narrow with `GINKGO_FOCUS='regex'`.
 
 **Required env for direct `go test` calls** (save these as shell aliases — you will retype them constantly):
 

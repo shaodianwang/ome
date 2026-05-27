@@ -28,6 +28,7 @@ require (
 	istio.io/api v1.19.4
 	istio.io/client-go v1.19.4
 	k8s.io/api v0.33.7
+	k8s.io/apiextensions-apiserver v0.32.3
 	k8s.io/apimachinery v0.33.7
 	k8s.io/client-go v0.33.7
 	k8s.io/klog/v2 v2.130.1
@@ -68,7 +69,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
@@ -112,7 +112,6 @@ require (
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/apiextensions-apiserver v0.32.3 // indirect
 	knative.dev/serving v0.39.3 // indirect
 	sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect

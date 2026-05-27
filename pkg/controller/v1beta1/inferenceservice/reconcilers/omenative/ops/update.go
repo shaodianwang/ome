@@ -543,6 +543,25 @@ func podMatchesTarget(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	return podImagesMatch(pod, target)
 }
 
+// canonicalImage normalizes a container image reference for the
+// runtime-vs-spec equality compare. The runtime (containerd, Docker)
+// stamps Status.ContainerStatuses[*].Image with the fully-qualified
+// form `docker.io/library/<name>:<tag>` for implicit-registry tags,
+// while spec.containers[].image stays as the user wrote it
+// (`<name>:<tag>`). String-equality on the two would always return
+// false even after kubelet has fully rolled the container, blocking
+// in-place updates forever on any image the user tagged without an
+// explicit registry. Strip the default Docker-Hub-library prefix so
+// `fake-serving:v1` and `docker.io/library/fake-serving:v1` compare
+// equal. Images with an explicit registry round-trip unchanged.
+func canonicalImage(img string) string {
+	const dockerHubLibraryPrefix = "docker.io/library/"
+	if len(img) > len(dockerHubLibraryPrefix) && img[:len(dockerHubLibraryPrefix)] == dockerHubLibraryPrefix {
+		return img[len(dockerHubLibraryPrefix):]
+	}
+	return img
+}
+
 // podRuntimeImagesMatch is the runtime-truth signal complementing
 // podImagesMatch's spec check: spec.image flips immediately on patch but
 // kubelet may not have rolled the container yet, leaving the old image
@@ -554,10 +573,10 @@ func podRuntimeImagesMatch(pod *corev1.Pod, target *corev1.PodSpec) bool {
 	}
 	want := make(map[string]string, len(target.Containers))
 	for _, c := range target.Containers {
-		want[c.Name] = c.Image
+		want[c.Name] = canonicalImage(c.Image)
 	}
 	for _, cs := range pod.Status.ContainerStatuses {
-		if want[cs.Name] != cs.Image {
+		if want[cs.Name] != canonicalImage(cs.Image) {
 			return false
 		}
 	}

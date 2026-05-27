@@ -195,6 +195,39 @@ def ci_steps() -> str:
                       - name: container-0
                         image: "{CI_IMAGE}"
 
+          - label: ":test_tube: Integration Tests (KIND)"
+            key: "integration-test-kind"
+{_gh_status("integration-test-kind")}
+            # KIND-backed suites under
+            # tests/integration/singlecluster/controller/coordination_kind/
+            # exercise OEP-0007.{{1,2}} + OEP-0011 contracts against real
+            # kubelet + scheduler + containerd that the envtest sibling's
+            # PodKubeletSimulator can't model (drain races, in-place
+            # patches, Sequential handoff timing, RatioBalanced gate at
+            # scale). ~5 min wall-clock, 24 specs.
+            #
+            # Independent from integration-test — they run in parallel.
+            # Requires Docker on the agent host; run_kind_tests.sh bails
+            # out with a clear error if `docker info` fails.
+            #
+            # soft_fail: mks-cpu Kubernetes-pod agents don't expose a
+            # Docker daemon, so the step currently bails out at the
+            # `docker info` check. Keeping it non-blocking so the signal
+            # is visible (and turns green once we either move this step
+            # to a DinD/sysbox-capable queue or stand up a Docker-on-pod
+            # sidecar). Flip back to a hard fail once infra supports it.
+            soft_fail: true
+            command: |
+              sh .buildkite/run_kind_tests.sh
+            agents:
+              queue: "{DEFAULT_QUEUE}"
+            plugins:
+              - kubernetes:
+                  podSpec:
+                    containers:
+                      - name: container-0
+                        image: "{CI_IMAGE}"
+
           - label: ":helm: Helm Lint"
             key: "helm-lint"
 {_gh_status("helm-lint")}

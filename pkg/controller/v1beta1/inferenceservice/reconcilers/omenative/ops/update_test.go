@@ -951,6 +951,52 @@ func TestDrainServiceForPod_EmptyWhenLabelMissing(t *testing.T) {
 	}
 }
 
+// canonicalImage must strip the docker.io/library/ prefix so spec
+// image references (which the user writes as `<name>:<tag>` for
+// implicit Docker Hub library images) match the runtime-stamped form
+// containerd writes into Status.ContainerStatuses[*].Image. Without
+// the strip, in-place updates wait forever on `podRuntimeImagesMatch`
+// and never reach the serving-gate flip.
+func TestCanonicalImage_StripsDockerHubLibraryPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"implicit library tag", "fake-serving:v1", "fake-serving:v1"},
+		{"runtime-stamped library tag", "docker.io/library/fake-serving:v1", "fake-serving:v1"},
+		{"explicit registry round-trip", "ghcr.io/foo/bar:v1", "ghcr.io/foo/bar:v1"},
+		{"explicit docker.io non-library", "docker.io/myuser/myimg:v1", "docker.io/myuser/myimg:v1"},
+		{"empty string", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canonicalImage(tc.in); got != tc.want {
+				t.Errorf("canonicalImage(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// podRuntimeImagesMatch must treat `fake-serving:v1` (spec) and
+// `docker.io/library/fake-serving:v1` (runtime) as the same image —
+// otherwise in-place updates against KIND or any cluster whose runtime
+// fully-qualifies implicit Docker Hub references would never converge.
+func TestPodRuntimeImagesMatch_RegistryNormalization(t *testing.T) {
+	target := &corev1.PodSpec{Containers: []corev1.Container{
+		{Name: "main", Image: "fake-serving:v2"},
+	}}
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "fake-serving:v2"}}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: "main", Image: "docker.io/library/fake-serving:v2"},
+		}},
+	}
+	if !podRuntimeImagesMatch(pod, target) {
+		t.Errorf("expected match between spec %q and runtime %q after canonicalImage normalization",
+			target.Containers[0].Image, pod.Status.ContainerStatuses[0].Image)
+	}
+}
+
 // Ensure types still compose — keeps `fmt` import live when test bodies
 // remove their string-formatted assertions.
 var _ = fmt.Sprint
