@@ -19,7 +19,7 @@ require (
 	github.com/sgl-project/ome v0.1.6-0.20260510082155-6a8fea26adf4
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.19.0
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 	go.uber.org/fx v1.22.2
 	go.uber.org/zap v1.27.0
 	golang.org/x/sync v0.20.0
@@ -27,10 +27,10 @@ require (
 	google.golang.org/protobuf v1.36.11
 	istio.io/api v1.19.4
 	istio.io/client-go v1.19.4
-	k8s.io/api v0.33.7
-	k8s.io/apiextensions-apiserver v0.32.3
-	k8s.io/apimachinery v0.33.7
-	k8s.io/client-go v0.33.7
+	k8s.io/api v0.33.12
+	k8s.io/apiextensions-apiserver v0.32.13
+	k8s.io/apimachinery v0.33.12
+	k8s.io/client-go v0.33.12
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/kube-openapi v0.0.0-20250318190949-c8a335a9a2ff
 	k8s.io/utils v0.0.0-20241210054802-24370beab758
