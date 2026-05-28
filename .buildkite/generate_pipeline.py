@@ -68,7 +68,7 @@ IMAGES = [
     ("ome-agent", "ome-agent", "dockerfiles/ome-agent.Dockerfile"),
 ]
 
-CHARTS = ["ome-crd", "ome-resources"]
+CHARTS = ["ome-crd", "ome-resources", "ome-isvc"]
 
 
 # ---------------------------------------------------------------------------
