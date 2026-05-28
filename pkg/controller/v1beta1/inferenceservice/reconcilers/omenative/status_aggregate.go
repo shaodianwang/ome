@@ -3,7 +3,6 @@ package omenative
 import (
 	"context"
 	"fmt"
-	"sort"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -17,9 +16,9 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -219,44 +218,27 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 // StuckPodFailureGracePeriod is the wait window after a pod's
 // CreationTimestamp before a terminal kubelet waiting state
 // (ImagePullBackOff, ErrImagePull, InvalidImageName,
-// CreateContainerConfigError, CreateContainerError) escalates the owning
-// Instance to Phase=Failed. Tuned to debounce the transient
-// ContainerCreating / ImagePulling states that a real kubelet briefly
-// passes through on initial pod placement — 60 seconds is comfortable
-// headroom for a 5–10 second pull cycle on a healthy node before
-// committing to "this is genuinely stuck."
+// CreateContainerConfigError, CreateContainerError) escalates the
+// owning Instance to Phase=Failed.
 //
-// Exported so tests can lower the value to keep test runtime sane while
-// still exercising the real escalation path (a hardcoded constant would
-// force tests to spin for 60+ seconds per case, gating the suite on a
-// wall-clock that adds nothing to coverage).
+// Tests override the value to keep runtime sane (a hardcoded constant
+// would force a 60-second wait per case). Production callers leave it
+// at the default. The omenative-side var is the single source of
+// truth — both the legacy in-package escalator wrapper and the
+// workload-side escalator (via the closure below) read it on each
+// call.
 var StuckPodFailureGracePeriod = 60 * time.Second
 
-// escalateStuckPodFailures walks every InstanceStatus and escalates to
-// Phase=Failed when one of two conditions holds:
+// escalateStuckPodFailures is the ISVC-side adapter that bridges the
+// legacy AggregateAndWriteStatus body to the workload-side
+// EscalateStuckPodFailures. Builds a workload.ReconcileInput just for
+// the escalation step (MutateInstance + WarnInstanceFailed) and
+// delegates the policy logic to the workload package.
 //
-//  1. (Transient-phase path, the original PR #257 surface) The Instance
-//     has an in-flight Operation AND its Phase is one of {Creating,
-//     Updating, Restarting, Migrating} AND at least one of its pods has
-//     been in a terminal kubelet waiting state past
-//     StuckPodFailureGracePeriod.
-//
-//  2. (Wedged-pod recovery path, task #52 follow-up) The Instance has
-//     at least one pod whose ome.io/revision-hash label disagrees with
-//     the Component's CurrentRevision hash AND that pod is stuck past
-//     the grace window. This catches the post-surge cluster shape where
-//     the per-Instance state machine has been reset out of the transient
-//     phase set but a real wedged surge pod still exists (the X-1
-//     53-minute reproduction against the dev cluster). The
-//     CurrentRevision compare is the discriminator vs. the steady-state
-//     "operator manually broke the canonical pod" scenario, where the
-//     pod's hash equals CurrentRevision and there is nothing to
-//     escalate (no rollout in flight).
-//
-// Idempotent: a second pass on an already-Failed Instance is a no-op
-// (no status write, no event). The coordination layer's
-// buildComponentObservation sees the Phase=Failed flip on the next
-// read and lifts it to Component.Failed → group Phase=Failed.
+// The two-stage build keeps the BIG mirror retry loop in this file
+// (the apiserver round-trip for counters / conditions / top-level
+// EngineReady is still ISVC-shape) while routing the
+// adapter-agnostic escalator through the shared workload helper.
 //
 // Reads byIndex (the per-Instance live pod buckets the caller already
 // computed for counters) so we don't re-list pods. Walks
@@ -271,397 +253,117 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 	if !ok || cs.OMENative == nil {
 		return nil
 	}
-	now := time.Now()
-	// currentHash is the steady-state pin: pods carrying this hash are
-	// on the controller's CurrentRevision, so even if they're stuck the
-	// wedge is not driven by an in-flight rollout — only pods that
-	// disagree with it qualify for the wedged-pod recovery branch.
-	// Empty when no rollout has ever promoted; the wedged branch then
-	// gates on "pod has a hash AND it doesn't match (the empty current
-	// hash)" which would over-fire. Treat empty CurrentRevision as
-	// "every pod hash matches current" for that branch (safe default —
-	// the original transient-phase guard still fires for genuine
-	// in-flight cases).
-	currentHash := query.RevisionHashFromControllerRevisionName(cs.OMENative.CurrentRevision)
-	for _, s := range cs.OMENative.InstanceStatuses {
-		if !shouldCheckForStuckPods(&s, byIndex[s.Index], currentHash) {
-			continue
-		}
-		stuckPod, reason := firstStuckPodForInstance(byIndex[s.Index], now)
-		if stuckPod == nil {
-			continue
-		}
-		// Idempotent: skip the mutate when already at Phase=Failed so
-		// the operator-facing event fires exactly once per escalation.
-		if s.Phase == v1beta1.OMENativeInstanceFailed {
-			continue
-		}
-		if err := stampInstanceFailedForStuckPod(ctx, p, plan.Component, s.Index); err != nil {
-			return fmt.Errorf("stamp Phase=Failed (instance=%d): %w", s.Index, err)
-		}
-		status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonInstanceFailed,
-			"OMENative %s escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)",
-			status.InstanceKey(plan.Component, s.Index), stuckPod.Name, reason)
-	}
-	return nil
-}
+	// Override the workload-side grace period with the ISVC-side var
+	// for the duration of this call. Tests bind the omenative-side var
+	// via withStuckPodGracePeriod (writes restored by t.Cleanup), and
+	// the workload-side default would otherwise force the 60-second
+	// production grace through.
+	prevWorkloadGrace := workload.StuckPodFailureGracePeriod
+	workload.StuckPodFailureGracePeriod = StuckPodFailureGracePeriod
+	defer func() { workload.StuckPodFailureGracePeriod = prevWorkloadGrace }()
 
-// shouldCheckForStuckPods reports whether s qualifies for the
-// fast-failure check. Two paths qualify:
-//
-//   - Transient-phase path: an Instance with an in-flight Operation in
-//     the {Creating, Updating, Restarting, Migrating} set. This is the
-//     in-flight surge / create / migrate / restart surface PR #257
-//     originally added.
-//
-//   - Wedged-pod recovery path: an Instance with at least one pod
-//     whose ome.io/revision-hash label disagrees with the Component's
-//     CurrentRevision hash (currentHash). Regardless of Phase /
-//     Operation, the controller's bookkeeping has lost the trail of a
-//     real in-flight pod — the surge-attempt evidence on the cluster is
-//     the only remaining signal. Catches the task-#52 X-1 reproduction
-//     (post-#257 cluster shape where the Instance is Phase=Ready /
-//     Operation=nil but a stuck surge pod at the new revision still
-//     exists).
-//
-// Skips Failed (already done) and Deleting (Delete pass owns its own
-// deadline). Skips empty currentHash (the no-rollout-ever case) for
-// the wedged branch to avoid over-firing during initial Create.
-func shouldCheckForStuckPods(s *v1beta1.OMENativeInstanceStatus, pods []*corev1.Pod, currentHash string) bool {
-	if s == nil {
-		return false
+	// Bridge the v1beta1-typed status surface into a workload-typed
+	// ReconcileInput. The MutateInstance closure is what the
+	// workload-side StampInstanceFailedForStuckPod calls; it round-trips
+	// the workload.InstanceStatus mutation back to v1beta1 via the
+	// existing status.MutateInstance helper. WarnInstanceFailed wraps
+	// the legacy status.RecordWarning emitter.
+	input := workload.ReconcileInput{
+		OwnerObject: p.ISVC,
+		EventTarget: p.ISVC,
+		MutateInstance: func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+			return status.MutateInstance(ctx, p.Client, p.ISVC, plan.Component, idx, func(v *v1beta1.OMENativeInstanceStatus) bool {
+				w := internalsource.InstanceStatusToWorkload(*v)
+				if !mutate(&w) {
+					return false
+				}
+				*v = internalsource.InstanceStatusFromWorkload(w)
+				return true
+			})
+		},
+		WarnInstanceFailed: func(idx int32, podName, reason string) {
+			status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonInstanceFailed,
+				"OMENative %s escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)",
+				status.InstanceKey(plan.Component, idx), podName, reason)
+		},
 	}
-	// Terminal phases are settled; no escalation is meaningful.
-	if s.Phase == v1beta1.OMENativeInstanceFailed || s.Phase == v1beta1.OMENativeInstanceDeleting {
-		return false
-	}
-	// Transient-phase path: in-flight Operation in a recoverable phase.
-	if s.Operation != nil {
-		switch s.Phase {
-		case v1beta1.OMENativeInstanceCreating,
-			v1beta1.OMENativeInstanceUpdating,
-			v1beta1.OMENativeInstanceRestarting,
-			v1beta1.OMENativeInstanceMigrating:
-			return true
-		}
-	}
-	// Wedged-pod recovery path: any pod with a hash that disagrees
-	// with the Component's CurrentRevision is a candidate for the
-	// stuck-pod check below, regardless of Phase / Operation. Empty
-	// currentHash means the Component has never promoted a revision
-	// (initial Create, no UpdateRevision yet) — the transient-phase
-	// path covers that case and we don't second-guess it here.
-	if currentHash == "" {
-		return false
-	}
-	for _, pod := range pods {
-		if pod == nil {
-			continue
-		}
-		hash := pod.Labels[query.LabelRevisionHash]
-		if hash == "" {
-			continue
-		}
-		if hash != currentHash {
-			return true
-		}
-	}
-	return false
-}
 
-// firstStuckPodForInstance returns the first pod in pods that is stuck
-// in a terminal kubelet waiting state past the grace window, plus the
-// kubelet reason string. Returns (nil, "") when no pod is stuck —
-// caller skips escalation.
-//
-// "First" is order-deterministic by the input slice; callers that need
-// a stable index should sort pods before calling. For event emission
-// the order doesn't matter (the message names the specific pod).
-func firstStuckPodForInstance(pods []*corev1.Pod, now time.Time) (*corev1.Pod, string) {
-	for _, pod := range pods {
-		if pod == nil {
-			continue
-		}
-		// Skip pods marked for deletion — kubelet may be tearing them
-		// down, and "ImagePullBackOff on a deleting pod" is not an
-		// escalation signal (the pod is about to be gone anyway).
-		if pod.DeletionTimestamp != nil {
-			continue
-		}
-		if stuck, reason := status.PodStuckPullFailure(pod, now, StuckPodFailureGracePeriod); stuck {
-			return pod, reason
-		}
-	}
-	return nil, ""
-}
-
-// stampInstanceFailedForStuckPod is the status-side counterpart to
-// ops/timeouts.go's stampInstanceFailed — escalates Phase to Failed
-// when a stuck pod past grace forces the controller to give up on
-// converging the Instance. The Operation field is preserved (when
-// present) — operators want to see WHAT was in flight when the kubelet
-// wedge surfaced.
-//
-// Guards against resurrecting a deliberately-removed InstanceStatus:
-// MutateInstance re-fetches and appends an empty slot
-// (OMENativeInstanceStatus{Index: idx}) when the (component, idx) entry
-// is gone (e.g., the migrate-abandon path's surge cleanup). A fresh
-// slot has Phase=="" and Incarnation==0 — we use Phase=="" as the
-// "this is a brand-new empty slot, not a real Instance" sentinel so
-// the wedged-pod recovery path (which legitimately has Operation==nil
-// but Phase=Ready) is still allowed to escalate. The original
-// transient-phase path's Operation==nil shape was always indistinguishable
-// from the resurrected-slot shape, so removing the Operation guard
-// would have over-fired; gating on Phase=="" instead is the narrower
-// "is this a real Instance with prior status?" check that also handles
-// the new wedged-pod branch correctly.
-//
-// The OperationStuck condition stays False here (only the Deadline path
-// stamps OperationStuck=True via Operation.Reason=DeadlineExceeded —
-// the stuck-pod path is a different failure mode and gets its own
-// surface via the InstanceFailed event + Phase=Failed alone).
-func stampInstanceFailedForStuckPod(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32) error {
-	return status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
-		if s.Phase == "" {
-			// Fresh-empty slot from MutateInstance's append path — the
-			// real InstanceStatus was deleted out from under us
-			// (migrate-abandon cleanup, etc.). Don't resurrect.
-			return false
-		}
-		if s.Phase == v1beta1.OMENativeInstanceFailed {
-			return false
-		}
-		s.Phase = v1beta1.OMENativeInstanceFailed
-		return true
+	return workload.EscalateStuckPodFailures(ctx, input, workload.EscalationParams{
+		Instances:           internalsource.InstanceStatusSliceToWorkload(cs.OMENative.InstanceStatuses),
+		PodsByIndex:         byIndex,
+		CurrentRevisionHash: query.RevisionHashFromControllerRevisionName(cs.OMENative.CurrentRevision),
+		RevisionHashLabel:   query.LabelRevisionHash,
 	})
 }
 
-// defaultRevisionRetention caps non-live ControllerRevisions per
-// Component (StatefulSet default; rollback headroom without unbounded
-// etcd growth).
-const defaultRevisionRetention = 10
+// defaultRevisionRetention is the legacy alias for the workload-side
+// constant. Both names resolve to the same value (10) so callers
+// importing either one see the same retention cap.
+const defaultRevisionRetention = workload.DefaultRevisionRetention
 
-// availablePodSet returns pod names that are Ready and non-terminating
-// in any EndpointSlice for serviceName. drain.EndpointAvailable excludes
-// terminating-but-Ready endpoints — they're not getting new traffic.
-// Single slice list (vs. drain.IsPodInRotation per pod) avoids N+1 reads.
+// availablePodSet is the legacy adapter-shape wrapper around
+// workload.AvailablePodSet. New callers should use the workload
+// helper directly; this thin wrapper exists so the ISVC-side
+// AggregateAndWriteStatus body keeps its existing call site.
 func availablePodSet(ctx context.Context, reads client.Reader, namespace, serviceName string) (map[string]struct{}, error) {
-	out := map[string]struct{}{}
-	slices, err := drain.EndpointSlicesForService(ctx, reads, namespace, serviceName)
-	if err != nil {
-		return nil, err
-	}
-	for _, slice := range slices {
-		for _, ep := range slice.Endpoints {
-			if ep.TargetRef == nil || ep.TargetRef.Kind != "" && ep.TargetRef.Kind != "Pod" {
-				continue
-			}
-			if !drain.EndpointAvailable(ep) {
-				continue
-			}
-			out[ep.TargetRef.Name] = struct{}{}
-		}
-	}
-	return out, nil
+	return workload.AvailablePodSet(ctx, reads, namespace, serviceName)
 }
 
-func countReadyPods(pods []*corev1.Pod) int32 {
-	var n int32
-	for _, p := range pods {
-		if podreadiness.IsContainersReady(p) {
-			n++
-		}
-	}
-	return n
-}
-
-// countServingPods counts pods that are BOTH ContainersReady AND have
-// the controller's serving gate set to True — i.e., pods actually in
-// the load-balancer rotation. This is the count MaxUnavailable budgets
-// in coordination/ratio.go gate against; ContainersReady alone misses
-// the case where the controller has flipped serving=False (in-place
-// update drain, recreate Phase A) while containers technically remain
-// Ready.
+// countReadyPods / countServingPods / countScheduledPods /
+// countAvailablePods / uniqueNodes are unexported aliases that delegate
+// to the workload-side counters. Kept as adapter-package wrappers so
+// the in-package status_aggregate.go body keeps its existing call sites
+// (and so the per-Instance loop reads a single-line counter for
+// readability).
+func countReadyPods(pods []*corev1.Pod) int32 { return workload.CountReadyPods(pods) }
 func countServingPods(pods []*corev1.Pod) int32 {
-	var n int32
-	for _, p := range pods {
-		if podreadiness.IsContainersReady(p) && podreadiness.IsServing(p) {
-			n++
-		}
-	}
-	return n
+	return workload.CountServingPods(pods)
 }
-
 func countScheduledPods(pods []*corev1.Pod) int32 {
-	var n int32
-	for _, p := range pods {
-		if p.Spec.NodeName != "" {
-			n++
-		}
-	}
-	return n
+	return workload.CountScheduledPods(pods)
 }
-
 func countAvailablePods(pods []*corev1.Pod, availableByName map[string]struct{}) int32 {
-	var n int32
-	for _, p := range pods {
-		if _, ok := availableByName[p.Name]; ok {
-			n++
-		}
-	}
-	return n
+	return workload.CountAvailablePods(pods, availableByName)
 }
-
-func uniqueNodes(pods []*corev1.Pod) []string {
-	if len(pods) == 0 {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	for _, p := range pods {
-		if p.Spec.NodeName == "" {
-			continue
-		}
-		seen[p.Spec.NodeName] = struct{}{}
-	}
-	if len(seen) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(seen))
-	for n := range seen {
-		out = append(out, n)
-	}
-	sort.Strings(out)
-	return out
-}
+func uniqueNodes(pods []*corev1.Pod) []string { return workload.UniqueNodes(pods) }
 
 // desiredPodCountByInstance maps each planned Instance index to its
-// desired canonical pod count (sum of Runner sizes). Returns nil for
-// an empty plan so callers fall back to the observed PodCount
-// comparison (pre-existing behavior for Instances absent from the
-// plan — e.g., during scale-down with stale status entries).
+// desired canonical pod count (sum of Runner sizes). Delegates to the
+// workload-side helper with the legacy ComponentPlan shape; the
+// underlying logic is shared with the IR adapter.
 func desiredPodCountByInstance(plan ComponentPlan) map[int32]int32 {
-	if len(plan.Instances) == 0 {
-		return nil
-	}
-	out := make(map[int32]int32, len(plan.Instances))
-	for _, inst := range plan.Instances {
-		out[inst.Index] = inst.TotalPods()
-	}
-	return out
+	return workload.DesiredPodCountByInstance(plan)
 }
 
-// desiredFor returns the desired pod count for idx — the plan entry's
-// value when present, otherwise the observed PodCount (no plan info ⇒
-// use the observed count, matching pre-fix behavior for stale-status
-// scale-down Instances).
-func desiredFor(desiredByIdx map[int32]int32, idx int32, observedPodCount int32) int32 {
-	if desiredByIdx == nil {
-		return observedPodCount
-	}
-	if d, ok := desiredByIdx[idx]; ok {
-		return d
-	}
-	return observedPodCount
-}
-
-// instanceMeetsThreshold is the shared classifier the count*Instances
-// helpers share: an Instance "counts" when at least its desired pod
-// count of pods satisfy the relevant predicate (Ready / Serving /
-// Available). Differs from the pre-fix `observed == PodCount`
-// comparison: SurgeThenDrain transiently puts an extra pod alive on
-// the Instance, lifting PodCount above desired. The old comparison
-// would mis-classify mid-surge Instances as not-Ready / not-Serving
-// the whole time the surge pod is starting up — that's the user-
-// visible serving dip seen in PR #238 sampler runs.
-//
-// The desired value falls back to observedPodCount when the plan
-// has no entry for this index (scale-down with stale status).
-func instanceMeetsThreshold(observedPodCount, observedSatisfying, desired int32) bool {
-	if observedPodCount == 0 {
-		return false
-	}
-	if desired <= 0 {
-		return observedSatisfying == observedPodCount
-	}
-	return observedSatisfying >= desired
-}
-
-// countReadyInstances counts Instances whose desired-many pods are
-// ContainersReady=True. See instanceMeetsThreshold for the
-// surge-tolerant semantic.
+// countReadyInstances / countServingInstances / countAvailableInstances /
+// countUpdatedInstances are ISVC-shape wrappers that round-trip the
+// v1beta1 InstanceStatus slice through workload.InstanceStatus before
+// delegating to the workload-side counters. The conversion is
+// field-for-field and round-trips cleanly; per-Instance counters are the
+// only fields the workload helpers read so a partial conversion would
+// still produce the correct result, but the full converter keeps the
+// boundary contract uniform.
 func countReadyInstances(insts []v1beta1.OMENativeInstanceStatus, desiredByIdx map[int32]int32) int32 {
-	var n int32
-	for _, s := range insts {
-		desired := desiredFor(desiredByIdx, s.Index, s.PodCount)
-		if instanceMeetsThreshold(s.PodCount, s.ReadyPodCount, desired) {
-			n++
-		}
-	}
-	return n
+	return workload.CountReadyInstances(internalsource.InstanceStatusSliceToWorkload(insts), desiredByIdx)
 }
 
-// countServingInstances counts Instances whose desired-many pods are
-// BOTH ContainersReady AND serving=True. This is the count
-// CheckUnavailabilityGate uses — "instances actually in the load
-// balancer rotation right now."
 func countServingInstances(insts []v1beta1.OMENativeInstanceStatus, desiredByIdx map[int32]int32) int32 {
-	var n int32
-	for _, s := range insts {
-		desired := desiredFor(desiredByIdx, s.Index, s.PodCount)
-		if instanceMeetsThreshold(s.PodCount, s.ServingPodCount, desired) {
-			n++
-		}
-	}
-	return n
+	return workload.CountServingInstances(internalsource.InstanceStatusSliceToWorkload(insts), desiredByIdx)
 }
 
-// countAvailableInstances counts Instances whose desired-many pods
-// are in EndpointSlice rotation. Strict sub-condition of Ready —
-// kube-proxy only publishes Ready pods.
 func countAvailableInstances(insts []v1beta1.OMENativeInstanceStatus, desiredByIdx map[int32]int32) int32 {
-	var n int32
-	for _, s := range insts {
-		desired := desiredFor(desiredByIdx, s.Index, s.PodCount)
-		if instanceMeetsThreshold(s.PodCount, s.AvailablePodCount, desired) {
-			n++
-		}
-	}
-	return n
+	return workload.CountAvailableInstances(internalsource.InstanceStatusSliceToWorkload(insts), desiredByIdx)
 }
 
-// countUpdatedInstances returns (UpdatedReplicas, UpdatedReadyReplicas)
-// for Instances on targetRevName. UpdatedReadyReplicas adds the Ready
-// gate — what HPA's scale-aware rollout pacing reads. The Ready check
-// shares the same surge-tolerant classifier as countReadyInstances.
 func countUpdatedInstances(insts []v1beta1.OMENativeInstanceStatus, targetRevName string, desiredByIdx map[int32]int32) (updated, updatedReady int32) {
-	for _, s := range insts {
-		if s.RunningRevision != targetRevName {
-			continue
-		}
-		updated++
-		desired := desiredFor(desiredByIdx, s.Index, s.PodCount)
-		if instanceMeetsThreshold(s.PodCount, s.ReadyPodCount, desired) {
-			updatedReady++
-		}
-	}
-	return updated, updatedReady
+	return workload.CountUpdatedInstances(internalsource.InstanceStatusSliceToWorkload(insts), targetRevName, desiredByIdx)
 }
 
 // rolloutComplete is the CurrentRevision promotion gate: every Instance
-// on targetRevName AND Phase=Ready.
+// on targetRevName AND Phase=Ready. ISVC-shape wrapper around
+// workload.RolloutComplete.
 func rolloutComplete(insts []v1beta1.OMENativeInstanceStatus, targetRevName string) bool {
-	if len(insts) == 0 {
-		return false
-	}
-	for _, s := range insts {
-		if s.Phase != v1beta1.OMENativeInstanceReady {
-			return false
-		}
-		if s.RunningRevision != targetRevName {
-			return false
-		}
-	}
-	return true
+	return workload.RolloutComplete(internalsource.InstanceStatusSliceToWorkload(insts), targetRevName)
 }
 
 // componentLabelSelectorString is the canonical "k=v,k=v" selector

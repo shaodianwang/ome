@@ -133,4 +133,16 @@ type ReconcileInput struct {
 	// Migrate tolerates a nil callback as "trigger source has no
 	// removal contract".
 	ClearMigrationRequest func(ctx context.Context, uuid string) error
+
+	// WarnInstanceFailed emits a Warning event against the workload's
+	// EventTarget reporting that the (idx) Instance escalated to
+	// Phase=Failed. The caller wraps the adapter-specific recorder
+	// (e.g., the ISVC adapter wires status.RecordWarning against the
+	// parent ISVC) inside this closure; workload-side escalator code
+	// calls it once per escalation with the stuck pod name and reason.
+	//
+	// nil-safe: workload code MUST tolerate a nil callback (e.g.,
+	// tests that don't wire a recorder). When the callback is nil the
+	// escalation still mutates Phase=Failed but no event is emitted.
+	WarnInstanceFailed func(idx int32, podName, reason string)
 }
