@@ -1,0 +1,268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ome-isvc chart values",
+  "description": "Scientist-facing schema for charts/ome-isvc/values.yaml. The chart bundles N InferenceService stacks per release; SRE-y concerns (resources, tolerations, RDMA, volumes) are hidden in the vendor ClusterServingRuntime profiles under templates/vendors/.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "namespace",
+    "scope",
+    "deployments"
+  ],
+  "properties": {
+    "nameOverride": {
+      "type": "string",
+      "description": "Override the chart name component of release-derived names."
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "description": "Pin the exact release-name prefix; bypasses release-name composition."
+    },
+    "namespace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Namespace the InferenceService(s) land in. Must already exist; chart does not create it."
+        }
+      }
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["cluster", "namespace"],
+      "description": "Tenant child runtime scope (cluster -> ClusterServingRuntime; namespace -> ServingRuntime). Vendor runtimes under templates/vendors/ are always cluster-scoped regardless."
+    },
+    "vendor": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Default vendor profile inherited by deployments that omit `vendor:`. Must match a profile bundled under templates/vendors/."
+    },
+    "deployments": {
+      "type": "array",
+      "minItems": 1,
+      "description": "One or more model-serving stacks. Each entry produces one InferenceService + one tenant child ClusterServingRuntime.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "servingMode"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "description": "Short identifier; becomes <release>-<name> for the InferenceService and <release>-<name>-csr for the tenant child ClusterServingRuntime."
+          },
+          "vendor": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Vendor ClusterServingRuntime name the tenant child runtime inherits from via the ome.io/inherit-from annotation. Optional: defaults to .Values.vendor. Must match a profile bundled under templates/vendors/."
+          },
+          "servingMode": {
+            "type": "string",
+            "enum": ["standalone", "pd", "multinode"],
+            "description": "standalone = single engine component; pd = prefill+decode disaggregated (prefill + decode, plus optional router); multinode = single engine with leader/worker gang."
+          },
+          "prefill":  {"$ref": "#/$defs/componentBlock"},
+          "decode":   {"$ref": "#/$defs/componentBlock"},
+          "engine":   {"$ref": "#/$defs/engineBlock"},
+          "router":   {"$ref": "#/$defs/routerBlock"},
+          "coordination": {"$ref": "#/$defs/coordinationBlock"},
+          "modelRef": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string"},
+              "scope": {
+                "type": "string",
+                "enum": ["cluster", "namespace"]
+              }
+            },
+            "description": "Reference to a (Cluster)BaseModel already on the cluster (or created inline via the top-level basemodels list)."
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "servingMode": {"const": "pd"}
+            },
+            "required": ["prefill", "decode"]
+          },
+          {
+            "properties": {
+              "servingMode": {"const": "standalone"}
+            },
+            "required": ["engine"]
+          },
+          {
+            "properties": {
+              "servingMode": {"const": "multinode"}
+            },
+            "required": ["engine"]
+          }
+        ]
+      }
+    },
+    "vendors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deployAll": {
+          "type": "boolean",
+          "description": "When true, emit EVERY bundled vendor ClusterServingRuntime. When false (default), emit only vendor runtimes referenced by some entry in deployments[].vendor."
+        }
+      }
+    },
+    "basemodels": {
+      "type": "array",
+      "description": "Optional inline (Cluster)BaseModel(s). Empty by default — most deployments reference a model that already exists on the cluster. Scientists only need `name` and `storageUri`; everything else is optional and inferred by the OME controller.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "storageUri"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "BaseModel name. Required."
+          },
+          "storageUri": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Source URI of the model in a supported storage backend (oci://, hf://, s3://, gs://, az://, github://, ...). Required."
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["cluster", "namespace"],
+            "description": "cluster -> ClusterBaseModel (default); namespace -> BaseModel in `namespace.name`."
+          },
+          "vendor": {
+            "type": "string",
+            "description": "Optional vendor label on the BaseModel. Omitted from the rendered resource when unset."
+          },
+          "distribution": {
+            "type": "string",
+            "description": "Optional distribution mode (e.g. Sharded). Omitted when unset; controller chooses based on model size."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "Optional human-friendly display name. Omitted when unset; controller derives from `name`."
+          }
+        }
+      }
+    },
+    "commonLabels": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
+    "commonAnnotations": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    }
+  },
+  "$defs": {
+    "replicasBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min": {"type": "integer", "minimum": 0},
+        "max": {"type": "integer", "minimum": 0}
+      }
+    },
+    "autoscalingBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "metrics": {
+          "type": "array",
+          "description": "Placeholder for the KEDA metrics surface; see chart README open work items.",
+          "items": {"type": "object"}
+        }
+      }
+    },
+    "componentBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Scientist-facing component knobs. Hidden infrastructure (resources, tolerations, RDMA) lives in the vendor profile.",
+      "properties": {
+        "image":                 {"type": "string"},
+        "replicas":              {"$ref": "#/$defs/replicasBlock"},
+        "args":                  {"type": "array", "items": {"type": "string"}},
+        "contextLength":         {"type": "integer", "minimum": 1, "description": "Synthesised as `--context-length <N>` on the runner args."},
+        "tensorParallelSize":    {"type": "integer", "minimum": 1, "description": "Synthesised as `--tensor-parallel-size <N>` (sglang)."},
+        "gpuMemoryUtilization":  {"type": "number",  "minimum": 0, "maximum": 1, "description": "Fraction (0.0–1.0) of GPU memory the engine may use; synthesised as `--mem-fraction-static <X>` (sglang)."},
+        "maxConcurrentRequests": {"type": "integer", "minimum": 1, "description": "Cap on in-flight requests; synthesised as `--max-running-requests <N>` (sglang)."},
+        "autoscaling":           {"$ref": "#/$defs/autoscalingBlock"}
+      }
+    },
+    "engineBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Engine component knobs for standalone or multinode servingModes. workerSize only applies in multinode.",
+      "properties": {
+        "image":                 {"type": "string"},
+        "replicas":              {"$ref": "#/$defs/replicasBlock"},
+        "args":                  {"type": "array", "items": {"type": "string"}},
+        "contextLength":         {"type": "integer", "minimum": 1, "description": "Synthesised as `--context-length <N>` on the runner args."},
+        "tensorParallelSize":    {"type": "integer", "minimum": 1, "description": "Synthesised as `--tensor-parallel-size <N>` (sglang)."},
+        "gpuMemoryUtilization":  {"type": "number",  "minimum": 0, "maximum": 1, "description": "Fraction (0.0–1.0) of GPU memory the engine may use; synthesised as `--mem-fraction-static <X>` (sglang)."},
+        "maxConcurrentRequests": {"type": "integer", "minimum": 1, "description": "Cap on in-flight requests; synthesised as `--max-running-requests <N>` (sglang)."},
+        "workerSize":            {"type": "integer", "minimum": 1, "description": "Number of worker pods per leader gang (multinode servingMode only)."},
+        "autoscaling":           {"$ref": "#/$defs/autoscalingBlock"}
+      }
+    },
+    "routerBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Router component knobs (prefill+decode disaggregated servingMode). enabled=false omits the router entirely.",
+      "properties": {
+        "enabled":                  {"type": "boolean"},
+        "image":                    {"type": "string"},
+        "replicas":                 {"$ref": "#/$defs/replicasBlock"},
+        "args":                     {"type": "array", "items": {"type": "string"}, "description": "Extra CLI flags appended after the synthesised flags; user overrides win on duplicate flags."},
+        "timeoutSeconds":           {"type": "integer", "minimum": 1, "description": "Request-completion deadline; synthesised as `--backend-timeout <N>` on the router runner."},
+        "streamingTimeoutSeconds":  {"type": "integer", "minimum": 1, "description": "SSE/token-stream deadline (default 600); synthesised as `--streaming-timeout-secs <N>` (sglang router flag name may differ; see template)."},
+        "loadBalancingAlgorithm":   {"type": "string"}
+      }
+    },
+    "coordinationBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Cross-Component rollout coordination. The chart synthesises one RolloutCoordinationGroup containing the Components present in this deployment.",
+      "properties": {
+        "policy": {
+          "type": "string",
+          "enum": ["BlueGreen", "Sequential", "RollingUpdate", "Independent"]
+        },
+        "order": {
+          "type": "array",
+          "description": "Required when policy=Sequential. Scientist-facing names (prefill/decode/engine/router); the chart translates to OME Component names.",
+          "items": {
+            "type": "string",
+            "enum": ["prefill", "decode", "engine", "router"]
+          }
+        },
+        "soak": {
+          "type": "string",
+          "description": "Wait duration between Sequential steps; Go-style duration string (e.g. \"10m\")."
+        },
+        "pacing": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["PerComponent", "RatioBalanced"]
+            },
+            "maxSurge":       {"type": ["integer", "string"]},
+            "maxUnavailable": {"type": ["integer", "string"]},
+            "ratioTolerance": {"type": "integer"}
+          }
+        }
+      }
+    }
+  }
+}

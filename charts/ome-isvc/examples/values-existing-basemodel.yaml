@@ -1,0 +1,49 @@
+# Example: single prefill+decode disaggregated deployment that
+# references an existing ClusterBaseModel and does NOT create any
+# BaseModel inline.
+#
+# Use this pattern when the platform team manages models centrally and
+# scientists are read-only consumers.
+
+namespace:
+  name: ml-research-prod
+
+scope: namespace
+
+# vendor: cks-gb300-sglang-pd  # chart-level default; the deployment below inherits it
+
+deployments:
+  - name: llama4x
+    servingMode: pd
+
+    prefill:
+      replicas:
+        min: 1
+        max: 1
+      contextLength: 131072
+
+    decode:
+      replicas:
+        min: 1
+        max: 1
+      contextLength: 131072
+
+    router:
+      enabled: true
+      replicas:
+        min: 1
+        max: 1
+      timeoutSeconds: 60
+
+    coordination:
+      policy: BlueGreen
+      pacing:
+        type: PerComponent
+        maxSurge: 1
+        maxUnavailable: 0
+
+    modelRef:
+      name: avo-tier5-pd-test
+      scope: cluster
+
+basemodels: []

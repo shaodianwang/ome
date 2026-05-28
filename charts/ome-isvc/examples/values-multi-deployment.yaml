@@ -1,0 +1,97 @@
+# Example: prod + shadow stack from a single release.
+#
+# Pattern: two deployments inside the same `deployments` list. The
+# tenant ships a production stack at full replicas and a shadow stack
+# at minimal replicas, both on the same (default) vendor profile, in
+# the same namespace.
+#
+# Resulting resources:
+#   - ClusterServingRuntime/cks-gb300-sglang-pd            (vendor, shared)
+#   - ClusterServingRuntime/llama4x-stacks-prod-csr        (tenant runtime, prod)
+#   - ClusterServingRuntime/llama4x-stacks-shadow-csr      (tenant runtime, shadow)
+#   - InferenceService/llama4x-stacks-prod                 (in ml-team-prod)
+#   - InferenceService/llama4x-stacks-shadow               (in ml-team-prod)
+
+namespace:
+  name: ml-team-prod
+
+scope: cluster
+
+# vendor: cks-gb300-sglang-pd  # chart-level default; both deployments inherit it
+
+deployments:
+  # ----- Production stack -----
+  - name: prod
+    servingMode: pd
+
+    prefill:
+      replicas:
+        min: 4
+        max: 8
+      contextLength: 1048576
+
+    decode:
+      replicas:
+        min: 4
+        max: 8
+      contextLength: 1048576
+
+    router:
+      enabled: true
+      replicas:
+        min: 2
+        max: 2
+      timeoutSeconds: 300
+      loadBalancingAlgorithm: round-robin
+
+    coordination:
+      policy: Sequential
+      order: [decode, prefill]
+      pacing:
+        type: PerComponent
+        maxSurge: 1
+        maxUnavailable: 0
+
+    modelRef:
+      name: avo-tier5-pd-prod
+      scope: cluster
+
+  # ----- Shadow stack (smaller, blue/green rollouts) -----
+  - name: shadow
+    servingMode: pd
+
+    prefill:
+      replicas:
+        min: 1
+        max: 1
+      contextLength: 131072
+
+    decode:
+      replicas:
+        min: 1
+        max: 1
+      contextLength: 131072
+
+    router:
+      enabled: true
+      replicas:
+        min: 1
+        max: 1
+      timeoutSeconds: 60
+
+    coordination:
+      policy: BlueGreen
+      pacing:
+        type: PerComponent
+        maxSurge: 1
+        maxUnavailable: 0
+
+    modelRef:
+      name: avo-tier5-pd-shadow
+      scope: cluster
+
+# vendors.deployAll left false; cks-gb300-sglang-pd is auto-deployed
+# (and shared) because both deployments above resolve to it via the
+# top-level vendor default.
+
+basemodels: []

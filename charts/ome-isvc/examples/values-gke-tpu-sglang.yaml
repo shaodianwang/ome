@@ -1,0 +1,36 @@
+# Example: simpler single-component sglang deployment on GKE TPU.
+#
+# Pattern: one deployment, `standalone` servingMode (just an `engine`
+# block, no prefill+decode disaggregation), sit on top of the
+# gke-tpu-sglang vendor profile. This example overrides the chart-level
+# vendor default since GKE TPU is a different platform than gb300.
+#
+# Resulting resources:
+#   - ClusterServingRuntime/gke-tpu-sglang        (vendor profile, illustrative)
+#   - ServingRuntime/llama-tpu-llama-csr          (tenant child runtime in namespace)
+#   - InferenceService/llama-tpu-llama            (in ml-team-dev)
+
+namespace:
+  name: ml-team-dev
+
+scope: namespace
+
+deployments:
+  - name: llama
+    vendor: gke-tpu-sglang     # override chart-level default
+    servingMode: standalone
+
+    engine:
+      replicas:
+        min: 1
+        max: 2
+      contextLength: 8192
+      autoscaling:
+        enabled: false
+        metrics: []
+
+    modelRef:
+      name: llama-3-1-8b-instruct
+      scope: cluster
+
+basemodels: []

@@ -1,0 +1,15 @@
+# Patterns to ignore when building Helm packages.
+.DS_Store
+.git/
+.gitignore
+.bzr/
+.bzrignore
+.hg/
+.hgignore
+.svn/
+*.swp
+*.tmp
+*.orig
+*~
+# Keep examples/ and TODO-*.md in the package so they ship with the
+# chart and are visible via `helm pull && tar tf …`.

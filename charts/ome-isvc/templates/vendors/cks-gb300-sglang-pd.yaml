@@ -1,0 +1,414 @@
+{{- /*
+templates/vendors/cks-gb300-sglang-pd.yaml — pre-tailored
+ClusterServingRuntime for CW gb300 running sglang in prefill+decode
+disaggregated mode for the Llama4x nvfp4 family.
+
+Gating:
+  - Auto-deployed when any entry in .Values.deployments has
+    `vendor: cks-gb300-sglang-pd`.
+  - Force-deployed when .Values.vendors.deployAll is true (operator
+    scenario: install the full vendor catalog as a dedicated release).
+
+When deployed, every tenant child runtime rendered by
+templates/servingruntime.yaml for this vendor inherits this spec via
+strategic-merge inheritance against the ome.io/inherit-from annotation.
+*/ -}}
+{{- if include "ome-isvc.vendorIsActive" (dict "root" $ "vendor" "cks-gb300-sglang-pd") }}
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: cks-gb300-sglang-pd
+  labels:
+    {{- include "ome-isvc.labels" . | nindent 4 }}
+    ome.io/vendor: cks-gb300
+  {{- $commonAnn := include "ome-isvc.commonAnnotations" . | trim }}
+  {{- if $commonAnn }}
+  annotations:
+    {{- $commonAnn | nindent 4 }}
+  {{- end }}
+spec:
+  disabled: false
+  protocolVersions:
+    - openAI
+  supportedModelFormats:
+    # Sharded BaseModels delivered via cluster_cache.
+    - modelFormat:
+        name: safetensors
+        version: "1.0.0"
+        operator: GreaterThanOrEqual
+      modelFramework:
+        name: transformers
+        operator: Equal
+      modelArchitecture: Llama4ForConditionalGeneration
+      quantization: nvfp4
+      modelCacheProviders:
+        - cluster_cache
+      autoSelect: false
+      priority: 1
+    # PVC-distributed BaseModels (mount-based delivery, no cache provider).
+    - modelFormat:
+        name: safetensors
+        version: "1.0.0"
+        operator: GreaterThanOrEqual
+      modelFramework:
+        name: transformers
+        operator: Equal
+      modelArchitecture: Llama4ForConditionalGeneration
+      quantization: nvfp4
+      autoSelect: false
+      priority: 1
+
+  # --- Prefill (engine) ----------------------------------------------------
+  engineConfig:
+    annotations:
+      k8s.v1.cni.cncf.io/networks: '[{"name":"ibs0p0-macvlan","namespace":"cw-multus"},{"name":"ibs0p1-macvlan","namespace":"cw-multus"},{"name":"ibs0p2-macvlan","namespace":"cw-multus"},{"name":"ibs0p3-macvlan","namespace":"cw-multus"},{"name":"ibs1p0-macvlan","namespace":"cw-multus"},{"name":"ibs1p1-macvlan","namespace":"cw-multus"},{"name":"ibs1p2-macvlan","namespace":"cw-multus"},{"name":"ibs1p3-macvlan","namespace":"cw-multus"},{"name":"ibs2p0-macvlan","namespace":"cw-multus"},{"name":"ibs2p1-macvlan","namespace":"cw-multus"},{"name":"ibs2p2-macvlan","namespace":"cw-multus"},{"name":"ibs2p3-macvlan","namespace":"cw-multus"},{"name":"ibs3p0-macvlan","namespace":"cw-multus"},{"name":"ibs3p1-macvlan","namespace":"cw-multus"},{"name":"ibs3p2-macvlan","namespace":"cw-multus"},{"name":"ibs3p3-macvlan","namespace":"cw-multus"}]'
+      prometheus.io/path: /metrics
+      prometheus.io/port: "30000"
+      prometheus.io/scrape: "true"
+    nodeSelector:
+      kubernetes.io/arch: arm64
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+    volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 940Gi
+      - name: tmp-storage
+        emptyDir: {}
+    runner:
+      name: ome-container
+      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-gb300:20260517-7304a529
+      command:
+        - python3
+        - -m
+        - sglang_meta.launch_server
+        - --host
+        - 0.0.0.0
+        - --port
+        - "30000"
+        - --model-path
+        - $(MODEL_PATH)
+        - --tp-size
+        - "4"
+        - --ep-size
+        - "4"
+        - --dtype
+        - bfloat16
+        - --quantization
+        - modelopt_fp4
+        - --kv-cache-dtype
+        - bfloat16
+        - --mem-fraction-static
+        - "0.8"
+        - --moe-runner-backend
+        - flashinfer_trtllm
+        - --context-length
+        - "1048576"
+        - --speculative-algorithm
+        - EAGLE3
+        - --speculative-draft-model
+        - $(MODEL_PATH)/draft_hf
+        - --speculative-draft-model-quantization
+        - unquant
+        - --log-requests
+        - --log-requests-level
+        - "1"
+        - --enable-request-time-stats-logging
+        - --json-model-override-args
+        - '{"attn_temperature_tuning_floor_scale":131072,"attn_temperature_tuning_layers":"global","attn_temperature_tuning_q_scale_constant":0.2}'
+        - --disaggregation-mode
+        - prefill
+        - --disaggregation-transfer-backend
+        - nixl
+        - --disaggregation-bootstrap-port
+        - "8998"
+      env:
+        - name: SGLANG_EXTERNAL_MODEL_PACKAGE
+          value: sglang_meta.srt.models
+        - name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN
+          value: "1"
+        - name: SGLANG_HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: TRITON_PTXAS_PATH
+          value: /usr/local/cuda/bin/ptxas
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: NCCL_MNNVL_ENABLE
+          value: "1"
+        - name: NCCL_CUMEM_ENABLE
+          value: "1"
+        - name: NCCL_IB_ADDR_FAMILY
+          value: AF_INET6
+        - name: NCCL_SOCKET_IFNAME
+          value: eth0
+        - name: NCCL_SOCKET_FAMILY
+          value: AF_INET6
+        - name: CUDA_ENABLE_COREDUMP_ON_EXCEPTION
+          value: "1"
+        - name: CUDA_COREDUMP_GENERATION_FLAGS
+          value: skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory,skip_abort
+        - name: CUDA_COREDUMP_FILE
+          value: /tmp/sgl_crash_dump/cudacore.%h.%p
+        - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+          value: UCX
+      ports:
+        - containerPort: 30000
+          name: http
+          protocol: TCP
+        - containerPort: 8998
+          name: bootstrap
+          protocol: TCP
+      resources:
+        requests:
+          nvidia.com/gpu: "4"
+          rdma/ib: "4"
+        limits:
+          nvidia.com/gpu: "4"
+          rdma/ib: "4"
+      securityContext:
+        capabilities:
+          add: [IPC_LOCK, SYS_PTRACE]
+        privileged: true
+      volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /tmp
+          name: tmp-storage
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 30000
+        failureThreshold: 60
+        periodSeconds: 30
+        timeoutSeconds: 30
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 30000
+        failureThreshold: 5
+        initialDelaySeconds: 120
+        periodSeconds: 30
+        timeoutSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 30000
+        failureThreshold: 5
+        periodSeconds: 60
+        timeoutSeconds: 30
+
+  # --- Decode (decoder) ----------------------------------------------------
+  decoderConfig:
+    annotations:
+      k8s.v1.cni.cncf.io/networks: '[{"name":"ibs0p0-macvlan","namespace":"cw-multus"},{"name":"ibs0p1-macvlan","namespace":"cw-multus"},{"name":"ibs0p2-macvlan","namespace":"cw-multus"},{"name":"ibs0p3-macvlan","namespace":"cw-multus"},{"name":"ibs1p0-macvlan","namespace":"cw-multus"},{"name":"ibs1p1-macvlan","namespace":"cw-multus"},{"name":"ibs1p2-macvlan","namespace":"cw-multus"},{"name":"ibs1p3-macvlan","namespace":"cw-multus"},{"name":"ibs2p0-macvlan","namespace":"cw-multus"},{"name":"ibs2p1-macvlan","namespace":"cw-multus"},{"name":"ibs2p2-macvlan","namespace":"cw-multus"},{"name":"ibs2p3-macvlan","namespace":"cw-multus"},{"name":"ibs3p0-macvlan","namespace":"cw-multus"},{"name":"ibs3p1-macvlan","namespace":"cw-multus"},{"name":"ibs3p2-macvlan","namespace":"cw-multus"},{"name":"ibs3p3-macvlan","namespace":"cw-multus"}]'
+      prometheus.io/path: /metrics
+      prometheus.io/port: "30000"
+      prometheus.io/scrape: "true"
+    nodeSelector:
+      kubernetes.io/arch: arm64
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+    volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 940Gi
+      - name: tmp-storage
+        emptyDir: {}
+    runner:
+      name: ome-container
+      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-gb300:20260517-7304a529
+      command:
+        - python3
+        - -m
+        - sglang_meta.launch_server
+        - --host
+        - 0.0.0.0
+        - --port
+        - "30000"
+        - --model-path
+        - $(MODEL_PATH)
+        - --tp-size
+        - "4"
+        - --ep-size
+        - "4"
+        - --dtype
+        - bfloat16
+        - --quantization
+        - modelopt_fp4
+        - --kv-cache-dtype
+        - bfloat16
+        - --mem-fraction-static
+        - "0.8"
+        - --moe-runner-backend
+        - flashinfer_trtllm
+        - --context-length
+        - "1048576"
+        - --speculative-algorithm
+        - EAGLE3
+        - --speculative-draft-model
+        - $(MODEL_PATH)/draft_hf
+        - --speculative-draft-model-quantization
+        - unquant
+        - --log-requests
+        - --log-requests-level
+        - "1"
+        - --enable-request-time-stats-logging
+        - --json-model-override-args
+        - '{"attn_temperature_tuning_floor_scale":131072,"attn_temperature_tuning_layers":"global","attn_temperature_tuning_q_scale_constant":0.2}'
+        - --disaggregation-mode
+        - decode
+        - --disaggregation-transfer-backend
+        - nixl
+      env:
+        - name: SGLANG_EXTERNAL_MODEL_PACKAGE
+          value: sglang_meta.srt.models
+        - name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN
+          value: "1"
+        - name: SGLANG_HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: TRITON_PTXAS_PATH
+          value: /usr/local/cuda/bin/ptxas
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: NCCL_MNNVL_ENABLE
+          value: "1"
+        - name: NCCL_CUMEM_ENABLE
+          value: "1"
+        - name: NCCL_IB_ADDR_FAMILY
+          value: AF_INET6
+        - name: NCCL_SOCKET_IFNAME
+          value: eth0
+        - name: NCCL_SOCKET_FAMILY
+          value: AF_INET6
+        - name: CUDA_ENABLE_COREDUMP_ON_EXCEPTION
+          value: "1"
+        - name: CUDA_COREDUMP_GENERATION_FLAGS
+          value: skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory,skip_abort
+        - name: CUDA_COREDUMP_FILE
+          value: /tmp/sgl_crash_dump/cudacore.%h.%p
+        - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+          value: UCX
+      ports:
+        - containerPort: 30000
+          name: http
+          protocol: TCP
+      resources:
+        requests:
+          nvidia.com/gpu: "4"
+          rdma/ib: "4"
+        limits:
+          nvidia.com/gpu: "4"
+          rdma/ib: "4"
+      securityContext:
+        capabilities:
+          add: [IPC_LOCK, SYS_PTRACE]
+        privileged: true
+      volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /tmp
+          name: tmp-storage
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 30000
+        failureThreshold: 60
+        periodSeconds: 30
+        timeoutSeconds: 30
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 30000
+        failureThreshold: 5
+        initialDelaySeconds: 120
+        periodSeconds: 30
+        timeoutSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 30000
+        failureThreshold: 5
+        periodSeconds: 60
+        timeoutSeconds: 30
+
+  # --- Router --------------------------------------------------------------
+  routerConfig:
+    nodeSelector:
+      kubernetes.io/arch: arm64
+    runner:
+      name: router
+      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-router:20260515-d702bf5f
+      args:
+        - --port
+        - "30080"
+        - --metrics-port
+        - "9090"
+        - --model-name
+        - llama4x
+        - --backend-timeout
+        - "300"
+        - --bootstrap-port
+        - "8998"
+        - --k8s-namespace
+        - $(NAMESPACE)
+        - --prefill-label-selector
+        - component=engine,ome.io/inferenceservice=$(INFERENCESERVICE_NAME)
+        - --decode-label-selector
+        - component=decoder,ome.io/inferenceservice=$(INFERENCESERVICE_NAME)
+        - --k8s-engine-port
+        - "30000"
+      env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: INFERENCESERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['ome.io/inferenceservice']
+      ports:
+        - containerPort: 30080
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+      startupProbe:
+        httpGet:
+          path: /readiness
+          port: 30080
+        failureThreshold: 30
+        periodSeconds: 20
+        timeoutSeconds: 10
+      readinessProbe:
+        httpGet:
+          path: /readiness
+          port: 30080
+        failureThreshold: 5
+        periodSeconds: 30
+        timeoutSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /liveness
+          port: 30080
+        failureThreshold: 5
+        periodSeconds: 30
+        timeoutSeconds: 10
+{{- end }}

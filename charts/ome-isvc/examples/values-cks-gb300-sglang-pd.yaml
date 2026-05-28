@@ -1,0 +1,72 @@
+# Example: single Llama4x prefill+decode disaggregated deployment on CW gb300.
+#
+# Pattern: one deployment, prefill+decode disaggregated servingMode, sit on
+# top of the cks-gb300-sglang-pd vendor profile (the top-level default,
+# so `vendor:` is omitted on the deployment). Tenant only sets replica
+# counts, context length, coordination policy — everything else (image,
+# NCCL envs, RDMA / multus, resources, probes, security context) is
+# inherited from the vendor ClusterServingRuntime.
+#
+# Resulting resources:
+#   - ClusterServingRuntime/cks-gb300-sglang-pd          (vendor profile)
+#   - ClusterServingRuntime/llama4x-prod-llama4x-csr     (tenant child runtime)
+#   - InferenceService/llama4x-prod-llama4x              (in ml-team-prod)
+
+namespace:
+  name: ml-team-prod
+
+scope: cluster
+
+# vendor: cks-gb300-sglang-pd  # already the chart-level default; omitted
+
+deployments:
+  - name: llama4x
+    servingMode: pd
+
+    prefill:
+      replicas:
+        min: 2
+        max: 4
+      contextLength: 1048576
+      tensorParallelSize: 4
+      gpuMemoryUtilization: 0.92
+      maxConcurrentRequests: 256
+
+    decode:
+      replicas:
+        min: 2
+        max: 4
+      contextLength: 1048576
+      tensorParallelSize: 4
+      gpuMemoryUtilization: 0.92
+      maxConcurrentRequests: 256
+
+    router:
+      enabled: true
+      replicas:
+        min: 2
+        max: 2
+      timeoutSeconds: 300
+      loadBalancingAlgorithm: round-robin
+
+    coordination:
+      policy: Sequential
+      order: [decode, prefill]
+      pacing:
+        type: PerComponent
+        maxSurge: 1
+        maxUnavailable: 0
+
+    modelRef:
+      name: avo-tier5-pd-prod
+      scope: cluster
+
+# vendors.deployAll defaults to false; the chart auto-deploys
+# cks-gb300-sglang-pd because some deployment above references it
+# (via the top-level vendor default).
+
+# Create the ClusterBaseModel inline. Scientists only specify `name`
+# and `storageUri`; the OME controller infers everything else.
+basemodels:
+  - name: avo-tier5-pd-prod
+    storageUri: oci://my-registry/avo-tier5-pd-prod:latest

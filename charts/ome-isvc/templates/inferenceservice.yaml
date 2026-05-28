@@ -1,0 +1,91 @@
+{{- /*
+inferenceservice.yaml — emits one InferenceService per entry in
+.Values.deployments.
+
+The chart maps scientist-facing component names to OME's Component
+identifiers in `templates/_helpers.tpl::ome-isvc.componentName`:
+
+  Values key  | OME Component | servingMode
+  ------------+---------------+----------------------------
+  prefill     | engine        | pd (prefill+decode disaggregated)
+  decode      | decoder       | pd (prefill+decode disaggregated)
+  engine      | engine        | standalone, multinode
+  router      | router        | (optional, all servingModes)
+
+`spec.model.name` + `spec.runtime.name` are wired automatically from the
+deployment's modelRef + the tenant child runtime rendered by
+servingruntime.yaml.
+
+Annotation passthrough policy (v0.1): trust the OME webhook to reject
+inappropriate annotations on the merged InferenceService spec.
+*/ -}}
+{{- $root := . -}}
+{{- range $i, $deployment := .Values.deployments }}
+{{- if $i }}
+---
+{{ end }}
+{{- /* servingMode-driven Component shape -------------------------------- */ -}}
+{{- $servingMode := $deployment.servingMode -}}
+{{- $hasEngine  := eq $servingMode "standalone" -}}
+{{- $hasEngine  = or $hasEngine (eq $servingMode "multinode") -}}
+{{- $hasPrefill := eq $servingMode "pd" -}}
+{{- $hasDecode  := eq $servingMode "pd" -}}
+{{- $hasRouter  := and (eq $servingMode "pd") (and $deployment.router $deployment.router.enabled) -}}
+
+{{- /* Collect OME component names present in this deployment, used by
+       the synthesised RolloutCoordinationGroup below. --------------- */ -}}
+{{- $components := list -}}
+{{- if $hasPrefill }}{{- $components = append $components "engine" -}}{{- end -}}
+{{- if $hasDecode  }}{{- $components = append $components "decoder" -}}{{- end -}}
+{{- if $hasEngine  }}{{- $components = append $components "engine" -}}{{- end -}}
+{{- if $hasRouter  }}{{- $components = append $components "router" -}}{{- end -}}
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: {{ include "ome-isvc.isvcName" (dict "root" $root "deployment" $deployment) }}
+  namespace: {{ $root.Values.namespace.name }}
+  labels:
+    {{- include "ome-isvc.deploymentLabels" (dict "root" $root "deployment" $deployment) | nindent 4 }}
+  annotations:
+    ome.io/deploymentMode: OMENative
+    {{- with include "ome-isvc.commonAnnotations" $root | trim }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- /* Model: required field. Tenants must set deployments[].modelRef.name */ -}}
+  {{- $modelRef := $deployment.modelRef | default dict }}
+  {{- $modelName := required (printf "deployments[%d].modelRef.name is required" $i) $modelRef.name }}
+  {{- $modelScope := default "cluster" $modelRef.scope }}
+  model:
+    name: {{ $modelName }}
+    kind: {{ include "ome-isvc.baseModelKind" (dict "root" $root "scope" $modelScope) }}
+  runtime:
+    name: {{ include "ome-isvc.runtimeName" (dict "root" $root "deployment" $deployment) }}
+  {{- /* prefill -> engine -------------------------------------------- */ -}}
+  {{- if $hasPrefill }}
+  engine:
+    {{- include "ome-isvc.renderComponent" (dict "block" $deployment.prefill) | trim | nindent 4 }}
+  {{- end }}
+  {{- /* decode -> decoder -------------------------------------------- */ -}}
+  {{- if $hasDecode }}
+  decoder:
+    {{- include "ome-isvc.renderComponent" (dict "block" $deployment.decode) | trim | nindent 4 }}
+  {{- end }}
+  {{- /* engine (standalone / multinode) ------------------------------ */ -}}
+  {{- if $hasEngine }}
+  engine:
+    {{- include "ome-isvc.renderEngineComponent" (dict "block" $deployment.engine "servingMode" $servingMode) | trim | nindent 4 }}
+  {{- end }}
+  {{- /* router -------------------------------------------------------- */ -}}
+  {{- if $hasRouter }}
+  router:
+    {{- include "ome-isvc.renderRouter" (dict "block" $deployment.router) | trim | nindent 4 }}
+  {{- end }}
+  {{- /* coordination: synthesise a single group covering the deployment's Components */ -}}
+  {{- $group := include "ome-isvc.coordinationGroup" (dict "deployment" $deployment "components" $components) | trim }}
+  {{- if $group }}
+  rolloutCoordination:
+    groups:
+      {{- $group | nindent 6 }}
+  {{- end }}
+{{- end }}

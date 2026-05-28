@@ -1,0 +1,123 @@
+{{- /*
+templates/vendors/gke-tpu-sglang.yaml — illustrative pre-tailored
+ClusterServingRuntime for GKE TPU clusters running sglang in a
+single-component (engine-only) servingMode.
+
+This template is intentionally a placeholder — it demonstrates the
+multi-vendor extension point on a TPU node pool. Real GKE TPU runtimes
+require a tenant-specific image catalog, RDMA / multus wiring, and
+NCCL tuning; an operator publishing a real profile would replace the
+placeholder image, TPU resource request, and sglang args here.
+
+Gating:
+  - Auto-deployed when any entry in .Values.deployments has
+    `vendor: gke-tpu-sglang`.
+  - Force-deployed when .Values.vendors.deployAll is true.
+*/ -}}
+{{- if include "ome-isvc.vendorIsActive" (dict "root" $ "vendor" "gke-tpu-sglang") }}
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: gke-tpu-sglang
+  labels:
+    {{- include "ome-isvc.labels" . | nindent 4 }}
+    ome.io/vendor: gke-tpu
+  {{- $commonAnn := include "ome-isvc.commonAnnotations" . | trim }}
+  {{- if $commonAnn }}
+  annotations:
+    {{- $commonAnn | nindent 4 }}
+  {{- end }}
+spec:
+  disabled: false
+  protocolVersions:
+    - openAI
+  supportedModelFormats:
+    - modelFormat:
+        name: safetensors
+        version: "1.0.0"
+        operator: GreaterThanOrEqual
+      modelFramework:
+        name: transformers
+        operator: Equal
+      modelArchitecture: LlamaForCausalLM
+      autoSelect: false
+      priority: 1
+
+  # --- Engine (single-component, TPU) --------------------------------------
+  engineConfig:
+    annotations:
+      prometheus.io/path: /metrics
+      prometheus.io/port: "30000"
+      prometheus.io/scrape: "true"
+    nodeSelector:
+      cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+      cloud.google.com/gke-tpu-topology: 2x2x1
+    tolerations:
+      - key: google.com/tpu
+        operator: Exists
+        effect: NoSchedule
+    volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Gi
+    runner:
+      name: ome-container
+      # Placeholder image — replace with operator-published GKE TPU sglang build.
+      image: gcr.io/PROJECT/sglang-tpu:latest
+      command:
+        - python3
+        - -m
+        - sglang.launch_server
+        - --host
+        - 0.0.0.0
+        - --port
+        - "30000"
+        - --model-path
+        - $(MODEL_PATH)
+        - --device
+        - tpu
+        - --dtype
+        - bfloat16
+      env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: TPU_NAME
+          value: localhost
+        - name: JAX_PLATFORMS
+          value: tpu
+      ports:
+        - containerPort: 30000
+          name: http
+          protocol: TCP
+      resources:
+        requests:
+          google.com/tpu: "4"
+        limits:
+          google.com/tpu: "4"
+      volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 30000
+        failureThreshold: 60
+        periodSeconds: 30
+        timeoutSeconds: 30
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 30000
+        failureThreshold: 5
+        initialDelaySeconds: 120
+        periodSeconds: 30
+        timeoutSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 30000
+        failureThreshold: 5
+        periodSeconds: 60
+        timeoutSeconds: 30
+{{- end }}

@@ -1,0 +1,51 @@
+{{- /*
+basemodel.yaml — emits one (Cluster)BaseModel per entry in
+.Values.basemodels.
+
+The list is OPTIONAL — most chart releases reference (Cluster)BaseModels
+that already exist on the cluster via `deployments[].modelRef.name`. The
+basemodels list is for the scientist who also wants this release to
+provision the model resource itself.
+
+Scientist-facing surface: only `name` and `storageUri` are required.
+Everything else (`scope`, `vendor`, `distribution`, `displayName`) is
+optional — omitted fields are left out of the rendered resource and the
+OME controller picks its own defaults.
+
+Per-entry `.scope` (default `cluster`) controls whether the resource is
+BaseModel (namespace-scoped, lands in `namespace.name`) or
+ClusterBaseModel (cluster-scoped).
+*/ -}}
+{{- $root := . -}}
+{{- range $i, $bm := .Values.basemodels }}
+{{- if $i }}
+---
+{{ end }}
+{{- $scope := default "cluster" $bm.scope -}}
+{{- $kind := ternary "BaseModel" "ClusterBaseModel" (eq $scope "namespace") -}}
+apiVersion: ome.io/v1beta1
+kind: {{ $kind }}
+metadata:
+  name: {{ $bm.name }}
+  {{- if eq $kind "BaseModel" }}
+  namespace: {{ $root.Values.namespace.name }}
+  {{- end }}
+  labels:
+    {{- include "ome-isvc.labels" $root | nindent 4 }}
+  {{- with include "ome-isvc.commonAnnotations" $root | trim }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  storage:
+    storageUri: {{ $bm.storageUri | quote }}
+  {{- with $bm.vendor }}
+  vendor: {{ . | quote }}
+  {{- end }}
+  {{- with $bm.distribution }}
+  distribution: {{ . | quote }}
+  {{- end }}
+  {{- with $bm.displayName }}
+  displayName: {{ . | quote }}
+  {{- end }}
+{{- end }}

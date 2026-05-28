@@ -1,0 +1,152 @@
+{{- /*
+servingruntime.yaml — emits one tenant CHILD (Cluster)ServingRuntime per
+entry in .Values.deployments.
+
+Each child runtime is intentionally thin:
+  - It carries `metadata.annotations["ome.io/inherit-from"]: <vendor>`
+    so the OME controller resolves the full spec at consume time
+    against the matching vendor profile under templates/vendors/.
+  - Its `spec` contains ONLY the per-component overrides synthesised
+    from the deployment's scientist-facing knobs (image, args,
+    contextLength, tensorParallelSize, gpuMemoryUtilization,
+    maxConcurrentRequests). The vendor's container shape (resources,
+    RDMA, volumes, probes, security context) is inherited verbatim.
+
+Component naming translation:
+  prefill -> engineConfig         (prefill+decode disaggregated servingMode)
+  decode  -> decoderConfig        (prefill+decode disaggregated servingMode)
+  engine  -> engineConfig         (standalone / multinode servingMode)
+  router  -> routerConfig         (optional)
+
+Strategic-merge inheritance (via the ome.io/inherit-from annotation):
+  - child wins on collision;
+  - listMapKey lists (e.g. `env`) merge per `name`;
+  - plain lists (e.g. `args`, `command`) are wholesale-replaced — so a
+    child `args` override REPLACES the vendor base args. The vendor
+    template supplies the base CLI under `command`; the child appends
+    the runtime knobs the scientist set under each component (context
+    length, tensor parallel, etc.) plus any `args` extras, ordered so
+    the user `args` win on duplicate flags.
+*/ -}}
+{{- $root := . -}}
+{{- $kind := include "ome-isvc.runtimeKind" $root -}}
+{{- range $i, $deployment := .Values.deployments }}
+{{- if $i }}
+---
+{{ end }}
+{{- $servingMode := $deployment.servingMode -}}
+{{- $hasEngine  := or (eq $servingMode "standalone") (eq $servingMode "multinode") -}}
+{{- $hasPrefill := eq $servingMode "pd" -}}
+{{- $hasDecode  := eq $servingMode "pd" -}}
+{{- $hasRouter  := and (eq $servingMode "pd") (and $deployment.router $deployment.router.enabled) -}}
+{{- $vendor := include "ome-isvc.deploymentVendor" (dict "root" $root "deployment" $deployment) -}}
+apiVersion: ome.io/v1beta1
+kind: {{ $kind }}
+metadata:
+  name: {{ include "ome-isvc.runtimeName" (dict "root" $root "deployment" $deployment) }}
+  {{- if eq $kind "ServingRuntime" }}
+  namespace: {{ $root.Values.namespace.name }}
+  {{- end }}
+  labels:
+    {{- include "ome-isvc.deploymentLabels" (dict "root" $root "deployment" $deployment) | nindent 4 }}
+  annotations:
+    ome.io/inherit-from: {{ $vendor | quote }}
+    {{- with include "ome-isvc.commonAnnotations" $root | trim }}
+    {{- . | nindent 4 }}
+    {{- end }}
+{{- /* Compute whether we'll emit any spec override at all. When nothing
+       is set, render `spec: {}` so the child runtime inherits the
+       vendor spec verbatim. */ -}}
+{{- $emitPrefill := false -}}
+{{- $prefillArgs := list -}}
+{{- if $hasPrefill -}}
+  {{- $b := $deployment.prefill -}}
+  {{- $prefillArgs = include "ome-isvc.componentArgs" (dict "block" $b) | fromJsonArray -}}
+  {{- if or $b.image (gt (len $prefillArgs) 0) -}}{{- $emitPrefill = true -}}{{- end -}}
+{{- end -}}
+{{- $emitDecode := false -}}
+{{- $decodeArgs := list -}}
+{{- if $hasDecode -}}
+  {{- $b := $deployment.decode -}}
+  {{- $decodeArgs = include "ome-isvc.componentArgs" (dict "block" $b) | fromJsonArray -}}
+  {{- if or $b.image (gt (len $decodeArgs) 0) -}}{{- $emitDecode = true -}}{{- end -}}
+{{- end -}}
+{{- $emitEngine := false -}}
+{{- $engineArgs := list -}}
+{{- if $hasEngine -}}
+  {{- $b := $deployment.engine -}}
+  {{- $engineArgs = include "ome-isvc.componentArgs" (dict "block" $b) | fromJsonArray -}}
+  {{- if or $b.image (gt (len $engineArgs) 0) $b.workerSize -}}{{- $emitEngine = true -}}{{- end -}}
+{{- end -}}
+{{- $emitRouter := false -}}
+{{- if $hasRouter -}}
+  {{- $b := $deployment.router -}}
+  {{- if $b.image -}}{{- $emitRouter = true -}}{{- end -}}
+{{- end -}}
+{{- $anyEmit := or (or $emitPrefill $emitDecode) (or $emitEngine $emitRouter) }}
+{{- if $anyEmit }}
+spec:
+  {{- /* prefill -> engineConfig override -------------------------------- */ -}}
+  {{- if $emitPrefill }}
+  {{- $b := $deployment.prefill }}
+  engineConfig:
+    runner:
+      name: ome-container
+      {{- if $b.image }}
+      image: {{ $b.image | quote }}
+      {{- end }}
+      {{- if gt (len $prefillArgs) 0 }}
+      args:
+        {{- toYaml $prefillArgs | nindent 8 }}
+      {{- end }}
+  {{- end }}
+  {{- /* decode -> decoderConfig override -------------------------------- */ -}}
+  {{- if $emitDecode }}
+  {{- $b := $deployment.decode }}
+  decoderConfig:
+    runner:
+      name: ome-container
+      {{- if $b.image }}
+      image: {{ $b.image | quote }}
+      {{- end }}
+      {{- if gt (len $decodeArgs) 0 }}
+      args:
+        {{- toYaml $decodeArgs | nindent 8 }}
+      {{- end }}
+  {{- end }}
+  {{- /* engine -> engineConfig override (standalone / multinode) ------- */ -}}
+  {{- if $emitEngine }}
+  {{- $b := $deployment.engine }}
+  engineConfig:
+    {{- if or $b.image (gt (len $engineArgs) 0) }}
+    runner:
+      name: ome-container
+      {{- if $b.image }}
+      image: {{ $b.image | quote }}
+      {{- end }}
+      {{- if gt (len $engineArgs) 0 }}
+      args:
+        {{- toYaml $engineArgs | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- if and (eq $servingMode "multinode") $b.workerSize }}
+    worker:
+      size: {{ $b.workerSize }}
+    {{- end }}
+  {{- end }}
+  {{- /* router -> routerConfig override (image only; the router CLI
+         flags land on the InferenceService runner via renderRouter
+         in inferenceservice.yaml) ----------------------------------- */ -}}
+  {{- if $hasRouter }}
+  {{- $b := $deployment.router }}
+  {{- if $b.image }}
+  routerConfig:
+    runner:
+      name: router
+      image: {{ $b.image | quote }}
+  {{- end }}
+  {{- end }}
+{{- else }}
+spec: {}
+{{- end }}
+{{- end }}

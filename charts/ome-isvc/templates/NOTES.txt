@@ -1,0 +1,79 @@
+{{- $root := . -}}
+{{- $refs := include "ome-isvc.referencedVendors" . | fromJson -}}
+{{- $deployAll := and .Values.vendors .Values.vendors.deployAll -}}
+Release {{ .Release.Name }} installed in {{ .Release.Namespace }}.
+
+Vendor profiles (cluster-scoped):
+{{- $activeAny := false }}
+{{- range $vendor := (list "cks-gb300-sglang-pd" "gke-tpu-sglang") }}
+{{- if eq (include "ome-isvc.vendorIsActive" (dict "root" $root "vendor" $vendor)) "true" }}
+{{- $activeAny = true }}
+  - ClusterServingRuntime/{{ $vendor }}
+    (active: {{ if $deployAll }}vendors.deployAll=true{{ else }}referenced by deployments{{ end }})
+{{- end }}
+{{- end }}
+{{- if not $activeAny }}
+  (none — no deployments reference a bundled vendor, and vendors.deployAll=false)
+{{- end }}
+
+Deployments:
+{{- range $i, $d := .Values.deployments }}
+{{- $vendor := include "ome-isvc.deploymentVendor" (dict "root" $root "deployment" $d) }}
+
+  [{{ $d.name }}]   servingMode={{ $d.servingMode }}, vendor={{ $vendor }}
+    - {{ include "ome-isvc.runtimeKind" $root }}/{{ include "ome-isvc.runtimeName" (dict "root" $root "deployment" $d) }}
+      (tenant child runtime, inherits from {{ $vendor }} via ome.io/inherit-from)
+    - InferenceService/{{ include "ome-isvc.isvcName" (dict "root" $root "deployment" $d) }}
+      (in namespace {{ $root.Values.namespace.name }})
+    Components:
+{{- $servingMode := $d.servingMode }}
+{{- if eq $servingMode "pd" }}
+      - prefill  -> OME engine
+      - decode   -> OME decoder
+{{- if and $d.router $d.router.enabled }}
+      - router
+{{- end }}
+{{- else if eq $servingMode "standalone" }}
+      - engine
+{{- else if eq $servingMode "multinode" }}
+      - engine   ({{ $d.engine.workerSize | default 0 }} worker pods per leader gang)
+{{- end }}
+{{- if $d.coordination }}
+    Coordination: policy={{ $d.coordination.policy }}{{ if $d.coordination.order }}, order={{ $d.coordination.order | toJson }}{{ end }}
+{{- end }}
+{{- end }}
+
+{{- if .Values.basemodels }}
+
+BaseModels created by this release:
+{{- range $bm := .Values.basemodels }}
+{{- $bmScope := default "cluster" $bm.scope }}
+{{- $bmKind := ternary "BaseModel" "ClusterBaseModel" (eq $bmScope "namespace") }}
+  - {{ $bmKind }}/{{ $bm.name }}
+{{- end }}
+{{- else }}
+
+BaseModels: none created by this release (deployments reference existing
+            (Cluster)BaseModels via modelRef).
+{{- end }}
+
+Next steps:
+{{ range $d := .Values.deployments }}
+  # Watch deployment {{ $d.name }} come up:
+  kubectl -n {{ $root.Values.namespace.name }} get isvc {{ include "ome-isvc.isvcName" (dict "root" $root "deployment" $d) }} -w
+
+  # Inspect resolved runtime spec (after inheritance) for {{ $d.name }}:
+  kubectl get {{ include "ome-isvc.runtimeKind" $root }} {{ include "ome-isvc.runtimeName" (dict "root" $root "deployment" $d) }} {{ if eq (include "ome-isvc.runtimeKind" $root) "ServingRuntime" }}-n {{ $root.Values.namespace.name }}{{ end }} -o yaml
+
+  # Pods for {{ $d.name }}:
+  kubectl -n {{ $root.Values.namespace.name }} get pods -l ome.io/inferenceservice={{ include "ome-isvc.isvcName" (dict "root" $root "deployment" $d) }}
+{{ end -}}
+{{- if and (gt (len .Values.deployments) 0) (not $activeAny) }}
+
+NOTE: No bundled vendor ClusterServingRuntimes are active, but the
+deployments above reference one via `vendor:`. Make sure each
+referenced vendor ClusterServingRuntime is already on the cluster
+(typically published by the platform team via a separate GitOps
+surface). Otherwise the OME inheritance webhook will reject the tenant
+runtime or the controller will emit `InheritanceReady=False`.
+{{- end }}

@@ -1,0 +1,24 @@
+apiVersion: v2
+name: ome-isvc
+description: One-shot deploy of a single OME InferenceService bundle (InferenceService + ServingRuntime + optional BaseModel) on top of an existing OME installation.
+type: application
+version: 0.1.0
+appVersion: "ome-1.0"
+keywords:
+  - ome
+  - inference
+  - isvc
+  - llm
+  - sglang
+maintainers:
+  - name: OME Team
+# Deliberate: no Helm dependencies. The chart assumes:
+#  - OME CRDs (ome-crd) installed.
+#  - OME controller + webhooks (ome-resources) running.
+#  - Vendor base runtimes (or vendor profiles) already applied to the cluster
+#    when `runtime.parent` references one.
+#
+# The chart leans on OME's ServingRuntime inheritance via the
+# `ome.io/inherit-from` annotation so tenants override only what they
+# care about; the operator's profile catalog provides infrastructure +
+# container image defaults.

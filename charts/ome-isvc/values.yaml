@@ -1,0 +1,73 @@
+# ome-isvc values.yaml — scientist-facing surface. See README.md for the
+# full schema, vendor inheritance model, and per-field reference.
+
+# Release name overrides. Resource names default to `<release>-<deployment.name>`.
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace for InferenceServices (and namespace-scoped BaseModels).
+# Must already exist; chart does not create namespaces.
+namespace:
+  name: default
+
+# `cluster` or `namespace`: scope of the tenant child runtime + inline BaseModels.
+scope: namespace
+
+# Default vendor profile inherited by deployments that omit `vendor:`.
+vendor: cks-gb300-sglang-pd
+
+# Deployments — one or more model serving stacks. See README for full schema.
+deployments:
+  - name: llama4x-prod
+    # vendor: <override>          # default: .Values.vendor
+    servingMode: pd               # standalone | pd | multinode
+
+    prefill:
+      replicas: { min: 2, max: 4 }
+      contextLength: 128000
+      tensorParallelSize: 4
+      gpuMemoryUtilization: 0.92
+      maxConcurrentRequests: 256
+      args: []                    # extra flags appended after synthesized ones
+
+    decode:
+      replicas: { min: 2, max: 4 }
+      contextLength: 128000
+      tensorParallelSize: 4
+      gpuMemoryUtilization: 0.92
+      maxConcurrentRequests: 256
+      args: []                    # extra flags appended after synthesized ones
+
+    router:
+      enabled: true
+      replicas: { min: 2, max: 2 }
+      timeoutSeconds: 30                  # request deadline
+      streamingTimeoutSeconds: 600        # SSE/token deadline
+      loadBalancingAlgorithm: round-robin
+      args: []                    # extra flags appended after synthesized ones
+
+    coordination:
+      policy: Sequential
+      order: [decode, prefill]
+      pacing:
+        type: PerComponent
+        maxSurge: 1
+        maxUnavailable: 0
+
+    modelRef:
+      name: ""           # required: (Cluster)BaseModel name
+      scope: cluster     # cluster | namespace
+
+# Vendor catalog gating. See README "Vendor profiles + inheritance".
+vendors:
+  deployAll: false       # true: emit every bundled vendor profile
+
+# Optional inline (Cluster)BaseModels. Empty by default. See README "BaseModels".
+basemodels: []
+# basemodels:
+#   - name: my-model
+#     storageUri: oci://my-registry/my-model:v1
+
+# Labels / annotations stamped on every chart-emitted resource.
+commonLabels: {}
+commonAnnotations: {}
