@@ -1,4 +1,4 @@
-package ops
+package ops_test
 
 import (
 	"context"
@@ -17,17 +17,31 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// newFakeClient builds a controller-runtime fake client with the scheme
-// the omenative reconciler needs (corev1 + v1beta1 + appsv1 for
-// ControllerRevision) and tells the fake about the status subresource
-// for InferenceService so Status().Update works as it would against a
-// real API server.
+// Test file is in package ops_test so the tests only see the
+// workload.* API surface — no privileged access to ops/ internals. The
+// imports above are the only types create_test.go reaches for; the
+// only v1beta1 surface used is the fake-client scheme registration
+// plus the in-memory observed state mirror the MutateInstance closure
+// writes through.
+//
+// HISTORY: the bug-fix coverage in this file originally lived in
+// pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops/
+// before the per-Instance Create state machine moved to workload/ops
+// (part 2 slice 4b of N). Test names are kept identical to the
+// upstream omenative copies so the prior bug-coverage map carries over
+// unchanged.
+
+// newFakeClient builds a controller-runtime fake client with the
+// scheme the workload reconciler needs. The fake exposes the
+// InferenceService status subresource so the MutateInstance closure
+// (which the test wires through to a fake-client Status().Update can
+// be observed in tests that read back the ISVC for assertions).
 func newFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -51,6 +65,10 @@ func newFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 }
 
 // minimalISVC builds an ISVC with the minimum metadata Create() needs.
+// The workload tests still construct an ISVC because the fake-client
+// status-write path the MutateInstance closure delegates to needs a
+// concrete owner object to round-trip — workload code reads the
+// resulting ReconcileInput opaquely.
 func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 	mr := replicas
 	return &v1beta1.InferenceService{
@@ -71,8 +89,6 @@ func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 
 // testRevisionHash is the synthetic revision hash stamped on test
 // pods (matches what production Render emits via ome.io/revision-hash).
-// Per-revision Service fixtures in drain tests name themselves after
-// this constant via coordination.PerRevisionServiceName.
 const testRevisionHash = "testrev1"
 
 // testPodLabels reproduces the label set workload/ops.Render stamps on
@@ -91,30 +107,212 @@ func testPodLabels(isvc string, component v1beta1.ComponentType, instanceIdx int
 	}
 }
 
-// minimalParams builds a core.ReconcileParams in the single-pod / engine shape.
-func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client) core.ReconcileParams {
-	t.Helper()
-	return core.ReconcileParams{
-		ISVC:         isvc,
-		PodSpec:      &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}},
-		Component:    v1beta1.EngineComponent,
-		ComponentExt: &isvc.Spec.Engine.ComponentExtensionSpec,
-		Client:       c,
+// buildTestInput projects the ISVC under test onto a
+// workload.ReconcileInput. Mirrors what
+// omenative/internalsource.BuildReconcileInput does in production —
+// the workload-level tests reproduce the shape inline so they don't
+// take a backward import on the omenative adapter package.
+//
+// MutateInstance round-trips through the fake client's Status().Update
+// so tests can assert on the persisted ISVC.Status.Components[c].OMENative
+// shape (the legacy bug-fix tests in the omenative layer relied on
+// observing post-write status on the ISVC).
+func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component v1beta1.ComponentType) workload.ReconcileInput {
+	var instances []workload.InstanceStatus
+	if cs, ok := isvc.Status.Components[component]; ok && cs.OMENative != nil {
+		for _, s := range cs.OMENative.InstanceStatuses {
+			instances = append(instances, workload.InstanceStatus{
+				Index:           s.Index,
+				Incarnation:     s.Incarnation,
+				Phase:           workload.InstancePhase(s.Phase),
+				RunningRevision: s.RunningRevision,
+				TargetRevision:  s.TargetRevision,
+				ActiveOrdinal:   s.ActiveOrdinal,
+			})
+		}
+	}
+	return workload.ReconcileInput{
+		OwnerObject: isvc,
+		OwnerGVK:    v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
+		EventTarget: isvc,
+		Key: workload.Key{
+			Namespace:   isvc.Namespace,
+			OwnerName:   isvc.Name,
+			Component:   workload.ComponentType(component),
+			OwnerLabels: isvc.Labels,
+			SelectorLabels: map[string]string{
+				constants.InferenceServicePodLabelKey: isvc.Name,
+				constants.OMEComponentLabel:           string(component),
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+			},
+		},
+		DesiredSpec: workload.WorkloadDesiredSpec{
+			PodSpec: &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}},
+		},
+		ObservedState: workload.WorkloadObservedState{
+			InstanceStatuses: instances,
+		},
+		MutateInstance: testMutateInstance(c, isvc, component),
 	}
 }
 
-// resetExpectations clears core.DefaultExpectations so per-test create attempts
-// aren't blocked by entries from a previous test. The cache is a process
-// singleton in production; tests need isolation.
+// testMutateInstance is the test-side persistence layer for
+// ReconcileInput.MutateInstance. Mirrors omenative/status.MutateInstance
+// at the wire level — Get / mutate / Status().Update — but skips
+// retry.RetryOnConflict (the fake client has no optimistic-concurrency
+// failures to retry).
+func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+		fresh := &v1beta1.InferenceService{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
+			return fmt.Errorf("get isvc: %w", err)
+		}
+		if fresh.Status.Components == nil {
+			fresh.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
+		}
+		cs := fresh.Status.Components[component]
+		if cs.OMENative == nil {
+			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+		}
+		pos := -1
+		for i, s := range cs.OMENative.InstanceStatuses {
+			if s.Index == idx {
+				pos = i
+				break
+			}
+		}
+		var w workload.InstanceStatus
+		if pos == -1 {
+			w = workload.InstanceStatus{Index: idx}
+		} else {
+			s := cs.OMENative.InstanceStatuses[pos]
+			w = workload.InstanceStatus{
+				Index:           s.Index,
+				Incarnation:     s.Incarnation,
+				Phase:           workload.InstancePhase(s.Phase),
+				RunningRevision: s.RunningRevision,
+				TargetRevision:  s.TargetRevision,
+				ActiveOrdinal:   s.ActiveOrdinal,
+				Operation:       fromV1beta1Op(s.Operation),
+			}
+		}
+		if !mutate(&w) {
+			return nil
+		}
+		updated := v1beta1.OMENativeInstanceStatus{
+			Index:           w.Index,
+			Incarnation:     w.Incarnation,
+			Phase:           v1beta1.OMENativeInstancePhase(w.Phase),
+			RunningRevision: w.RunningRevision,
+			TargetRevision:  w.TargetRevision,
+			ActiveOrdinal:   w.ActiveOrdinal,
+			Operation:       toV1beta1Op(w.Operation),
+		}
+		if pos == -1 {
+			cs.OMENative.InstanceStatuses = append(cs.OMENative.InstanceStatuses, updated)
+		} else {
+			cs.OMENative.InstanceStatuses[pos] = updated
+		}
+		fresh.Status.Components[component] = cs
+		return c.Status().Update(ctx, fresh)
+	}
+}
+
+func fromV1beta1Op(op *v1beta1.InstanceOperation) *workload.InstanceOperation {
+	if op == nil {
+		return nil
+	}
+	return &workload.InstanceOperation{
+		ID:             op.ID,
+		Type:           workload.InstanceOperationType(op.Type),
+		Step:           op.Step,
+		StartedAt:      op.StartedAt,
+		LastProgressAt: op.LastProgressAt,
+		Deadline:       op.Deadline,
+	}
+}
+
+func toV1beta1Op(op *workload.InstanceOperation) *v1beta1.InstanceOperation {
+	if op == nil {
+		return nil
+	}
+	return &v1beta1.InstanceOperation{
+		ID:             op.ID,
+		Type:           v1beta1.InstanceOperationType(op.Type),
+		Step:           op.Step,
+		StartedAt:      op.StartedAt,
+		LastProgressAt: op.LastProgressAt,
+		Deadline:       op.Deadline,
+	}
+}
+
+// buildPlanSinglePodEngine builds the workload.ComponentPlan a
+// single-pod engine reconcile uses. Replicas drives the count.
+func buildPlanSinglePodEngine(replicas int32) workload.ComponentPlan {
+	instances := make([]workload.InstancePlan, replicas)
+	for i := int32(0); i < replicas; i++ {
+		instances[i] = workload.InstancePlan{
+			Index:       i,
+			Incarnation: 1,
+			Runners:     []workload.RunnerPlan{{Name: "default", Size: 1}},
+		}
+	}
+	return workload.ComponentPlan{
+		Component:            v1beta1.EngineComponent,
+		Replicas:             replicas,
+		Instances:            instances,
+		InstanceReadyTimeout: 30 * time.Minute,
+	}
+}
+
+// resetExpectations re-seats the workload-level expectations singleton
+// so back-to-back tests don't observe prior ExpectCreates entries.
 func resetExpectations(t *testing.T) {
 	t.Helper()
-	core.DefaultExpectations = core.NewExpectations()
+	workload.DefaultExpectations = workload.NewExpectations()
+}
+
+// podForInstance fabricates a pod matching what Render() would produce
+// for the given (ISVC, instance) pair, with knobs for runtime-ready /
+// serving state. The `ready` knob synthesizes ContainersReady=True,
+// not PodReady=True, because the controller gates on ContainersReady
+// and PodReady requires every readiness gate (including ome.io/serving)
+// to be True — which is exactly what the controller is about to write.
+func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, serving bool) *corev1.Pod {
+	labels := testPodLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1, 0)
+	labels[query.LabelRevisionHash] = testRevisionHash
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      query.PodName(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 0),
+			Namespace: isvc.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "test:v1"}},
+		},
+	}
+	now := metav1.NewTime(time.Now())
+	if ready {
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type:               corev1.ContainersReady,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: now,
+		})
+	}
+	if serving {
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type:               query.ServingConditionType,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: now,
+		})
+	}
+	return pod
 }
 
 func TestCreate_NilClient(t *testing.T) {
 	resetExpectations(t)
-	plan := core.ComponentPlan{Component: v1beta1.EngineComponent}
-	_, err := Create(context.Background(), core.ReconcileParams{}, plan, nil)
+	plan := workload.ComponentPlan{Component: v1beta1.EngineComponent}
+	_, err := ops.Create(context.Background(), workload.Deps{}, workload.ReconcileInput{}, plan, nil)
 	if err == nil {
 		t.Fatal("expected error for nil client")
 	}
@@ -124,13 +322,10 @@ func TestCreate_EmptyClusterCreatesPodsAndRequeues(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 2)
 	c := newFakeClient(t, isvc)
-	p := minimalParams(t, isvc, c)
-	plan, err := core.BuildPlan(p)
-	if err != nil {
-		t.Fatalf("core.BuildPlan: %v", err)
-	}
+	input := buildTestInput(isvc, c, v1beta1.EngineComponent)
+	plan := buildPlanSinglePodEngine(2)
 
-	result, err := Create(context.Background(), p, plan, nil)
+	result, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -201,10 +396,10 @@ func TestCreate_AllPodsExistButNotReady_HoldsCreating(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	pod := podForInstance(isvc, 0, false /* ready */, false /* serving */)
 	c := newFakeClient(t, isvc, pod)
-	p := minimalParams(t, isvc, c)
-	plan, _ := core.BuildPlan(p)
+	input := buildTestInput(isvc, c, v1beta1.EngineComponent)
+	plan := buildPlanSinglePodEngine(1)
 
-	result, err := Create(context.Background(), p, plan, nil)
+	result, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -224,10 +419,10 @@ func TestCreate_AllPodsReady_FlipsServingAndMarksReady(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	pod := podForInstance(isvc, 0, true /* ready */, false /* serving */)
 	c := newFakeClient(t, isvc, pod)
-	p := minimalParams(t, isvc, c)
-	plan, _ := core.BuildPlan(p)
+	input := buildTestInput(isvc, c, v1beta1.EngineComponent)
+	plan := buildPlanSinglePodEngine(1)
 
-	result, err := Create(context.Background(), p, plan, nil)
+	result, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -266,10 +461,10 @@ func TestCreate_PartialPods_CreatesOnlyMissing(t *testing.T) {
 	// Instance 0 already exists; Instance 1 missing.
 	existing := podForInstance(isvc, 0, false, false)
 	c := newFakeClient(t, isvc, existing)
-	p := minimalParams(t, isvc, c)
-	plan, _ := core.BuildPlan(p)
+	input := buildTestInput(isvc, c, v1beta1.EngineComponent)
+	plan := buildPlanSinglePodEngine(2)
 
-	_, err := Create(context.Background(), p, plan, nil)
+	_, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -288,62 +483,19 @@ func TestCreate_IdempotentOnAlreadyExists(t *testing.T) {
 	// which we treat as a no-op.
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClient(t, isvc)
-	p := minimalParams(t, isvc, c)
-	plan, _ := core.BuildPlan(p)
+	input := buildTestInput(isvc, c, v1beta1.EngineComponent)
+	plan := buildPlanSinglePodEngine(1)
 
 	// First call creates the pod.
-	if _, err := Create(context.Background(), p, plan, nil); err != nil {
+	if _, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
 	// Reset expectations so the second call attempts to re-create.
-	core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
+	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
 	// Second call should not error even though the pod already exists.
-	if _, err := Create(context.Background(), p, plan, nil); err != nil {
+	if _, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil); err != nil {
 		t.Fatalf("second Create: %v", err)
 	}
-}
-
-// podForInstance fabricates a pod matching what Render() would produce
-// for the given (ISVC, instance) pair, with knobs for runtime-ready /
-// serving state.
-//
-// The `ready` knob synthesizes ContainersReady=True, not PodReady=True,
-// because the controller gates on ContainersReady and PodReady requires
-// every readiness gate (including ome.io/serving) to be True — which is
-// exactly what the controller is about to write. Synthesizing PodReady
-// in tests would mask the real ordering.
-func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, serving bool) *corev1.Pod {
-	labels := testPodLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1, 0)
-	// Production Render stamps ome.io/revision-hash so per-revision
-	// Service selectors match. Test pods must carry it too — the drain
-	// path computes the per-revision routed Service from this label.
-	labels[query.LabelRevisionHash] = testRevisionHash
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodName(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 0),
-			Namespace: isvc.Namespace,
-			Labels:    labels,
-		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{Name: "main", Image: "test:v1"}},
-		},
-	}
-	now := metav1.NewTime(time.Now())
-	if ready {
-		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-			Type:               corev1.ContainersReady,
-			Status:             corev1.ConditionTrue,
-			LastTransitionTime: now,
-		})
-	}
-	if serving {
-		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-			Type:               query.ServingConditionType,
-			Status:             corev1.ConditionTrue,
-			LastTransitionTime: now,
-		})
-	}
-	return pod
 }
 
 // Promote to Ready must record RunningRevision so detectUpdateTrigger's
@@ -357,13 +509,13 @@ func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 	// straight to the promote step.
 	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
 	c := newFakeClient(t, isvc, pod)
-	p := minimalParams(t, isvc, c)
-	plan, _ := core.BuildPlan(p)
+	input := buildTestInput(isvc, c, v1beta1.EngineComponent)
+	plan := buildPlanSinglePodEngine(1)
 	target := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-deadbeef", Namespace: "prod"},
 	}
 
-	if _, err := Create(context.Background(), p, plan, target); err != nil {
+	if _, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, target); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -392,10 +544,10 @@ func TestCreate_PromoteWithNilTargetSkipsRunningRevision(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	pod := podForInstance(isvc, 0, true, true)
 	c := newFakeClient(t, isvc, pod)
-	p := minimalParams(t, isvc, c)
-	plan, _ := core.BuildPlan(p)
+	input := buildTestInput(isvc, c, v1beta1.EngineComponent)
+	plan := buildPlanSinglePodEngine(1)
 
-	if _, err := Create(context.Background(), p, plan, nil); err != nil {
+	if _, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

@@ -3,6 +3,7 @@ package workload
 import (
 	"context"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -33,6 +34,16 @@ type ReconcileInput struct {
 	// *v1beta1.InferenceService; the IR caller will set it to
 	// *v1beta1.InferenceReplica.
 	OwnerObject client.Object
+
+	// OwnerGVK is the GroupVersionKind the workload renderer stamps on
+	// every emitted pod's OwnerReference. Decoded objects often have
+	// an empty TypeMeta because controller-runtime strips it during
+	// deserialization, so the workload package cannot reliably derive
+	// the GVK from OwnerObject — the caller passes the correct value
+	// alongside. The ISVC caller sets this to
+	// `ome.io/v1beta1, Kind=InferenceService`; the IR caller will set
+	// the IR equivalent.
+	OwnerGVK schema.GroupVersionKind
 
 	// EventTarget is the object emitted events are stamped against.
 	// Usually OwnerObject; the IR caller may set this to the parent

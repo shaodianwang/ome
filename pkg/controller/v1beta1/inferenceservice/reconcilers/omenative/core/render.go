@@ -59,11 +59,22 @@ func isvcRenderKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentTy
 	}
 }
 
-// isvcRenderHook returns the workload.RenderHook the ISVC adapter
+// ISVCRenderHook returns the workload.RenderHook the ISVC adapter
 // wires onto every Render call: coordination.InjectPeerEnv so
 // OME_<PEER>_ENDPOINT vars land on every container when the ISVC
 // has a rolloutCoordination block. Returns nil when the ISVC has no
 // coordination block (renderer skips the no-op call).
+//
+// Exposed for callers (e.g. the omenative ops dispatch shim) that
+// construct workload.Deps directly rather than going through the
+// RenderWithRevisionForISVC wrapper.
+func ISVCRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
+	return isvcRenderHook(isvc)
+}
+
+// isvcRenderHook is the unexported implementation kept as the in-package
+// entry point so the existing RenderWithRevisionForISVC wiring keeps
+// using the unqualified name.
 func isvcRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
 	if isvc == nil || isvc.Spec.RolloutCoordination == nil {
 		return nil
