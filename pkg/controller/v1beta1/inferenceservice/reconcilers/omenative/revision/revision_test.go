@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -93,6 +94,85 @@ func TestRevisionHash_DeterministicForSameInput(t *testing.T) {
 	}
 	if string(raw1) != string(raw2) {
 		t.Errorf("raw bytes differ across calls")
+	}
+}
+
+// TestRevisionHash_DeterministicAcrossInvocations pins hash determinism
+// across many invocations on a SAME PodSpec / PodMeta combination that
+// exercises every map-typed field in the canonical payload — NodeSelector,
+// Container.Resources.{Limits,Requests}, PodMeta.{Labels,Annotations}.
+// Go's runtime randomizes map iteration order, so any code path that
+// serializes a map without sorting keys would produce non-deterministic
+// output and a non-deterministic hash; this test guards against any such
+// regression. The 1000-iteration budget is high enough to catch even a
+// rare flake; in practice json.Marshal sorts keys, so all 1000 calls
+// must agree.
+//
+// Pins the absence of A-2-shape orphan-hash drift in the revision
+// pipeline: a single bump of a pod-template annotation must produce
+// exactly ONE new ControllerRevision name, not a fresh name on every
+// reconcile.
+func TestRevisionHash_DeterministicAcrossInvocations(t *testing.T) {
+	// PodSpec with multiple map-typed fields to exercise the
+	// serialization path most likely to be non-deterministic if
+	// json.Marshal ever changes (or a custom MarshalJSON is added).
+	ps := &corev1.PodSpec{
+		NodeSelector: map[string]string{
+			"node-pool":     "gpu-a100",
+			"zone":          "us-west-2a",
+			"models.ome.io": "Ready",
+			"accelerator":   "h100",
+		},
+		Containers: []corev1.Container{
+			{
+				Name:  "main",
+				Image: "engine:v1",
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						"nvidia.com/gpu": resource.MustParse("8"),
+						"memory":         resource.MustParse("256Gi"),
+						"cpu":            resource.MustParse("32"),
+					},
+					Requests: corev1.ResourceList{
+						"nvidia.com/gpu": resource.MustParse("8"),
+						"memory":         resource.MustParse("128Gi"),
+						"cpu":            resource.MustParse("16"),
+					},
+				},
+			},
+		},
+	}
+	meta := &metav1.ObjectMeta{
+		Labels: map[string]string{
+			"app.kubernetes.io/name":      "engine",
+			"app.kubernetes.io/instance":  "a1",
+			"ome.io/serving-runtime":      "srt-test-clone-pd",
+			"ome.io/base-model-name":      "llama-7b",
+			"app.kubernetes.io/component": "engine",
+		},
+		Annotations: map[string]string{
+			"ome.io/deploymentMode":           "OMENative",
+			"ome.io/base-model-name":          "llama-7b",
+			"test.ome.io/rollout-trigger":     "2026-05-27T10:42:31.999999999Z",
+			"ome.io/ingress-disable-creation": "true",
+			"ome.io/storage-uri":              "oci://meta/llama-7b@v1",
+			"ome.io/base-model-format":        "huggingface",
+		},
+	}
+	const iterations = 1000
+	want, _, err := HashWithWorker(ps, nil, meta, nil)
+	if err != nil {
+		t.Fatalf("baseline hash: %v", err)
+	}
+	for i := 0; i < iterations; i++ {
+		got, _, err := HashWithWorker(ps, nil, meta, nil)
+		if err != nil {
+			t.Fatalf("iter %d hash: %v", i, err)
+		}
+		if got != want {
+			t.Fatalf("hash drift at iter %d: got %q want %q (non-determinism in revision pipeline)",
+				i, got, want)
+		}
 	}
 }
 

@@ -156,6 +156,22 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		if topCond != nil {
 			p.ISVC.Status.SetCondition(topCond.Type, topCond)
 		}
+		// Mirror the just-committed Component-level revision fields
+		// (UpdateRevision, CurrentRevision) onto the cached ISVC the
+		// caller is reading. Same shape as PR #246's MutateInstance
+		// mirror and bumpCollisionCount's CollisionCount mirror in
+		// reconciler.go: any downstream caller that reads
+		// p.ISVC.Status.Components[X].OMENative within the same
+		// reconcile (coordination's latestRevisionHash, ops/create.go's
+		// revisionHashForInstance, etc.) sees the post-write state, not
+		// the stale snapshot from when the reconcile started.
+		// Without the mirror, a future code path that fires AFTER
+		// AggregateAndWriteStatus would observe a stale
+		// UpdateRevision / CurrentRevision and could re-compute a
+		// downstream hash off the wrong value, surfacing as the A-2
+		// orphan-hash drift symptom (status field references a CR
+		// that no longer matches what the controller just decided).
+		mirrorComponentRevisionFields(p.ISVC, plan.Component, cs.OMENative)
 		return nil
 	})
 	if isvcGone {
@@ -616,4 +632,49 @@ func topLevelComponentReadyFromOMENative(component v1beta1.ComponentType, cs *v1
 		cond.Message = fmt.Sprintf("%d/%d Instances ready", cs.ReadyReplicas, cs.Replicas)
 	}
 	return cond
+}
+
+// mirrorComponentRevisionFields copies UpdateRevision + CurrentRevision
+// from the just-committed OMENativeComponentStatus onto the caller's
+// in-memory ISVC snapshot. The dispatcher and the parent reconciler can
+// then observe the post-write revision pointers within the same
+// reconcile pass, instead of the stale pre-reconcile values.
+//
+// Pairs with the mirror in status/mutate.go's MutateInstance (per-Instance
+// fields) and reconciler.go's bumpCollisionCount (CollisionCount):
+// every Component-level field AggregateAndWriteStatus owns lands back
+// onto p.ISVC, so downstream callers reading p.ISVC.Status.Components[X]
+// see the canonical post-write shape.
+//
+// Creates the Components map / OMENative sub-status on demand so the
+// caller doesn't need to pre-allocate when this is the first
+// AggregateAndWriteStatus pass for a brand-new Component.
+//
+// Bug context: the A-2 SurgeThenDrain orphan-hash symptom (task #56)
+// observed UpdateRevision and CurrentRevision pointing at hashes with
+// no backing ControllerRevision. The most likely fault mode is a
+// downstream caller that reads UR/CR from p.ISVC (stale, pre-write)
+// while AggregateAndWriteStatus had already written different values to
+// the apiserver — the parent reconciler's updateStatus flush then
+// commits the stale in-memory values via desiredService.Status,
+// overwriting the OMENative reconciler's write. The parent's
+// mergeOMENativeComponentStatus restores the OMENative substatus from
+// the post-conflict re-read, so in practice this race is closed there
+// — but mirroring the values onto p.ISVC also closes the in-reconcile
+// observability gap and matches the precedent set by PR #246 for
+// per-Instance fields.
+func mirrorComponentRevisionFields(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, src *v1beta1.OMENativeComponentStatus) {
+	if isvc == nil || src == nil {
+		return
+	}
+	if isvc.Status.Components == nil {
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+	}
+	cs := isvc.Status.Components[component]
+	if cs.OMENative == nil {
+		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	}
+	cs.OMENative.UpdateRevision = src.UpdateRevision
+	cs.OMENative.CurrentRevision = src.CurrentRevision
+	isvc.Status.Components[component] = cs
 }

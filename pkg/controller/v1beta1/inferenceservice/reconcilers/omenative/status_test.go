@@ -20,6 +20,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/revision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 )
 
@@ -549,5 +550,390 @@ func TestMutateInstanceStatus_NoWriteWhenMutateReturnsFalse(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Errorf("expected 0 Update attempts when mutate returns false, got %d", calls)
+	}
+}
+
+// TestSurgeUpdate_SingleBump_URMatchesCR_OnlyOneNewCR is the unit
+// reproduction of task #56's A-2 cluster symptom: a single bump of an
+// ISVC's pod-template annotation must, after the surge cycle fully
+// completes, leave:
+//   - exactly ONE new ControllerRevision created (count 1 → 2);
+//   - status.UpdateRevision == status.CurrentRevision == the new CR's
+//     name (no orphan-hash drift between the two status fields).
+//
+// The production observation (cluster f783c1b0, post-#256+#258):
+//   - CRs count 1 → 2 (one new CR created — correct).
+//   - status.UpdateRevision = 300e2aa3 (the new target).
+//   - status.CurrentRevision = e176faf1 (a hash with NO backing CR).
+//
+// The orphan in CurrentRevision is the symptom this test pins shut. The
+// test drives the full surge cycle (initial create → bump → surge pod
+// create → surge ready → drain old → promote) through ReconcileComponent,
+// then asserts the status invariant.
+//
+// Mechanism: AggregateAndWriteStatus stamps cs.OMENative.UpdateRevision =
+// target.Name on every pass and promotes CurrentRevision = target.Name
+// when rolloutComplete=true. target.Name is the .Name of the
+// ControllerRevision EnsureControllerRevision returned, which is always
+// a backing CR in the cluster — so neither field should ever drift to
+// an orphan hash. The test exercises the end-to-end path.
+func TestSurgeUpdate_SingleBump_URMatchesCR_OnlyOneNewCR(t *testing.T) {
+	resetExpectations(t)
+	// Build a SurgeThenDrain ISVC: minReplicas=1, engine annotation set
+	// to the "pre-bump" trigger value. The annotation goes into the
+	// rendered ObjectMeta and thus into the hash → bumping it triggers a
+	// new revision exactly like the cluster repro.
+	isvc := minimalISVC("a1", "sandbox", 1)
+	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
+		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+			Type: v1beta1.OMENativeUpdateStrategySurgeThenDrain,
+		},
+	}
+	isvc.Spec.Engine.Annotations = map[string]string{
+		"test.ome.io/rollout-trigger": "initial",
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+
+	// Initial reconcile: drives Create. The exact set of mid-state
+	// reconciles isn't load-bearing for this test — what matters is that
+	// after the bump, the surge completes and UR == CR == new CR's name.
+	//
+	// First, set up a steady-state Ready InstanceStatus on the initial
+	// revision by hand (so we don't have to spin a full Create loop —
+	// that's covered by TestReconcileComponent_DispatchesToCreate).
+	initialSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "engine:initial"}},
+	}
+	initialMeta := &metav1.ObjectMeta{
+		Annotations: map[string]string{
+			"test.ome.io/rollout-trigger": "initial",
+		},
+	}
+	initialCR, _, err := revision.EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, initialSpec, initialMeta, nil)
+	if err != nil {
+		t.Fatalf("seed initial CR: %v", err)
+	}
+
+	// Seed the steady-state pod for ord=0 on the initial revision.
+	oldPod := podAtIncarnation(isvc, 0, 1, true /* ready */, true /* serving */)
+	oldPod.Labels[query.LabelPodOrdinal] = "0"
+	oldPod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(initialCR.Name)
+	if err := c.Create(context.Background(), oldPod); err != nil {
+		t.Fatalf("seed old pod: %v", err)
+	}
+	// Update isvc.Status to reflect the steady-state on the initial CR.
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				CurrentRevision: initialCR.Name,
+				UpdateRevision:  initialCR.Name,
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
+					Index:           0,
+					Incarnation:     1,
+					Phase:           v1beta1.OMENativeInstanceReady,
+					RunningRevision: initialCR.Name,
+				}},
+			},
+		},
+	}
+	if err := c.Status().Update(context.Background(), isvc); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+
+	// Pre-bump sanity: only 1 CR exists.
+	preList := &appsv1.ControllerRevisionList{}
+	_ = c.List(context.Background(), preList, client.InNamespace("sandbox"))
+	if len(preList.Items) != 1 {
+		t.Fatalf("pre-bump CR count: got %d want 1", len(preList.Items))
+	}
+
+	// --- BUMP ---
+	// Operator changes the annotation to a unique nanosecond timestamp —
+	// the canonical SurgeThenDrain test trigger. The new value forces a
+	// new revision hash and surge cycle.
+	isvc.Spec.Engine.Annotations["test.ome.io/rollout-trigger"] = "bumped"
+
+	// Drive ReconcileComponent through the full surge cycle. Each pass
+	// advances pod state to simulate the kubelet acknowledging
+	// transitions (ContainersReady, serving=True, old pod gone).
+	bumpedSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "engine:initial"}},
+	}
+	bumpedMeta := metav1.ObjectMeta{
+		Annotations: map[string]string{
+			"test.ome.io/rollout-trigger": "bumped",
+		},
+	}
+	p := ReconcileParams{
+		ISVC:         isvc,
+		ObjectMeta:   bumpedMeta,
+		PodSpec:      bumpedSpec,
+		Component:    v1beta1.EngineComponent,
+		ComponentExt: &isvc.Spec.Engine.ComponentExtensionSpec,
+		Client:       c,
+	}
+
+	// Pass 1: ensureRevisionWithCollisionRetry creates the new CR.
+	// surgeUpdate creates the surge pod at ord=1, stamps Op{Step=Surge}.
+	// Defer: AggregateAndWriteStatus writes UR=newCR.Name (rolloutComplete=false → CR stays at initial).
+	if _, err := ReconcileComponent(context.Background(), p); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+
+	// After pass 1, the new CR exists.
+	postPass1List := &appsv1.ControllerRevisionList{}
+	_ = c.List(context.Background(), postPass1List, client.InNamespace("sandbox"))
+	if len(postPass1List.Items) != 2 {
+		names := make([]string, 0, len(postPass1List.Items))
+		for _, cr := range postPass1List.Items {
+			names = append(names, cr.Name)
+		}
+		t.Fatalf("post-pass-1 CR count: got %d (%v) want 2", len(postPass1List.Items), names)
+	}
+
+	// Identify the new CR (the one that's NOT initialCR).
+	var newCR *appsv1.ControllerRevision
+	for i := range postPass1List.Items {
+		cr := &postPass1List.Items[i]
+		if cr.Name != initialCR.Name {
+			newCR = cr
+			break
+		}
+	}
+	if newCR == nil {
+		t.Fatalf("could not find the new CR")
+	}
+
+	// Simulate kubelet: surge pod becomes ContainersReady.
+	surgePodName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 1)
+	surgePod := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: surgePodName}, surgePod); err != nil {
+		t.Fatalf("get surge pod: %v", err)
+	}
+	surgePod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionFalse},
+	}
+	if err := c.Status().Update(context.Background(), surgePod); err != nil {
+		t.Fatalf("flip surge pod ContainersReady: %v", err)
+	}
+
+	// Pass 2: surge advances to Step=SurgeDrain (surge serving=True,
+	// old serving=False, wait drain).
+	if _, err := ReconcileComponent(context.Background(), p); err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+
+	// Simulate drain completing: delete old pod, flip surge to serving=True.
+	if err := c.Delete(context.Background(), oldPod); err != nil {
+		t.Fatalf("delete old pod: %v", err)
+	}
+	surgePodFresh := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: surgePodName}, surgePodFresh); err != nil {
+		t.Fatalf("re-read surge pod: %v", err)
+	}
+	surgePodFresh.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
+	}
+	if err := c.Status().Update(context.Background(), surgePodFresh); err != nil {
+		t.Fatalf("flip surge to serving=True: %v", err)
+	}
+
+	// Pass 3: Phase 3 promote — old pod gone, surge becomes canonical.
+	// AggregateAndWriteStatus: rolloutComplete=true → CR=newCR.Name.
+	if _, err := ReconcileComponent(context.Background(), p); err != nil {
+		t.Fatalf("pass 3: %v", err)
+	}
+
+	// Pass 4: idempotent pass to settle any remaining status writes
+	// (e.g., the post-promote status mirror). This is the parallel of
+	// the cluster's "another reconcile happened after promote" step.
+	if _, err := ReconcileComponent(context.Background(), p); err != nil {
+		t.Fatalf("pass 4: %v", err)
+	}
+
+	// --- ASSERTIONS ---
+
+	// Exactly 2 CRs in the cluster (no extras created by spurious bumps).
+	finalCRs := &appsv1.ControllerRevisionList{}
+	_ = c.List(context.Background(), finalCRs, client.InNamespace("sandbox"))
+	if len(finalCRs.Items) != 2 {
+		names := make([]string, 0, len(finalCRs.Items))
+		for _, cr := range finalCRs.Items {
+			names = append(names, cr.Name)
+		}
+		t.Errorf("final CR count: got %d (%v) want 2 (initial + new)", len(finalCRs.Items), names)
+	}
+
+	// Status: UR == CR == newCR.Name. Both must reference a backing CR.
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read ISVC: %v", err)
+	}
+	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	if cs == nil {
+		t.Fatalf("OMENativeComponentStatus missing")
+	}
+	if cs.UpdateRevision != newCR.Name {
+		t.Errorf("UpdateRevision: got %q want %q (new CR)", cs.UpdateRevision, newCR.Name)
+	}
+	if cs.CurrentRevision != newCR.Name {
+		t.Errorf("CurrentRevision: got %q want %q (new CR, rollout complete)",
+			cs.CurrentRevision, newCR.Name)
+	}
+	if cs.UpdateRevision != cs.CurrentRevision {
+		t.Errorf("UR != CR after full surge convergence: UR=%q CR=%q (this is the A-2 orphan-hash bug)",
+			cs.UpdateRevision, cs.CurrentRevision)
+	}
+
+	// Sanity: every name referenced by status has a backing CR.
+	crNames := make(map[string]struct{}, len(finalCRs.Items))
+	for _, cr := range finalCRs.Items {
+		crNames[cr.Name] = struct{}{}
+	}
+	if _, ok := crNames[cs.UpdateRevision]; !ok {
+		t.Errorf("status.UpdateRevision=%q is an ORPHAN — no backing CR (cluster has %v)",
+			cs.UpdateRevision, crNamesSlice(finalCRs.Items))
+	}
+	if _, ok := crNames[cs.CurrentRevision]; !ok {
+		t.Errorf("status.CurrentRevision=%q is an ORPHAN — no backing CR (cluster has %v)",
+			cs.CurrentRevision, crNamesSlice(finalCRs.Items))
+	}
+}
+
+// crNamesSlice returns the .Name of every CR in items, for error formatting.
+func crNamesSlice(items []appsv1.ControllerRevision) []string {
+	out := make([]string, 0, len(items))
+	for _, cr := range items {
+		out = append(out, cr.Name)
+	}
+	return out
+}
+
+// TestAggregateAndWriteStatus_MirrorsCommittedRevisionFieldsOntoInMemoryISVC
+// pins the (d)-style fix for task #56: after AggregateAndWriteStatus
+// commits UR / CR to the cluster, the just-committed values must also
+// land on the caller's in-memory ISVC snapshot. Pairs with PR #246's
+// MutateInstance mirror (per-Instance fields) and reconciler.go's
+// bumpCollisionCount mirror (CollisionCount) — every status-write
+// entry point owns the same post-commit observability contract.
+//
+// Without the mirror, a downstream caller that reads
+// p.ISVC.Status.Components[X].OMENative within the same reconcile
+// (coordination's latestRevisionHash, ops/create.go's
+// revisionHashForInstance, etc.) observes the stale pre-write values,
+// which is the operative fault mode for the A-2 SurgeThenDrain
+// orphan-hash drift symptom on the cluster.
+func TestAggregateAndWriteStatus_MirrorsCommittedRevisionFieldsOntoInMemoryISVC(t *testing.T) {
+	resetExpectations(t)
+	// Single Instance already on the target revision and Phase=Ready —
+	// AggregateAndWriteStatus stamps both UR and CR to target.Name. The
+	// mirror must reflect both on the in-memory ISVC.
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	targetSpec := targetSpecImage("llama:v1")
+	pod := podAtIncarnation(isvc, 0, 1, true, true)
+	pod.Spec.NodeName = "node-7"
+	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, v1beta1.EngineComponent), pod, true)
+	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
+	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpec)
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].RunningRevision = tcr.Name
+	if err := c.Status().Update(context.Background(), isvc); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	// Sanity: before AggregateAndWriteStatus, the in-memory ISVC has the
+	// seed values (UR and CR both empty, since isvcReadyAtIncarnation
+	// only seeds Phase=Ready, not the revision fields).
+	preCS := isvc.Status.Components[v1beta1.EngineComponent].OMENative
+	if preCS == nil {
+		t.Fatalf("pre-test: OMENativeComponentStatus missing")
+	}
+
+	if err := AggregateAndWriteStatus(context.Background(), p, plan, tcr); err != nil {
+		t.Fatalf("AggregateAndWriteStatus: %v", err)
+	}
+
+	// API: UR == CR == tcr.Name (rolloutComplete=true triggers CR promote).
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read ISVC: %v", err)
+	}
+	apiCS := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	if apiCS.UpdateRevision != tcr.Name {
+		t.Fatalf("API UpdateRevision: got %q want %q", apiCS.UpdateRevision, tcr.Name)
+	}
+	if apiCS.CurrentRevision != tcr.Name {
+		t.Fatalf("API CurrentRevision: got %q want %q", apiCS.CurrentRevision, tcr.Name)
+	}
+
+	// MIRROR: the in-memory ISVC must reflect the just-committed values.
+	mirrorCS := isvc.Status.Components[v1beta1.EngineComponent].OMENative
+	if mirrorCS == nil {
+		t.Fatalf("mirror missed OMENativeComponentStatus")
+	}
+	if mirrorCS.UpdateRevision != tcr.Name {
+		t.Errorf("in-memory UpdateRevision: got %q want %q (mirror gap — A-2 orphan-hash bug shape)",
+			mirrorCS.UpdateRevision, tcr.Name)
+	}
+	if mirrorCS.CurrentRevision != tcr.Name {
+		t.Errorf("in-memory CurrentRevision: got %q want %q (mirror gap — A-2 orphan-hash bug shape)",
+			mirrorCS.CurrentRevision, tcr.Name)
+	}
+}
+
+// TestAggregateAndWriteStatus_MirrorsURWhenRolloutInProgress pins the
+// mid-rollout shape: when rolloutComplete is false (typical mid-surge
+// state), AggregateAndWriteStatus stamps UR=target.Name but leaves CR
+// at its previous value. The mirror must reflect both — UR=new target,
+// CR=stale (whatever the cluster previously committed).
+func TestAggregateAndWriteStatus_MirrorsURWhenRolloutInProgress(t *testing.T) {
+	resetExpectations(t)
+	// Instance is Ready but RunningRevision is some other CR → rolloutComplete=false.
+	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	targetSpec := targetSpecImage("llama:v2")
+	pod := podAtIncarnation(isvc, 0, 1, true, true)
+	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, v1beta1.EngineComponent), pod, true)
+	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
+	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpec)
+	// Pre-seed both API and in-memory CR field with an "older revision" —
+	// simulates the prior rolled-out CR's name surviving across reconciles.
+	const olderRev = "llama-70b-engine-older"
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].RunningRevision = olderRev
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision = olderRev
+	if err := c.Status().Update(context.Background(), isvc); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	if err := AggregateAndWriteStatus(context.Background(), p, plan, tcr); err != nil {
+		t.Fatalf("AggregateAndWriteStatus: %v", err)
+	}
+
+	// API: UR=tcr (new), CR=olderRev (rollout NOT complete).
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read ISVC: %v", err)
+	}
+	apiCS := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	if apiCS.UpdateRevision != tcr.Name {
+		t.Errorf("API UpdateRevision: got %q want %q", apiCS.UpdateRevision, tcr.Name)
+	}
+	if apiCS.CurrentRevision != olderRev {
+		t.Errorf("API CurrentRevision: got %q want %q (should not promote mid-rollout)",
+			apiCS.CurrentRevision, olderRev)
+	}
+
+	// MIRROR: in-memory must match.
+	mirrorCS := isvc.Status.Components[v1beta1.EngineComponent].OMENative
+	if mirrorCS.UpdateRevision != tcr.Name {
+		t.Errorf("in-memory UpdateRevision: got %q want %q", mirrorCS.UpdateRevision, tcr.Name)
+	}
+	if mirrorCS.CurrentRevision != olderRev {
+		t.Errorf("in-memory CurrentRevision: got %q want %q (mid-rollout preserves prior CR)",
+			mirrorCS.CurrentRevision, olderRev)
 	}
 }
