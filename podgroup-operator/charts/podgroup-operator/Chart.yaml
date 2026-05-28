@@ -1,0 +1,6 @@
+apiVersion: v2
+name: podgroup-operator
+description: PodGroupDeployment operator for scheduler-plugins PodGroup workloads
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

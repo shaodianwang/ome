@@ -1,0 +1,299 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sglang-podgroup-test-mn-router
+  namespace: sandbox
+  labels:
+    app.kubernetes.io/name: sglang-podgroup-test-mn-router
+    app.kubernetes.io/component: router
+spec:
+  serviceAccountName: sglang-sandbox-automated-router #using exisiting service account
+  priorityClassName: staging
+  schedulerName: default-scheduler
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 30
+  imagePullSecrets:
+  - name: regcred
+  nodeSelector:
+    kubernetes.io/arch: arm64
+  containers:
+  - name: router
+    image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-router:20260515-d702bf5f
+    imagePullPolicy: IfNotPresent
+    args:
+    - --port
+    - "30080"
+    - --metrics-port
+    - "9090"
+    - --model-name
+    - llama4x
+    - --backend-timeout
+    - "300"
+    - --bootstrap-port
+    - "8998"
+    - --k8s-namespace
+    - sandbox
+    - --prefill-label-selector
+    - app.kubernetes.io/component=prefill,app.kubernetes.io/instance=sglang-podgroup-test-mn-prefill,podgroup.meta.com/service-target=true
+    - --decode-label-selector
+    - app.kubernetes.io/component=decode,app.kubernetes.io/instance=sglang-podgroup-test-mn-decode,podgroup.meta.com/service-target=true
+    - --k8s-engine-port
+    - "30000"
+    ports:
+    - name: http
+      containerPort: 30080
+    - name: metrics
+      containerPort: 9090
+    resources:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+    startupProbe:
+      failureThreshold: 30
+      httpGet:
+        path: /readiness
+        port: 30080
+      periodSeconds: 20
+      timeoutSeconds: 10
+    readinessProbe:
+      failureThreshold: 5
+      httpGet:
+        path: /readiness
+        port: 30080
+      periodSeconds: 30
+      timeoutSeconds: 10
+    livenessProbe:
+      failureThreshold: 5
+      httpGet:
+        path: /liveness
+        port: 30080
+      periodSeconds: 30
+      timeoutSeconds: 10
+---
+apiVersion: podgroup.meta.com/v1alpha1
+kind: PodGroupDeploymentRollout
+metadata:
+  name: sglang-podgroup-test-mn
+  namespace: sandbox
+spec:
+  mode: disagg
+  strategy:
+    maxUnavailablePercent: 25
+    maxSkew: 0
+  base:
+    topologyKey: ds.coreweave.com/nvlink.domain
+    serviceTargetOrdinal: 0
+    scheduleTimeoutSeconds: 60
+    schedulerName: default-scheduler
+    multiNode:
+      enabled: true
+      tensorParallelSize: 8
+      distInitPort: 20000
+    updateStrategy:
+      type: RecreatePod
+    template:
+      metadata:
+        annotations:
+          fb.metric.schema: sglang_metrics
+          k8s.v1.cni.cncf.io/networks: >-
+            [{"name":"ibs0p0-macvlan","namespace":"cw-multus"},{"name":"ibs0p1-macvlan","namespace":"cw-multus"},{"name":"ibs0p2-macvlan","namespace":"cw-multus"},{"name":"ibs0p3-macvlan","namespace":"cw-multus"},{"name":"ibs1p0-macvlan","namespace":"cw-multus"},{"name":"ibs1p1-macvlan","namespace":"cw-multus"},{"name":"ibs1p2-macvlan","namespace":"cw-multus"},{"name":"ibs1p3-macvlan","namespace":"cw-multus"},{"name":"ibs2p0-macvlan","namespace":"cw-multus"},{"name":"ibs2p1-macvlan","namespace":"cw-multus"},{"name":"ibs2p2-macvlan","namespace":"cw-multus"},{"name":"ibs2p3-macvlan","namespace":"cw-multus"},{"name":"ibs3p0-macvlan","namespace":"cw-multus"},{"name":"ibs3p1-macvlan","namespace":"cw-multus"},{"name":"ibs3p2-macvlan","namespace":"cw-multus"},{"name":"ibs3p3-macvlan","namespace":"cw-multus"}]
+        labels:
+          app.kubernetes.io/name: sglang-podgroup-test-mn
+      spec:
+        priorityClassName: staging
+        terminationGracePeriodSeconds: 30
+        restartPolicy: Always
+        serviceAccountName: default
+        imagePullSecrets:
+        - name: regcred
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        containers:
+        - name: worker
+          image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-gb300:20260517-7304a529
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - sglang_meta.launch_server
+          - --host
+          - 0.0.0.0
+          - --port
+          - "30000"
+          - --model-path
+          - $(MODEL_PATH)
+          - --tp-size
+          - "8"
+          - --ep-size
+          - "8"
+          - --dtype
+          - bfloat16
+          - --quantization
+          - modelopt_fp4
+          - --kv-cache-dtype
+          - bfloat16
+          - --mem-fraction-static
+          - "0.8"
+          - --moe-runner-backend
+          - flashinfer_trtllm
+          - --moe-a2a-backend
+          - flashinfer
+          - --context-length
+          - "1048576"
+          - --speculative-algorithm
+          - EAGLE3
+          - --speculative-draft-model
+          - $(MODEL_PATH)/draft_hf
+          - --speculative-draft-model-quantization
+          - unquant
+          - --log-requests
+          - --log-requests-level
+          - "1"
+          - --enable-request-time-stats-logging
+          - --json-model-override-args
+          - '{"attn_temperature_tuning_floor_scale":131072,"attn_temperature_tuning_layers":"global","attn_temperature_tuning_q_scale_constant":0.2}'
+          - --disaggregation-transfer-backend
+          - meta-p2p
+          - --disable-custom-all-reduce
+          env:
+          - name: SGLANG_CLUSTER
+            value: cks
+          - name: SGLANG_EXTERNAL_MODEL_PACKAGE
+            value: sglang_meta.srt.models
+          - name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN
+            value: "1"
+          - name: SGLANG_HOST_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: TRITON_PTXAS_PATH
+            value: /usr/local/cuda/bin/ptxas
+          - name: PYTHONUNBUFFERED
+            value: "1"
+          - name: NCCL_MNNVL_ENABLE
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: NCCL_IB_ADDR_FAMILY
+            value: AF_INET6
+          - name: NCCL_SOCKET_IFNAME
+            value: eth0
+          - name: NCCL_SOCKET_FAMILY
+            value: AF_INET6
+          - name: CUDA_ENABLE_COREDUMP_ON_EXCEPTION
+            value: "1"
+          - name: CUDA_COREDUMP_GENERATION_FLAGS
+            value: skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory,skip_abort
+          - name: CUDA_COREDUMP_FILE
+            value: /tmp/sgl_crash_dump/cudacore.%h.%p
+          - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+            value: UCX
+          - name: MODEL_PATH
+            value: /opt/ml/model
+          - name: PARALLELISM_SIZE
+            value: "8"
+          ports:
+          - name: http
+            containerPort: 30000
+          resources:
+            requests:
+              nvidia.com/gpu: "4"
+              rdma/ib: "4"
+            limits:
+              nvidia.com/gpu: "4"
+              rdma/ib: "4"
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /health
+              port: 30000
+            periodSeconds: 30
+            timeoutSeconds: 30
+          readinessProbe:
+            failureThreshold: 5
+            httpGet:
+              path: /health
+              port: 30000
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+          livenessProbe:
+            failureThreshold: 5
+            httpGet:
+              path: /health
+              port: 30000
+            periodSeconds: 60
+            timeoutSeconds: 30
+          volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+          - name: tmp-storage
+            mountPath: /tmp
+          - name: tier5-code-prod-nvfp4-ptq
+            mountPath: /opt/ml/model
+            readOnly: true
+            subPath: .
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 940Gi
+        - name: tmp-storage
+          emptyDir: {}
+        - name: tier5-code-prod-nvfp4-ptq
+          persistentVolumeClaim:
+            claimName: tier5-code-prod-nvfp4-ptq
+            readOnly: true
+  prefill:
+    groups: 8
+    replicasPerGroup: 2
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/component: prefill
+      spec:
+        containers:
+        - name: worker
+          command:
+          - --disaggregation-mode
+          - prefill
+          - --disaggregation-bootstrap-port
+          - "8998"
+          ports:
+          - name: bootstrap
+            containerPort: 8998
+  decode:
+    groups: 4
+    replicasPerGroup: 2
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/component: decode
+      spec:
+        containers:
+        - name: worker
+          command:
+          - --disaggregation-mode
+          - decode

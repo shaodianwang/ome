@@ -1,0 +1,36 @@
+replicaCount: 1
+
+image:
+  repository: 588845226011.dkr.ecr.us-east-2.amazonaws.com/msl_infra/podgroup-operator
+  tag: "0.1.5"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+schedulerRbac:
+  enabled: true
+  subjects:
+  - kind: User
+    name: system:kube-scheduler
+  - kind: User
+    name: system:kube-scheduler:coscheduler
