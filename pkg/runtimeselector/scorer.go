@@ -190,14 +190,12 @@ func (s *DefaultRuntimeScorer) calculateSizeScore(runtime RuntimeMatch, model *v
 	return minDiff + maxDiff
 }
 
-// compareVersions is a helper that delegates to the matcher's version comparison logic.
+// compareVersions delegates to the shared version comparison helper.
 func (s *DefaultRuntimeScorer) compareVersions(supportedFormat *v1beta1.ModelFormat, modelFormat *v1beta1.ModelFormat) bool {
-	matcher := NewDefaultRuntimeMatcher(s.config)
-	return matcher.(*DefaultRuntimeMatcher).compareModelFormatVersions(supportedFormat, modelFormat)
+	return compareVersionsWithOperator(*modelFormat.Version, *supportedFormat.Version, supportedFormat.Operator)
 }
 
-// compareFrameworkVersions is a helper that delegates to the matcher's version comparison logic.
+// compareFrameworkVersions delegates to the shared version comparison helper.
 func (s *DefaultRuntimeScorer) compareFrameworkVersions(supportedFramework *v1beta1.ModelFrameworkSpec, modelFramework *v1beta1.ModelFrameworkSpec) bool {
-	matcher := NewDefaultRuntimeMatcher(s.config)
-	return matcher.(*DefaultRuntimeMatcher).compareModelFrameworkVersions(supportedFramework, modelFramework)
+	return compareVersionsWithOperator(*modelFramework.Version, *supportedFramework.Version, supportedFramework.Operator)
 }

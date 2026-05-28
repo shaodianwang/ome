@@ -58,26 +58,15 @@ func (s *defaultSelector) SelectRuntime(ctx context.Context, model *v1beta1.Base
 		// Build detailed error with exclusion reasons
 		collection, _ := s.fetcher.FetchRuntimes(ctx, namespace)
 		excludedRuntimes := make(map[string]error)
-
-		// Check namespace runtimes
-		for _, rt := range collection.NamespaceRuntimes {
-			if compatible, _ := s.matcher.IsCompatible(&rt.Spec, model, isvc, rt.Name); !compatible {
-				report, _ := s.matcher.GetCompatibilityDetails(&rt.Spec, model, isvc, rt.Name)
-				if report != nil && len(report.IncompatibilityReasons) > 0 {
-					excludedRuntimes[rt.Name] = fmt.Errorf("%s", report.IncompatibilityReasons[0])
-				}
+		collection.forEach(func(name string, spec *v1beta1.ServingRuntimeSpec, _ bool) {
+			if compatible, _ := s.matcher.IsCompatible(spec, model, isvc, name); compatible {
+				return
 			}
-		}
-
-		// Check cluster runtimes
-		for _, rt := range collection.ClusterRuntimes {
-			if compatible, _ := s.matcher.IsCompatible(&rt.Spec, model, isvc, rt.Name); !compatible {
-				report, _ := s.matcher.GetCompatibilityDetails(&rt.Spec, model, isvc, rt.Name)
-				if report != nil && len(report.IncompatibilityReasons) > 0 {
-					excludedRuntimes[rt.Name] = fmt.Errorf("%s", report.IncompatibilityReasons[0])
-				}
+			report, _ := s.matcher.GetCompatibilityDetails(spec, model, isvc, name)
+			if report != nil && len(report.IncompatibilityReasons) > 0 {
+				excludedRuntimes[name] = fmt.Errorf("%s", report.IncompatibilityReasons[0])
 			}
-		}
+		})
 
 		return nil, &NoRuntimeFoundError{
 			ModelName:          getModelName(model),
@@ -115,28 +104,23 @@ func (s *defaultSelector) GetCompatibleRuntimes(ctx context.Context, model *v1be
 		return nil, fmt.Errorf("failed to fetch runtimes: %w", err)
 	}
 
-	var namespaceMatches []RuntimeMatch
-	var clusterMatches []RuntimeMatch
-
-	// Process namespace-scoped runtimes
-	for _, runtime := range collection.NamespaceRuntimes {
-		if match := s.evaluateRuntime(ctx, &runtime.Spec, model, isvc, runtime.Name, false); match != nil {
+	var namespaceMatches, clusterMatches []RuntimeMatch
+	collection.forEach(func(name string, spec *v1beta1.ServingRuntimeSpec, isCluster bool) {
+		match := s.evaluateRuntime(ctx, spec, model, isvc, name, isCluster)
+		if match == nil {
+			return
+		}
+		if isCluster {
+			clusterMatches = append(clusterMatches, *match)
+		} else {
 			namespaceMatches = append(namespaceMatches, *match)
 		}
-	}
+	})
 
-	// Process cluster-scoped runtimes
-	for _, runtime := range collection.ClusterRuntimes {
-		if match := s.evaluateRuntime(ctx, &runtime.Spec, model, isvc, runtime.Name, true); match != nil {
-			clusterMatches = append(clusterMatches, *match)
-		}
-	}
-
-	// Sort namespace and cluster matches separately
+	// Sort each scope separately, then append cluster after namespace
+	// (namespace-scoped runtimes have priority).
 	s.sortMatches(namespaceMatches, model)
 	s.sortMatches(clusterMatches, model)
-
-	// Append cluster matches after namespace matches (namespace-scoped have priority)
 	matches := append(namespaceMatches, clusterMatches...)
 
 	logger.Info("Found compatible runtimes",
@@ -197,16 +181,7 @@ func (s *defaultSelector) ValidateRuntime(ctx context.Context, runtimeName strin
 		}
 	}
 
-	// Check if runtime has auto-select enabled
-	hasAutoSelect := false
-	for _, format := range runtimeSpec.SupportedModelFormats {
-		if format.AutoSelect != nil && *format.AutoSelect {
-			hasAutoSelect = true
-			break
-		}
-	}
-
-	if !hasAutoSelect {
+	if !runtimeHasAutoSelectFormat(runtimeSpec) {
 		logger.V(1).Info("Runtime does not have auto-select enabled but is compatible",
 			"runtime", runtimeName)
 	}
@@ -238,16 +213,7 @@ func (s *defaultSelector) evaluateRuntime(ctx context.Context, spec *v1beta1.Ser
 		return nil
 	}
 
-	// Check if runtime has auto-select enabled for at least one supported format
-	hasAutoSelect := false
-	for _, format := range spec.SupportedModelFormats {
-		if format.AutoSelect != nil && *format.AutoSelect {
-			hasAutoSelect = true
-			break
-		}
-	}
-
-	if !hasAutoSelect {
+	if !runtimeHasAutoSelectFormat(spec) {
 		logger.V(2).Info("Runtime does not have auto-select enabled", "runtime", name)
 		return nil
 	}

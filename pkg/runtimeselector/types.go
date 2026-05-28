@@ -116,6 +116,19 @@ type RuntimeCollection struct {
 	ClusterRuntimes []v1beta1.ClusterServingRuntime
 }
 
+// forEach invokes fn for every runtime in the collection, namespace-scoped
+// first then cluster-scoped. isCluster reports the scope of the current item.
+func (c *RuntimeCollection) forEach(fn func(name string, spec *v1beta1.ServingRuntimeSpec, isCluster bool)) {
+	for i := range c.NamespaceRuntimes {
+		rt := &c.NamespaceRuntimes[i]
+		fn(rt.Name, &rt.Spec, false)
+	}
+	for i := range c.ClusterRuntimes {
+		rt := &c.ClusterRuntimes[i]
+		fn(rt.Name, &rt.Spec, true)
+	}
+}
+
 // RuntimeMatcher handles compatibility checking between runtimes and models.
 type RuntimeMatcher interface {
 	// IsCompatible checks if a runtime can serve a model.

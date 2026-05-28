@@ -110,17 +110,8 @@ func (m *DefaultRuntimeMatcher) GetCompatibilityDetails(runtime *v1beta1.Serving
 	// At this point, runtime supports the model
 	report.IsCompatible = true
 
-	// Check if runtime has auto-select enabled (this is separate from compatibility)
-	hasAutoSelectFormat := false
-	for _, format := range runtime.SupportedModelFormats {
-		if format.AutoSelect != nil && *format.AutoSelect {
-			hasAutoSelectFormat = true
-			break
-		}
-	}
-
-	if !hasAutoSelectFormat {
-		// Note: This doesn't make it incompatible, but it's tracked separately
+	// Auto-select is informational only — it doesn't affect compatibility.
+	if !runtimeHasAutoSelectFormat(runtime) {
 		report.Warnings = append(report.Warnings,
 			"runtime does not have auto-select enabled for any supported format")
 	}
@@ -178,64 +169,43 @@ func (m *DefaultRuntimeMatcher) evaluateFormatMatch(model *v1beta1.BaseModelSpec
 		match.Reasons = append(match.Reasons, pipelineReason)
 	}
 
-	// Check architecture
-	if model.ModelArchitecture != nil && format.ModelArchitecture != nil {
-		match.ArchitectureMatch = *model.ModelArchitecture == *format.ModelArchitecture
-		if !match.ArchitectureMatch {
+	match.ArchitectureMatch = optionalEqual(model.ModelArchitecture, format.ModelArchitecture)
+	if !match.ArchitectureMatch {
+		if model.ModelArchitecture != nil && format.ModelArchitecture != nil {
 			match.Reasons = append(match.Reasons,
 				fmt.Sprintf("architecture mismatch: model=%s, runtime=%s",
 					*model.ModelArchitecture, *format.ModelArchitecture))
+		} else {
+			match.Reasons = append(match.Reasons, "architecture requirement mismatch")
 		}
-	} else if (model.ModelArchitecture == nil) != (format.ModelArchitecture == nil) {
-		match.ArchitectureMatch = false
-		match.Reasons = append(match.Reasons, "architecture requirement mismatch")
 	}
 
-	// Check quantization
-	if model.Quantization != nil && format.Quantization != nil {
-		match.QuantizationMatch = *model.Quantization == *format.Quantization
-		if !match.QuantizationMatch {
+	match.QuantizationMatch = optionalEqual(model.Quantization, format.Quantization)
+	if !match.QuantizationMatch {
+		if model.Quantization != nil && format.Quantization != nil {
 			match.Reasons = append(match.Reasons,
 				fmt.Sprintf("quantization mismatch: model=%s, runtime=%s",
 					*model.Quantization, *format.Quantization))
+		} else {
+			match.Reasons = append(match.Reasons, "quantization requirement mismatch")
 		}
-	} else if (model.Quantization == nil) != (format.Quantization == nil) {
-		match.QuantizationMatch = false
-		match.Reasons = append(match.Reasons, "quantization requirement mismatch")
 	}
 
 	// Check model format
-	if format.ModelFormat != nil {
-		if format.ModelFormat.Name == model.ModelFormat.Name {
-			// Check version compatibility if both are specified
-			if format.ModelFormat.Version != nil && model.ModelFormat.Version != nil {
-				match.FormatMatch = m.compareModelFormatVersions(format.ModelFormat, &model.ModelFormat)
-			} else if format.ModelFormat.Version == nil && model.ModelFormat.Version == nil {
-				match.FormatMatch = true
-			} else {
-				// One has version, one doesn't - not a match
-				match.FormatMatch = false
-			}
-
-			if match.FormatMatch && format.ModelFormat.Weight > 0 {
-				match.Weight += format.ModelFormat.Weight * int64(match.Priority)
-			}
+	if format.ModelFormat != nil && format.ModelFormat.Name == model.ModelFormat.Name {
+		match.FormatMatch = matchOptionalVersions(model.ModelFormat.Version, format.ModelFormat.Version, func() bool {
+			return m.compareModelFormatVersions(format.ModelFormat, &model.ModelFormat)
+		})
+		if match.FormatMatch && format.ModelFormat.Weight > 0 {
+			match.Weight += format.ModelFormat.Weight * int64(match.Priority)
 		}
 	}
 
-	// Check model framework
 	if format.ModelFramework != nil && model.ModelFramework != nil {
 		if format.ModelFramework.Name == model.ModelFramework.Name {
-			// Check version compatibility if both are specified
-			if format.ModelFramework.Version != nil && model.ModelFramework.Version != nil {
-				match.FrameworkMatch = m.compareModelFrameworkVersions(format.ModelFramework, model.ModelFramework)
-			} else if format.ModelFramework.Version == nil && model.ModelFramework.Version == nil {
-				match.FrameworkMatch = true
-			} else {
-				// One has version, one doesn't - not a match
-				match.FrameworkMatch = false
-			}
-
+			match.FrameworkMatch = matchOptionalVersions(model.ModelFramework.Version, format.ModelFramework.Version, func() bool {
+				return m.compareModelFrameworkVersions(format.ModelFramework, model.ModelFramework)
+			})
 			if match.FrameworkMatch && format.ModelFramework.Weight > 0 {
 				match.Weight += format.ModelFramework.Weight * int64(match.Priority)
 			}
@@ -257,37 +227,20 @@ func (m *DefaultRuntimeMatcher) compareSupportedModelFormats(model *v1beta1.Base
 		return false
 	}
 
-	// Check architecture
-	if model.ModelArchitecture != nil && format.ModelArchitecture != nil {
-		if *model.ModelArchitecture != *format.ModelArchitecture {
-			return false
-		}
-	} else if (model.ModelArchitecture == nil) != (format.ModelArchitecture == nil) {
+	if !optionalEqual(model.ModelArchitecture, format.ModelArchitecture) {
+		return false
+	}
+	if !optionalEqual(model.Quantization, format.Quantization) {
 		return false
 	}
 
-	// Check quantization
-	if model.Quantization != nil && format.Quantization != nil {
-		if *model.Quantization != *format.Quantization {
-			return false
-		}
-	} else if (model.Quantization == nil) != (format.Quantization == nil) {
+	// Check model format (required: format.ModelFormat must be set).
+	if format.ModelFormat == nil || format.ModelFormat.Name != model.ModelFormat.Name {
 		return false
 	}
-
-	// Check model format
-	if format.ModelFormat != nil {
-		if format.ModelFormat.Name != model.ModelFormat.Name {
-			return false
-		}
-		if format.ModelFormat.Version != nil && model.ModelFormat.Version != nil {
-			if !m.compareModelFormatVersions(format.ModelFormat, &model.ModelFormat) {
-				return false
-			}
-		} else if (format.ModelFormat.Version == nil) != (model.ModelFormat.Version == nil) {
-			return false
-		}
-	} else {
+	if !matchOptionalVersions(model.ModelFormat.Version, format.ModelFormat.Version, func() bool {
+		return m.compareModelFormatVersions(format.ModelFormat, &model.ModelFormat)
+	}) {
 		return false
 	}
 
@@ -296,11 +249,9 @@ func (m *DefaultRuntimeMatcher) compareSupportedModelFormats(model *v1beta1.Base
 		if format.ModelFramework.Name != model.ModelFramework.Name {
 			return false
 		}
-		if format.ModelFramework.Version != nil && model.ModelFramework.Version != nil {
-			if !m.compareModelFrameworkVersions(format.ModelFramework, model.ModelFramework) {
-				return false
-			}
-		} else if (format.ModelFramework.Version == nil) != (model.ModelFramework.Version == nil) {
+		if !matchOptionalVersions(model.ModelFramework.Version, format.ModelFramework.Version, func() bool {
+			return m.compareModelFrameworkVersions(format.ModelFramework, model.ModelFramework)
+		}) {
 			return false
 		}
 	} else if (format.ModelFramework != nil) != (model.ModelFramework != nil) {
@@ -498,79 +449,49 @@ func compareDiffusionComponent(name string, model *v1beta1.DiffusionComponentSpe
 
 // compareModelFormatVersions compares model format versions based on operator.
 func (m *DefaultRuntimeMatcher) compareModelFormatVersions(supportedFormat *v1beta1.ModelFormat, modelFormat *v1beta1.ModelFormat) bool {
-	baseVersion, err := modelVer.Parse(*modelFormat.Version)
-	if err != nil {
-		return false
-	}
-
-	supportedVersion, err := modelVer.Parse(*supportedFormat.Version)
-	if err != nil {
-		return false
-	}
-
-	// Check for unofficial versions
-	hasUnofficial := modelVer.ContainsUnofficialVersion(baseVersion) ||
-		modelVer.ContainsUnofficialVersion(supportedVersion)
-
-	operator := getRuntimeSelectorOperator(supportedFormat.Operator)
-
-	// If there are unofficial versions or operator is Equal, use Equal comparison
-	if hasUnofficial || operator == "Equal" {
-		return modelVer.Equal(supportedVersion, baseVersion)
-	}
-
-	// Check for version precision mismatch and major version prefix mismatch
-	if baseVersion.Precision != supportedVersion.Precision ||
-		strings.Compare(baseVersion.MajorPrefix, supportedVersion.MajorPrefix) != 0 {
-		return false
-	}
-
-	switch operator {
-	case "GreaterThan":
-		return modelVer.GreaterThan(supportedVersion, baseVersion)
-	case "GreaterThanOrEqual":
-		return modelVer.GreaterThanOrEqual(supportedVersion, baseVersion)
-	default:
-		return modelVer.Equal(supportedVersion, baseVersion)
-	}
+	return compareVersionsWithOperator(*modelFormat.Version, *supportedFormat.Version, supportedFormat.Operator)
 }
 
 // compareModelFrameworkVersions compares model framework versions based on operator.
 func (m *DefaultRuntimeMatcher) compareModelFrameworkVersions(supportedFramework *v1beta1.ModelFrameworkSpec, modelFramework *v1beta1.ModelFrameworkSpec) bool {
-	baseVersion, err := modelVer.Parse(*modelFramework.Version)
+	return compareVersionsWithOperator(*modelFramework.Version, *supportedFramework.Version, supportedFramework.Operator)
+}
+
+// compareVersionsWithOperator parses the model and supported version strings and
+// applies the comparison operator. Returns false if either version fails to parse.
+// Unofficial (pre-release) versions always force an Equal comparison regardless
+// of the operator.
+func compareVersionsWithOperator(modelVersion, supportedVersion string, op *v1beta1.RuntimeSelectorOperator) bool {
+	base, err := modelVer.Parse(modelVersion)
+	if err != nil {
+		return false
+	}
+	supported, err := modelVer.Parse(supportedVersion)
 	if err != nil {
 		return false
 	}
 
-	supportedVersion, err := modelVer.Parse(*supportedFramework.Version)
-	if err != nil {
-		return false
+	operator := getRuntimeSelectorOperator(op)
+
+	// Unofficial versions or explicit Equal: fall back to equality.
+	if operator == "Equal" ||
+		modelVer.ContainsUnofficialVersion(base) ||
+		modelVer.ContainsUnofficialVersion(supported) {
+		return modelVer.Equal(supported, base)
 	}
 
-	// Check for unofficial versions
-	hasUnofficial := modelVer.ContainsUnofficialVersion(baseVersion) ||
-		modelVer.ContainsUnofficialVersion(supportedVersion)
-
-	operator := getRuntimeSelectorOperator(supportedFramework.Operator)
-
-	// If there are unofficial versions or operator is Equal, use Equal comparison
-	if hasUnofficial || operator == "Equal" {
-		return modelVer.Equal(supportedVersion, baseVersion)
-	}
-
-	// Check for version precision mismatch and major version prefix mismatch
-	if baseVersion.Precision != supportedVersion.Precision ||
-		strings.Compare(baseVersion.MajorPrefix, supportedVersion.MajorPrefix) != 0 {
+	// Differing precision or major prefix can't satisfy ordering comparisons.
+	if base.Precision != supported.Precision || base.MajorPrefix != supported.MajorPrefix {
 		return false
 	}
 
 	switch operator {
 	case "GreaterThan":
-		return modelVer.GreaterThan(supportedVersion, baseVersion)
+		return modelVer.GreaterThan(supported, base)
 	case "GreaterThanOrEqual":
-		return modelVer.GreaterThanOrEqual(supportedVersion, baseVersion)
+		return modelVer.GreaterThanOrEqual(supported, base)
 	default:
-		return modelVer.Equal(supportedVersion, baseVersion)
+		return modelVer.Equal(supported, base)
 	}
 }
 
@@ -605,6 +526,37 @@ func getRuntimeSelectorOperator(operator *v1beta1.RuntimeSelectorOperator) strin
 		return string(v1beta1.RuntimeSelectorOpEqual)
 	}
 	return string(*operator)
+}
+
+// runtimeHasAutoSelectFormat returns true if any supported format has AutoSelect=true.
+func runtimeHasAutoSelectFormat(runtime *v1beta1.ServingRuntimeSpec) bool {
+	for _, format := range runtime.SupportedModelFormats {
+		if format.AutoSelect != nil && *format.AutoSelect {
+			return true
+		}
+	}
+	return false
+}
+
+// optionalEqual reports whether two optional fields are compatible: both nil,
+// or both non-nil with equal dereferenced values. A mixed presence (one side
+// requires the field, the other doesn't specify it) is considered a mismatch.
+func optionalEqual[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// matchOptionalVersions applies the standard tri-state version match: both
+// versions set -> compare via cmp, both nil -> match, exactly one set -> no
+// match. Used for ModelFormat.Version and ModelFrameworkSpec.Version which
+// share the same shape.
+func matchOptionalVersions(modelVersion, supportedVersion *string, cmp func() bool) bool {
+	if modelVersion != nil && supportedVersion != nil {
+		return cmp()
+	}
+	return modelVersion == nil && supportedVersion == nil
 }
 
 // parseModelSize converts a model size string (e.g., "7B", "13B", "70B") to a float64 value.

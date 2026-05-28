@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -106,24 +107,27 @@ func (f *DefaultRuntimeFetcher) getClusterHead(ctx context.Context, name string)
 
 // sortServingRuntimeList sorts a list of ServingRuntimes by creation timestamp (desc) and name (asc).
 func sortServingRuntimeList(runtimes *v1beta1.ServingRuntimeList) {
-	sort.Slice(runtimes.Items, func(i, j int) bool {
-		// First sort by creation timestamp (newer first)
-		if !runtimes.Items[i].CreationTimestamp.Equal(&runtimes.Items[j].CreationTimestamp) {
-			return runtimes.Items[i].CreationTimestamp.After(runtimes.Items[j].CreationTimestamp.Time)
-		}
-		// Then by name (alphabetically)
-		return runtimes.Items[i].Name < runtimes.Items[j].Name
+	sortByCreationTimestampThenName(runtimes.Items, func(r *v1beta1.ServingRuntime) (metav1.Time, string) {
+		return r.CreationTimestamp, r.Name
 	})
 }
 
 // sortClusterServingRuntimeList sorts a list of ClusterServingRuntimes by creation timestamp (desc) and name (asc).
 func sortClusterServingRuntimeList(runtimes *v1beta1.ClusterServingRuntimeList) {
-	sort.Slice(runtimes.Items, func(i, j int) bool {
-		// First sort by creation timestamp (newer first)
-		if !runtimes.Items[i].CreationTimestamp.Equal(&runtimes.Items[j].CreationTimestamp) {
-			return runtimes.Items[i].CreationTimestamp.After(runtimes.Items[j].CreationTimestamp.Time)
+	sortByCreationTimestampThenName(runtimes.Items, func(r *v1beta1.ClusterServingRuntime) (metav1.Time, string) {
+		return r.CreationTimestamp, r.Name
+	})
+}
+
+// sortByCreationTimestampThenName sorts items in place: newest first, then
+// alphabetical by name as a tiebreaker.
+func sortByCreationTimestampThenName[T any](items []T, key func(*T) (metav1.Time, string)) {
+	sort.Slice(items, func(i, j int) bool {
+		ti, ni := key(&items[i])
+		tj, nj := key(&items[j])
+		if !ti.Equal(&tj) {
+			return ti.After(tj.Time)
 		}
-		// Then by name (alphabetically)
-		return runtimes.Items[i].Name < runtimes.Items[j].Name
+		return ni < nj
 	})
 }
