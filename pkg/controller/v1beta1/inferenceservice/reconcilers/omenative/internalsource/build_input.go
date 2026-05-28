@@ -94,10 +94,12 @@ type BuildInputDeps struct {
 	// helper; the IR adapter (when it lands) wires its own removal
 	// flow.
 	//
-	// nil-safe: when unset, ReconcileInput.ClearMigrationRequest is
-	// also nil and Migrate skips the clear step. Callers that don't
-	// drive the Migrate state machine (Create-only / Delete-only
-	// tests) leave this empty.
+	// Optional input field: when unset BuildReconcileInput defaults the
+	// emitted ReconcileInput.ClearMigrationRequest to a no-op closure
+	// so the panic-on-nil contract documented on
+	// workload.ReconcileInput is satisfied. Callers that don't drive
+	// the Migrate state machine (Create-only / Delete-only) leave this
+	// empty.
 	ClearMigrationRequestAnnotation func(ctx context.Context, uuid string) error
 }
 
@@ -120,6 +122,20 @@ type BuildInputDeps struct {
 // workload code reads input.Key.SelectorLabels opaquely. The IR
 // adapter will populate its own IR-specific keys here.
 func BuildReconcileInput(d BuildInputDeps) workload.ReconcileInput {
+	// ClearMigrationRequest and WarnInstanceFailed satisfy the
+	// panic-on-nil contract documented on workload.ReconcileInput.
+	// Create-only / Delete-only callers leave
+	// d.ClearMigrationRequestAnnotation nil; the escalator path lives
+	// in omenative/status_aggregate.go and constructs its own
+	// ReconcileInput with a real WarnInstanceFailed wired to
+	// status.RecordWarning. For every other code path through
+	// BuildReconcileInput these two fields aren't exercised, but the
+	// closures land here so the workload-side contract holds
+	// uniformly.
+	clearMigration := d.ClearMigrationRequestAnnotation
+	if clearMigration == nil {
+		clearMigration = func(_ context.Context, _ string) error { return nil }
+	}
 	return workload.ReconcileInput{
 		OwnerObject: d.ISVC,
 		OwnerGVK:    isvcGVK,
@@ -137,7 +153,8 @@ func BuildReconcileInput(d BuildInputDeps) workload.ReconcileInput {
 		MutateInstance:          buildMutateInstance(d.Client, d.ISVC, d.Component),
 		RemoveInstance:          buildRemoveInstance(d.Client, d.ISVC, d.Component, d.Expectations),
 		WriteAggregateCondition: buildWriteAggregateCondition(d.Client, d.ISVC, d.Component),
-		ClearMigrationRequest:   d.ClearMigrationRequestAnnotation,
+		ClearMigrationRequest:   clearMigration,
+		WarnInstanceFailed:      func(_ int32, _, _ string) {},
 	}
 }
 

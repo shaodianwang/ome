@@ -457,10 +457,11 @@ func TestEscalateStuckPodFailures_AlreadyFailedNoOp(t *testing.T) {
 	}
 }
 
-// TestEscalateStuckPodFailures_NoWarnCallbackTolerated pins the nil-safe
-// contract: a missing WarnInstanceFailed callback must not panic; the
-// Phase=Failed mutation still lands.
-func TestEscalateStuckPodFailures_NoWarnCallbackTolerated(t *testing.T) {
+// TestEscalateStuckPodFailures_NoOpWarnCallback pins the panic-on-nil
+// contract escape hatch: callers that don't wire a real recorder
+// (workload-side unit tests, adapters with no event surface) set an
+// explicit no-op closure and the Phase=Failed mutation still lands.
+func TestEscalateStuckPodFailures_NoOpWarnCallback(t *testing.T) {
 	prev := workload.StuckPodFailureGracePeriod
 	workload.StuckPodFailureGracePeriod = 1 * time.Millisecond
 	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
@@ -485,16 +486,19 @@ func TestEscalateStuckPodFailures_NoWarnCallbackTolerated(t *testing.T) {
 			}
 			return nil
 		},
-		// WarnInstanceFailed deliberately nil — workload code must tolerate.
+		// Explicit no-op stub — the panic-on-nil contract requires a
+		// non-nil callback; adapters that don't emit events wire this
+		// shape (see workload.ReconcileInput docs).
+		WarnInstanceFailed: func(_ int32, _, _ string) {},
 	}
 	if err := workload.EscalateStuckPodFailures(context.Background(), input, workload.EscalationParams{
 		Instances:   insts,
 		PodsByIndex: map[int32][]*corev1.Pod{0: {stuck}},
 	}); err != nil {
-		t.Fatalf("EscalateStuckPodFailures with nil WarnInstanceFailed: %v", err)
+		t.Fatalf("EscalateStuckPodFailures with no-op WarnInstanceFailed: %v", err)
 	}
 	if insts[0].Phase != workload.InstancePhaseFailed {
-		t.Errorf("Phase: got %q want Failed (escalation must land even without warn callback)", insts[0].Phase)
+		t.Errorf("Phase: got %q want Failed (escalation must land even with no-op warn callback)", insts[0].Phase)
 	}
 }
 

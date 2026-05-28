@@ -559,11 +559,13 @@ func drainServiceForPod(input workload.ReconcileInput, plan workload.ComponentPl
 	return query.PerRevisionServiceName(input.Key.OwnerName, plan.Component, hash)
 }
 
-// clearMigrationRequest forwards to input.ClearMigrationRequest. Nil-safe:
-// when the callback isn't wired (workload-side unit tests, IR adapter
-// without an annotation contract) this is a no-op.
+// clearMigrationRequest forwards to input.ClearMigrationRequest.
+// input.ClearMigrationRequest is required by contract — callers that
+// don't wire a removal flow set an explicit no-op closure (see
+// workload.ReconcileInput docs). Empty uuid is a no-op: nothing to
+// clear.
 func clearMigrationRequest(ctx context.Context, input workload.ReconcileInput, uuid string) error {
-	if input.ClearMigrationRequest == nil || uuid == "" {
+	if uuid == "" {
 		return nil
 	}
 	return input.ClearMigrationRequest(ctx, uuid)

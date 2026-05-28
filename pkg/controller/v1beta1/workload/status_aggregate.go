@@ -570,9 +570,7 @@ func EscalateStuckPodFailures(ctx context.Context, input ReconcileInput, p Escal
 		if err := StampInstanceFailedForStuckPod(ctx, input, s.Index); err != nil {
 			return fmt.Errorf("stamp Phase=Failed (instance=%d): %w", s.Index, err)
 		}
-		if input.WarnInstanceFailed != nil {
-			input.WarnInstanceFailed(s.Index, stuckPod.Name, reason)
-		}
+		input.WarnInstanceFailed(s.Index, stuckPod.Name, reason)
 	}
 	return nil
 }

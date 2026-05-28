@@ -8,6 +8,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
 	"knative.dev/pkg/apis"
@@ -267,7 +268,9 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 	// workload-side StampInstanceFailedForStuckPod calls; it round-trips
 	// the workload.InstanceStatus mutation back to v1beta1 via the
 	// existing status.MutateInstance helper. WarnInstanceFailed wraps
-	// the legacy status.RecordWarning emitter.
+	// the legacy status.RecordWarning emitter. The remaining callbacks
+	// aren't exercised by EscalateStuckPodFailures but satisfy the
+	// panic-on-nil contract documented on workload.ReconcileInput.
 	input := workload.ReconcileInput{
 		OwnerObject: p.ISVC,
 		EventTarget: p.ISVC,
@@ -281,6 +284,9 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 				return true
 			})
 		},
+		RemoveInstance:          func(_ context.Context, _ int32) (bool, error) { return false, nil },
+		WriteAggregateCondition: func(_ context.Context, _ metav1.Condition) error { return nil },
+		ClearMigrationRequest:   func(_ context.Context, _ string) error { return nil },
 		WarnInstanceFailed: func(idx int32, podName, reason string) {
 			status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonInstanceFailed,
 				"OMENative %s escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)",

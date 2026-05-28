@@ -252,15 +252,11 @@ func EnsurePodGroups(ctx context.Context, deps workload.Deps, input workload.Rec
 // Status transitions and concurrent reconciles can't lose the write
 // to each other.
 //
-// When input.WriteAggregateCondition is nil — typical for tests that
-// construct ReconcileInput without the bridge wiring — the call
-// falls through as a no-op. Production paths populate the callback
-// via internalsource.BuildReconcileInput so this branch never hits
-// live.
+// input.WriteAggregateCondition is required by contract — workload
+// code panics on a nil callback rather than silently dropping the
+// condition write. Adapters that don't need the condition stamped
+// wire an explicit no-op closure (see input.go).
 func patchGangSchedulingCondition(ctx context.Context, input workload.ReconcileInput, crdPresent, anyMultiPod bool) error {
-	if input.WriteAggregateCondition == nil {
-		return nil
-	}
 	var generation int64
 	if input.OwnerObject != nil {
 		generation = input.OwnerObject.GetGeneration()

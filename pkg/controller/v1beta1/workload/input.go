@@ -112,9 +112,15 @@ type ReconcileInput struct {
 	// without reaching back into the owner-CRD typed status. The
 	// caller wraps apimeta.SetStatusCondition + the apiserver round
 	// trip inside the closure so LastTransitionTime only bumps on a
-	// real transition. nil-OK: when unset, workload code falls back
-	// to a no-op write (the existing path through the next aggregate
-	// status flush picks up the condition on the following reconcile).
+	// real transition.
+	//
+	// MUST be set on every constructed ReconcileInput — workload code
+	// panics on a nil callback rather than silently dropping condition
+	// writes. Adapters that genuinely want a no-op (workload-side unit
+	// tests that don't assert on conditions, IR adapters that route
+	// their condition writes elsewhere) wire an explicit
+	// `func(_ context.Context, _ metav1.Condition) error { return nil }`
+	// stub.
 	WriteAggregateCondition func(ctx context.Context, cond metav1.Condition) error
 
 	// ClearMigrationRequest removes the source-of-truth annotation /
@@ -126,12 +132,12 @@ type ReconcileInput struct {
 	// per-UUID annotation; the IR adapter (when it lands) will wire
 	// its own removal flow.
 	//
-	// nil-safe: when unset (e.g. workload-side unit tests that don't
-	// exercise the annotation contract) Migrate skips the clear
-	// step. Workload code MUST NOT panic on a nil callback for this
-	// field — the Delete / Create state machines never call it, and
-	// Migrate tolerates a nil callback as "trigger source has no
-	// removal contract".
+	// MUST be set on every constructed ReconcileInput — workload code
+	// panics on a nil callback rather than silently leaving the
+	// trigger in place. Adapters that genuinely don't have a removal
+	// contract (workload-side unit tests that don't exercise Migrate)
+	// wire an explicit
+	// `func(_ context.Context, _ string) error { return nil }` stub.
 	ClearMigrationRequest func(ctx context.Context, uuid string) error
 
 	// WarnInstanceFailed emits a Warning event against the workload's
@@ -141,8 +147,10 @@ type ReconcileInput struct {
 	// parent ISVC) inside this closure; workload-side escalator code
 	// calls it once per escalation with the stuck pod name and reason.
 	//
-	// nil-safe: workload code MUST tolerate a nil callback (e.g.,
-	// tests that don't wire a recorder). When the callback is nil the
-	// escalation still mutates Phase=Failed but no event is emitted.
+	// MUST be set on every constructed ReconcileInput — workload code
+	// panics on a nil callback rather than silently dropping the
+	// operator-facing event. Adapters that genuinely don't wire a
+	// recorder (workload-side unit tests that don't assert on events)
+	// wire an explicit `func(_ int32, _, _ string) {}` stub.
 	WarnInstanceFailed func(idx int32, podName, reason string)
 }
