@@ -17,8 +17,11 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 )
 
 // Carrier types defined in core/ are re-exported here so the rest of
@@ -113,7 +116,29 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 	// GangSchedulingUnavailable Component condition: True when multi-pod
 	// Instances are requested but the CRD is not installed, False
 	// otherwise. No-op for single-pod Components.
-	if err := ensurePodGroups(ctx, p, plan); err != nil {
+	//
+	// Bridges into workload/gang via internalsource.BuildReconcileInput;
+	// the legacy v1beta1-typed ensurePodGroups helper that previously
+	// lived in omenative/gang.go is gone after the workload extraction
+	// (part 2 slice 4g of N).
+	gangDeps := workload.Deps{
+		Client:       p.Client,
+		APIReader:    p.APIReader,
+		Recorder:     p.Recorder,
+		Expectations: p.ExpectationsCache(),
+		RenderHook:   core.ISVCRenderHook(p.ISVC),
+	}
+	gangInput := internalsource.BuildReconcileInput(internalsource.BuildInputDeps{
+		ISVC:                    p.ISVC,
+		Component:               p.Component,
+		ObjectMeta:              p.ObjectMeta,
+		PodSpec:                 p.PodSpec,
+		WorkerPodSpec:           p.WorkerPodSpec,
+		Client:                  p.Client,
+		Expectations:            p.ExpectationsCache(),
+		GangSchedulingAvailable: p.GangSchedulingAvailable,
+	})
+	if err := workloadgang.EnsurePodGroups(ctx, gangDeps, gangInput, plan); err != nil {
 		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: ensure pod groups (component=%s): %w", plan.Component, err)
 	}
 

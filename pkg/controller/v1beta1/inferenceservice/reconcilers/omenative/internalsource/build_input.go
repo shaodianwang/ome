@@ -6,6 +6,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
@@ -71,6 +72,17 @@ type BuildInputDeps struct {
 	// nil the workload-level DefaultExpectations singleton is used —
 	// matches the fallback every legacy callsite already relies on.
 	Expectations *workload.Expectations
+
+	// GangSchedulingAvailable is the cluster-discovery boolean
+	// threaded through from the InferenceServiceReconciler — true
+	// when the scheduler-plugins
+	// `scheduling.x-k8s.io/v1alpha1` PodGroup CRD is installed at
+	// controller startup. Mirrored onto
+	// workload.WorkloadDesiredSpec.GangSchedulingAvailable so the
+	// gang.EnsurePodGroups reconciler reads it from the
+	// workload-typed projection. Tests / single-pod Components /
+	// pre-wiring callers leave it false.
+	GangSchedulingAvailable bool
 }
 
 // BuildReconcileInput projects (ISVC, Component, podSpec, ...) onto a
@@ -98,15 +110,17 @@ func BuildReconcileInput(d BuildInputDeps) workload.ReconcileInput {
 		EventTarget: d.ISVC,
 		Key:         buildWorkloadKey(d.ISVC, d.Component),
 		DesiredSpec: workload.WorkloadDesiredSpec{
-			PodSpec:               d.PodSpec,
-			WorkerPodSpec:         d.WorkerPodSpec,
-			PodTemplateObjectMeta: &d.ObjectMeta,
+			PodSpec:                 d.PodSpec,
+			WorkerPodSpec:           d.WorkerPodSpec,
+			PodTemplateObjectMeta:   &d.ObjectMeta,
+			GangSchedulingAvailable: d.GangSchedulingAvailable,
 		},
 		ObservedState: workload.WorkloadObservedState{
 			InstanceStatuses: InstanceStatusSliceToWorkload(extractInstanceStatuses(d.ISVC, d.Component)),
 		},
-		MutateInstance: buildMutateInstance(d.Client, d.ISVC, d.Component),
-		RemoveInstance: buildRemoveInstance(d.Client, d.ISVC, d.Component, d.Expectations),
+		MutateInstance:          buildMutateInstance(d.Client, d.ISVC, d.Component),
+		RemoveInstance:          buildRemoveInstance(d.Client, d.ISVC, d.Component, d.Expectations),
+		WriteAggregateCondition: buildWriteAggregateCondition(d.Client, d.ISVC, d.Component),
 	}
 }
 
@@ -198,6 +212,69 @@ func buildRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compon
 			cache.Forget(isvc.Namespace, isvc.Name, ComponentTypeToWorkload(component), idx)
 		}
 		return hadEntry, nil
+	}
+}
+
+// buildWriteAggregateCondition wraps the legacy ISVC-side Component
+// condition writer as a workload.ReconcileInput.WriteAggregateCondition
+// callback. The closure merges cond into the per-Component condition
+// list under retry.RetryOnConflict so LastTransitionTime only bumps
+// on a real transition and concurrent reconciles can't lose the
+// write to each other. Mirrors the v1beta1-typed
+// patchGangSchedulingCondition that previously lived in
+// omenative/gang.go before the workload extraction (part 2 slice 4g
+// of N).
+//
+// The legacy bumpCollisionCount + buildRemoveInstance helpers above
+// use the same retry shape so a future refactor can collapse them
+// onto a shared retry-wrapped status patcher.
+//
+// NotFound handling: if the ISVC was deleted between the caller
+// pulling the work item and us re-reading, both the Get and the
+// Status().Update return apierrors.IsNotFound. Treat both as
+// "operation succeeded trivially" — there is no status left to
+// mutate — and drop the error. Same shape as MutateInstance above.
+func buildWriteAggregateCondition(c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) func(ctx context.Context, cond metav1.Condition) error {
+	return func(ctx context.Context, cond metav1.Condition) error {
+		if c == nil || isvc == nil {
+			return fmt.Errorf("buildWriteAggregateCondition: nil client or ISVC")
+		}
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			fresh := &v1beta1.InferenceService{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("re-read ISVC: %w", err)
+			}
+			if fresh.Status.Components == nil {
+				fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+			}
+			cs := fresh.Status.Components[component]
+			if cs.OMENative == nil {
+				cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+			}
+			// Detect a no-op before issuing the API write — saves a
+			// status patch and the implicit ResourceVersion bump on
+			// every reconcile. Mirrors the same no-op short-circuit
+			// the legacy patchGangSchedulingCondition used.
+			if existing := apimeta.FindStatusCondition(cs.OMENative.Conditions, cond.Type); existing != nil &&
+				existing.Status == cond.Status &&
+				existing.Reason == cond.Reason &&
+				existing.ObservedGeneration == cond.ObservedGeneration &&
+				existing.Message == cond.Message {
+				return nil
+			}
+			apimeta.SetStatusCondition(&cs.OMENative.Conditions, cond)
+			fresh.Status.Components[component] = cs
+			if err := c.Status().Update(ctx, fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("status update: %w", err)
+			}
+			return nil
+		})
 	}
 }
 

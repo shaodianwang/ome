@@ -52,8 +52,8 @@ func TestIsMultiPodInstance(t *testing.T) {
 func TestBuildPodGroup_NilISVC(t *testing.T) {
 	plan := core.ComponentPlan{Component: v1beta1.EngineComponent}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
-	if _, err := BuildPodGroup(nil, plan, inst); err == nil {
-		t.Fatal("expected error for nil ISVC")
+	if _, err := BuildPodGroup(nil, testPodGroupOwnerGVK, plan, inst); err == nil {
+		t.Fatal("expected error for nil owner")
 	}
 }
 
@@ -61,7 +61,7 @@ func TestBuildPodGroup_SinglePodRejected(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	plan := core.ComponentPlan{Component: v1beta1.EngineComponent}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "default", Size: 1}}}
-	if _, err := BuildPodGroup(isvc, plan, inst); err == nil {
+	if _, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, plan, inst); err == nil {
 		t.Fatal("expected single-pod build to error (caller must guard with IsMultiPodInstance)")
 	}
 }
@@ -83,7 +83,7 @@ func TestBuildPodGroup_Shape(t *testing.T) {
 		},
 	}
 
-	pg, err := BuildPodGroup(isvc, plan, inst)
+	pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, plan, inst)
 	if err != nil {
 		t.Fatalf("BuildPodGroup: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestBuildPodGroup_TimeoutClamp(t *testing.T) {
 					{Name: "worker", Size: 1},
 				},
 			}
-			pg, err := BuildPodGroup(isvc, plan, inst)
+			pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, plan, inst)
 			if err != nil {
 				t.Fatalf("BuildPodGroup: %v", err)
 			}
@@ -191,7 +191,7 @@ func TestBuildPodGroup_HighWorkerCount(t *testing.T) {
 			{Name: "worker", Size: 7}, // tensor-parallel-8 setup
 		},
 	}
-	pg, err := BuildPodGroup(isvc, plan, inst)
+	pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, plan, inst)
 	if err != nil {
 		t.Fatalf("BuildPodGroup: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestEnsurePodGroup_SinglePodNoOp(t *testing.T) {
 	plan := core.ComponentPlan{Component: v1beta1.EngineComponent, InstanceReadyTimeout: 5 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "default", Size: 1}}}
 
-	if err := EnsurePodGroup(context.Background(), c, isvc, plan, inst); err != nil {
+	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
 		t.Fatalf("EnsurePodGroup: %v", err)
 	}
 
@@ -236,7 +236,7 @@ func TestEnsurePodGroup_CreatesWhenAbsent(t *testing.T) {
 	plan := core.ComponentPlan{Component: v1beta1.EngineComponent, InstanceReadyTimeout: 5 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 3}}}
 
-	if err := EnsurePodGroup(context.Background(), c, isvc, plan, inst); err != nil {
+	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
 		t.Fatalf("EnsurePodGroup: %v", err)
 	}
 
@@ -272,7 +272,7 @@ func TestEnsurePodGroup_DriftCorrected(t *testing.T) {
 	plan := core.ComponentPlan{Component: v1beta1.EngineComponent, InstanceReadyTimeout: 3 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
 
-	if err := EnsurePodGroup(context.Background(), c, isvc, plan, inst); err != nil {
+	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
 		t.Fatalf("EnsurePodGroup: %v", err)
 	}
 
@@ -303,7 +303,7 @@ func TestEnsurePodGroup_Idempotent(t *testing.T) {
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 2}}}
 
 	for i := 0; i < 2; i++ {
-		if err := EnsurePodGroup(context.Background(), c, isvc, plan, inst); err != nil {
+		if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
 			t.Fatalf("EnsurePodGroup pass %d: %v", i, err)
 		}
 	}
@@ -350,6 +350,13 @@ func TestDeletePodGroup_AbsentIsNoOp(t *testing.T) {
 // Helpers — local fixtures (intentionally not shared with the parent
 // package; podgroup is leaf-level and shouldn't import test_helpers).
 // ---------------------------------------------------------------------
+
+// testPodGroupOwnerGVK is the GroupVersionKind every test passes
+// alongside the ISVC fixture so the OwnerReference matches what the
+// ISVC adapter populates at the dispatch site. Mirrors the gang
+// reconciler's wiring of internalsource.ISVCGVK() without taking on
+// that import here.
+var testPodGroupOwnerGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
 func newPodGroupISVC(ns, name string) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{

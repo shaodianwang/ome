@@ -3,6 +3,7 @@ package workload
 import (
 	"context"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -103,4 +104,16 @@ type ReconcileInput struct {
 	// code panics on a nil callback rather than silently leaking
 	// status entries.
 	RemoveInstance func(ctx context.Context, idx int32) (bool, error)
+
+	// WriteAggregateCondition merges cond into the owner's
+	// per-Component condition list (under retry.RetryOnConflict) so
+	// workload code can stamp top-level Component-scoped conditions —
+	// today only `GangSchedulingUnavailable` (extracted gang.go) —
+	// without reaching back into the owner-CRD typed status. The
+	// caller wraps apimeta.SetStatusCondition + the apiserver round
+	// trip inside the closure so LastTransitionTime only bumps on a
+	// real transition. nil-OK: when unset, workload code falls back
+	// to a no-op write (the existing path through the next aggregate
+	// status flush picks up the condition on the following reconcile).
+	WriteAggregateCondition func(ctx context.Context, cond metav1.Condition) error
 }

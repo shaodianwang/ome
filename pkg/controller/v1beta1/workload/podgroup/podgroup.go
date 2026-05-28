@@ -30,11 +30,11 @@
 // this field (the operator may have installed Coscheduling as a
 // plugin inside the default scheduler, in which case the value
 // `default-scheduler` IS gang-aware and a hard check would produce
-// false positives). Instead, the omenative reconciler emits a
+// false positives). Instead, the workload gang reconciler emits a
 // one-shot Warning event `MaybeNoGangScheduler` against the parent
-// ISVC when a PodGroup is created for a pod whose effective
+// owner when a PodGroup is created for a pod whose effective
 // SchedulerName is empty or `default-scheduler`; see
-// `pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/gang.go`
+// `pkg/controller/v1beta1/workload/gang/gang.go`
 // `maybeWarnNoGangScheduler` for the heuristic and dedup behavior.
 package podgroup
 
@@ -44,19 +44,15 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
-
-// isvcGroupVersionKind identifies the InferenceService owner reference
-// stamped on every emitted PodGroup. Local copy keeps this package's
-// import surface narrow — no top-level omenative package dep.
-var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
 // maxScheduleTimeoutSeconds caps the per-PodGroup
 // scheduleTimeoutSeconds value derived from
@@ -78,7 +74,7 @@ const minScheduleTimeoutSeconds int32 = 60
 // across all Runners — i.e., it needs a PodGroup. Wraps
 // InstancePlan.TotalPods with the OEP threshold (>=2) so callers
 // don't repeat the constant.
-func IsMultiPodInstance(inst core.InstancePlan) bool {
+func IsMultiPodInstance(inst workload.InstancePlan) bool {
 	return inst.TotalPods() > 1
 }
 
@@ -92,26 +88,34 @@ func IsMultiPodInstance(inst core.InstancePlan) bool {
 // no other members).
 //
 // Properties:
-//   - Name: query.PodGroupName(isvc, component, inst.Index) —
-//     `<isvc>-<comp>-<idx>`, mirrors the Instance subdomain prefix.
-//   - Namespace: inherits from the parent ISVC.
+//   - Name: query.PodGroupName(owner.Name, component, inst.Index) —
+//     `<owner>-<comp>-<idx>`, mirrors the Instance subdomain prefix.
+//   - Namespace: inherits from the parent owner.
 //   - Labels: same Component-scoped trio every OMENative-emitted
 //     resource carries (inferenceservice, component, managed-by).
 //     The instance-index label is included so a single-Component
 //     selector can fan out by Instance for debugging.
-//   - OwnerReference: ISVC as Controller, blockOwnerDeletion=true so
-//     the K8s garbage collector handles cascade-delete when the ISVC
-//     is removed.
+//   - OwnerReference: owner (typically the InferenceService) as
+//     Controller, blockOwnerDeletion=true so the K8s garbage collector
+//     handles cascade-delete when the owner is removed.
 //   - Spec.MinMember: TotalPodsForInstance(inst) — every leader +
 //     worker pod must be schedulable for the gang to land.
 //   - Spec.ScheduleTimeoutSeconds: clamped from the caller's
 //     InstanceReadyTimeout into [minScheduleTimeoutSeconds,
 //     maxScheduleTimeoutSeconds]; see the constant comments above.
 //
+// The owner is taken as the abstract client.Object + GroupVersionKind
+// (rather than a concrete v1beta1.InferenceService) so this leaf
+// package stays callable from the workload reconciler — which lives
+// above the owner-CRD typed boundary and never imports
+// pkg/apis/ome/v1beta1. Adapters supply the concrete object plus the
+// GVK at the dispatch site (omenative passes the ISVC + isvcGVK; the
+// future InferenceReplica adapter will pass its own).
+//
 // Pure compute, no I/O.
-func BuildPodGroup(isvc *v1beta1.InferenceService, plan core.ComponentPlan, inst core.InstancePlan) (*schedulingv1alpha1.PodGroup, error) {
-	if isvc == nil {
-		return nil, fmt.Errorf("BuildPodGroup: nil InferenceService")
+func BuildPodGroup(owner client.Object, ownerGVK schema.GroupVersionKind, plan workload.ComponentPlan, inst workload.InstancePlan) (*schedulingv1alpha1.PodGroup, error) {
+	if owner == nil {
+		return nil, fmt.Errorf("BuildPodGroup: nil owner")
 	}
 	if !IsMultiPodInstance(inst) {
 		return nil, fmt.Errorf("BuildPodGroup: instance %d is single-pod (no gang)", inst.Index)
@@ -120,15 +124,15 @@ func BuildPodGroup(isvc *v1beta1.InferenceService, plan core.ComponentPlan, inst
 	minMember := inst.TotalPods()
 	timeout := clampScheduleTimeoutSeconds(int32(plan.InstanceReadyTimeout.Seconds()))
 
-	labels := podGroupLabels(isvc.Name, plan.Component, inst.Index)
+	labels := podGroupLabels(owner.GetName(), plan.Component, inst.Index)
 
 	return &schedulingv1alpha1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodGroupName(isvc.Name, plan.Component, inst.Index),
-			Namespace: isvc.Namespace,
+			Name:      query.PodGroupName(owner.GetName(), plan.Component, inst.Index),
+			Namespace: owner.GetNamespace(),
 			Labels:    labels,
 			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(isvc, isvcGroupVersionKind),
+				*metav1.NewControllerRef(owner, ownerGVK),
 			},
 		},
 		Spec: schedulingv1alpha1.PodGroupSpec{
@@ -182,14 +186,19 @@ func clampScheduleTimeoutSeconds(in int32) int32 {
 // indistinguishable from "transient apiserver hiccup" at the typed
 // level, so the discovery check is the right gate (done by
 // CRDPresent above the caller).
-func EnsurePodGroup(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, plan core.ComponentPlan, inst core.InstancePlan) error {
+//
+// owner + ownerGVK are passed straight through to BuildPodGroup so
+// callers above the owner-CRD typed boundary (the workload gang
+// reconciler) can drive the PodGroup lifecycle without importing
+// pkg/apis/ome/v1beta1.
+func EnsurePodGroup(ctx context.Context, c client.Client, owner client.Object, ownerGVK schema.GroupVersionKind, plan workload.ComponentPlan, inst workload.InstancePlan) error {
 	if c == nil {
 		return fmt.Errorf("EnsurePodGroup: nil client")
 	}
 	if !IsMultiPodInstance(inst) {
 		return nil
 	}
-	desired, err := BuildPodGroup(isvc, plan, inst)
+	desired, err := BuildPodGroup(owner, ownerGVK, plan, inst)
 	if err != nil {
 		return fmt.Errorf("EnsurePodGroup: build desired: %w", err)
 	}
@@ -217,22 +226,26 @@ func EnsurePodGroup(ctx context.Context, c client.Client, isvc *v1beta1.Inferenc
 // drained. Safe to call when the PodGroup doesn't exist (returns nil)
 // or when single-pod Instances are passed (no-op).
 //
-// In practice cascade-delete on ISVC handles whole-ISVC teardown via
-// the controller-owner ref; this function is for scale-down (one
+// In practice cascade-delete on the owner handles whole-owner teardown
+// via the controller-owner ref; this function is for scale-down (one
 // Instance shrinks out of the plan while others remain) and for
 // migration (the source Instance's PodGroup is removed once the
 // surge is Ready).
-func DeletePodGroup(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, instanceIdx int32) error {
+//
+// owner is taken as the abstract client.Object (rather than a concrete
+// v1beta1.InferenceService) for the same reason BuildPodGroup /
+// EnsurePodGroup do — see those docstrings.
+func DeletePodGroup(ctx context.Context, c client.Client, owner client.Object, component v1beta1.ComponentType, instanceIdx int32) error {
 	if c == nil {
 		return fmt.Errorf("DeletePodGroup: nil client")
 	}
-	if isvc == nil {
-		return fmt.Errorf("DeletePodGroup: nil InferenceService")
+	if owner == nil {
+		return fmt.Errorf("DeletePodGroup: nil owner")
 	}
 	pg := &schedulingv1alpha1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodGroupName(isvc.Name, component, instanceIdx),
-			Namespace: isvc.Namespace,
+			Name:      query.PodGroupName(owner.GetName(), component, instanceIdx),
+			Namespace: owner.GetNamespace(),
 		},
 	}
 	if err := c.Delete(ctx, pg); err != nil && !apierrors.IsNotFound(err) {

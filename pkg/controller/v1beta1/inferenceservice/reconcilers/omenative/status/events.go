@@ -79,7 +79,9 @@ const (
 	// arrangement from inside the cluster, so we err on the side of
 	// surfacing the heuristic). De-duplicated per (ISVC, Component)
 	// per controller process so reconciles do not spam the event log;
-	// see gang.go `maybeWarnNoGangScheduler` for the dedup map.
+	// see workload/gang.maybeWarnNoGangScheduler for the dedup map
+	// (the workload-extraction refactor (part 2 slice 4g of N) moved
+	// the helper out of omenative/gang.go).
 	EventReasonMaybeNoGangScheduler = "MaybeNoGangScheduler"
 )
 
