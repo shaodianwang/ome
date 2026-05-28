@@ -5,12 +5,13 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // Render builds the corev1.Pod for one ordinal of one Runner of one
@@ -18,83 +19,91 @@ import (
 // to RenderWithRevision with revisionHash="" — kept as a back-compat
 // entry point for tests and callers that don't have a target revision
 // in scope.
+//
+// Owner reference comes from owner + ownerGVK; the workload key seeds
+// label/selector composition (key.Labels carries the
+// {ome.io/inferenceservice, component, managed-by} trio adapters
+// populate at construction time).
 func Render(
-	isvc *v1beta1.InferenceService,
+	owner client.Object,
+	ownerGVK schema.GroupVersionKind,
+	key workload.WorkloadKey,
 	podSpec *corev1.PodSpec,
-	plan core.ComponentPlan,
-	inst core.InstancePlan,
-	runner core.RunnerPlan,
+	plan workload.ComponentPlan,
+	inst workload.InstancePlan,
+	runner workload.RunnerPlan,
 	ordinal int32,
+	hook workload.RenderHook,
 ) (*corev1.Pod, error) {
-	return RenderWithRevision(isvc, podSpec, nil, plan, inst, runner, ordinal, "")
+	return RenderWithRevision(owner, ownerGVK, key, podSpec, nil, plan, inst, runner, ordinal, "", hook)
 }
 
 // RenderWithRevision builds the corev1.Pod for one ordinal of one
 // Runner of one Instance, stamping ome.io/revision-hash with
 // revisionHash so per-revision Services can select the pod.
 //
-// Single-pod scope: the caller passes plan with one Runner per Instance
-// of size 1. Multi-pod Runner layout (leader + N workers per Instance)
-// is added in a follow-up.
-//
 // The returned Pod carries:
-//   - stable name <isvc>-<comp>-<inst-idx>-<runner>-<ordinal>
+//   - stable name <key.Name>-<inst-idx>-<runner>-<ordinal>
 //   - hostname + subdomain so peer DNS resolves under the Component's
 //     headless service
-//   - the OMENative labels (inferenceservice / component /
-//     instance-index / instance-incarnation / runner / managed-by),
-//     plus ome.io/revision-hash when revisionHash is non-empty
-//   - pod-template annotations from componentObjectMeta — that's the
-//     merged ServingRuntime engineConfig.annotations +
-//     ISVC.spec.{engine,decoder,router}.annotations the upstream
-//     component builder already produced. Without this, OMENative
-//     drops critical annotations like
-//     k8s.v1.cni.cncf.io/networks (multus IB attachments needed by
-//     PD runtimes) and other ones lower runtime stack expects.
-//     OME-controlled labels live on a different field (Labels) and
-//     are not affected.
+//   - the workload labels (ome.io/inferenceservice / component /
+//     instance-index / instance-incarnation / runner / managed-by /
+//     pod-ordinal), plus ome.io/revision-hash when revisionHash is
+//     non-empty
+//   - pod-template annotations from podTemplateObjectMeta
 //   - controller-owned `ome.io/serving` readiness gate appended after
 //     any user-declared gates
 //   - OME_* environment variables injected into every container
-//     (OMENative values override user-supplied ones with the same Name)
-//   - one OwnerReference back to the parent InferenceService
+//     (workload-controlled values override user-supplied ones)
+//   - one OwnerReference back to the owner (controller=true)
 //
-// componentObjectMeta may be nil for back-compat tests that don't
-// have a fully-built ObjectMeta in scope; annotations are skipped in
-// that case.
+// After composing the canonical pod, the adapter-supplied RenderHook
+// (workload.Deps.RenderHook) is invoked once with (pod, runnerName,
+// ordinal, revisionHash) so adapters can layer their own overlays
+// (e.g., coordination.InjectPeerEnv for the ISVC adapter).
+//
+// podTemplateObjectMeta may be nil for back-compat tests that don't
+// have a fully-built ObjectMeta in scope; user labels / annotations
+// are then skipped (workload-owned labels still land).
 func RenderWithRevision(
-	isvc *v1beta1.InferenceService,
+	owner client.Object,
+	ownerGVK schema.GroupVersionKind,
+	key workload.WorkloadKey,
 	podSpec *corev1.PodSpec,
-	componentObjectMeta *metav1.ObjectMeta,
-	plan core.ComponentPlan,
-	inst core.InstancePlan,
-	runner core.RunnerPlan,
+	podTemplateObjectMeta *metav1.ObjectMeta,
+	plan workload.ComponentPlan,
+	inst workload.InstancePlan,
+	runner workload.RunnerPlan,
 	ordinal int32,
 	revisionHash string,
+	hook workload.RenderHook,
 ) (*corev1.Pod, error) {
-	if isvc == nil {
-		return nil, fmt.Errorf("nil InferenceService")
+	if owner == nil {
+		return nil, fmt.Errorf("nil owner")
 	}
 	if podSpec == nil {
 		return nil, fmt.Errorf("nil PodSpec")
 	}
 
-	name := query.PodName(isvc.Name, plan.Component, inst.Index, runner.Name, ordinal)
-	subdomain := query.HeadlessServiceName(isvc.Name, plan.Component)
+	// Pod-naming inputs derived from the WorkloadKey + plan. The
+	// query.PodName helper still takes (isvc-from-labels, component,
+	// idx, runner, ordinal) — the isvc name comes from
+	// key.Labels["ome.io/inferenceservice"] which adapters populated.
+	isvcName := key.Labels[constants.InferenceServicePodLabelKey]
+	name := query.PodName(isvcName, plan.Component, inst.Index, runner.Name, ordinal)
+	subdomain := query.HeadlessServiceName(isvcName, plan.Component)
 
-	// Start from the upstream-merged CSR + ISVC labels so user-declared
-	// labels (e.g. fb.metric.schema) land on the pod, then overlay the
-	// OMENative-mandatory labels last so selectors keep working even if
-	// the user tried to set the same key. Same merge shape for
-	// annotations below; both were previously dropped, which crashed
-	// runtimes that needed multus/network annotations to spin up.
+	// Start from the caller's user-intent labels (so user-declared
+	// labels land on the pod), then overlay the workload-mandatory
+	// labels last so selectors keep working even if the user tried to
+	// set the same key. Same merge shape for annotations below.
 	lbls := make(map[string]string)
-	if componentObjectMeta != nil {
-		for k, v := range componentObjectMeta.Labels {
+	if podTemplateObjectMeta != nil {
+		for k, v := range podTemplateObjectMeta.Labels {
 			lbls[k] = v
 		}
 	}
-	for k, v := range podLabels(isvc.Name, plan.Component, inst.Index, runner.Name, inst.Incarnation, ordinal) {
+	for k, v := range podLabels(isvcName, plan.Component, inst.Index, runner.Name, inst.Incarnation, ordinal) {
 		lbls[k] = v
 	}
 	if revisionHash != "" {
@@ -103,26 +112,26 @@ func RenderWithRevision(
 	// Multi-pod Instances stamp the scheduler-plugins pod-group label so
 	// the gang-aware scheduler co-schedules every pod in the Instance.
 	// Single-pod Instances skip the label — no PodGroup, no gang. The
-	// PodGroup itself is created by gang.ensurePodGroups before the
-	// first pod is created; this label is the pod-side correlator.
-	if query.TotalPodsForInstance(inst) > 1 {
-		lbls[query.LabelPodGroup] = query.PodGroupName(isvc.Name, plan.Component, inst.Index)
+	// PodGroup itself is created by the workload gang reconciler before
+	// the first pod is created; this label is the pod-side correlator.
+	if inst.TotalPods() > 1 {
+		lbls[query.LabelPodGroup] = query.PodGroupName(isvcName, plan.Component, inst.Index)
 	}
 	var anns map[string]string
-	if componentObjectMeta != nil && len(componentObjectMeta.Annotations) > 0 {
-		anns = make(map[string]string, len(componentObjectMeta.Annotations))
-		for k, v := range componentObjectMeta.Annotations {
+	if podTemplateObjectMeta != nil && len(podTemplateObjectMeta.Annotations) > 0 {
+		anns = make(map[string]string, len(podTemplateObjectMeta.Annotations))
+		for k, v := range podTemplateObjectMeta.Annotations {
 			anns[k] = v
 		}
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
-			Namespace:   isvc.Namespace,
+			Namespace:   key.Namespace,
 			Labels:      lbls,
 			Annotations: anns,
 			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(isvc, isvcGroupVersionKind),
+				*metav1.NewControllerRef(owner, ownerGVK),
 			},
 		},
 		Spec: *podSpec.DeepCopy(),
@@ -148,12 +157,18 @@ func RenderWithRevision(
 	// nor the ISVC sets a runner name, but a caller that builds a PodSpec
 	// directly (back-compat tests, future direct callers) can still hand
 	// us an unnamed container. Stamp the canonical default here so the
-	// render path is the single source of truth at apply time. See Bug #42.
+	// render path is the single source of truth at apply time.
 	backfillEmptyContainerNames(&pod.Spec)
 
-	injectOMENativeEnv(pod, plan, inst, runner, ordinal, isvc.Name)
-	injectPeerEndpointEnv(pod, isvc, plan.Component, revisionHash)
+	injectOMENativeEnv(pod, plan, inst, runner, ordinal, isvcName)
 	applyMigrationOverlay(pod, inst.MigrationOverlay)
+
+	// Adapter-supplied hook: peer-env injection for the ISVC adapter,
+	// nil for the IR adapter (peer-env stays on the parent ISVC
+	// controller for v1).
+	if hook != nil {
+		hook(pod, runner.Name, ordinal, revisionHash)
+	}
 
 	return pod, nil
 }
@@ -179,45 +194,12 @@ func backfillEmptyContainerNames(spec *corev1.PodSpec) {
 	}
 }
 
-// injectPeerEndpointEnv stamps OME_<PEER>_ENDPOINT and
-// OME_<PEER>_REVISION_ENDPOINT env vars on every container so each
-// pod can dial its coordination peers at generation-scoped DNS.
-// No-op for ISVCs without a rolloutCoordination block, for the
-// degenerate single-Component group case, or when revisionHash is
-// empty (caller didn't go through RenderWithRevision).
-//
-// Per the OEP-0007.1 contract: the revision-aware endpoint uses the
-// pod's OWN revision-hash — BlueGreen gang semantics guarantee peers
-// surge together, so a new-revision pod dials peers at the same
-// hash. RollingUpdate permits cross-revision but the REVISION_ENDPOINT
-// still points at the pod's-own-revision peer; runtimes use the
-// generic ENDPOINT form when cross-revision peers are acceptable.
-//
-// Closes G2: previously coordination.InjectPeerEnv existed but no
-// production caller invoked it from the render path. Runtimes that
-// read OME_<PEER>_ENDPOINT saw empty values.
-func injectPeerEndpointEnv(pod *corev1.Pod, isvc *v1beta1.InferenceService, c v1beta1.ComponentType, revisionHash string) {
-	if isvc.Spec.RolloutCoordination == nil {
-		return
-	}
-	groups := coordination.ResolveGroups(isvc.Spec.RolloutCoordination)
-	peers := coordination.SortedPeers(groups, c, nil)
-	if len(peers) == 0 {
-		return
-	}
-	var hashFn func(v1beta1.ComponentType) string
-	if revisionHash != "" {
-		hashFn = func(_ v1beta1.ComponentType) string { return revisionHash }
-	}
-	coordination.InjectPeerEnv(pod, isvc.Name, isvc.Namespace, peers, hashFn)
-}
-
 // applyMigrationOverlay layers migration placement onto the rendered pod.
 // Hard anti-affinity moves the surge off FromNode; preferred affinity
 // nudges toward HintTargetNodes without making placement hard-fail.
 // Idempotent: a second Render after a cache-lag retry doesn't
 // double-stamp the same NotIn / hint term.
-func applyMigrationOverlay(pod *corev1.Pod, overlay *core.MigrationOverlay) {
+func applyMigrationOverlay(pod *corev1.Pod, overlay *workload.MigrationOverlay) {
 	if overlay == nil {
 		return
 	}
@@ -289,10 +271,8 @@ const overlayPreferredHintWeight int32 = 50
 //
 // Called from migrate.go's up-front validation: a true result means
 // reject the migration with a Failed audit row rather than create a
-// permanently-pending surge pod. Lives next to applyMigrationOverlay
-// because the two functions are duals — apply stamps the overlay,
-// WouldOverlayConflict... checks whether stamping would be safe.
-func WouldOverlayConflictWithNodeAffinity(spec *corev1.PodSpec, overlay *core.MigrationOverlay) bool {
+// permanently-pending surge pod.
+func WouldOverlayConflictWithNodeAffinity(spec *corev1.PodSpec, overlay *workload.MigrationOverlay) bool {
 	if overlay == nil || overlay.FromNode == "" || spec == nil {
 		return false
 	}
@@ -374,10 +354,6 @@ func hasPreferredHintTerm(existing []corev1.PreferredSchedulingTerm, hints []str
 	return false
 }
 
-// isvcGroupVersionKind identifies the InferenceService owner reference
-// used when stamping child pods.
-var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
-
 // hasServingReadinessGate is the dedup check before Render appends the
 // ome.io/serving gate.
 func hasServingReadinessGate(gates []corev1.PodReadinessGate) bool {
@@ -401,11 +377,11 @@ func podLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, 
 	}
 }
 
-// injectOMENativeEnv overlays OMENative's OME_* env vars onto every
+// injectOMENativeEnv overlays workload OME_* env vars onto every
 // container. If a container declared a variable with the same Name,
-// OMENative's value replaces it (the controller-owned values are the
+// the workload value replaces it (the controller-owned values are the
 // authoritative source for these names).
-func injectOMENativeEnv(pod *corev1.Pod, plan core.ComponentPlan, inst core.InstancePlan, runner core.RunnerPlan, ordinal int32, isvcName string) {
+func injectOMENativeEnv(pod *corev1.Pod, plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, ordinal int32, isvcName string) {
 	env := buildOMENativeEnv(plan, inst, runner, ordinal, isvcName)
 	owned := make(map[string]bool, len(env))
 	for _, e := range env {
@@ -422,7 +398,7 @@ func injectOMENativeEnv(pod *corev1.Pod, plan core.ComponentPlan, inst core.Inst
 	}
 }
 
-func buildOMENativeEnv(plan core.ComponentPlan, inst core.InstancePlan, runner core.RunnerPlan, ordinal int32, isvcName string) []corev1.EnvVar {
+func buildOMENativeEnv(plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, ordinal int32, isvcName string) []corev1.EnvVar {
 	// OME_RUNNER_INDEX reports the runner's position within the gang
 	// (0..runner.Size-1), NOT the pod-naming ordinal. For single-pod
 	// runners (Size=1) it's always 0; SurgeThenDrain alternates the pod
@@ -463,15 +439,8 @@ func buildOMENativeEnv(plan core.ComponentPlan, inst core.InstancePlan, runner c
 // path appends `.<ns>.svc.<cluster-domain>` at resolution time, so this
 // resolves the same as the fully-qualified
 // `<pod>.<headless>.<ns>.svc.cluster.local` form without the controller
-// needing to discover the cluster's actual DNS domain. Matches LWS
-// behavior (LWS also leaves cluster-domain qualification to the search
-// path). Documented in OEP-0007.2 §"Service Discovery" sign-off answer.
-//
-// Both the leader pod and every worker pod in the same Instance carry
-// the same value: the leader sees its own address (so code paths that
-// branch on `getenv("OME_LEADER_ADDRESS") == self_hostname` can identify
-// the leader role) and workers see where to dial back to the gang head.
-func leaderAddressForInstance(isvcName string, component v1beta1.ComponentType, inst core.InstancePlan) string {
+// needing to discover the cluster's actual DNS domain.
+func leaderAddressForInstance(isvcName string, component v1beta1.ComponentType, inst workload.InstancePlan) string {
 	for _, r := range inst.Runners {
 		if r.Name == "leader" {
 			return fmt.Sprintf("%s.%s",

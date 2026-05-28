@@ -13,10 +13,10 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/drain"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // deleteDrainKey is the per-Instance key the Delete-drain writer adds to
@@ -49,7 +49,7 @@ func Delete(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan
 	// Live read — a cached "pods gone" view could trick us into removing
 	// the InstanceStatus while the apiserver still holds the pods, leaking
 	// them.
-	pods, err := query.LiveListPodsForInstance(ctx, p, plan.Component, idx)
+	pods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx)
 	if err != nil {
 		return false, fmt.Errorf("Delete: list pods (instance=%d): %w", idx, err)
 	}

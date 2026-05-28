@@ -8,13 +8,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 )
 
 func newDiscoverTestClient(t *testing.T, objs ...client.Object) client.Client {
@@ -61,29 +59,12 @@ func newDiscoverPod(name string, instanceIdx int32, incarnation int64, withDelet
 	return pod
 }
 
-func newDiscoverParams(t *testing.T, objs ...client.Object) core.ReconcileParams {
-	t.Helper()
-	c := newDiscoverTestClient(t, objs...)
-	return core.ReconcileParams{
-		ISVC: &v1beta1.InferenceService{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "isvc",
-				Namespace: "ns",
-				UID:       types.UID("isvc-uid"),
-			},
-		},
-		Component: v1beta1.EngineComponent,
-		Client:    c,
-		APIReader: c, // fake is both — exercise the Reader() path
-	}
-}
-
 func TestLiveListPodsForInstance_FiltersByIndex(t *testing.T) {
 	pod0 := newDiscoverPod("p-0", 0, 1, false)
 	pod1 := newDiscoverPod("p-1", 1, 1, false)
-	p := newDiscoverParams(t, pod0, pod1)
+	c := newDiscoverTestClient(t, pod0, pod1)
 
-	got, err := LiveListPodsForInstance(context.Background(), p, v1beta1.EngineComponent, 0)
+	got, err := LiveListPodsForInstance(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0)
 	if err != nil {
 		t.Fatalf("LiveListPodsForInstance: %v", err)
 	}
@@ -93,8 +74,8 @@ func TestLiveListPodsForInstance_FiltersByIndex(t *testing.T) {
 }
 
 func TestLiveOldPodsClearedForRecreate_NoPods(t *testing.T) {
-	p := newDiscoverParams(t)
-	clear, err := LiveOldPodsClearedForRecreate(context.Background(), p, v1beta1.EngineComponent, 0, 2)
+	c := newDiscoverTestClient(t)
+	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -107,11 +88,11 @@ func TestLiveOldPodsClearedForRecreate_OnlyNewIncarnation(t *testing.T) {
 	// Phase B reconcile after the controller previously created the
 	// new-incarnation pods but crashed before Ready. Old pods are
 	// long gone, new pods exist. Should be clear.
-	p := newDiscoverParams(t,
+	c := newDiscoverTestClient(t,
 		newDiscoverPod("p-new-0", 0, 2, false),
 		newDiscoverPod("p-new-1", 0, 2, false),
 	)
-	clear, err := LiveOldPodsClearedForRecreate(context.Background(), p, v1beta1.EngineComponent, 0, 2)
+	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,10 +104,10 @@ func TestLiveOldPodsClearedForRecreate_OnlyNewIncarnation(t *testing.T) {
 func TestLiveOldPodsClearedForRecreate_OldStillRunning(t *testing.T) {
 	// Phase B reconcile fired but Phase A deletes haven't propagated
 	// — old pod still present, no DeletionTimestamp. Must NOT proceed.
-	p := newDiscoverParams(t,
+	c := newDiscoverTestClient(t,
 		newDiscoverPod("p-old", 0, 1, false),
 	)
-	clear, err := LiveOldPodsClearedForRecreate(context.Background(), p, v1beta1.EngineComponent, 0, 2)
+	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -139,10 +120,10 @@ func TestLiveOldPodsClearedForRecreate_OldTerminatingTolerated(t *testing.T) {
 	// Old pod has DeletionTimestamp (foreground propagation in
 	// flight) — Phase B can proceed because the stable name will
 	// land on a different pod once GC completes.
-	p := newDiscoverParams(t,
+	c := newDiscoverTestClient(t,
 		newDiscoverPod("p-old", 0, 1, true),
 	)
-	clear, err := LiveOldPodsClearedForRecreate(context.Background(), p, v1beta1.EngineComponent, 0, 2)
+	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -159,9 +140,9 @@ func TestLiveOldPodsClearedForRecreate_MissingLabelDoesNotBlockPhaseB(t *testing
 	// are they all terminating?".
 	pod := newDiscoverPod("p-orphan", 0, 0, false)
 	delete(pod.Labels, LabelInstanceIncarnation)
-	p := newDiscoverParams(t, pod)
+	c := newDiscoverTestClient(t, pod)
 
-	clear, err := LiveOldPodsClearedForRecreate(context.Background(), p, v1beta1.EngineComponent, 0, 2)
+	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

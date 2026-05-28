@@ -11,11 +11,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // ExpireOperationsIfDeadlinePassed walks every InstanceStatus and takes
@@ -188,7 +188,7 @@ func tryAbandonStuckMigration(ctx context.Context, p core.ReconcileParams, compo
 	surgeIdx := *source.Operation.SurgeIndex
 	uuid := source.Operation.RequestUUID
 
-	surgePods, err := query.LiveListPodsForInstance(ctx, p, component, surgeIdx)
+	surgePods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, component, surgeIdx)
 	if err != nil {
 		return false, fmt.Errorf("list surge pods: %w", err)
 	}
@@ -211,7 +211,7 @@ func tryAbandonStuckMigration(ctx context.Context, p core.ReconcileParams, compo
 	// Undo the source-drain key (set during Migrate step 8). If the
 	// drain key was never added (timeout fired before step 8) the
 	// remove is a no-op via podreadiness's idempotency.
-	sourcePods, err := query.LiveListPodsForInstance(ctx, p, component, source.Index)
+	sourcePods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, component, source.Index)
 	if err != nil {
 		return false, fmt.Errorf("list source pods: %w", err)
 	}

@@ -1,7 +1,6 @@
-package core
+package workload
 
 import (
-	"fmt"
 	"sort"
 	"time"
 
@@ -11,9 +10,9 @@ import (
 )
 
 // ComponentPlan is the desired Component → Instance → Runner → Pod shape
-// computed each reconcile from the InferenceService spec, ServingRuntime,
-// and BaseModel. Not persisted; recomputed every iteration. The policy
-// fields hold the effective values after defaults are applied.
+// computed each reconcile from the workload's desired + observed state.
+// Not persisted; recomputed every iteration. The policy fields hold the
+// effective values after defaults are applied.
 type ComponentPlan struct {
 	// Component identifies which of router / engine / decoder this plan
 	// describes.
@@ -37,7 +36,7 @@ type ComponentPlan struct {
 	// ReadyPolicy is the effective Instance-level readiness aggregation.
 	ReadyPolicy v1beta1.OMENativeReadyPolicy
 
-	// InstanceReadyTimeout is OMENative's wait ceiling on a newly-created
+	// InstanceReadyTimeout is the wait ceiling on a newly-created
 	// Instance becoming Ready.
 	InstanceReadyTimeout time.Duration
 
@@ -100,67 +99,92 @@ type RunnerPlan struct {
 	Size int32
 }
 
-// BuildPlan computes the desired ComponentPlan from a ReconcileParams.
+// TotalPods returns the total desired pod count across all Runners in
+// this Instance — 1 for single-pod, 1+N for leader+worker. Defined as
+// a method so callers can reach the sum without importing workload/query
+// (which would close an import cycle once workload/ itself imports
+// query/).
+func (i InstancePlan) TotalPods() int32 {
+	var n int32
+	for _, r := range i.Runners {
+		n += r.Size
+	}
+	return n
+}
+
+// BuildPlan computes the desired ComponentPlan from the projected
+// (WorkloadDesiredSpec, WorkloadObservedState) pair.
 //
-// The function is pure: it inspects p (ISVC + ComponentExt + MultiPod
-// flag + replica counts) and produces the plan the rest of the reconciler
-// will drive toward. No I/O, no controller-runtime calls.
+// The function is pure: it inspects desired (Replicas, MultiPod,
+// WorkerPodSpec presence, Lifecycle) and observed (InstanceStatuses)
+// and produces the plan the rest of the reconciler will drive toward.
+// No I/O, no controller-runtime calls. Adapters are responsible for
+// projecting the spec/status they own into these two value types.
 //
 // Runner layout:
-//   - Single-pod Instances (p.MultiPod=false): one Runner named "default"
-//     of size 1 per Instance. Used by Router and any Engine/Decoder
-//     without Leader+Worker declared.
-//   - Multi-pod Instances (p.MultiPod=true): one "leader" Runner of size 1
-//     plus one "worker" Runner of size p.WorkerSize per Instance. Matches
-//     OEP-0007 Story 1 and the Pod Topology Model in §"Internal Data Model".
+//   - Single-pod Instances (desired.MultiPod=false): one Runner named
+//     "default" of size 1 per Instance. Used by Router and any
+//     Engine/Decoder without Leader+Worker declared.
+//   - Multi-pod Instances (desired.MultiPod=true): one "leader" Runner of
+//     size 1 plus one "worker" Runner of size derived from the
+//     desired.WorkerPodSpec presence. Matches OEP-0007 Story 1.
 //
-// Defaulting: the mutating webhook fills in `omenative.*` for OMENative-
-// annotated Components, so in production the fields are non-nil. For
-// robustness against pre-defaulter objects or test fixtures, BuildPlan
-// also applies the same defaults inline rather than relying solely on
-// the webhook.
-func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
-	if p.ComponentExt == nil {
-		return ComponentPlan{}, fmt.Errorf("nil ComponentExtensionSpec for component=%s", p.Component)
+// Defaulting: the mutating webhook fills in lifecycle fields for
+// OMENative-annotated Components, so in production the fields are
+// non-nil. For robustness against pre-defaulter objects or test
+// fixtures, BuildPlan also applies the same defaults inline.
+//
+// Component is taken from the caller; it is metadata for downstream
+// consumers and is not part of the planning computation.
+func BuildPlan(component v1beta1.ComponentType, desired WorkloadDesiredSpec, observed WorkloadObservedState) (ComponentPlan, error) {
+	replicas := desired.Replicas
+	if replicas <= 0 {
+		replicas = 1
 	}
 
-	replicas := int32(1)
-	if p.ComponentExt.MinReplicas != nil && *p.ComponentExt.MinReplicas > 0 {
-		replicas = int32(*p.ComponentExt.MinReplicas)
-	}
+	workerSize := workerSizeFromRunners(desired.Runners)
 
 	// Compute the plan's Instance index set. Existing InstanceStatus
 	// entries — including any migration-surge index above the replica
 	// count — are preserved so the rest of Loop A keeps driving them.
 	// The plan grows beyond replicas during the surge phase of a
-	// migration; scale-down logic (extraInstanceIndices) is responsible
-	// for picking the right deletion target after that surge resolves.
-	indices := instancePlanIndices(p.ISVC, p.Component, replicas)
+	// migration; scale-down logic is responsible for picking the right
+	// deletion target after that surge resolves.
+	indices := instancePlanIndices(observed.InstanceStatuses, replicas)
 	instances := make([]InstancePlan, len(indices))
-	runners := runnersForInstance(p.MultiPod, int32(p.WorkerSize))
+	runners := runnersForInstance(desired.MultiPod, workerSize)
 	for i, idx := range indices {
 		instances[i] = InstancePlan{
 			Index:       idx,
-			Incarnation: incarnationForIndex(p.ISVC, p.Component, idx),
+			Incarnation: incarnationForIndex(observed.InstanceStatuses, idx),
 			Runners:     append([]RunnerPlan(nil), runners...),
 		}
 	}
 
-	omenative := p.ComponentExt.OMENative
-	if omenative == nil {
-		omenative = &v1beta1.OMENativeComponentSpec{}
-	}
+	lifecycle := desired.Lifecycle
 
 	return ComponentPlan{
-		Component:            p.Component,
+		Component:            component,
 		Replicas:             replicas,
 		Instances:            instances,
-		RestartPolicy:        restartPolicyOrDefault(omenative.RestartPolicy, p.MultiPod),
-		UpdateStrategy:       updateStrategyWithDefaults(omenative.UpdateStrategy),
-		ReadyPolicy:          readyPolicyOrDefault(omenative.ReadyPolicy, p.MultiPod),
-		InstanceReadyTimeout: instanceReadyTimeoutOrDefault(omenative.InstanceReadyTimeout),
-		MigrationMode:        migrationModeOrDefault(omenative.MigrationPolicy),
+		RestartPolicy:        restartPolicyOrDefault(lifecycle.RestartPolicy, desired.MultiPod),
+		UpdateStrategy:       updateStrategyWithDefaults(lifecycle.UpdateStrategy),
+		ReadyPolicy:          readyPolicyOrDefault(lifecycle.ReadyPolicy, desired.MultiPod),
+		InstanceReadyTimeout: instanceReadyTimeoutOrDefault(lifecycle.InstanceReadyTimeout),
+		MigrationMode:        migrationModeOrDefault(lifecycle.MigrationPolicy),
 	}, nil
+}
+
+// workerSizeFromRunners extracts the "worker" Runner size from the
+// desired Runner set. Returns 0 when no worker Runner is present
+// (single-pod Component).
+func workerSizeFromRunners(runners []Runner) int32 {
+	for _, r := range runners {
+		if r.Name == "worker" {
+			return r.Size
+		}
+	}
+	return 0
 }
 
 // runnersForInstance returns the Runner layout for one Instance based on
@@ -260,10 +284,10 @@ func migrationModeOrDefault(p *v1beta1.OMENativeMigrationPolicy) v1beta1.OMENati
 // The replica cap counts only non-migration indices. Counting the
 // surge against it would drop a healthy non-migrating sibling out of
 // the plan and into scale-down.
-func instancePlanIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, replicas int32) []int32 {
-	used := existingInstanceIndices(isvc, component)
-	migrationProtected := migrationInFlightIndices(isvc, component)
-	migrationSource := migrationSourceIndices(isvc, component)
+func instancePlanIndices(instances []v1beta1.OMENativeInstanceStatus, replicas int32) []int32 {
+	used := existingInstanceIndices(instances)
+	migrationProtected := migrationInFlightIndices(instances)
+	migrationSource := migrationSourceIndices(instances)
 
 	sorted := make([]int32, 0, len(used))
 	for idx := range used {
@@ -333,16 +357,9 @@ func instancePlanIndices(isvc *v1beta1.InferenceService, component v1beta1.Compo
 // (the source) or Operation.Type=Migrate (the surge). These indices
 // stay in the plan past scale-down boundaries because deleting them
 // mid-migration would abandon a partially-rolled-out surge.
-func migrationInFlightIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[int32]struct{} {
+func migrationInFlightIndices(instances []v1beta1.OMENativeInstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
-	if isvc == nil {
-		return out
-	}
-	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.OMENative == nil {
-		return out
-	}
-	for _, s := range cs.OMENative.InstanceStatuses {
+	for _, s := range instances {
 		if s.Phase == v1beta1.OMENativeInstanceMigrating {
 			out[s.Index] = struct{}{}
 			continue
@@ -359,16 +376,9 @@ func migrationInFlightIndices(isvc *v1beta1.InferenceService, component v1beta1.
 // participants (Phase=Creating + Operation.Migrate) are not included
 // because they are the +1 over MinReplicas, not the user-facing
 // replica being relocated.
-func migrationSourceIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[int32]struct{} {
+func migrationSourceIndices(instances []v1beta1.OMENativeInstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
-	if isvc == nil {
-		return out
-	}
-	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.OMENative == nil {
-		return out
-	}
-	for _, s := range cs.OMENative.InstanceStatuses {
+	for _, s := range instances {
 		if s.Phase == v1beta1.OMENativeInstanceMigrating {
 			out[s.Index] = struct{}{}
 		}
@@ -376,18 +386,11 @@ func migrationSourceIndices(isvc *v1beta1.InferenceService, component v1beta1.Co
 	return out
 }
 
-// existingInstanceIndices returns the set of indices the Component's
-// InstanceStatus currently records.
-func existingInstanceIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[int32]struct{} {
+// existingInstanceIndices returns the set of indices the InstanceStatus
+// slice currently records.
+func existingInstanceIndices(instances []v1beta1.OMENativeInstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
-	if isvc == nil {
-		return out
-	}
-	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.OMENative == nil {
-		return out
-	}
-	for _, s := range cs.OMENative.InstanceStatuses {
+	for _, s := range instances {
 		out[s.Index] = struct{}{}
 	}
 	return out
@@ -395,11 +398,11 @@ func existingInstanceIndices(isvc *v1beta1.InferenceService, component v1beta1.C
 
 // AllocateSurgeIndex returns a fresh non-negative index for a surge
 // replica — the lowest int32 not currently present in any of the
-// Component's InstanceStatuses. The migration op uses this to pick
-// the slot for its +1 surge pod without colliding with steady-state
-// indices or other in-flight surges.
-func AllocateSurgeIndex(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) int32 {
-	return lowestUnusedIndex(existingInstanceIndices(isvc, component))
+// InstanceStatuses. The migration op uses this to pick the slot for
+// its +1 surge pod without colliding with steady-state indices or
+// other in-flight surges.
+func AllocateSurgeIndex(instances []v1beta1.OMENativeInstanceStatus) int32 {
+	return lowestUnusedIndex(existingInstanceIndices(instances))
 }
 
 // lowestUnusedIndex returns the smallest non-negative int32 not
@@ -418,20 +421,14 @@ func lowestUnusedIndex(used map[int32]struct{}) int32 {
 	return int32(len(used))
 }
 
-// incarnationForIndex returns the current Incarnation for the (component, idx)
-// pair. If the ISVC has no InstanceStatus for that pair yet — first reconcile,
-// or after a delete — incarnation starts at 1. Otherwise the existing value
-// is preserved. This function only reads status; the writers are the
-// patchInstanceStatus* helpers that own each lifecycle transition.
-func incarnationForIndex(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) int64 {
-	if isvc == nil {
-		return 1
-	}
-	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.OMENative == nil {
-		return 1
-	}
-	for _, s := range cs.OMENative.InstanceStatuses {
+// incarnationForIndex returns the current Incarnation for the idx
+// in the InstanceStatus slice. If no matching entry exists yet —
+// first reconcile, or after a delete — incarnation starts at 1.
+// Otherwise the existing value is preserved. This function only reads
+// status; the writers are the patchInstanceStatus* helpers that own
+// each lifecycle transition.
+func incarnationForIndex(instances []v1beta1.OMENativeInstanceStatus, idx int32) int64 {
+	for _, s := range instances {
 		if s.Index == idx && s.Incarnation > 0 {
 			return s.Incarnation
 		}

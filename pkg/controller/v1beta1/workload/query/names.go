@@ -53,7 +53,7 @@ func InstanceSubdomain(isvc string, component v1beta1.ComponentType, instanceIdx
 // `kubectl get pg <name>` can pivot directly to
 // `kubectl get pods -l <subdomain>` without re-deriving the prefix.
 // Single-pod Instances do NOT get a PodGroup; callers must check
-// query.TotalPodsForInstance(inst) > 1 before invoking the builder.
+// inst.TotalPods() > 1 before invoking the builder.
 func PodGroupName(isvc string, component v1beta1.ComponentType, instanceIdx int32) string {
 	return fmt.Sprintf("%s-%s-%d", isvc, component, instanceIdx)
 }

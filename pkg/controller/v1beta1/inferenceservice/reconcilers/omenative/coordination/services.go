@@ -13,7 +13,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // perRevisionServicePort is the default port the per-revision routing

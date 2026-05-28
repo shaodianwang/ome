@@ -1,17 +1,13 @@
 // Package revision owns the ControllerRevision history for a
-// per-Component OMENative pod template — deterministic hashing,
-// collision-aware create, retention.
+// per-workload pod template — deterministic hashing, collision-aware
+// create, retention.
 //
 // Boundary: this package is a leaf. It depends on Kubernetes API
 // machinery + the project's v1beta1 types + constants for the
-// project-wide pod label keys. It owns the labels + OwnerReference
-// it stamps on the CRs it creates ("ome.io/managed-by=OMENative" plus
-// the InferenceService GroupVersionKind) — the canonical copies of the
-// same strings live in query/labels.go, query/names.go, and
-// ops/render.go for the Pods + Services those other layers emit. A
-// single source of truth would require pushing the OwnerReference
-// helper down here too; the stable string-literal duplication is
-// acceptable for now.
+// project-wide pod label keys. The labels stamped on emitted CRs are
+// taken from the caller-supplied workload.WorkloadKey so the same
+// labels carry through the pod-selector composition the rest of the
+// workload pipeline does.
 //
 // Imports the audit subpackage solely to share the
 // MigrationRequestAnnotationPrefix constant — the controller-written
@@ -34,13 +30,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 )
+
+// WorkloadKey is the small subset of workload.WorkloadKey this package
+// needs. Defining it locally (rather than importing workload) keeps
+// this leaf importable by both the workload top-level package (commit
+// 9) and by adapters that hold their own composition of these fields.
+// Adapters typically build it from the workload.WorkloadKey they
+// already have in scope.
+type WorkloadKey struct {
+	Namespace string
+	Name      string
+	Labels    map[string]string
+}
 
 // DataPayload is the canonical content hashed into the
 // ControllerRevision name. Only steady-state fields are hashed;
@@ -132,13 +140,14 @@ func HashWithWorker(template, workerSpec *corev1.PodSpec, templateMeta *metav1.O
 // annotations) only. Operational fields (UID, ResourceVersion, etc.)
 // are excluded so the hash stays stable when only those change. Returns
 // nil when neither labels nor annotations are set — preserves the
-// legacy `"podMeta":null` shape so ISVCs that don't yet carry template
-// metadata don't see a phantom rollout when this code first deploys.
+// legacy `"podMeta":null` shape so workloads that don't yet carry
+// template metadata don't see a phantom rollout when this code first
+// deploys.
 //
 // Filters out lifecycle annotations that the controller writes back to
-// the ISVC (migration requests) so adding/removing them does not bump
+// the owner (migration requests) so adding/removing them does not bump
 // the revision hash. Without this, a migration request landing on the
-// ISVC would drift every Component's revision hash — including
+// owner would drift every Component's revision hash — including
 // Components that aren't the migration target — and force a phantom
 // rollout that envtest cannot complete.
 func TemplateMeta(src *metav1.ObjectMeta) *metav1.ObjectMeta {
@@ -195,40 +204,34 @@ func isLifecycleAnnotation(key string) bool {
 	return key == pausedRolloutAnnotation
 }
 
-// Name composes the ControllerRevision object name from the parent
-// ISVC name, the Component, and the hash. Deterministic — the same
-// inputs always yield the same name, which is what makes
-// "reuse-if-exists" work.
-func Name(isvcName string, component v1beta1.ComponentType, hash string) string {
-	return fmt.Sprintf("%s-%s-%s", isvcName, component, hash)
+// Name composes the ControllerRevision object name from the WorkloadKey
+// and the hash — `<key.Name>-<hash>`. Deterministic, so "reuse-if-exists"
+// works.
+//
+// For the ISVC adapter, key.Name = "<isvc>-<component>", producing the
+// same name shape (`<isvc>-<component>-<hash>`) that existed pre-refactor.
+// IR-adapter callers set key.Name the same way (since one IR is one
+// (ISVC, Component) tuple), so cross-adapter CRs share the same name and
+// the in-place migration window stays seamless.
+func Name(key WorkloadKey, hash string) string {
+	return fmt.Sprintf("%s-%s", key.Name, hash)
 }
 
-// labelManagedBy / managedByValue are stamped on every CR this package
-// creates and used as the selector for List operations. Duplicated
-// from render.go's constants — same string, same intent.
-const (
-	labelManagedBy = "ome.io/managed-by"
-	managedByValue = "OMENative"
-)
-
-// isvcGroupVersionKind is the GroupVersionKind the OwnerReference on
-// every CR points at. Computed from v1beta1.SchemeGroupVersion so a
-// future API version bump flips this in one place.
-var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
-
 // Labels are stamped on every ControllerRevision so the list selector
-// picks them up. Mirror the pod label set so a single label-based query
-// can answer "everything OMENative owns for this (isvc, component)."
-func Labels(isvcName string, component v1beta1.ComponentType) map[string]string {
-	return map[string]string{
-		constants.InferenceServicePodLabelKey: isvcName,
-		constants.OMEComponentLabel:           string(component),
-		labelManagedBy:                        managedByValue,
+// picks them up. Taken directly from the WorkloadKey's seed label set,
+// which the adapter populated with the {ome.io/inferenceservice,
+// component, managed-by} trio so the existing pod selector also picks
+// up the CRs.
+func Labels(key WorkloadKey) map[string]string {
+	out := make(map[string]string, len(key.Labels))
+	for k, v := range key.Labels {
+		out[k] = v
 	}
+	return out
 }
 
 // EnsureControllerRevision creates or reuses a CR matching the
-// Component's pod template. `reads` must be the live API reader: a
+// workload's pod template. `reads` must be the live API reader: a
 // stale cache could return NotFound for an object the apiserver
 // already holds, causing re-Create over a concurrent writer.
 //
@@ -237,7 +240,7 @@ func Labels(isvcName string, component v1beta1.ComponentType) map[string]string 
 // different salt so the next name lands.
 //
 // New CRs are stamped with Labels() and a controller OwnerReference
-// for the parent ISVC; existing CRs keep whatever labels/owners they
+// for the workload owner; existing CRs keep whatever labels/owners they
 // already have.
 //
 // Single-pod variant — does not hash a worker template. Multi-pod
@@ -247,13 +250,14 @@ func EnsureControllerRevision(
 	ctx context.Context,
 	c client.Client,
 	reads client.Reader,
-	isvc *v1beta1.InferenceService,
-	component v1beta1.ComponentType,
+	owner client.Object,
+	ownerGVK schema.GroupVersionKind,
+	key WorkloadKey,
 	template *corev1.PodSpec,
 	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
 ) (cr *appsv1.ControllerRevision, collision bool, err error) {
-	return EnsureControllerRevisionWithWorker(ctx, c, reads, isvc, component, template, nil, templateMeta, collisionCount)
+	return EnsureControllerRevisionWithWorker(ctx, c, reads, owner, ownerGVK, key, template, nil, templateMeta, collisionCount)
 }
 
 // EnsureControllerRevisionWithWorker is the multi-pod-aware sibling of
@@ -265,15 +269,16 @@ func EnsureControllerRevisionWithWorker(
 	ctx context.Context,
 	c client.Client,
 	reads client.Reader,
-	isvc *v1beta1.InferenceService,
-	component v1beta1.ComponentType,
+	owner client.Object,
+	ownerGVK schema.GroupVersionKind,
+	key WorkloadKey,
 	template *corev1.PodSpec,
 	workerSpec *corev1.PodSpec,
 	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
 ) (cr *appsv1.ControllerRevision, collision bool, err error) {
-	if isvc == nil {
-		return nil, false, fmt.Errorf("EnsureControllerRevision: nil ISVC")
+	if owner == nil {
+		return nil, false, fmt.Errorf("EnsureControllerRevision: nil owner")
 	}
 	if c == nil {
 		return nil, false, fmt.Errorf("EnsureControllerRevision: nil client")
@@ -286,15 +291,15 @@ func EnsureControllerRevisionWithWorker(
 	if err != nil {
 		return nil, false, err
 	}
-	name := Name(isvc.Name, component, hash)
-	key := client.ObjectKey{Namespace: isvc.Namespace, Name: name}
+	name := Name(key, hash)
+	objKey := client.ObjectKey{Namespace: key.Namespace, Name: name}
 
 	existing := &appsv1.ControllerRevision{}
-	if getErr := reads.Get(ctx, key, existing); getErr == nil {
+	if getErr := reads.Get(ctx, objKey, existing); getErr == nil {
 		// Foreign ownership = collision: a CR left over from a
-		// previously-deleted-and-recreated ISVC of the same name would
+		// previously-deleted-and-recreated owner of the same name would
 		// otherwise be silently adopted, mixing histories.
-		if !controllerOwnedBy(existing.OwnerReferences, isvc.UID) {
+		if !controllerOwnedBy(existing.OwnerReferences, owner.GetUID()) {
 			return existing, true, nil
 		}
 		if !bytes.Equal(existing.Data.Raw, raw) {
@@ -305,7 +310,7 @@ func EnsureControllerRevisionWithWorker(
 		return nil, false, fmt.Errorf("get ControllerRevision %s: %w", name, getErr)
 	}
 
-	nextRev, err := nextRevisionNumber(ctx, reads, isvc, component)
+	nextRev, err := nextRevisionNumber(ctx, reads, key)
 	if err != nil {
 		return nil, false, err
 	}
@@ -313,9 +318,9 @@ func EnsureControllerRevisionWithWorker(
 	cr = &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
-			Namespace:       isvc.Namespace,
-			Labels:          Labels(isvc.Name, component),
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(isvc, isvcGroupVersionKind)},
+			Namespace:       key.Namespace,
+			Labels:          Labels(key),
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(owner, ownerGVK)},
 		},
 		Data:     runtime.RawExtension{Raw: raw},
 		Revision: nextRev,
@@ -327,10 +332,10 @@ func EnsureControllerRevisionWithWorker(
 		// Lost the race; re-read via live reader (cache may still show
 		// NotFound) and apply the same ownership / match-or-collision
 		// gating as the existing-on-Get branch.
-		if getErr := reads.Get(ctx, key, cr); getErr != nil {
+		if getErr := reads.Get(ctx, objKey, cr); getErr != nil {
 			return nil, false, fmt.Errorf("re-get after AlreadyExists: %w", getErr)
 		}
-		if !controllerOwnedBy(cr.OwnerReferences, isvc.UID) {
+		if !controllerOwnedBy(cr.OwnerReferences, owner.GetUID()) {
 			return cr, true, nil
 		}
 		if !bytes.Equal(cr.Data.Raw, raw) {
@@ -352,30 +357,29 @@ func controllerOwnedBy(refs []metav1.OwnerReference, uid types.UID) bool {
 	return false
 }
 
-// RetainControllerRevisions sweeps the (isvc, component)-scoped
-// ControllerRevisions and keeps the most recent maxNonLive non-live
-// ones, in addition to any revision named in liveNames. Older non-live
-// revisions are deleted. Order is by .Revision (highest = newest).
+// RetainControllerRevisions sweeps the workload-scoped ControllerRevisions
+// and keeps the most recent maxNonLive non-live ones, in addition to any
+// revision named in liveNames. Older non-live revisions are deleted. Order
+// is by .Revision (highest = newest).
 //
 // reads is the live API reader used for the listing step so retention
 // decisions aren't made against a stale cache.
 //
-// liveNames typically holds CurrentRevision and UpdateRevision from
-// OMENativeComponentStatus. Empty entries are ignored. The recommended
-// default for maxNonLive is 10.
+// liveNames typically holds CurrentRevision and UpdateRevision plus
+// every InstanceStatus.RunningRevision/TargetRevision. Empty entries
+// are ignored. The recommended default for maxNonLive is 10.
 func RetainControllerRevisions(
 	ctx context.Context,
 	c client.Client,
 	reads client.Reader,
-	isvc *v1beta1.InferenceService,
-	component v1beta1.ComponentType,
+	key WorkloadKey,
 	maxNonLive int,
 	liveNames ...string,
 ) error {
 	if maxNonLive < 0 {
 		return fmt.Errorf("RetainControllerRevisions: maxNonLive must be >= 0")
 	}
-	existing, err := listControllerRevisions(ctx, reads, isvc, component)
+	existing, err := listControllerRevisions(ctx, reads, key)
 	if err != nil {
 		return err
 	}
@@ -421,19 +425,17 @@ func RetainControllerRevisions(
 	return sweepErr
 }
 
-// listControllerRevisions returns every ControllerRevision owned by
-// the (isvc, component) tuple, identified by the labels stamped at
-// create time.
+// listControllerRevisions returns every ControllerRevision matching the
+// workload's seed label set.
 func listControllerRevisions(
 	ctx context.Context,
 	reads client.Reader,
-	isvc *v1beta1.InferenceService,
-	component v1beta1.ComponentType,
+	key WorkloadKey,
 ) ([]appsv1.ControllerRevision, error) {
 	list := &appsv1.ControllerRevisionList{}
-	sel := labels.SelectorFromSet(labels.Set(Labels(isvc.Name, component)))
+	sel := labels.SelectorFromSet(labels.Set(Labels(key)))
 	if err := reads.List(ctx, list,
-		client.InNamespace(isvc.Namespace),
+		client.InNamespace(key.Namespace),
 		client.MatchingLabelsSelector{Selector: sel},
 	); err != nil {
 		return nil, fmt.Errorf("list ControllerRevisions: %w", err)
@@ -441,7 +443,7 @@ func listControllerRevisions(
 	return list.Items, nil
 }
 
-// nextRevisionNumber returns max(.Revision)+1 across the Component's
+// nextRevisionNumber returns max(.Revision)+1 across the workload's
 // existing CRs, or 1 when none exist. Reads via the supplied reader so
 // the caller can force a live read when the monotonicity guarantee
 // matters (two concurrent reconciles reading from a stale cache could
@@ -449,10 +451,9 @@ func listControllerRevisions(
 func nextRevisionNumber(
 	ctx context.Context,
 	reads client.Reader,
-	isvc *v1beta1.InferenceService,
-	component v1beta1.ComponentType,
+	key WorkloadKey,
 ) (int64, error) {
-	existing, err := listControllerRevisions(ctx, reads, isvc, component)
+	existing, err := listControllerRevisions(ctx, reads, key)
 	if err != nil {
 		return 0, err
 	}
@@ -465,16 +466,19 @@ func nextRevisionNumber(
 	return maxRev + 1, nil
 }
 
-// CollectLiveRevisionNames is the union retention must protect: the
-// Component's Current/UpdateRevision plus every
+// CollectLiveRevisionNames is the union retention must protect:
+// CurrentRevision + UpdateRevision plus every
 // InstanceStatus.RunningRevision/TargetRevision. Without the per-instance
 // union, an in-flight migration whose source RunningRevision points to
 // an older CR could have that CR swept mid-flight, then the migration
 // resume path returns nil and the migration bails forever.
-func CollectLiveRevisionNames(cs *v1beta1.OMENativeComponentStatus) []string {
-	if cs == nil {
-		return nil
-	}
+//
+// Takes the slice of InstanceStatuses + the two revision pointers
+// directly so the call works against either an OMENativeComponentStatus
+// (ISVC path) or an InferenceReplicaStatus (IR path) without needing a
+// type-specific reader. Either adapter projects its status surface into
+// these primitive args.
+func CollectLiveRevisionNames(current, update string, instances []v1beta1.OMENativeInstanceStatus) []string {
 	seen := map[string]struct{}{}
 	add := func(name string) {
 		if name == "" {
@@ -482,9 +486,9 @@ func CollectLiveRevisionNames(cs *v1beta1.OMENativeComponentStatus) []string {
 		}
 		seen[name] = struct{}{}
 	}
-	add(cs.CurrentRevision)
-	add(cs.UpdateRevision)
-	for _, inst := range cs.InstanceStatuses {
+	add(current)
+	add(update)
+	for _, inst := range instances {
 		add(inst.RunningRevision)
 		add(inst.TargetRevision)
 	}

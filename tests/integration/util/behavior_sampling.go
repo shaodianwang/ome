@@ -12,7 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 )
 
 // SampleDuringRollout calls sampleFn at every tick until done is closed or

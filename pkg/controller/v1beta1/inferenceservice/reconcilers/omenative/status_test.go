@@ -19,9 +19,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // ---------------------------------------------------------------------
@@ -609,7 +609,7 @@ func TestSurgeUpdate_SingleBump_URMatchesCR_OnlyOneNewCR(t *testing.T) {
 			"test.ome.io/rollout-trigger": "initial",
 		},
 	}
-	initialCR, _, err := revision.EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, initialSpec, initialMeta, nil)
+	initialCR, _, err := core.EnsureControllerRevisionForISVC(context.Background(), c, c, isvc, v1beta1.EngineComponent, initialSpec, initialMeta, nil)
 	if err != nil {
 		t.Fatalf("seed initial CR: %v", err)
 	}

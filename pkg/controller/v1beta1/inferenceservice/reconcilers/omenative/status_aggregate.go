@@ -16,11 +16,11 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/drain"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // AggregateAndWriteStatus computes Component + per-Instance counters from
@@ -145,7 +145,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		}
 		// Capture after a successful Update so a retry replays the names
 		// off the post-conflict re-read.
-		liveRevisionNames = revision.CollectLiveRevisionNames(cs.OMENative)
+		liveRevisionNames = core.CollectLiveRevisionNamesForISVC(cs.OMENative)
 
 		// Mirror the top-level component-ready condition onto the
 		// cached ISVC the parent reconciler is holding. The outer
@@ -202,7 +202,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 	// Retention runs post-commit. The liveNames union ensures in-flight
 	// migrations whose RunningRevision points to an older CR aren't
 	// retention-deleted out from under them.
-	if rerr := revision.RetainControllerRevisions(
+	if rerr := core.RetainControllerRevisionsForISVC(
 		ctx,
 		p.Client,
 		p.Reader(),
@@ -545,7 +545,7 @@ func desiredPodCountByInstance(plan ComponentPlan) map[int32]int32 {
 	}
 	out := make(map[int32]int32, len(plan.Instances))
 	for _, inst := range plan.Instances {
-		out[inst.Index] = query.TotalPodsForInstance(inst)
+		out[inst.Index] = inst.TotalPods()
 	}
 	return out
 }

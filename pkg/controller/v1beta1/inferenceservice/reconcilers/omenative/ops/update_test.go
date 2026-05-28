@@ -16,8 +16,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 )
 
 // boolPtr is a tiny pointer helper used by MarkNotReadyDuringLifecycle
@@ -48,7 +47,7 @@ func runningPodAtRevision(isvc *v1beta1.InferenceService, instIdx int32, incarna
 // dispatch against.
 func ensureTargetCR(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, spec *corev1.PodSpec) *appsv1.ControllerRevision {
 	t.Helper()
-	cr, _, err := revision.EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, nil, nil)
+	cr, _, err := core.EnsureControllerRevisionForISVC(context.Background(), c, c, isvc, component, spec, nil, nil)
 	if err != nil {
 		t.Fatalf("revision.EnsureControllerRevision: %v", err)
 	}
@@ -61,7 +60,7 @@ func ensureTargetCR(t *testing.T, c client.Client, isvc *v1beta1.InferenceServic
 // (not the live pod) to decide if a target diff is image-only.
 func seedRunningRevision(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, spec *corev1.PodSpec) {
 	t.Helper()
-	cr, _, err := revision.EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, nil, nil)
+	cr, _, err := core.EnsureControllerRevisionForISVC(context.Background(), c, c, isvc, component, spec, nil, nil)
 	if err != nil {
 		t.Fatalf("seedRunningRevision: %v", err)
 	}
@@ -1155,7 +1154,7 @@ var _ = metav1.NewTime
 // ensureTargetCR (i.e., revision is hashed without a PodMeta block).
 func ensureTargetCRWithMeta(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, spec *corev1.PodSpec, meta *metav1.ObjectMeta) *appsv1.ControllerRevision {
 	t.Helper()
-	cr, _, err := revision.EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, meta, nil)
+	cr, _, err := core.EnsureControllerRevisionForISVC(context.Background(), c, c, isvc, component, spec, meta, nil)
 	if err != nil {
 		t.Fatalf("revision.EnsureControllerRevision: %v", err)
 	}
@@ -1170,7 +1169,7 @@ func ensureTargetCRWithMeta(t *testing.T, c client.Client, isvc *v1beta1.Inferen
 // asserts the live pod's metadata.annotations is reconciled.
 func seedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, spec *corev1.PodSpec, meta *metav1.ObjectMeta) {
 	t.Helper()
-	cr, _, err := revision.EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, meta, nil)
+	cr, _, err := core.EnsureControllerRevisionForISVC(context.Background(), c, c, isvc, component, spec, meta, nil)
 	if err != nil {
 		t.Fatalf("seedRunningRevisionWithMeta: %v", err)
 	}

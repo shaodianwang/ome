@@ -115,16 +115,12 @@ func TestCollectLiveRevisionNames_UnionAcrossInstanceStatuses(t *testing.T) {
 	// Retention must protect every InstanceStatus.RunningRevision /
 	// TargetRevision — an in-flight migration whose source points at an
 	// older CR would otherwise have that CR swept mid-flight.
-	cs := &v1beta1.OMENativeComponentStatus{
-		CurrentRevision: "rev-current",
-		UpdateRevision:  "rev-update",
-		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-			{Index: 0, RunningRevision: "rev-old-source", TargetRevision: ""},
-			{Index: 2, RunningRevision: "rev-current", TargetRevision: "rev-update"},
-			{Index: 3, RunningRevision: "", TargetRevision: ""},
-		},
+	instances := []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, RunningRevision: "rev-old-source", TargetRevision: ""},
+		{Index: 2, RunningRevision: "rev-current", TargetRevision: "rev-update"},
+		{Index: 3, RunningRevision: "", TargetRevision: ""},
 	}
-	got := CollectLiveRevisionNames(cs)
+	got := CollectLiveRevisionNames("rev-current", "rev-update", instances)
 	want := map[string]bool{
 		"rev-current":    true,
 		"rev-update":     true,
@@ -141,23 +137,19 @@ func TestCollectLiveRevisionNames_UnionAcrossInstanceStatuses(t *testing.T) {
 }
 
 func TestCollectLiveRevisionNames_HandlesNilStatus(t *testing.T) {
-	if got := CollectLiveRevisionNames(nil); got != nil {
-		t.Errorf("expected nil for nil status, got %v", got)
+	if got := CollectLiveRevisionNames("", "", nil); got != nil {
+		t.Errorf("expected nil for empty (no live names), got %v", got)
 	}
-	if got := CollectLiveRevisionNames(&v1beta1.OMENativeComponentStatus{}); got != nil {
+	if got := CollectLiveRevisionNames("", "", []v1beta1.OMENativeInstanceStatus{}); got != nil {
 		t.Errorf("expected nil for empty status (no live names), got %v", got)
 	}
 }
 
 func TestCollectLiveRevisionNames_DropsEmpty(t *testing.T) {
-	cs := &v1beta1.OMENativeComponentStatus{
-		CurrentRevision: "",
-		UpdateRevision:  "rev-a",
-		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-			{Index: 0, RunningRevision: "", TargetRevision: ""},
-		},
+	instances := []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, RunningRevision: "", TargetRevision: ""},
 	}
-	got := CollectLiveRevisionNames(cs)
+	got := CollectLiveRevisionNames("", "rev-a", instances)
 	if len(got) != 1 || got[0] != "rev-a" {
 		t.Errorf("expected only [rev-a], got %v", got)
 	}

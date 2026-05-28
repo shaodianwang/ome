@@ -20,8 +20,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // Test fixtures shared by reconciler_test.go and status_test.go.
@@ -239,7 +238,7 @@ func targetSpecImage(image string) *corev1.PodSpec {
 // tests that need a target CR have one to dispatch against.
 func ensureTargetCR(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, spec *corev1.PodSpec) *appsv1.ControllerRevision {
 	t.Helper()
-	cr, _, err := revision.EnsureControllerRevision(context.Background(), c, c, isvc, component, spec, nil, nil)
+	cr, _, err := core.EnsureControllerRevisionForISVC(context.Background(), c, c, isvc, component, spec, nil, nil)
 	if err != nil {
 		t.Fatalf("revision.EnsureControllerRevision: %v", err)
 	}

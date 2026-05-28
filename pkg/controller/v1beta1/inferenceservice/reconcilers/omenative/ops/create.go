@@ -13,9 +13,9 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // createRequeueInterval is how long to wait before re-checking pod
@@ -218,7 +218,7 @@ func createMissingPods(ctx context.Context, p core.ReconcileParams, plan core.Co
 			template = p.WorkerPodSpec
 		}
 
-		pod, err := RenderWithRevision(p.ISVC, template, &p.ObjectMeta, plan, inst, t.Runner, t.Ordinal, revisionHash)
+		pod, err := core.RenderWithRevisionForISVC(p, template, plan, inst, t.Runner, t.Ordinal, revisionHash)
 		if err != nil {
 			return created, fmt.Errorf("render pod %s: %w", t.Name, err)
 		}

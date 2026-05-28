@@ -12,10 +12,10 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/drain"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // restartDrainKey identifies a Restart drain writer against one Instance
@@ -130,7 +130,7 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 	// Live-read the OLD pod set first — a stable-name Create with the
 	// cache stale would AlreadyExists against the still-terminating
 	// previous incarnation. Matches K8s foreground-deletion propagation.
-	clear, err := query.LiveOldPodsClearedForRecreate(ctx, p, plan.Component, inst.Index, newInc)
+	clear, err := query.LiveOldPodsClearedForRecreate(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, newInc)
 	if err != nil {
 		return false, fmt.Errorf("Restart: live-check Phase A done (instance=%d): %w", inst.Index, err)
 	}
@@ -209,7 +209,7 @@ func detectRestartTrigger(ctx context.Context, p core.ReconcileParams, plan core
 	if err != nil {
 		return false, "", err
 	}
-	expected := query.TotalPodsForInstance(inst)
+	expected := inst.TotalPods()
 
 	for _, pod := range pods {
 		if pod.Status.Phase == corev1.PodFailed {

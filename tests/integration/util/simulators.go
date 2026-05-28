@@ -14,7 +14,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 )
 
 // LabelManagedByKey + ManagedByOMENativeValue mirror the omenative

@@ -42,13 +42,34 @@ func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 	}
 }
 
-// testManagedByLabelKey / testManagedByLabelValue mirror the package's
-// label-key constants so the "managed-by label is stamped" assertion
-// reads them through a test-only alias and stays grep-stable.
+// testManagedByLabelKey / testManagedByLabelValue mirror the workload
+// query package's label-key constants so the "managed-by label is
+// stamped" assertion reads them through a test-only alias and stays
+// grep-stable. The values match constants in workload/query/labels.go.
 const (
-	testManagedByLabelKey   = labelManagedBy
-	testManagedByLabelValue = managedByValue
+	testManagedByLabelKey   = "ome.io/managed-by"
+	testManagedByLabelValue = "OMENative"
 )
+
+// testISVCGVK is the GroupVersionKind every ISVC-shaped OwnerReference
+// stamps. Hard-coded here rather than importing the omenative/core
+// package because that package depends on workload (cyclic).
+var testISVCGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
+
+// testKey is the WorkloadKey the ISVC-form helpers produced before the
+// extraction: Namespace = isvc.Namespace, Name = "<isvc>-<component>",
+// Labels = the ISVC pod-selector trio.
+func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) WorkloadKey {
+	return WorkloadKey{
+		Namespace: isvc.Namespace,
+		Name:      isvc.Name + "-" + string(component),
+		Labels: map[string]string{
+			"ome.io/inferenceservice": isvc.Name,
+			"ome.io/component":        string(component),
+			testManagedByLabelKey:     testManagedByLabelValue,
+		},
+	}
+}
 
 // newFakeClientWithApps builds a fake controller-runtime client carrying
 // the schemes revision.go reads (corev1 + v1beta1 + appsv1 for
@@ -368,7 +389,7 @@ func TestEnsureControllerRevision_CreatesNew(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClientWithApps(t, isvc)
 
-	cr, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, basicPodSpecForRevision(), nil, nil)
+	cr, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), basicPodSpecForRevision(), nil, nil)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
@@ -399,11 +420,11 @@ func TestEnsureControllerRevision_ReusesExistingMatchingData(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClientWithApps(t, isvc)
 
-	first, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, basicPodSpecForRevision(), nil, nil)
+	first, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), basicPodSpecForRevision(), nil, nil)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	second, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, basicPodSpecForRevision(), nil, nil)
+	second, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), basicPodSpecForRevision(), nil, nil)
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -434,16 +455,16 @@ func TestEnsureControllerRevision_DetectsCollision(t *testing.T) {
 	hash, _, _ := Hash(want, nil, nil)
 	pre := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      Name(isvc.Name, v1beta1.EngineComponent, hash),
+			Name:      Name(testKey(isvc, v1beta1.EngineComponent), hash),
 			Namespace: isvc.Namespace,
-			Labels:    Labels(isvc.Name, v1beta1.EngineComponent),
+			Labels:    Labels(testKey(isvc, v1beta1.EngineComponent)),
 		},
 		Data:     runtime.RawExtension{Raw: []byte(`{"podSpec":{"containers":[{"name":"other","image":"other:v1"}]}}`)},
 		Revision: 1,
 	}
 	c := newFakeClientWithApps(t, isvc, pre)
 
-	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, want, nil, nil)
+	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), want, nil, nil)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
@@ -461,20 +482,20 @@ func TestEnsureControllerRevision_CollisionCountSaltRetryLands(t *testing.T) {
 	hash0, _, _ := Hash(want, nil, nil)
 	pre := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      Name(isvc.Name, v1beta1.EngineComponent, hash0),
+			Name:      Name(testKey(isvc, v1beta1.EngineComponent), hash0),
 			Namespace: isvc.Namespace,
-			Labels:    Labels(isvc.Name, v1beta1.EngineComponent),
+			Labels:    Labels(testKey(isvc, v1beta1.EngineComponent)),
 		},
 		Data:     runtime.RawExtension{Raw: []byte(`{"podSpec":{"containers":[{"name":"other","image":"other:v1"}]}}`)},
 		Revision: 1,
 	}
 	c := newFakeClientWithApps(t, isvc, pre)
 
-	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, want, nil, nil)
+	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), want, nil, nil)
 	if err != nil || !collision {
 		t.Fatalf("expected collision on first call: err=%v collision=%v", err, collision)
 	}
-	cr2, collision2, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, want, nil, ptr.To(int32(1)))
+	cr2, collision2, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), want, nil, ptr.To(int32(1)))
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -493,13 +514,13 @@ func TestEnsureControllerRevision_NilGuards(t *testing.T) {
 	c := newFakeClientWithApps(t)
 	isvc := minimalISVC("x", "y", 1)
 	template := basicPodSpecForRevision()
-	if _, _, err := EnsureControllerRevision(context.Background(), c, c, nil, v1beta1.EngineComponent, template, nil, nil); err == nil {
+	if _, _, err := EnsureControllerRevision(context.Background(), c, c, nil, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), template, nil, nil); err == nil {
 		t.Fatal("expected error for nil ISVC")
 	}
-	if _, _, err := EnsureControllerRevision(context.Background(), nil, c, isvc, v1beta1.EngineComponent, template, nil, nil); err == nil {
+	if _, _, err := EnsureControllerRevision(context.Background(), nil, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), template, nil, nil); err == nil {
 		t.Fatal("expected error for nil client")
 	}
-	if _, _, err := EnsureControllerRevision(context.Background(), c, nil, isvc, v1beta1.EngineComponent, template, nil, nil); err == nil {
+	if _, _, err := EnsureControllerRevision(context.Background(), c, nil, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), template, nil, nil); err == nil {
 		t.Fatal("expected error for nil reader")
 	}
 }
@@ -529,9 +550,9 @@ func TestEnsureControllerRevision_RacePathCreateAlreadyExists(t *testing.T) {
 	hash, _, _ := Hash(template, nil, nil)
 	conflicting := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      Name(isvc.Name, v1beta1.EngineComponent, hash),
+			Name:      Name(testKey(isvc, v1beta1.EngineComponent), hash),
 			Namespace: isvc.Namespace,
-			Labels:    Labels(isvc.Name, v1beta1.EngineComponent),
+			Labels:    Labels(testKey(isvc, v1beta1.EngineComponent)),
 		},
 		Data:     runtime.RawExtension{Raw: []byte(`{"podSpec":{"containers":[{"name":"other","image":"other:v1"}]},"podMeta":null}`)},
 		Revision: 1,
@@ -552,7 +573,7 @@ func TestEnsureControllerRevision_RacePathCreateAlreadyExists(t *testing.T) {
 		}).
 		Build()
 
-	cr, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, template, nil, nil)
+	cr, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), template, nil, nil)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
@@ -570,11 +591,11 @@ func TestRetainControllerRevisions_BelowMaxIsNoOp(t *testing.T) {
 	// Two revisions, both non-live; maxNonLive=10 keeps everything.
 	for i, image := range []string{"a", "b"} {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
-		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, ps, nil, nil); err != nil {
+		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), ps, nil, nil); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}
 	}
-	if err := RetainControllerRevisions(context.Background(), c, c, isvc, v1beta1.EngineComponent, 10); err != nil {
+	if err := RetainControllerRevisions(context.Background(), c, c, testKey(isvc, v1beta1.EngineComponent), 10); err != nil {
 		t.Fatalf("retain: %v", err)
 	}
 	list := &appsv1.ControllerRevisionList{}
@@ -590,11 +611,11 @@ func TestRetainControllerRevisions_DropsOldestNonLive(t *testing.T) {
 	c := newFakeClientWithApps(t, isvc)
 	for _, image := range []string{"v1", "v2", "v3", "v4", "v5"} {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
-		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, ps, nil, nil); err != nil {
+		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), ps, nil, nil); err != nil {
 			t.Fatalf("seed %s: %v", image, err)
 		}
 	}
-	if err := RetainControllerRevisions(context.Background(), c, c, isvc, v1beta1.EngineComponent, 2); err != nil {
+	if err := RetainControllerRevisions(context.Background(), c, c, testKey(isvc, v1beta1.EngineComponent), 2); err != nil {
 		t.Fatalf("retain: %v", err)
 	}
 	list := &appsv1.ControllerRevisionList{}
@@ -620,14 +641,14 @@ func TestRetainControllerRevisions_NeverDeletesLiveRevisions(t *testing.T) {
 	names := make(map[string]string, 4) // image -> CR name
 	for _, image := range []string{"v1", "v2", "v3", "v4"} {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
-		cr, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, ps, nil, nil)
+		cr, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), ps, nil, nil)
 		if err != nil {
 			t.Fatalf("seed %s: %v", image, err)
 		}
 		names[image] = cr.Name
 	}
 	liveName := names["v1"] // oldest, but pinned as live
-	if err := RetainControllerRevisions(context.Background(), c, c, isvc, v1beta1.EngineComponent, 1, liveName); err != nil {
+	if err := RetainControllerRevisions(context.Background(), c, c, testKey(isvc, v1beta1.EngineComponent), 1, liveName); err != nil {
 		t.Fatalf("retain: %v", err)
 	}
 	list := &appsv1.ControllerRevisionList{}
@@ -648,7 +669,7 @@ func TestRetainControllerRevisions_NeverDeletesLiveRevisions(t *testing.T) {
 func TestRetainControllerRevisions_NegativeMaxRejected(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClientWithApps(t, isvc)
-	if err := RetainControllerRevisions(context.Background(), c, c, isvc, v1beta1.EngineComponent, -1); err == nil {
+	if err := RetainControllerRevisions(context.Background(), c, c, testKey(isvc, v1beta1.EngineComponent), -1); err == nil {
 		t.Fatal("expected error for negative maxNonLive")
 	}
 }
@@ -663,7 +684,7 @@ func TestRetainControllerRevisions_ContinuesAfterDeleteError(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
 	_ = v1beta1.AddToScheme(scheme)
-	failName := Name(isvc.Name, v1beta1.EngineComponent, "")
+	failName := Name(testKey(isvc, v1beta1.EngineComponent), "")
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(isvc).
@@ -680,12 +701,12 @@ func TestRetainControllerRevisions_ContinuesAfterDeleteError(t *testing.T) {
 
 	for _, image := range []string{"v1", "v2", "v3", "v4"} {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
-		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, ps, nil, nil); err != nil {
+		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), ps, nil, nil); err != nil {
 			t.Fatalf("seed %s: %v", image, err)
 		}
 	}
 
-	err := RetainControllerRevisions(context.Background(), c, c, isvc, v1beta1.EngineComponent, 1)
+	err := RetainControllerRevisions(context.Background(), c, c, testKey(isvc, v1beta1.EngineComponent), 1)
 	if err == nil {
 		t.Fatal("expected aggregated error from the failing delete")
 	}
@@ -715,7 +736,7 @@ func TestRetainControllerRevisions_ContinuesAfterDeleteError(t *testing.T) {
 func TestNextRevisionNumber_NoExisting(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClientWithApps(t, isvc)
-	n, err := nextRevisionNumber(context.Background(), c, isvc, v1beta1.EngineComponent)
+	n, err := nextRevisionNumber(context.Background(), c, testKey(isvc, v1beta1.EngineComponent))
 	if err != nil {
 		t.Fatalf("nextRevisionNumber: %v", err)
 	}
@@ -770,9 +791,9 @@ func TestEnsureControllerRevision_RejectsForeignOwnerAsCollision(t *testing.T) {
 	foreignUID := types.UID("ancient-uid")
 	pre := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      Name(isvc.Name, v1beta1.EngineComponent, hash),
+			Name:      Name(testKey(isvc, v1beta1.EngineComponent), hash),
 			Namespace: isvc.Namespace,
-			Labels:    Labels(isvc.Name, v1beta1.EngineComponent),
+			Labels:    Labels(testKey(isvc, v1beta1.EngineComponent)),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "ome.io/v1beta1",
 				Kind:       "InferenceService",
@@ -786,7 +807,7 @@ func TestEnsureControllerRevision_RejectsForeignOwnerAsCollision(t *testing.T) {
 	}
 	c := newFakeClientWithApps(t, isvc, pre)
 
-	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, spec, nil, nil)
+	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), spec, nil, nil)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
@@ -804,9 +825,9 @@ func TestEnsureControllerRevision_AcceptsMatchingOwnerUID(t *testing.T) {
 	hash, raw, _ := Hash(spec, nil, nil)
 	pre := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      Name(isvc.Name, v1beta1.EngineComponent, hash),
+			Name:      Name(testKey(isvc, v1beta1.EngineComponent), hash),
 			Namespace: isvc.Namespace,
-			Labels:    Labels(isvc.Name, v1beta1.EngineComponent),
+			Labels:    Labels(testKey(isvc, v1beta1.EngineComponent)),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "ome.io/v1beta1",
 				Kind:       "InferenceService",
@@ -820,7 +841,7 @@ func TestEnsureControllerRevision_AcceptsMatchingOwnerUID(t *testing.T) {
 	}
 	c := newFakeClientWithApps(t, isvc, pre)
 
-	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, v1beta1.EngineComponent, spec, nil, nil)
+	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, v1beta1.EngineComponent), spec, nil, nil)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}

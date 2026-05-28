@@ -13,12 +13,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/drain"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // migrationRequestJSON builds the canonical Alfred annotation value.
@@ -711,48 +711,8 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 	t.Fatalf("Migrate did not converge after %d passes", maxPasses)
 }
 
-// --- helpers / overlay ---
-
-func TestApplyMigrationOverlay_HardAntiAffinityAndPreferred(t *testing.T) {
-	pod := &corev1.Pod{Spec: corev1.PodSpec{}}
-	applyMigrationOverlay(pod, &core.MigrationOverlay{
-		FromNode:        "node5",
-		HintTargetNodes: []string{"node3", "node7"},
-	})
-	na := pod.Spec.Affinity.NodeAffinity
-	if na == nil {
-		t.Fatal("NodeAffinity must be set")
-	}
-	if na.RequiredDuringSchedulingIgnoredDuringExecution == nil {
-		t.Fatal("required anti-affinity must be set")
-	}
-	terms := na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
-	if len(terms) == 0 {
-		t.Fatal("at least one node selector term expected")
-	}
-	foundReq := false
-	for _, term := range terms {
-		for _, expr := range term.MatchExpressions {
-			if expr.Key == "kubernetes.io/hostname" && expr.Operator == corev1.NodeSelectorOpNotIn {
-				foundReq = true
-			}
-		}
-	}
-	if !foundReq {
-		t.Errorf("required NotIn FromNode rule missing: %+v", terms)
-	}
-	if len(na.PreferredDuringSchedulingIgnoredDuringExecution) == 0 {
-		t.Error("preferred affinity for hint targets missing")
-	}
-}
-
-func TestApplyMigrationOverlay_NilNoOp(t *testing.T) {
-	pod := &corev1.Pod{Spec: corev1.PodSpec{}}
-	applyMigrationOverlay(pod, nil)
-	if pod.Spec.Affinity != nil {
-		t.Errorf("nil overlay should leave Affinity nil; got %+v", pod.Spec.Affinity)
-	}
-}
+// (TestApplyMigrationOverlay_* moved to workload/ops/render_test.go
+// in commit 5; the overlay function lives in workload/ops/render.go now.)
 
 // --- test-only helpers ---
 

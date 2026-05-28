@@ -1,4 +1,4 @@
-package core
+package workload
 
 import (
 	"testing"
@@ -20,24 +20,35 @@ func readyPolicyPtr(v v1beta1.OMENativeReadyPolicy) *v1beta1.OMENativeReadyPolic
 	return &v
 }
 
-func TestBuildPlan_NilComponentExt(t *testing.T) {
-	_, err := BuildPlan(ReconcileParams{Component: v1beta1.EngineComponent})
-	if err == nil {
-		t.Fatal("expected error for nil ComponentExt, got nil")
+// singlePodDesired builds a single-pod WorkloadDesiredSpec for tests.
+// replicas <= 0 mirrors the production path where MinReplicas=nil/0
+// defaults to 1.
+func singlePodDesired(replicas int32, lifecycle v1beta1.OMENativeComponentSpec) WorkloadDesiredSpec {
+	return WorkloadDesiredSpec{
+		Replicas:  replicas,
+		Runners:   []Runner{{Name: "default", Size: 1}},
+		Lifecycle: lifecycle,
 	}
 }
 
-// TestBuildPlan_MultiPodEmitsLeaderWorkerRunners pins the multi-pod layout:
-// one leader runner of size 1 plus one worker runner of size WorkerSize.
-// Replaces the previous TestBuildPlan_MultiPodRejected, which guarded the
-// pre-multi-node ErrMultiPodNotYetSupported short-circuit.
+func multiPodDesired(replicas, workerSize int32, lifecycle v1beta1.OMENativeComponentSpec) WorkloadDesiredSpec {
+	return WorkloadDesiredSpec{
+		Replicas: replicas,
+		MultiPod: true,
+		Runners: []Runner{
+			{Name: "leader", Size: 1},
+			{Name: "worker", Size: workerSize},
+		},
+		Lifecycle: lifecycle,
+	}
+}
+
+// TestBuildPlan_MultiPodEmitsLeaderWorkerRunners pins the multi-pod
+// layout: one leader runner of size 1 plus one worker runner of size
+// WorkerSize.
 func TestBuildPlan_MultiPodEmitsLeaderWorkerRunners(t *testing.T) {
-	plan, err := BuildPlan(ReconcileParams{
-		Component:    v1beta1.EngineComponent,
-		ComponentExt: &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(2)},
-		MultiPod:     true,
-		WorkerSize:   3,
-	})
+	desired := multiPodDesired(2, 3, v1beta1.OMENativeComponentSpec{})
+	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -61,16 +72,12 @@ func TestBuildPlan_MultiPodEmitsLeaderWorkerRunners(t *testing.T) {
 	}
 }
 
-// TestBuildPlan_MultiPodDefaultsMatchOEP pins the OEP-mandated defaults for
-// multi-pod Instances: RestartPolicy=RecreateInstance, ReadyPolicy=AllPodReady.
-// Single-pod defaults stay None for both (verified elsewhere).
+// TestBuildPlan_MultiPodDefaultsMatchOEP pins the OEP-mandated defaults
+// for multi-pod Instances: RestartPolicy=RecreateInstance,
+// ReadyPolicy=AllPodReady. Single-pod defaults stay None for both.
 func TestBuildPlan_MultiPodDefaultsMatchOEP(t *testing.T) {
-	plan, err := BuildPlan(ReconcileParams{
-		Component:    v1beta1.EngineComponent,
-		ComponentExt: &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(1)},
-		MultiPod:     true,
-		WorkerSize:   1,
-	})
+	desired := multiPodDesired(1, 1, v1beta1.OMENativeComponentSpec{})
+	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,16 +91,10 @@ func TestBuildPlan_MultiPodDefaultsMatchOEP(t *testing.T) {
 
 // TestBuildPlan_MultiPodWithZeroWorkerSize confirms WorkerSize=0 still
 // produces leader+worker entries; the webhook validator rejects orphan
-// leader without worker.size>0, but BuildPlan stays defensive — it would
-// produce a leader-only Instance (worker runner of size 0). Multi-pod
-// without worker is a misconfiguration callers should never reach.
+// leader without worker.size>0, but BuildPlan stays defensive.
 func TestBuildPlan_MultiPodWithZeroWorkerSize(t *testing.T) {
-	plan, err := BuildPlan(ReconcileParams{
-		Component:    v1beta1.EngineComponent,
-		ComponentExt: &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(1)},
-		MultiPod:     true,
-		WorkerSize:   0,
-	})
+	desired := multiPodDesired(1, 0, v1beta1.OMENativeComponentSpec{})
+	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -109,27 +110,23 @@ func TestBuildPlan_MultiPodWithZeroWorkerSize(t *testing.T) {
 }
 
 func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
-	// Simulates an InferenceService that went through the mutating webhook
-	// defaulter (#152) — omenative.* is fully populated.
-	plan, err := BuildPlan(ReconcileParams{
-		Component: v1beta1.EngineComponent,
-		ComponentExt: &v1beta1.ComponentExtensionSpec{
-			MinReplicas: intPtr(2),
-			OMENative: &v1beta1.OMENativeComponentSpec{
-				RestartPolicy: restartPolicyPtr(v1beta1.OMENativeRestartPolicyNone),
-				ReadyPolicy:   readyPolicyPtr(v1beta1.OMENativeReadyPolicyNone),
-				UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-					Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-					InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
-						GracePeriodSeconds:          int32Ptr(30),
-						MarkNotReadyDuringLifecycle: boolPtr(true),
-					},
-				},
-				InstanceReadyTimeout: &metav1.Duration{Duration: 30 * time.Minute},
-				MigrationPolicy:      &v1beta1.OMENativeMigrationPolicy{Mode: v1beta1.OMENativeMigrationPolicyModeAuto},
+	// Simulates a WorkloadDesiredSpec produced by an adapter whose source
+	// went through the mutating webhook defaulter — lifecycle is fully
+	// populated.
+	desired := singlePodDesired(2, v1beta1.OMENativeComponentSpec{
+		RestartPolicy: restartPolicyPtr(v1beta1.OMENativeRestartPolicyNone),
+		ReadyPolicy:   readyPolicyPtr(v1beta1.OMENativeReadyPolicyNone),
+		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+				GracePeriodSeconds:          int32Ptr(30),
+				MarkNotReadyDuringLifecycle: boolPtr(true),
 			},
 		},
+		InstanceReadyTimeout: &metav1.Duration{Duration: 30 * time.Minute},
+		MigrationPolicy:      &v1beta1.OMENativeMigrationPolicy{Mode: v1beta1.OMENativeMigrationPolicyModeAuto},
 	})
+	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -159,12 +156,10 @@ func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
 }
 
 func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
-	// Simulates an ISVC that never went through the defaulter (e.g.,
-	// pre-#152 object on disk). BuildPlan applies the same defaults inline.
-	plan, err := BuildPlan(ReconcileParams{
-		Component:    v1beta1.EngineComponent,
-		ComponentExt: &v1beta1.ComponentExtensionSpec{},
-	})
+	// Simulates a pre-defaulter object — adapter projected an empty
+	// lifecycle. BuildPlan applies the same defaults inline.
+	desired := singlePodDesired(1, v1beta1.OMENativeComponentSpec{})
+	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -206,12 +201,12 @@ func TestBuildPlan_ReplicaCount(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plan, err := BuildPlan(ReconcileParams{
-				Component: v1beta1.EngineComponent,
-				ComponentExt: &v1beta1.ComponentExtensionSpec{
-					MinReplicas: tt.minRep,
-				},
-			})
+			var rep int32
+			if tt.minRep != nil {
+				rep = int32(*tt.minRep)
+			}
+			desired := singlePodDesired(rep, v1beta1.OMENativeComponentSpec{})
+			plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -236,14 +231,10 @@ func TestBuildPlan_ReplicaCount(t *testing.T) {
 }
 
 func TestBuildPlan_IncarnationDefaultsToOneOnFirstReconcile(t *testing.T) {
-	// No Status.Components yet — every Instance gets Incarnation=1.
-	plan, err := BuildPlan(ReconcileParams{
-		Component: v1beta1.EngineComponent,
-		ISVC:      &v1beta1.InferenceService{},
-		ComponentExt: &v1beta1.ComponentExtensionSpec{
-			MinReplicas: intPtr(3),
-		},
-	})
+	// Observed state has no InstanceStatuses — every Instance gets
+	// Incarnation=1.
+	desired := singlePodDesired(3, v1beta1.OMENativeComponentSpec{})
+	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -255,27 +246,16 @@ func TestBuildPlan_IncarnationDefaultsToOneOnFirstReconcile(t *testing.T) {
 }
 
 func TestBuildPlan_IncarnationPreservedFromStatus(t *testing.T) {
-	// ISVC carries InstanceStatuses with explicit Incarnations — BuildPlan
-	// reads them back instead of resetting to 1.
-	isvc := &v1beta1.InferenceService{
-		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
-						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-							{Index: 0, Incarnation: 4},
-							{Index: 1, Incarnation: 2},
-						},
-					},
-				},
-			},
+	// Observed state carries InstanceStatuses with explicit Incarnations —
+	// BuildPlan reads them back instead of resetting to 1.
+	desired := singlePodDesired(2, v1beta1.OMENativeComponentSpec{})
+	observed := WorkloadObservedState{
+		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Incarnation: 4},
+			{Index: 1, Incarnation: 2},
 		},
 	}
-	plan, err := BuildPlan(ReconcileParams{
-		Component:    v1beta1.EngineComponent,
-		ISVC:         isvc,
-		ComponentExt: &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(2)},
-	})
+	plan, err := BuildPlan(v1beta1.EngineComponent, desired, observed)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -287,44 +267,26 @@ func TestBuildPlan_IncarnationPreservedFromStatus(t *testing.T) {
 	}
 }
 
-func TestBuildPlan_IncarnationScopedToComponent(t *testing.T) {
-	// Status entry for Decoder must not influence Engine plan.
-	isvc := &v1beta1.InferenceService{
-		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.DecoderComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
-						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-							{Index: 0, Incarnation: 9},
-						},
-					},
-				},
-			},
-		},
-	}
-	plan, err := BuildPlan(ReconcileParams{
-		Component:    v1beta1.EngineComponent,
-		ISVC:         isvc,
-		ComponentExt: &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(1)},
-	})
+func TestBuildPlan_IncarnationScopedToWorkload(t *testing.T) {
+	// The observed state is per-workload now (Source.ObservedState
+	// returns only this Component's statuses), so cross-Component leakage
+	// is impossible at the call site. The test pins the BuildPlan contract:
+	// no InstanceStatuses → default to 1 for every Instance.
+	desired := singlePodDesired(1, v1beta1.OMENativeComponentSpec{})
+	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if plan.Instances[0].Incarnation != 1 {
-		t.Errorf("Engine[0].Incarnation: got %d want 1 (decoder status must not leak)",
-			plan.Instances[0].Incarnation)
+		t.Errorf("Engine[0].Incarnation: got %d want 1", plan.Instances[0].Incarnation)
 	}
 }
 
 func TestBuildPlan_RestartPolicyExplicitWinsOverDefault(t *testing.T) {
-	plan, err := BuildPlan(ReconcileParams{
-		Component: v1beta1.EngineComponent,
-		ComponentExt: &v1beta1.ComponentExtensionSpec{
-			OMENative: &v1beta1.OMENativeComponentSpec{
-				RestartPolicy: restartPolicyPtr(v1beta1.OMENativeRestartPolicyRecreateISVC),
-			},
-		},
+	desired := singlePodDesired(0, v1beta1.OMENativeComponentSpec{
+		RestartPolicy: restartPolicyPtr(v1beta1.OMENativeRestartPolicyRecreateISVC),
 	})
+	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -346,25 +308,12 @@ func TestLowestUnusedIndex(t *testing.T) {
 func TestInstancePlanIndices_MultiReplicaMigrationPreservesUnrelatedInstance(t *testing.T) {
 	// Regression: with replicas=2 and statuses {0 Ready, 1 Ready},
 	// migrating instance 0 (surge at 2) must yield plan {0, 1, 2}.
-	// Counting migration-protected indices against the replica cap
-	// would push instance 1 out of the plan and into extraInstanceIndices,
-	// where Delete would silently tear it down.
-	isvc := &v1beta1.InferenceService{
-		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
-						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-							{Index: 0, Phase: v1beta1.OMENativeInstanceMigrating},
-							{Index: 1, Phase: v1beta1.OMENativeInstanceReady},
-							{Index: 2, Phase: v1beta1.OMENativeInstanceCreating, Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationMigrate}},
-						},
-					},
-				},
-			},
-		},
+	instances := []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceMigrating},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceReady},
+		{Index: 2, Phase: v1beta1.OMENativeInstanceCreating, Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationMigrate}},
 	}
-	got := instancePlanIndices(isvc, v1beta1.EngineComponent, 2)
+	got := instancePlanIndices(instances, 2)
 	hit := map[int32]bool{}
 	for _, idx := range got {
 		hit[idx] = true
@@ -375,21 +324,11 @@ func TestInstancePlanIndices_MultiReplicaMigrationPreservesUnrelatedInstance(t *
 }
 
 func TestInstancePlanIndices_PreservesSparseMigrationLayout(t *testing.T) {
-	isvc := &v1beta1.InferenceService{
-		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
-						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-							{Index: 0, Phase: v1beta1.OMENativeInstanceMigrating},
-							{Index: 2, Phase: v1beta1.OMENativeInstanceCreating, Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationMigrate}},
-						},
-					},
-				},
-			},
-		},
+	instances := []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceMigrating},
+		{Index: 2, Phase: v1beta1.OMENativeInstanceCreating, Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationMigrate}},
 	}
-	got := instancePlanIndices(isvc, v1beta1.EngineComponent, 1)
+	got := instancePlanIndices(instances, 1)
 	// Both migration-in-flight indices must be in the plan even though
 	// replicas=1.
 	hit := map[int32]bool{}
@@ -403,25 +342,14 @@ func TestInstancePlanIndices_PreservesSparseMigrationLayout(t *testing.T) {
 
 func TestAllocateSurgeIndex(t *testing.T) {
 	// Smoke: with statuses {0, 1, 3}, surge should land at 2.
-	isvc := &v1beta1.InferenceService{
-		Status: v1beta1.InferenceServiceStatus{
-			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
-						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
-							{Index: 0}, {Index: 1}, {Index: 3},
-						},
-					},
-				},
-			},
-		},
+	instances := []v1beta1.OMENativeInstanceStatus{
+		{Index: 0}, {Index: 1}, {Index: 3},
 	}
-	if got := AllocateSurgeIndex(isvc, v1beta1.EngineComponent); got != 2 {
+	if got := AllocateSurgeIndex(instances); got != 2 {
 		t.Errorf("got %d want 2", got)
 	}
 	// Empty status returns 0.
-	empty := &v1beta1.InferenceService{}
-	if got := AllocateSurgeIndex(empty, v1beta1.EngineComponent); got != 0 {
+	if got := AllocateSurgeIndex(nil); got != 0 {
 		t.Errorf("empty: got %d want 0", got)
 	}
 }

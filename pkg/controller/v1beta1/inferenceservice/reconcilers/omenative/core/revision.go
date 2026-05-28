@@ -1,0 +1,112 @@
+package core
+
+import (
+	"context"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+)
+
+// isvcGVK is the GroupVersionKind every OMENative-on-ISVC adapter
+// emits on owner references. Centralized so a future API version bump
+// flips this in one place.
+var isvcGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
+
+// isvcWorkloadKey is the per-Component WorkloadKey projection for one
+// OMENative-on-ISVC reconcile. Mirrors what the ISVC adapter
+// (commit 9) will compute; centralized here so the legacy dispatch
+// callers in commits 4-8 don't repeat the build-up.
+func isvcWorkloadKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) revision.WorkloadKey {
+	name := isvc.Name + "-" + string(component)
+	return revision.WorkloadKey{
+		Namespace: isvc.Namespace,
+		Name:      name,
+		Labels: map[string]string{
+			constants.InferenceServicePodLabelKey: isvc.Name,
+			constants.OMEComponentLabel:           string(component),
+			query.LabelManagedBy:                  query.ManagedByOMENative,
+		},
+	}
+}
+
+// EnsureControllerRevisionForISVC is the (isvc, component) shape of
+// workload/revision.EnsureControllerRevision used by the legacy
+// OMENative-on-ISVC dispatch path. Adapter callers in commit 9 skip
+// this wrapper and call workload/revision directly with their own
+// projected WorkloadKey.
+func EnsureControllerRevisionForISVC(
+	ctx context.Context,
+	c client.Client,
+	reads client.Reader,
+	isvc *v1beta1.InferenceService,
+	component v1beta1.ComponentType,
+	template *corev1.PodSpec,
+	templateMeta *metav1.ObjectMeta,
+	collisionCount *int32,
+) (*appsv1.ControllerRevision, bool, error) {
+	return revision.EnsureControllerRevision(ctx, c, reads, isvc, isvcGVK, isvcWorkloadKey(isvc, component), template, templateMeta, collisionCount)
+}
+
+// EnsureControllerRevisionForISVCWithWorker is the multi-pod sibling of
+// EnsureControllerRevisionForISVC; folds workerSpec into the revision
+// hash so worker-only template changes trigger a new CR.
+func EnsureControllerRevisionForISVCWithWorker(
+	ctx context.Context,
+	c client.Client,
+	reads client.Reader,
+	isvc *v1beta1.InferenceService,
+	component v1beta1.ComponentType,
+	template *corev1.PodSpec,
+	workerSpec *corev1.PodSpec,
+	templateMeta *metav1.ObjectMeta,
+	collisionCount *int32,
+) (*appsv1.ControllerRevision, bool, error) {
+	return revision.EnsureControllerRevisionWithWorker(ctx, c, reads, isvc, isvcGVK, isvcWorkloadKey(isvc, component), template, workerSpec, templateMeta, collisionCount)
+}
+
+// RetainControllerRevisionsForISVC is the (isvc, component) shape of
+// workload/revision.RetainControllerRevisions.
+func RetainControllerRevisionsForISVC(
+	ctx context.Context,
+	c client.Client,
+	reads client.Reader,
+	isvc *v1beta1.InferenceService,
+	component v1beta1.ComponentType,
+	maxNonLive int,
+	liveNames ...string,
+) error {
+	return revision.RetainControllerRevisions(ctx, c, reads, isvcWorkloadKey(isvc, component), maxNonLive, liveNames...)
+}
+
+// CollectLiveRevisionNamesForISVC projects an OMENativeComponentStatus
+// to the (current, update, instances) tuple the workload sweeper takes.
+func CollectLiveRevisionNamesForISVC(cs *v1beta1.OMENativeComponentStatus) []string {
+	if cs == nil {
+		return nil
+	}
+	return revision.CollectLiveRevisionNames(cs.CurrentRevision, cs.UpdateRevision, cs.InstanceStatuses)
+}
+
+// RevisionName composes the legacy CR name `<isvc>-<component>-<hash>`.
+// Wrapper around workload/revision.Name with the ISVC-form WorkloadKey.
+func RevisionName(isvcName string, component v1beta1.ComponentType, hash string) string {
+	return revision.Name(revision.WorkloadKey{Name: isvcName + "-" + string(component)}, hash)
+}
+
+// RevisionLabels returns the ISVC-form revision label set.
+func RevisionLabels(isvcName string, component v1beta1.ComponentType) map[string]string {
+	return revision.Labels(revision.WorkloadKey{
+		Labels: map[string]string{
+			constants.InferenceServicePodLabelKey: isvcName,
+			constants.OMEComponentLabel:           string(component),
+			query.LabelManagedBy:                  query.ManagedByOMENative,
+		},
+	})
+}

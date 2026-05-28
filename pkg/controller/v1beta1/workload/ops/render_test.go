@@ -11,33 +11,76 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-func singlePodPlan() (core.ComponentPlan, core.InstancePlan, core.RunnerPlan) {
-	runner := core.RunnerPlan{Name: "default", Size: 1}
-	inst := core.InstancePlan{Index: 0, Incarnation: 1, Runners: []core.RunnerPlan{runner}}
-	plan := core.ComponentPlan{
+// testISVCGVK is the GroupVersionKind for InferenceService owner refs
+// (duplicated from omenative/core to keep workload/ops free of the
+// dispatch-side helpers).
+var testISVCGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
+
+// testKey is the ISVC-form WorkloadKey the legacy render path produced
+// before the extraction: Namespace from the ISVC, Name =
+// "<isvc>-<component>", Labels = the OMENative pod-selector trio.
+func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.WorkloadKey {
+	return workload.WorkloadKey{
+		Namespace: isvc.Namespace,
+		Name:      isvc.Name + "-" + string(component),
+		Component: component,
+		Labels: map[string]string{
+			constants.InferenceServicePodLabelKey: isvc.Name,
+			constants.OMEComponentLabel:           string(component),
+			query.LabelManagedBy:                  query.ManagedByOMENative,
+		},
+	}
+}
+
+// testRender is the legacy (isvc, podSpec, plan, inst, runner, ordinal)
+// Render shape, expressed in terms of the new owner/key/hook
+// signature. Test fixtures call this so the body of every existing
+// test stays untouched.
+func testRender(isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, ordinal int32) (*corev1.Pod, error) {
+	if isvc == nil {
+		// Existing tests rely on Render rejecting nil ISVC. The new
+		// Render takes owner client.Object, so we pass nil through.
+		return Render(nil, testISVCGVK, workload.WorkloadKey{}, podSpec, plan, inst, runner, ordinal, nil)
+	}
+	return Render(isvc, testISVCGVK, testKey(isvc, plan.Component), podSpec, plan, inst, runner, ordinal, nil)
+}
+
+// testRenderWithRevision is the legacy (isvc, podSpec, podTemplateMeta,
+// plan, inst, runner, ordinal, revisionHash) RenderWithRevision shape.
+func testRenderWithRevision(isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, meta *metav1.ObjectMeta, plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, ordinal int32, revisionHash string) (*corev1.Pod, error) {
+	if isvc == nil {
+		return RenderWithRevision(nil, testISVCGVK, workload.WorkloadKey{}, podSpec, meta, plan, inst, runner, ordinal, revisionHash, nil)
+	}
+	return RenderWithRevision(isvc, testISVCGVK, testKey(isvc, plan.Component), podSpec, meta, plan, inst, runner, ordinal, revisionHash, nil)
+}
+
+func singlePodPlan() (workload.ComponentPlan, workload.InstancePlan, workload.RunnerPlan) {
+	runner := workload.RunnerPlan{Name: "default", Size: 1}
+	inst := workload.InstancePlan{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{runner}}
+	plan := workload.ComponentPlan{
 		Component: v1beta1.EngineComponent,
 		Replicas:  2,
-		Instances: []core.InstancePlan{inst},
+		Instances: []workload.InstancePlan{inst},
 	}
 	return plan, inst, runner
 }
 
 // multiPodPlan returns a 2-Runner Instance shape: 1 leader + workerSize
 // workers. Used by the multi-pod render tests.
-func multiPodPlan(workerSize int32) (core.ComponentPlan, core.InstancePlan, []core.RunnerPlan) {
-	runners := []core.RunnerPlan{
+func multiPodPlan(workerSize int32) (workload.ComponentPlan, workload.InstancePlan, []workload.RunnerPlan) {
+	runners := []workload.RunnerPlan{
 		{Name: "leader", Size: 1},
 		{Name: "worker", Size: workerSize},
 	}
-	inst := core.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
-	plan := core.ComponentPlan{
+	inst := workload.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
+	plan := workload.ComponentPlan{
 		Component: v1beta1.EngineComponent,
 		Replicas:  1,
-		Instances: []core.InstancePlan{inst},
+		Instances: []workload.InstancePlan{inst},
 	}
 	return plan, inst, runners
 }
@@ -62,17 +105,17 @@ func basicPodSpec() *corev1.PodSpec {
 
 func TestRender_NilInputsRejected(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
-	if _, err := Render(nil, basicPodSpec(), plan, inst, runner, 0); err == nil {
+	if _, err := testRender(nil, basicPodSpec(), plan, inst, runner, 0); err == nil {
 		t.Fatal("expected error for nil ISVC")
 	}
-	if _, err := Render(basicISVC(), nil, plan, inst, runner, 0); err == nil {
+	if _, err := testRender(basicISVC(), nil, plan, inst, runner, 0); err == nil {
 		t.Fatal("expected error for nil PodSpec")
 	}
 }
 
 func TestRender_StableNameAndDNS(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
-	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +135,7 @@ func TestRender_StableNameAndDNS(t *testing.T) {
 
 func TestRender_Labels(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
-	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +160,7 @@ func TestRender_Labels(t *testing.T) {
 // coscheduler into a wait-for-non-existent-gang state.
 func TestRender_SinglePod_OmitsPodGroupLabel(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
-	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -136,15 +179,15 @@ func TestRender_MultiPod_StampsPodGroupLabel(t *testing.T) {
 	leader := runners[0]
 	worker := runners[1]
 
-	leaderPod, err := Render(basicISVC(), basicPodSpec(), plan, inst, leader, 0)
+	leaderPod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, leader, 0)
 	if err != nil {
 		t.Fatalf("leader: %v", err)
 	}
-	worker0, err := Render(basicISVC(), basicPodSpec(), plan, inst, worker, 0)
+	worker0, err := testRender(basicISVC(), basicPodSpec(), plan, inst, worker, 0)
 	if err != nil {
 		t.Fatalf("worker 0: %v", err)
 	}
-	worker1, err := Render(basicISVC(), basicPodSpec(), plan, inst, worker, 1)
+	worker1, err := testRender(basicISVC(), basicPodSpec(), plan, inst, worker, 1)
 	if err != nil {
 		t.Fatalf("worker 1: %v", err)
 	}
@@ -169,23 +212,23 @@ func TestRender_MultiPod_StampsPodGroupLabel(t *testing.T) {
 // the coscheduler would treat both Instances as one mega-gang and
 // hang both until every member of both is schedulable.
 func TestRender_MultiPod_PodGroupLabelPerInstance(t *testing.T) {
-	runners := []core.RunnerPlan{
+	runners := []workload.RunnerPlan{
 		{Name: "leader", Size: 1},
 		{Name: "worker", Size: 1},
 	}
-	inst0 := core.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
-	inst1 := core.InstancePlan{Index: 1, Incarnation: 1, Runners: runners}
-	plan := core.ComponentPlan{
+	inst0 := workload.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
+	inst1 := workload.InstancePlan{Index: 1, Incarnation: 1, Runners: runners}
+	plan := workload.ComponentPlan{
 		Component: v1beta1.EngineComponent,
 		Replicas:  2,
-		Instances: []core.InstancePlan{inst0, inst1},
+		Instances: []workload.InstancePlan{inst0, inst1},
 	}
 
-	inst0Pod, err := Render(basicISVC(), basicPodSpec(), plan, inst0, runners[1], 0)
+	inst0Pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst0, runners[1], 0)
 	if err != nil {
 		t.Fatalf("inst0 worker: %v", err)
 	}
-	inst1Pod, err := Render(basicISVC(), basicPodSpec(), plan, inst1, runners[1], 0)
+	inst1Pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst1, runners[1], 0)
 	if err != nil {
 		t.Fatalf("inst1 worker: %v", err)
 	}
@@ -206,7 +249,7 @@ func TestRender_MultiPod_PodGroupLabelPerInstance(t *testing.T) {
 
 func TestRenderWithRevision_StampsRevisionHashLabel(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
-	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), nil, plan, inst, runner, 0, "abc12345")
+	pod, err := testRenderWithRevision(basicISVC(), basicPodSpec(), nil, plan, inst, runner, 0, "abc12345")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -217,7 +260,7 @@ func TestRenderWithRevision_StampsRevisionHashLabel(t *testing.T) {
 
 func TestRenderWithRevision_EmptyHashOmitsRevisionLabel(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
-	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), nil, plan, inst, runner, 0, "")
+	pod, err := testRenderWithRevision(basicISVC(), basicPodSpec(), nil, plan, inst, runner, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -228,9 +271,9 @@ func TestRenderWithRevision_EmptyHashOmitsRevisionLabel(t *testing.T) {
 
 func TestRender_DelegatesToRenderWithRevisionEmptyHash(t *testing.T) {
 	// Render() is the back-compat entry point and must produce the same
-	// pod as RenderWithRevision(..., "") — i.e., no revision-hash label.
+	// pod as testRenderWithRevision(..., "") — i.e., no revision-hash label.
 	plan, inst, runner := singlePodPlan()
-	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -257,7 +300,7 @@ func TestRenderWithRevision_PropagatesComponentMetaAnnotationsAndLabels(t *testi
 			constants.InferenceServicePodLabelKey: "should-be-overwritten-by-OMENative",
 		},
 	}
-	pod, err := RenderWithRevision(basicISVC(), basicPodSpec(), meta, plan, inst, runner, 0, "")
+	pod, err := testRenderWithRevision(basicISVC(), basicPodSpec(), meta, plan, inst, runner, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -278,7 +321,7 @@ func TestRenderWithRevision_PropagatesComponentMetaAnnotationsAndLabels(t *testi
 func TestRender_IncarnationStampedOnLabel(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
 	inst.Incarnation = 7
-	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -289,7 +332,7 @@ func TestRender_IncarnationStampedOnLabel(t *testing.T) {
 
 func TestRender_OwnerReference(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
-	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -311,7 +354,7 @@ func TestRender_AppendsServingReadinessGateWithoutClobberingExisting(t *testing.
 	ps.ReadinessGates = []corev1.PodReadinessGate{
 		{ConditionType: "user.example.com/ready"},
 	}
-	pod, err := Render(basicISVC(), ps, plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), ps, plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -336,7 +379,7 @@ func TestRender_DoesNotDuplicateExistingServingGate(t *testing.T) {
 	ps.ReadinessGates = []corev1.PodReadinessGate{
 		{ConditionType: query.ServingConditionType},
 	}
-	pod, err := Render(basicISVC(), ps, plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), ps, plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -356,7 +399,7 @@ func TestRender_OMEEnvVarsInEveryContainer(t *testing.T) {
 			{Name: "sidecar", Image: "metrics:v1"},
 		},
 	}
-	pod, err := Render(basicISVC(), ps, plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), ps, plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -395,7 +438,7 @@ func TestRender_OMEEnvVarsInEveryContainer(t *testing.T) {
 func TestRender_MultiPod_LeaderEnvVarsForLeader(t *testing.T) {
 	plan, inst, runners := multiPodPlan(2)
 	leader := runners[0]
-	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, leader, 0)
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, leader, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -424,11 +467,11 @@ func TestRender_MultiPod_LeaderAddressOnWorker(t *testing.T) {
 	plan, inst, runners := multiPodPlan(2)
 	worker := runners[1]
 
-	pod0, err := Render(basicISVC(), basicPodSpec(), plan, inst, worker, 0)
+	pod0, err := testRender(basicISVC(), basicPodSpec(), plan, inst, worker, 0)
 	if err != nil {
 		t.Fatalf("worker 0: %v", err)
 	}
-	pod1, err := Render(basicISVC(), basicPodSpec(), plan, inst, worker, 1)
+	pod1, err := testRender(basicISVC(), basicPodSpec(), plan, inst, worker, 1)
 	if err != nil {
 		t.Fatalf("worker 1: %v", err)
 	}
@@ -458,23 +501,23 @@ func TestRender_MultiPod_LeaderAddressOnWorker(t *testing.T) {
 // leader; Instance 1's workers point at the Instance 1 leader. Cross-talk
 // would be a sharding bug.
 func TestRender_MultiPod_LeaderAddressPerInstance(t *testing.T) {
-	runners := []core.RunnerPlan{
+	runners := []workload.RunnerPlan{
 		{Name: "leader", Size: 1},
 		{Name: "worker", Size: 1},
 	}
-	inst0 := core.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
-	inst1 := core.InstancePlan{Index: 1, Incarnation: 1, Runners: runners}
-	plan := core.ComponentPlan{
+	inst0 := workload.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
+	inst1 := workload.InstancePlan{Index: 1, Incarnation: 1, Runners: runners}
+	plan := workload.ComponentPlan{
 		Component: v1beta1.EngineComponent,
 		Replicas:  2,
-		Instances: []core.InstancePlan{inst0, inst1},
+		Instances: []workload.InstancePlan{inst0, inst1},
 	}
 
-	pod0Worker, err := Render(basicISVC(), basicPodSpec(), plan, inst0, runners[1], 0)
+	pod0Worker, err := testRender(basicISVC(), basicPodSpec(), plan, inst0, runners[1], 0)
 	if err != nil {
 		t.Fatalf("inst0 worker: %v", err)
 	}
-	pod1Worker, err := Render(basicISVC(), basicPodSpec(), plan, inst1, runners[1], 0)
+	pod1Worker, err := testRender(basicISVC(), basicPodSpec(), plan, inst1, runners[1], 0)
 	if err != nil {
 		t.Fatalf("inst1 worker: %v", err)
 	}
@@ -497,7 +540,7 @@ func TestRender_MultiPod_LeaderAddressPerInstance(t *testing.T) {
 // branch on it would interpret its presence as a multi-pod environment.
 func TestRender_SinglePod_OmitsLeaderAddress(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
-	pod, err := Render(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -520,7 +563,7 @@ func TestRender_OMEEnvOverridesUserEnvWithSameName(t *testing.T) {
 			},
 		},
 	}
-	pod, err := Render(basicISVC(), ps, plan, inst, runner, 0)
+	pod, err := testRender(basicISVC(), ps, plan, inst, runner, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -602,7 +645,7 @@ func envKeys(env []corev1.EnvVar) []string {
 
 func TestApplyMigrationOverlay_IdempotentDoesNotDuplicateRequirements(t *testing.T) {
 	pod := &corev1.Pod{Spec: corev1.PodSpec{}}
-	overlay := &core.MigrationOverlay{
+	overlay := &workload.MigrationOverlay{
 		FromNode:        "node5",
 		HintTargetNodes: []string{"node3", "node7"},
 	}
@@ -633,7 +676,7 @@ func TestApplyMigrationOverlay_PreferredWeightIsSentinel(t *testing.T) {
 	// Weight is a documented sentinel — pinned so future changes are
 	// deliberate and don't silently collide with operator preferences.
 	pod := &corev1.Pod{Spec: corev1.PodSpec{}}
-	applyMigrationOverlay(pod, &core.MigrationOverlay{HintTargetNodes: []string{"node3"}})
+	applyMigrationOverlay(pod, &workload.MigrationOverlay{HintTargetNodes: []string{"node3"}})
 	pref := pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
 	if len(pref) != 1 || pref[0].Weight != overlayPreferredHintWeight {
 		t.Errorf("preferred weight: got %+v want sentinel=%d", pref, overlayPreferredHintWeight)
@@ -660,7 +703,7 @@ func TestWouldOverlayConflictWithNodeAffinity_DetectsUnsatisfiablePin(t *testing
 			},
 		},
 	}
-	overlay := &core.MigrationOverlay{FromNode: "node5"}
+	overlay := &workload.MigrationOverlay{FromNode: "node5"}
 	if !WouldOverlayConflictWithNodeAffinity(spec, overlay) {
 		t.Errorf("hostname=FromNode pin should be detected as conflict")
 	}
@@ -684,7 +727,7 @@ func TestWouldOverlayConflictWithNodeAffinity_HostnameSetWithOtherNodesIsSatisfi
 			},
 		},
 	}
-	overlay := &core.MigrationOverlay{FromNode: "node5"}
+	overlay := &workload.MigrationOverlay{FromNode: "node5"}
 	if WouldOverlayConflictWithNodeAffinity(spec, overlay) {
 		t.Errorf("multi-value hostname set must not be flagged as conflict")
 	}
@@ -709,14 +752,14 @@ func TestWouldOverlayConflictWithNodeAffinity_OnlyConflictIfEveryTermPins(t *tes
 			},
 		},
 	}
-	overlay := &core.MigrationOverlay{FromNode: "node5"}
+	overlay := &workload.MigrationOverlay{FromNode: "node5"}
 	if WouldOverlayConflictWithNodeAffinity(spec, overlay) {
 		t.Errorf("at least one satisfiable term must clear the conflict")
 	}
 }
 
 func TestWouldOverlayConflictWithNodeAffinity_NilSpecOrAffinityNoConflict(t *testing.T) {
-	overlay := &core.MigrationOverlay{FromNode: "node5"}
+	overlay := &workload.MigrationOverlay{FromNode: "node5"}
 	if WouldOverlayConflictWithNodeAffinity(nil, overlay) {
 		t.Errorf("nil spec should not conflict")
 	}
@@ -742,7 +785,7 @@ func TestWouldOverlayConflictWithNodeAffinity_NilOverlayOrEmptyFromNode(t *testi
 	if WouldOverlayConflictWithNodeAffinity(spec, nil) {
 		t.Errorf("nil overlay must not conflict")
 	}
-	if WouldOverlayConflictWithNodeAffinity(spec, &core.MigrationOverlay{FromNode: ""}) {
+	if WouldOverlayConflictWithNodeAffinity(spec, &workload.MigrationOverlay{FromNode: ""}) {
 		t.Errorf("empty FromNode must not conflict")
 	}
 }
@@ -778,7 +821,7 @@ func TestRender_ContainerName_FallbackPrecedence(t *testing.T) {
 		spec := &corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "my-runner", Image: "img:v1"}},
 		}
-		pod, err := Render(basicISVC(), spec, plan, inst, runner, 0)
+		pod, err := testRender(basicISVC(), spec, plan, inst, runner, 0)
 		if err != nil {
 			t.Fatalf("Render: %v", err)
 		}
@@ -794,7 +837,7 @@ func TestRender_ContainerName_FallbackPrecedence(t *testing.T) {
 		spec := &corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "", Image: "img:v1"}},
 		}
-		pod, err := Render(basicISVC(), spec, plan, inst, runner, 0)
+		pod, err := testRender(basicISVC(), spec, plan, inst, runner, 0)
 		if err != nil {
 			t.Fatalf("Render: %v", err)
 		}
@@ -812,7 +855,7 @@ func TestRender_ContainerName_FallbackPrecedence(t *testing.T) {
 				{Name: "", Image: "main:v1"},
 			},
 		}
-		pod, err := Render(basicISVC(), spec, plan, inst, runner, 0)
+		pod, err := testRender(basicISVC(), spec, plan, inst, runner, 0)
 		if err != nil {
 			t.Fatalf("Render: %v", err)
 		}
@@ -831,7 +874,7 @@ func TestRender_ContainerName_FallbackPrecedence(t *testing.T) {
 			InitContainers: []corev1.Container{{Name: "", Image: "init:v1"}},
 			Containers:     []corev1.Container{{Name: "main", Image: "main:v1"}},
 		}
-		pod, err := Render(basicISVC(), spec, plan, inst, runner, 0)
+		pod, err := testRender(basicISVC(), spec, plan, inst, runner, 0)
 		if err != nil {
 			t.Fatalf("Render: %v", err)
 		}

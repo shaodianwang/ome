@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,9 +16,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // newFakeClient builds a controller-runtime fake client with the scheme
@@ -71,6 +73,22 @@ func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 // Per-revision Service fixtures in drain tests name themselves after
 // this constant via coordination.PerRevisionServiceName.
 const testRevisionHash = "testrev1"
+
+// testPodLabels reproduces the label set workload/ops.Render stamps on
+// every emitted pod. Duplicated here (rather than re-exported from
+// workload/ops) because workload/ops keeps the helper private; tests
+// in this package fabricate pods directly without going through Render.
+func testPodLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, incarnation int64, ordinal int32) map[string]string {
+	return map[string]string{
+		constants.InferenceServicePodLabelKey: isvc,
+		constants.OMEComponentLabel:           string(component),
+		query.LabelInstanceIdx:                fmt.Sprintf("%d", instanceIdx),
+		query.LabelInstanceIncarnation:        fmt.Sprintf("%d", incarnation),
+		query.LabelRunner:                     runner,
+		query.LabelManagedBy:                  query.ManagedByOMENative,
+		query.LabelPodOrdinal:                 fmt.Sprintf("%d", ordinal),
+	}
+}
 
 // minimalParams builds a core.ReconcileParams in the single-pod / engine shape.
 func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client) core.ReconcileParams {
@@ -294,7 +312,7 @@ func TestCreate_IdempotentOnAlreadyExists(t *testing.T) {
 // exactly what the controller is about to write. Synthesizing PodReady
 // in tests would mask the real ordering.
 func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, serving bool) *corev1.Pod {
-	labels := podLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1, 0)
+	labels := testPodLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1, 0)
 	// Production Render stamps ome.io/revision-hash so per-revision
 	// Service selectors match. Test pods must carry it too — the drain
 	// path computes the per-revision routed Service from this label.

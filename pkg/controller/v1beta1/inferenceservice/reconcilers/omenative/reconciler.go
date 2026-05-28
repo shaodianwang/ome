@@ -18,7 +18,6 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/revision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 )
 
@@ -170,7 +169,7 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	if !p.MultiPod {
 		workerSpec = nil
 	}
-	target, collision, err := revision.EnsureControllerRevisionWithWorker(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, workerSpec, &p.ObjectMeta, collisionCount)
+	target, collision, err := core.EnsureControllerRevisionForISVCWithWorker(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, workerSpec, &p.ObjectMeta, collisionCount)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +184,7 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonRevisionCollision,
 		"OMENative component=%s ControllerRevision hash collision; CollisionCount bumped to %d",
 		component, derefInt32(bumped))
-	target, collision, err = revision.EnsureControllerRevisionWithWorker(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, workerSpec, &p.ObjectMeta, bumped)
+	target, collision, err = core.EnsureControllerRevisionForISVCWithWorker(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, workerSpec, &p.ObjectMeta, bumped)
 	if err != nil {
 		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)
 	}

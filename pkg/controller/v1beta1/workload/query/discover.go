@@ -1,9 +1,8 @@
 // Package query holds the read-side primitives shared between the
-// top-level reconciler dispatch (discover.go, render.go, services.go,
-// status_aggregate.go, watches.go) and the ops/ subpackage. Lives as
-// a leaf so ops/ can import it without pulling in the top-level
-// omenative package — that would close a cycle since omenative
-// dispatches to ops.ReconcileComponentOps.
+// workload pipeline (workload/aggregate.go, workload/ops/...) and the
+// per-Component dispatch surfaces still on the ISVC controller
+// (omenative/services.go, watches.go). Lives as a leaf so the
+// workload package can import it without closing a cycle.
 package query
 
 import (
@@ -16,8 +15,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 )
 
 // ListOMENativePods returns every pod the OMENative selector matches for
@@ -60,7 +58,7 @@ func ListPodsForInstance(ctx context.Context, c client.Reader, isvc *v1beta1.Inf
 }
 
 // LiveListPodsForInstance returns the pods matching the (component,
-// idx) tuple via the live API reader (p.Reader()). Use this from any
+// idx) tuple via the supplied live API reader. Use this from any
 // destructive code path — Delete, the zero-old-pods confirmation
 // between recreate/restart Phase A and Phase B, Migrate's
 // source-drain and source-delete steps — so the controller doesn't
@@ -70,8 +68,46 @@ func ListPodsForInstance(ctx context.Context, c client.Reader, isvc *v1beta1.Inf
 // Cache-driven ListPodsForInstance is fine for plan computation and
 // status aggregation (the OEP §8.3 "Cache Lag Rule"), but every step
 // that mutates pod state needs a live read first.
-func LiveListPodsForInstance(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32) ([]*corev1.Pod, error) {
-	return ListPodsForInstance(ctx, p.Reader(), p.ISVC, component, idx)
+//
+// Takes primitive args (reader + namespace + isvcName + component) so
+// the workload/query leaf doesn't take on a backward import to either
+// workload.Deps / workload.WorkloadKey or to a Component-spec carrier
+// type — keeps the leaf importable by both adapter paths without
+// closing a cycle. Adapters compose these from their own Deps + key.
+func LiveListPodsForInstance(ctx context.Context, reader client.Reader, namespace, isvcName string, component v1beta1.ComponentType, idx int32) ([]*corev1.Pod, error) {
+	pods, err := ListOMENativePodsByName(ctx, reader, namespace, isvcName, component)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if i, ok := InstanceIdxFromLabels(pod); ok && i == idx {
+			out = append(out, pod)
+		}
+	}
+	return out, nil
+}
+
+// ListOMENativePodsByName is the *v1beta1.InferenceService-free variant of
+// ListOMENativePods — selects by namespace + isvcName + component
+// directly. Used by LiveListPodsForInstance so the destructive code
+// paths can call into query without holding the whole ISVC object
+// (the IR adapter path doesn't have one).
+func ListOMENativePodsByName(ctx context.Context, c client.Reader, namespace, isvcName string, component v1beta1.ComponentType) ([]*corev1.Pod, error) {
+	pods := &corev1.PodList{}
+	sel := labels.SelectorFromSet(labels.Set{
+		constants.InferenceServicePodLabelKey: isvcName,
+		constants.OMEComponentLabel:           string(component),
+		LabelManagedBy:                        ManagedByOMENative,
+	})
+	if err := c.List(ctx, pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
+		return nil, err
+	}
+	out := make([]*corev1.Pod, 0, len(pods.Items))
+	for i := range pods.Items {
+		out = append(out, &pods.Items[i])
+	}
+	return out, nil
 }
 
 // BucketPodsByInstanceIdx groups pods by their ome.io/instance-index
@@ -226,8 +262,11 @@ func AllTerminating(pods []*corev1.Pod) bool {
 // Create that AlreadyExists-conflicts against the still-terminating
 // previous incarnation). Tolerating terminating-but-not-yet-gone
 // matches K8s foreground propagation semantics.
-func LiveOldPodsClearedForRecreate(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32, currentInc int64) (bool, error) {
-	pods, err := LiveListPodsForInstance(ctx, p, component, idx)
+//
+// Same primitive-arg shape as LiveListPodsForInstance (see comment
+// there for the rationale).
+func LiveOldPodsClearedForRecreate(ctx context.Context, reader client.Reader, namespace, isvcName string, component v1beta1.ComponentType, idx int32, currentInc int64) (bool, error) {
+	pods, err := LiveListPodsForInstance(ctx, reader, namespace, isvcName, component, idx)
 	if err != nil {
 		return false, err
 	}
@@ -253,14 +292,4 @@ func FindInstanceStatus(isvc *v1beta1.InferenceService, component v1beta1.Compon
 		}
 	}
 	return nil
-}
-
-// TotalPodsForInstance sums desired pod count across Runners — 1 for
-// single-pod, 1+N for leader+worker.
-func TotalPodsForInstance(inst core.InstancePlan) int32 {
-	var n int32
-	for _, r := range inst.Runners {
-		n += r.Size
-	}
-	return n
 }

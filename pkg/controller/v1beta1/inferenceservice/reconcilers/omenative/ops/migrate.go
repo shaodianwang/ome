@@ -17,13 +17,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/drain"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podreadiness"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/revision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 )
 
 // migrateRequeueInterval is the wait between Migrate passes while a
@@ -133,7 +133,7 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 		if surgeRevSpec == nil {
 			return false, nil
 		}
-		if WouldOverlayConflictWithNodeAffinity(surgeRevSpec, &core.MigrationOverlay{
+		if core.WouldOverlayConflictForISVC(surgeRevSpec, &core.MigrationOverlay{
 			FromNode:        req.FromNode,
 			HintTargetNodes: req.HintTargetNodes,
 		}) {
@@ -198,7 +198,7 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 	// Refuse a surge whose hard NodeAffinity would collapse to
 	// "hostname=FromNode AND hostname!=FromNode". Without this gate the
 	// surge sits Pending until timeout — silent rejection vs. early fail.
-	if WouldOverlayConflictWithNodeAffinity(surgeRevSpec, surgeInst.MigrationOverlay) {
+	if core.WouldOverlayConflictForISVC(surgeRevSpec, surgeInst.MigrationOverlay) {
 		reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
 		status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonMigrationNodeAffinityConflict,
 			"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
@@ -291,7 +291,7 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 
 	// Live read before deletes — a stale-empty cache view would skip the
 	// delete loop and orphan source pods at source-status removal.
-	sourcePods, err = query.LiveListPodsForInstance(ctx, p, plan.Component, sourceIdx)
+	sourcePods, err = query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx)
 	if err != nil {
 		return false, fmt.Errorf("Migrate: live-list source pods: %w", err)
 	}
@@ -354,7 +354,7 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 // Source pods on multiple nodes is a rejection — alpha single-pod can't
 // legitimately span nodes.
 func validateFromNode(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, sourceIdx int32, fromNode string) (string, bool, error) {
-	pods, err := query.LiveListPodsForInstance(ctx, p, component, sourceIdx)
+	pods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, component, sourceIdx)
 	if err != nil {
 		return "", false, fmt.Errorf("list source pods: %w", err)
 	}
@@ -421,7 +421,7 @@ func failMigration(ctx context.Context, p core.ReconcileParams, ledger *audit.Le
 func isMultiPodInstance(plan core.ComponentPlan, sourceIdx int32) bool {
 	for _, inst := range plan.Instances {
 		if inst.Index == sourceIdx {
-			return query.TotalPodsForInstance(inst) > 1
+			return inst.TotalPods() > 1
 		}
 	}
 	return false

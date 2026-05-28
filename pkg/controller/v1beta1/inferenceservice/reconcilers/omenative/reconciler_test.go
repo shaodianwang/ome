@@ -13,7 +13,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 )
 
 // TestReconcileComponent_NilClientRejected pins that the entry function
@@ -166,12 +167,12 @@ func TestReconcileComponent_RevisionCollisionBumpsAndRetries(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	targetSpec := targetSpecImage("llama:v2")
 	hash, _, _ := revision.Hash(targetSpec, nil, nil)
-	conflictingName := revision.Name(isvc.Name, v1beta1.EngineComponent, hash)
+	conflictingName := core.RevisionName(isvc.Name, v1beta1.EngineComponent, hash)
 	conflicting := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      conflictingName,
 			Namespace: isvc.Namespace,
-			Labels:    revision.Labels(isvc.Name, v1beta1.EngineComponent),
+			Labels:    core.RevisionLabels(isvc.Name, v1beta1.EngineComponent),
 		},
 		Data:     runtime.RawExtension{Raw: []byte(`{"podSpec":{"containers":[{"name":"other","image":"other:v1"}]},"podMeta":null}`)},
 		Revision: 1,
@@ -201,7 +202,7 @@ func TestReconcileComponent_RevisionCollisionBumpsAndRetries(t *testing.T) {
 		t.Errorf("CR count after retry: got %d want 2 (conflicting + salt-shifted)", len(list.Items))
 	}
 	saltedHash, _, _ := revision.Hash(targetSpec, nil, cs.OMENative.CollisionCount)
-	saltedName := revision.Name(isvc.Name, v1beta1.EngineComponent, saltedHash)
+	saltedName := core.RevisionName(isvc.Name, v1beta1.EngineComponent, saltedHash)
 	found := false
 	names := make([]string, 0, len(list.Items))
 	for _, cr := range list.Items {

@@ -50,7 +50,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // isvcGroupVersionKind identifies the InferenceService owner reference
@@ -76,10 +76,10 @@ const minScheduleTimeoutSeconds int32 = 60
 
 // IsMultiPodInstance reports whether the Instance has more than one pod
 // across all Runners — i.e., it needs a PodGroup. Wraps
-// query.TotalPodsForInstance with the OEP threshold (>=2) so callers
+// InstancePlan.TotalPods with the OEP threshold (>=2) so callers
 // don't repeat the constant.
 func IsMultiPodInstance(inst core.InstancePlan) bool {
-	return query.TotalPodsForInstance(inst) > 1
+	return inst.TotalPods() > 1
 }
 
 // BuildPodGroup produces the desired PodGroup for one multi-pod
@@ -117,7 +117,7 @@ func BuildPodGroup(isvc *v1beta1.InferenceService, plan core.ComponentPlan, inst
 		return nil, fmt.Errorf("BuildPodGroup: instance %d is single-pod (no gang)", inst.Index)
 	}
 
-	minMember := query.TotalPodsForInstance(inst)
+	minMember := inst.TotalPods()
 	timeout := clampScheduleTimeoutSeconds(int32(plan.InstanceReadyTimeout.Seconds()))
 
 	labels := podGroupLabels(isvc.Name, plan.Component, inst.Index)

@@ -13,8 +13,8 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/podgroup"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podgroup"
 )
 
 // maybeNoGangSchedulerSeen tracks which (ISVC, Component) pairs have
