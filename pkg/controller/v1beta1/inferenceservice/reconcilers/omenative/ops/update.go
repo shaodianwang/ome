@@ -1136,12 +1136,26 @@ func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.Componen
 	// naturally after this surge promotes, because detectUpdateTrigger
 	// observes RunningRevision != target.Name.
 	surgeTargetName := target.Name
-	if s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil &&
-		s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationUpdate &&
-		(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) &&
-		s.Operation.TargetRevision != "" {
-		surgeTargetName = s.Operation.TargetRevision
+	var runningRevName string
+	if s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil {
+		runningRevName = s.RunningRevision
+		if s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationUpdate &&
+			(s.Operation.Step == updateStepSurge || s.Operation.Step == updateStepSurgeDrain) &&
+			s.Operation.TargetRevision != "" {
+			surgeTargetName = s.Operation.TargetRevision
+		}
 	}
+	surgeTargetHash := query.RevisionHashFromControllerRevisionName(surgeTargetName)
+	runningRevHash := query.RevisionHashFromControllerRevisionName(runningRevName)
+
+	// Re-route any pod stranded at the surge ordinal but labeled with
+	// the just-promoted RunningRevision through the drain path —
+	// otherwise the ordinal partition above treats it as a valid
+	// surge and Phase 3 promotes RunningRevision to the in-flight
+	// target while the actual pod is on the prior rev. See
+	// reclassifyByRevisionHash's header for the X-2 (task #54)
+	// recovery path this guards.
+	surgePods, oldPods = reclassifyByRevisionHash(surgePods, oldPods, surgeTargetHash, runningRevHash)
 
 	// Phase 1 entry: stamp Phase=Updating + Op.Step=Surge if not
 	// already there. Idempotent on the second pass. Writes
@@ -1166,7 +1180,23 @@ func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.Componen
 	// ome.io/revision-hash label is stamped from surgeTargetName so it
 	// matches the in-flight commitment. revisionHashFromName is the
 	// pinned-target equivalent of revisionHashFromTarget.
-	if len(surgePods) == 0 {
+	//
+	// Skip the create when the surge ordinal slot is already occupied
+	// by a pod the reclassify just moved into the drain set. That's
+	// the recovery path (task #54) where a stale-rev pod lives at the
+	// surge slot — the Create would AlreadyExists against it, leaving
+	// the stale pod in place forever. Falling through to Phase 2
+	// drains both the alternate-slot canonical and the stale pod;
+	// the NEXT reconcile pass enters Phase 1 with an empty surge slot
+	// and creates the correct-rev pod.
+	staleAtSurgeSlot := false
+	for _, pod := range oldPods {
+		if ord, ok := query.PodOrdinalFromLabels(pod); ok && ord == newOrdinal {
+			staleAtSurgeSlot = true
+			break
+		}
+	}
+	if len(surgePods) == 0 && !staleAtSurgeSlot {
 		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
 			return false, nil
 		}
@@ -1177,6 +1207,57 @@ func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.Componen
 		}}
 		if _, err := createMissingPods(ctx, p, plan, inst, inst.Index, targets, query.RevisionHashFromControllerRevisionName(surgeTargetName)); err != nil {
 			return false, fmt.Errorf("create surge pod (instance=%d, ordinal=%d): %w", inst.Index, newOrdinal, err)
+		}
+		return false, nil
+	}
+	// If the surge slot is occupied by a stale pod (no valid surge
+	// alive yet), let Phase 2 drain ALL old pods (including the
+	// stale at the surge slot) and a subsequent reconcile re-create
+	// the surge pod with the correct rev.
+	if staleAtSurgeSlot && len(surgePods) == 0 {
+		// Mark the surge step transition once so the dispatcher's
+		// CheckSurgeGate accounting matches the in-flight phase even
+		// while the surge pod is absent. Idempotent.
+		if err := patchInstanceStatusSurgeStepDrain(ctx, p, plan.Component, inst.Index); err != nil {
+			return false, fmt.Errorf("transition surge step to drain (instance=%d): %w", inst.Index, err)
+		}
+		for _, pod := range oldPods {
+			if !podreadiness.IsServing(pod) {
+				continue
+			}
+			if err := podreadiness.MarkPodNotServing(ctx, p.Client, pod, podreadiness.WriterUpdateSurgeDrain, surgeDrainKey(inst.Index, newOrdinal)); err != nil {
+				return false, fmt.Errorf("mark old not serving for stale-slot recovery (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+			}
+		}
+		// Live drain check identical to the canonical Phase 2 path.
+		for _, pod := range oldPods {
+			serviceName := drainServiceForPod(p.ISVC.Name, plan.Component, pod)
+			if serviceName == "" {
+				continue
+			}
+			drained, err := drain.IsPodDrained(ctx, p.Reader(), p.ISVC.Namespace, serviceName, pod)
+			if err != nil {
+				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+			}
+			if !drained {
+				return false, nil
+			}
+		}
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+			return false, nil
+		}
+		for _, pod := range oldPods {
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
+			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, 1)
+			if err := p.Client.Delete(ctx, pod); err != nil {
+				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index)
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return false, fmt.Errorf("delete stale-slot pod %s/%s: %w", pod.Namespace, pod.Name, err)
+			}
 		}
 		return false, nil
 	}
@@ -1285,6 +1366,78 @@ func partitionPodsBySurgeOrdinal(pods []*corev1.Pod, oldOrdinal, newOrdinal int3
 		default:
 			stragglers = append(stragglers, pod)
 		}
+	}
+	return
+}
+
+// reclassifyByRevisionHash promotes any pod incorrectly bucketed as a
+// surge candidate into the drain set when its revision-hash label
+// matches the just-promoted RunningRevision — i.e., it is left over
+// from the previous surge cycle, not the in-flight one. The ordinal
+// partition is load-bearing for the no-downtime invariant (the surge
+// slot is the ALTERNATE ordinal), but it can mis-classify in the
+// multi-bump recovery path:
+//
+//   - Bump v1 → v2: surge cycle stamps Op{TargetRev=v2}, creates v2 at
+//     ord=1, drains v1 at ord=0, promotes — RunningRev=v2,
+//     ActiveOrdinal=1.
+//   - Bump v2 → v3 arrives while a fresh reconcile is pending. The
+//     dispatcher's NEXT pass sees RunningRev=v2 != target=v3 and fires
+//     a fresh surge cycle. surgeUpdate computes oldOrdinal=1,
+//     newOrdinal=0, partitions [v2@ord=1, v3-surge-just-created@ord=0]
+//     correctly — v2 in old, v3 in surge.
+//
+// But there are recovery scenarios where the surge slot holds a pod
+// labeled with the PRIOR running revision (e.g., a re-entry from a
+// previous surge cycle that did not cleanly delete its alternate-slot
+// peer, or a controller restart that lost the in-flight bookkeeping
+// and re-derived state from observed pod labels). Without this
+// recheck the ordinal partition would treat the stale pod as the
+// "valid surge" — Phase 3 would promote RunningRevision to the
+// pinned target while the actual pod is on a prior rev — exactly the
+// X-2 "v2 straggler labeled post-promote as v3" symptom captured on
+// cluster msl-cw-use2-dev-2 after the post-#256 deploy (OEP-0007.2
+// task #54).
+//
+// The recheck is narrow: a pod is reclassified into the drain set
+// ONLY when its revision-hash label matches the just-promoted
+// runningRev (i.e., it is leftover from the previous cycle's
+// promote). Pods with arbitrary other labels are kept in the surge
+// bucket so existing test fixtures (which stamp a generic
+// testRevisionHash regardless of target) and legacy pods (label
+// missing) continue to round-trip. The recheck is a no-op when
+// runningRev is empty (first-ever surge cycle, no prior promote to
+// inherit from) or matches targetHash (no rev difference, the surge
+// is already valid).
+func reclassifyByRevisionHash(surge, drain []*corev1.Pod, targetHash, runningRevHash string) (newSurge, newDrain []*corev1.Pod) {
+	if runningRevHash == "" || runningRevHash == targetHash {
+		return surge, drain
+	}
+	newSurge = surge[:0]
+	newDrain = drain
+	for _, pod := range surge {
+		hash, ok := pod.Labels[query.LabelRevisionHash]
+		if !ok || hash == "" {
+			// No label — fall back to the ordinal classification so
+			// legacy pods aren't churned. partition tests pin this.
+			newSurge = append(newSurge, pod)
+			continue
+		}
+		if hash == runningRevHash {
+			// Stale: pod is labeled with the just-promoted rev but is
+			// sitting at the surge ordinal. Drain + delete so the
+			// next reconcile's Phase 1 re-creates with the
+			// in-flight target rev. Any pod whose rev is neither the
+			// prior promote nor the in-flight target (e.g., test
+			// fixtures with a synthetic label) stays in the surge
+			// bucket on purpose — production callers always stamp
+			// rev-hash from createMissingPods's surgeTargetHash
+			// argument, so a non-matching rev outside the prior /
+			// current pair shouldn't happen and shouldn't be punished.
+			newDrain = append(newDrain, pod)
+			continue
+		}
+		newSurge = append(newSurge, pod)
 	}
 	return
 }

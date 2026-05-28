@@ -1135,6 +1135,333 @@ func TestPatchInstanceStatusSurgingForUpdate_IdempotentOnSurgeDrainStep(t *testi
 	}
 }
 
+// TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires pins the
+// X-2 follow-up regression (post-#256): after a v1→v2 surge cycle
+// COMPLETES for an Instance with RunningRevision=v2 and ActiveOrdinal
+// flipped to the new slot, a fresh spec bump to v3 must drive the
+// Instance to RunningRevision=v3 with the v2 pod fully drained — NOT
+// leave the v2 pod alive alongside the v3 surge pod.
+//
+// Reproduces the X-2 cluster capture (sandbox/x2-bump-during-bump on
+// msl-cw-use2-dev-2, post-f783c1b0 deploy): engine.minReplicas=4 +
+// SurgeThenDrain, two bumps 30s apart. After PR #256 v3 is reachable,
+// but pods on v2 stay alive (5 engine pods total: 4 canonical + 1
+// surge straggler from the bump-during-bump cycle). This test exercises
+// the single-Instance variant end-to-end so the unit suite catches the
+// drain regression independent of the multi-Instance surge-gate pacing.
+//
+// Walks every pass of the v3 surge cycle through to promote and
+// asserts the final pod set is exactly one pod (the v3 promoted surge)
+// — no v2 straggler, no extra at the drained slot.
+func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
+	resetExpectations(t)
+	isvc := surgeISVCWithStrategy("llama-70b", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, err := core.BuildPlan(p)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Simulate post-v2-promote state: RunningRevision=rev2,
+	// ActiveOrdinal=1, single pod alive at ord=1 on rev2.
+	rev2 := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpecImage("llama:v2"))
+	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), p, v1beta1.EngineComponent, 0, rev2.Name, 1); err != nil {
+		t.Fatalf("seed post-v2-promote state: %v", err)
+	}
+	v2Pod := surgePodAtOrdinal(isvc, 0, 1, 1, true, true)
+	// Tag the v2 pod with its revision-hash label so per-revision Service
+	// gating downstream behaves as in production. Without this label
+	// drainServiceForPod returns "" and drain is treated as immediate.
+	v2Pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(rev2.Name)
+	if err := c.Create(context.Background(), v2Pod); err != nil {
+		t.Fatalf("seed v2 pod: %v", err)
+	}
+
+	// Bump to rev3. The next surgeUpdate pass must start a fresh surge
+	// cycle: create v3 surge at the alternate ordinal (ord=0), wait
+	// ready, drain the v2 pod, delete it, promote v3.
+	rev3 := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpecImage("llama:v3"))
+
+	// Pass 1: Phase 1 entry for the v3 cycle. Stamps Op{Surge, rev3} and
+	// creates the v3 surge pod at ord=0.
+	if _, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev3, []*corev1.Pod{v2Pod}); err != nil {
+		t.Fatalf("pass 1 (v3 surge create): %v", err)
+	}
+	rev3SurgeName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 0)
+	rev3Surge := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev3SurgeName}, rev3Surge); err != nil {
+		t.Fatalf("v3 surge pod missing after pass 1: %v", err)
+	}
+	if got := rev3Surge.Labels[query.LabelRevisionHash]; got != query.RevisionHashFromControllerRevisionName(rev3.Name) {
+		t.Errorf("v3 surge pod hash label: got %q want %q", got, query.RevisionHashFromControllerRevisionName(rev3.Name))
+	}
+	s := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Operation == nil || s.Operation.TargetRevision != rev3.Name {
+		t.Fatalf("pass 1: Op should be on rev3, got %+v", s.Operation)
+	}
+
+	// Forget the create expectation so subsequent passes can proceed.
+	// In production the informer fires the matching ObservedCreate; the
+	// fake client doesn't.
+	core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+
+	// Pass 2: flip the v3 surge pod ContainersReady so Phase 1 advances
+	// to Phase 2.
+	rev3Surge.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionFalse},
+	}
+	if err := c.Status().Update(context.Background(), rev3Surge); err != nil {
+		t.Fatalf("flip v3 surge ContainersReady: %v", err)
+	}
+	if _, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev3,
+		[]*corev1.Pod{v2Pod, rev3Surge}); err != nil {
+		t.Fatalf("pass 2 (Phase 2 entry + drain + delete v2): %v", err)
+	}
+	// Forget the delete expectation Pass 2 issued.
+	core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+
+	// The fake client's per-revision Service for v2 doesn't exist
+	// (drainedWhenSliceListEmpty fall-through), so drain succeeds
+	// immediately and the v2 pod is deleted in pass 2. Verify.
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(v2Pod), &corev1.Pod{}); err == nil {
+		t.Errorf("v2 pod should be deleted after Phase 2 drain, but still exists")
+	}
+
+	// Pass 3: v2 gone, v3 surge serving — Phase 3 promote.
+	rev3SurgeFresh := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev3SurgeName}, rev3SurgeFresh); err != nil {
+		t.Fatalf("re-read v3 surge before flip Serving: %v", err)
+	}
+	rev3SurgeFresh.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
+	}
+	if err := c.Status().Update(context.Background(), rev3SurgeFresh); err != nil {
+		t.Fatalf("flip v3 surge Serving: %v", err)
+	}
+	done, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev3,
+		[]*corev1.Pod{rev3SurgeFresh})
+	if err != nil {
+		t.Fatalf("pass 3 (promote): %v", err)
+	}
+	if !done {
+		t.Fatalf("pass 3 should return done=true after promote")
+	}
+
+	// Final assertions: pod count = 1 (only the v3 surge), status
+	// reflects RunningRevision=rev3, ActiveOrdinal=0.
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		names := make([]string, 0, len(pods.Items))
+		revs := make([]string, 0, len(pods.Items))
+		for _, p := range pods.Items {
+			names = append(names, p.Name)
+			revs = append(revs, p.Labels[query.LabelRevisionHash])
+		}
+		t.Fatalf("post-v3-promote pod count: got %d (names=%v revs=%v) want 1 (v3 only)",
+			len(pods.Items), names, revs)
+	}
+	if got := pods.Items[0].Labels[query.LabelRevisionHash]; got != query.RevisionHashFromControllerRevisionName(rev3.Name) {
+		t.Errorf("surviving pod rev: got %q want %q (v3)", got, query.RevisionHashFromControllerRevisionName(rev3.Name))
+	}
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read after promote: %v", err)
+	}
+	s = fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.RunningRevision != rev3.Name {
+		t.Errorf("post-promote RunningRevision: got %q want %q", s.RunningRevision, rev3.Name)
+	}
+	if s.ActiveOrdinal != 0 {
+		t.Errorf("post-promote ActiveOrdinal: got %d want 0 (alternated back)", s.ActiveOrdinal)
+	}
+}
+
+// TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained pins the X-2 follow-up
+// invariant for the fix-shape-A drain path (task #54). When a pod
+// labeled with the just-promoted RunningRevision survives at the
+// surge ordinal — e.g., a controller restart that lost the in-flight
+// bookkeeping, or a re-entered surge cycle whose previous Phase 1
+// create landed under a stale ActiveOrdinal — the ordinal partition
+// alone would mis-identify it as the valid surge for the in-flight
+// target. Without the rev-hash recheck, Phase 3 promote would write
+// RunningRevision=in-flight-target while the actual pod is on the
+// prior rev (the X-2 "v2 straggler labeled post-promote as v3"
+// production capture). The fix moves the stale pod into the drain
+// bucket; the next reconcile re-creates a fresh pod at the surge
+// ordinal with the correct rev.
+//
+// Test setup primes the post-v2-promote Instance state then injects a
+// v2-labeled pod at the v3 surge ordinal (ord=0). surgeUpdate must
+// route it through drain + delete; Phase 3 must NOT promote on it.
+func TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained(t *testing.T) {
+	resetExpectations(t)
+	isvc := surgeISVCWithStrategy("llama-70b", "prod", 1)
+	c := newFakeClientWithDiscovery(t, isvc)
+	p := minimalParams(t, isvc, c)
+	plan, err := core.BuildPlan(p)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Stamp the post-v2-promote state: RunningRevision=rev2,
+	// ActiveOrdinal=1.
+	rev2 := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpecImage("llama:v2"))
+	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), p, v1beta1.EngineComponent, 0, rev2.Name, 1); err != nil {
+		t.Fatalf("seed post-v2-promote state: %v", err)
+	}
+
+	// Canonical pod at ord=1 on rev2.
+	canonical := surgePodAtOrdinal(isvc, 0, 1, 1, true, true)
+	canonical.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(rev2.Name)
+	if err := c.Create(context.Background(), canonical); err != nil {
+		t.Fatalf("seed canonical pod: %v", err)
+	}
+
+	// STALE pod at ord=0 — also labeled with rev2 (the just-promoted
+	// rev). This is the recovery scenario: re-entered Phase 1 from a
+	// crash that lost in-flight bookkeeping; the leftover pod at the
+	// surge slot is labeled with the prior cycle's rev, not the
+	// in-flight target.
+	stale := surgePodAtOrdinal(isvc, 0, 1, 0, true, true)
+	stale.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(rev2.Name)
+	if err := c.Create(context.Background(), stale); err != nil {
+		t.Fatalf("seed stale pod: %v", err)
+	}
+
+	// Now bump to rev3. surgeUpdate should detect the rev mismatch
+	// and route the stale pod into the drain bucket — NOT promote on
+	// it.
+	rev3 := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpecImage("llama:v3"))
+
+	// Pass 1: drain + delete the stale + canonical pods.
+	// Both will be in oldPods after the reclassify (stale by rev,
+	// canonical by ordinal).
+	if _, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev3,
+		[]*corev1.Pod{canonical, stale}); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	// Forget the delete expectations issued in pass 1.
+	core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+
+	// Both pods should be deleted by Phase 2's drain (per-revision
+	// Service for rev2 doesn't exist in the fake client, so
+	// drainedWhenSliceListEmpty returns true).
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(canonical), &corev1.Pod{}); err == nil {
+		t.Errorf("canonical pod should be deleted (in oldPods by ordinal), but still exists")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), &corev1.Pod{}); err == nil {
+		t.Errorf("stale pod at surge slot should be deleted (in oldPods by rev-hash recheck), but still exists")
+	}
+
+	// Status MUST still say Updating with TargetRev=rev3 — promote
+	// did NOT fire because both surge slots were drained, not
+	// promoted.
+	s := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Phase != v1beta1.OMENativeInstanceUpdating {
+		t.Errorf("Phase: got %q want Updating (no promote on a drained slot)", s.Phase)
+	}
+	if s.Operation == nil || s.Operation.TargetRevision != rev3.Name {
+		t.Fatalf("Op.TargetRevision: got %+v want rev3 (%q)", s.Operation, rev3.Name)
+	}
+	if s.RunningRevision != rev2.Name {
+		t.Errorf("RunningRevision: got %q want rev2 (%q) — must NOT advance to rev3 yet",
+			s.RunningRevision, rev2.Name)
+	}
+
+	// Pass 2: pods cleared. Phase 1 re-creates the v3 surge pod at
+	// ord=0 (newOrdinal). The CORRECT rev this time.
+	if _, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev3, nil); err != nil {
+		t.Fatalf("pass 2 (re-create surge): %v", err)
+	}
+	core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+
+	rev3SurgeName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 0)
+	rev3Surge := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev3SurgeName}, rev3Surge); err != nil {
+		t.Fatalf("v3 surge pod missing after pass 2 re-create: %v", err)
+	}
+	if got := rev3Surge.Labels[query.LabelRevisionHash]; got != query.RevisionHashFromControllerRevisionName(rev3.Name) {
+		t.Errorf("re-created surge rev-hash: got %q want rev3 (%q)",
+			got, query.RevisionHashFromControllerRevisionName(rev3.Name))
+	}
+}
+
+// TestReclassifyByRevisionHash_KeepsValidSurge pins the recheck's
+// no-op contract: a surge pod labeled with the in-flight target
+// (or with an arbitrary unrelated label, including the
+// testRevisionHash fixture string) must NOT be moved into the drain
+// bucket. The recheck is narrow on purpose — it triggers only for
+// pods whose rev-hash matches the just-promoted RunningRevision and
+// therefore is clearly a leftover from the previous cycle.
+func TestReclassifyByRevisionHash_KeepsValidSurge(t *testing.T) {
+	mk := func(rev string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{query.LabelRevisionHash: rev},
+			},
+		}
+	}
+	validSurge := mk("rev3")
+	unrelated := mk("synthetic")
+	missingLabel := &corev1.Pod{}
+
+	// runningRev=rev2, targetHash=rev3 — the normal mid-cycle state.
+	surge, drain := reclassifyByRevisionHash(
+		[]*corev1.Pod{validSurge, unrelated, missingLabel},
+		nil, "rev3", "rev2",
+	)
+	if len(drain) != 0 {
+		t.Errorf("drain bucket should be empty (no stale labels); got %d", len(drain))
+	}
+	if len(surge) != 3 {
+		t.Errorf("surge bucket should keep all three pods; got %d", len(surge))
+	}
+
+	// runningRev="" (first-ever surge) — recheck is a no-op even with
+	// a fully mismatched label.
+	mismatched := mk("anything")
+	surge2, drain2 := reclassifyByRevisionHash(
+		[]*corev1.Pod{mismatched}, nil, "rev3", "",
+	)
+	if len(drain2) != 0 || len(surge2) != 1 {
+		t.Errorf("empty runningRev should leave buckets untouched; surge=%d drain=%d",
+			len(surge2), len(drain2))
+	}
+}
+
+// TestReclassifyByRevisionHash_DrainsStaleByRunningRev pins the
+// recheck's primary purpose: a pod labeled with the just-promoted
+// RunningRevision but sitting in the surge bucket MUST be moved to
+// drain so Phase 2 deletes it.
+func TestReclassifyByRevisionHash_DrainsStaleByRunningRev(t *testing.T) {
+	mk := func(rev string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{query.LabelRevisionHash: rev},
+			},
+		}
+	}
+	staleRev2 := mk("rev2")
+	validRev3 := mk("rev3")
+
+	surge, drain := reclassifyByRevisionHash(
+		[]*corev1.Pod{staleRev2, validRev3},
+		[]*corev1.Pod{}, "rev3", "rev2",
+	)
+	if len(drain) != 1 || drain[0] != staleRev2 {
+		t.Errorf("drain bucket should contain the rev2-labeled stale pod; got %d entries", len(drain))
+	}
+	if len(surge) != 1 || surge[0] != validRev3 {
+		t.Errorf("surge bucket should keep only the rev3-labeled valid surge; got %d entries", len(surge))
+	}
+}
+
 // Compile-time sanity: ensure the test file uses the metav1 import (the
 // linter complains otherwise on imports added defensively).
 var _ = metav1.NewTime
