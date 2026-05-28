@@ -1,11 +1,13 @@
 package ops
 
-// Helpers carved out of create.go when the per-Instance Create state
-// machine moved to pkg/controller/v1beta1/workload/ops (part 2 slice 4b
-// of N). The callers below still live in this package and read the
-// v1beta1.OMENativeInstanceStatus shape directly — keeping the helpers
-// here as v1beta1-typed functions keeps the peer migrations (delete,
-// update, restart, migrate, timeouts) byte-for-byte unchanged.
+// Helpers carved out of create.go (part 2 slice 4b of N) and delete.go
+// (part 2 slice 4c of N) when those per-Instance state machines moved
+// to pkg/controller/v1beta1/workload/ops. The callers below still live
+// in this package and read the v1beta1.OMENativeInstanceStatus shape
+// directly — keeping the helpers here as v1beta1-typed functions keeps
+// the peer ops (update, restart, migrate, timeouts) byte-for-byte
+// unchanged. The dispatcher (dispatch.go) also still reads from this
+// file (extraInstanceIndices, deleteRequeueInterval).
 //
 // Each helper shrinks out as the matching peer op moves to workload/ops
 // in a follow-up slice.
@@ -13,9 +15,12 @@ package ops
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
@@ -23,6 +28,14 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
+
+// deleteRequeueInterval is the wait between scale-down passes; the
+// dispatcher requeues after this when at least one extra Instance is
+// still draining. Mirrors the workload-side
+// workload/ops.deleteRequeueInterval byte-for-byte (5s); kept here
+// because dispatch.go reads it and dispatch.go has not yet migrated
+// to workload/ops.
+const deleteRequeueInterval = 5 * time.Second
 
 // podTarget describes one pod to create within an Instance. Kept in
 // the omenative/ops package because the peer ops (restart, migrate,
@@ -176,4 +189,106 @@ func patchInstanceStatusReady(ctx context.Context, p core.ReconcileParams, compo
 		s.Operation = nil
 		return true
 	})
+}
+
+// extraInstanceIndices returns InstanceStatus indices the plan no longer
+// covers — these are scale-down targets. Set-difference framing handles
+// sparse indices from surge migration: index 7 is "extra" only when no
+// core.InstancePlan covers it, regardless of replica count. Mid-migration
+// Instances are excluded so the surge pair (source + surge) isn't
+// scale-down-deleted out from under Migrate.
+//
+// Read by the omenative dispatcher (ReconcileComponentOps in dispatch.go)
+// before driving Delete on each extra index. Stays here as a v1beta1-typed
+// helper because the dispatcher still reads ISVC.Status directly; it will
+// migrate to workload/ops when the dispatcher itself does.
+func extraInstanceIndices(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, plan core.ComponentPlan) []int32 {
+	if isvc == nil {
+		return nil
+	}
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.OMENative == nil {
+		return nil
+	}
+	planned := make(map[int32]struct{}, len(plan.Instances))
+	for _, inst := range plan.Instances {
+		planned[inst.Index] = struct{}{}
+	}
+	var extras []int32
+	for _, s := range cs.OMENative.InstanceStatuses {
+		if _, inPlan := planned[s.Index]; inPlan {
+			continue
+		}
+		if s.Phase == v1beta1.OMENativeInstanceMigrating {
+			continue
+		}
+		if s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationMigrate {
+			continue
+		}
+		extras = append(extras, s.Index)
+	}
+	return extras
+}
+
+// removeInstanceStatus drops the InstanceStatus entry for (component, idx).
+// hadEntry=true when a real removal happened, false when already cleared.
+// Wrapped in retry.RetryOnConflict; re-checks existence on each attempt so
+// a parallel clear becomes a no-op.
+//
+// Mirrors the buildRemoveInstance closure in internalsource (which wraps
+// the same operation as a workload.ReconcileInput.RemoveInstance callback).
+// Kept here as a v1beta1-typed function so peer ops still in this package
+// (migrate.go, timeouts.go) call it byte-for-byte unchanged. Migrates to
+// workload/ops alongside its callers in follow-up slices.
+func removeInstanceStatus(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32) (bool, error) {
+	var hadEntry bool
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		hadEntry = false
+		fresh := &v1beta1.InferenceService{}
+		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				// ISVC deleted during reconcile — the InstanceStatus
+				// entry is gone with it. Treat as a successful no-op.
+				return nil
+			}
+			return fmt.Errorf("re-read ISVC: %w", err)
+		}
+		if fresh.Status.Components == nil {
+			return nil
+		}
+		cs, ok := fresh.Status.Components[component]
+		if !ok || cs.OMENative == nil {
+			return nil
+		}
+		insts := cs.OMENative.InstanceStatuses
+		pos := -1
+		for i, s := range insts {
+			if s.Index == idx {
+				pos = i
+				break
+			}
+		}
+		if pos == -1 {
+			return nil
+		}
+		cs.OMENative.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
+		fresh.Status.Components[component] = cs
+
+		if err := p.Client.Status().Update(ctx, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("update ISVC status: %w", err)
+		}
+		hadEntry = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if hadEntry {
+		// Forget so a later index reuse doesn't inherit stale counters.
+		p.ExpectationsCache().Forget(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(component), idx)
+	}
+	return hadEntry, nil
 }

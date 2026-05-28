@@ -89,4 +89,18 @@ type ReconcileInput struct {
 	// Instance entries — workload code panics on a nil callback rather
 	// than silently dropping status updates.
 	MutateInstance func(ctx context.Context, idx int32, mutate func(*InstanceStatus) bool) error
+
+	// RemoveInstance drops the InstanceStatus entry for idx and
+	// returns (true, nil) when a real removal happened, (false, nil)
+	// when the entry was already absent. Like MutateInstance the
+	// caller wraps apiserver round-trip (under retry.RetryOnConflict)
+	// and any expectations-bookkeeping forget step inside this
+	// closure. workload code calls it from Delete's final step once
+	// every pod for the Instance is gone.
+	//
+	// MUST be set when ObservedState carries any Instance entries
+	// the Delete state machine might converge to gone — workload
+	// code panics on a nil callback rather than silently leaking
+	// status entries.
+	RemoveInstance func(ctx context.Context, idx int32) (bool, error)
 }

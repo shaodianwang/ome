@@ -58,6 +58,7 @@ func Create(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan
 		PodSpec:       p.PodSpec,
 		WorkerPodSpec: p.WorkerPodSpec,
 		Client:        p.Client,
+		Expectations:  p.ExpectationsCache(),
 	})
 	return workloadops.Create(ctx, deps, input, plan, target)
 }

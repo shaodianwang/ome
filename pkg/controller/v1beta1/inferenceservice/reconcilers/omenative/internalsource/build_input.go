@@ -2,10 +2,13 @@ package internalsource
 
 import (
 	"context"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -62,6 +65,12 @@ type BuildInputDeps struct {
 	// Client is the controller-runtime client used to persist status
 	// writes via the MutateInstance closure.
 	Client client.Client
+
+	// Expectations is the per-reconcile expectations cache the
+	// RemoveInstance closure forgets on a successful removal. When
+	// nil the workload-level DefaultExpectations singleton is used —
+	// matches the fallback every legacy callsite already relies on.
+	Expectations *workload.Expectations
 }
 
 // BuildReconcileInput projects (ISVC, Component, podSpec, ...) onto a
@@ -97,6 +106,7 @@ func BuildReconcileInput(d BuildInputDeps) workload.ReconcileInput {
 			InstanceStatuses: InstanceStatusSliceToWorkload(extractInstanceStatuses(d.ISVC, d.Component)),
 		},
 		MutateInstance: buildMutateInstance(d.Client, d.ISVC, d.Component),
+		RemoveInstance: buildRemoveInstance(d.Client, d.ISVC, d.Component, d.Expectations),
 	}
 }
 
@@ -115,6 +125,79 @@ func buildMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compon
 			*v = InstanceStatusFromWorkload(w)
 			return true
 		})
+	}
+}
+
+// buildRemoveInstance wraps the v1beta1-typed status removal flow as a
+// workload.ReconcileInput.RemoveInstance callback. Mirrors the
+// removeInstanceStatus helper that previously lived in
+// omenative/ops/delete.go before the per-Instance Delete state machine
+// moved to workload/ops (part 2 slice 4c of N). Kept in internalsource
+// rather than the status package because the post-commit
+// Expectations.Forget step needs the workload-typed component, which
+// would force a forward dependency from the v1beta1-typed status
+// package onto workload.
+//
+// exp is the expectations cache the closure forgets on successful
+// removal. When nil the workload-level DefaultExpectations singleton
+// is used — matches the fallback every legacy callsite relies on via
+// p.ExpectationsCache().
+func buildRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, exp *workload.Expectations) func(ctx context.Context, idx int32) (bool, error) {
+	return func(ctx context.Context, idx int32) (bool, error) {
+		var hadEntry bool
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			hadEntry = false
+			fresh := &v1beta1.InferenceService{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					// ISVC deleted during reconcile — the InstanceStatus
+					// entry is gone with it. Treat as a successful no-op.
+					return nil
+				}
+				return fmt.Errorf("re-read ISVC: %w", err)
+			}
+			if fresh.Status.Components == nil {
+				return nil
+			}
+			cs, ok := fresh.Status.Components[component]
+			if !ok || cs.OMENative == nil {
+				return nil
+			}
+			insts := cs.OMENative.InstanceStatuses
+			pos := -1
+			for i, s := range insts {
+				if s.Index == idx {
+					pos = i
+					break
+				}
+			}
+			if pos == -1 {
+				return nil
+			}
+			cs.OMENative.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
+			fresh.Status.Components[component] = cs
+
+			if err := c.Status().Update(ctx, fresh); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("update ISVC status: %w", err)
+			}
+			hadEntry = true
+			return nil
+		})
+		if err != nil {
+			return false, err
+		}
+		if hadEntry {
+			// Forget so a later index reuse doesn't inherit stale counters.
+			cache := exp
+			if cache == nil {
+				cache = workload.DefaultExpectations
+			}
+			cache.Forget(isvc.Namespace, isvc.Name, ComponentTypeToWorkload(component), idx)
+		}
+		return hadEntry, nil
 	}
 }
 

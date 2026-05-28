@@ -5,10 +5,15 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -88,6 +93,64 @@ func resetExpectations(t *testing.T) {
 	t.Helper()
 	core.DefaultExpectations = core.NewExpectations()
 	workload.DefaultExpectations = workload.NewExpectations()
+}
+
+// newFakeClientWithDiscovery builds a controller-runtime fake client with
+// the schemes the omenative/ops tests touch (corev1 + v1beta1 +
+// discoveryv1 + appsv1). The status subresource is registered so
+// Status().Update mirrors API-server behavior. Used by every *_test.go
+// in this package that constructs an ISVC + pod fixture set;
+// originally lived in delete_test.go before the per-Instance Delete
+// state machine moved to workload/ops (part 2 slice 4c of N).
+func newFakeClientWithDiscovery(t *testing.T, initObjs ...client.Object) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1: %v", err)
+	}
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add v1beta1: %v", err)
+	}
+	if err := discoveryv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add discoveryv1: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add appsv1: %v", err)
+	}
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(initObjs...).
+		Build()
+}
+
+// sliceWithEndpoint constructs an EndpointSlice for serviceName carrying
+// exactly one endpoint that targets pod, with the given Ready condition.
+// Used by drain-path tests across Delete / Update / Migrate to gate
+// the drain wait on real apiserver state. Originally lived in
+// delete_test.go.
+func sliceWithEndpoint(namespace, sliceName, serviceName string, pod *corev1.Pod, ready bool) *discoveryv1.EndpointSlice {
+	return &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sliceName,
+			Namespace: namespace,
+			Labels:    map[string]string{discoveryv1.LabelServiceName: serviceName},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{
+			{
+				Addresses: []string{"10.0.0.1"},
+				Conditions: discoveryv1.EndpointConditions{
+					Ready: ptr.To(ready),
+				},
+				TargetRef: &corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: pod.Namespace,
+					Name:      pod.Name,
+				},
+			},
+		},
+	}
 }
 
 // podForInstance fabricates a pod matching what Render() would produce

@@ -37,6 +37,22 @@ func StableServiceName(isvc string, component v1beta1.ComponentType) string {
 	return fmt.Sprintf("%s-%s", isvc, component)
 }
 
+// PerRevisionServiceName returns the per-revision *routed* Service name
+// for one (component, revisionHash) tuple. Format:
+// `<isvc>-<component>-rev-<hash>`.
+//
+// Mirrors the legacy coordination.PerRevisionServiceName helper at the
+// byte level so existing Service names line up across the dispatch
+// path. Lives in workload/query/ because workload/ops/delete.go reads
+// per-revision Service names when computing drain targets and must not
+// import the omenative coordination package (which would close a cycle
+// with the workload extraction). The coordination package retains its
+// own copy until the per-revision Service builders themselves move to
+// workload/ in a later slice.
+func PerRevisionServiceName(isvc string, component v1beta1.ComponentType, revisionHash string) string {
+	return fmt.Sprintf("%s-%s-rev-%s", isvc, component, revisionHash)
+}
+
 // InstanceSubdomain returns the per-Instance DNS subdomain stamped
 // into the OME_INSTANCE_SUBDOMAIN env var. Format is
 // <isvc>-<component>-<instance-idx>; today this is metadata-only — the
