@@ -1,98 +1,32 @@
 package workload
 
 import (
-	"context"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// NOTE on residual v1beta1 imports (slice 3 of N):
+// NOTE on residual v1beta1 imports (slice 4a of N):
 //
-// Slice 3 flips the three named carrier types — ComponentType,
-// OMENativeInstanceStatus, the MutateInstance callback — to the
-// workload-owned mirrors from types.go. WorkloadDesiredSpec.Lifecycle and
-// WorkloadAggregateStatus.Traffic still reference v1beta1 because the
-// lifecycle subtree (5 nested structs + 4 string enums) and the traffic
-// target struct have no workload mirror yet. Mirroring them inflates
-// slice 3 past the +500 LOC ceiling; slice 4+ moves the bodies that
-// reason about Lifecycle into workload/ and mirrors these types as part
-// of that move. See the report attached to slice 3's PR for the
-// rationale.
-
-// Source is the per-workload contract the workload reconciler reads and
-// writes. Implemented by adapters: the ISVC OMENative dispatch path
-// (omenative/adapter.go) and the InferenceReplica controller path
-// (inferencereplica/adapter.go).
+// WorkloadDesiredSpec.Lifecycle and WorkloadAggregateStatus.Traffic
+// still reference v1beta1 because the lifecycle subtree (5 nested
+// structs + 4 string enums) and the traffic target struct have no
+// workload mirror yet. Mirroring them inflates the current slice past
+// the +500 LOC ceiling; slice 4b+ moves the bodies that reason about
+// Lifecycle into workload/ and mirrors these types as part of that
+// move.
 //
-// The interface is intentionally narrow: identity (3 methods), one
-// desired-state read, one observed-state read, three status writers.
-// Anything else the reconciler needs (client, recorder, expectations)
-// flows through Deps, not Source.
-type Source interface {
-	// Key returns the namespaced name + a stable opaque identity used
-	// for label/selector composition. Returns the workload-owned Key
-	// type (types.go) — adapters compose it from the owner-CRD shape.
-	// For both adapters today the composed OwnerName is the owner's
-	// bare name so existing ControllerRevisions, headless Services,
-	// and pod selectors keep the same names.
-	Key() Key
-
-	// OwnerObject returns the K8s object whose UID/Kind/APIVersion
-	// becomes the controllerOwner on every emitted pod / revision /
-	// service / PodGroup / PDB. ISVC adapter returns
-	// *v1beta1.InferenceService; IR adapter returns
-	// *v1beta1.InferenceReplica.
-	OwnerObject() client.Object
-
-	// EventTarget returns the object emitted events are stamped
-	// against. Usually OwnerObject(); the IR adapter may return the
-	// parent ISVC instead so user-facing event streams stay coherent
-	// once the ISVC controller delegates Component management to IR.
-	EventTarget() client.Object
-
-	// DesiredSpec is the workload-shape projection the reconciler
-	// drives toward. Pure read; no I/O. Adapters precompute the
-	// projection once per reconcile.
-	DesiredSpec() WorkloadDesiredSpec
-
-	// ObservedState exposes the per-workload status subtree the
-	// reconciler reasons about: InstanceStatuses, CollisionCount,
-	// revision pointers, Conditions, ObservedGeneration. The return
-	// is a snapshot owned by the adapter; the reconciler MUST NOT
-	// mutate it in place. Status writes go through MutateInstance and
-	// WriteAggregateStatus.
-	ObservedState() WorkloadObservedState
-
-	// MutateInstance applies the mutate callback to the (idx)
-	// InstanceStatus entry under retry.RetryOnConflict, mirrors the
-	// result onto OwnerObject() for in-reconcile readers, and emits
-	// any side-effecting top-level conditions the adapter is
-	// responsible for. mutate returns true when a real change was
-	// made; false short-circuits the status write. The callback
-	// receives the workload-owned InstanceStatus mirror — adapters
-	// convert the workload type back to their owner-CRD shape inside
-	// the implementation (`internalsource.InstanceStatusFromWorkload`
-	// for the ISVC adapter).
-	MutateInstance(ctx context.Context, idx int32, mutate func(*InstanceStatus) bool) error
-
-	// WriteAggregateStatus commits the per-workload counters,
-	// Component-level conditions, traffic, and revision pointers in
-	// one status flush. Adapters choose where to write (legacy
-	// OMENativeComponentStatus subtree for ISVC, InferenceReplica
-	// status root for IR).
-	WriteAggregateStatus(ctx context.Context, agg WorkloadAggregateStatus) error
-
-	// BumpCollisionCount increments CollisionCount (initializing to 1
-	// when nil) and returns the new pointer for revision-retry
-	// callers. Wrapped in retry.RetryOnConflict so concurrent
-	// reconciles can't lose the bump.
-	BumpCollisionCount(ctx context.Context) (*int32, error)
-}
+// SCOPE NOTE (slice 4a): The prior `Source` interface this file
+// defined is gone. Adapters now populate `ReconcileInput` (input.go)
+// directly — one plain-data struct that bundles identity (Key,
+// OwnerObject, EventTarget), the projected DesiredSpec /
+// ObservedState, and the single MutateInstance function value. Helper
+// types below — WorkloadKey, WorkloadDesiredSpec, WorkloadObservedState,
+// WorkloadAggregateStatus, WorkloadPacing, PacingDecisions, Runner —
+// survive unchanged; they are referenced by `params.go`, `render.go`,
+// `plan.go`, and the ops package.
 
 // WorkloadKey identifies one logical workload and seeds label/selector
 // composition for the ops/render.go entry points. Both adapters produce
@@ -101,7 +35,7 @@ type Source interface {
 // the refactor.
 //
 // Distinct from `Key` (types.go) which is the workload-owned identity
-// the Source interface returns. Slice 4+ migrates the ops entry points
+// the ReconcileInput carries. Slice 4b+ migrates the ops entry points
 // onto `Key` and retires this type; until then `WorkloadKey` carries
 // the legacy ops/render.go shape (Name + Labels) so leaf-package
 // signatures stay stable.
