@@ -75,7 +75,7 @@ func resolveGroup(idx int, g *v1beta1.RolloutCoordinationGroup) ResolvedGroup {
 }
 
 // pacingWithDefaults applies the pacing default fills (25% surge,
-// 0 unavailable, PerComponent type, 5% ratio tolerance for
+// 25% unavailable, PerComponent type, 5% ratio tolerance for
 // RatioBalanced). Callers can rely on the returned struct having
 // every relevant field populated to its documented default.
 func pacingWithDefaults(in *v1beta1.CoordinationPacing) v1beta1.CoordinationPacing {
@@ -285,7 +285,8 @@ func pacingZeroSurge(p v1beta1.CoordinationPacing) bool {
 }
 
 // pacingZeroUnavailable mirrors pacingZeroSurge for MaxUnavailable.
-// Nil means "use default" which is 0 today — count nil as zero too.
+// Nil is treated as zero defensively; in practice the resolved group
+// has defaults applied via pacingWithDefaults before this is called.
 func pacingZeroUnavailable(p v1beta1.CoordinationPacing) bool {
 	if p.MaxUnavailable == nil {
 		return true

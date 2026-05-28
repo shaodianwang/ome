@@ -60,20 +60,8 @@ func CheckSequentialGate(isvc *v1beta1.InferenceService, component v1beta1.Compo
 		return true, "no coordination block"
 	}
 
-	groups := ResolveGroups(isvc.Spec.RolloutCoordination)
-	var group *ResolvedGroup
-	for i := range groups {
-		for _, c := range groups[i].Components {
-			if c == component {
-				group = &groups[i]
-				break
-			}
-		}
-		if group != nil {
-			break
-		}
-	}
-	if group == nil {
+	group, ok := MembershipFor(ResolveGroups(isvc.Spec.RolloutCoordination), component)
+	if !ok {
 		return true, "component not in any coord group"
 	}
 	if group.Policy != v1beta1.CoordinationPolicySequential {

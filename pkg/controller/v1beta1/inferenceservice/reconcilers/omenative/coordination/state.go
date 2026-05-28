@@ -615,9 +615,6 @@ func computeSurgeBudget(obs GroupObservation) map[v1beta1.ComponentType]int32 {
 // MaxSurge budget — when the ratio band would be exceeded by even one
 // surge, the budget is zeroed and skew=true so the caller can fire
 // RatioSkewRejected metrics/events.
-//
-// Closes G3 + threads into G5 (RatioSkewRejected) and G6 (RatioState
-// reads OriginalReplicas + NewPods from obs).
 func computeSurgeBudgetWithRatio(obs GroupObservation) (map[v1beta1.ComponentType]int32, bool) {
 	budget := computeSurgeBudget(obs)
 	if obs.Group.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {

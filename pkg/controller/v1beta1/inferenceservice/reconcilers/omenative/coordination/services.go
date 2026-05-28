@@ -19,10 +19,10 @@ import (
 // perRevisionServicePort is the default port the per-revision routing
 // Service exposes when the Component spec doesn't pin one. 8080 is the
 // long-standing inferencing convention (kserve / kfserving / OME).
-// HTTPRoute backendRef consumers target this port; runtimes that listen
-// elsewhere should set spec.Engine.Runner.Ports (G14 — make this
-// configurable). For now, hard-coded to keep the producer-side surface
-// minimal and unblock the ClusterIP validation which requires ≥1 port.
+// HTTPRoute backendRef consumers target this port. ClusterIP Service
+// validation requires at least one port; hard-coding 8080 keeps the
+// producer-side surface minimal until runtimes need a configurable
+// port from spec.Engine.Runner.Ports.
 const perRevisionServicePort int32 = 8080
 
 // isvcGroupVersionKind identifies the InferenceService owner reference

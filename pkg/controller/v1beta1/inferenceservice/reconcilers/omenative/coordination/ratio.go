@@ -252,14 +252,13 @@ func SnapshotOriginal(replicas map[v1beta1.ComponentType]int32) map[v1beta1.Comp
 //
 // Reads exclusively from isvc.Status — no client/cache hits — so it is
 // safe to call from hot paths.
-// CheckRatioGate's `inFlightDelta` is the number of pods the
-// dispatcher has ALREADY pulled from rotation in THIS wake-up for the
-// caller's Component. status.ServingReplicas reflects the prior
-// reconcile pass — without subtracting in-flight, every gate decision
-// in one wake-up shares the same stale snapshot answer and the
-// dispatcher fires past the band before status catches up (the load-
-// scale variant of the mass-outage bug; same shape as the fix the
-// unavailability gate received in OEP-0007.2 commit 12).
+//
+// inFlightDelta is the number of pods the dispatcher has ALREADY pulled
+// from rotation in THIS wake-up for the caller's Component.
+// status.ServingReplicas reflects the prior reconcile pass — without
+// subtracting in-flight, every gate decision in one wake-up shares the
+// same stale snapshot answer and the dispatcher fires past the band
+// before status catches up.
 func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
 	if isvc == nil {
 		return true, "nil ISVC"
@@ -267,21 +266,8 @@ func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentT
 	if isvc.Spec.RolloutCoordination == nil || len(isvc.Spec.RolloutCoordination.Groups) == 0 {
 		return true, "no coordination block"
 	}
-	// Find the group this component is part of.
-	groups := ResolveGroups(isvc.Spec.RolloutCoordination)
-	var group *ResolvedGroup
-	for i := range groups {
-		for _, c := range groups[i].Components {
-			if c == component {
-				group = &groups[i]
-				break
-			}
-		}
-		if group != nil {
-			break
-		}
-	}
-	if group == nil {
+	group, ok := MembershipFor(ResolveGroups(isvc.Spec.RolloutCoordination), component)
+	if !ok {
 		return true, "component not in any coord group"
 	}
 	if group.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
@@ -393,20 +379,8 @@ func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.C
 	if isvc.Spec.RolloutCoordination == nil || len(isvc.Spec.RolloutCoordination.Groups) == 0 {
 		return true, "no coordination block"
 	}
-	groups := ResolveGroups(isvc.Spec.RolloutCoordination)
-	var group *ResolvedGroup
-	for i := range groups {
-		for _, c := range groups[i].Components {
-			if c == component {
-				group = &groups[i]
-				break
-			}
-		}
-		if group != nil {
-			break
-		}
-	}
-	if group == nil {
+	group, ok := MembershipFor(ResolveGroups(isvc.Spec.RolloutCoordination), component)
+	if !ok {
 		return true, "component not in any coord group"
 	}
 
@@ -467,20 +441,8 @@ func CheckSurgeGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentT
 	if isvc.Spec.RolloutCoordination == nil || len(isvc.Spec.RolloutCoordination.Groups) == 0 {
 		return true, "no coordination block"
 	}
-	groups := ResolveGroups(isvc.Spec.RolloutCoordination)
-	var group *ResolvedGroup
-	for i := range groups {
-		for _, c := range groups[i].Components {
-			if c == component {
-				group = &groups[i]
-				break
-			}
-		}
-		if group != nil {
-			break
-		}
-	}
-	if group == nil {
+	group, ok := MembershipFor(ResolveGroups(isvc.Spec.RolloutCoordination), component)
+	if !ok {
 		return true, "component not in any coord group"
 	}
 

@@ -446,7 +446,7 @@ func sumPodCounts(in map[string]int32) int32 {
 }
 
 // gcOrphanedPerRevisionServices deletes per-revision Service pairs
-// whose revision-hash has no live pods for `component`. Closes G4.
+// whose revision-hash has no live pods for `component`.
 //
 // The sweep lists Services in the ISVC's namespace that carry the
 // (inferenceservice + component + revision-hash) selector keys, then
