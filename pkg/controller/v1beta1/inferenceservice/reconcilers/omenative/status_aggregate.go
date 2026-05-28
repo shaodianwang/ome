@@ -232,12 +232,26 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 // wall-clock that adds nothing to coverage).
 var StuckPodFailureGracePeriod = 60 * time.Second
 
-// escalateStuckPodFailures walks every InstanceStatus whose Operation
-// is in flight and whose Phase is a transient one (Creating / Updating /
-// Restarting / Migrating). For each such Instance, if any of its pods
-// has been in a terminal kubelet waiting state past
-// StuckPodFailureGracePeriod, escalate the Instance to Phase=Failed
-// and emit a Warning event naming the stuck pod + reason.
+// escalateStuckPodFailures walks every InstanceStatus and escalates to
+// Phase=Failed when one of two conditions holds:
+//
+//  1. (Transient-phase path, the original PR #257 surface) The Instance
+//     has an in-flight Operation AND its Phase is one of {Creating,
+//     Updating, Restarting, Migrating} AND at least one of its pods has
+//     been in a terminal kubelet waiting state past
+//     StuckPodFailureGracePeriod.
+//
+//  2. (Wedged-pod recovery path, task #52 follow-up) The Instance has
+//     at least one pod whose ome.io/revision-hash label disagrees with
+//     the Component's CurrentRevision hash AND that pod is stuck past
+//     the grace window. This catches the post-surge cluster shape where
+//     the per-Instance state machine has been reset out of the transient
+//     phase set but a real wedged surge pod still exists (the X-1
+//     53-minute reproduction against the dev cluster). The
+//     CurrentRevision compare is the discriminator vs. the steady-state
+//     "operator manually broke the canonical pod" scenario, where the
+//     pod's hash equals CurrentRevision and there is nothing to
+//     escalate (no rollout in flight).
 //
 // Idempotent: a second pass on an already-Failed Instance is a no-op
 // (no status write, no event). The coordination layer's
@@ -258,8 +272,19 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 		return nil
 	}
 	now := time.Now()
+	// currentHash is the steady-state pin: pods carrying this hash are
+	// on the controller's CurrentRevision, so even if they're stuck the
+	// wedge is not driven by an in-flight rollout — only pods that
+	// disagree with it qualify for the wedged-pod recovery branch.
+	// Empty when no rollout has ever promoted; the wedged branch then
+	// gates on "pod has a hash AND it doesn't match (the empty current
+	// hash)" which would over-fire. Treat empty CurrentRevision as
+	// "every pod hash matches current" for that branch (safe default —
+	// the original transient-phase guard still fires for genuine
+	// in-flight cases).
+	currentHash := query.RevisionHashFromControllerRevisionName(cs.OMENative.CurrentRevision)
 	for _, s := range cs.OMENative.InstanceStatuses {
-		if !shouldCheckForStuckPods(&s) {
+		if !shouldCheckForStuckPods(&s, byIndex[s.Index], currentHash) {
 			continue
 		}
 		stuckPod, reason := firstStuckPodForInstance(byIndex[s.Index], now)
@@ -282,22 +307,64 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 }
 
 // shouldCheckForStuckPods reports whether s qualifies for the
-// fast-failure check. Only Instances with an in-flight Operation in a
-// transient phase are candidates: a Ready Instance has no in-flight
-// failure to escalate, a Failed Instance is already done, and Deleting
-// is owned by the Delete pass (which has its own deadline). Instances
-// with no Operation at all (steady-state Ready / freshly-created)
-// also have nothing to escalate.
-func shouldCheckForStuckPods(s *v1beta1.OMENativeInstanceStatus) bool {
-	if s == nil || s.Operation == nil {
+// fast-failure check. Two paths qualify:
+//
+//   - Transient-phase path: an Instance with an in-flight Operation in
+//     the {Creating, Updating, Restarting, Migrating} set. This is the
+//     in-flight surge / create / migrate / restart surface PR #257
+//     originally added.
+//
+//   - Wedged-pod recovery path: an Instance with at least one pod
+//     whose ome.io/revision-hash label disagrees with the Component's
+//     CurrentRevision hash (currentHash). Regardless of Phase /
+//     Operation, the controller's bookkeeping has lost the trail of a
+//     real in-flight pod — the surge-attempt evidence on the cluster is
+//     the only remaining signal. Catches the task-#52 X-1 reproduction
+//     (post-#257 cluster shape where the Instance is Phase=Ready /
+//     Operation=nil but a stuck surge pod at the new revision still
+//     exists).
+//
+// Skips Failed (already done) and Deleting (Delete pass owns its own
+// deadline). Skips empty currentHash (the no-rollout-ever case) for
+// the wedged branch to avoid over-firing during initial Create.
+func shouldCheckForStuckPods(s *v1beta1.OMENativeInstanceStatus, pods []*corev1.Pod, currentHash string) bool {
+	if s == nil {
 		return false
 	}
-	switch s.Phase {
-	case v1beta1.OMENativeInstanceCreating,
-		v1beta1.OMENativeInstanceUpdating,
-		v1beta1.OMENativeInstanceRestarting,
-		v1beta1.OMENativeInstanceMigrating:
-		return true
+	// Terminal phases are settled; no escalation is meaningful.
+	if s.Phase == v1beta1.OMENativeInstanceFailed || s.Phase == v1beta1.OMENativeInstanceDeleting {
+		return false
+	}
+	// Transient-phase path: in-flight Operation in a recoverable phase.
+	if s.Operation != nil {
+		switch s.Phase {
+		case v1beta1.OMENativeInstanceCreating,
+			v1beta1.OMENativeInstanceUpdating,
+			v1beta1.OMENativeInstanceRestarting,
+			v1beta1.OMENativeInstanceMigrating:
+			return true
+		}
+	}
+	// Wedged-pod recovery path: any pod with a hash that disagrees
+	// with the Component's CurrentRevision is a candidate for the
+	// stuck-pod check below, regardless of Phase / Operation. Empty
+	// currentHash means the Component has never promoted a revision
+	// (initial Create, no UpdateRevision yet) — the transient-phase
+	// path covers that case and we don't second-guess it here.
+	if currentHash == "" {
+		return false
+	}
+	for _, pod := range pods {
+		if pod == nil {
+			continue
+		}
+		hash := pod.Labels[query.LabelRevisionHash]
+		if hash == "" {
+			continue
+		}
+		if hash != currentHash {
+			return true
+		}
 	}
 	return false
 }
@@ -331,20 +398,34 @@ func firstStuckPodForInstance(pods []*corev1.Pod, now time.Time) (*corev1.Pod, s
 // stampInstanceFailedForStuckPod is the status-side counterpart to
 // ops/timeouts.go's stampInstanceFailed — escalates Phase to Failed
 // when a stuck pod past grace forces the controller to give up on
-// converging the Instance. Mirrors the Operation guard
-// (`if s.Operation == nil` returns false) so a removed-then-readded
-// InstanceStatus race in the same reconcile pass doesn't accidentally
-// resurrect a deliberately-deleted Instance.
+// converging the Instance. The Operation field is preserved (when
+// present) — operators want to see WHAT was in flight when the kubelet
+// wedge surfaced.
 //
-// The Operation is preserved — operators want to see WHAT was in flight
-// when the kubelet wedge surfaced. The OperationStuck condition stays
-// False here (only the Deadline path stamps OperationStuck=True via
-// Operation.Reason=DeadlineExceeded — the stuck-pod path is a different
-// failure mode and gets its own surface via the InstanceFailed event +
-// Phase=Failed alone).
+// Guards against resurrecting a deliberately-removed InstanceStatus:
+// MutateInstance re-fetches and appends an empty slot
+// (OMENativeInstanceStatus{Index: idx}) when the (component, idx) entry
+// is gone (e.g., the migrate-abandon path's surge cleanup). A fresh
+// slot has Phase=="" and Incarnation==0 — we use Phase=="" as the
+// "this is a brand-new empty slot, not a real Instance" sentinel so
+// the wedged-pod recovery path (which legitimately has Operation==nil
+// but Phase=Ready) is still allowed to escalate. The original
+// transient-phase path's Operation==nil shape was always indistinguishable
+// from the resurrected-slot shape, so removing the Operation guard
+// would have over-fired; gating on Phase=="" instead is the narrower
+// "is this a real Instance with prior status?" check that also handles
+// the new wedged-pod branch correctly.
+//
+// The OperationStuck condition stays False here (only the Deadline path
+// stamps OperationStuck=True via Operation.Reason=DeadlineExceeded —
+// the stuck-pod path is a different failure mode and gets its own
+// surface via the InstanceFailed event + Phase=Failed alone).
 func stampInstanceFailedForStuckPod(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType, idx int32) error {
 	return status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
-		if s.Operation == nil {
+		if s.Phase == "" {
+			// Fresh-empty slot from MutateInstance's append path — the
+			// real InstanceStatus was deleted out from under us
+			// (migrate-abandon cleanup, etc.). Don't resurrect.
 			return false
 		}
 		if s.Phase == v1beta1.OMENativeInstanceFailed {
