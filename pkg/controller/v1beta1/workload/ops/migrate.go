@@ -556,7 +556,7 @@ func drainServiceForPod(input workload.ReconcileInput, plan workload.ComponentPl
 	if hash == "" {
 		return ""
 	}
-	return query.PerRevisionServiceName(input.Key.OwnerName, plan.Component, hash)
+	return query.PerRevisionServiceName(input.Key.OwnerName, workload.ComponentType(plan.Component), hash)
 }
 
 // clearMigrationRequest forwards to input.ClearMigrationRequest.

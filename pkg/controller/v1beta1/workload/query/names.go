@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
 // PodName returns the stable pod name for one ordinal of one Runner
@@ -38,19 +39,23 @@ func StableServiceName(isvc string, component v1beta1.ComponentType) string {
 }
 
 // PerRevisionServiceName returns the per-revision *routed* Service name
-// for one (component, revisionHash) tuple. Format:
-// `<isvc>-<component>-rev-<hash>`.
+// for one (owner, component, revisionHash) tuple. Format:
+// `<owner>-<component>-rev-<hash>`.
 //
-// Mirrors the legacy coordination.PerRevisionServiceName helper at the
-// byte level so existing Service names line up across the dispatch
-// path. Lives in workload/query/ because workload/ops/delete.go reads
-// per-revision Service names when computing drain targets and must not
-// import the omenative coordination package (which would close a cycle
-// with the workload extraction). The coordination package retains its
-// own copy until the per-revision Service builders themselves move to
-// workload/ in a later slice.
-func PerRevisionServiceName(isvc string, component v1beta1.ComponentType, revisionHash string) string {
-	return fmt.Sprintf("%s-%s-rev-%s", isvc, component, revisionHash)
+// Takes workload.ComponentType so workload/ops/ can call this without
+// pulling in the CRD API package (slice 4f audit requirement: zero
+// pkg/apis/ome/v1beta1 imports inside workload/ops/update.go). The
+// omenative coordination package retains its own v1beta1-typed copy
+// until the per-revision Service builders themselves move to workload/
+// in a later slice; the two functions produce byte-identical strings.
+//
+// The single canonical workload-side helper replaces the inlined
+// per-revision-Service format string that previously lived in
+// workload/ops/update.go's drainServiceForPod — a stale literal there
+// would have silently mismatched the routed Service the coordination
+// layer creates.
+func PerRevisionServiceName(ownerName string, component workload.ComponentType, revisionHash string) string {
+	return fmt.Sprintf("%s-%s-rev-%s", ownerName, component, revisionHash)
 }
 
 // InstanceSubdomain returns the per-Instance DNS subdomain stamped

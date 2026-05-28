@@ -69,6 +69,33 @@ const (
 	InstancePhaseDeleting InstancePhase = "Deleting"
 )
 
+// UpdateStrategyType is the workload-internal rollout-mechanism
+// selector. Mirrors the CRD OMENativeUpdateStrategyType at the string
+// level so the adapter conversion is a verbatim cast; the distinct Go
+// type prevents accidental drift between workload-side dispatch logic
+// and the v1beta1 enum (slice 4f-followup audit requirement: the prior
+// design compared `string(plan.UpdateStrategy.Type)` against
+// const-string literals, which would silently break dispatch if either
+// side mutated the spelling).
+type UpdateStrategyType string
+
+const (
+	// UpdateStrategySurgeThenDrain mirrors the SurgeThenDrain CRD
+	// strategy: create a new pod for the target revision, wait
+	// for it to serve, then drain + delete the old pod.
+	UpdateStrategySurgeThenDrain UpdateStrategyType = "SurgeThenDrain"
+	// UpdateStrategyRecreatePod mirrors the RecreatePod CRD strategy:
+	// always delete pods and recreate them at a bumped Incarnation.
+	UpdateStrategyRecreatePod UpdateStrategyType = "RecreatePod"
+	// UpdateStrategyInPlaceIfPossible mirrors the InPlaceIfPossible CRD
+	// strategy: try image-patch in place; fall through to recreate on
+	// non-image-only diffs.
+	UpdateStrategyInPlaceIfPossible UpdateStrategyType = "InPlaceIfPossible"
+	// UpdateStrategyInPlaceOnly mirrors the InPlaceOnly CRD strategy:
+	// image-patch in place when eligible; error otherwise.
+	UpdateStrategyInPlaceOnly UpdateStrategyType = "InPlaceOnly"
+)
+
 // InstanceOperationType is the workload-internal kind of an in-flight
 // destructive operation against one Instance. Mirrors the CRD
 // InstanceOperationType at the string level.

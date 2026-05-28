@@ -37,9 +37,13 @@ import (
 // to workload/ops.
 const deleteRequeueInterval = 5 * time.Second
 
-// podTarget describes one pod to create within an Instance. Kept in
-// the omenative/ops package because the peer ops (restart, migrate,
-// update) construct and consume this shape directly.
+// podTarget describes one pod to create within an Instance. Now
+// call-site-orphaned: the peer ops (restart, migrate, update) that
+// once consumed it have migrated to workload/ops. Retained until the
+// omenative/ops package fully empties; remove in a follow-up sweep
+// along with the helpers that take or return it.
+//
+//nolint:unused
 type podTarget struct {
 	Name    string
 	Runner  core.RunnerPlan
@@ -65,6 +69,8 @@ type podTarget struct {
 // Instances without a status entry (initial create) default to
 // ordinal 0 — matches FindInstanceStatus returning nil and preserves
 // the pre-fix behavior of every Create-from-empty path.
+//
+//nolint:unused
 func expectedPodNamesForInstance(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inst core.InstancePlan) []podTarget {
 	if isvc == nil {
 		return nil
@@ -95,6 +101,8 @@ func expectedPodNamesForInstance(isvc *v1beta1.InferenceService, component v1bet
 // for (component, idx), or 0 when no status exists yet. Single-pod
 // Create / Restart / recreateUpdate paths consult this to address the
 // post-surge canonical slot (which may be 1, not 0).
+//
+//nolint:unused
 func activeOrdinalForInstance(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) int32 {
 	if s := query.FindInstanceStatus(isvc, component, idx); s != nil {
 		return s.ActiveOrdinal
@@ -108,6 +116,8 @@ func activeOrdinalForInstance(isvc *v1beta1.InferenceService, component v1beta1.
 // Migrate's surge create. Callers must NOT call ExpectCreates themselves.
 // revisionHash, when non-empty, stamps ome.io/revision-hash on every
 // created pod so per-revision Services can select it.
+//
+//nolint:unused
 func createMissingPods(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan, idx int32, targets []podTarget, revisionHash string) (int, error) {
 	created := 0
 	for _, t := range targets {

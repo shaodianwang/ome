@@ -69,6 +69,23 @@ func TestInstanceOperationTypeRoundtrip(t *testing.T) {
 	}
 }
 
+func TestUpdateStrategyTypeRoundtrip(t *testing.T) {
+	cases := []v1beta1.OMENativeUpdateStrategyType{
+		v1beta1.OMENativeUpdateStrategySurgeThenDrain,
+		v1beta1.OMENativeUpdateStrategyRecreatePod,
+		v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+		v1beta1.OMENativeUpdateStrategyInPlaceOnly,
+	}
+	for _, in := range cases {
+		t.Run(string(in), func(t *testing.T) {
+			got := UpdateStrategyTypeFromWorkload(UpdateStrategyTypeToWorkload(in))
+			if got != in {
+				t.Fatalf("round-trip mismatch: in=%q got=%q", in, got)
+			}
+		})
+	}
+}
+
 // --- enum reverse round-trips (workload → v1beta1 → workload) ------------
 
 func TestComponentTypeRoundtripReverse(t *testing.T) {
@@ -127,6 +144,23 @@ func TestInstanceOperationTypeRoundtripReverse(t *testing.T) {
 	}
 }
 
+func TestUpdateStrategyTypeRoundtripReverse(t *testing.T) {
+	cases := []workload.UpdateStrategyType{
+		workload.UpdateStrategySurgeThenDrain,
+		workload.UpdateStrategyRecreatePod,
+		workload.UpdateStrategyInPlaceIfPossible,
+		workload.UpdateStrategyInPlaceOnly,
+	}
+	for _, in := range cases {
+		t.Run(string(in), func(t *testing.T) {
+			got := UpdateStrategyTypeToWorkload(UpdateStrategyTypeFromWorkload(in))
+			if got != in {
+				t.Fatalf("reverse round-trip mismatch: in=%q got=%q", in, got)
+			}
+		})
+	}
+}
+
 // --- unknown-value tolerance --------------------------------------------
 
 func TestComponentType_UnknownValueReturnsEmpty(t *testing.T) {
@@ -153,6 +187,15 @@ func TestInstanceOperationType_UnknownValueReturnsEmpty(t *testing.T) {
 	}
 	if got := InstanceOperationTypeFromWorkload(workload.InstanceOperationType("Rotate")); got != "" {
 		t.Fatalf("unknown workload op type should map to empty; got=%q", got)
+	}
+}
+
+func TestUpdateStrategyType_UnknownValueReturnsEmpty(t *testing.T) {
+	if got := UpdateStrategyTypeToWorkload(v1beta1.OMENativeUpdateStrategyType("BlueGreen")); got != "" {
+		t.Fatalf("unknown v1beta1 strategy should map to empty; got=%q", got)
+	}
+	if got := UpdateStrategyTypeFromWorkload(workload.UpdateStrategyType("BlueGreen")); got != "" {
+		t.Fatalf("unknown workload strategy should map to empty; got=%q", got)
 	}
 }
 

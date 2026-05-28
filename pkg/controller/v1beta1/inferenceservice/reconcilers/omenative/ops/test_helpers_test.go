@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -151,6 +152,69 @@ func sliceWithEndpoint(namespace, sliceName, serviceName string, pod *corev1.Pod
 			},
 		},
 	}
+}
+
+// targetSpecImage builds the basic single-container PodSpec used as a
+// rollout target throughout the legacy tests. Lifted from the deleted
+// update_test.go so peer test files (migrate_test.go) still find it.
+func targetSpecImage(image string) *corev1.PodSpec {
+	return &corev1.PodSpec{
+		Containers: []corev1.Container{
+			{Name: "main", Image: image},
+		},
+	}
+}
+
+// runningPodAtRevision shapes a pod that the controller would consider
+// to be "running at revName" — labeled with the appropriate incarnation,
+// has the given image, and is runtime-ready + serving. Lifted from the
+// deleted update_test.go so peer test files (migrate_test.go) still
+// find it.
+func runningPodAtRevision(isvc *v1beta1.InferenceService, instIdx int32, incarnation int64, image string) *corev1.Pod {
+	pod := podAtIncarnation(isvc, instIdx, incarnation, true /* ready */, true /* serving */)
+	pod.Spec.Containers = []corev1.Container{{Name: "main", Image: image}}
+	return pod
+}
+
+// seedRunningRevision creates a ControllerRevision capturing spec as the
+// Instance's recorded "running" template and writes its name onto
+// InstanceStatus[idx].RunningRevision. inPlaceEligible reads this CR
+// (not the live pod) to decide if a target diff is image-only. Lifted
+// from the deleted update_test.go so peer test files (migrate_test.go)
+// still find it.
+func seedRunningRevision(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, spec *corev1.PodSpec) {
+	t.Helper()
+	cr, _, err := core.EnsureControllerRevisionForISVC(context.Background(), c, c, isvc, component, spec, nil, nil)
+	if err != nil {
+		t.Fatalf("seedRunningRevision: %v", err)
+	}
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read ISVC: %v", err)
+	}
+	if fresh.Status.Components == nil {
+		fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+	}
+	cs := fresh.Status.Components[component]
+	if cs.OMENative == nil {
+		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	}
+	for i := range cs.OMENative.InstanceStatuses {
+		if cs.OMENative.InstanceStatuses[i].Index == idx {
+			cs.OMENative.InstanceStatuses[i].RunningRevision = cr.Name
+			fresh.Status.Components[component] = cs
+			if err := c.Status().Update(context.Background(), fresh); err != nil {
+				t.Fatalf("set RunningRevision: %v", err)
+			}
+			if isvc.Status.Components == nil {
+				isvc.Status.Components = fresh.Status.Components
+			} else {
+				isvc.Status.Components[component] = fresh.Status.Components[component]
+			}
+			return
+		}
+	}
+	t.Fatalf("no InstanceStatus for idx=%d to attach RunningRevision", idx)
 }
 
 // podForInstance fabricates a pod matching what Render() would produce

@@ -109,6 +109,47 @@ func InstancePhaseFromWorkload(w workload.InstancePhase) v1beta1.OMENativeInstan
 	}
 }
 
+// UpdateStrategyTypeToWorkload converts a v1beta1.OMENativeUpdateStrategyType
+// to a workload.UpdateStrategyType. Unknown values map to the empty string
+// so adapters tolerate API-version skew without panicking.
+//
+// The workload state machine compares against workload.UpdateStrategyType
+// constants exclusively — this converter is the only seam where the
+// CRD-shape strategy enters workload code, so any future drift between
+// the v1beta1 enum and the workload enum becomes a compile-time error.
+func UpdateStrategyTypeToWorkload(v v1beta1.OMENativeUpdateStrategyType) workload.UpdateStrategyType {
+	switch v {
+	case v1beta1.OMENativeUpdateStrategySurgeThenDrain:
+		return workload.UpdateStrategySurgeThenDrain
+	case v1beta1.OMENativeUpdateStrategyRecreatePod:
+		return workload.UpdateStrategyRecreatePod
+	case v1beta1.OMENativeUpdateStrategyInPlaceIfPossible:
+		return workload.UpdateStrategyInPlaceIfPossible
+	case v1beta1.OMENativeUpdateStrategyInPlaceOnly:
+		return workload.UpdateStrategyInPlaceOnly
+	default:
+		return workload.UpdateStrategyType("")
+	}
+}
+
+// UpdateStrategyTypeFromWorkload converts a workload.UpdateStrategyType
+// to a v1beta1.OMENativeUpdateStrategyType. Unknown values map to the
+// empty string so adapters tolerate API-version skew without panicking.
+func UpdateStrategyTypeFromWorkload(w workload.UpdateStrategyType) v1beta1.OMENativeUpdateStrategyType {
+	switch w {
+	case workload.UpdateStrategySurgeThenDrain:
+		return v1beta1.OMENativeUpdateStrategySurgeThenDrain
+	case workload.UpdateStrategyRecreatePod:
+		return v1beta1.OMENativeUpdateStrategyRecreatePod
+	case workload.UpdateStrategyInPlaceIfPossible:
+		return v1beta1.OMENativeUpdateStrategyInPlaceIfPossible
+	case workload.UpdateStrategyInPlaceOnly:
+		return v1beta1.OMENativeUpdateStrategyInPlaceOnly
+	default:
+		return v1beta1.OMENativeUpdateStrategyType("")
+	}
+}
+
 // InstanceOperationTypeToWorkload converts a v1beta1.InstanceOperationType
 // to a workload.InstanceOperationType. Unknown values map to the empty
 // string so adapters tolerate API-version skew without panicking.
