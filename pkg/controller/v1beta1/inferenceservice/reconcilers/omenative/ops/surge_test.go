@@ -12,6 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -1204,7 +1205,7 @@ func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 	// Forget the create expectation so subsequent passes can proceed.
 	// In production the informer fires the matching ObservedCreate; the
 	// fake client doesn't.
-	core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+	core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 
 	// Pass 2: flip the v3 surge pod ContainersReady so Phase 1 advances
 	// to Phase 2.
@@ -1220,7 +1221,7 @@ func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 		t.Fatalf("pass 2 (Phase 2 entry + drain + delete v2): %v", err)
 	}
 	// Forget the delete expectation Pass 2 issued.
-	core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+	core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 
 	// The fake client's per-revision Service for v2 doesn't exist
 	// (drainedWhenSliceListEmpty fall-through), so drain succeeds
@@ -1347,7 +1348,7 @@ func TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained(t *testing.T) {
 		t.Fatalf("pass 1: %v", err)
 	}
 	// Forget the delete expectations issued in pass 1.
-	core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+	core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 
 	// Both pods should be deleted by Phase 2's drain (per-revision
 	// Service for rev2 doesn't exist in the fake client, so
@@ -1379,7 +1380,7 @@ func TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained(t *testing.T) {
 	if _, err := surgeUpdate(context.Background(), p, plan, plan.Instances[0], rev3, nil); err != nil {
 		t.Fatalf("pass 2 (re-create surge): %v", err)
 	}
-	core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+	core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 
 	rev3SurgeName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 0)
 	rev3Surge := &corev1.Pod{}

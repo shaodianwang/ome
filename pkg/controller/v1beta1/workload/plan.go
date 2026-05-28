@@ -16,6 +16,13 @@ import (
 type ComponentPlan struct {
 	// Component identifies which of router / engine / decoder this plan
 	// describes.
+	//
+	// Residual v1beta1 dependency: ComponentPlan is consumed by ~140
+	// call sites in pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/
+	// that pass plan.Component on to query/, status/, and per-op helpers
+	// that still take v1beta1.ComponentType. Slice 4+ migrates the ops
+	// into workload/ and flips this field to workload.ComponentType as
+	// part of the move. See slice 3 PR.
 	Component v1beta1.ComponentType
 
 	// Replicas is the desired number of Instances for this Component
@@ -136,6 +143,10 @@ func (i InstancePlan) TotalPods() int32 {
 //
 // Component is taken from the caller; it is metadata for downstream
 // consumers and is not part of the planning computation.
+//
+// Residual v1beta1 dependency on the component parameter type: see the
+// note on ComponentPlan.Component above. Slice 4+ flips to
+// workload.ComponentType.
 func BuildPlan(component v1beta1.ComponentType, desired WorkloadDesiredSpec, observed WorkloadObservedState) (ComponentPlan, error) {
 	replicas := desired.Replicas
 	if replicas <= 0 {
@@ -284,7 +295,7 @@ func migrationModeOrDefault(p *v1beta1.OMENativeMigrationPolicy) v1beta1.OMENati
 // The replica cap counts only non-migration indices. Counting the
 // surge against it would drop a healthy non-migrating sibling out of
 // the plan and into scale-down.
-func instancePlanIndices(instances []v1beta1.OMENativeInstanceStatus, replicas int32) []int32 {
+func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 	used := existingInstanceIndices(instances)
 	migrationProtected := migrationInFlightIndices(instances)
 	migrationSource := migrationSourceIndices(instances)
@@ -357,14 +368,14 @@ func instancePlanIndices(instances []v1beta1.OMENativeInstanceStatus, replicas i
 // (the source) or Operation.Type=Migrate (the surge). These indices
 // stay in the plan past scale-down boundaries because deleting them
 // mid-migration would abandon a partially-rolled-out surge.
-func migrationInFlightIndices(instances []v1beta1.OMENativeInstanceStatus) map[int32]struct{} {
+func migrationInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	for _, s := range instances {
-		if s.Phase == v1beta1.OMENativeInstanceMigrating {
+		if s.Phase == InstancePhaseMigrating {
 			out[s.Index] = struct{}{}
 			continue
 		}
-		if s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationMigrate {
+		if s.Operation != nil && s.Operation.Type == InstanceOperationMigrate {
 			out[s.Index] = struct{}{}
 		}
 	}
@@ -376,10 +387,10 @@ func migrationInFlightIndices(instances []v1beta1.OMENativeInstanceStatus) map[i
 // participants (Phase=Creating + Operation.Migrate) are not included
 // because they are the +1 over MinReplicas, not the user-facing
 // replica being relocated.
-func migrationSourceIndices(instances []v1beta1.OMENativeInstanceStatus) map[int32]struct{} {
+func migrationSourceIndices(instances []InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	for _, s := range instances {
-		if s.Phase == v1beta1.OMENativeInstanceMigrating {
+		if s.Phase == InstancePhaseMigrating {
 			out[s.Index] = struct{}{}
 		}
 	}
@@ -388,7 +399,7 @@ func migrationSourceIndices(instances []v1beta1.OMENativeInstanceStatus) map[int
 
 // existingInstanceIndices returns the set of indices the InstanceStatus
 // slice currently records.
-func existingInstanceIndices(instances []v1beta1.OMENativeInstanceStatus) map[int32]struct{} {
+func existingInstanceIndices(instances []InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	for _, s := range instances {
 		out[s.Index] = struct{}{}
@@ -401,7 +412,7 @@ func existingInstanceIndices(instances []v1beta1.OMENativeInstanceStatus) map[in
 // InstanceStatuses. The migration op uses this to pick the slot for
 // its +1 surge pod without colliding with steady-state indices or
 // other in-flight surges.
-func AllocateSurgeIndex(instances []v1beta1.OMENativeInstanceStatus) int32 {
+func AllocateSurgeIndex(instances []InstanceStatus) int32 {
 	return lowestUnusedIndex(existingInstanceIndices(instances))
 }
 
@@ -427,7 +438,7 @@ func lowestUnusedIndex(used map[int32]struct{}) int32 {
 // Otherwise the existing value is preserved. This function only reads
 // status; the writers are the patchInstanceStatus* helpers that own
 // each lifecycle transition.
-func incarnationForIndex(instances []v1beta1.OMENativeInstanceStatus, idx int32) int64 {
+func incarnationForIndex(instances []InstanceStatus, idx int32) int64 {
 	for _, s := range instances {
 		if s.Index == idx && s.Incarnation > 0 {
 			return s.Incarnation

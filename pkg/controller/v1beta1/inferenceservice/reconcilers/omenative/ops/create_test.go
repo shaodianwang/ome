@@ -18,6 +18,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
@@ -295,7 +296,7 @@ func TestCreate_IdempotentOnAlreadyExists(t *testing.T) {
 		t.Fatalf("first Create: %v", err)
 	}
 	// Reset expectations so the second call attempts to re-create.
-	core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+	core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 	// Second call should not error even though the pod already exists.
 	if _, err := Create(context.Background(), p, plan, nil); err != nil {
 		t.Fatalf("second Create: %v", err)

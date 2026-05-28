@@ -16,6 +16,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -50,11 +51,12 @@ func TestPodEventHandler_ObservedCreatesAndEnqueuesOwner(t *testing.T) {
 	ns := "prod"
 	isvc := "llama-70b"
 	component := v1beta1.EngineComponent
+	wComponent := workload.ComponentType(component)
 	idx := int32(0)
 
 	// Pretend the controller just issued one create for this Instance.
-	exp.ExpectCreates(ns, isvc, component, idx, 1)
-	if exp.Satisfied(ns, isvc, component, idx) {
+	exp.ExpectCreates(ns, isvc, wComponent, idx, 1)
+	if exp.Satisfied(ns, isvc, wComponent, idx) {
 		t.Fatalf("expectations should NOT be satisfied immediately after ExpectCreates")
 	}
 
@@ -64,7 +66,7 @@ func TestPodEventHandler_ObservedCreatesAndEnqueuesOwner(t *testing.T) {
 	h := NewPodEventHandler(exp)
 	h.Create(context.Background(), event.TypedCreateEvent[client.Object]{Object: pod}, q)
 
-	if !exp.Satisfied(ns, isvc, component, idx) {
+	if !exp.Satisfied(ns, isvc, wComponent, idx) {
 		t.Errorf("expectations should be satisfied after observed create")
 	}
 	if q.Len() != 1 {
@@ -82,8 +84,9 @@ func TestPodEventHandler_ObservedDelete(t *testing.T) {
 	ns := "prod"
 	isvc := "llama-70b"
 	component := v1beta1.EngineComponent
+	wComponent := workload.ComponentType(component)
 	idx := int32(2)
-	exp.ExpectDeletes(ns, isvc, component, idx, 1)
+	exp.ExpectDeletes(ns, isvc, wComponent, idx, 1)
 
 	pod := newOMENativePod(ns, isvc, component, idx, true)
 	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
@@ -91,7 +94,7 @@ func TestPodEventHandler_ObservedDelete(t *testing.T) {
 	h := NewPodEventHandler(exp)
 	h.Delete(context.Background(), event.TypedDeleteEvent[client.Object]{Object: pod}, q)
 
-	if !exp.Satisfied(ns, isvc, component, idx) {
+	if !exp.Satisfied(ns, isvc, wComponent, idx) {
 		t.Errorf("expectations should be satisfied after observed delete")
 	}
 	if q.Len() != 1 {
@@ -103,13 +106,14 @@ func TestPodEventHandler_NoOwnerNoEnqueue(t *testing.T) {
 	// Pod has OMENative labels but no controller-ref to ISVC — enqueue
 	// is best-effort and silently skips; expectations still flip.
 	exp := NewExpectations()
-	exp.ExpectCreates("prod", "llama-70b", v1beta1.EngineComponent, 0, 1)
+	wEngine := workload.ComponentType(v1beta1.EngineComponent)
+	exp.ExpectCreates("prod", "llama-70b", wEngine, 0, 1)
 	pod := newOMENativePod("prod", "llama-70b", v1beta1.EngineComponent, 0, false)
 	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
 
 	NewPodEventHandler(exp).Create(context.Background(), event.TypedCreateEvent[client.Object]{Object: pod}, q)
 
-	if !exp.Satisfied("prod", "llama-70b", v1beta1.EngineComponent, 0) {
+	if !exp.Satisfied("prod", "llama-70b", wEngine, 0) {
 		t.Errorf("expectations should be satisfied even without owner-ref")
 	}
 	if q.Len() != 0 {
@@ -123,7 +127,7 @@ func TestPodEventHandler_NilExpectationsFallsBackToDefault(t *testing.T) {
 	pod := newOMENativePod("prod", "llama-70b", v1beta1.EngineComponent, 0, true)
 	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
 
-	defer core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+	defer core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 
 	h := NewPodEventHandler(nil)
 	h.Create(context.Background(), event.TypedCreateEvent[client.Object]{Object: pod}, q)

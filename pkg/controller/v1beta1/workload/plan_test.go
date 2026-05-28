@@ -250,7 +250,7 @@ func TestBuildPlan_IncarnationPreservedFromStatus(t *testing.T) {
 	// BuildPlan reads them back instead of resetting to 1.
 	desired := singlePodDesired(2, v1beta1.OMENativeComponentSpec{})
 	observed := WorkloadObservedState{
-		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+		InstanceStatuses: []InstanceStatus{
 			{Index: 0, Incarnation: 4},
 			{Index: 1, Incarnation: 2},
 		},
@@ -308,10 +308,10 @@ func TestLowestUnusedIndex(t *testing.T) {
 func TestInstancePlanIndices_MultiReplicaMigrationPreservesUnrelatedInstance(t *testing.T) {
 	// Regression: with replicas=2 and statuses {0 Ready, 1 Ready},
 	// migrating instance 0 (surge at 2) must yield plan {0, 1, 2}.
-	instances := []v1beta1.OMENativeInstanceStatus{
-		{Index: 0, Phase: v1beta1.OMENativeInstanceMigrating},
-		{Index: 1, Phase: v1beta1.OMENativeInstanceReady},
-		{Index: 2, Phase: v1beta1.OMENativeInstanceCreating, Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationMigrate}},
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseMigrating},
+		{Index: 1, Phase: InstancePhaseReady},
+		{Index: 2, Phase: InstancePhaseCreating, Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
 	}
 	got := instancePlanIndices(instances, 2)
 	hit := map[int32]bool{}
@@ -324,9 +324,9 @@ func TestInstancePlanIndices_MultiReplicaMigrationPreservesUnrelatedInstance(t *
 }
 
 func TestInstancePlanIndices_PreservesSparseMigrationLayout(t *testing.T) {
-	instances := []v1beta1.OMENativeInstanceStatus{
-		{Index: 0, Phase: v1beta1.OMENativeInstanceMigrating},
-		{Index: 2, Phase: v1beta1.OMENativeInstanceCreating, Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationMigrate}},
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseMigrating},
+		{Index: 2, Phase: InstancePhaseCreating, Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
 	}
 	got := instancePlanIndices(instances, 1)
 	// Both migration-in-flight indices must be in the plan even though
@@ -342,7 +342,7 @@ func TestInstancePlanIndices_PreservesSparseMigrationLayout(t *testing.T) {
 
 func TestAllocateSurgeIndex(t *testing.T) {
 	// Smoke: with statuses {0, 1, 3}, surge should land at 2.
-	instances := []v1beta1.OMENativeInstanceStatus{
+	instances := []InstanceStatus{
 		{Index: 0}, {Index: 1}, {Index: 3},
 	}
 	if got := AllocateSurgeIndex(instances); got != 2 {

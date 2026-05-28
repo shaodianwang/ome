@@ -3,8 +3,6 @@ package workload
 import (
 	"sync"
 	"time"
-
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 // expectationsTTL is how long an Instance's expectation stays in the
@@ -31,7 +29,7 @@ type Expectations struct {
 type expectationKey struct {
 	Namespace string
 	ISVC      string
-	Component v1beta1.ComponentType
+	Component ComponentType
 	Instance  int32
 }
 
@@ -53,7 +51,7 @@ var DefaultExpectations = NewExpectations()
 // ExpectCreates records that n pod creates are in flight for the given
 // (ISVC, Component, Instance). Satisfied returns false until all of them
 // are observed via ObservedCreate, or the deadline elapses.
-func (e *Expectations) ExpectCreates(namespace, isvc string, component v1beta1.ComponentType, instance int32, n int) {
+func (e *Expectations) ExpectCreates(namespace, isvc string, component ComponentType, instance int32, n int) {
 	if n <= 0 {
 		return
 	}
@@ -70,7 +68,7 @@ func (e *Expectations) ExpectCreates(namespace, isvc string, component v1beta1.C
 }
 
 // ExpectDeletes records that n pod deletes are in flight.
-func (e *Expectations) ExpectDeletes(namespace, isvc string, component v1beta1.ComponentType, instance int32, n int) {
+func (e *Expectations) ExpectDeletes(namespace, isvc string, component ComponentType, instance int32, n int) {
 	if n <= 0 {
 		return
 	}
@@ -88,17 +86,17 @@ func (e *Expectations) ExpectDeletes(namespace, isvc string, component v1beta1.C
 
 // ObservedCreate decrements the create counter, called when a pod
 // belonging to (ISVC, Component, Instance) appears in the watch cache.
-func (e *Expectations) ObservedCreate(namespace, isvc string, component v1beta1.ComponentType, instance int32) {
+func (e *Expectations) ObservedCreate(namespace, isvc string, component ComponentType, instance int32) {
 	e.observed(namespace, isvc, component, instance, true)
 }
 
 // ObservedDelete decrements the delete counter, called when a pod
 // belonging to (ISVC, Component, Instance) disappears.
-func (e *Expectations) ObservedDelete(namespace, isvc string, component v1beta1.ComponentType, instance int32) {
+func (e *Expectations) ObservedDelete(namespace, isvc string, component ComponentType, instance int32) {
 	e.observed(namespace, isvc, component, instance, false)
 }
 
-func (e *Expectations) observed(namespace, isvc string, component v1beta1.ComponentType, instance int32, isAdd bool) {
+func (e *Expectations) observed(namespace, isvc string, component ComponentType, instance int32, isAdd bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	k := expectationKey{namespace, isvc, component, instance}
@@ -120,7 +118,7 @@ func (e *Expectations) observed(namespace, isvc string, component v1beta1.Compon
 // Satisfied returns true when no outstanding creates or deletes are
 // expected for the Instance — either the watch cache has caught up,
 // the entry expired, or no expectations were ever recorded.
-func (e *Expectations) Satisfied(namespace, isvc string, component v1beta1.ComponentType, instance int32) bool {
+func (e *Expectations) Satisfied(namespace, isvc string, component ComponentType, instance int32) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	k := expectationKey{namespace, isvc, component, instance}
@@ -136,7 +134,7 @@ func (e *Expectations) Satisfied(namespace, isvc string, component v1beta1.Compo
 }
 
 // Forget clears the entry, e.g., when the Instance is deleted entirely.
-func (e *Expectations) Forget(namespace, isvc string, component v1beta1.ComponentType, instance int32) {
+func (e *Expectations) Forget(namespace, isvc string, component ComponentType, instance int32) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.entries, expectationKey{namespace, isvc, component, instance})

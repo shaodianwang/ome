@@ -11,6 +11,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
@@ -157,7 +158,7 @@ func TestRestart_DeletesOldPodOnceDrained(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), got); err == nil {
 		t.Errorf("old pod %s should be deleted", pod.Name)
 	}
-	if core.DefaultExpectations.Satisfied("prod", "llama-70b", v1beta1.EngineComponent, 0) {
+	if core.DefaultExpectations.Satisfied("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0) {
 		t.Errorf("ExpectDeletes should record the in-flight delete")
 	}
 }
@@ -251,7 +252,7 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 
 		// Fast-forward: simulate the fake watch observing every delete the
 		// previous pass issued.
-		core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+		core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 
 		// Synthesize ContainersReady on any new-incarnation pod the
 		// previous pass created — the fake client doesn't run kubelet.

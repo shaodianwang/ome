@@ -14,6 +14,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -69,7 +70,7 @@ func Delete(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan
 
 	// Only the Delete RPC batch is expectations-gated; the drain reads
 	// below are idempotent on repeat.
-	expectationsSatisfied := p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx)
+	expectationsSatisfied := p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), idx)
 
 	for _, pod := range pods {
 		if !podreadiness.IsServing(pod) {
@@ -105,9 +106,9 @@ func Delete(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan
 		if pod.DeletionTimestamp != nil {
 			continue
 		}
-		p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx, 1)
+		p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), idx, 1)
 		if err := p.Client.Delete(ctx, pod); err != nil {
-			p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx)
+			p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), idx)
 			if apierrors.IsNotFound(err) {
 				continue
 			}
@@ -225,7 +226,7 @@ func removeInstanceStatus(ctx context.Context, p core.ReconcileParams, component
 	}
 	if hadEntry {
 		// Forget so a later index reuse doesn't inherit stale counters.
-		p.ExpectationsCache().Forget(p.ISVC.Namespace, p.ISVC.Name, component, idx)
+		p.ExpectationsCache().Forget(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(component), idx)
 	}
 	return hadEntry, nil
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
@@ -538,9 +539,9 @@ func TestMigrate_WaitsForSurgeRotationBeforeDrainingSource(t *testing.T) {
 			}
 			synthesizeContainersReady(t, c, &surgePods.Items[i])
 		}
-		core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+		core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 		if src := query.FindInstanceStatus(fresh, v1beta1.EngineComponent, 0); src != nil && src.Operation != nil && src.Operation.SurgeIndex != nil {
-			core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, *src.Operation.SurgeIndex)
+			core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), *src.Operation.SurgeIndex)
 		}
 		done, err := Migrate(context.Background(), pPass, planPass, 0, "req-no-rotation", req)
 		if err != nil {
@@ -671,9 +672,9 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 		// source pod as Ready=false (drained).
 		ensureDrainedSlice(t, c, isvc, sourcePod)
 		// Simulate the pod-watch observing the prior pass's writes.
-		core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+		core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 		if src := query.FindInstanceStatus(fresh, v1beta1.EngineComponent, 0); src != nil && src.Operation != nil && src.Operation.SurgeIndex != nil {
-			core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, *src.Operation.SurgeIndex)
+			core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), *src.Operation.SurgeIndex)
 		}
 
 		done, err := Migrate(context.Background(), pPass, planPass, 0, "req-end-to-end", req)

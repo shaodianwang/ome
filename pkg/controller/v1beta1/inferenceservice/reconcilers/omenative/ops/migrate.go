@@ -19,6 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
@@ -214,7 +215,7 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 		}
 	}
 	if len(missing) > 0 {
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, surgeIdx) {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), surgeIdx) {
 			return false, nil
 		}
 		// Render against the surge revision's PodSpec, not p.PodSpec.
@@ -297,7 +298,7 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 	}
 
 	if len(sourcePods) > 0 {
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx) {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), sourceIdx) {
 			return false, nil
 		}
 		// EXPECT-ORDER: per-pod ExpectDeletes BEFORE Delete, rollback via
@@ -306,9 +307,9 @@ func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
-			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx, 1)
+			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), sourceIdx, 1)
 			if err := p.Client.Delete(ctx, pod); err != nil {
-				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, plan.Component, sourceIdx)
+				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), sourceIdx)
 				if apierrors.IsNotFound(err) {
 					continue
 				}

@@ -42,13 +42,15 @@ func RenderWithRevisionForISVC(
 }
 
 // isvcRenderKey is the WorkloadKey projection for the legacy ISVC
-// dispatch path. Note this differs from revision.WorkloadKey only in
-// the package name; both are pure value types sharing the same shape.
+// dispatch path. After slice 3 of the workload-extraction refactor
+// WorkloadKey.Component is workload.ComponentType — the v1beta1
+// component the caller already holds gets cast at the boundary (the
+// two share the same string underlying so the conversion is free).
 func isvcRenderKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.WorkloadKey {
 	return workload.WorkloadKey{
 		Namespace: isvc.Namespace,
 		Name:      isvc.Name + "-" + string(component),
-		Component: component,
+		Component: workload.ComponentType(component),
 		Labels: map[string]string{
 			"ome.io/inferenceservice": isvc.Name,
 			"ome.io/component":        string(component),

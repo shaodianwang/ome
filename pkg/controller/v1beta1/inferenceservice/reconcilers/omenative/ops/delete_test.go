@@ -15,6 +15,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 )
 
@@ -199,7 +200,7 @@ func TestDelete_DrainedPodIsDeleted(t *testing.T) {
 	}
 
 	// core.Expectations should record one pending delete.
-	if core.DefaultExpectations.Satisfied("prod", "llama-70b", v1beta1.EngineComponent, 0) {
+	if core.DefaultExpectations.Satisfied("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0) {
 		t.Errorf("core.DefaultExpectations should record the pending delete")
 	}
 }
@@ -238,11 +239,11 @@ func TestDelete_ConvergesAcrossPasses(t *testing.T) {
 			}
 			// Allow the cache to "observe" the delete: clear the
 			// expectations entry that ExpectDeletes left behind.
-			core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+			core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 			return
 		}
 		// Simulate the watch observing the delete after step 4 issued it.
-		core.DefaultExpectations.Forget("prod", "llama-70b", v1beta1.EngineComponent, 0)
+		core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
 	}
 	t.Fatalf("Delete did not converge after %d passes", maxPasses)
 }
@@ -270,7 +271,7 @@ func TestDelete_PodAlreadyTerminatingIsSkipped(t *testing.T) {
 		t.Fatalf("expected done=false: pod is terminating, status entry still present")
 	}
 	// No new delete should have been issued — expectations stay clean.
-	if !core.DefaultExpectations.Satisfied("prod", "llama-70b", v1beta1.EngineComponent, 0) {
+	if !core.DefaultExpectations.Satisfied("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0) {
 		t.Errorf("ExpectDeletes recorded a count for an already-terminating pod")
 	}
 }

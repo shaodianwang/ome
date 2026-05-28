@@ -27,7 +27,7 @@ func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) wo
 	return workload.WorkloadKey{
 		Namespace: isvc.Namespace,
 		Name:      isvc.Name + "-" + string(component),
-		Component: component,
+		Component: workload.ComponentType(component),
 		Labels: map[string]string{
 			constants.InferenceServicePodLabelKey: isvc.Name,
 			constants.OMEComponentLabel:           string(component),

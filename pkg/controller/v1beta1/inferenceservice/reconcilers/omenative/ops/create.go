@@ -14,6 +14,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
@@ -93,7 +94,7 @@ func reconcileInstance(ctx context.Context, p core.ReconcileParams, plan core.Co
 				status.InstanceKey(plan.Component, inst.Index), len(missing))
 		}
 
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index) {
 			return false, nil
 		}
 
@@ -225,9 +226,9 @@ func createMissingPods(ctx context.Context, p core.ReconcileParams, plan core.Co
 
 		// EXPECT-ORDER: expectation before RPC, rollback via ObservedCreate
 		// on error — a failed Create fires no watch event to decrement it.
-		p.ExpectationsCache().ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx, 1)
+		p.ExpectationsCache().ExpectCreates(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), idx, 1)
 		if err := p.Client.Create(ctx, pod); err != nil {
-			p.ExpectationsCache().ObservedCreate(p.ISVC.Namespace, p.ISVC.Name, plan.Component, idx)
+			p.ExpectationsCache().ObservedCreate(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), idx)
 			if apierrors.IsAlreadyExists(err) {
 				// Prior reconcile created it; cache hasn't caught up yet.
 				continue

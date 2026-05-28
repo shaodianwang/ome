@@ -17,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -108,10 +109,10 @@ func (h *podEventHandler) observe(pod *corev1.Pod, isAdd bool) {
 		return
 	}
 	if isAdd {
-		h.expectations.ObservedCreate(pod.Namespace, isvcName, component, idx)
+		h.expectations.ObservedCreate(pod.Namespace, isvcName, workload.ComponentType(component), idx)
 		return
 	}
-	h.expectations.ObservedDelete(pod.Namespace, isvcName, component, idx)
+	h.expectations.ObservedDelete(pod.Namespace, isvcName, workload.ComponentType(component), idx)
 }
 
 // enqueueOwner pushes a reconcile request for the InferenceService

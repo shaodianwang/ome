@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
@@ -47,9 +48,13 @@ var (
 // AllocateSurgeIndex is the ISVC-adapter-facing wrapper around
 // workload.AllocateSurgeIndex. It centralizes the
 // ISVC.Status.Components[c].OMENative.InstanceStatuses projection so
-// callers don't repeat the nil-guard dance.
+// callers don't repeat the nil-guard dance. Converts at the boundary
+// via internalsource.InstanceStatusSliceToWorkload — slice 3 of the
+// workload-extraction refactor flipped workload.AllocateSurgeIndex to
+// take workload-owned types so the workload package itself stays free
+// of pkg/apis/ome/v1beta1.
 func AllocateSurgeIndex(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) int32 {
-	return workload.AllocateSurgeIndex(extractInstanceStatuses(isvc, component))
+	return workload.AllocateSurgeIndex(internalsource.InstanceStatusSliceToWorkload(extractInstanceStatuses(isvc, component)))
 }
 
 // extractInstanceStatuses pulls the OMENative InstanceStatuses slice
@@ -90,7 +95,7 @@ func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
 	}
 
 	observed := workload.WorkloadObservedState{
-		InstanceStatuses: extractInstanceStatuses(p.ISVC, p.Component),
+		InstanceStatuses: internalsource.InstanceStatusSliceToWorkload(extractInstanceStatuses(p.ISVC, p.Component)),
 	}
 
 	return workload.BuildPlan(p.Component, desired, observed)

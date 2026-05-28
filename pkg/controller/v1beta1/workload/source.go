@@ -11,6 +11,19 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
+// NOTE on residual v1beta1 imports (slice 3 of N):
+//
+// Slice 3 flips the three named carrier types — ComponentType,
+// OMENativeInstanceStatus, the MutateInstance callback — to the
+// workload-owned mirrors from types.go. WorkloadDesiredSpec.Lifecycle and
+// WorkloadAggregateStatus.Traffic still reference v1beta1 because the
+// lifecycle subtree (5 nested structs + 4 string enums) and the traffic
+// target struct have no workload mirror yet. Mirroring them inflates
+// slice 3 past the +500 LOC ceiling; slice 4+ moves the bodies that
+// reason about Lifecycle into workload/ and mirrors these types as part
+// of that move. See the report attached to slice 3's PR for the
+// rationale.
+
 // Source is the per-workload contract the workload reconciler reads and
 // writes. Implemented by adapters: the ISVC OMENative dispatch path
 // (omenative/adapter.go) and the InferenceReplica controller path
@@ -22,11 +35,12 @@ import (
 // flows through Deps, not Source.
 type Source interface {
 	// Key returns the namespaced name + a stable opaque identity used
-	// for label/selector composition. For both adapters today the
-	// composed Name is "<isvc>-<component>" so existing
-	// ControllerRevisions, headless Services, and pod selectors keep
-	// the same names.
-	Key() WorkloadKey
+	// for label/selector composition. Returns the workload-owned Key
+	// type (types.go) — adapters compose it from the owner-CRD shape.
+	// For both adapters today the composed OwnerName is the owner's
+	// bare name so existing ControllerRevisions, headless Services,
+	// and pod selectors keep the same names.
+	Key() Key
 
 	// OwnerObject returns the K8s object whose UID/Kind/APIVersion
 	// becomes the controllerOwner on every emitted pod / revision /
@@ -59,8 +73,12 @@ type Source interface {
 	// result onto OwnerObject() for in-reconcile readers, and emits
 	// any side-effecting top-level conditions the adapter is
 	// responsible for. mutate returns true when a real change was
-	// made; false short-circuits the status write.
-	MutateInstance(ctx context.Context, idx int32, mutate func(*v1beta1.OMENativeInstanceStatus) bool) error
+	// made; false short-circuits the status write. The callback
+	// receives the workload-owned InstanceStatus mirror — adapters
+	// convert the workload type back to their owner-CRD shape inside
+	// the implementation (`internalsource.InstanceStatusFromWorkload`
+	// for the ISVC adapter).
+	MutateInstance(ctx context.Context, idx int32, mutate func(*InstanceStatus) bool) error
 
 	// WriteAggregateStatus commits the per-workload counters,
 	// Component-level conditions, traffic, and revision pointers in
@@ -77,9 +95,16 @@ type Source interface {
 }
 
 // WorkloadKey identifies one logical workload and seeds label/selector
-// composition. Both adapters produce a Name of "<isvc>-<component>" so
-// existing pod selectors, ControllerRevision names, and Service names
-// remain unchanged across the refactor.
+// composition for the ops/render.go entry points. Both adapters produce
+// a Name of "<isvc>-<component>" so existing pod selectors,
+// ControllerRevision names, and Service names remain unchanged across
+// the refactor.
+//
+// Distinct from `Key` (types.go) which is the workload-owned identity
+// the Source interface returns. Slice 4+ migrates the ops entry points
+// onto `Key` and retires this type; until then `WorkloadKey` carries
+// the legacy ops/render.go shape (Name + Labels) so leaf-package
+// signatures stay stable.
 type WorkloadKey struct {
 	// Namespace is the namespace every pod / revision / service the
 	// reconciler emits is created in.
@@ -92,7 +117,7 @@ type WorkloadKey struct {
 	// Component identifies which of router / engine / decoder this
 	// workload represents. Used by status conditions, events, and
 	// the pod-selector label set.
-	Component v1beta1.ComponentType
+	Component ComponentType
 
 	// Labels is the seed label set the workload reconciler stamps on
 	// every emitted pod. Includes ome.io/inferenceservice,
@@ -181,8 +206,11 @@ type WorkloadObservedState struct {
 
 	// InstanceStatuses reports per-Instance state. The reconciler
 	// reads but does not mutate this slice — writes go through
-	// Source.MutateInstance.
-	InstanceStatuses []v1beta1.OMENativeInstanceStatus
+	// Source.MutateInstance. Workload-owned mirrors (types.go) —
+	// adapters convert from the owner-CRD shape via
+	// `internalsource.InstanceStatusSliceToWorkload` for the ISVC
+	// adapter.
+	InstanceStatuses []InstanceStatus
 
 	// Conditions reports component-level conditions.
 	Conditions []metav1.Condition

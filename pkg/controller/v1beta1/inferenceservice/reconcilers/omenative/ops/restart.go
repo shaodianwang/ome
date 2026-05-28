@@ -13,6 +13,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -105,7 +106,7 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 			}
 		}
 
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index) {
 			return false, nil
 		}
 		// EXPECT-ORDER: per-pod ExpectDeletes BEFORE Delete, rollback via
@@ -114,9 +115,9 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
-			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, 1)
+			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index, 1)
 			if err := p.Client.Delete(ctx, pod); err != nil {
-				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index)
+				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index)
 				if apierrors.IsNotFound(err) {
 					continue
 				}
@@ -151,7 +152,7 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 		}
 	}
 	if len(missing) > 0 {
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index) {
 			return false, nil
 		}
 		if _, err := createMissingPods(ctx, p, plan, newInst, inst.Index, missing, revisionHashForInstance(p.ISVC, plan.Component, inst.Index, nil)); err != nil {

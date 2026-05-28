@@ -18,6 +18,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -545,7 +546,7 @@ func recreateUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compo
 				return false, nil
 			}
 		}
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index) {
 			return false, nil
 		}
 		// EXPECT-ORDER: per-pod ExpectDeletes BEFORE Delete, rollback via
@@ -554,9 +555,9 @@ func recreateUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compo
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
-			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, 1)
+			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index, 1)
 			if err := p.Client.Delete(ctx, pod); err != nil {
-				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index)
+				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index)
 				if apierrors.IsNotFound(err) {
 					continue
 				}
@@ -590,7 +591,7 @@ func recreateUpdate(ctx context.Context, p core.ReconcileParams, plan core.Compo
 		}
 	}
 	if len(missing) > 0 {
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index) {
 			return false, nil
 		}
 		if _, err := createMissingPods(ctx, p, plan, newInst, inst.Index, missing, revisionHashFromTarget(target)); err != nil {
@@ -1197,7 +1198,7 @@ func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.Componen
 		}
 	}
 	if len(surgePods) == 0 && !staleAtSurgeSlot {
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index) {
 			return false, nil
 		}
 		targets := []podTarget{{
@@ -1243,16 +1244,16 @@ func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.Componen
 				return false, nil
 			}
 		}
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index) {
 			return false, nil
 		}
 		for _, pod := range oldPods {
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
-			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, 1)
+			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index, 1)
 			if err := p.Client.Delete(ctx, pod); err != nil {
-				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index)
+				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index)
 				if apierrors.IsNotFound(err) {
 					continue
 				}
@@ -1310,7 +1311,7 @@ func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.Componen
 				return false, nil
 			}
 		}
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index) {
+		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index) {
 			return false, nil
 		}
 		// EXPECT-ORDER: per-pod ExpectDelete BEFORE Delete, rollback via
@@ -1319,9 +1320,9 @@ func surgeUpdate(ctx context.Context, p core.ReconcileParams, plan core.Componen
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
-			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, 1)
+			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index, 1)
 			if err := p.Client.Delete(ctx, pod); err != nil {
-				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index)
+				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index)
 				if apierrors.IsNotFound(err) {
 					continue
 				}
