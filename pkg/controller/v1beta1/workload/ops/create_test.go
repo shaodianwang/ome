@@ -222,28 +222,54 @@ func fromV1beta1Op(op *v1beta1.InstanceOperation) *workload.InstanceOperation {
 	if op == nil {
 		return nil
 	}
-	return &workload.InstanceOperation{
+	out := &workload.InstanceOperation{
 		ID:             op.ID,
 		Type:           workload.InstanceOperationType(op.Type),
 		Step:           op.Step,
 		StartedAt:      op.StartedAt,
 		LastProgressAt: op.LastProgressAt,
 		Deadline:       op.Deadline,
+		RetryCount:     op.RetryCount,
+		TargetRevision: op.TargetRevision,
+		Reason:         op.Reason,
+		FromNode:       op.FromNode,
+		RequestUUID:    op.RequestUUID,
 	}
+	if op.SurgeIndex != nil {
+		s := *op.SurgeIndex
+		out.SurgeIndex = &s
+	}
+	if op.HintTargetNodes != nil {
+		out.HintTargetNodes = append([]string(nil), op.HintTargetNodes...)
+	}
+	return out
 }
 
 func toV1beta1Op(op *workload.InstanceOperation) *v1beta1.InstanceOperation {
 	if op == nil {
 		return nil
 	}
-	return &v1beta1.InstanceOperation{
+	out := &v1beta1.InstanceOperation{
 		ID:             op.ID,
 		Type:           v1beta1.InstanceOperationType(op.Type),
 		Step:           op.Step,
 		StartedAt:      op.StartedAt,
 		LastProgressAt: op.LastProgressAt,
 		Deadline:       op.Deadline,
+		RetryCount:     op.RetryCount,
+		TargetRevision: op.TargetRevision,
+		Reason:         op.Reason,
+		FromNode:       op.FromNode,
+		RequestUUID:    op.RequestUUID,
 	}
+	if op.SurgeIndex != nil {
+		s := *op.SurgeIndex
+		out.SurgeIndex = &s
+	}
+	if op.HintTargetNodes != nil {
+		out.HintTargetNodes = append([]string(nil), op.HintTargetNodes...)
+	}
+	return out
 }
 
 // buildPlanSinglePodEngine builds the workload.ComponentPlan a

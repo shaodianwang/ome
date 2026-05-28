@@ -1,188 +1,85 @@
+// Dispatch shim for Restart — the per-Instance Restart state machine
+// itself lives in pkg/controller/v1beta1/workload/ops after the
+// workload-extraction refactor (part 2 slice 4e of N).
+//
+// The shim's only job is to build the workload.ReconcileInput +
+// workload.Deps pair from the legacy core.ReconcileParams and delegate.
+// The Restart trigger detector (detectRestartTrigger) and its
+// Migrate-suppression helper (isMigrateOwned) stay in this package
+// because the dispatcher (dispatch.go) and the Update detector
+// (update.go) still call them directly. They migrate to workload/ops
+// alongside their callers in later slices.
 package ops
 
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// restartDrainKey identifies a Restart drain writer against one Instance
-// materialization. Same shape as the Update drain key, but the writer
-// userAgent differs so the two can't cancel each other out.
-func restartDrainKey(idx int32, incarnation int64) string {
-	return strconv.Itoa(int(idx)) + "-" + strconv.FormatInt(incarnation, 10)
-}
-
 // restartRequeueInterval is the wait between passes while a Restart is
-// in flight.
+// in flight. Mirrors the workload-side workload/ops package's internal
+// timing byte-for-byte (5s); kept here because dispatch.go reads it
+// and dispatch.go has not yet migrated to workload/ops.
 const restartRequeueInterval = 5 * time.Second
 
-// Restart drives one Instance through Restart-on-pod-loss. Multi-pass,
-// idempotent. Three phases:
+// Restart is the ISVC-adapter entry point for the per-Instance Restart
+// state machine. It projects the legacy core.ReconcileParams onto
+// workload.Deps + workload.ReconcileInput and delegates to
+// workloadops.Restart — the source-agnostic body.
 //
-//	A. Drain + delete every pod at the old incarnation.
-//	B. Recreate the pod set at the bumped incarnation
-//	   (distinguished by the ome.io/instance-incarnation label).
-//	C. Wait for runtime ready, flip ome.io/serving=True, promote to Ready.
+// Signature preserved for backwards compatibility with the dispatcher
+// (dispatch.go calls Restart(ctx, p, plan, inst, reason) directly). The
+// IR controller will skip this wrapper and build workload.ReconcileInput
+// from its own source types.
 //
-// reason lands on Operation.Reason on the first pass only; later passes
-// preserve it via the skip-write guard.
+// Wires deps.RenderHook to core.ISVCRenderHook(p.ISVC) so the Phase B
+// recreate path runs coordination.InjectPeerEnv on every rendered pod —
+// matches the legacy core.RenderWithRevisionForISVC behavior.
 func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan, reason string) (bool, error) {
-	if p.Client == nil {
-		return false, fmt.Errorf("Restart: nil client")
+	deps := workload.Deps{
+		Client:       p.Client,
+		APIReader:    p.APIReader,
+		Recorder:     p.Recorder,
+		Expectations: p.ExpectationsCache(),
+		RenderHook:   core.ISVCRenderHook(p.ISVC),
 	}
-
-	// Use the post-patch Incarnation, not inst.Incarnation — core.BuildPlan
-	// ran against an earlier read.
-	wasNotRestarting := true
-	if s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index); s != nil && s.Phase == v1beta1.OMENativeInstanceRestarting {
-		wasNotRestarting = false
+	input := internalsource.BuildReconcileInput(internalsource.BuildInputDeps{
+		ISVC:          p.ISVC,
+		Component:     p.Component,
+		ObjectMeta:    p.ObjectMeta,
+		PodSpec:       p.PodSpec,
+		WorkerPodSpec: p.WorkerPodSpec,
+		Client:        p.Client,
+		Expectations:  p.ExpectationsCache(),
+	})
+	// core.InstancePlan and workload.InstancePlan are structurally
+	// identical — both packages own their own type set after slices
+	// 3+4. Convert field-for-field so the workload layer sees its own
+	// type.
+	winst := workload.InstancePlan{
+		Index:       inst.Index,
+		Incarnation: inst.Incarnation,
 	}
-	newInc, err := patchInstanceStatusRestarting(ctx, p, plan.Component, inst.Index, reason, plan.InstanceReadyTimeout)
-	if err != nil {
-		return false, fmt.Errorf("patch status Restarting (instance=%d): %w", inst.Index, err)
+	for _, r := range inst.Runners {
+		winst.Runners = append(winst.Runners, workload.RunnerPlan{Name: r.Name, Size: r.Size})
 	}
-	if wasNotRestarting {
-		status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonRestartTriggered,
-			"OMENative %s restart triggered: %s (incarnation=%d)",
-			status.InstanceKey(plan.Component, inst.Index), reason, newInc)
-	}
-
-	pods, err := query.ListPodsForInstance(ctx, p.Client, p.ISVC, plan.Component, inst.Index)
-	if err != nil {
-		return false, fmt.Errorf("Restart: list pods (instance=%d): %w", inst.Index, err)
-	}
-	oldPods, newPods, unknownPods := query.PartitionPodsByIncarnation(pods, newInc)
-
-	// Surface orphan pods (label-missing) as warnings and refuse to delete.
-	// A stripped label or a third-party operator stamping the OMENative
-	// managed-by label would otherwise get torn down by Phase A. Operator
-	// must re-classify or delete the pod for Restart to proceed.
-	if len(unknownPods) > 0 {
-		for _, pod := range unknownPods {
-			status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonFoundOrphan,
-				"OMENative %s found orphan pod %s/%s without ome.io/instance-incarnation; refusing to delete",
-				status.InstanceKey(plan.Component, inst.Index), pod.Namespace, pod.Name)
-		}
-		return false, nil
-	}
-
-	// Phase A: drain + delete old pods.
-	if len(oldPods) > 0 {
-		for _, pod := range oldPods {
-			if !podreadiness.IsServing(pod) {
-				continue
-			}
-			if err := podreadiness.MarkPodNotServing(ctx, p.Client, pod, podreadiness.WriterRestartDrain, restartDrainKey(inst.Index, newInc)); err != nil {
-				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
-			}
-		}
-
-		// Live reader on drain check so kube-proxy isn't still routing.
-		for _, pod := range oldPods {
-			serviceName := drainServiceForPod(p.ISVC.Name, plan.Component, pod)
-			if serviceName == "" {
-				continue
-			}
-			drained, err := drain.IsPodDrained(ctx, p.Reader(), p.ISVC.Namespace, serviceName, pod)
-			if err != nil {
-				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
-			}
-			if !drained {
-				return false, nil
-			}
-		}
-
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index) {
-			return false, nil
-		}
-		// EXPECT-ORDER: per-pod ExpectDeletes BEFORE Delete, rollback via
-		// ObservedDelete on error — a failed RPC fires no event to decrement.
-		for _, pod := range oldPods {
-			if pod.DeletionTimestamp != nil {
-				continue
-			}
-			p.ExpectationsCache().ExpectDeletes(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index, 1)
-			if err := p.Client.Delete(ctx, pod); err != nil {
-				p.ExpectationsCache().ObservedDelete(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index)
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return false, fmt.Errorf("delete pod %s/%s: %w", pod.Namespace, pod.Name, err)
-			}
-		}
-		return false, nil
-	}
-
-	// Phase B: recreate at the bumped Incarnation.
-	// Live-read the OLD pod set first — a stable-name Create with the
-	// cache stale would AlreadyExists against the still-terminating
-	// previous incarnation. Matches K8s foreground-deletion propagation.
-	clear, err := query.LiveOldPodsClearedForRecreate(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, plan.Component, inst.Index, newInc)
-	if err != nil {
-		return false, fmt.Errorf("Restart: live-check Phase A done (instance=%d): %w", inst.Index, err)
-	}
-	if !clear {
-		return false, nil
-	}
-
-	// Override Incarnation on the ad-hoc plan so Render stamps the new label.
-	newInst := inst
-	newInst.Incarnation = newInc
-
-	desired := expectedPodNamesForInstance(p.ISVC, plan.Component, newInst)
-	existingByName := query.IndexPodsByName(newPods)
-	missing := make([]podTarget, 0)
-	for _, target := range desired {
-		if _, ok := existingByName[target.Name]; !ok {
-			missing = append(missing, target)
+	if inst.MigrationOverlay != nil {
+		winst.MigrationOverlay = &workload.MigrationOverlay{
+			FromNode:        inst.MigrationOverlay.FromNode,
+			HintTargetNodes: append([]string(nil), inst.MigrationOverlay.HintTargetNodes...),
 		}
 	}
-	if len(missing) > 0 {
-		if !p.ExpectationsCache().Satisfied(p.ISVC.Namespace, p.ISVC.Name, workload.ComponentType(plan.Component), inst.Index) {
-			return false, nil
-		}
-		if _, err := createMissingPods(ctx, p, plan, newInst, inst.Index, missing, revisionHashForInstance(p.ISVC, plan.Component, inst.Index, nil)); err != nil {
-			return false, err
-		}
-		return false, nil
-	}
-
-	// Phase C: flip serving, promote Ready.
-	if !query.AllPodsRuntimeReady(newPods) {
-		return false, nil
-	}
-	for _, pod := range newPods {
-		if podreadiness.IsServing(pod) {
-			continue
-		}
-		// Lifecycle key on fresh pods; the Restart-drain key only lived
-		// on the now-deleted OLD pods.
-		if err := podreadiness.MarkPodServing(ctx, p.Client, pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
-			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
-		}
-	}
-
-	if err := patchInstanceStatusReady(ctx, p, plan.Component, inst.Index); err != nil {
-		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
-	}
-	status.RecordNormal(p.Recorder, p.ISVC, status.EventReasonRestartCompleted,
-		"OMENative %s restart complete (incarnation=%d)",
-		status.InstanceKey(plan.Component, inst.Index), newInc)
-	return true, nil
+	return workloadops.Restart(ctx, deps, input, plan, winst, reason)
 }
 
 // detectRestartTrigger fires when the Instance is mid-restart, or when
@@ -191,6 +88,10 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 // Migrate-owned Instance (source mid-drain, surge mid-create) is
 // suppressed explicitly because Migrate's source-pod deletion will
 // otherwise trip the "pod count below desired" trigger on the source.
+//
+// Kept here as a v1beta1-typed function because dispatch.go (in this
+// package, still using v1beta1.OMENativeRestartPolicy on the plan)
+// calls it directly. Migrates to workload/ops alongside the dispatcher.
 func detectRestartTrigger(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan) (bool, string, error) {
 	s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index)
 	if s == nil {
@@ -228,6 +129,10 @@ func detectRestartTrigger(ctx context.Context, p core.ReconcileParams, plan core
 // during create carry Operation.Type=Migrate even while Phase=Creating.
 // Detectors (restart, update) consult this to keep their guards explicit
 // rather than relying on the incidental "Phase != Ready" skip.
+//
+// Kept here as a v1beta1-typed function because the Update detector
+// in update.go (peer file in this package) still calls it directly.
+// Migrates to workload/ops alongside Update.
 func isMigrateOwned(s *v1beta1.OMENativeInstanceStatus) bool {
 	if s == nil {
 		return false
@@ -236,38 +141,4 @@ func isMigrateOwned(s *v1beta1.OMENativeInstanceStatus) bool {
 		return true
 	}
 	return s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationMigrate
-}
-
-// patchInstanceStatusRestarting idempotently stamps Phase=Restarting +
-// Restart/Drain with the given reason and increments Incarnation by one.
-// Returns the post-write Incarnation; if a previous pass already moved
-// into Restart, the existing Incarnation is preserved.
-func patchInstanceStatusRestarting(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32, reason string, timeout time.Duration) (int64, error) {
-	var observedIncarnation int64
-	err := status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
-		if s.Phase == v1beta1.OMENativeInstanceRestarting &&
-			s.Operation != nil && s.Operation.Type == v1beta1.InstanceOperationRestart {
-			observedIncarnation = s.Incarnation
-			return false
-		}
-		// Bump first so old pods can be distinguished from the new set.
-		if s.Incarnation == 0 {
-			s.Incarnation = 1
-		}
-		s.Incarnation++
-		observedIncarnation = s.Incarnation
-		s.Phase = v1beta1.OMENativeInstanceRestarting
-		now := metav1.NewTime(time.Now())
-		s.Operation = &v1beta1.InstanceOperation{
-			ID:             fmt.Sprintf("restart-%d-%d", idx, now.Unix()),
-			Type:           v1beta1.InstanceOperationRestart,
-			Step:           "Drain",
-			Reason:         reason,
-			StartedAt:      now,
-			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
-		}
-		return true
-	})
-	return observedIncarnation, err
 }
