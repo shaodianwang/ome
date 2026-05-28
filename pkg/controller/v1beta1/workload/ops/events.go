@@ -22,6 +22,17 @@ func recordNormal(rec record.EventRecorder, target client.Object, reason, messag
 	rec.Eventf(target, corev1.EventTypeNormal, reason, messageFmt, args...)
 }
 
+// recordWarning emits a Warning K8s Event against target. Same nil-safe
+// semantics as recordNormal. Mirrors omenative/status.RecordWarning
+// byte-for-byte so the per-event reason strings stay grep-compatible
+// across the workload-extraction refactor.
+func recordWarning(rec record.EventRecorder, target client.Object, reason, messageFmt string, args ...any) {
+	if rec == nil || target == nil {
+		return
+	}
+	rec.Eventf(target, corev1.EventTypeWarning, reason, messageFmt, args...)
+}
+
 // eventTarget returns the object emitted events should be stamped
 // against — input.EventTarget when set, falling back to OwnerObject.
 // Matches the nil-OK semantics documented on ReconcileInput.EventTarget

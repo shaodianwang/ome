@@ -116,4 +116,21 @@ type ReconcileInput struct {
 	// to a no-op write (the existing path through the next aggregate
 	// status flush picks up the condition on the following reconcile).
 	WriteAggregateCondition func(ctx context.Context, cond metav1.Condition) error
+
+	// ClearMigrationRequest removes the source-of-truth annotation /
+	// trigger carrying the migration request identified by uuid. The
+	// requester contract typically requires accept/reject within a
+	// short window via this removal; without it the requester
+	// re-delivers the same UUID indefinitely. The ISVC adapter wires
+	// this to a retry.RetryOnConflict round-trip that strips the
+	// per-UUID annotation; the IR adapter (when it lands) will wire
+	// its own removal flow.
+	//
+	// nil-safe: when unset (e.g. workload-side unit tests that don't
+	// exercise the annotation contract) Migrate skips the clear
+	// step. Workload code MUST NOT panic on a nil callback for this
+	// field — the Delete / Create state machines never call it, and
+	// Migrate tolerates a nil callback as "trigger source has no
+	// removal contract".
+	ClearMigrationRequest func(ctx context.Context, uuid string) error
 }

@@ -916,80 +916,12 @@ func TestMigrate_RejectsNodeAffinityConflict(t *testing.T) {
 }
 
 // --- validateFromNode ---
-
-func TestValidateFromNode_MatchOK(t *testing.T) {
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	pod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
-	pod.Spec.NodeName = "node5"
-	c := newFakeClientWithDiscovery(t, isvc, pod)
-	p := minimalParams(t, isvc, c)
-
-	mismatch, defer_, err := validateFromNode(context.Background(), p, v1beta1.EngineComponent, 0, "node5")
-	if err != nil {
-		t.Fatalf("validateFromNode: %v", err)
-	}
-	if defer_ || mismatch != "" {
-		t.Errorf("expected pass; got mismatch=%q defer=%v", mismatch, defer_)
-	}
-}
-
-func TestValidateFromNode_MismatchRejected(t *testing.T) {
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	pod := runningPodAtRevision(isvc, 0, 1, "llama:v1")
-	pod.Spec.NodeName = "node7" // pod actually on node7
-	c := newFakeClientWithDiscovery(t, isvc, pod)
-	p := minimalParams(t, isvc, c)
-
-	mismatch, defer_, err := validateFromNode(context.Background(), p, v1beta1.EngineComponent, 0, "node5")
-	if err != nil {
-		t.Fatalf("validateFromNode: %v", err)
-	}
-	if defer_ {
-		t.Errorf("scheduled pod on different node must be a rejection, not a defer")
-	}
-	if mismatch == "" {
-		t.Errorf("expected mismatch reason")
-	}
-}
-
-func TestValidateFromNode_UnscheduledDefers(t *testing.T) {
-	// Pod exists but Spec.NodeName is empty. Defer rather than reject —
-	// the next reconcile re-polls.
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	pod := runningPodAtRevision(isvc, 0, 1, "llama:v1") // NodeName left ""
-	c := newFakeClientWithDiscovery(t, isvc, pod)
-	p := minimalParams(t, isvc, c)
-
-	mismatch, defer_, err := validateFromNode(context.Background(), p, v1beta1.EngineComponent, 0, "node5")
-	if err != nil {
-		t.Fatalf("validateFromNode: %v", err)
-	}
-	if !defer_ {
-		t.Errorf("unscheduled pod must defer; got mismatch=%q defer=%v", mismatch, defer_)
-	}
-	if mismatch != "" {
-		t.Errorf("defer must not carry a rejection reason; got %q", mismatch)
-	}
-}
-
-func TestValidateFromNode_NoLivePodsRejects(t *testing.T) {
-	// Source instance has no pods at all — that's a rejection (Alfred
-	// can't legitimately request a migration of a non-existent instance).
-	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	c := newFakeClientWithDiscovery(t, isvc)
-	p := minimalParams(t, isvc, c)
-
-	mismatch, defer_, err := validateFromNode(context.Background(), p, v1beta1.EngineComponent, 0, "node5")
-	if err != nil {
-		t.Fatalf("validateFromNode: %v", err)
-	}
-	if defer_ {
-		t.Errorf("no live pods must reject, not defer")
-	}
-	if mismatch == "" {
-		t.Errorf("expected mismatch reason for no-live-pods")
-	}
-}
+//
+// Moved to pkg/controller/v1beta1/workload/ops/migrate_test.go (internal
+// package test) when the per-Instance Migrate state machine extracted to
+// workload/ops in part 2 slice 4d of N. The function is no longer
+// reachable from the omenative/ops package after the move; the
+// internal-package tests preserve identical names + assertions.
 
 // --- clearMigrationRequestAnnotation ---
 

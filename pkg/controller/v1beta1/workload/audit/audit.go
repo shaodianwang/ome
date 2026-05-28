@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -141,12 +142,25 @@ func ConfigMapName(isvc *v1beta1.InferenceService) string {
 	return isvc.Name + ConfigMapNameSuffix
 }
 
+// ConfigMapNameForOwner is the v1beta1-free ConfigMapName variant for
+// workload-side callers holding the owner opaquely.
+func ConfigMapNameForOwner(owner metav1.Object) string {
+	return owner.GetName() + ConfigMapNameSuffix
+}
+
 // LoadLedger fetches the per-ISVC audit ConfigMap and parses its
 // history.json payload. Returns an empty ledger (and no error) when
 // the ConfigMap doesn't exist yet — first migration on this ISVC.
 func LoadLedger(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService) (*Ledger, error) {
+	return LoadLedgerForOwner(ctx, reads, isvc)
+}
+
+// LoadLedgerForOwner is the v1beta1-free LoadLedger variant. Owner is
+// held as metav1.Object so workload-side callers can use the same
+// persistence path the ISVC adapter does.
+func LoadLedgerForOwner(ctx context.Context, reads client.Reader, owner metav1.Object) (*Ledger, error) {
 	cm := &corev1.ConfigMap{}
-	key := client.ObjectKey{Namespace: isvc.Namespace, Name: ConfigMapName(isvc)}
+	key := client.ObjectKey{Namespace: owner.GetNamespace(), Name: ConfigMapNameForOwner(owner)}
 	if err := reads.Get(ctx, key, cm); err != nil {
 		if apierrors.IsNotFound(err) {
 			return &Ledger{}, nil
@@ -275,12 +289,26 @@ func PersistLedger(
 	isvc *v1beta1.InferenceService,
 	l *Ledger,
 ) error {
+	return PersistLedgerForOwner(ctx, c, isvc, isvcGroupVersionKind, l)
+}
+
+// PersistLedgerForOwner is the v1beta1-free PersistLedger variant.
+// Owner is held as metav1.Object and the OwnerReference GVK is passed
+// explicitly so workload-side callers can persist via the same path
+// the ISVC adapter does.
+func PersistLedgerForOwner(
+	ctx context.Context,
+	c client.Client,
+	owner metav1.Object,
+	gvk schema.GroupVersionKind,
+	l *Ledger,
+) error {
 	raw, err := json.Marshal(l)
 	if err != nil {
 		return fmt.Errorf("marshal audit ledger: %w", err)
 	}
 	cm := &corev1.ConfigMap{}
-	key := client.ObjectKey{Namespace: isvc.Namespace, Name: ConfigMapName(isvc)}
+	key := client.ObjectKey{Namespace: owner.GetNamespace(), Name: ConfigMapNameForOwner(owner)}
 	if err := c.Get(ctx, key, cm); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("get audit configmap %s: %w", key.Name, err)
@@ -290,7 +318,7 @@ func PersistLedger(
 				Name:            key.Name,
 				Namespace:       key.Namespace,
 				Labels:          map[string]string{labelManagedBy: managedByValue},
-				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(isvc, isvcGroupVersionKind)},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(owner, gvk)},
 			},
 			Data: map[string]string{LedgerKey: string(raw)},
 		}
@@ -313,9 +341,9 @@ func PersistLedger(
 	// Claim ownership when we land on a pre-existing CM without our
 	// controller ref. The race path (Create -> AlreadyExists -> Get)
 	// silently took whatever was there; without this we'd happily write
-	// to a CM the cluster GC won't sweep when the ISVC is deleted.
-	if !hasControllerRefForISVC(cm, isvc) {
-		cm.OwnerReferences = append(cm.OwnerReferences, *metav1.NewControllerRef(isvc, isvcGroupVersionKind))
+	// to a CM the cluster GC won't sweep when the owner is deleted.
+	if !hasControllerRefForOwner(cm, owner) {
+		cm.OwnerReferences = append(cm.OwnerReferences, *metav1.NewControllerRef(owner, gvk))
 	}
 	if err := c.Update(ctx, cm); err != nil {
 		return fmt.Errorf("update audit configmap %s: %w", key.Name, err)
@@ -323,11 +351,11 @@ func PersistLedger(
 	return nil
 }
 
-// hasControllerRefForISVC reports whether obj already has a controller
-// OwnerReference pointing at the given ISVC.
-func hasControllerRefForISVC(obj metav1.Object, isvc *v1beta1.InferenceService) bool {
+// hasControllerRefForOwner reports whether obj already has a controller
+// OwnerReference pointing at the given owner (matched on UID).
+func hasControllerRefForOwner(obj metav1.Object, owner metav1.Object) bool {
 	for _, ref := range obj.GetOwnerReferences() {
-		if ref.Controller != nil && *ref.Controller && ref.UID == isvc.UID {
+		if ref.Controller != nil && *ref.Controller && ref.UID == owner.GetUID() {
 			return true
 		}
 	}

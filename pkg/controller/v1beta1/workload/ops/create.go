@@ -33,6 +33,16 @@ const (
 	// any non-Ready phase to Phase=Ready (every pod runtime-ready and
 	// ome.io/serving=True).
 	EventReasonInstanceReady = "InstanceReady"
+
+	// Migration request lifecycle. Match omenative/status constants
+	// byte-for-byte so dashboards / alerts grepping on reason strings
+	// keep matching after extraction.
+	EventReasonMigrationRequestAccepted      = "MigrationRequestAccepted"
+	EventReasonMigrationRequestRejected      = "MigrationRequestRejected"
+	EventReasonMigrationCompleted            = "MigrationCompleted"
+	EventReasonRateLimited                   = "RateLimited"
+	EventReasonMigrationFromNodeMismatch     = "MigrationFromNodeMismatch"
+	EventReasonMigrationNodeAffinityConflict = "MigrationNodeAffinityConflict"
 )
 
 // Create drives Create / Scale-Up toward each desired Instance. Multi-pass:

@@ -38,10 +38,11 @@ func ISVCGVK() schema.GroupVersionKind { return isvcGVK }
 // without taking on a backward import to core/ (which would close a
 // cycle: core imports internalsource for converters).
 //
-// SCOPE NOTE (slice 4b of N): only the fields the Create state machine
-// reads (Client, ISVC, Component, PodSpec, WorkerPodSpec, ObjectMeta)
-// are populated. As peer ops migrate to workload/ops in later slices
-// the bag grows to cover Lifecycle/Pacing/GangSchedulingAvailable.
+// SCOPE NOTE (slice 4b-4d of N): only the fields the workload Create /
+// Delete / Migrate state machines read (Client, ISVC, Component,
+// PodSpec, WorkerPodSpec, ObjectMeta, ClearAnnotation) are populated.
+// As peer ops migrate to workload/ops in later slices the bag grows to
+// cover Lifecycle/Pacing/GangSchedulingAvailable.
 type BuildInputDeps struct {
 	// ISVC is the parent InferenceService being reconciled. Used as
 	// both the workload OwnerObject and the EventTarget.
@@ -83,6 +84,21 @@ type BuildInputDeps struct {
 	// workload-typed projection. Tests / single-pod Components /
 	// pre-wiring callers leave it false.
 	GangSchedulingAvailable bool
+
+	// ClearMigrationRequestAnnotation removes the per-UUID Alfred
+	// migration request annotation from the parent ISVC. Wired into
+	// the workload.ReconcileInput.ClearMigrationRequest callback so
+	// the source-agnostic workload.Migrate body can clear the trigger
+	// without importing v1beta1 itself. The ISVC-OMENative dispatcher
+	// shim wires this to the local clearMigrationRequestAnnotation
+	// helper; the IR adapter (when it lands) wires its own removal
+	// flow.
+	//
+	// nil-safe: when unset, ReconcileInput.ClearMigrationRequest is
+	// also nil and Migrate skips the clear step. Callers that don't
+	// drive the Migrate state machine (Create-only / Delete-only
+	// tests) leave this empty.
+	ClearMigrationRequestAnnotation func(ctx context.Context, uuid string) error
 }
 
 // BuildReconcileInput projects (ISVC, Component, podSpec, ...) onto a
@@ -121,6 +137,7 @@ func BuildReconcileInput(d BuildInputDeps) workload.ReconcileInput {
 		MutateInstance:          buildMutateInstance(d.Client, d.ISVC, d.Component),
 		RemoveInstance:          buildRemoveInstance(d.Client, d.ISVC, d.Component, d.Expectations),
 		WriteAggregateCondition: buildWriteAggregateCondition(d.Client, d.ISVC, d.Component),
+		ClearMigrationRequest:   d.ClearMigrationRequestAnnotation,
 	}
 }
 
