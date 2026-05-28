@@ -58,12 +58,19 @@ stacks. Per stack, the chart emits:
 | `deployments[].prefill.tensorParallelSize` | int |  | Synthesised as `--tensor-parallel-size <N>` (sglang). |
 | `deployments[].prefill.gpuMemoryUtilization` | number |  | Fraction (0.0–1.0); synthesised as `--mem-fraction-static <X>` (sglang). |
 | `deployments[].prefill.maxConcurrentRequests` | int |  | Synthesised as `--max-running-requests <N>` (sglang). |
-| `deployments[].prefill.args` | array | `[]` | Extra CLI flags appended after the chart production defaults and synthesised flags; user overrides win on duplicate flags. Chart-owned args list — see "Args ownership" below. |
+| `deployments[].prefill.dtype` | string | `""` | Model compute dtype. Enum: `""` / `bfloat16` / `fp16` / `fp8` / `auto`. Empty string omits the flag (sglang default takes effect); a set value synthesises `--dtype <value>`. |
+| `deployments[].prefill.quantization` | string | `""` | Model quantization scheme (e.g. `modelopt_fp4`, `awq`, `gptq`, `fp8`). Free-form string; empty omits the flag; a set value synthesises `--quantization <value>`. |
+| `deployments[].prefill.kvCacheDtype` | string | `""` | KV cache dtype. Enum: `""` / `bfloat16` / `fp16` / `fp8` / `auto`. Empty omits the flag; a set value synthesises `--kv-cache-dtype <value>`. |
+| `deployments[].prefill.moeRunnerBackend` | string | `""` | MoE-only runner backend (e.g. `flashinfer_trtllm`). Free-form string; empty omits the flag; a set value synthesises `--moe-runner-backend <value>`. |
+| `deployments[].prefill.speculative.algorithm` | string | `""` | Speculative decoding algorithm (e.g. `EAGLE`, `EAGLE3`). Empty disables the WHOLE speculative block (gating field). A set value synthesises `--speculative-algorithm <value>`. |
+| `deployments[].prefill.speculative.draftModelPath` | string | `""` | Path to the draft model (e.g. `$(MODEL_PATH)/draft_hf`). Synthesises `--speculative-draft-model <value>` only when `algorithm` is set; otherwise silently ignored. |
+| `deployments[].prefill.speculative.draftModelQuantization` | string | `""` | Draft model quantization (e.g. `unquant`). Synthesises `--speculative-draft-model-quantization <value>` only when `algorithm` is set. |
+| `deployments[].prefill.args` | array | `[]` | Extra CLI flags appended after the runtime base + synthesised typed flags. User entries WIN on duplicate `--flag` via dedup-by-flag-name. Chart-owned args list — see "Args layering" below. |
 | `deployments[].prefill.env` | array | `[]` | Extra container env vars. Each entry is a corev1.EnvVar (`{name, value}` or `{name, valueFrom: ...}`). Forwarded to the tenant CSR's `runner.env`, where they merge with the vendor's env list **by `name` key** (per-key strategic merge — predictable, additive). See "Env merge" below. |
 | `deployments[].prefill.autoscaling.enabled` | bool | `false` | Placeholder. KEDA wiring is reserved for a follow-up. |
 | `deployments[].prefill.autoscaling.metrics` | array | `[]` | Placeholder. Shape reserved; v0.1 templates ignore it. |
-| `deployments[].decode.*` | object |  | Same shape as `prefill.*` (including `env: []`). `pd` only. |
-| `deployments[].engine.*` | object |  | Same shape as `prefill.*` (including `env: []`), plus `workerSize`. `standalone` or `multinode` only. |
+| `deployments[].decode.*` | object |  | Same shape as `prefill.*` (including the 4 typed model knobs, `speculative.*`, `env: []`, and `args: []`). `pd` only. |
+| `deployments[].engine.*` | object |  | Same shape as `prefill.*` (including the 4 typed model knobs, `speculative.*`, `env: []`, and `args: []`), plus `workerSize`. `standalone` or `multinode` only. |
 | `deployments[].engine.workerSize` | int |  | Multinode only: number of worker pods per leader gang. |
 | `deployments[].router.enabled` | bool | `true` | `pd` only. Whether to emit the router Component. |
 | `deployments[].router.image` | string | `""` | Router image override. |
@@ -170,7 +177,7 @@ list, so there is nothing to lose.
 | Infrastructure env (NCCL_*, CUDA_*, host IP, PYTHONUNBUFFERED, ...) | ✅ owns | — |
 | Security context + probes + ports | ✅ owns | — |
 | Container `command` | ❌ stripped | container `ENTRYPOINT` from the image takes effect |
-| Container `args` | ❌ stripped | ✅ owns full list (production defaults + synthesised typed flags + user `args:`) |
+| Container `args` | ❌ stripped | ✅ owns full list (runtime base + synthesised typed flags + user `args:`, deduped by flag name; see "Args layering") |
 | Workload-tuning env (SGLANG_*, model-package knobs) | ❌ stripped | ✅ owns via `deployments[].<component>.env: []` |
 
 The vendor file's leading comment block (`IN scope` / `OUT of scope`)
@@ -193,18 +200,24 @@ spec:
       image: <override>    # only if you set deployments[].prefill.image
       args:                # full list owned by the chart; replaces the
                            # vendor's (empty) args wholesale
-        - --enable-prefix-cache      # ome-isvc.engineDefaultArgs
+        - --host                     # runtime base (ome-isvc.engineBaseArgs)
+        - 0.0.0.0
+        - --port
+        - "30000"
+        - --enable-prefix-cache
         - --schedule-policy
         - lpm
         - --context-length           # synthesised from contextLength
         - "1048576"
         - --tensor-parallel-size     # synthesised from tensorParallelSize
         - "4"
-        - --mem-fraction-static      # synthesised from gpuMemoryUtilization
-        - "0.92"
-        - --max-running-requests     # synthesised from maxConcurrentRequests
-        - "256"
-        # ...followed by any user-supplied .args[]
+        - --dtype                    # synthesised from dtype
+        - bfloat16
+        - --quantization             # synthesised from quantization
+        - modelopt_fp4
+        - --speculative-algorithm    # synthesised from speculative.algorithm (gates the block)
+        - EAGLE3
+        # ...followed by any user-supplied .args[] (with dedup-by-flag-name)
       env:                 # per-name merge against vendor env at consume time
         - name: SGLANG_EXTERNAL_MODEL_PACKAGE
           value: sglang_meta.srt.models
@@ -216,26 +229,47 @@ strategic-merge inheritance. Child wins on collision; lists keyed by
 wholesale-replaced — that's the trap. The chart sidesteps it by
 having the vendor carry no `args` at all.
 
-### Args ownership
+### Args layering
 
 For each engine/prefill/decode component the chart-side tenant CSR's
-`runner.args` is constructed as the concatenation of:
+`runner.args` is built by merging three layers, in order, with
+**dedup-by-flag-name** (user wins on duplicate `--flag`):
 
-1. **Chart production defaults** — `ome-isvc.engineDefaultArgs` in
-   `templates/_helpers.tpl`. Hard-coded sglang flags every tenant
-   gets unless they override the entire list (e.g. `--enable-prefix-cache`,
-   `--schedule-policy lpm`). Keep this list minimal — anything that
-   varies by workload belongs in a typed knob or the scientist's
-   `args:`.
-2. **Synthesised typed flags** — emitted from the per-component knobs
-   listed below, only when explicitly set.
-3. **User-supplied `args:`** — appended last so they win on duplicate
-   flags.
+| Layer | What | Source | Defined in |
+|---|---|---|---|
+| 1. **Vendor profile** | hardware / infra env only — no args | vendor CSR `runner.env`, resources, probes, volumes | `templates/vendors/<vendor>.yaml` (NOT in args) |
+| 2. **Runtime base** | port/host/server defaults universally true for sglang | `--host 0.0.0.0`, `--port 30000`, `--enable-prefix-cache`, `--schedule-policy lpm` | `_helpers.tpl::ome-isvc.engineBaseArgs` |
+| 3. **Synthesised flags** | typed knobs, only when set | `--context-length`, `--tensor-parallel-size`, `--mem-fraction-static`, `--max-running-requests`, `--dtype`, `--quantization`, `--kv-cache-dtype`, `--moe-runner-backend`, `--speculative-*` | `_helpers.tpl::ome-isvc.componentSynthesizedArgs` (driven by values.yaml typed fields) |
+| 4. **User `args:`** | escape hatch — appended last; OVERRIDES on duplicate `--flag` | scientist's `deployments[].<component>.args` list | `values.yaml` |
 
-Scientists who need to **suppress** a chart production default must
-override the entire list via `args:`, or ask for the default to be
-removed from the chart. The chart does **not** offer a per-flag
-removal mechanism in v0.1.
+The merge happens in `_helpers.tpl::ome-isvc.mergeArgs`. It walks each
+list in pairs (recognising `--flag` items and pulling the following
+non-`--` item as the value, or treating bare flags as booleans),
+builds an ordered map of flag-name → value, and emits the final list.
+User entries OVERWRITE base entries on duplicate flag rather than
+producing two copies in the result.
+
+#### Dedup-by-flag-name semantics
+
+If the chart hardcodes `--port 30000` in the runtime base and a
+scientist sets:
+
+```yaml
+deployments[0].prefill.args:
+  - --port
+  - "31000"
+```
+
+the merged tenant CSR's `args:` contains `--port 31000` (single
+instance) — the user value wins, the base value is dropped, and there
+is NO duplicate `--port` in the result. See
+`examples/values-args-override.yaml` for a full worked example.
+
+The router uses the same 3-layer pipeline via
+`ome-isvc.routerBaseArgs` + `ome-isvc.routerSynthesizedArgs` + user
+`args:`; `routerBaseArgs` is empty by default since no flag has been
+deemed universally true for the router (extend in `_helpers.tpl` if
+that changes).
 
 ### Env merge
 
@@ -249,18 +283,31 @@ by the child. There is no wholesale-replace risk on `env`.
 ### Synthesised CLI flags
 
 Each scientist-facing knob below maps to one sglang flag, emitted only
-when you explicitly set the knob:
+when you explicitly set the knob. The synthesised block is layer 3 of
+the args merge — runtime base flags from layer 2 (host/port/etc.) come
+first, then synthesised, then user `args:`.
 
-| Values key                | sglang flag              |
-|---------------------------|--------------------------|
-| `contextLength`           | `--context-length`       |
-| `tensorParallelSize`      | `--tensor-parallel-size` |
-| `gpuMemoryUtilization`    | `--mem-fraction-static`  |
-| `maxConcurrentRequests`   | `--max-running-requests` |
+| Values key                            | sglang flag                              |
+|---------------------------------------|------------------------------------------|
+| `contextLength`                       | `--context-length`                       |
+| `tensorParallelSize`                  | `--tensor-parallel-size`                 |
+| `gpuMemoryUtilization`                | `--mem-fraction-static`                  |
+| `maxConcurrentRequests`               | `--max-running-requests`                 |
+| `dtype`                               | `--dtype`                                |
+| `quantization`                        | `--quantization`                         |
+| `kvCacheDtype`                        | `--kv-cache-dtype`                       |
+| `moeRunnerBackend`                    | `--moe-runner-backend`                   |
+| `speculative.algorithm`               | `--speculative-algorithm` *(gates the block)* |
+| `speculative.draftModelPath`          | `--speculative-draft-model`              |
+| `speculative.draftModelQuantization`  | `--speculative-draft-model-quantization` |
 
-Unset knobs are omitted — the chart production defaults / sglang
-defaults take effect. The `args:` list you supply is appended last so
-it wins on duplicate flags.
+Unset knobs (empty string or absent key) are omitted — the runtime
+base / sglang defaults take effect. The speculative block is GATED by
+`algorithm`: if it is empty, none of the speculative-* flags emit,
+even if `draftModelPath` is set.
+
+The `args:` list you supply is appended last and dedup-by-flag-name
+ensures it wins on any duplicate `--flag`.
 
 ### Vendor defaulting
 
@@ -300,10 +347,11 @@ vendor names.
 
 | File | Description |
 |---|---|
-| `examples/values-cks-gb300-sglang-pd.yaml` | Single PD-disaggregated Llama4x stack on CW gb300 inheriting the chart-level default vendor; creates ClusterBaseModel inline. |
+| `examples/values-cks-gb300-sglang-pd.yaml` | Single PD-disaggregated Llama4x stack on CW gb300 inheriting the chart-level default vendor; demonstrates the typed model knobs (`dtype`, `quantization`, `kvCacheDtype`, `moeRunnerBackend`, full `speculative:` block) mirroring the production launch; creates ClusterBaseModel inline. |
 | `examples/values-multi-deployment.yaml`    | Two stacks (prod + shadow) from one release, both inheriting the default vendor. |
 | `examples/values-gke-tpu-sglang.yaml`      | Standalone single-engine stack on GKE TPU; overrides `vendor:` to the illustrative GKE profile. |
 | `examples/values-existing-basemodel.yaml`  | PD-disaggregated stack pointing at a pre-existing ClusterBaseModel; no inline `basemodels`. |
+| `examples/values-args-override.yaml`       | Demonstrates scientist override of a chart-hardcoded base flag via `args:`. The merge helper deduplicates by flag name (user wins) so the final tenant CSR has a single `--port 31000` rather than two `--port` entries. |
 
 ## 7. Coordination knobs
 
@@ -362,8 +410,9 @@ The current chart explicitly defers the following:
    in-release vendor template matches.
 5. **`values.schema.json` auto-generation** from OME CRD OpenAPI
    schemas (the schema is hand-written for v0.1).
-6. **Per-flag suppression for chart production defaults.** Scientists
-   today must override the entire `args:` list to drop a single
-   chart-default flag (e.g. `--enable-prefix-cache`). A future
-   `removeArg:` (or similar) mechanism could let scientists drop a
-   single default without retyping the whole list.
+6. **Per-flag drop for chart base defaults.** The 3-layer args merge
+   lets scientists OVERRIDE a chart-hardcoded flag value via `args:`
+   (e.g. `--port 31000` replaces base `--port 30000` via
+   dedup-by-flag-name), but there is no mechanism to fully DROP a base
+   flag (e.g. remove `--enable-prefix-cache` entirely). A future
+   `removeArgs:` (or similar) field could express that.

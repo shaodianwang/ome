@@ -183,6 +183,16 @@
         }
       }
     },
+    "speculativeBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Speculative decoding knobs. The `algorithm` field GATES the whole block — if empty/unset, none of the speculative-* flags emit even if a draftModelPath is set.",
+      "properties": {
+        "algorithm":              {"type": "string", "description": "Speculative algorithm (e.g. EAGLE, EAGLE3). Empty string disables the whole block (gating field). Synthesised as `--speculative-algorithm <value>`."},
+        "draftModelPath":         {"type": "string", "description": "Path to the draft model on disk (e.g. `$(MODEL_PATH)/draft_hf`). Emits `--speculative-draft-model <value>` only when `algorithm` is set."},
+        "draftModelQuantization": {"type": "string", "description": "Quantization scheme for the draft model (e.g. `unquant`). Emits `--speculative-draft-model-quantization <value>` only when `algorithm` is set."}
+      }
+    },
     "componentBlock": {
       "type": "object",
       "additionalProperties": false,
@@ -190,12 +200,17 @@
       "properties": {
         "image":                 {"type": "string"},
         "replicas":              {"$ref": "#/$defs/replicasBlock"},
-        "args":                  {"type": "array", "items": {"type": "string"}},
+        "args":                  {"type": "array", "items": {"type": "string"}, "description": "Extra CLI flags appended after the runtime base + synthesised typed flags. User entries win on duplicate `--flag` via dedup-by-flag-name. See README \"Args layering\"."},
         "env":                   {"$ref": "#/$defs/envList"},
         "contextLength":         {"type": "integer", "minimum": 1, "description": "Synthesised as `--context-length <N>` on the runner args."},
         "tensorParallelSize":    {"type": "integer", "minimum": 1, "description": "Synthesised as `--tensor-parallel-size <N>` (sglang)."},
         "gpuMemoryUtilization":  {"type": "number",  "minimum": 0, "maximum": 1, "description": "Fraction (0.0–1.0) of GPU memory the engine may use; synthesised as `--mem-fraction-static <X>` (sglang)."},
         "maxConcurrentRequests": {"type": "integer", "minimum": 1, "description": "Cap on in-flight requests; synthesised as `--max-running-requests <N>` (sglang)."},
+        "dtype":                 {"type": "string", "enum": ["", "bfloat16", "fp16", "fp8", "auto"], "description": "Model compute dtype. Empty string omits the flag (sglang default applies); set to a known sglang value to synthesise `--dtype <value>`."},
+        "quantization":          {"type": "string", "description": "Model quantization scheme (e.g. modelopt_fp4, awq, gptq, fp8). Synthesised as `--quantization <value>`; empty string omits the flag."},
+        "kvCacheDtype":          {"type": "string", "enum": ["", "bfloat16", "fp16", "fp8", "auto"], "description": "KV cache dtype. Empty string omits the flag (sglang default applies); set to a known sglang value to synthesise `--kv-cache-dtype <value>`."},
+        "moeRunnerBackend":      {"type": "string", "description": "MoE-only runner backend (e.g. flashinfer_trtllm). Synthesised as `--moe-runner-backend <value>`; empty string omits the flag."},
+        "speculative":           {"$ref": "#/$defs/speculativeBlock"},
         "autoscaling":           {"$ref": "#/$defs/autoscalingBlock"}
       }
     },
@@ -206,12 +221,17 @@
       "properties": {
         "image":                 {"type": "string"},
         "replicas":              {"$ref": "#/$defs/replicasBlock"},
-        "args":                  {"type": "array", "items": {"type": "string"}},
+        "args":                  {"type": "array", "items": {"type": "string"}, "description": "Extra CLI flags appended after the runtime base + synthesised typed flags. User entries win on duplicate `--flag` via dedup-by-flag-name. See README \"Args layering\"."},
         "env":                   {"$ref": "#/$defs/envList"},
         "contextLength":         {"type": "integer", "minimum": 1, "description": "Synthesised as `--context-length <N>` on the runner args."},
         "tensorParallelSize":    {"type": "integer", "minimum": 1, "description": "Synthesised as `--tensor-parallel-size <N>` (sglang)."},
         "gpuMemoryUtilization":  {"type": "number",  "minimum": 0, "maximum": 1, "description": "Fraction (0.0–1.0) of GPU memory the engine may use; synthesised as `--mem-fraction-static <X>` (sglang)."},
         "maxConcurrentRequests": {"type": "integer", "minimum": 1, "description": "Cap on in-flight requests; synthesised as `--max-running-requests <N>` (sglang)."},
+        "dtype":                 {"type": "string", "enum": ["", "bfloat16", "fp16", "fp8", "auto"], "description": "Model compute dtype. Empty string omits the flag (sglang default applies); set to a known sglang value to synthesise `--dtype <value>`."},
+        "quantization":          {"type": "string", "description": "Model quantization scheme (e.g. modelopt_fp4, awq, gptq, fp8). Synthesised as `--quantization <value>`; empty string omits the flag."},
+        "kvCacheDtype":          {"type": "string", "enum": ["", "bfloat16", "fp16", "fp8", "auto"], "description": "KV cache dtype. Empty string omits the flag (sglang default applies); set to a known sglang value to synthesise `--kv-cache-dtype <value>`."},
+        "moeRunnerBackend":      {"type": "string", "description": "MoE-only runner backend (e.g. flashinfer_trtllm). Synthesised as `--moe-runner-backend <value>`; empty string omits the flag."},
+        "speculative":           {"$ref": "#/$defs/speculativeBlock"},
         "workerSize":            {"type": "integer", "minimum": 1, "description": "Number of worker pods per leader gang (multinode servingMode only)."},
         "autoscaling":           {"$ref": "#/$defs/autoscalingBlock"}
       }

@@ -175,88 +175,218 @@ for sprinkling on every resource.
 {{- end -}}
 
 {{/*
-ome-isvc.engineDefaultArgs — chart-side production defaults prepended
-to every engine/prefill/decode component's args list. The vendor
-profile carries NO command/args (see templates/vendors/*.yaml), so the
-chart owns the full args list. Production-default flags live here so
-that every tenant inherits the same baseline without having to retype
-them.
+ome-isvc.engineBaseArgs — chart-hardcoded runtime base config every
+engine/prefill/decode tenant inherits. These are flags that are
+universally true for the sglang server binary (host/port wiring and
+proven-good defaults like prefix caching). The vendor profile carries
+NO `command`/`args` (see templates/vendors/*.yaml); this list is the
+first layer of the tenant CSR's args.
 
-Keep this list MINIMAL — anything that varies by workload belongs in
-the scientist's per-component `args:` (or a typed knob like
-`contextLength`). When unsure, leave it OUT and let the scientist add
-it via `args:`. Scientists who need to suppress a default here must
-override the entire `args:` list (the chart does not provide a
-per-flag drop mechanism in v0.1 — see README open items).
+Layering order (see README "Args layering"):
+  1. Runtime base       (THIS template — host/port/server defaults)
+  2. Synthesised flags  (componentSynthesizedArgs — typed knobs)
+  3. User args[]        (escape hatch — wins on duplicate --flag)
 
-Returns: a YAML list of strings (one flag/value per line).
+Returns: a YAML list of strings (alternating flag/value).
 */}}
-{{- define "ome-isvc.engineDefaultArgs" -}}
+{{- define "ome-isvc.engineBaseArgs" -}}
+- --host
+- 0.0.0.0
+- --port
+- "30000"
 - --enable-prefix-cache
 - --schedule-policy
 - lpm
 {{- end -}}
 
 {{/*
-ome-isvc.routerDefaultArgs — chart-side production defaults prepended
-to the router component's args list. Same contract as
-ome-isvc.engineDefaultArgs. Empty by default — the router's behaviour
-is fully specified by the typed knobs (timeout, load-balancer) plus
-the scientist's `args:`.
+ome-isvc.routerBaseArgs — chart-hardcoded runtime base config for the
+router component. Same contract as ome-isvc.engineBaseArgs. Empty by
+default; the router's behaviour is fully specified by the typed knobs
+(timeoutSeconds, loadBalancingAlgorithm, ...) plus the scientist's
+`args:`. Define entries here if a future router flag becomes
+"universally true" for every tenant.
 */}}
-{{- define "ome-isvc.routerDefaultArgs" -}}
+{{- define "ome-isvc.routerBaseArgs" -}}
 {{- end -}}
 
 {{/*
-ome-isvc.componentArgs — assemble the args list for a component block.
-The vendor profile carries no args; this helper builds the entire
-runner args list. Order:
+ome-isvc.mergeArgs — merges two args lists with dedup-by-flag-name.
+User entries WIN on duplicate `--flag` and entirely new user flags get
+APPENDED at the end (after base entries).
 
-  1. Chart production defaults (ome-isvc.engineDefaultArgs).
-  2. Synthesised flags from explicit knobs (only emitted when set):
-       --context-length         <contextLength>
-       --tensor-parallel-size   <tensorParallelSize>
-       --mem-fraction-static    <gpuMemoryUtilization>
-       --max-running-requests   <maxConcurrentRequests>
-  3. User-supplied `args:` from the values block, appended last so the
-     escape hatch wins on duplicate flags.
+Input dict:
+  .base = list of strings (chart-hardcoded base args; alternating
+          `--flag` then value, with bare boolean flags allowed).
+  .user = list of strings (scientist's `args:` from values.yaml; same
+          shape as .base).
 
-Each knob is emitted ONLY when the values block explicitly carries the
-key (`hasKey`) — unset knobs leave the vendor / sglang default in place.
+Walking semantics:
+  - Items starting with `--` are flags.
+  - The NEXT item is the value IFF it does NOT start with `--`;
+    otherwise the flag is a bare boolean (no value).
+  - We build an ordered list of flag names (preserving base order,
+    appending net-new user flags), plus a map flag -> value.
+  - User entries OVERWRITE base entries on duplicate flag (so user
+    `--port 31000` replaces base `--port 30000` rather than producing
+    two `--port` entries in the final list).
+  - Bare boolean values are represented by the empty string in the
+    map and re-emitted as a single line.
+
+Output: a YAML sequence ready to drop into `args:` (with `nindent`).
+Each line is either `- --flag` (boolean) or `- --flag` followed by
+`- "value"`.
+*/}}
+{{- define "ome-isvc.mergeArgs" -}}
+{{- $base := default (list) .base -}}
+{{- $user := default (list) .user -}}
+{{- $merged := dict -}}
+{{- $order := list -}}
+{{- /* Walk base in pairs. Use index-based iteration so we can peek ahead. */ -}}
+{{- $baseLen := len $base -}}
+{{- range $i, $item := $base -}}
+{{- if hasPrefix "--" $item -}}
+{{- /* Flag. Peek next item. */ -}}
+{{- $val := "" -}}
+{{- $next := add $i 1 -}}
+{{- if lt $next $baseLen -}}
+{{- $peek := index $base $next -}}
+{{- if not (hasPrefix "--" $peek) -}}
+{{- $val = $peek -}}
+{{- end -}}
+{{- end -}}
+{{- if not (hasKey $merged $item) -}}
+{{- $order = append $order $item -}}
+{{- end -}}
+{{- $_ := set $merged $item $val -}}
+{{- end -}}
+{{- end -}}
+{{- /* Walk user in pairs, same logic but user wins on duplicates. */ -}}
+{{- $userLen := len $user -}}
+{{- range $i, $item := $user -}}
+{{- if hasPrefix "--" $item -}}
+{{- $val := "" -}}
+{{- $next := add $i 1 -}}
+{{- if lt $next $userLen -}}
+{{- $peek := index $user $next -}}
+{{- if not (hasPrefix "--" $peek) -}}
+{{- $val = $peek -}}
+{{- end -}}
+{{- end -}}
+{{- if not (hasKey $merged $item) -}}
+{{- $order = append $order $item -}}
+{{- end -}}
+{{- $_ := set $merged $item $val -}}
+{{- end -}}
+{{- end -}}
+{{- /* Emit the merged list as a YAML sequence. */ -}}
+{{- range $flag := $order }}
+- {{ $flag }}
+{{- $val := index $merged $flag }}
+{{- if ne $val "" }}
+- {{ $val | quote }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+ome-isvc.componentSynthesizedArgs — emit the synthesised typed-flag
+block for a component (engine/prefill/decode). One sglang flag per
+explicitly set knob; unset knobs are omitted (so the chart base or
+sglang default takes effect).
 
 Args:  dict "block" .prefill | .decode | .engine
-Returns: a list of strings (use with `toYaml` at the call site).
+Returns: a YAML list of strings (alternating flag/value). Empty if no
+knob is set.
+
+Mapping (see README "Synthesised CLI flags"):
+  contextLength                    -> --context-length
+  tensorParallelSize               -> --tensor-parallel-size
+  gpuMemoryUtilization             -> --mem-fraction-static
+  maxConcurrentRequests            -> --max-running-requests
+  dtype                            -> --dtype
+  quantization                     -> --quantization
+  kvCacheDtype                     -> --kv-cache-dtype
+  moeRunnerBackend                 -> --moe-runner-backend
+  speculative.algorithm            -> --speculative-algorithm        (gates the block)
+  speculative.draftModelPath       -> --speculative-draft-model
+  speculative.draftModelQuantization -> --speculative-draft-model-quantization
+*/}}
+{{- define "ome-isvc.componentSynthesizedArgs" -}}
+{{- $b := .block -}}
+{{- if hasKey $b "contextLength" }}
+- --context-length
+- "{{ printf "%d" (int $b.contextLength) }}"
+{{- end -}}
+{{- if hasKey $b "tensorParallelSize" }}
+- --tensor-parallel-size
+- "{{ printf "%d" (int $b.tensorParallelSize) }}"
+{{- end -}}
+{{- if hasKey $b "gpuMemoryUtilization" }}
+- --mem-fraction-static
+- "{{ printf "%v" $b.gpuMemoryUtilization }}"
+{{- end -}}
+{{- if hasKey $b "maxConcurrentRequests" }}
+- --max-running-requests
+- "{{ printf "%d" (int $b.maxConcurrentRequests) }}"
+{{- end -}}
+{{- /* Model artifact knobs — emit ONLY when set to a non-empty value. */ -}}
+{{- if and (hasKey $b "dtype") $b.dtype }}
+- --dtype
+- {{ $b.dtype | quote }}
+{{- end -}}
+{{- if and (hasKey $b "quantization") $b.quantization }}
+- --quantization
+- {{ $b.quantization | quote }}
+{{- end -}}
+{{- if and (hasKey $b "kvCacheDtype") $b.kvCacheDtype }}
+- --kv-cache-dtype
+- {{ $b.kvCacheDtype | quote }}
+{{- end -}}
+{{- if and (hasKey $b "moeRunnerBackend") $b.moeRunnerBackend }}
+- --moe-runner-backend
+- {{ $b.moeRunnerBackend | quote }}
+{{- end -}}
+{{- /* Speculative decoding — algorithm GATES the whole block. */ -}}
+{{- if and $b.speculative $b.speculative.algorithm }}
+- --speculative-algorithm
+- {{ $b.speculative.algorithm | quote }}
+{{- if $b.speculative.draftModelPath }}
+- --speculative-draft-model
+- {{ $b.speculative.draftModelPath | quote }}
+{{- end -}}
+{{- if $b.speculative.draftModelQuantization }}
+- --speculative-draft-model-quantization
+- {{ $b.speculative.draftModelQuantization | quote }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+ome-isvc.componentArgs — assemble the FULL args list for a component
+block, layered as: runtime base + synthesised typed flags + user args,
+with dedup-by-flag-name (user wins on duplicates). Renamed knobs are
+emitted only when explicitly set — unset knobs leave the chart base /
+sglang default in place.
+
+Args:  dict "block" .prefill | .decode | .engine
+Returns: JSON-encoded list of strings (use `fromJsonArray` at the call
+site to materialise back to a Helm list, then `toYaml`).
 */}}
 {{- define "ome-isvc.componentArgs" -}}
 {{- $b := .block -}}
-{{- $args := list -}}
-{{- /* 1. production defaults */ -}}
-{{- $defaultsRaw := include "ome-isvc.engineDefaultArgs" . | trim -}}
-{{- if $defaultsRaw -}}
-{{- range $a := $defaultsRaw | fromYamlArray -}}{{- $args = append $args $a -}}{{- end -}}
-{{- end -}}
-{{- /* 2. synthesised flags */ -}}
-{{- if hasKey $b "contextLength" -}}
-{{- $args = append $args "--context-length" -}}
-{{- $args = append $args (printf "%d" (int $b.contextLength)) -}}
-{{- end -}}
-{{- if hasKey $b "tensorParallelSize" -}}
-{{- $args = append $args "--tensor-parallel-size" -}}
-{{- $args = append $args (printf "%d" (int $b.tensorParallelSize)) -}}
-{{- end -}}
-{{- if hasKey $b "gpuMemoryUtilization" -}}
-{{- $args = append $args "--mem-fraction-static" -}}
-{{- $args = append $args (printf "%v" $b.gpuMemoryUtilization) -}}
-{{- end -}}
-{{- if hasKey $b "maxConcurrentRequests" -}}
-{{- $args = append $args "--max-running-requests" -}}
-{{- $args = append $args (printf "%d" (int $b.maxConcurrentRequests)) -}}
-{{- end -}}
-{{- /* 3. user-supplied args */ -}}
-{{- if $b.args -}}
-{{- range $a := $b.args -}}{{- $args = append $args $a -}}{{- end -}}
-{{- end -}}
-{{- $args | toJson -}}
+{{- $baseRaw := include "ome-isvc.engineBaseArgs" . | trim -}}
+{{- $base := list -}}
+{{- if $baseRaw -}}{{- $base = $baseRaw | fromYamlArray -}}{{- end -}}
+{{- $synthRaw := include "ome-isvc.componentSynthesizedArgs" (dict "block" $b) | trim -}}
+{{- $synth := list -}}
+{{- if $synthRaw -}}{{- $synth = $synthRaw | fromYamlArray -}}{{- end -}}
+{{- $baseAndSynth := concat $base $synth -}}
+{{- $user := default (list) $b.args -}}
+{{- $mergedRaw := include "ome-isvc.mergeArgs" (dict "base" $baseAndSynth "user" $user) | trim -}}
+{{- $merged := list -}}
+{{- if $mergedRaw -}}{{- $merged = $mergedRaw | fromYamlArray -}}{{- end -}}
+{{- $merged | toJson -}}
 {{- end -}}
 
 {{/*
@@ -327,11 +457,64 @@ worker:
 {{- end -}}
 
 {{/*
+ome-isvc.routerSynthesizedArgs — emit the synthesised typed-flag block
+for the router component. One CLI flag per explicitly set router knob;
+unset knobs are omitted.
+
+Args:  dict "block" .router
+Returns: a YAML list of strings (alternating flag/value). Empty if no
+knob is set.
+*/}}
+{{- define "ome-isvc.routerSynthesizedArgs" -}}
+{{- $b := .block -}}
+{{- if hasKey $b "timeoutSeconds" }}
+- --backend-timeout
+- "{{ printf "%d" (int $b.timeoutSeconds) }}"
+{{- end -}}
+{{- /* streamingTimeoutSeconds: SSE / token deadline for long generations.
+       Emitted as --streaming-timeout-secs; the exact sglang router flag
+       name may differ — adjust here if the upstream binary expects
+       something else (e.g. --stream-timeout-secs). */ -}}
+{{- if hasKey $b "streamingTimeoutSeconds" }}
+- --streaming-timeout-secs
+- "{{ printf "%d" (int $b.streamingTimeoutSeconds) }}"
+{{- end -}}
+{{- if $b.loadBalancingAlgorithm }}
+- --load-balancer
+- {{ $b.loadBalancingAlgorithm | quote }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+ome-isvc.routerArgs — assemble the FULL router args list using the
+same 3-layer merge as the engine components: routerBaseArgs +
+routerSynthesizedArgs + user args, deduped by --flag (user wins).
+
+Args:  dict "block" .router
+Returns: JSON-encoded list of strings.
+*/}}
+{{- define "ome-isvc.routerArgs" -}}
+{{- $b := .block -}}
+{{- $baseRaw := include "ome-isvc.routerBaseArgs" . | trim -}}
+{{- $base := list -}}
+{{- if $baseRaw -}}{{- $base = $baseRaw | fromYamlArray -}}{{- end -}}
+{{- $synthRaw := include "ome-isvc.routerSynthesizedArgs" (dict "block" $b) | trim -}}
+{{- $synth := list -}}
+{{- if $synthRaw -}}{{- $synth = $synthRaw | fromYamlArray -}}{{- end -}}
+{{- $baseAndSynth := concat $base $synth -}}
+{{- $user := default (list) $b.args -}}
+{{- $mergedRaw := include "ome-isvc.mergeArgs" (dict "base" $baseAndSynth "user" $user) | trim -}}
+{{- $merged := list -}}
+{{- if $mergedRaw -}}{{- $merged = $mergedRaw | fromYamlArray -}}{{- end -}}
+{{- $merged | toJson -}}
+{{- end -}}
+
+{{/*
 ome-isvc.renderRouter — emit the InferenceService router spec from a
-scientist-facing router block. Adds router-specific extra args
-(timeout, load-balancer) into the `runner.args` list because the OME
-router runner is a single container that takes them as CLI flags. Same
-image/args override mechanic as the prefill/decode/engine components.
+scientist-facing router block. Adds the merged router args list onto
+the runner because the OME router runner is a single container that
+takes them as CLI flags. Same image/args override mechanic as the
+prefill/decode/engine components.
 
 Args:  dict "block" .router
 */}}
@@ -345,42 +528,16 @@ minReplicas: {{ $b.replicas.min }}
 maxReplicas: {{ $b.replicas.max }}
 {{- end }}
 {{- end }}
-{{- $extraArgs := list -}}
-{{- /* 1. chart production defaults (empty by default; safe to skip) */ -}}
-{{- $defaultsRaw := include "ome-isvc.routerDefaultArgs" . | trim -}}
-{{- if $defaultsRaw -}}
-{{- range $a := $defaultsRaw | fromYamlArray -}}{{- $extraArgs = append $extraArgs $a -}}{{- end -}}
-{{- end -}}
-{{- /* 2. synthesised flags from typed knobs */ -}}
-{{- if hasKey $b "timeoutSeconds" -}}
-{{- $extraArgs = append $extraArgs "--backend-timeout" -}}
-{{- $extraArgs = append $extraArgs (printf "%d" (int $b.timeoutSeconds)) -}}
-{{- end -}}
-{{- /* streamingTimeoutSeconds: SSE / token deadline for long generations.
-       Emitted as --streaming-timeout-secs; the exact sglang router flag
-       name may differ — adjust here if the upstream binary expects
-       something else (e.g. --stream-timeout-secs). */ -}}
-{{- if hasKey $b "streamingTimeoutSeconds" -}}
-{{- $extraArgs = append $extraArgs "--streaming-timeout-secs" -}}
-{{- $extraArgs = append $extraArgs (printf "%d" (int $b.streamingTimeoutSeconds)) -}}
-{{- end -}}
-{{- if $b.loadBalancingAlgorithm -}}
-{{- $extraArgs = append $extraArgs "--load-balancer" -}}
-{{- $extraArgs = append $extraArgs $b.loadBalancingAlgorithm -}}
-{{- end -}}
-{{- /* 3. user-supplied args (escape hatch — wins on duplicate flags) */ -}}
-{{- if $b.args -}}
-{{- range $a := $b.args -}}{{- $extraArgs = append $extraArgs $a -}}{{- end -}}
-{{- end -}}
-{{- if or $b.image (gt (len $extraArgs) 0) }}
+{{- $merged := include "ome-isvc.routerArgs" (dict "block" $b) | fromJsonArray -}}
+{{- if or $b.image (gt (len $merged) 0) }}
 runner:
   name: router
   {{- if $b.image }}
   image: {{ $b.image | quote }}
   {{- end }}
-  {{- if gt (len $extraArgs) 0 }}
+  {{- if gt (len $merged) 0 }}
   args:
-    {{- toYaml $extraArgs | nindent 4 }}
+    {{- toYaml $merged | nindent 4 }}
   {{- end }}
 {{- end -}}
 {{- end -}}

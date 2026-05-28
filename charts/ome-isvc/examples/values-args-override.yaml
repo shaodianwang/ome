@@ -1,0 +1,76 @@
+# Example: scientist overrides a chart-hardcoded base flag via the
+# `args:` escape hatch.
+#
+# This is the third layer of the 3-layer args model (see README "Args
+# layering"):
+#
+#   1. Runtime base       (chart-hardcoded — host/port/server defaults)
+#   2. Synthesised flags  (typed knobs — only emitted when set)
+#   3. User args[]        (this file — wins on duplicate --flag)
+#
+# Here the scientist needs the prefill container to listen on port
+# 31000 instead of the chart's hardcoded 30000. The merge helper
+# deduplicates by flag name, so the final tenant CSR's args carry
+# `--port 31000` (single instance) — the user value wins and the base
+# value is NOT silently duplicated.
+#
+# Resulting resources (relevant portion):
+#   ClusterServingRuntime/llama4x-port-override-llama4x-csr
+#     spec.engineConfig.runner.args:
+#       - --host
+#       - 0.0.0.0
+#       - --port
+#       - "31000"          # <-- user-supplied; OVERRIDES base --port 30000
+#       - --enable-prefix-cache
+#       - --schedule-policy
+#       - lpm
+#       - --context-length
+#       - "131072"
+
+namespace:
+  name: ml-team-prod
+
+scope: cluster
+
+# vendor: cks-gb300-sglang-pd  # chart-level default
+
+deployments:
+  - name: llama4x
+    servingMode: pd
+
+    prefill:
+      replicas:
+        min: 1
+        max: 1
+      contextLength: 131072
+      # Override the chart's hardcoded --port 30000 with --port 31000.
+      # Dedup happens at the merge layer (see _helpers.tpl::mergeArgs).
+      args:
+        - --port
+        - "31000"
+
+    decode:
+      replicas:
+        min: 1
+        max: 1
+      contextLength: 131072
+
+    router:
+      enabled: true
+      replicas:
+        min: 1
+        max: 1
+      timeoutSeconds: 60
+
+    coordination:
+      policy: BlueGreen
+      pacing:
+        type: PerComponent
+        maxSurge: 1
+        maxUnavailable: 0
+
+    modelRef:
+      name: avo-tier5-pd-prod
+      scope: cluster
+
+basemodels: []

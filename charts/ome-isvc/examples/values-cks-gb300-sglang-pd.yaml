@@ -29,8 +29,30 @@ deployments:
         max: 4
       contextLength: 1048576
       tensorParallelSize: 4
-      gpuMemoryUtilization: 0.92
+      gpuMemoryUtilization: 0.8
       maxConcurrentRequests: 256
+      # Typed model-artifact knobs synthesise sglang flags only when set
+      # (see README "Args layering" + "Synthesised CLI flags"). Mirrors
+      # the production Llama4x nvfp4 launch on gb300.
+      dtype: bfloat16
+      quantization: modelopt_fp4
+      kvCacheDtype: bfloat16
+      moeRunnerBackend: flashinfer_trtllm
+      speculative:
+        algorithm: EAGLE3
+        draftModelPath: $(MODEL_PATH)/draft_hf
+        draftModelQuantization: unquant
+      # Extra flags that have no typed knob equivalent. User entries win
+      # on duplicate --flag against the chart base / synthesised layers.
+      args:
+        - --ep-size
+        - "4"
+        - --disaggregation-mode
+        - prefill
+        - --disaggregation-transfer-backend
+        - nixl
+        - --disaggregation-bootstrap-port
+        - "8998"
       # env entries are merged into the vendor's env list by `name`
       # (predictable per-key strategic merge). Use this to extend the
       # vendor's infra env (e.g. workload-specific knobs the scientist
@@ -49,8 +71,23 @@ deployments:
         max: 4
       contextLength: 1048576
       tensorParallelSize: 4
-      gpuMemoryUtilization: 0.92
+      gpuMemoryUtilization: 0.8
       maxConcurrentRequests: 256
+      dtype: bfloat16
+      quantization: modelopt_fp4
+      kvCacheDtype: bfloat16
+      moeRunnerBackend: flashinfer_trtllm
+      speculative:
+        algorithm: EAGLE3
+        draftModelPath: $(MODEL_PATH)/draft_hf
+        draftModelQuantization: unquant
+      args:
+        - --ep-size
+        - "4"
+        - --disaggregation-mode
+        - decode
+        - --disaggregation-transfer-backend
+        - nixl
       env:
         - name: SGLANG_EXTERNAL_MODEL_PACKAGE
           value: sglang_meta.srt.models

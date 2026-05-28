@@ -28,7 +28,16 @@ deployments:
       tensorParallelSize: 4
       gpuMemoryUtilization: 0.92
       maxConcurrentRequests: 256
-      args: []                    # extra flags appended after synthesized ones
+      # Model artifact knobs — each emits its sglang flag only when set.
+      dtype: ""                   # e.g., bfloat16 / fp16 / fp8 / auto
+      quantization: ""            # e.g., modelopt_fp4 / awq / gptq / fp8
+      kvCacheDtype: ""            # e.g., bfloat16 / fp8
+      moeRunnerBackend: ""        # MoE only, e.g., flashinfer_trtllm
+      speculative:                # omit block (or leave algorithm empty) for non-speculative
+        algorithm: ""             # gates the speculative block (e.g. EAGLE / EAGLE3)
+        draftModelPath: ""        # e.g., $(MODEL_PATH)/draft_hf
+        draftModelQuantization: ""# e.g., unquant
+      args: []                    # extra flags; user wins on duplicate --flag (see README "Args layering")
       env: []                     # merged into vendor env by name (per-key strategic merge)
 
     decode:
@@ -37,7 +46,15 @@ deployments:
       tensorParallelSize: 4
       gpuMemoryUtilization: 0.92
       maxConcurrentRequests: 256
-      args: []                    # extra flags appended after synthesized ones
+      dtype: ""
+      quantization: ""
+      kvCacheDtype: ""
+      moeRunnerBackend: ""
+      speculative:
+        algorithm: ""
+        draftModelPath: ""
+        draftModelQuantization: ""
+      args: []                    # extra flags; user wins on duplicate --flag (see README "Args layering")
       env: []                     # merged into vendor env by name (per-key strategic merge)
 
     router:
