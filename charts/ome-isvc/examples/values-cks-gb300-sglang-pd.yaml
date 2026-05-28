@@ -31,6 +31,17 @@ deployments:
       tensorParallelSize: 4
       gpuMemoryUtilization: 0.92
       maxConcurrentRequests: 256
+      # env entries are merged into the vendor's env list by `name`
+      # (predictable per-key strategic merge). Use this to extend the
+      # vendor's infra env (e.g. workload-specific knobs the scientist
+      # wants to toggle without rolling a new vendor image).
+      env:
+        - name: SGLANG_EXTERNAL_MODEL_PACKAGE
+          value: sglang_meta.srt.models
+        - name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN
+          value: "1"
+        - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+          value: UCX
 
     decode:
       replicas:
@@ -40,6 +51,13 @@ deployments:
       tensorParallelSize: 4
       gpuMemoryUtilization: 0.92
       maxConcurrentRequests: 256
+      env:
+        - name: SGLANG_EXTERNAL_MODEL_PACKAGE
+          value: sglang_meta.srt.models
+        - name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN
+          value: "1"
+        - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+          value: UCX
 
     router:
       enabled: true

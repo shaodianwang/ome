@@ -191,6 +191,7 @@
         "image":                 {"type": "string"},
         "replicas":              {"$ref": "#/$defs/replicasBlock"},
         "args":                  {"type": "array", "items": {"type": "string"}},
+        "env":                   {"$ref": "#/$defs/envList"},
         "contextLength":         {"type": "integer", "minimum": 1, "description": "Synthesised as `--context-length <N>` on the runner args."},
         "tensorParallelSize":    {"type": "integer", "minimum": 1, "description": "Synthesised as `--tensor-parallel-size <N>` (sglang)."},
         "gpuMemoryUtilization":  {"type": "number",  "minimum": 0, "maximum": 1, "description": "Fraction (0.0–1.0) of GPU memory the engine may use; synthesised as `--mem-fraction-static <X>` (sglang)."},
@@ -206,6 +207,7 @@
         "image":                 {"type": "string"},
         "replicas":              {"$ref": "#/$defs/replicasBlock"},
         "args":                  {"type": "array", "items": {"type": "string"}},
+        "env":                   {"$ref": "#/$defs/envList"},
         "contextLength":         {"type": "integer", "minimum": 1, "description": "Synthesised as `--context-length <N>` on the runner args."},
         "tensorParallelSize":    {"type": "integer", "minimum": 1, "description": "Synthesised as `--tensor-parallel-size <N>` (sglang)."},
         "gpuMemoryUtilization":  {"type": "number",  "minimum": 0, "maximum": 1, "description": "Fraction (0.0–1.0) of GPU memory the engine may use; synthesised as `--mem-fraction-static <X>` (sglang)."},
@@ -223,9 +225,32 @@
         "image":                    {"type": "string"},
         "replicas":                 {"$ref": "#/$defs/replicasBlock"},
         "args":                     {"type": "array", "items": {"type": "string"}, "description": "Extra CLI flags appended after the synthesised flags; user overrides win on duplicate flags."},
+        "env":                      {"$ref": "#/$defs/envList"},
         "timeoutSeconds":           {"type": "integer", "minimum": 1, "description": "Request-completion deadline; synthesised as `--backend-timeout <N>` on the router runner."},
         "streamingTimeoutSeconds":  {"type": "integer", "minimum": 1, "description": "SSE/token-stream deadline (default 600); synthesised as `--streaming-timeout-secs <N>` (sglang router flag name may differ; see template)."},
         "loadBalancingAlgorithm":   {"type": "string"}
+      }
+    },
+    "envList": {
+      "type": "array",
+      "description": "Container env vars. Forwarded onto the tenant CSR's runner.env, where they merge with the vendor profile's env list by `name` (predictable per-key strategic merge). Use either `{name, value}` for literals or `{name, valueFrom}` for downward-API / configMap / secret refs.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name":      {"type": "string", "minLength": 1},
+          "value":     {"type": "string"},
+          "valueFrom": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Standard corev1.EnvVarSource (fieldRef / resourceFieldRef / configMapKeyRef / secretKeyRef). Schema not narrowed in v0.1; OME webhook validates the rendered InferenceService."
+          }
+        },
+        "oneOf": [
+          {"required": ["value"]},
+          {"required": ["valueFrom"]}
+        ]
       }
     },
     "coordinationBlock": {

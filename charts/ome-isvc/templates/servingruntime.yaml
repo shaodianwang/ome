@@ -6,11 +6,19 @@ Each child runtime is intentionally thin:
   - It carries `metadata.annotations["ome.io/inherit-from"]: <vendor>`
     so the OME controller resolves the full spec at consume time
     against the matching vendor profile under templates/vendors/.
-  - Its `spec` contains ONLY the per-component overrides synthesised
-    from the deployment's scientist-facing knobs (image, args,
-    contextLength, tensorParallelSize, gpuMemoryUtilization,
-    maxConcurrentRequests). The vendor's container shape (resources,
-    RDMA, volumes, probes, security context) is inherited verbatim.
+  - Its `spec` carries:
+      * `runner.image`  — when the deployment overrides the image;
+      * `runner.args`   — the COMPLETE args list (chart production
+                          defaults + synthesised typed flags + user
+                          `args:`). The vendor profile carries no
+                          args; the chart owns the whole list to avoid
+                          strategic-merge's wholesale-replace trap on
+                          plain `[]string` lists.
+      * `runner.env`    — user-supplied env entries from the values
+                          block; merged into vendor env by `name` key
+                          via strategic merge (predictable, additive).
+    Other infrastructure (resources, RDMA, volumes, probes, security
+    context) is inherited verbatim from the vendor profile.
 
 Component naming translation:
   prefill -> engineConfig         (prefill+decode disaggregated servingMode)
@@ -20,13 +28,10 @@ Component naming translation:
 
 Strategic-merge inheritance (via the ome.io/inherit-from annotation):
   - child wins on collision;
-  - listMapKey lists (e.g. `env`) merge per `name`;
-  - plain lists (e.g. `args`, `command`) are wholesale-replaced — so a
-    child `args` override REPLACES the vendor base args. The vendor
-    template supplies the base CLI under `command`; the child appends
-    the runtime knobs the scientist set under each component (context
-    length, tensor parallel, etc.) plus any `args` extras, ordered so
-    the user `args` win on duplicate flags.
+  - listMapKey lists (e.g. `env`) merge per `name` — predictable, additive;
+  - plain lists (e.g. `args`, `command`) are wholesale-replaced — this
+    is exactly why the vendor profile leaves them empty: the chart
+    re-emits the full child list so there is nothing to silently lose.
 */ -}}
 {{- $root := . -}}
 {{- $kind := include "ome-isvc.runtimeKind" $root -}}
@@ -54,40 +59,25 @@ metadata:
     {{- with include "ome-isvc.commonAnnotations" $root | trim }}
     {{- . | nindent 4 }}
     {{- end }}
-{{- /* Compute whether we'll emit any spec override at all. When nothing
-       is set, render `spec: {}` so the child runtime inherits the
-       vendor spec verbatim. */ -}}
-{{- $emitPrefill := false -}}
-{{- $prefillArgs := list -}}
-{{- if $hasPrefill -}}
-  {{- $b := $deployment.prefill -}}
-  {{- $prefillArgs = include "ome-isvc.componentArgs" (dict "block" $b) | fromJsonArray -}}
-  {{- if or $b.image (gt (len $prefillArgs) 0) -}}{{- $emitPrefill = true -}}{{- end -}}
-{{- end -}}
-{{- $emitDecode := false -}}
-{{- $decodeArgs := list -}}
-{{- if $hasDecode -}}
-  {{- $b := $deployment.decode -}}
-  {{- $decodeArgs = include "ome-isvc.componentArgs" (dict "block" $b) | fromJsonArray -}}
-  {{- if or $b.image (gt (len $decodeArgs) 0) -}}{{- $emitDecode = true -}}{{- end -}}
-{{- end -}}
-{{- $emitEngine := false -}}
-{{- $engineArgs := list -}}
-{{- if $hasEngine -}}
-  {{- $b := $deployment.engine -}}
-  {{- $engineArgs = include "ome-isvc.componentArgs" (dict "block" $b) | fromJsonArray -}}
-  {{- if or $b.image (gt (len $engineArgs) 0) $b.workerSize -}}{{- $emitEngine = true -}}{{- end -}}
-{{- end -}}
-{{- $emitRouter := false -}}
-{{- if $hasRouter -}}
-  {{- $b := $deployment.router -}}
-  {{- if $b.image -}}{{- $emitRouter = true -}}{{- end -}}
-{{- end -}}
-{{- $anyEmit := or (or $emitPrefill $emitDecode) (or $emitEngine $emitRouter) }}
-{{- if $anyEmit }}
+  {{- /* Pre-compute args lists per component. componentArgs always
+       returns at least the chart production defaults (see
+       ome-isvc.engineDefaultArgs), so a tenant always ships a full
+       args list rather than relying on the vendor (which has none). */}}
+  {{- $prefillArgs := list }}
+  {{- if $hasPrefill }}
+  {{- $prefillArgs = include "ome-isvc.componentArgs" (dict "block" $deployment.prefill) | fromJsonArray }}
+  {{- end }}
+  {{- $decodeArgs := list }}
+  {{- if $hasDecode }}
+  {{- $decodeArgs = include "ome-isvc.componentArgs" (dict "block" $deployment.decode) | fromJsonArray }}
+  {{- end }}
+  {{- $engineArgs := list }}
+  {{- if $hasEngine }}
+  {{- $engineArgs = include "ome-isvc.componentArgs" (dict "block" $deployment.engine) | fromJsonArray }}
+  {{- end }}
 spec:
   {{- /* prefill -> engineConfig override -------------------------------- */ -}}
-  {{- if $emitPrefill }}
+  {{- if $hasPrefill }}
   {{- $b := $deployment.prefill }}
   engineConfig:
     runner:
@@ -99,9 +89,13 @@ spec:
       args:
         {{- toYaml $prefillArgs | nindent 8 }}
       {{- end }}
+      {{- if and $b.env (gt (len $b.env) 0) }}
+      env:
+        {{- toYaml $b.env | nindent 8 }}
+      {{- end }}
   {{- end }}
   {{- /* decode -> decoderConfig override -------------------------------- */ -}}
-  {{- if $emitDecode }}
+  {{- if $hasDecode }}
   {{- $b := $deployment.decode }}
   decoderConfig:
     runner:
@@ -113,12 +107,15 @@ spec:
       args:
         {{- toYaml $decodeArgs | nindent 8 }}
       {{- end }}
+      {{- if and $b.env (gt (len $b.env) 0) }}
+      env:
+        {{- toYaml $b.env | nindent 8 }}
+      {{- end }}
   {{- end }}
   {{- /* engine -> engineConfig override (standalone / multinode) ------- */ -}}
-  {{- if $emitEngine }}
+  {{- if $hasEngine }}
   {{- $b := $deployment.engine }}
   engineConfig:
-    {{- if or $b.image (gt (len $engineArgs) 0) }}
     runner:
       name: ome-container
       {{- if $b.image }}
@@ -128,25 +125,27 @@ spec:
       args:
         {{- toYaml $engineArgs | nindent 8 }}
       {{- end }}
-    {{- end }}
+      {{- if and $b.env (gt (len $b.env) 0) }}
+      env:
+        {{- toYaml $b.env | nindent 8 }}
+      {{- end }}
     {{- if and (eq $servingMode "multinode") $b.workerSize }}
     worker:
       size: {{ $b.workerSize }}
     {{- end }}
   {{- end }}
-  {{- /* router -> routerConfig override (image only; the router CLI
-         flags land on the InferenceService runner via renderRouter
-         in inferenceservice.yaml) ----------------------------------- */ -}}
+  {{- /* router -> routerConfig override --------------------------------- */ -}}
   {{- if $hasRouter }}
   {{- $b := $deployment.router }}
-  {{- if $b.image }}
   routerConfig:
     runner:
       name: router
+      {{- if $b.image }}
       image: {{ $b.image | quote }}
+      {{- end }}
+      {{- if and $b.env (gt (len $b.env) 0) }}
+      env:
+        {{- toYaml $b.env | nindent 8 }}
+      {{- end }}
   {{- end }}
-  {{- end }}
-{{- else }}
-spec: {}
-{{- end }}
 {{- end }}

@@ -1,13 +1,24 @@
 {{- /*
-templates/vendors/gke-tpu-sglang.yaml — illustrative pre-tailored
-ClusterServingRuntime for GKE TPU clusters running sglang in a
-single-component (engine-only) servingMode.
+templates/vendors/gke-tpu-sglang.yaml — illustrative slim "where-it-runs"
+profile for GKE TPU sglang in a single-component (engine-only)
+servingMode. Placeholder image — operators publishing a real GKE TPU
+sglang build will swap it in.
 
-This template is intentionally a placeholder — it demonstrates the
-multi-vendor extension point on a TPU node pool. Real GKE TPU runtimes
-require a tenant-specific image catalog, RDMA / multus wiring, and
-NCCL tuning; an operator publishing a real profile would replace the
-placeholder image, TPU resource request, and sglang args here.
+IN scope (vendor owns these):
+  - container image
+  - TPU resources (google.com/tpu)
+  - shared-memory volume + volumeMount
+  - infrastructure env vars (TPU runtime identification, JAX platform
+    pin, Python tooling paths)
+  - nodeSelector (TPU accelerator/topology) + tolerations
+  - probes + container ports + prometheus scrape annotations
+  - runner.name
+
+OUT of scope (chart-side tenant CSR / scientist owns these):
+  - container `command` and `args` — every flag lives in the tenant
+    CSR's args list so strategic-merge cannot wipe the vendor list
+    when a scientist appends one flag (plain `[]string` lists collide
+    wholesale; named lists like `env` merge by key)
 
 Gating:
   - Auto-deployed when any entry in .Values.deployments has
@@ -65,25 +76,14 @@ spec:
       name: ome-container
       # Placeholder image — replace with operator-published GKE TPU sglang build.
       image: gcr.io/PROJECT/sglang-tpu:latest
-      command:
-        - python3
-        - -m
-        - sglang.launch_server
-        - --host
-        - 0.0.0.0
-        - --port
-        - "30000"
-        - --model-path
-        - $(MODEL_PATH)
-        - --device
-        - tpu
-        - --dtype
-        - bfloat16
       env:
+        # PYTHONUNBUFFERED — stream stdout/stderr to kubectl logs.
         - name: PYTHONUNBUFFERED
           value: "1"
+        # TPU_NAME — TPU runtime identity expected by libtpu.
         - name: TPU_NAME
           value: localhost
+        # JAX_PLATFORMS — pin JAX to the TPU backend.
         - name: JAX_PLATFORMS
           value: tpu
       ports:

@@ -58,16 +58,18 @@ stacks. Per stack, the chart emits:
 | `deployments[].prefill.tensorParallelSize` | int |  | Synthesised as `--tensor-parallel-size <N>` (sglang). |
 | `deployments[].prefill.gpuMemoryUtilization` | number |  | Fraction (0.0–1.0); synthesised as `--mem-fraction-static <X>` (sglang). |
 | `deployments[].prefill.maxConcurrentRequests` | int |  | Synthesised as `--max-running-requests <N>` (sglang). |
-| `deployments[].prefill.args` | array | `[]` | Extra CLI flags appended after the synthesised flags; user overrides win on duplicate flags. |
+| `deployments[].prefill.args` | array | `[]` | Extra CLI flags appended after the chart production defaults and synthesised flags; user overrides win on duplicate flags. Chart-owned args list — see "Args ownership" below. |
+| `deployments[].prefill.env` | array | `[]` | Extra container env vars. Each entry is a corev1.EnvVar (`{name, value}` or `{name, valueFrom: ...}`). Forwarded to the tenant CSR's `runner.env`, where they merge with the vendor's env list **by `name` key** (per-key strategic merge — predictable, additive). See "Env merge" below. |
 | `deployments[].prefill.autoscaling.enabled` | bool | `false` | Placeholder. KEDA wiring is reserved for a follow-up. |
 | `deployments[].prefill.autoscaling.metrics` | array | `[]` | Placeholder. Shape reserved; v0.1 templates ignore it. |
-| `deployments[].decode.*` | object |  | Same shape as `prefill.*`. `pd` only. |
-| `deployments[].engine.*` | object |  | Same shape as `prefill.*`, plus `workerSize`. `standalone` or `multinode` only. |
+| `deployments[].decode.*` | object |  | Same shape as `prefill.*` (including `env: []`). `pd` only. |
+| `deployments[].engine.*` | object |  | Same shape as `prefill.*` (including `env: []`), plus `workerSize`. `standalone` or `multinode` only. |
 | `deployments[].engine.workerSize` | int |  | Multinode only: number of worker pods per leader gang. |
 | `deployments[].router.enabled` | bool | `true` | `pd` only. Whether to emit the router Component. |
 | `deployments[].router.image` | string | `""` | Router image override. |
 | `deployments[].router.replicas.{min,max}` | int |  | Router replica counts. |
-| `deployments[].router.args` | array | `[]` | Extra router CLI flags appended after the synthesised flags; user overrides win on duplicate flags. |
+| `deployments[].router.args` | array | `[]` | Extra router CLI flags appended after the synthesised flags; user overrides win on duplicate flags. Chart-owned list. |
+| `deployments[].router.env` | array | `[]` | Extra router container env vars (same shape + merge semantics as `prefill.env`). |
 | `deployments[].router.timeoutSeconds` | int | `30` | Request-completion deadline; synthesised as `--backend-timeout <N>` on the router runner. |
 | `deployments[].router.streamingTimeoutSeconds` | int | `600` | SSE/token-stream deadline (so long generations don't time out mid-stream); synthesised as `--streaming-timeout-secs <N>`. The exact sglang router flag name may differ between versions; adjust in `_helpers.tpl::ome-isvc.renderRouter` if upstream renames it. |
 | `deployments[].router.loadBalancingAlgorithm` | string |  | Synthesised as `--load-balancer <value>` (placeholder; see open work items). |
@@ -131,10 +133,48 @@ emits `[decoder, engine]`.
 ## 5. Vendor profiles + inheritance
 
 Vendor profiles are pre-tailored `ClusterServingRuntime` resources
-bundled under `templates/vendors/`. They bake in container image,
-command line, GPU / TPU / RDMA / IB (InfiniBand) resource requests +
-limits, node selectors, tolerations, multus / macvlan annotations,
-NCCL env vars, volumes, security contexts, and probes.
+bundled under `templates/vendors/`. They are deliberately a "where it
+runs" description: container image, GPU / TPU / RDMA / IB resource
+requests, node selectors, tolerations, multus / macvlan annotations,
+infrastructure-grade env vars (NCCL networking, CUDA coredump, host
+identity), volumes, security contexts, and probes. They do **not**
+own the workload args, the workload-tuning env vars, or the
+process-launch `command`.
+
+### What's IN the vendor vs the chart
+
+The split matters because Kubernetes strategic-merge handles named
+lists (like `env`) very differently from plain `[]string` lists (like
+`args`):
+
+| List | Patch strategy | Effect on inheritance |
+|---|---|---|
+| `runner.env` (named — `name` key) | per-key merge | Vendor env + child env land in the final container, deduplicated by `name`. Predictable, additive. |
+| `runner.args` (plain `[]string`) | wholesale-replace | Whichever side last sets `args` wins; the other side's list is silently dropped. |
+| `runner.command` (plain `[]string`) | wholesale-replace | Same as `args`. |
+
+So if the vendor shipped a full `args:` list and a scientist appended
+a single `--my-flag`, the resulting tenant CSR would carry **only**
+that single flag — strategic-merge would have wiped the rest. The
+chart works around this by stripping `args`/`command` from the vendor
+profile entirely and having the chart's tenant CSR own the complete
+list, so there is nothing to lose.
+
+| Concern | Vendor (`templates/vendors/*.yaml`) | Chart-side tenant CSR (`templates/servingruntime.yaml`) |
+|---|---|---|
+| Container image | ✅ owns | overridable via `deployments[].<component>.image` |
+| GPU / RDMA / TPU resources | ✅ owns | — |
+| nodeSelector / tolerations | ✅ owns | — |
+| Volumes + volumeMounts | ✅ owns | — |
+| Multus / macvlan / IB annotations | ✅ owns | — |
+| Infrastructure env (NCCL_*, CUDA_*, host IP, PYTHONUNBUFFERED, ...) | ✅ owns | — |
+| Security context + probes + ports | ✅ owns | — |
+| Container `command` | ❌ stripped | container `ENTRYPOINT` from the image takes effect |
+| Container `args` | ❌ stripped | ✅ owns full list (production defaults + synthesised typed flags + user `args:`) |
+| Workload-tuning env (SGLANG_*, model-package knobs) | ❌ stripped | ✅ owns via `deployments[].<component>.env: []` |
+
+The vendor file's leading comment block (`IN scope` / `OUT of scope`)
+spells out the same rule for that profile specifically.
 
 ### Inheritance model
 
@@ -149,26 +189,62 @@ metadata:
 spec:
   engineConfig:            # or decoderConfig / routerConfig
     runner:
+      name: ome-container
       image: <override>    # only if you set deployments[].prefill.image
-      args:                # appended to vendor base via strategic merge
-        - --context-length
+      args:                # full list owned by the chart; replaces the
+                           # vendor's (empty) args wholesale
+        - --enable-prefix-cache      # ome-isvc.engineDefaultArgs
+        - --schedule-policy
+        - lpm
+        - --context-length           # synthesised from contextLength
         - "1048576"
-        - --tensor-parallel-size
+        - --tensor-parallel-size     # synthesised from tensorParallelSize
         - "4"
-        - --mem-fraction-static
+        - --mem-fraction-static      # synthesised from gpuMemoryUtilization
         - "0.92"
-        - --max-running-requests
+        - --max-running-requests     # synthesised from maxConcurrentRequests
         - "256"
+        # ...followed by any user-supplied .args[]
+      env:                 # per-name merge against vendor env at consume time
+        - name: SGLANG_EXTERNAL_MODEL_PACKAGE
+          value: sglang_meta.srt.models
 ```
 
 The OME controller resolves the full spec at consume time via
 strategic-merge inheritance. Child wins on collision; lists keyed by
 `name` (e.g. `env`) merge per-name; plain lists like `args` are
-wholesale-replaced — so each component's `args` override **replaces**
-the vendor base args. The chart template assembles the args list as:
-synthesised flags from `contextLength` / `tensorParallelSize` /
-`gpuMemoryUtilization` / `maxConcurrentRequests` first, then any
-`args:` extras you set (so your extras win on duplicate flags).
+wholesale-replaced — that's the trap. The chart sidesteps it by
+having the vendor carry no `args` at all.
+
+### Args ownership
+
+For each engine/prefill/decode component the chart-side tenant CSR's
+`runner.args` is constructed as the concatenation of:
+
+1. **Chart production defaults** — `ome-isvc.engineDefaultArgs` in
+   `templates/_helpers.tpl`. Hard-coded sglang flags every tenant
+   gets unless they override the entire list (e.g. `--enable-prefix-cache`,
+   `--schedule-policy lpm`). Keep this list minimal — anything that
+   varies by workload belongs in a typed knob or the scientist's
+   `args:`.
+2. **Synthesised typed flags** — emitted from the per-component knobs
+   listed below, only when explicitly set.
+3. **User-supplied `args:`** — appended last so they win on duplicate
+   flags.
+
+Scientists who need to **suppress** a chart production default must
+override the entire list via `args:`, or ask for the default to be
+removed from the chart. The chart does **not** offer a per-flag
+removal mechanism in v0.1.
+
+### Env merge
+
+For each component the chart-side tenant CSR's `runner.env` carries the
+scientist's `env: []` entries verbatim. When OME resolves the runtime
+at consume time, strategic-merge unions them with the vendor's `env`
+list using `name` as the merge key — i.e. vendor entries are
+preserved, child entries are added, and matching names are overridden
+by the child. There is no wholesale-replace risk on `env`.
 
 ### Synthesised CLI flags
 
@@ -182,9 +258,9 @@ when you explicitly set the knob:
 | `gpuMemoryUtilization`    | `--mem-fraction-static`  |
 | `maxConcurrentRequests`   | `--max-running-requests` |
 
-Unset knobs are omitted — the vendor profile / sglang defaults take
-effect. The `args:` list you supply is appended last so it wins on
-duplicate flags.
+Unset knobs are omitted — the chart production defaults / sglang
+defaults take effect. The `args:` list you supply is appended last so
+it wins on duplicate flags.
 
 ### Vendor defaulting
 
@@ -286,3 +362,8 @@ The current chart explicitly defers the following:
    in-release vendor template matches.
 5. **`values.schema.json` auto-generation** from OME CRD OpenAPI
    schemas (the schema is hand-written for v0.1).
+6. **Per-flag suppression for chart production defaults.** Scientists
+   today must override the entire `args:` list to drop a single
+   chart-default flag (e.g. `--enable-prefix-cache`). A future
+   `removeArg:` (or similar) mechanism could let scientists drop a
+   single default without retyping the whole list.

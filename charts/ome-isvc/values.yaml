@@ -29,6 +29,7 @@ deployments:
       gpuMemoryUtilization: 0.92
       maxConcurrentRequests: 256
       args: []                    # extra flags appended after synthesized ones
+      env: []                     # merged into vendor env by name (per-key strategic merge)
 
     decode:
       replicas: { min: 2, max: 4 }
@@ -37,6 +38,7 @@ deployments:
       gpuMemoryUtilization: 0.92
       maxConcurrentRequests: 256
       args: []                    # extra flags appended after synthesized ones
+      env: []                     # merged into vendor env by name (per-key strategic merge)
 
     router:
       enabled: true
@@ -45,6 +47,7 @@ deployments:
       streamingTimeoutSeconds: 600        # SSE/token deadline
       loadBalancingAlgorithm: round-robin
       args: []                    # extra flags appended after synthesized ones
+      env: []                     # merged into vendor env by name (per-key strategic merge)
 
     coordination:
       policy: Sequential

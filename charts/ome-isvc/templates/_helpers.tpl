@@ -175,20 +175,54 @@ for sprinkling on every resource.
 {{- end -}}
 
 {{/*
-ome-isvc.componentArgs — assemble the args list for a component block.
-The vendor profile supplies the base `command` (binary + base flags);
-this helper builds the `args` list that follows. Order:
+ome-isvc.engineDefaultArgs — chart-side production defaults prepended
+to every engine/prefill/decode component's args list. The vendor
+profile carries NO command/args (see templates/vendors/*.yaml), so the
+chart owns the full args list. Production-default flags live here so
+that every tenant inherits the same baseline without having to retype
+them.
 
-  1. Synthesised flags from explicit knobs (only emitted when set):
+Keep this list MINIMAL — anything that varies by workload belongs in
+the scientist's per-component `args:` (or a typed knob like
+`contextLength`). When unsure, leave it OUT and let the scientist add
+it via `args:`. Scientists who need to suppress a default here must
+override the entire `args:` list (the chart does not provide a
+per-flag drop mechanism in v0.1 — see README open items).
+
+Returns: a YAML list of strings (one flag/value per line).
+*/}}
+{{- define "ome-isvc.engineDefaultArgs" -}}
+- --enable-prefix-cache
+- --schedule-policy
+- lpm
+{{- end -}}
+
+{{/*
+ome-isvc.routerDefaultArgs — chart-side production defaults prepended
+to the router component's args list. Same contract as
+ome-isvc.engineDefaultArgs. Empty by default — the router's behaviour
+is fully specified by the typed knobs (timeout, load-balancer) plus
+the scientist's `args:`.
+*/}}
+{{- define "ome-isvc.routerDefaultArgs" -}}
+{{- end -}}
+
+{{/*
+ome-isvc.componentArgs — assemble the args list for a component block.
+The vendor profile carries no args; this helper builds the entire
+runner args list. Order:
+
+  1. Chart production defaults (ome-isvc.engineDefaultArgs).
+  2. Synthesised flags from explicit knobs (only emitted when set):
        --context-length         <contextLength>
        --tensor-parallel-size   <tensorParallelSize>
        --mem-fraction-static    <gpuMemoryUtilization>
        --max-running-requests   <maxConcurrentRequests>
-  2. User-supplied `args:` from the values block, appended last so the
+  3. User-supplied `args:` from the values block, appended last so the
      escape hatch wins on duplicate flags.
 
 Each knob is emitted ONLY when the values block explicitly carries the
-key (`hasKey`) — unset knobs leave the vendor default in place.
+key (`hasKey`) — unset knobs leave the vendor / sglang default in place.
 
 Args:  dict "block" .prefill | .decode | .engine
 Returns: a list of strings (use with `toYaml` at the call site).
@@ -196,6 +230,12 @@ Returns: a list of strings (use with `toYaml` at the call site).
 {{- define "ome-isvc.componentArgs" -}}
 {{- $b := .block -}}
 {{- $args := list -}}
+{{- /* 1. production defaults */ -}}
+{{- $defaultsRaw := include "ome-isvc.engineDefaultArgs" . | trim -}}
+{{- if $defaultsRaw -}}
+{{- range $a := $defaultsRaw | fromYamlArray -}}{{- $args = append $args $a -}}{{- end -}}
+{{- end -}}
+{{- /* 2. synthesised flags */ -}}
 {{- if hasKey $b "contextLength" -}}
 {{- $args = append $args "--context-length" -}}
 {{- $args = append $args (printf "%d" (int $b.contextLength)) -}}
@@ -212,6 +252,7 @@ Returns: a list of strings (use with `toYaml` at the call site).
 {{- $args = append $args "--max-running-requests" -}}
 {{- $args = append $args (printf "%d" (int $b.maxConcurrentRequests)) -}}
 {{- end -}}
+{{- /* 3. user-supplied args */ -}}
 {{- if $b.args -}}
 {{- range $a := $b.args -}}{{- $args = append $args $a -}}{{- end -}}
 {{- end -}}
@@ -305,6 +346,12 @@ maxReplicas: {{ $b.replicas.max }}
 {{- end }}
 {{- end }}
 {{- $extraArgs := list -}}
+{{- /* 1. chart production defaults (empty by default; safe to skip) */ -}}
+{{- $defaultsRaw := include "ome-isvc.routerDefaultArgs" . | trim -}}
+{{- if $defaultsRaw -}}
+{{- range $a := $defaultsRaw | fromYamlArray -}}{{- $extraArgs = append $extraArgs $a -}}{{- end -}}
+{{- end -}}
+{{- /* 2. synthesised flags from typed knobs */ -}}
 {{- if hasKey $b "timeoutSeconds" -}}
 {{- $extraArgs = append $extraArgs "--backend-timeout" -}}
 {{- $extraArgs = append $extraArgs (printf "%d" (int $b.timeoutSeconds)) -}}
@@ -321,6 +368,7 @@ maxReplicas: {{ $b.replicas.max }}
 {{- $extraArgs = append $extraArgs "--load-balancer" -}}
 {{- $extraArgs = append $extraArgs $b.loadBalancingAlgorithm -}}
 {{- end -}}
+{{- /* 3. user-supplied args (escape hatch — wins on duplicate flags) */ -}}
 {{- if $b.args -}}
 {{- range $a := $b.args -}}{{- $extraArgs = append $extraArgs $a -}}{{- end -}}
 {{- end -}}

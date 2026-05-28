@@ -1,7 +1,30 @@
 {{- /*
-templates/vendors/cks-gb300-sglang-pd.yaml — pre-tailored
-ClusterServingRuntime for CW gb300 running sglang in prefill+decode
-disaggregated mode for the Llama4x nvfp4 family.
+templates/vendors/cks-gb300-sglang-pd.yaml — slim "where-it-runs" profile
+for CW gb300 sglang in prefill+decode disaggregated mode for the
+Llama4x nvfp4 family.
+
+IN scope (vendor owns these):
+  - container image
+  - GPU + RDMA + memory + CPU resources
+  - volumes (shared memory, scratch) + volumeMounts
+  - infrastructure env vars (NCCL networking, CUDA coredump, host IP,
+    Python tooling paths) — required for the binary to find its
+    libraries and hardware
+  - nodeSelector + tolerations + securityContext
+  - probes + container ports + service annotations (multus / IB
+    macvlan, prometheus scrape)
+  - runner.name (canonical container name)
+
+OUT of scope (chart-side tenant CSR / scientist owns these):
+  - container `command` and `args` — every flag, including the sglang
+    launcher invocation itself, lives in the tenant CSR's args list so
+    strategic-merge does not silently REPLACE the vendor list when a
+    scientist appends one flag (plain `[]string` lists collide
+    wholesale; named lists like `env` merge by key)
+  - workload-tuning env vars (e.g. SGLANG_EXTERNAL_MODEL_PACKAGE,
+    SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN,
+    SGLANG_DISAGGREGATION_NIXL_BACKEND) — these are runtime knobs, not
+    hardware enablement, and belong with the scientist's args/env
 
 Gating:
   - Auto-deployed when any entry in .Values.deployments has
@@ -81,63 +104,20 @@ spec:
     runner:
       name: ome-container
       image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-gb300:20260517-7304a529
-      command:
-        - python3
-        - -m
-        - sglang_meta.launch_server
-        - --host
-        - 0.0.0.0
-        - --port
-        - "30000"
-        - --model-path
-        - $(MODEL_PATH)
-        - --tp-size
-        - "4"
-        - --ep-size
-        - "4"
-        - --dtype
-        - bfloat16
-        - --quantization
-        - modelopt_fp4
-        - --kv-cache-dtype
-        - bfloat16
-        - --mem-fraction-static
-        - "0.8"
-        - --moe-runner-backend
-        - flashinfer_trtllm
-        - --context-length
-        - "1048576"
-        - --speculative-algorithm
-        - EAGLE3
-        - --speculative-draft-model
-        - $(MODEL_PATH)/draft_hf
-        - --speculative-draft-model-quantization
-        - unquant
-        - --log-requests
-        - --log-requests-level
-        - "1"
-        - --enable-request-time-stats-logging
-        - --json-model-override-args
-        - '{"attn_temperature_tuning_floor_scale":131072,"attn_temperature_tuning_layers":"global","attn_temperature_tuning_q_scale_constant":0.2}'
-        - --disaggregation-mode
-        - prefill
-        - --disaggregation-transfer-backend
-        - nixl
-        - --disaggregation-bootstrap-port
-        - "8998"
       env:
-        - name: SGLANG_EXTERNAL_MODEL_PACKAGE
-          value: sglang_meta.srt.models
-        - name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN
-          value: "1"
+        # SGLANG_HOST_IP — required by the sglang process to announce its
+        # advertised address for inter-pod NIXL transfers.
         - name: SGLANG_HOST_IP
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+        # TRITON_PTXAS_PATH — pins the CUDA ptxas binary triton must call out to.
         - name: TRITON_PTXAS_PATH
           value: /usr/local/cuda/bin/ptxas
+        # PYTHONUNBUFFERED — ensures stdout/stderr stream to kubectl logs.
         - name: PYTHONUNBUFFERED
           value: "1"
+        # NCCL_* — network-fabric tuning for arm64 + IB on gb300.
         - name: NCCL_MNNVL_ENABLE
           value: "1"
         - name: NCCL_CUMEM_ENABLE
@@ -148,14 +128,13 @@ spec:
           value: eth0
         - name: NCCL_SOCKET_FAMILY
           value: AF_INET6
+        # CUDA_* — coredump tooling for post-mortem GPU crash analysis.
         - name: CUDA_ENABLE_COREDUMP_ON_EXCEPTION
           value: "1"
         - name: CUDA_COREDUMP_GENERATION_FLAGS
           value: skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory,skip_abort
         - name: CUDA_COREDUMP_FILE
           value: /tmp/sgl_crash_dump/cudacore.%h.%p
-        - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
-          value: UCX
       ports:
         - containerPort: 30000
           name: http
@@ -225,53 +204,7 @@ spec:
     runner:
       name: ome-container
       image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-gb300:20260517-7304a529
-      command:
-        - python3
-        - -m
-        - sglang_meta.launch_server
-        - --host
-        - 0.0.0.0
-        - --port
-        - "30000"
-        - --model-path
-        - $(MODEL_PATH)
-        - --tp-size
-        - "4"
-        - --ep-size
-        - "4"
-        - --dtype
-        - bfloat16
-        - --quantization
-        - modelopt_fp4
-        - --kv-cache-dtype
-        - bfloat16
-        - --mem-fraction-static
-        - "0.8"
-        - --moe-runner-backend
-        - flashinfer_trtllm
-        - --context-length
-        - "1048576"
-        - --speculative-algorithm
-        - EAGLE3
-        - --speculative-draft-model
-        - $(MODEL_PATH)/draft_hf
-        - --speculative-draft-model-quantization
-        - unquant
-        - --log-requests
-        - --log-requests-level
-        - "1"
-        - --enable-request-time-stats-logging
-        - --json-model-override-args
-        - '{"attn_temperature_tuning_floor_scale":131072,"attn_temperature_tuning_layers":"global","attn_temperature_tuning_q_scale_constant":0.2}'
-        - --disaggregation-mode
-        - decode
-        - --disaggregation-transfer-backend
-        - nixl
       env:
-        - name: SGLANG_EXTERNAL_MODEL_PACKAGE
-          value: sglang_meta.srt.models
-        - name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN
-          value: "1"
         - name: SGLANG_HOST_IP
           valueFrom:
             fieldRef:
@@ -296,8 +229,6 @@ spec:
           value: skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory,skip_abort
         - name: CUDA_COREDUMP_FILE
           value: /tmp/sgl_crash_dump/cudacore.%h.%p
-        - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
-          value: UCX
       ports:
         - containerPort: 30000
           name: http
@@ -348,26 +279,11 @@ spec:
     runner:
       name: router
       image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-router:20260515-d702bf5f
-      args:
-        - --port
-        - "30080"
-        - --metrics-port
-        - "9090"
-        - --model-name
-        - llama4x
-        - --backend-timeout
-        - "300"
-        - --bootstrap-port
-        - "8998"
-        - --k8s-namespace
-        - $(NAMESPACE)
-        - --prefill-label-selector
-        - component=engine,ome.io/inferenceservice=$(INFERENCESERVICE_NAME)
-        - --decode-label-selector
-        - component=decoder,ome.io/inferenceservice=$(INFERENCESERVICE_NAME)
-        - --k8s-engine-port
-        - "30000"
       env:
+        # NAMESPACE / INFERENCESERVICE_NAME — downward-API identity the
+        # router uses to discover its prefill/decode backends via
+        # label selectors. Kept here because they are pure pod-identity
+        # plumbing, not workload tuning.
         - name: NAMESPACE
           valueFrom:
             fieldRef:
