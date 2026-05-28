@@ -7,20 +7,6 @@
 // OMENative-on-ISVC status type field-for-field; the adapter boundary
 // in `omenative/internalsource/` (ISVC adapter) and the future
 // `inferencereplica/` adapter performs the two-way conversion.
-//
-// HISTORY: closed PR #264 attempted to keep the CRD status types as the
-// wire format between `workload/` and adapters. That left the CRD-API
-// import plus ISVC-only pod-label-key references inside `workload/`,
-// which defeated the architectural boundary. This file is the corrected
-// design: workload owns its types, adapters convert at the edge. See
-// `.claude/specs/2026-05-27-workload-extraction/plan.md` §3.X for the
-// cost/benefit analysis.
-//
-// SCOPE: This file lands in Part-2 slice 1 — type definitions only.
-// `workload/source.go` continues to reference the CRD types in the
-// same package until slice 2 introduces the conversion layer and flips
-// the Source interface signatures. These types coexist alongside the
-// CRD types referenced by source.go during the transition window.
 package workload
 
 import (
@@ -234,9 +220,9 @@ type InstanceStatus struct {
 // sets OwnerName=ir.Name and SelectorLabels with the IR pod-label-key
 // seed.
 //
-// Distinct from the legacy `WorkloadKey` type in source.go — `Key`
-// carries the decoupled label-seed shape and will replace `WorkloadKey`
-// in slice 2 when source.go flips to consume workload-owned types.
+// Distinct from `WorkloadKey` in source.go which carries the
+// ops/render.go shape (Name + Labels). `Key` is the decoupled,
+// label-seed identity carried on ReconcileInput.
 type Key struct {
 	// Namespace is the namespace every emitted pod / revision /
 	// service is created in.

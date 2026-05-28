@@ -29,13 +29,6 @@ import (
 // only v1beta1 surface used is the fake-client scheme registration
 // plus the in-memory observed state mirror the MutateInstance closure
 // writes through.
-//
-// HISTORY: the bug-fix coverage in this file originally lived in
-// pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops/
-// before the per-Instance Create state machine moved to workload/ops
-// (part 2 slice 4b of N). Test names are kept identical to the
-// upstream omenative copies so the prior bug-coverage map carries over
-// unchanged.
 
 // newFakeClient builds a controller-runtime fake client with the
 // scheme the workload reconciler needs. The fake exposes the
@@ -115,8 +108,7 @@ func testPodLabels(isvc string, component v1beta1.ComponentType, instanceIdx int
 //
 // MutateInstance round-trips through the fake client's Status().Update
 // so tests can assert on the persisted ISVC.Status.Components[c].OMENative
-// shape (the legacy bug-fix tests in the omenative layer relied on
-// observing post-write status on the ISVC).
+// shape.
 func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component v1beta1.ComponentType) workload.ReconcileInput {
 	var instances []workload.InstanceStatus
 	if cs, ok := isvc.Status.Components[component]; ok && cs.OMENative != nil {
@@ -562,9 +554,8 @@ func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 	}
 }
 
-// Inverse: when target is nil (legacy callers, scale-down-only reconciles),
-// Create promotes without writing RunningRevision. Preserves the pre-fix
-// behavior for callers that don't yet plumb target through.
+// Inverse: when target is nil (scale-down-only reconciles), Create
+// promotes without writing RunningRevision.
 func TestCreate_PromoteWithNilTargetSkipsRunningRevision(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)

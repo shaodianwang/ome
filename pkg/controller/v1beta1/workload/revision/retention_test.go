@@ -99,8 +99,8 @@ func TestRevisionHash_AnnotationChangeProducesDifferentHash(t *testing.T) {
 }
 
 func TestRevisionHash_NoMetaAndEmptyMetaProduceSameHash(t *testing.T) {
-	// nil and empty meta MUST hash identically so the legacy "no PodMeta"
-	// hash shape stays stable for ISVCs without template labels/annotations.
+	// nil and empty meta MUST hash identically so the "no PodMeta" hash
+	// shape stays stable for ISVCs without template labels/annotations.
 	ps := &corev1.PodSpec{
 		Containers: []corev1.Container{{Name: "main", Image: "llama:v1"}},
 	}

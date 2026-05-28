@@ -43,13 +43,15 @@ func StableServiceName(isvc string, component v1beta1.ComponentType) string {
 // `<owner>-<component>-rev-<hash>`.
 //
 // Takes workload.ComponentType so workload/ops/ can call this without
-// pulling in the CRD API package (slice 4f audit requirement: zero
-// pkg/apis/ome/v1beta1 imports inside workload/ops/update.go). The
-// omenative coordination package retains its own v1beta1-typed copy
-// until the per-revision Service builders themselves move to workload/
-// in a later slice; the two functions produce byte-identical strings.
+// importing the CRD API package. Lives in workload/query/ because
+// workload/ops/delete.go reads per-revision Service names when
+// computing drain targets and must not import the omenative
+// coordination package (which would close a dependency cycle). The
+// coordination package retains its own v1beta1-typed copy of the
+// helper for the per-revision Service builders; both copies must
+// produce identical names so dispatch-path lookups line up.
 //
-// The single canonical workload-side helper replaces the inlined
+// This single canonical workload-side helper replaces the inlined
 // per-revision-Service format string that previously lived in
 // workload/ops/update.go's drainServiceForPod — a stale literal there
 // would have silently mismatched the routed Service the coordination

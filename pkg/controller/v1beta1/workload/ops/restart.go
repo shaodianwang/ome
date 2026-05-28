@@ -15,10 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// Event reasons emitted by the workload Restart state machine. The
-// strings match the legacy omenative/status constants byte-for-byte so
-// existing operator dashboards and `kubectl describe` output keep
-// matching after the extraction.
+// Event reasons emitted by the workload Restart state machine.
 const (
 	// EventReasonRestartTriggered fires the first time an Instance
 	// transitions into Phase=Restarting from a non-Restarting baseline.
@@ -56,12 +53,10 @@ func restartDrainKey(idx int32, incarnation int64) string {
 // Returns done=true once the Instance is back at Phase=Ready with
 // Operation=nil; done=false means the caller should requeue and resume.
 //
-// SCOPE NOTE: This function is the source-agnostic body of the per-Instance
-// Restart state machine. The ISVC-OMENative dispatcher (the shim in the
-// omenative/ops package) constructs workload.ReconcileInput from
-// (ISVC, Component) via internalsource.BuildReconcileInput and delegates
-// here. The IR controller, when it lands, will call into the same entry
-// point with its own ReconcileInput.
+// Source-agnostic: callers construct workload.ReconcileInput from their
+// own source-of-truth types. The ISVC-OMENative dispatcher delegates
+// via internalsource.BuildReconcileInput; the IR controller will call
+// the same entry point with its own ReconcileInput.
 func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, reason string) (bool, error) {
 	if deps.Client == nil {
 		return false, fmt.Errorf("Restart: nil client")

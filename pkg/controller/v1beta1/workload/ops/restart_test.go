@@ -16,13 +16,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// HISTORY: the bug-fix coverage in this file originally lived in
-// pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops/
-// before the per-Instance Restart state machine moved to workload/ops
-// (part 2 slice 4e of N). Test names are kept identical to the
-// upstream omenative copies so the prior bug-coverage map carries over
-// unchanged.
-
 // isvcReadyAtIncarnation builds an ISVC whose InstanceStatus for engine
 // index 0 is Phase=Ready at the given Incarnation — the steady-state from
 // which a restart trigger fires.

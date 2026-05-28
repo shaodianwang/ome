@@ -34,12 +34,10 @@ func deleteDrainKey(idx int32) string {
 //
 // Returns done=true once step 6 completes; done=false means requeue.
 //
-// SCOPE NOTE: This function is the source-agnostic body of the per-Instance
-// Delete state machine. The ISVC-OMENative dispatcher (the shim in the
-// omenative/ops package) constructs workload.ReconcileInput from
-// (ISVC, Component) via internalsource.BuildReconcileInput and delegates
-// here. The IR controller, when it lands, will call into the same entry
-// point with its own ReconcileInput.
+// Source-agnostic: callers construct workload.ReconcileInput from their
+// own source-of-truth types. The ISVC-OMENative dispatcher delegates
+// via internalsource.BuildReconcileInput; the IR controller will call
+// the same entry point with its own ReconcileInput.
 func Delete(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, idx int32) (bool, error) {
 	if deps.Client == nil {
 		return false, fmt.Errorf("Delete: nil client")

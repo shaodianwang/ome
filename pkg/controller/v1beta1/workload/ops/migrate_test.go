@@ -1,13 +1,11 @@
-// Internal-package tests for workload.Migrate's private helpers. The
-// public-API end-to-end TestMigrate_* tests stay in the omenative
-// adapter package (omenative/ops/migrate_test.go) because they depend
-// on the omenative-side test harness (audit ledger seeding via real
-// ISVC ConfigMap round-trips, multi-pass status counter refresh,
-// per-revision EndpointSlice synthesis) coupled to pkg/apis/ome/v1beta1
-// fixtures. The shim preserves the Migrate signature so those
-// end-to-end tests exercise this body unchanged. This file covers
-// helpers no longer reachable from outside the workload/ops package
-// after the extraction (validateFromNode).
+// Internal-package tests for workload.Migrate's private helpers
+// (validateFromNode, etc.) that aren't reachable from outside the
+// workload/ops package. The public-API end-to-end TestMigrate_* tests
+// live in the omenative adapter package (omenative/ops/migrate_test.go)
+// because they depend on the omenative-side test harness (audit ledger
+// seeding via real ISVC ConfigMap round-trips, multi-pass status
+// counter refresh, per-revision EndpointSlice synthesis) coupled to
+// pkg/apis/ome/v1beta1 fixtures.
 package ops
 
 import (

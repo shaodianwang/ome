@@ -15,14 +15,10 @@ import (
 // effective values after defaults are applied.
 type ComponentPlan struct {
 	// Component identifies which of router / engine / decoder this plan
-	// describes.
-	//
-	// Residual v1beta1 dependency: ComponentPlan is consumed by ~140
-	// call sites in pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/
-	// that pass plan.Component on to query/, status/, and per-op helpers
-	// that still take v1beta1.ComponentType. Slice 4+ migrates the ops
-	// into workload/ and flips this field to workload.ComponentType as
-	// part of the move. See slice 3 PR.
+	// describes. Typed as v1beta1.ComponentType because downstream call
+	// sites in pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/
+	// pass plan.Component on to query/, status/, and per-op helpers that
+	// still take v1beta1.ComponentType.
 	Component v1beta1.ComponentType
 
 	// Replicas is the desired number of Instances for this Component
@@ -142,11 +138,8 @@ func (i InstancePlan) TotalPods() int32 {
 // fixtures, BuildPlan also applies the same defaults inline.
 //
 // Component is taken from the caller; it is metadata for downstream
-// consumers and is not part of the planning computation.
-//
-// Residual v1beta1 dependency on the component parameter type: see the
-// note on ComponentPlan.Component above. Slice 4+ flips to
-// workload.ComponentType.
+// consumers and is not part of the planning computation. Typed as
+// v1beta1.ComponentType — see the note on ComponentPlan.Component above.
 func BuildPlan(component v1beta1.ComponentType, desired WorkloadDesiredSpec, observed WorkloadObservedState) (ComponentPlan, error) {
 	replicas := desired.Replicas
 	if replicas <= 0 {

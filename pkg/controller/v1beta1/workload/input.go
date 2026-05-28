@@ -17,17 +17,6 @@ import (
 // caller's types. This is the boundary that lets one workload package
 // serve both the ISVC and IR control planes without sharing a type
 // system.
-//
-// DESIGN NOTE: ReconcileInput replaces the prior `Source` interface
-// (deleted in this slice). The interface required adapters to implement
-// 7 methods, 4 of which were trivial data projections. Bundling them as
-// struct fields eliminates the adapter scaffolding without losing the
-// decoupling — the only behaviour worth abstracting (per-Instance
-// status mutation under retry.RetryOnConflict, plus side-effecting
-// top-level conditions) is captured as the MutateInstance function
-// value. When the InferenceReplica controller lands, factoring a
-// dedicated Source interface back out of the populated struct is a
-// 30-minute refactor.
 type ReconcileInput struct {
 	// OwnerObject is the K8s object whose UID/Kind/APIVersion becomes
 	// the controllerOwner on every emitted pod / revision / service /

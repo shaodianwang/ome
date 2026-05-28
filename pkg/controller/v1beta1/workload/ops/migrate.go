@@ -43,12 +43,10 @@ const MigrateRequeueInterval = 5 * time.Second
 //  6. Promote surge Ready+RunningRevision, drop source InstanceStatus,
 //     persist Completed entry — in that order (crash window if reversed).
 //
-// SCOPE NOTE: This function is the source-agnostic body of the per-Instance
-// Migrate state machine. The ISVC-OMENative dispatcher (the shim in the
-// omenative/ops package) constructs workload.ReconcileInput from
-// (ISVC, Component) via internalsource.BuildReconcileInput and delegates
-// here. The IR controller, when it lands, will call into the same entry
-// point with its own ReconcileInput.
+// Source-agnostic: callers construct workload.ReconcileInput from their
+// own source-of-truth types. The ISVC-OMENative dispatcher delegates
+// via internalsource.BuildReconcileInput; the IR controller will call
+// the same entry point with its own ReconcileInput.
 //
 // SINGLE-POD ONLY: Multi-pod migration is OEP-deferred — surge sizing
 // must mirror the source's full Runner layout (1 leader + N workers),
@@ -76,8 +74,8 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return true, nil
 	}
 
-	// Multi-pod migration is OEP-deferred (see SCOPE NOTE on Migrate
-	// above). Reject up-front with a Failed audit row.
+	// Multi-pod migration is OEP-deferred (see the SINGLE-POD ONLY
+	// note on Migrate above). Reject up-front with a Failed audit row.
 	if isMultiPodInstance(plan, sourceIdx) {
 		return failMigration(ctx, deps, input, ledger, req, requestUUID,
 			"multi-pod Instance migration not yet supported (single-pod surge cannot satisfy a multi-pod gang)")
@@ -545,7 +543,6 @@ func patchInstanceStatusMigrationSurge(ctx context.Context, input workload.Recon
 // PublishNotReadyAddresses=false) reflects the controller-owned
 // ome.io/serving gate correctly.
 //
-// Mirrors the omenative/ops drainServiceForPod helper byte-for-byte.
 // plan.Component type flows from the caller so migrate.go can address
 // per-revision Services without importing v1beta1 itself.
 func drainServiceForPod(input workload.ReconcileInput, plan workload.ComponentPlan, pod *corev1.Pod) string {

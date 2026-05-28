@@ -20,9 +20,8 @@ import (
 // dispatch-side helpers).
 var testISVCGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
-// testKey is the ISVC-form WorkloadKey the legacy render path produced
-// before the extraction: Namespace from the ISVC, Name =
-// "<isvc>-<component>", Labels = the OMENative pod-selector trio.
+// testKey produces the ISVC-form WorkloadKey: Namespace from the ISVC,
+// Name = "<isvc>-<component>", Labels = the OMENative pod-selector trio.
 func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.WorkloadKey {
 	return workload.WorkloadKey{
 		Namespace: isvc.Namespace,
@@ -36,21 +35,21 @@ func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) wo
 	}
 }
 
-// testRender is the legacy (isvc, podSpec, plan, inst, runner, ordinal)
-// Render shape, expressed in terms of the new owner/key/hook
-// signature. Test fixtures call this so the body of every existing
-// test stays untouched.
+// testRender wraps Render with the (isvc, podSpec, plan, inst, runner,
+// ordinal) signature test bodies use directly, deriving the
+// owner/key/hook arguments from the ISVC under test.
 func testRender(isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, ordinal int32) (*corev1.Pod, error) {
 	if isvc == nil {
-		// Existing tests rely on Render rejecting nil ISVC. The new
-		// Render takes owner client.Object, so we pass nil through.
+		// Tests rely on Render rejecting a nil owner — pass nil
+		// through to exercise that branch.
 		return Render(nil, testISVCGVK, workload.WorkloadKey{}, podSpec, plan, inst, runner, ordinal, nil)
 	}
 	return Render(isvc, testISVCGVK, testKey(isvc, plan.Component), podSpec, plan, inst, runner, ordinal, nil)
 }
 
-// testRenderWithRevision is the legacy (isvc, podSpec, podTemplateMeta,
-// plan, inst, runner, ordinal, revisionHash) RenderWithRevision shape.
+// testRenderWithRevision wraps RenderWithRevision with the (isvc,
+// podSpec, podTemplateMeta, plan, inst, runner, ordinal, revisionHash)
+// signature test bodies use directly.
 func testRenderWithRevision(isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, meta *metav1.ObjectMeta, plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, ordinal int32, revisionHash string) (*corev1.Pod, error) {
 	if isvc == nil {
 		return RenderWithRevision(nil, testISVCGVK, workload.WorkloadKey{}, podSpec, meta, plan, inst, runner, ordinal, revisionHash, nil)

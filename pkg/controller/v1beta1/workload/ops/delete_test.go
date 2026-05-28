@@ -17,13 +17,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 )
 
-// HISTORY: the bug-fix coverage in this file originally lived in
-// pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops/
-// before the per-Instance Delete state machine moved to workload/ops
-// (part 2 slice 4c of N). Test names are kept identical to the
-// upstream omenative copies so the prior bug-coverage map carries over
-// unchanged.
-
 // isvcWithStatus builds an ISVC carrying a single InstanceStatus for the
 // engine Component at the given index in Phase. Useful for delete tests
 // that need pre-existing status entries.

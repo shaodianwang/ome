@@ -13,8 +13,7 @@ import (
 // recordNormal emits a Normal K8s Event against target. nil-safe: when
 // the recorder isn't wired (tests that construct workload.Deps{}
 // directly) OR the target is nil, this is a no-op so callers don't have
-// to plumb a recorder. Mirrors the omenative/status.RecordNormal
-// helper byte-for-byte so existing operator dashboards keep matching.
+// to plumb a recorder.
 func recordNormal(rec record.EventRecorder, target client.Object, reason, messageFmt string, args ...any) {
 	if rec == nil || target == nil {
 		return
@@ -23,9 +22,7 @@ func recordNormal(rec record.EventRecorder, target client.Object, reason, messag
 }
 
 // recordWarning emits a Warning K8s Event against target. Same nil-safe
-// semantics as recordNormal. Mirrors omenative/status.RecordWarning
-// byte-for-byte so the per-event reason strings stay grep-compatible
-// across the workload-extraction refactor.
+// semantics as recordNormal.
 func recordWarning(rec record.EventRecorder, target client.Object, reason, messageFmt string, args ...any) {
 	if rec == nil || target == nil {
 		return

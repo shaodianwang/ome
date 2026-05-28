@@ -56,9 +56,9 @@ const (
 // package because that package depends on workload (cyclic).
 var testISVCGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
-// testKey is the WorkloadKey the ISVC-form helpers produced before the
-// extraction: Namespace = isvc.Namespace, Name = "<isvc>-<component>",
-// Labels = the ISVC pod-selector trio.
+// testKey builds the WorkloadKey for an ISVC: Namespace =
+// isvc.Namespace, Name = "<isvc>-<component>", Labels = the ISVC
+// pod-selector trio.
 func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) WorkloadKey {
 	return WorkloadKey{
 		Namespace: isvc.Namespace,
@@ -291,7 +291,7 @@ func TestRevisionHash_NilWorkerSpecBackwardCompat(t *testing.T) {
 
 // TestRevisionHash_WorkerPodSpecPresentChangesShape pins that adding a
 // (non-nil) WorkerPodSpec changes the hash compared to nil, which is the
-// correct behavior for a single-pod-to-multi-pod migration. The legacy
+// correct behavior for a single-pod-to-multi-pod migration. The
 // single-pod hash must remain stable for ISVCs that never declared a
 // worker (covered by NilWorkerSpecBackwardCompat above).
 func TestRevisionHash_WorkerPodSpecPresentChangesShape(t *testing.T) {

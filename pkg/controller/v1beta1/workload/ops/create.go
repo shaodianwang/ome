@@ -20,10 +20,7 @@ import (
 // readiness when an Instance is still coming up.
 const createRequeueInterval = 5 * time.Second
 
-// Event reasons emitted by the workload Create state machine. The
-// strings match the legacy omenative/status constants byte-for-byte so
-// existing operator dashboards and `kubectl describe` output keep
-// matching after the extraction.
+// Event reasons emitted by the workload Create state machine.
 const (
 	// EventReasonInstanceCreated fires the first time an Instance's
 	// pods are materialized (first transition into Phase=Creating).
@@ -34,9 +31,7 @@ const (
 	// ome.io/serving=True).
 	EventReasonInstanceReady = "InstanceReady"
 
-	// Migration request lifecycle. Match omenative/status constants
-	// byte-for-byte so dashboards / alerts grepping on reason strings
-	// keep matching after extraction.
+	// Migration request lifecycle.
 	EventReasonMigrationRequestAccepted      = "MigrationRequestAccepted"
 	EventReasonMigrationRequestRejected      = "MigrationRequestRejected"
 	EventReasonMigrationCompleted            = "MigrationCompleted"
@@ -60,12 +55,10 @@ const (
 // short-circuit. Without it, per-pod podMatchesTarget runs and false-positives
 // against the post-Render pod mutations, triggering a spurious recreate.
 //
-// SCOPE NOTE: This function is the source-agnostic body of the per-Instance
-// Create state machine. The ISVC-OMENative dispatcher (the shim in the
-// omenative/ops package) constructs workload.ReconcileInput from
-// (ISVC, Component) via internalsource.BuildReconcileInput and delegates
-// here. The IR controller, when it lands, will call into the same entry
-// point with its own ReconcileInput.
+// Source-agnostic: callers construct workload.ReconcileInput from their
+// own source-of-truth types. The ISVC-OMENative dispatcher delegates
+// via internalsource.BuildReconcileInput; the IR controller will call
+// the same entry point with its own ReconcileInput.
 func Create(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
 	if deps.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("Create: nil client")
@@ -291,10 +284,9 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 }
 
 // renderKeyFromInput projects the workload.ReconcileInput's identity
-// into the legacy workload.WorkloadKey shape ops/render.go still
-// consumes. WorkloadKey.Name is "<owner>-<component>" — the legacy
-// pod-naming convention every adapter shares so existing selectors
-// keep matching across the refactor.
+// into the workload.WorkloadKey shape ops/render.go consumes.
+// WorkloadKey.Name is "<owner>-<component>" — the pod-naming
+// convention every adapter shares so selectors line up.
 func renderKeyFromInput(input workload.ReconcileInput) workload.WorkloadKey {
 	return workload.WorkloadKey{
 		Namespace: input.Key.Namespace,

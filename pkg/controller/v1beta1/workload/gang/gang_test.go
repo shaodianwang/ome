@@ -70,8 +70,7 @@ func newGangClient(t *testing.T, initObjs ...client.Object) client.Client {
 // stamp on the Component status — production paths persist into the
 // owner's status subtree, but tests don't need that round-trip to
 // assert behavior. Single-condition Replace semantics mirror what
-// the legacy patchGangSchedulingCondition emitted in its
-// retry-wrapped status update.
+// the retry-wrapped status update would persist.
 func inputWithConditionStore(owner client.Object, multiPod bool, workerSize int32, gangAvailable bool, schedulerName string) (workload.ReconcileInput, *conditionStore) {
 	store := newConditionStore()
 
@@ -335,10 +334,9 @@ func TestEnsurePodGroups_NilClientErrors(t *testing.T) {
 // ---------------------------------------------------------------------
 
 // TestPatchGangSchedulingCondition_StatusUpdateFlipsCondition writes
-// True→False (recovery) and asserts the callback observed it.
-// Mirrors the legacy live-status round-trip — the store stand-in
-// captures the post-write shape the apiserver round-trip would have
-// persisted.
+// True→False (recovery) and asserts the callback observed it. The
+// store stand-in captures the post-write shape the apiserver round-trip
+// would have persisted.
 func TestPatchGangSchedulingCondition_StatusUpdateFlipsCondition(t *testing.T) {
 	owner := newOwner("prod", "llama")
 	store := newConditionStore()

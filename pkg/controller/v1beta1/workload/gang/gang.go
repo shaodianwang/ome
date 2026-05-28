@@ -13,16 +13,6 @@
 // cycle (workload/gang → workload, workload/gang → workload/podgroup,
 // workload/podgroup → workload — no cycle since nothing in
 // workload root or workload/podgroup back-imports workload/gang).
-// See `.claude/specs/2026-05-27-workload-extraction/plan.md` for the
-// cost/benefit analysis.
-//
-// SCOPE NOTE (slice 4g of N): this package lands as part of the
-// workload-extraction refactor. The legacy
-// `omenative/gang.go` is gone; the ISVC adapter dispatcher calls
-// `gang.EnsurePodGroups` from `omenative/reconciler.go` via
-// `internalsource.BuildReconcileInput`. The future InferenceReplica
-// controller will call the same entry point with its own
-// ReconcileInput.
 package gang
 
 import (
@@ -40,14 +30,9 @@ import (
 )
 
 // Condition types / reasons / event reasons stamped by the gang
-// reconciler. Strings match the legacy omenative/status constants
-// byte-for-byte so existing operator dashboards and `kubectl
-// describe` output keep matching after the workload extraction (part
-// 2 slice 4g of N). The omenative-side status package retains its own
-// copies of these constants for legacy callers that still write
-// through the v1beta1-typed status helpers; the values stay
-// synchronized by convention. See the omenative/status package's
-// conditions.go and events.go for the v1beta1-typed mirrors.
+// reconciler. The omenative/status package retains its own copies of
+// these constants for the v1beta1-typed status helpers; values are
+// kept in lockstep by convention.
 const (
 	// ConditionGangSchedulingUnavailable is True when the Component
 	// has at least one multi-pod Instance but the cluster does not
@@ -272,8 +257,8 @@ func patchGangSchedulingCondition(ctx context.Context, input workload.ReconcileI
 // lacks the scheduler-plugins PodGroup CRD; False otherwise.
 //
 // Local to this package — the omenative/status package retains its
-// own copy (with v1beta1-typed types) for legacy callers that still
-// consult it; values are kept in lockstep by convention.
+// own copy (with v1beta1-typed types) for the typed-status callers;
+// values are kept in lockstep by convention.
 func gangSchedulingUnavailableCondition(crdPresent, anyMultiPodInstance bool, generation int64) metav1.Condition {
 	now := metav1.Now()
 	if !anyMultiPodInstance || crdPresent {

@@ -8,37 +8,19 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// NOTE on residual v1beta1 imports (slice 4a of N):
-//
 // WorkloadDesiredSpec.Lifecycle and WorkloadAggregateStatus.Traffic
-// still reference v1beta1 because the lifecycle subtree (5 nested
-// structs + 4 string enums) and the traffic target struct have no
-// workload mirror yet. Mirroring them inflates the current slice past
-// the +500 LOC ceiling; slice 4b+ moves the bodies that reason about
-// Lifecycle into workload/ and mirrors these types as part of that
-// move.
-//
-// SCOPE NOTE (slice 4a): The prior `Source` interface this file
-// defined is gone. Adapters now populate `ReconcileInput` (input.go)
-// directly — one plain-data struct that bundles identity (Key,
-// OwnerObject, EventTarget), the projected DesiredSpec /
-// ObservedState, and the single MutateInstance function value. Helper
-// types below — WorkloadKey, WorkloadDesiredSpec, WorkloadObservedState,
-// WorkloadAggregateStatus, WorkloadPacing, PacingDecisions, Runner —
-// survive unchanged; they are referenced by `params.go`, `render.go`,
-// `plan.go`, and the ops package.
+// reference v1beta1 because the lifecycle subtree (5 nested structs +
+// 4 string enums) and the traffic target struct have no workload
+// mirror yet.
 
 // WorkloadKey identifies one logical workload and seeds label/selector
 // composition for the ops/render.go entry points. Both adapters produce
 // a Name of "<isvc>-<component>" so existing pod selectors,
-// ControllerRevision names, and Service names remain unchanged across
-// the refactor.
+// ControllerRevision names, and Service names line up across adapters.
 //
 // Distinct from `Key` (types.go) which is the workload-owned identity
-// the ReconcileInput carries. Slice 4b+ migrates the ops entry points
-// onto `Key` and retires this type; until then `WorkloadKey` carries
-// the legacy ops/render.go shape (Name + Labels) so leaf-package
-// signatures stay stable.
+// the ReconcileInput carries. `WorkloadKey` carries the ops/render.go
+// shape (Name + Labels) consumed by leaf packages.
 type WorkloadKey struct {
 	// Namespace is the namespace every pod / revision / service the
 	// reconciler emits is created in.
