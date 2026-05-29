@@ -488,7 +488,7 @@ const (
 // IsValid checks if the deployment mode is valid
 func (d DeploymentModeType) IsValid() bool {
 	switch d {
-	case RawDeployment, MultiNode, VirtualDeployment, OMENative:
+	case RawDeployment, PDDisaggregated, MultiNode, VirtualDeployment, OMENative:
 		return true
 	default:
 		return false
