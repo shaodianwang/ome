@@ -1,94 +1,322 @@
 // Package inferencereplica implements the controller for the
 // InferenceReplica CRD.
 //
-// THIS IS A NO-OP SKELETON. The full reconciler — instance lifecycle,
-// revision management, pod / service / podmonitor creation, drain,
-// migration, status aggregation — lands in PR 2 of this work
-// (.claude/specs/2026-05-27-inference-workload-crd/impl-plan.md
-// commits 5 - 8). The skeleton exists to:
+// One InferenceReplica per (InferenceService, Component) tuple. The
+// IR controller owns the per-Instance pipeline (Create / Update /
+// Restart / Migrate / Delete) by handing a workload.ReconcileInput to
+// workload.Reconcile each pass. It does NOT own ISVC-shape
+// supporting resources (headless / per-revision Services, PodMonitor)
+// or coordination — those stay on the ISVC controller in this PR.
 //
-//   - prove the wiring (scheme registration, watch setup, RBAC
-//     scaffolding, manager flag) end-to-end before any real logic
-//     accretes,
-//   - stamp status.observedGeneration so operators can confirm with
-//     kubectl that the controller is running against the new CR.
+// Status writer: this controller is the sole writer of
+// InferenceReplica.status. The ISVC controller is the sole writer of
+// InferenceReplica.spec (see the validating webhook in
+// pkg/webhook/admission/inferencereplica/).
 //
-// The controller is enabled by default; the --enable-inferencereplica-controller
-// manager flag lets operators flip it off if PR 2 lands a regression.
+// The controller is enabled by default; the
+// --enable-inferencereplica-controller manager flag lets operators
+// flip it off if a regression lands.
 package inferencereplica
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/go-logr/logr"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 )
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferencereplicas,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ome.io,resources=inferencereplicas/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ome.io,resources=inferencereplicas/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ome.io,resources=inferencereplicas/finalizers,verbs=update
+// +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create;update;patch;delete
 
-// Reconciler is the no-op skeleton for the InferenceReplica controller.
-// PR 2 will replace this with the real lifecycle reconciler ported from
-// pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/.
+// Reconciler is the per-IR lifecycle reconciler. Replaces the no-op
+// skeleton from PR 1 (#245) with the real workload-driven pipeline.
 type Reconciler struct {
 	client.Client
-	Log    logr.Logger
-	Scheme *runtime.Scheme
+	Log      logr.Logger
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
+
+	// APIReader is the live (uncached) API reader. Used for the
+	// correctness-critical reads in revision bookkeeping where stale
+	// cache contents could cause spurious collisions. Optional; when
+	// nil the cached Client is used.
+	APIReader client.Reader
+
+	// Expectations is the create/delete bookkeeping cache the
+	// workload pipeline uses to avoid re-issuing batches before the
+	// controller-runtime watch has confirmed prior writes. Optional;
+	// when nil the workload-level DefaultExpectations singleton is
+	// used.
+	Expectations *workload.Expectations
 }
 
-// Reconcile loads the InferenceReplica and stamps observedGeneration.
-// No other side effects yet — pod / service / status aggregation all
-// land in PR 2.
-func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile loads the InferenceReplica, projects (Spec, Status) onto a
+// workload.ReconcileInput, computes the target ControllerRevision,
+// delegates the per-Instance dispatch loop to workload.Reconcile, and
+// aggregates the per-Component counters onto IR.Status.
+//
+// Loop (mirrors the omenative.ReconcileComponent shape):
+//
+//  1. Get IR. NotFound → no-op (owner-ref cascade GC handles children).
+//  2. DeletionTimestamp set → no-op (foreground GC is owned by the
+//     apiserver via blockOwnerDeletion on each child).
+//  3. Resolve parent ISVC so user-facing events stay on the ISVC
+//     stream. Parent fetch failure is NON-fatal — fall back to the
+//     IR itself as the event target.
+//  4. Build the workload.ReconcileInput + Deps + ComponentPlan.
+//  5. Ensure the target ControllerRevision for the rendered template.
+//     The collision-retry shape matches the ISVC adapter: on a
+//     same-name-different-Data collision, bump CollisionCount and
+//     retry the EnsureControllerRevision call with the new salt.
+//  6. Defer the status aggregator so it runs even when the workload
+//     dispatcher returns early.
+//  7. Call workload.Reconcile.
+//
+// Returns whatever (ctrl.Result, error) the workload dispatcher hands
+// back, unchanged.
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	log := r.Log.WithValues("inferencereplica", req.NamespacedName)
 
 	ir := &v1beta1.InferenceReplica{}
 	if err := r.Get(ctx, req.NamespacedName, ir); err != nil {
 		if apierrors.IsNotFound(err) {
-			// The IR was deleted between enqueue and reconcile. Owner-ref
-			// cascade GC handles the children (pods, services, etc. — none
-			// of which the skeleton creates anyway).
+			// IR deleted between enqueue and reconcile. Owner-ref
+			// cascade GC handles the children (pods, ControllerRevisions).
 			return ctrl.Result{}, nil
 		}
 		log.Error(err, "Failed to get InferenceReplica")
 		return ctrl.Result{}, err
 	}
 
-	if ir.Status.ObservedGeneration == ir.Generation {
-		// Already in sync. Cheap shortcut so test-driven generation bumps
-		// don't write the same value back unnecessarily.
+	if ir.DeletionTimestamp != nil {
+		// Foreground cascade-delete is owned by the apiserver via
+		// blockOwnerDeletion on each child owner ref. The IR controller
+		// has no finalizer — its work is observation-only at delete time.
 		return ctrl.Result{}, nil
 	}
 
-	// Retry on conflict — the IR is owned by this controller, but the
-	// fake client + status subresource separation in tests can race the
-	// resourceVersion check on the first read. retry.RetryOnConflict
-	// covers both production (concurrent reconciler workers, though we
-	// run only one) and test paths.
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latest := &v1beta1.InferenceReplica{}
-		if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
-			return err
-		}
-		latest.Status.ObservedGeneration = latest.Generation
-		return r.Status().Update(ctx, latest)
-	}); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
-		log.Error(err, "Failed to stamp observedGeneration")
-		return ctrl.Result{}, err
+	// Resolve the parent ISVC for the event stream. Best-effort: an
+	// IR can outlive its parent for a brief window during foreground
+	// GC; surface NotFound / Forbidden as "no parent" rather than
+	// failing the reconcile.
+	parent := r.resolveParent(ctx, ir)
+
+	input := r.buildReconcileInput(ir, parent)
+	plan, perr := workload.BuildPlan(ir.Spec.Component, input.DesiredSpec, input.ObservedState)
+	if perr != nil {
+		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: build plan (ir=%s/%s): %w",
+			ir.Namespace, ir.Name, perr)
 	}
 
-	log.V(1).Info("Skeleton reconcile complete",
-		"observedGeneration", ir.Generation)
-	return ctrl.Result{}, nil
+	deps := workload.Deps{
+		Client:       r.Client,
+		APIReader:    r.APIReader,
+		Recorder:     r.Recorder,
+		Expectations: r.Expectations,
+		// RenderHook stays nil for the IR adapter — peer-env injection
+		// lives on the parent ISVC controller for v1 (per design doc).
+	}
+
+	// Compute the target ControllerRevision before kicking off the
+	// dispatcher so the Update pass + status aggregator both see the
+	// same name. The collision-retry shape matches the ISVC adapter:
+	// on a hash collision bump CollisionCount and retry. When PodSpec
+	// is nil — webhook-rejected today but defensive — skip revision
+	// entirely; the workload Update pass short-circuits on nil target.
+	var target *appsv1.ControllerRevision
+	if input.DesiredSpec.PodSpec != nil {
+		t, terr := r.ensureRevisionWithCollisionRetry(ctx, ir, input)
+		if terr != nil {
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: ensure revision (ir=%s/%s): %w",
+				ir.Namespace, ir.Name, terr)
+		}
+		target = t
+	}
+
+	// Defer status aggregation so it runs regardless of whether the
+	// workload dispatcher returned a requeue or an error. Status-write
+	// errors don't clobber a real dispatcher error — they only surface
+	// when everything else succeeded.
+	defer func() {
+		if serr := r.aggregateAndWriteStatus(ctx, ir, plan, target); serr != nil {
+			if err == nil {
+				err = fmt.Errorf("InferenceReplica reconciler: write status: %w", serr)
+			}
+		}
+	}()
+
+	result, err = workload.Reconcile(ctx, deps, input, plan, target)
+
+	// TODO(IR PR 2.1): wire workload.ReconcileHeadlessService once Lane B lands
+	return result, err
+}
+
+// resolveParent fetches the parent ISVC named on the IR's ParentRef so
+// the workload.ReconcileInput.EventTarget can stay anchored to the
+// user-visible parent resource. NotFound / Forbidden are best-effort:
+// returns nil and the caller falls back to the IR itself. Other errors
+// are logged but also non-fatal — events landing on the IR instead of
+// the parent is a soft degradation, not a reason to fail the whole
+// reconcile.
+func (r *Reconciler) resolveParent(ctx context.Context, ir *v1beta1.InferenceReplica) *v1beta1.InferenceService {
+	if ir.Spec.ParentRef.Name == "" {
+		return nil
+	}
+	parent := &v1beta1.InferenceService{}
+	key := types.NamespacedName{Namespace: ir.Namespace, Name: ir.Spec.ParentRef.Name}
+	if err := r.Get(ctx, key, parent); err != nil {
+		if !apierrors.IsNotFound(err) && !apierrors.IsForbidden(err) {
+			r.Log.V(1).Info("Failed to fetch parent ISVC for IR event stream; falling back to IR target",
+				"ir", client.ObjectKeyFromObject(ir), "parent", key, "err", err)
+		}
+		return nil
+	}
+	return parent
+}
+
+// ensureRevisionWithCollisionRetry computes the target
+// ControllerRevision for the IR's current PodSpec, honoring the
+// collision contract from workload/revision: on a same-name-different-
+// Data (or foreign-ownership) collision, bump
+// IR.Status.CollisionCount, persist, and retry the EnsureControllerRevision
+// with the new salt. The retry yields a different hash and lands.
+//
+// Mirrors the ISVC-side ensureRevisionWithCollisionRetry byte-for-byte
+// except for: (a) the v1beta1.InferenceReplica handle, (b) the
+// owner-ref shape (IR is owner), (c) collision-counter persistence
+// goes to IR.Status.CollisionCount instead of the per-Component status.
+func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v1beta1.InferenceReplica, input workload.ReconcileInput) (*appsv1.ControllerRevision, error) {
+	revKey := revision.Key{
+		Namespace: ir.Namespace,
+		Name:      ir.Spec.ParentRef.Name + "-" + string(ir.Spec.Component),
+		Labels: map[string]string{
+			constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
+			constants.OMEComponentLabel:           string(ir.Spec.Component),
+			query.LabelManagedBy:                  query.ManagedByOMENative,
+		},
+	}
+
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+
+	target, collision, err := revision.EnsureControllerRevisionWithWorker(
+		ctx, r.Client, reader,
+		ir, irGVK, revKey,
+		input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec,
+		input.DesiredSpec.PodTemplateObjectMeta,
+		ir.Status.CollisionCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !collision {
+		return target, nil
+	}
+
+	bumped, berr := r.bumpCollisionCount(ctx, ir)
+	if berr != nil {
+		return nil, fmt.Errorf("bump CollisionCount after revision collision: %w", berr)
+	}
+	if r.Recorder != nil {
+		r.Recorder.Eventf(ir, corev1.EventTypeWarning, "RevisionCollision",
+			"InferenceReplica %s/%s ControllerRevision hash collision; CollisionCount bumped to %d",
+			ir.Namespace, ir.Name, derefInt32(bumped))
+	}
+
+	target, collision, err = revision.EnsureControllerRevisionWithWorker(
+		ctx, r.Client, reader,
+		ir, irGVK, revKey,
+		input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec,
+		input.DesiredSpec.PodTemplateObjectMeta,
+		bumped,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)
+	}
+	if collision {
+		return nil, fmt.Errorf("revision still collides after CollisionCount bump (count=%d)", *bumped)
+	}
+	return target, nil
+}
+
+// bumpCollisionCount increments IR.Status.CollisionCount (initializing
+// to 1 when nil) and persists the status under retry.RetryOnConflict
+// so concurrent reconciles can't lose the bump. Each retry re-reads
+// the current count and increments from there — collision counting is
+// monotonic, so incrementing whatever the apiserver currently shows is
+// the right semantic.
+//
+// Mirrors the ISVC-side bumpCollisionCount; NotFound on Get/Update is
+// treated as "owner gone, nothing to bump" and the caller proceeds.
+func (r *Reconciler) bumpCollisionCount(ctx context.Context, ir *v1beta1.InferenceReplica) (*int32, error) {
+	key := client.ObjectKeyFromObject(ir)
+	var next int32
+	gone := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &v1beta1.InferenceReplica{}
+		if err := r.Client.Get(ctx, key, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				gone = true
+				return nil
+			}
+			return fmt.Errorf("re-read IR for CollisionCount bump: %w", err)
+		}
+		next = int32(1)
+		if fresh.Status.CollisionCount != nil {
+			next = *fresh.Status.CollisionCount + 1
+		}
+		fresh.Status.CollisionCount = &next
+		if err := r.Client.Status().Update(ctx, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				gone = true
+				return nil
+			}
+			return fmt.Errorf("persist CollisionCount: %w", err)
+		}
+		return nil
+	})
+	if gone {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Mirror onto the cached IR so the immediate retry sees the bumped
+	// value. Same mirror shape the ISVC adapter uses.
+	ir.Status.CollisionCount = &next
+	return &next, nil
+}
+
+// derefInt32 returns 0 for a nil pointer, *p otherwise. Used for event
+// messages where "<nil>" would be confusing.
+func derefInt32(p *int32) int32 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }

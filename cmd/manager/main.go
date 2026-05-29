@@ -121,10 +121,11 @@ func DefaultOptions() Options {
 		leaderElectionNamespace:    LeaderElectionNamespace,
 		runtimeRevisionRetention:   10,
 		runtimeRevisionGracePeriod: 24 * time.Hour,
-		// The InferenceReplica controller defaults ON. In this PR the
-		// reconciler is a no-op skeleton (only stamps observedGeneration)
-		// so leaving it enabled is safe. The flag exists so operators
-		// can disable it if PR 2's lifecycle code ships a regression.
+		// The InferenceReplica controller defaults ON. The reconciler
+		// drives the per-Component pipeline via workload.Reconcile when
+		// an IR is created directly (PR 3 wires the ISVC controller to
+		// project IRs). The flag exists so operators can disable the
+		// controller if a regression lands.
 		enableInferenceReplicaCtrl: true,
 		zapOpts: zap.Options{
 			TimeEncoder: zapcore.RFC3339TimeEncoder,
@@ -154,8 +155,7 @@ func GetOptions() Options {
 	flag.DurationVar(&opts.runtimeRevisionGracePeriod, "runtime-revision-grace-period", opts.runtimeRevisionGracePeriod,
 		"How long an OME-owned ControllerRevision stays after first being observed unreferenced + over retention.")
 	flag.BoolVar(&opts.enableInferenceReplicaCtrl, "enable-inferencereplica-controller", opts.enableInferenceReplicaCtrl,
-		"Run the InferenceReplica controller. Defaults true; flip to false to disable when PR 2's lifecycle code ships a regression. "+
-			"In this PR the reconciler is a no-op skeleton that only stamps observedGeneration.")
+		"Run the InferenceReplica controller. Defaults true; flip to false to disable if the per-IR lifecycle code ships a regression.")
 	opts.zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	return opts
@@ -364,11 +364,13 @@ func main() {
 	}
 
 	if options.enableInferenceReplicaCtrl {
-		setupLog.Info("Setting up InferenceReplica controller (skeleton)")
+		setupLog.Info("Setting up InferenceReplica controller")
 		if err = (&v1beta1inferencereplicacontroller.Reconciler{
-			Client: mgr.GetClient(),
-			Log:    ctrl.Log.WithName("InferenceReplica"),
-			Scheme: mgr.GetScheme(),
+			Client:    mgr.GetClient(),
+			Log:       ctrl.Log.WithName("InferenceReplica"),
+			Scheme:    mgr.GetScheme(),
+			APIReader: mgr.GetAPIReader(),
+			Recorder:  eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create InferenceReplica controller")
 			os.Exit(1)

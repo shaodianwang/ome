@@ -1,21 +1,39 @@
 package inferencereplica
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// SetupWithManager wires the Reconciler into the controller manager. PR
-// 2 will add Owns() entries for pods, services, podmonitors, and
-// controllerrevisions; the skeleton owns nothing.
+// SetupWithManager wires the Reconciler into the controller manager.
 //
-// The parent InferenceService is NOT watched here (the IR's owner ref
-// to its parent means the parent's controller already gets re-enqueued
-// on IR status churn via Owns(&InferenceReplica{}); the IR controller
-// itself only needs to react to its own object).
+// Watches:
+//   - InferenceReplica (primary): re-enqueue on spec / status changes.
+//   - Pods (owned): pod-status churn → re-enqueue the owning IR so the
+//     status aggregator picks up new ReadyPodCount / ServingPodCount /
+//     AvailablePodCount values. Owns() composes both an enqueue handler
+//     and a controller-owns predicate.
+//   - ControllerRevisions (owned): re-enqueue on revision GC so the
+//     workload-side retention sweep doesn't fight a manual delete.
+//
+// The parent InferenceService is NOT watched — the IR's owner ref to
+// its parent means the parent's controller already gets re-enqueued
+// on IR status churn via ISVC's Owns(&InferenceReplica{}) (PR 3
+// wires that). The IR controller only needs to react to its own
+// object plus the pods/CRs it owns.
+//
+// Services / PodMonitor are NOT watched: the ISVC controller still
+// owns them (PR 2 scope) — the IR controller can't observe-only on
+// resources it doesn't manage without confusing the owner-ref shape.
+// PR 2.1 (Lane B) lands the headless-Service extraction; the watch
+// list will grow then.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.InferenceReplica{}).
+		Owns(&corev1.Pod{}).
+		Owns(&appsv1.ControllerRevision{}).
 		Complete(r)
 }
