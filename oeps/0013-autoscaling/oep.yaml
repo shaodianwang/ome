@@ -4,6 +4,7 @@ authors:
   - "@simo-lin"
 status: provisional
 creation-date: 2026-05-19
+last-revised: 2026-05-28
 reviewers:
   - TBD
 approvers:
@@ -16,9 +17,23 @@ see-also:
 # The target maturity stage in the current dev cycle.
 stage: alpha
 
+# No Kubernetes feature gate. Opt-in is per-Component via the new
+# spec.<component>.autoscaler block; legacy fields and the
+# ome.io/autoscalerClass annotation continue to work.
+feature-gates: []
+disable-supported: true
+
 latest-milestone: "TBD"
 
 milestone:
   alpha: "TBD"
   beta: "TBD"
   stable: "TBD"
+
+metrics:
+  - ome_autoscaler_scaledobject_total                # labels: ir, class (keda|hpa|external|none)
+  - ome_autoscaler_external_target_total             # labels: ir, target_kind (ScaledObject|HorizontalPodAutoscaler)
+  - ome_autoscaler_prometheus_scrape_failures_total  # bundled-Prometheus only; labels: ir, reason
+  - ome_autoscaler_projection_total                  # labels: isvc, component, outcome (created|updated|noop)
+  - ome_autoscaler_spec_source_total                 # labels: isvc, component, source (isvc|runtime|legacy|default|external)
+  - ome_scaling_policy_coordinator_total             # labels: isvc, anchor, follower, outcome (scaled|noop|error)
