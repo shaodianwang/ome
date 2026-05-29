@@ -76,11 +76,3 @@ data:
         "authType" : "{{ .Values.ome.omeAgent.authType }}",
         "region": "{{ .Values.ome.omeAgent.region }}"
     }
-  kedaConfig: |-
-    {
-      "enableKeda" : {{ .Values.ome.kedaConfig.enableKeda | default true }},
-      "promServerAddress": "{{ .Values.ome.kedaConfig.promServerAddress | default "http://prometheus-operated.monitoring.svc.cluster.local:9090" }}",
-      "customPromQuery": "{{ .Values.ome.kedaConfig.customPromQuery | default "" }}",
-      "scalingThreshold": "{{ .Values.ome.kedaConfig.scalingThreshold | default "10" }}",
-      "scalingOperator": "{{ .Values.ome.kedaConfig.scalingOperator | default "GreaterThanOrEqual" }}"
-    }

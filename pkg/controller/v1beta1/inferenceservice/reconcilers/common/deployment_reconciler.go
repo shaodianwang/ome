@@ -36,12 +36,13 @@ func (r *DeploymentReconciler) ReconcileRawDeployment(
 ) (ctrl.Result, error) {
 	// Synthetic InferenceServiceSpec carrying the component-level extension
 	// spec to the downstream raw reconciler. Engine is the carrier;
-	// raw/autoscaler/keda all read from Spec.Engine.ComponentExtensionSpec.
+	// raw/autoscaler/keda all read from Spec.Engine.ComponentExtensionSpec
+	// (which now holds the per-component Autoscaler block introduced in
+	// OEP-0013).
 	inferenceServiceSpec := &v1beta1.InferenceServiceSpec{
 		Engine: &v1beta1.EngineSpec{
 			ComponentExtensionSpec: *componentSpec,
 		},
-		KedaConfig: isvc.Spec.KedaConfig,
 	}
 
 	reconciler, err := raw.NewRawKubeReconciler(r.Client, r.Clientset, r.Scheme, objectMeta, inferenceServiceSpec, podSpec)

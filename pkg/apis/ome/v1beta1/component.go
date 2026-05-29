@@ -45,14 +45,20 @@ type ComponentExtensionSpec struct {
 	// +optional
 	DeploymentStrategy *appsv1.DeploymentStrategy `json:"deploymentStrategy,omitempty"`
 
-	KedaConfig *KedaConfig `json:"kedaConfig,omitempty"`
-
 	// Lifecycle groups OMENative-specific lifecycle policies for this
 	// Component. Applies only when the Component is annotated
 	// ome.io/deploymentMode=OMENative; ignored otherwise. The status
 	// counterpart is status.components.<component>.omenative.
 	// +optional
 	Lifecycle *LifecycleSpec `json:"lifecycle,omitempty"`
+
+	// Autoscaler configures the per-Component autoscaler dispatch and the
+	// underlying KEDA / HPA configuration. When set, takes priority over the
+	// legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass
+	// annotation for this Component. Alpha (OEP-0013). The API may change
+	// without notice.
+	// +optional
+	Autoscaler *ComponentAutoscaler `json:"autoscaler,omitempty"`
 }
 
 // ScaleMetric enum

@@ -20,6 +20,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":           schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":          schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList":      schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler":            schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentExtensionSpec":         schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec":            schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget":         schema_pkg_apis_ome_v1beta1_ComponentTrafficTarget(ref),
@@ -34,6 +35,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeight":                schema_pkg_apis_ome_v1beta1_FineTunedWeight(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightList":            schema_pkg_apis_ome_v1beta1_FineTunedWeightList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":            schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HPAAutoscaler":                  schema_pkg_apis_ome_v1beta1_HPAAutoscaler(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                     schema_pkg_apis_ome_v1beta1_HashCookie(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                     schema_pkg_apis_ome_v1beta1_HashHeader(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InPlaceUpdateStrategy":          schema_pkg_apis_ome_v1beta1_InPlaceUpdateStrategy(ref),
@@ -47,7 +49,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceSpec":           schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":         schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation":              schema_pkg_apis_ome_v1beta1_InstanceOperation(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig":                     schema_pkg_apis_ome_v1beta1_KedaConfig(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaAutoscaler":                 schema_pkg_apis_ome_v1beta1_KedaAutoscaler(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                     schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec":                  schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":                 schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
@@ -70,6 +72,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":                schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                schema_pkg_apis_ome_v1beta1_ParentReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                        schema_pkg_apis_ome_v1beta1_PodSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy":             schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate":                  schema_pkg_apis_ome_v1beta1_RollingUpdate(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus": schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref),
@@ -82,7 +85,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                     schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner":                         schema_pkg_apis_ome_v1beta1_Runner(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                     schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalerAuthenticationRef":        schema_pkg_apis_ome_v1beta1_ScalerAuthenticationRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy":                  schema_pkg_apis_ome_v1beta1_ScalingPolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntime":                 schema_pkg_apis_ome_v1beta1_ServingRuntime(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeList":             schema_pkg_apis_ome_v1beta1_ServingRuntimeList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimePodSpec":          schema_pkg_apis_ome_v1beta1_ServingRuntimePodSpec(ref),
@@ -622,6 +625,42 @@ func schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref common.ReferenceC
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). When set, it takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"class": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Class selects the autoscaler implementation.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"keda": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Keda holds KEDA-specific configuration. Required when Class == \"keda\".",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaAutoscaler"),
+						},
+					},
+					"hpa": {
+						SchemaProps: spec.SchemaProps{
+							Description: "HPA holds HorizontalPodAutoscaler-specific configuration. Optional when Class == \"hpa\"; if absent the controller emits a default CPU=80% HPA.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HPAAutoscaler"),
+						},
+					},
+				},
+				Required: []string{"class"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HPAAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaAutoscaler"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -721,22 +760,23 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 							Ref:         ref("k8s.io/api/apps/v1.DeploymentStrategy"),
 						},
 					},
-					"kedaConfig": {
-						SchemaProps: spec.SchemaProps{
-							Ref: ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig"),
-						},
-					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
+					"autoscaler": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -1530,15 +1570,16 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 							Ref:         ref("k8s.io/api/apps/v1.DeploymentStrategy"),
 						},
 					},
-					"kedaConfig": {
-						SchemaProps: spec.SchemaProps{
-							Ref: ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig"),
-						},
-					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
+						},
+					},
+					"autoscaler": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
 					"runner": {
@@ -1563,7 +1604,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -2276,15 +2317,16 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 							Ref:         ref("k8s.io/api/apps/v1.DeploymentStrategy"),
 						},
 					},
-					"kedaConfig": {
-						SchemaProps: spec.SchemaProps{
-							Ref: ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig"),
-						},
-					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
+						},
+					},
+					"autoscaler": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
 					"runner": {
@@ -2309,7 +2351,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -2550,6 +2592,46 @@ func schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref common.ReferenceCallbac
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec", "k8s.io/apimachinery/pkg/runtime.RawExtension"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_HPAAutoscaler(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "HPAAutoscaler holds HorizontalPodAutoscaler configuration passed through verbatim. Alpha (OEP-0013). The API may change without notice.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"metrics": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Metrics are passed through verbatim to autoscalingv2.HorizontalPodAutoscalerSpec.Metrics. Supports Resource, ContainerResource, Pods, Object, and External metric sources. If empty, the controller defaults to a single CPU=80% Resource metric.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/api/autoscaling/v2.MetricSpec"),
+									},
+								},
+							},
+						},
+					},
+					"behavior": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Behavior controls scaling stabilization windows and per-direction policies.",
+							Ref:         ref("k8s.io/api/autoscaling/v2.HorizontalPodAutoscalerBehavior"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/api/autoscaling/v2.HorizontalPodAutoscalerBehavior", "k8s.io/api/autoscaling/v2.MetricSpec"},
 	}
 }
 
@@ -2823,6 +2905,12 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing"),
 						},
 					},
+					"autoscaler": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Autoscaler is the live autoscaler configuration that downstream scalers (HPA / KEDA / external) target. The ISVC controller projects the per-Component autoscaler defaults from ISVC.spec.<component>.autoscaler onto the corresponding IR at create time + on subsequent reconciles (per OEP-0013 Option B). External autoscalers may also write directly to this field via the /scale subresource without going through the ISVC controller.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
+						},
+					},
 					"paused": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Paused, when true, stops the InferenceReplica controller from initiating any new Update / Restart / Create operations. In-flight operations resume on unpause.",
@@ -2835,7 +2923,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner"},
 	}
 }
 
@@ -3137,12 +3225,6 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec"),
 						},
 					},
-					"kedaConfig": {
-						SchemaProps: spec.SchemaProps{
-							Description: "KedaConfig defines the autoscaling configuration for KEDA Provides settings for event-driven autoscaling using KEDA (Kubernetes Event-driven Autoscaling), allowing the service to scale based on custom metrics or event sources.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig"),
-						},
-					},
 					"traffic": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Traffic configures the load-balancing policy applied to all HTTPRoutes OME emits for this InferenceService. See OEP-0011 and the TrafficSpec doc for details.",
@@ -3155,11 +3237,17 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec"),
 						},
 					},
+					"scalingPolicy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ScalingPolicy coordinates replica counts across Components when more than one autoscaler would otherwise drift (e.g., engine + decoder in a PD-disaggregated service that requires 1:1 sharding). When nil, every Component autoscales independently. Alpha (OEP-0013). The API may change without notice.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
 	}
 }
 
@@ -3442,66 +3530,71 @@ func schema_pkg_apis_ome_v1beta1_InstanceOperation(ref common.ReferenceCallback)
 	}
 }
 
-func schema_pkg_apis_ome_v1beta1_KedaConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
+func schema_pkg_apis_ome_v1beta1_KedaAutoscaler(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "KedaConfig stores the configuration settings for KEDA autoscaling within the InferenceService. It includes fields like the Prometheus server address, custom query, scaling threshold, and operator.",
+				Description: "KedaAutoscaler holds KEDA ScaledObject configuration passed through verbatim. Alpha (OEP-0013). The API may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"enableKeda": {
+					"triggers": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
-							Description: "EnableKeda determines whether KEDA autoscaling is enabled for the InferenceService. - true: KEDA will manage the autoscaling based on the provided configuration. - false: KEDA will not be used, and autoscaling will rely on other mechanisms (e.g., HPA).",
-							Type:        []string{"boolean"},
-							Format:      "",
+							Description: "Triggers are passed through verbatim to kedav1.ScaledObjectSpec.Triggers. The full KEDA trigger surface (prometheus, cron, external, kafka, ...) is supported.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/kedacore/keda/v2/apis/keda/v1alpha1.ScaleTriggers"),
+									},
+								},
+							},
 						},
 					},
-					"promServerAddress": {
+					"advanced": {
 						SchemaProps: spec.SchemaProps{
-							Description: "PromServerAddress specifies the address of the Prometheus server that KEDA will query to retrieve metrics for autoscaling decisions. This should be a fully qualified URL, including the protocol and port number.\n\nExample:\n  http://prometheus-operated.monitoring.svc.cluster.local:9090",
-							Type:        []string{"string"},
-							Format:      "",
+							Description: "Advanced ScaledObject configuration — horizontalPodAutoscalerConfig, restoreToOriginalReplicaCount.",
+							Ref:         ref("github.com/kedacore/keda/v2/apis/keda/v1alpha1.AdvancedConfig"),
 						},
 					},
-					"customPromQuery": {
+					"pollingInterval": {
 						SchemaProps: spec.SchemaProps{
-							Description: "CustomPromQuery defines a custom Prometheus query that KEDA will execute to evaluate the desired metric for scaling. This query should return a single numerical value that represents the metric to be monitored.\n\nExample:\n  avg_over_time(http_requests_total{service=\"llama\"}[5m])",
-							Type:        []string{"string"},
-							Format:      "",
+							Description: "PollingInterval is the interval, in seconds, at which KEDA checks each trigger. Defaults to the KEDA-side default when unset.",
+							Type:        []string{"integer"},
+							Format:      "int32",
 						},
 					},
-					"scalingThreshold": {
+					"cooldownPeriod": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScalingThreshold sets the numerical threshold against which the result of the Prometheus query will be compared. Depending on the ScalingOperator, this threshold determines when to scale the number of replicas up or down.\n\nExample:\n  \"10\" - The Autoscaler will compare the metric value to 10.",
-							Type:        []string{"string"},
-							Format:      "",
+							Description: "CooldownPeriod is the time, in seconds, KEDA waits before scaling down after the last trigger fires. Defaults to the KEDA-side default when unset.",
+							Type:        []string{"integer"},
+							Format:      "int32",
 						},
 					},
-					"scalingOperator": {
+					"idleReplicaCount": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScalingOperator specifies the comparison operator used by KEDA to decide whether to scale the Deployment. Common operators include: - \"GreaterThanOrEqual\": Scale up when the metric is >= ScalingThreshold. - \"LessThanOrEqual\": Scale down when the metric is <= ScalingThreshold.\n\nThis operator defines the condition under which scaling actions are triggered based on the evaluated metric.\n\nExample:\n  \"GreaterThanOrEqual\"",
-							Type:        []string{"string"},
-							Format:      "",
+							Description: "IdleReplicaCount enables scaling to a fixed count when no triggers fire (commonly 0 for scale-to-zero). Must be strictly less than the effective MinReplicaCount.",
+							Type:        []string{"integer"},
+							Format:      "int32",
 						},
 					},
-					"authenticationRef": {
+					"fallback": {
 						SchemaProps: spec.SchemaProps{
-							Description: "AuthenticationRef references a TriggerAuthentication or ClusterTriggerAuthentication resource that contains the authentication configuration for the Prometheus server. This is required when the Prometheus server requires authentication (e.g., Grafana Cloud).\n\nExample:\n  authenticationRef:\n    name: grafana-cloud-auth\n    kind: TriggerAuthentication",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalerAuthenticationRef"),
-						},
-					},
-					"authModes": {
-						SchemaProps: spec.SchemaProps{
-							Description: "AuthModes specifies the authentication mode(s) for the Prometheus scaler. Common values include: \"basic\", \"tls\", \"bearer\", \"custom\". Multiple modes can be specified comma-separated (e.g., \"tls,basic\").\n\nExample:\n  \"basic\" - Use basic authentication with username/password from TriggerAuthentication",
-							Type:        []string{"string"},
-							Format:      "",
+							Description: "Fallback policy applied when the metric source becomes unavailable.",
+							Ref:         ref("github.com/kedacore/keda/v2/apis/keda/v1alpha1.Fallback"),
 						},
 					},
 				},
+				Required: []string{"triggers"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalerAuthenticationRef"},
+			"github.com/kedacore/keda/v2/apis/keda/v1alpha1.AdvancedConfig", "github.com/kedacore/keda/v2/apis/keda/v1alpha1.Fallback", "github.com/kedacore/keda/v2/apis/keda/v1alpha1.ScaleTriggers"},
 	}
 }
 
@@ -5569,6 +5662,44 @@ func schema_pkg_apis_ome_v1beta1_PodSpec(ref common.ReferenceCallback) common.Op
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ProportionalPolicy specifies the anchor Component and per-follower replica ratios for ScalingProportional. Alpha (OEP-0013). The API may change without notice.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"anchor": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Anchor is the Component whose replica count drives followers.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"ratios": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Ratios maps each follower Component to its replica ratio relative to the anchor. A ratio of 1.0 means parity; 0.25 means one follower per four anchor replicas (rounded up). Components not listed scale independently.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"anchor"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_RollingUpdate(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -6601,15 +6732,16 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 							Ref:         ref("k8s.io/api/apps/v1.DeploymentStrategy"),
 						},
 					},
-					"kedaConfig": {
-						SchemaProps: spec.SchemaProps{
-							Ref: ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig"),
-						},
-					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
+						},
+					},
+					"autoscaler": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
 					"runner": {
@@ -6638,7 +6770,7 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -6979,31 +7111,33 @@ func schema_pkg_apis_ome_v1beta1_RunnerSpec(ref common.ReferenceCallback) common
 	}
 }
 
-func schema_pkg_apis_ome_v1beta1_ScalerAuthenticationRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
+func schema_pkg_apis_ome_v1beta1_ScalingPolicy(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ScalerAuthenticationRef points to a KEDA TriggerAuthentication or ClusterTriggerAuthentication resource that contains the credentials for authenticating with the scaler's target (e.g., Prometheus server).",
+				Description: "ScalingPolicy defines coordination between the Components of an InferenceService. Alpha (OEP-0013). The API may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"name": {
+					"mode": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Name of the TriggerAuthentication or ClusterTriggerAuthentication resource.",
+							Description: "Mode selects the coordination strategy.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
-					"kind": {
+					"proportional": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Kind of the authentication resource being referenced. Valid values are \"TriggerAuthentication\" (namespace-scoped) or \"ClusterTriggerAuthentication\" (cluster-scoped).",
-							Type:        []string{"string"},
-							Format:      "",
+							Description: "Proportional configuration; required when Mode == \"proportional\".",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy"),
 						},
 					},
 				},
+				Required: []string{"mode"},
 			},
 		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy"},
 	}
 }
 
@@ -7588,11 +7722,17 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref common.ReferenceCallback
 							Format:      "",
 						},
 					},
+					"scalingPolicy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ScalingPolicy default for InferenceServices binding this runtime. Replaced wholesale by isvc.spec.scalingPolicy when set on the ISVC. Alpha (OEP-0013). The API may change without notice.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.Volume"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.Volume"},
 	}
 }
 

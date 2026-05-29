@@ -191,6 +191,12 @@ type ServingRuntimeSpec struct {
 
 	// PodSpec for the serving runtime
 	ServingRuntimePodSpec `json:",inline"`
+
+	// ScalingPolicy default for InferenceServices binding this runtime.
+	// Replaced wholesale by isvc.spec.scalingPolicy when set on the ISVC.
+	// Alpha (OEP-0013). The API may change without notice.
+	// +optional
+	ScalingPolicy *ScalingPolicy `json:"scalingPolicy,omitempty"`
 }
 
 // ModelSizeRangeSpec defines the range of model sizes supported by this runtime

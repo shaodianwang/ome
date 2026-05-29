@@ -2,7 +2,6 @@ package keda
 
 import (
 	"context"
-	"fmt"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -21,7 +20,17 @@ import (
 
 var log = logf.Log.WithName("KEDAReconciler")
 
-// KEDAReconciler reconciles the ScaledObject resource
+// defaultMinReplicas is the floor applied when the component spec does not
+// declare MinReplicas > 0.
+const defaultMinReplicas int32 = 1
+
+// KEDAReconciler reconciles the ScaledObject resource.
+//
+// Phase 1 of OEP-0013 stubs the trigger path: if the component declares
+// an Autoscaler.Keda block with at least one trigger, those triggers are
+// passed through verbatim; otherwise no ScaledObject is emitted. Full
+// verbatim pass-through (Advanced, PollingInterval, CooldownPeriod,
+// IdleReplicaCount, Fallback) lands in phase 2.
 type KEDAReconciler struct {
 	client       client.Client
 	scheme       *runtime.Scheme
@@ -29,28 +38,30 @@ type KEDAReconciler struct {
 	componentExt *v1beta1.ComponentExtensionSpec
 }
 
-// NewKEDAReconciler creates a new KEDAReconciler
+// NewKEDAReconciler creates a new KEDAReconciler.
 func NewKEDAReconciler(
 	client client.Client,
 	scheme *runtime.Scheme,
 	componentMeta metav1.ObjectMeta,
-	inferenceServiceSpec *v1beta1.InferenceServiceSpec,
+	componentExt *v1beta1.ComponentExtensionSpec,
 ) (*KEDAReconciler, error) {
 
-	scaledObject := createScaledObject(componentMeta, *inferenceServiceSpec)
+	scaledObject := createScaledObject(componentMeta, componentExt)
 
 	return &KEDAReconciler{
 		client:       client,
 		scheme:       scheme,
 		ScaledObject: scaledObject,
-		componentExt: &inferenceServiceSpec.Engine.ComponentExtensionSpec,
+		componentExt: componentExt,
 	}, nil
 }
 
-// createScaledObject creates the ScaledObject resource
+// createScaledObject builds the desired ScaledObject. When the component
+// has no Autoscaler.Keda block, Triggers is left empty and Reconcile()
+// will skip the apply.
 func createScaledObject(
 	componentMeta metav1.ObjectMeta,
-	inferenceServiceSpec v1beta1.InferenceServiceSpec,
+	componentExt *v1beta1.ComponentExtensionSpec,
 ) *kedav1.ScaledObject {
 	filteredLabels := make(map[string]string)
 	for key, value := range componentMeta.Labels {
@@ -59,10 +70,13 @@ func createScaledObject(
 			filteredLabels[key] = value
 		}
 	}
-	componentExt := &inferenceServiceSpec.Engine.ComponentExtensionSpec
 	minReplicas := calculateMinReplicas(componentExt)
 	maxReplicas := calculateMaxReplicas(componentExt, minReplicas)
-	triggers := getScaledObjectTriggers(componentMeta, inferenceServiceSpec)
+
+	var triggers []kedav1.ScaleTriggers
+	if componentExt.Autoscaler != nil && componentExt.Autoscaler.Keda != nil {
+		triggers = componentExt.Autoscaler.Keda.Triggers
+	}
 
 	return &kedav1.ScaledObject{
 		ObjectMeta: metav1.ObjectMeta{
@@ -89,7 +103,7 @@ func calculateMinReplicas(componentExt *v1beta1.ComponentExtensionSpec) int32 {
 	if componentExt.MinReplicas != nil && *componentExt.MinReplicas > 0 {
 		return int32(*componentExt.MinReplicas)
 	}
-	return int32(constants.KedaDefaultMinReplicas)
+	return defaultMinReplicas
 }
 
 // calculateMaxReplicas calculates the maximum replicas
@@ -98,120 +112,6 @@ func calculateMaxReplicas(componentExt *v1beta1.ComponentExtensionSpec, minRepli
 		return int32(componentExt.MaxReplicas)
 	}
 	return minReplicas
-}
-
-// getScaledObjectTriggers constructs the triggers for the ScaledObject
-func getScaledObjectTriggers(metadata metav1.ObjectMeta, inferenceServiceSpec v1beta1.InferenceServiceSpec) []kedav1.ScaleTriggers {
-	kedaConfig := inferenceServiceSpec.KedaConfig
-	threshold := getScalingThreshold(metadata, kedaConfig)
-	operator := getScalingOperator(metadata, kedaConfig)
-	prometheusServerAddress := getPrometheusServerAddress(metadata, kedaConfig)
-	prometheusQuery := getPrometheusQuery(metadata, kedaConfig)
-	scaleMetric := getScaleMetric(inferenceServiceSpec)
-
-	triggerMetadata := map[string]string{
-		"serverAddress": prometheusServerAddress,
-		"metricName":    scaleMetric,
-		"query":         prometheusQuery,
-		"threshold":     threshold,
-		"operator":      operator,
-	}
-
-	trigger := kedav1.ScaleTriggers{
-		Type:     "prometheus",
-		Metadata: triggerMetadata,
-	}
-
-	// Add authenticationRef if configured
-	if kedaConfig != nil && kedaConfig.AuthenticationRef != nil {
-		kind := kedaConfig.AuthenticationRef.Kind
-		if kind == "" {
-			kind = "TriggerAuthentication" // Default kind
-		}
-		trigger.AuthenticationRef = &kedav1.AuthenticationRef{
-			Name: kedaConfig.AuthenticationRef.Name,
-			Kind: kind,
-		}
-		// Add authModes to metadata only when authenticationRef is present
-		// as KEDA requires authenticationRef for authModes to be effective
-		if kedaConfig.AuthModes != "" {
-			trigger.Metadata["authModes"] = kedaConfig.AuthModes
-		}
-	}
-
-	return []kedav1.ScaleTriggers{trigger}
-}
-
-// getScalingThreshold retrieves the scaling threshold
-func getScalingThreshold(metadata metav1.ObjectMeta, kedaConfig *v1beta1.KedaConfig) string {
-	if value, ok := metadata.Annotations[constants.KedaScalingThreshold]; ok {
-		return value
-	}
-	if kedaConfig != nil && kedaConfig.ScalingThreshold != "" {
-		return kedaConfig.ScalingThreshold
-	}
-	return "10" // Default threshold
-}
-
-// getScaleMetric retrieves the scaling metric name
-func getScaleMetric(inferenceServiceSpec v1beta1.InferenceServiceSpec) string {
-	// Use ScaleMetric from inferenceServiceSpec if available
-	if inferenceServiceSpec.Engine != nil &&
-		inferenceServiceSpec.Engine.ScaleMetric != nil &&
-		*inferenceServiceSpec.Engine.ScaleMetric != "" {
-		return string(*inferenceServiceSpec.Engine.ScaleMetric)
-	}
-	// Default metric
-	return string(v1beta1.MetricTPS)
-}
-
-// getScalingOperator retrieves the scaling operator
-func getScalingOperator(metadata metav1.ObjectMeta, kedaConfig *v1beta1.KedaConfig) string {
-	if value, ok := metadata.Annotations[constants.KedaScalingOperator]; ok {
-		return value
-	}
-	if kedaConfig != nil && kedaConfig.ScalingOperator != "" {
-		return kedaConfig.ScalingOperator
-	}
-	return "LessThanOrEqual" // Default operator
-}
-
-// getPrometheusServerAddress retrieves the Prometheus server address
-func getPrometheusServerAddress(metadata metav1.ObjectMeta, kedaConfig *v1beta1.KedaConfig) string {
-	if value, ok := metadata.Annotations[constants.KedaPrometheusServerAddress]; ok {
-		return value
-	}
-	if kedaConfig != nil && kedaConfig.PromServerAddress != "" {
-		return kedaConfig.PromServerAddress
-	}
-	return "http://prometheus-operated.monitoring.svc.cluster.local:9090" // Default address
-}
-
-// getPrometheusQuery constructs the Prometheus query
-func getPrometheusQuery(metadata metav1.ObjectMeta, kedaConfig *v1beta1.KedaConfig) string {
-	if value, ok := metadata.Annotations[constants.KedaPrometheusQuery]; ok {
-		return value
-	}
-	if kedaConfig != nil && kedaConfig.CustomPromQuery != "" {
-		return fmt.Sprintf(kedaConfig.CustomPromQuery, metadata.Name)
-	}
-	// Default VLLM Prometheus query
-	// Scale up condition: Low token throughput during high request load
-	throughputThreshold := 10   // Token throughput in TPS
-	requestRateThreshold := 0.5 // Request throughput in RPM
-	return fmt.Sprintf(
-		`sum(
-            avg_over_time(vllm:avg_generation_throughput_toks_per_s{ome_io_inferenceservice="%s"}[5m]) < bool %d
-        )
-        *
-        sum(
-            rate(vllm:request_success_total{ome_io_inferenceservice="%s"}[1m]) > bool %.2f
-        )`,
-		metadata.Name,
-		throughputThreshold,
-		metadata.Name,
-		requestRateThreshold,
-	)
 }
 
 // checkScaledObjectExist checks if the ScaledObject exists and determines the action
@@ -256,8 +156,13 @@ func shouldDeleteScaledObject(desired *kedav1.ScaledObject) bool {
 	return constants.AutoscalerClassType(desiredAutoscalerClass) == constants.AutoscalerClassExternal
 }
 
-// shouldCreateScaledObject determines if the ScaledObject should be created
+// shouldCreateScaledObject determines if the ScaledObject should be created.
+// Phase 1: require at least one trigger; otherwise skip apply to avoid
+// creating an invalid (zero-trigger) ScaledObject.
 func shouldCreateScaledObject(desired *kedav1.ScaledObject) bool {
+	if len(desired.Spec.Triggers) == 0 {
+		return false
+	}
 	desiredAutoscalerClass := desired.Annotations[constants.AutoscalerClass]
 	return desiredAutoscalerClass == "" || constants.AutoscalerClassType(desiredAutoscalerClass) == constants.AutoscalerClassKEDA
 }

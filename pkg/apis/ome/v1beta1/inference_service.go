@@ -39,11 +39,6 @@ type InferenceServiceSpec struct {
 	// +optional
 	Router *RouterSpec `json:"router,omitempty"`
 
-	// KedaConfig defines the autoscaling configuration for KEDA
-	// Provides settings for event-driven autoscaling using KEDA (Kubernetes Event-driven Autoscaling),
-	// allowing the service to scale based on custom metrics or event sources.
-	KedaConfig *KedaConfig `json:"kedaConfig,omitempty"`
-
 	// Traffic configures the load-balancing policy applied to all
 	// HTTPRoutes OME emits for this InferenceService. See OEP-0011
 	// and the TrafficSpec doc for details.
@@ -61,6 +56,14 @@ type InferenceServiceSpec struct {
 	// reference non-OMENative Components.
 	// +optional
 	RolloutCoordination *RolloutCoordinationSpec `json:"rolloutCoordination,omitempty"`
+
+	// ScalingPolicy coordinates replica counts across Components when more
+	// than one autoscaler would otherwise drift (e.g., engine + decoder in
+	// a PD-disaggregated service that requires 1:1 sharding). When nil,
+	// every Component autoscales independently. Alpha (OEP-0013). The API
+	// may change without notice.
+	// +optional
+	ScalingPolicy *ScalingPolicy `json:"scalingPolicy,omitempty"`
 }
 
 // EngineSpec defines the configuration for the Engine component (can be used for both single-node and multi-node deployments)

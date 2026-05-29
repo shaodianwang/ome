@@ -99,7 +99,7 @@ func createAutoscaler(client client.Client,
 		if err != nil {
 			return nil, fmt.Errorf("failed to delete existing HPA: %w", err)
 		}
-		return keda.NewKEDAReconciler(client, scheme, componentMeta, inferenceServiceSpec)
+		return keda.NewKEDAReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Engine.ComponentExtensionSpec)
 	default:
 		return nil, fmt.Errorf("unknown autoscaler class type: %v", ac)
 	}

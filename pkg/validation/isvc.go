@@ -2,9 +2,7 @@ package validation
 
 import (
 	"fmt"
-	"net/url"
 	"strconv"
-	"strings"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -432,7 +430,10 @@ func ValidateAutoscalerConfig(isvc *v1beta1.InferenceService) ([]string, error) 
 					}
 					return nil, nil
 				case constants.AutoscalerClassKEDA:
-					return ValidateKEDAConfig(isvc)
+					// Phase 1 of OEP-0013 removed the legacy KedaConfig
+					// shape; webhook validation for Autoscaler.Keda lands
+					// in a later phase. Accept without validating here.
+					return nil, nil
 				case constants.AutoscalerClassExternal:
 					return nil, nil
 				default:
@@ -466,123 +467,4 @@ func ValidateHPAMetrics(metric v1beta1.ScaleMetric) error {
 		}
 	}
 	return fmt.Errorf("[%s] is not a supported metric", metric)
-}
-
-var kedaValidScalingOperators = []string{
-	"GreaterThan",
-	"GreaterThanOrEqual",
-	"LessThan",
-	"LessThanOrEqual",
-}
-
-var kedaValidAuthModes = []string{
-	"basic",
-	"tls",
-	"bearer",
-	"custom",
-}
-
-func ValidateKEDAConfig(isvc *v1beta1.InferenceService) ([]string, error) {
-	var warnings []string
-	kedaConfig := isvc.Spec.KedaConfig
-	annotations := isvc.ObjectMeta.Annotations
-
-	if kedaConfig != nil && kedaConfig.ScalingOperator != "" {
-		if err := ValidateKEDAScalingOperator(kedaConfig.ScalingOperator); err != nil {
-			return warnings, err
-		}
-	}
-
-	if operatorAnnotation, ok := annotations[constants.KedaScalingOperator]; ok {
-		if err := ValidateKEDAScalingOperator(operatorAnnotation); err != nil {
-			return warnings, err
-		}
-	}
-
-	if kedaConfig != nil && kedaConfig.ScalingThreshold != "" {
-		if err := ValidateKEDAScalingThreshold(kedaConfig.ScalingThreshold); err != nil {
-			return warnings, err
-		}
-	}
-
-	if thresholdAnnotation, ok := annotations[constants.KedaScalingThreshold]; ok {
-		if err := ValidateKEDAScalingThreshold(thresholdAnnotation); err != nil {
-			return warnings, err
-		}
-	}
-
-	if kedaConfig != nil && kedaConfig.PromServerAddress != "" {
-		if err := ValidateKEDAPrometheusServerAddress(kedaConfig.PromServerAddress); err != nil {
-			return warnings, err
-		}
-	}
-
-	if promAddrAnnotation, ok := annotations[constants.KedaPrometheusServerAddress]; ok {
-		if err := ValidateKEDAPrometheusServerAddress(promAddrAnnotation); err != nil {
-			return warnings, err
-		}
-	}
-
-	if kedaConfig != nil && kedaConfig.AuthModes != "" {
-		if err := ValidateKEDAAuthModes(kedaConfig.AuthModes); err != nil {
-			return warnings, err
-		}
-		if kedaConfig.AuthenticationRef == nil {
-			warnings = append(warnings, "KEDA authModes is specified but authenticationRef is not set; authModes will be ignored by KEDA")
-		}
-	}
-
-	return warnings, nil
-}
-
-func ValidateKEDAScalingOperator(operator string) error {
-	for _, valid := range kedaValidScalingOperators {
-		if operator == valid {
-			return nil
-		}
-	}
-	return fmt.Errorf("invalid KEDA scaling operator %q, must be one of: %s", operator, strings.Join(kedaValidScalingOperators, ", "))
-}
-
-func ValidateKEDAScalingThreshold(threshold string) error {
-	_, err := strconv.ParseFloat(threshold, 64)
-	if err != nil {
-		return fmt.Errorf("invalid KEDA scaling threshold %q: must be a valid number", threshold)
-	}
-	return nil
-}
-
-func ValidateKEDAPrometheusServerAddress(address string) error {
-	parsedURL, err := url.Parse(address)
-	if err != nil {
-		return fmt.Errorf("invalid KEDA Prometheus server address %q: %v", address, err)
-	}
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return fmt.Errorf("invalid KEDA Prometheus server address %q: scheme must be http or https", address)
-	}
-	if parsedURL.Host == "" {
-		return fmt.Errorf("invalid KEDA Prometheus server address %q: host is required", address)
-	}
-	return nil
-}
-
-func ValidateKEDAAuthModes(authModes string) error {
-	modes := strings.Split(authModes, ",")
-	for _, mode := range modes {
-		mode = strings.TrimSpace(mode)
-		if mode == "" {
-			continue
-		}
-		valid := false
-		for _, validMode := range kedaValidAuthModes {
-			if mode == validMode {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			return fmt.Errorf("invalid KEDA auth mode %q, must be one of: %s", mode, strings.Join(kedaValidAuthModes, ", "))
-		}
-	}
-	return nil
 }

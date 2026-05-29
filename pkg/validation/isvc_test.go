@@ -323,7 +323,6 @@ func TestValidateAutoscalerConfig(t *testing.T) {
 	tests := []struct {
 		name        string
 		annotations map[string]string
-		kedaConfig  *v1beta1.KedaConfig
 		wantErr     bool
 	}{
 		{
@@ -359,27 +358,10 @@ func TestValidateAutoscalerConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "valid KEDA with scaling operator",
+			name: "KEDA class accepted (no validation in phase 1)",
 			annotations: map[string]string{
 				constants.AutoscalerClass: string(constants.AutoscalerClassKEDA),
 			},
-			kedaConfig: &v1beta1.KedaConfig{ScalingOperator: "GreaterThan"},
-		},
-		{
-			name: "KEDA with invalid scaling operator",
-			annotations: map[string]string{
-				constants.AutoscalerClass: string(constants.AutoscalerClassKEDA),
-			},
-			kedaConfig: &v1beta1.KedaConfig{ScalingOperator: "InvalidOp"},
-			wantErr:    true,
-		},
-		{
-			name: "KEDA with invalid threshold",
-			annotations: map[string]string{
-				constants.AutoscalerClass: string(constants.AutoscalerClassKEDA),
-			},
-			kedaConfig: &v1beta1.KedaConfig{ScalingThreshold: "not-a-number"},
-			wantErr:    true,
 		},
 		{
 			name: "valid external class",
@@ -393,7 +375,6 @@ func TestValidateAutoscalerConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			isvc := &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{Annotations: tc.annotations},
-				Spec:       v1beta1.InferenceServiceSpec{KedaConfig: tc.kedaConfig},
 			}
 			_, err := ValidateAutoscalerConfig(isvc)
 			if tc.wantErr && err == nil {

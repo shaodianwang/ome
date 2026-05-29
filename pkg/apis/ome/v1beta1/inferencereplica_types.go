@@ -115,6 +115,16 @@ type InferenceReplicaSpec struct {
 	// +optional
 	Pacing *InferenceReplicaPacing `json:"pacing,omitempty"`
 
+	// Autoscaler is the live autoscaler configuration that downstream
+	// scalers (HPA / KEDA / external) target. The ISVC controller projects
+	// the per-Component autoscaler defaults from ISVC.spec.<component>.autoscaler
+	// onto the corresponding IR at create time + on subsequent reconciles
+	// (per OEP-0013 Option B). External autoscalers may also write directly
+	// to this field via the /scale subresource without going through the
+	// ISVC controller.
+	// +optional
+	Autoscaler *ComponentAutoscaler `json:"autoscaler,omitempty"`
+
 	// Paused, when true, stops the InferenceReplica controller from
 	// initiating any new Update / Restart / Create operations.
 	// In-flight operations resume on unpause.

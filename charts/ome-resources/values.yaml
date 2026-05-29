@@ -95,12 +95,6 @@ ome:
       tolerations: []
       affinity: {}
       priorityClassName: ""
-  kedaConfig:
-    enableKeda: true
-    promServerAddress: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
-    customPromQuery: ""
-    scalingThreshold: "10"
-    scalingOperator: "GreaterThanOrEqual"
 modelAgent:
   # Disabled by default — this fork consumes upstream-published
   # model-agent images rather than building/deploying locally.

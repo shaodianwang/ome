@@ -237,15 +237,6 @@ var (
 	AutoscalerClassExternal AutoscalerClassType = "external"
 )
 
-// Keda Autoscaler Configs
-var (
-	KedaScalingThreshold        = "autoscaling.keda.sh/threshold"
-	KedaScalingOperator         = "autoscaling.keda.sh/operator"
-	KedaPrometheusServerAddress = "autoscaling.keda.sh/prometheus.serverAddress"
-	KedaPrometheusQuery         = "autoscaling.keda.sh/prometheus.query"
-	KedaDefaultMinReplicas      = 1
-)
-
 // Autoscaler Metrics
 var (
 	AutoScalerMetricsCPU AutoscalerMetricsType = "cpu"

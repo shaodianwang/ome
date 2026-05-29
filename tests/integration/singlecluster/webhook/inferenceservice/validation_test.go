@@ -94,21 +94,6 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(err.Error()).To(ContainSubstring("is not a supported metric"))
 	})
 
-	ginkgo.It("rejects ISVC with KEDA autoscaler + invalid scaling operator annotation", func() {
-		isvc := v1beta1testing.MakeInferenceService("bad-keda-op", "isvc-webhook").
-			Model("any-model").
-			Annotation(constants.AutoscalerClass, string(constants.AutoscalerClassKEDA)).
-			Annotation(constants.KedaScalingOperator, "EqualToButNotReally").
-			Engine(&v1beta1.EngineSpec{
-				PodSpec: v1beta1.PodSpec{
-					Containers: []corev1.Container{{Name: "ome-container", Image: "x"}},
-				},
-			}).Obj()
-		err := k8sClient.Create(suiteCtx, isvc)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("invalid KEDA scaling operator"))
-	})
-
 	ginkgo.It("rejects ISVC referencing a model that doesn't exist", func() {
 		// validateModelExists: the BaseModel/ClusterBaseModel lookup
 		// hits the apiserver, so this is the most-valuable

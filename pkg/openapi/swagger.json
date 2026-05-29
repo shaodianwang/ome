@@ -302,6 +302,28 @@
         }
       }
     },
+    "v1beta1.ComponentAutoscaler": {
+      "description": "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). When set, it takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+      "type": "object",
+      "required": [
+        "class"
+      ],
+      "properties": {
+        "class": {
+          "description": "Class selects the autoscaler implementation.",
+          "type": "string",
+          "default": ""
+        },
+        "hpa": {
+          "description": "HPA holds HorizontalPodAutoscaler-specific configuration. Optional when Class == \"hpa\"; if absent the controller emits a default CPU=80% HPA.",
+          "$ref": "#/definitions/v1beta1.HPAAutoscaler"
+        },
+        "keda": {
+          "description": "Keda holds KEDA-specific configuration. Required when Class == \"keda\".",
+          "$ref": "#/definitions/v1beta1.KedaAutoscaler"
+        }
+      }
+    },
     "v1beta1.ComponentExtensionSpec": {
       "description": "ComponentExtensionSpec defines the deployment configuration for a given InferenceService component",
       "type": "object",
@@ -314,6 +336,10 @@
             "default": ""
           }
         },
+        "autoscaler": {
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+          "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
+        },
         "canaryTrafficPercent": {
           "description": "CanaryTrafficPercent defines the traffic split percentage between the candidate revision and the last ready revision",
           "type": "integer",
@@ -322,9 +348,6 @@
         "deploymentStrategy": {
           "description": "The deployment strategy to use to replace existing pods with new ones. Only applicable for raw deployment mode.",
           "$ref": "#/definitions/k8s.io.api.apps.v1.DeploymentStrategy"
-        },
-        "kedaConfig": {
-          "$ref": "#/definitions/v1beta1.KedaConfig"
         },
         "labels": {
           "description": "Labels that will be added to the component pod. More info: http://kubernetes.io/docs/user-guide/labels",
@@ -526,6 +549,10 @@
           "description": "AutomountServiceAccountToken indicates whether a service account token should be automatically mounted.",
           "type": "boolean"
         },
+        "autoscaler": {
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+          "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
+        },
         "canaryTrafficPercent": {
           "description": "CanaryTrafficPercent defines the traffic split percentage between the candidate revision and the last ready revision",
           "type": "integer",
@@ -636,9 +663,6 @@
           "x-kubernetes-list-type": "map",
           "x-kubernetes-patch-merge-key": "name",
           "x-kubernetes-patch-strategy": "merge"
-        },
-        "kedaConfig": {
-          "$ref": "#/definitions/v1beta1.KedaConfig"
         },
         "labels": {
           "description": "Labels that will be added to the component pod. More info: http://kubernetes.io/docs/user-guide/labels",
@@ -952,6 +976,10 @@
           "description": "AutomountServiceAccountToken indicates whether a service account token should be automatically mounted.",
           "type": "boolean"
         },
+        "autoscaler": {
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+          "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
+        },
         "canaryTrafficPercent": {
           "description": "CanaryTrafficPercent defines the traffic split percentage between the candidate revision and the last ready revision",
           "type": "integer",
@@ -1062,9 +1090,6 @@
           "x-kubernetes-list-type": "map",
           "x-kubernetes-patch-merge-key": "name",
           "x-kubernetes-patch-strategy": "merge"
-        },
-        "kedaConfig": {
-          "$ref": "#/definitions/v1beta1.KedaConfig"
         },
         "labels": {
           "description": "Labels that will be added to the component pod. More info: http://kubernetes.io/docs/user-guide/labels",
@@ -1418,6 +1443,25 @@
         }
       }
     },
+    "v1beta1.HPAAutoscaler": {
+      "description": "HPAAutoscaler holds HorizontalPodAutoscaler configuration passed through verbatim. Alpha (OEP-0013). The API may change without notice.",
+      "type": "object",
+      "properties": {
+        "behavior": {
+          "description": "Behavior controls scaling stabilization windows and per-direction policies.",
+          "$ref": "#/definitions/k8s.io.api.autoscaling.v2.HorizontalPodAutoscalerBehavior"
+        },
+        "metrics": {
+          "description": "Metrics are passed through verbatim to autoscalingv2.HorizontalPodAutoscalerSpec.Metrics. Supports Resource, ContainerResource, Pods, Object, and External metric sources. If empty, the controller defaults to a single CPU=80% Resource metric.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/k8s.io.api.autoscaling.v2.MetricSpec"
+          },
+          "x-kubernetes-list-type": "atomic"
+        }
+      }
+    },
     "v1beta1.HashCookie": {
       "description": "HashCookie names a cookie and an optional TTL for auto-issuance.",
       "type": "object",
@@ -1538,6 +1582,10 @@
         "runners"
       ],
       "properties": {
+        "autoscaler": {
+          "description": "Autoscaler is the live autoscaler configuration that downstream scalers (HPA / KEDA / external) target. The ISVC controller projects the per-Component autoscaler defaults from ISVC.spec.\u003ccomponent\u003e.autoscaler onto the corresponding IR at create time + on subsequent reconciles (per OEP-0013 Option B). External autoscalers may also write directly to this field via the /scale subresource without going through the ISVC controller.",
+          "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
+        },
         "component": {
           "description": "Component is one of engine | decoder | router. Immutable; moving a workload between Component slots requires recreating the InferenceReplica.",
           "type": "string",
@@ -1748,10 +1796,6 @@
           "description": "Engine defines the serving engine spec This provides detailed container and pod specifications for model serving. It allows defining the model runner (container spec), as well as complete pod specifications including init containers, sidecar containers, and other pod-level configurations. Engine can also be configured for multi-node deployments using leader and worker specifications.",
           "$ref": "#/definitions/v1beta1.EngineSpec"
         },
-        "kedaConfig": {
-          "description": "KedaConfig defines the autoscaling configuration for KEDA Provides settings for event-driven autoscaling using KEDA (Kubernetes Event-driven Autoscaling), allowing the service to scale based on custom metrics or event sources.",
-          "$ref": "#/definitions/v1beta1.KedaConfig"
-        },
         "model": {
           "description": "Model defines the model to be used for inference, referencing either a BaseModel or a custom model. This allows models to be managed independently of the serving configuration.",
           "$ref": "#/definitions/v1beta1.ModelRef"
@@ -1767,6 +1811,10 @@
         "runtime": {
           "description": "Runtime defines the serving runtime environment that will be used to execute the model. It is an inference service spec template that determines how the service should be deployed. Runtime is optional - if not defined, the operator will automatically select the best runtime based on the model's size, architecture, format, quantization, and framework.",
           "$ref": "#/definitions/v1beta1.ServingRuntimeRef"
+        },
+        "scalingPolicy": {
+          "description": "ScalingPolicy coordinates replica counts across Components when more than one autoscaler would otherwise drift (e.g., engine + decoder in a PD-disaggregated service that requires 1:1 sharding). When nil, every Component autoscales independently. Alpha (OEP-0013). The API may change without notice.",
+          "$ref": "#/definitions/v1beta1.ScalingPolicy"
         },
         "traffic": {
           "description": "Traffic configures the load-balancing policy applied to all HTTPRoutes OME emits for this InferenceService. See OEP-0011 and the TrafficSpec doc for details.",
@@ -1937,37 +1985,44 @@
         }
       }
     },
-    "v1beta1.KedaConfig": {
-      "description": "KedaConfig stores the configuration settings for KEDA autoscaling within the InferenceService. It includes fields like the Prometheus server address, custom query, scaling threshold, and operator.",
+    "v1beta1.KedaAutoscaler": {
+      "description": "KedaAutoscaler holds KEDA ScaledObject configuration passed through verbatim. Alpha (OEP-0013). The API may change without notice.",
       "type": "object",
+      "required": [
+        "triggers"
+      ],
       "properties": {
-        "authModes": {
-          "description": "AuthModes specifies the authentication mode(s) for the Prometheus scaler. Common values include: \"basic\", \"tls\", \"bearer\", \"custom\". Multiple modes can be specified comma-separated (e.g., \"tls,basic\").\n\nExample:\n  \"basic\" - Use basic authentication with username/password from TriggerAuthentication",
-          "type": "string"
+        "advanced": {
+          "description": "Advanced ScaledObject configuration — horizontalPodAutoscalerConfig, restoreToOriginalReplicaCount.",
+          "$ref": "#/definitions/github.com.kedacore.keda.v2.apis.keda.v1alpha1.AdvancedConfig"
         },
-        "authenticationRef": {
-          "description": "AuthenticationRef references a TriggerAuthentication or ClusterTriggerAuthentication resource that contains the authentication configuration for the Prometheus server. This is required when the Prometheus server requires authentication (e.g., Grafana Cloud).\n\nExample:\n  authenticationRef:\n    name: grafana-cloud-auth\n    kind: TriggerAuthentication",
-          "$ref": "#/definitions/v1beta1.ScalerAuthenticationRef"
+        "cooldownPeriod": {
+          "description": "CooldownPeriod is the time, in seconds, KEDA waits before scaling down after the last trigger fires. Defaults to the KEDA-side default when unset.",
+          "type": "integer",
+          "format": "int32"
         },
-        "customPromQuery": {
-          "description": "CustomPromQuery defines a custom Prometheus query that KEDA will execute to evaluate the desired metric for scaling. This query should return a single numerical value that represents the metric to be monitored.\n\nExample:\n  avg_over_time(http_requests_total{service=\"llama\"}[5m])",
-          "type": "string"
+        "fallback": {
+          "description": "Fallback policy applied when the metric source becomes unavailable.",
+          "$ref": "#/definitions/github.com.kedacore.keda.v2.apis.keda.v1alpha1.Fallback"
         },
-        "enableKeda": {
-          "description": "EnableKeda determines whether KEDA autoscaling is enabled for the InferenceService. - true: KEDA will manage the autoscaling based on the provided configuration. - false: KEDA will not be used, and autoscaling will rely on other mechanisms (e.g., HPA).",
-          "type": "boolean"
+        "idleReplicaCount": {
+          "description": "IdleReplicaCount enables scaling to a fixed count when no triggers fire (commonly 0 for scale-to-zero). Must be strictly less than the effective MinReplicaCount.",
+          "type": "integer",
+          "format": "int32"
         },
-        "promServerAddress": {
-          "description": "PromServerAddress specifies the address of the Prometheus server that KEDA will query to retrieve metrics for autoscaling decisions. This should be a fully qualified URL, including the protocol and port number.\n\nExample:\n  http://prometheus-operated.monitoring.svc.cluster.local:9090",
-          "type": "string"
+        "pollingInterval": {
+          "description": "PollingInterval is the interval, in seconds, at which KEDA checks each trigger. Defaults to the KEDA-side default when unset.",
+          "type": "integer",
+          "format": "int32"
         },
-        "scalingOperator": {
-          "description": "ScalingOperator specifies the comparison operator used by KEDA to decide whether to scale the Deployment. Common operators include: - \"GreaterThanOrEqual\": Scale up when the metric is \u003e= ScalingThreshold. - \"LessThanOrEqual\": Scale down when the metric is \u003c= ScalingThreshold.\n\nThis operator defines the condition under which scaling actions are triggered based on the evaluated metric.\n\nExample:\n  \"GreaterThanOrEqual\"",
-          "type": "string"
-        },
-        "scalingThreshold": {
-          "description": "ScalingThreshold sets the numerical threshold against which the result of the Prometheus query will be compared. Depending on the ScalingOperator, this threshold determines when to scale the number of replicas up or down.\n\nExample:\n  \"10\" - The Autoscaler will compare the metric value to 10.",
-          "type": "string"
+        "triggers": {
+          "description": "Triggers are passed through verbatim to kedav1.ScaledObjectSpec.Triggers. The full KEDA trigger surface (prometheus, cron, external, kafka, ...) is supported.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/github.com.kedacore.keda.v2.apis.keda.v1alpha1.ScaleTriggers"
+          },
+          "x-kubernetes-list-type": "atomic"
         }
       }
     },
@@ -3156,6 +3211,27 @@
         }
       }
     },
+    "v1beta1.ProportionalPolicy": {
+      "description": "ProportionalPolicy specifies the anchor Component and per-follower replica ratios for ScalingProportional. Alpha (OEP-0013). The API may change without notice.",
+      "type": "object",
+      "required": [
+        "anchor"
+      ],
+      "properties": {
+        "anchor": {
+          "description": "Anchor is the Component whose replica count drives followers.",
+          "type": "string",
+          "default": ""
+        },
+        "ratios": {
+          "description": "Ratios maps each follower Component to its replica ratio relative to the anchor. A ratio of 1.0 means parity; 0.25 means one follower per four anchor replicas (rounded up). Components not listed scale independently.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/resource.Quantity"
+          }
+        }
+      }
+    },
     "v1beta1.RollingUpdate": {
       "description": "RollingUpdate paces rollout across Instances of one Component.",
       "type": "object",
@@ -3433,6 +3509,10 @@
           "description": "AutomountServiceAccountToken indicates whether a service account token should be automatically mounted.",
           "type": "boolean"
         },
+        "autoscaler": {
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+          "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
+        },
         "canaryTrafficPercent": {
           "description": "CanaryTrafficPercent defines the traffic split percentage between the candidate revision and the last ready revision",
           "type": "integer",
@@ -3551,9 +3631,6 @@
           "x-kubernetes-list-type": "map",
           "x-kubernetes-patch-merge-key": "name",
           "x-kubernetes-patch-strategy": "merge"
-        },
-        "kedaConfig": {
-          "$ref": "#/definitions/v1beta1.KedaConfig"
         },
         "labels": {
           "description": "Labels that will be added to the component pod. More info: http://kubernetes.io/docs/user-guide/labels",
@@ -3950,18 +4027,21 @@
         }
       }
     },
-    "v1beta1.ScalerAuthenticationRef": {
-      "description": "ScalerAuthenticationRef points to a KEDA TriggerAuthentication or ClusterTriggerAuthentication resource that contains the credentials for authenticating with the scaler's target (e.g., Prometheus server).",
+    "v1beta1.ScalingPolicy": {
+      "description": "ScalingPolicy defines coordination between the Components of an InferenceService. Alpha (OEP-0013). The API may change without notice.",
       "type": "object",
+      "required": [
+        "mode"
+      ],
       "properties": {
-        "kind": {
-          "description": "Kind of the authentication resource being referenced. Valid values are \"TriggerAuthentication\" (namespace-scoped) or \"ClusterTriggerAuthentication\" (cluster-scoped).",
-          "type": "string"
-        },
-        "name": {
-          "description": "Name of the TriggerAuthentication or ClusterTriggerAuthentication resource.",
+        "mode": {
+          "description": "Mode selects the coordination strategy.",
           "type": "string",
           "default": ""
+        },
+        "proportional": {
+          "description": "Proportional configuration; required when Mode == \"proportional\".",
+          "$ref": "#/definitions/v1beta1.ProportionalPolicy"
         }
       }
     },
@@ -4245,6 +4325,10 @@
         "routerConfig": {
           "description": "Router configuration for this runtime",
           "$ref": "#/definitions/v1beta1.RouterSpec"
+        },
+        "scalingPolicy": {
+          "description": "ScalingPolicy default for InferenceServices binding this runtime. Replaced wholesale by isvc.spec.scalingPolicy when set on the ISVC. Alpha (OEP-0013). The API may change without notice.",
+          "$ref": "#/definitions/v1beta1.ScalingPolicy"
         },
         "schedulerName": {
           "description": "If specified, the pod will be dispatched by specified scheduler. If not specified, the pod will be dispatched by default scheduler.",

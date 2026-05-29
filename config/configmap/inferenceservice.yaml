@@ -73,12 +73,3 @@ data:
       "affinity": {},
       "priorityClassName": ""
     }
-
-  kedaConfig: |-
-    {
-      "enableKeda" : true,
-      "promServerAddress": "http://prometheus-operated.monitoring.svc.cluster.local:9090",
-      "customPromQuery": "",
-      "scalingThreshold": "10",
-      "scalingOperator": "GreaterThanOrEqual"
-    }
