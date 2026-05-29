@@ -1977,3 +1977,70 @@ func TestClusterServingRuntimeValidator_SelfUpdateNotFlagged(t *testing.T) {
 	g.Expect(resp.Allowed).To(gomega.BeTrue(),
 		"self-update should not be flagged as a priority conflict; got rejection: %v", resp.Result)
 }
+
+// TestClusterServingRuntimeValidator_AutoscalerShape covers OEP-0013
+// per-Component Autoscaler block validation on the CSR webhook path.
+// Same shared validator.ValidateComponentAutoscaler that the ISVC
+// webhook calls is invoked here against EngineConfig / DecoderConfig /
+// RouterConfig so a malformed runtime-level default is rejected at
+// admission rather than silently inherited into an ISVC at runtime.
+func TestClusterServingRuntimeValidator_AutoscalerShape(t *testing.T) {
+	mkCSRWithEngineAutoscaler := func(name string, as *v1beta1.ComponentAutoscaler) *v1beta1.ClusterServingRuntime {
+		csr := mkCSRWithFormat(name, "safetensors", 1)
+		csr.Spec.EngineConfig = &v1beta1.EngineSpec{
+			ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Autoscaler: as},
+		}
+		return csr
+	}
+
+	tests := []struct {
+		name        string
+		csr         *v1beta1.ClusterServingRuntime
+		wantAllowed bool
+		wantSubstr  string
+	}{
+		{
+			name:        "valid engineConfig.autoscaler hpa default",
+			csr:         mkCSRWithEngineAutoscaler("rt-hpa", &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}),
+			wantAllowed: true,
+		},
+		{
+			name: "engineConfig.autoscaler keda with empty Triggers → denied",
+			csr: mkCSRWithEngineAutoscaler("rt-bad-keda", &v1beta1.ComponentAutoscaler{
+				Class: v1beta1.AutoscalerKEDA,
+				Keda:  &v1beta1.KedaAutoscaler{},
+			}),
+			wantAllowed: false,
+			wantSubstr:  "engineConfig",
+		},
+		{
+			name: "engineConfig.autoscaler unknown class → denied",
+			csr: mkCSRWithEngineAutoscaler("rt-bad-class", &v1beta1.ComponentAutoscaler{
+				Class: v1beta1.AutoscalerClass("knative"),
+			}),
+			wantAllowed: false,
+			wantSubstr:  "is not one of hpa|keda|external|none",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			c := ctrlclientfake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+			validator := &ClusterServingRuntimeValidator{Client: c, Decoder: newCSRDecoder(t)}
+
+			req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+				Operation: admissionv1.Create,
+				Object:    runtime.RawExtension{Raw: encodeCSR(t, tc.csr)},
+			}}
+			resp := validator.Handle(context.Background(), req)
+
+			g.Expect(resp.Allowed).To(gomega.Equal(tc.wantAllowed),
+				"unexpected admission decision; resp=%v", resp.Result)
+			if tc.wantSubstr != "" {
+				g.Expect(resp.Result).NotTo(gomega.BeNil())
+				g.Expect(resp.Result.Message).To(gomega.ContainSubstring(tc.wantSubstr))
+			}
+		})
+	}
+}

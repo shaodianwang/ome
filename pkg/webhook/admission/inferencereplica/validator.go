@@ -30,6 +30,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 var log = logf.Log.WithName("inferencereplica-validation-webhook")
@@ -110,5 +111,42 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 				req.Namespace, req.Name))
 		}
 	}
+
+	// OEP-0013: validate the projected Autoscaler block shape. The IR
+	// webhook is strict about all spec writes by default (controller-
+	// write annotation gate above); this is defense-in-depth against a
+	// misbehaving controller writing a malformed projection. Decision
+	// Q4 explicitly does NOT block external writes to spec.autoscaler —
+	// the /scale subresource only mutates spec.replicas, so a successful
+	// write here means either the controller did it or someone forged
+	// the annotation. Either way the shape must be valid.
+	if err := validateIRAutoscaler(newObj); err != nil {
+		return admission.Denied(fmt.Sprintf(
+			"InferenceReplica %s/%s: %s",
+			req.Namespace, req.Name, err.Error()))
+	}
+
 	return admission.Allowed("")
+}
+
+// validateIRAutoscaler wraps validation.ValidateComponentAutoscaler
+// against an IR's projected Autoscaler block. The IR spec carries its
+// own Replicas field (not a ComponentExtensionSpec), so we synthesize
+// the bag the shared helper expects: the per-Component MinReplicas
+// floor is derived from ir.spec.replicas (the IR's own MinReplicas
+// equivalent for the KEDA idle-vs-min check).
+func validateIRAutoscaler(ir *v1beta1.InferenceReplica) error {
+	if ir == nil || ir.Spec.Autoscaler == nil {
+		return nil
+	}
+	var minPtr *int
+	if ir.Spec.Replicas != nil {
+		min := int(*ir.Spec.Replicas)
+		minPtr = &min
+	}
+	ext := &v1beta1.ComponentExtensionSpec{
+		MinReplicas: minPtr,
+		Autoscaler:  ir.Spec.Autoscaler,
+	}
+	return validation.ValidateComponentAutoscaler(ext)
 }

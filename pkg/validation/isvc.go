@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 )
@@ -467,4 +469,227 @@ func ValidateHPAMetrics(metric v1beta1.ScaleMetric) error {
 		}
 	}
 	return fmt.Errorf("[%s] is not a supported metric", metric)
+}
+
+// OEP-0013 webhook validation reason constants. Operators and the
+// envtest suite (.../webhook/inferenceservice) reference these by
+// name, so they're exported and stable.
+const (
+	// ReasonAutoscalerClassUnknown rejects a ComponentAutoscaler.Class
+	// value that is not in the enum {hpa, keda, external, none}. The
+	// CRD's +kubebuilder:validation:Enum marker enforces this at the
+	// schema level; the webhook is defense-in-depth for clients that
+	// bypass schema validation (e.g., legacy clients with a stale CRD).
+	ReasonAutoscalerClassUnknown = "AutoscalerClassUnknown"
+
+	// ReasonKedaTriggersRequired rejects class=keda blocks with empty
+	// or nil Keda.Triggers. The CRD enforces MinItems=1 at the schema
+	// level; webhook is defense-in-depth and also covers the
+	// nil-Keda-pointer case the marker can't express.
+	ReasonKedaTriggersRequired = "KedaTriggersRequired"
+
+	// ReasonHPAMetricMalformed rejects HPA.Metrics entries whose
+	// declared Type field disagrees with which pointer-field is
+	// populated (e.g., Type=Resource with Resource=nil). Such entries
+	// would silently produce a no-op HPA at apply-time; the webhook
+	// surfaces the bug at admission.
+	ReasonHPAMetricMalformed = "HPAMetricMalformed"
+
+	// ReasonKedaIdleBelowMin rejects KEDA blocks whose IdleReplicaCount
+	// is not strictly less than the effective MinReplicaCount. KEDA's
+	// own admission rejects the same shape; this is a friendlier
+	// up-front error so operators don't get a confusing KEDA-side
+	// rejection after the OME write succeeds.
+	ReasonKedaIdleBelowMin = "KedaIdleBelowMin"
+
+	// ReasonAutoscalerAnnotationConflict rejects an ISVC that carries
+	// both the legacy ome.io/autoscalerClass annotation AND a new
+	// Autoscaler block on any Component. Decision Q2 (OEP-0013 plan)
+	// locks legacy fields for deletion in Slice 6; this validation
+	// pre-empts confusion during the transition.
+	ReasonAutoscalerAnnotationConflict = "AutoscalerAnnotationConflict"
+)
+
+// validAutoscalerClasses mirrors the CRD enum
+// (+kubebuilder:validation:Enum=hpa;keda;external;none on
+// AutoscalerClass). Used by the webhook defense-in-depth check.
+var validAutoscalerClasses = map[v1beta1.AutoscalerClass]struct{}{
+	v1beta1.AutoscalerHPA:      {},
+	v1beta1.AutoscalerKEDA:     {},
+	v1beta1.AutoscalerExternal: {},
+	v1beta1.AutoscalerNone:     {},
+}
+
+// ValidateComponentAutoscaler validates the shape of a Component's
+// Autoscaler block per OEP-0013 "Webhook validation" (oeps/0013/README
+// 1103-1142), filtered by the user-locked decisions (5.Decisions in
+// .claude/specs/2026-05-29-oep-0013-wiring-plan/plan.md):
+//
+//   - Q5: `none` and `external` are status-field twins; both are
+//     accepted at the webhook layer with no Class-specific shape
+//     requirements.
+//   - Q6: the KEDA-installed probe is removed entirely; cluster
+//     contract is "KEDA is always present". The webhook does not
+//     validate KEDA availability.
+//
+// Rules enforced:
+//
+//  1. Class must be one of {hpa, keda, external, none} (defense-in-depth
+//     against the CRD enum, in case of a stale-CRD client).
+//  2. class=keda requires Keda.Triggers to be set with at least one
+//     entry (defense-in-depth against MinItems=1 on the CRD, plus the
+//     nil-Keda-pointer case that MinItems can't express).
+//  3. class=hpa with HPA.Metrics: every entry's declared Type must have
+//     the corresponding pointer-field populated (Type=Resource ⇒
+//     Resource != nil, etc.). HPA.Metrics empty/nil is allowed — the
+//     controller defaults to CPU=80% per OEP backcompat table 1148.
+//  4. class=keda with both Keda.IdleReplicaCount and the supplied
+//     componentMinReplicas set: IdleReplicaCount must be strictly less
+//     than componentMinReplicas.
+//
+// Returns nil when componentExt is nil or componentExt.Autoscaler is
+// nil — every Component-level Autoscaler block is optional.
+//
+// componentMinReplicas is the effective MinReplicas for the Component
+// (typically ComponentExtensionSpec.MinReplicas); pass nil if the
+// caller cannot determine it. The IdleReplicaCount-vs-MinReplica check
+// is skipped when either side is nil.
+func ValidateComponentAutoscaler(componentExt *v1beta1.ComponentExtensionSpec) error {
+	if componentExt == nil || componentExt.Autoscaler == nil {
+		return nil
+	}
+	as := componentExt.Autoscaler
+
+	// Rule 1: class enum (defense-in-depth against the CRD marker).
+	if _, ok := validAutoscalerClasses[as.Class]; !ok {
+		return fmt.Errorf(
+			"%s: autoscaler.class %q is not one of hpa|keda|external|none",
+			ReasonAutoscalerClassUnknown, as.Class,
+		)
+	}
+
+	// Rule 2: class=keda requires at least one trigger.
+	if as.Class == v1beta1.AutoscalerKEDA {
+		if as.Keda == nil || len(as.Keda.Triggers) == 0 {
+			return fmt.Errorf(
+				"%s: class=keda requires at least 1 trigger",
+				ReasonKedaTriggersRequired,
+			)
+		}
+	}
+
+	// Rule 3: class=hpa with malformed metric entries.
+	if as.Class == v1beta1.AutoscalerHPA && as.HPA != nil {
+		for i, m := range as.HPA.Metrics {
+			if err := validateHPAMetricSpec(i, m); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Rule 4: KEDA IdleReplicaCount < componentMinReplicas.
+	if as.Class == v1beta1.AutoscalerKEDA && as.Keda != nil &&
+		as.Keda.IdleReplicaCount != nil && componentExt.MinReplicas != nil {
+		idle := int(*as.Keda.IdleReplicaCount)
+		min := *componentExt.MinReplicas
+		if idle >= min {
+			return fmt.Errorf(
+				"%s: keda.idleReplicaCount must be < minReplicas (got idleReplicaCount=%d, minReplicas=%d)",
+				ReasonKedaIdleBelowMin, idle, min,
+			)
+		}
+	}
+
+	return nil
+}
+
+// validateHPAMetricSpec checks that a single MetricSpec entry has its
+// Type field populated and the matching pointer field set. Returns a
+// formatted error including the entry index for operator legibility.
+func validateHPAMetricSpec(idx int, m autoscalingv2.MetricSpec) error {
+	if m.Type == "" {
+		return fmt.Errorf(
+			"%s: hpa.metrics[%d].type is empty; must be one of Resource|Pods|Object|External|ContainerResource",
+			ReasonHPAMetricMalformed, idx,
+		)
+	}
+	switch m.Type {
+	case autoscalingv2.ResourceMetricSourceType:
+		if m.Resource == nil {
+			return fmt.Errorf(
+				"%s: hpa.metrics[%d].type=Resource but hpa.metrics[%d].resource is nil",
+				ReasonHPAMetricMalformed, idx, idx,
+			)
+		}
+	case autoscalingv2.PodsMetricSourceType:
+		if m.Pods == nil {
+			return fmt.Errorf(
+				"%s: hpa.metrics[%d].type=Pods but hpa.metrics[%d].pods is nil",
+				ReasonHPAMetricMalformed, idx, idx,
+			)
+		}
+	case autoscalingv2.ObjectMetricSourceType:
+		if m.Object == nil {
+			return fmt.Errorf(
+				"%s: hpa.metrics[%d].type=Object but hpa.metrics[%d].object is nil",
+				ReasonHPAMetricMalformed, idx, idx,
+			)
+		}
+	case autoscalingv2.ExternalMetricSourceType:
+		if m.External == nil {
+			return fmt.Errorf(
+				"%s: hpa.metrics[%d].type=External but hpa.metrics[%d].external is nil",
+				ReasonHPAMetricMalformed, idx, idx,
+			)
+		}
+	case autoscalingv2.ContainerResourceMetricSourceType:
+		if m.ContainerResource == nil {
+			return fmt.Errorf(
+				"%s: hpa.metrics[%d].type=ContainerResource but hpa.metrics[%d].containerResource is nil",
+				ReasonHPAMetricMalformed, idx, idx,
+			)
+		}
+	default:
+		return fmt.Errorf(
+			"%s: hpa.metrics[%d].type %q is not one of Resource|Pods|Object|External|ContainerResource",
+			ReasonHPAMetricMalformed, idx, m.Type,
+		)
+	}
+	return nil
+}
+
+// ValidateAutoscalerAnnotationConflict rejects an InferenceService that
+// declares the legacy ome.io/autoscalerClass annotation AND a new
+// Autoscaler block on any Component. Per Decision Q2 (plan §5), the
+// legacy field is being deleted in Slice 6; this validator pre-empts
+// confusion during the transition by forcing the operator to pick one.
+//
+// Returns nil when the annotation is absent OR when no Component
+// carries an Autoscaler block.
+func ValidateAutoscalerAnnotationConflict(isvc *v1beta1.InferenceService) error {
+	if isvc == nil {
+		return nil
+	}
+	if _, has := isvc.Annotations[constants.AutoscalerClass]; !has {
+		return nil
+	}
+	conflicting := []string{}
+	if isvc.Spec.Engine != nil && isvc.Spec.Engine.Autoscaler != nil {
+		conflicting = append(conflicting, "engine")
+	}
+	if isvc.Spec.Decoder != nil && isvc.Spec.Decoder.Autoscaler != nil {
+		conflicting = append(conflicting, "decoder")
+	}
+	if isvc.Spec.Router != nil && isvc.Spec.Router.Autoscaler != nil {
+		conflicting = append(conflicting, "router")
+	}
+	if len(conflicting) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s: %s annotation is present together with spec.%s.autoscaler; "+
+			"remove the annotation — per-Component autoscaler block wins",
+		ReasonAutoscalerAnnotationConflict,
+		constants.AutoscalerClass, conflicting[0],
+	)
 }

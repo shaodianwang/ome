@@ -8,10 +8,14 @@ import (
 	"github.com/onsi/gomega"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -128,6 +132,24 @@ func withImage(ir *v1beta1.InferenceReplica, image string) *v1beta1.InferenceRep
 	return out
 }
 
+// withAutoscaler returns a clone with the Autoscaler block set on
+// spec.autoscaler. Used by the OEP-0013 IR-side webhook shape tests.
+func withAutoscaler(ir *v1beta1.InferenceReplica, as *v1beta1.ComponentAutoscaler) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Spec.Autoscaler = as
+	return out
+}
+
+// withReplicasAndAutoscaler returns a clone with both spec.replicas
+// and spec.autoscaler set. Used to test the KEDA
+// IdleReplicaCount-vs-Replicas (IR-side floor) check.
+func withReplicasAndAutoscaler(ir *v1beta1.InferenceReplica, n int32, as *v1beta1.ComponentAutoscaler) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Spec.Replicas = &n
+	out.Spec.Autoscaler = as
+	return out
+}
+
 // TestHandle covers every gate in pkg/webhook/admission/inferencereplica.
 //
 // Each row builds an admission request from `req(t)`, runs Handle, and
@@ -234,6 +256,102 @@ func TestHandle(t *testing.T) {
 				}}
 			},
 			wantAllowed: false,
+		},
+		// OEP-0013: IR-side defense-in-depth on spec.autoscaler shape.
+		// Per Decision Q4 the IR webhook does NOT block external writes
+		// to spec.autoscaler (the /scale subresource only mutates
+		// spec.replicas), but any successful write must carry a
+		// shape-valid Autoscaler block.
+		{
+			name: "create with valid hpa autoscaler → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withAutoscaler(baselineIR(wcw),
+					&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "create with valid keda autoscaler (1 trigger) → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withAutoscaler(baselineIR(wcw),
+					&v1beta1.ComponentAutoscaler{
+						Class: v1beta1.AutoscalerKEDA,
+						Keda: &v1beta1.KedaAutoscaler{Triggers: []kedav1.ScaleTriggers{{
+							Type:     "prometheus",
+							Metadata: map[string]string{"query": "x", "threshold": "1", "serverAddress": "http://p:9090"},
+						}}},
+					}))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "create with keda + empty Triggers → denied",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withAutoscaler(baselineIR(wcw),
+					&v1beta1.ComponentAutoscaler{
+						Class: v1beta1.AutoscalerKEDA,
+						Keda:  &v1beta1.KedaAutoscaler{Triggers: nil},
+					}))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"class=keda requires at least 1 trigger"},
+		},
+		{
+			name: "create with hpa Type=Resource, Resource=nil → denied",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withAutoscaler(baselineIR(wcw),
+					&v1beta1.ComponentAutoscaler{
+						Class: v1beta1.AutoscalerHPA,
+						HPA: &v1beta1.HPAAutoscaler{Metrics: []autoscalingv2.MetricSpec{{
+							Type: autoscalingv2.ResourceMetricSourceType,
+						}}},
+					}))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"type=Resource but"},
+		},
+		{
+			name: "create with keda IdleReplicaCount >= IR replicas floor → denied",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withReplicasAndAutoscaler(baselineIR(wcw), 2,
+					&v1beta1.ComponentAutoscaler{
+						Class: v1beta1.AutoscalerKEDA,
+						Keda: &v1beta1.KedaAutoscaler{
+							Triggers: []kedav1.ScaleTriggers{{
+								Type:     "prometheus",
+								Metadata: map[string]string{"query": "x", "threshold": "1", "serverAddress": "http://p:9090"},
+							}},
+							IdleReplicaCount: ptr.To[int32](2),
+						},
+					}))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"keda.idleReplicaCount must be < minReplicas"},
+		},
+		{
+			name: "create with bogus class value → denied (defense-in-depth)",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withAutoscaler(baselineIR(wcw),
+					&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerClass("knative")}))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"is not one of hpa|keda|external|none"},
+		},
+		{
+			name: "create with valid external class → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withAutoscaler(baselineIR(wcw),
+					&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerExternal}))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "create with valid none class → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withAutoscaler(baselineIR(wcw),
+					&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone}))
+			},
+			wantAllowed: true,
 		},
 	}
 

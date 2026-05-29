@@ -4,8 +4,13 @@ import (
 	"strings"
 	"testing"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+
+	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -754,6 +759,324 @@ func TestValidateMultiPodLeanRunner(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateComponentAutoscaler is the table-driven coverage for
+// OEP-0013 webhook validation of the new per-Component Autoscaler
+// block. The cases mirror the user-locked decisions in
+// .claude/specs/2026-05-29-oep-0013-wiring-plan/plan.md §5:
+//
+//   - Q5: `none` and `external` are status-field twins — both accept
+//     here with no shape requirements.
+//   - Q6: no KEDA-installed check — KEDA always required, webhook
+//     does not probe.
+//
+// At least 8 cases per the plan slice 5 spec.
+func TestValidateComponentAutoscaler(t *testing.T) {
+	cpu80 := resource.MustParse("80")
+	validHPAMetrics := []autoscalingv2.MetricSpec{{
+		Type: autoscalingv2.ResourceMetricSourceType,
+		Resource: &autoscalingv2.ResourceMetricSource{
+			Name: corev1.ResourceCPU,
+			Target: autoscalingv2.MetricTarget{
+				Type:         autoscalingv2.UtilizationMetricType,
+				AverageValue: &cpu80,
+			},
+		},
+	}}
+	validKedaTriggers := []kedav1.ScaleTriggers{{
+		Type: "prometheus",
+		Metadata: map[string]string{
+			"serverAddress": "http://prom:9090",
+			"query":         "rate(sglang:num_requests_waiting[1m])",
+			"threshold":     "20",
+		},
+	}}
+
+	tests := []struct {
+		name            string
+		ext             *v1beta1.ComponentExtensionSpec
+		wantErr         bool
+		wantErrContains string
+	}{
+		{
+			name: "valid hpa with nil HPA spec — defaults to CPU=80% downstream",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA},
+			},
+		},
+		{
+			name: "valid hpa with full Metrics",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerHPA,
+					HPA:   &v1beta1.HPAAutoscaler{Metrics: validHPAMetrics},
+				},
+			},
+		},
+		{
+			name: "valid keda with 1 trigger",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerKEDA,
+					Keda:  &v1beta1.KedaAutoscaler{Triggers: validKedaTriggers},
+				},
+			},
+		},
+		{
+			name: "valid external (Q5 status-field twin of none)",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerExternal},
+			},
+		},
+		{
+			name: "valid none (Q5 status-field twin of external)",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone},
+			},
+		},
+		{
+			name: "reject keda with empty Triggers",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerKEDA,
+					Keda:  &v1beta1.KedaAutoscaler{Triggers: nil},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "class=keda requires at least 1 trigger",
+		},
+		{
+			name: "reject keda with nil Keda block",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerKEDA,
+				},
+			},
+			wantErr:         true,
+			wantErrContains: ReasonKedaTriggersRequired,
+		},
+		{
+			name: "reject hpa Type=Resource with Resource=nil",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerHPA,
+					HPA: &v1beta1.HPAAutoscaler{Metrics: []autoscalingv2.MetricSpec{{
+						Type:     autoscalingv2.ResourceMetricSourceType,
+						Resource: nil,
+					}}},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "type=Resource but",
+		},
+		{
+			name: "reject hpa Type=Pods with Pods=nil",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerHPA,
+					HPA: &v1beta1.HPAAutoscaler{Metrics: []autoscalingv2.MetricSpec{{
+						Type: autoscalingv2.PodsMetricSourceType,
+					}}},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "type=Pods but",
+		},
+		{
+			name: "reject hpa empty Type",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerHPA,
+					HPA:   &v1beta1.HPAAutoscaler{Metrics: []autoscalingv2.MetricSpec{{Type: ""}}},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "is empty",
+		},
+		{
+			name: "reject hpa Type=External with External=nil",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerHPA,
+					HPA: &v1beta1.HPAAutoscaler{Metrics: []autoscalingv2.MetricSpec{{
+						Type: autoscalingv2.ExternalMetricSourceType,
+					}}},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "type=External but",
+		},
+		{
+			name: "reject keda IdleReplicaCount >= MinReplicaCount",
+			ext: &v1beta1.ComponentExtensionSpec{
+				MinReplicas: ptr.To[int](2),
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerKEDA,
+					Keda: &v1beta1.KedaAutoscaler{
+						Triggers:         validKedaTriggers,
+						IdleReplicaCount: ptr.To[int32](2),
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "keda.idleReplicaCount must be < minReplicas",
+		},
+		{
+			name: "accept keda IdleReplicaCount=0 with MinReplicaCount=1",
+			ext: &v1beta1.ComponentExtensionSpec{
+				MinReplicas: ptr.To[int](1),
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerKEDA,
+					Keda: &v1beta1.KedaAutoscaler{
+						Triggers:         validKedaTriggers,
+						IdleReplicaCount: ptr.To[int32](0),
+					},
+				},
+			},
+		},
+		{
+			name: "reject class value not in enum (defense-in-depth)",
+			ext: &v1beta1.ComponentExtensionSpec{
+				Autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerClass("knative")},
+			},
+			wantErr:         true,
+			wantErrContains: "is not one of hpa|keda|external|none",
+		},
+		{
+			name: "nil componentExt — no error",
+			ext:  nil,
+		},
+		{
+			name: "nil Autoscaler block — no error",
+			ext: &v1beta1.ComponentExtensionSpec{
+				MinReplicas: ptr.To[int](1),
+				MaxReplicas: 3,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateComponentAutoscaler(tc.ext)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr && tc.wantErrContains != "" {
+				if got := err.Error(); !strings.Contains(got, tc.wantErrContains) {
+					t.Fatalf("error string\n\tgot:  %q\n\twant substring: %q", got, tc.wantErrContains)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateAutoscalerAnnotationConflict covers the OEP-0013 rule
+// that the legacy ome.io/autoscalerClass annotation cannot coexist
+// with a new per-Component Autoscaler block (Decision Q2 — legacy is
+// being deleted in Slice 6; this validator pre-empts the confused
+// "two sources of truth" state during the transition).
+func TestValidateAutoscalerAnnotationConflict(t *testing.T) {
+	hpaBlock := &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}
+
+	tests := []struct {
+		name    string
+		isvc    *v1beta1.InferenceService
+		wantErr bool
+	}{
+		{
+			name: "no annotation, no block",
+			isvc: &v1beta1.InferenceService{},
+		},
+		{
+			name: "annotation alone (legacy path)",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						constants.AutoscalerClass: string(constants.AutoscalerClassHPA),
+					},
+				},
+			},
+		},
+		{
+			name: "Autoscaler block on engine, no annotation (new path)",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Autoscaler: hpaBlock},
+					},
+				},
+			},
+		},
+		{
+			name: "annotation + engine.autoscaler block — REJECT",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						constants.AutoscalerClass: string(constants.AutoscalerClassHPA),
+					},
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Autoscaler: hpaBlock},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "annotation + decoder.autoscaler block — REJECT",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						constants.AutoscalerClass: string(constants.AutoscalerClassKEDA),
+					},
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Decoder: &v1beta1.DecoderSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Autoscaler: hpaBlock},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "annotation + router.autoscaler block — REJECT",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						constants.AutoscalerClass: string(constants.AutoscalerClassExternal),
+					},
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Router: &v1beta1.RouterSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Autoscaler: hpaBlock},
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateAutoscalerAnnotationConflict(tc.isvc)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr {
+				if !strings.Contains(err.Error(), ReasonAutoscalerAnnotationConflict) {
+					t.Fatalf("error %q did not contain reason %q", err, ReasonAutoscalerAnnotationConflict)
+				}
 			}
 		})
 	}

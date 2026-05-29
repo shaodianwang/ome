@@ -67,6 +67,14 @@ func (sr *ServingRuntimeValidator) Handle(ctx context.Context, req admission.Req
 		return admission.Allowed("")
 	}
 
+	// OEP-0013: per-Component Autoscaler block validation. Same rules
+	// applied to the ISVC's blocks; ServingRuntime can declare
+	// autoscaler defaults that inherit to ISVCs (OEP "Inheritance
+	// chain"), so the same shape constraints apply.
+	if err := validateRuntimeComponentAutoscalers(&servingRuntime.Spec); err != nil {
+		return admission.Denied(err.Error())
+	}
+
 	for i := range existing.Items {
 		if err := validation.ValidateModelFormatPrioritySame(&servingRuntime.Spec); err != nil {
 			return admission.Denied(fmt.Sprintf(PriorityIsNotSameServingRuntimeError, err.Error(), servingRuntime.Name))
@@ -103,6 +111,11 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 
 	if clusterServingRuntime.Spec.IsDisabled() {
 		return admission.Allowed("")
+	}
+
+	// OEP-0013: per-Component Autoscaler block validation; see ServingRuntime.Handle.
+	if err := validateRuntimeComponentAutoscalers(&clusterServingRuntime.Spec); err != nil {
+		return admission.Denied(err.Error())
 	}
 
 	for i := range existing.Items {
@@ -185,6 +198,33 @@ func validateServingRuntimePriority(newSpec, existingSpec *v1beta1.ServingRuntim
 				*existingModelFormat.Priority == *newModelFormat.Priority {
 				return fmt.Errorf(InvalidPriorityError, newModelFormat.Name)
 			}
+		}
+	}
+	return nil
+}
+
+// validateRuntimeComponentAutoscalers runs ValidateComponentAutoscaler
+// against each Component on a ServingRuntime spec. Mirrors the per-
+// Component dispatch on the ISVC webhook so a runtime-level Autoscaler
+// block carrying a malformed shape is rejected at admission rather
+// than silently inherited into an ISVC at controller time.
+func validateRuntimeComponentAutoscalers(spec *v1beta1.ServingRuntimeSpec) error {
+	if spec == nil {
+		return nil
+	}
+	if spec.EngineConfig != nil {
+		if err := validation.ValidateComponentAutoscaler(&spec.EngineConfig.ComponentExtensionSpec); err != nil {
+			return fmt.Errorf("engineConfig: %w", err)
+		}
+	}
+	if spec.DecoderConfig != nil {
+		if err := validation.ValidateComponentAutoscaler(&spec.DecoderConfig.ComponentExtensionSpec); err != nil {
+			return fmt.Errorf("decoderConfig: %w", err)
+		}
+	}
+	if spec.RouterConfig != nil {
+		if err := validation.ValidateComponentAutoscaler(&spec.RouterConfig.ComponentExtensionSpec); err != nil {
+			return fmt.Errorf("routerConfig: %w", err)
 		}
 	}
 	return nil

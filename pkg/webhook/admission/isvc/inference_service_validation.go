@@ -104,6 +104,28 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	}
 	allWarnings = append(allWarnings, autoscalerWarnings...)
 
+	// OEP-0013 webhook validation: per-Component Autoscaler block shape
+	// (class enum, required fields, IdleReplicaCount vs MinReplicas) +
+	// annotation/block conflict.
+	if isvc.Spec.Engine != nil {
+		if err := validation.ValidateComponentAutoscaler(&isvc.Spec.Engine.ComponentExtensionSpec); err != nil {
+			return allWarnings, fmt.Errorf("engine: %w", err)
+		}
+	}
+	if isvc.Spec.Decoder != nil {
+		if err := validation.ValidateComponentAutoscaler(&isvc.Spec.Decoder.ComponentExtensionSpec); err != nil {
+			return allWarnings, fmt.Errorf("decoder: %w", err)
+		}
+	}
+	if isvc.Spec.Router != nil {
+		if err := validation.ValidateComponentAutoscaler(&isvc.Spec.Router.ComponentExtensionSpec); err != nil {
+			return allWarnings, fmt.Errorf("router: %w", err)
+		}
+	}
+	if err := validation.ValidateAutoscalerAnnotationConflict(isvc); err != nil {
+		return allWarnings, err
+	}
+
 	if err := validation.ValidateAutoscalerTargetUtilizationPercentage(isvc); err != nil {
 		return allWarnings, err
 	}
