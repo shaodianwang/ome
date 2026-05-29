@@ -12,6 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 )
 
 // AggregateIRStatus reads the live InferenceReplica for each
@@ -124,6 +125,15 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 	}
 
 	desired := irStatusToComponentStatus(ir)
+	// topCond is the standard top-level Component-ready condition
+	// (EngineReady / DecoderReady / RouterReady) derived from the same
+	// OMENative counters the legacy direct path uses. Computed once
+	// outside the retry closure: the derivation is a pure function of
+	// `desired`, which is recomputed only when the IR changes (a
+	// separate reconcile would re-enter AggregateIRStatus). On a peer
+	// status-write conflict we re-Get the ISVC and re-stamp, but the
+	// condition itself is stable for this pass.
+	topCond := omenative.TopLevelComponentReadyFromOMENative(component, desired)
 	isvcKey := client.ObjectKeyFromObject(isvc)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}
@@ -139,6 +149,18 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 		cs := fresh.Status.Components[component]
 		cs.OMENative = desired.DeepCopy()
 		fresh.Status.Components[component] = cs
+		// Emit the top-level component-ready condition in the same
+		// Status().Update round-trip as the subtree write. Without this,
+		// the OMENative counters land but no EngineReady / DecoderReady /
+		// RouterReady ever flips True, so the aggregate Ready rollup and
+		// `kubectl wait --for=condition=Ready` see Status=Unknown
+		// indefinitely. Mirrors the legacy direct path's behavior
+		// (omenative/status_aggregate.go:140-143) — this was a PR #310
+		// Piece 2 oversight: the unit tests asserted on the subtree but
+		// not on the top-level condition rollup.
+		if topCond != nil {
+			fresh.Status.SetCondition(topCond.Type, topCond)
+		}
 		if err := c.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil
@@ -162,6 +184,14 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 	cs := isvc.Status.Components[component]
 	cs.OMENative = desired.DeepCopy()
 	isvc.Status.Components[component] = cs
+	// Mirror the just-committed top-level condition onto the cached
+	// ISVC so the outer reconciler's updateStatus flush — which copies
+	// p.ISVC.Status onto a fresh re-read of the cluster — doesn't clobber
+	// it on the next pass. Same shape as the legacy direct path's mirror
+	// at omenative/status_aggregate.go:163.
+	if topCond != nil {
+		isvc.Status.SetCondition(topCond.Type, topCond)
+	}
 	return nil
 }
 

@@ -137,7 +137,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// never flips the top-level condition past InitializeComponent
 		// Condition's False/Initializing — and the outer reconciler's
 		// updateStatus flush stamps Ready=False forever.
-		topCond := topLevelComponentReadyFromOMENative(v1component, cs.OMENative)
+		topCond := TopLevelComponentReadyFromOMENative(v1component, cs.OMENative)
 		if topCond != nil {
 			fresh.Status.SetCondition(topCond.Type, topCond)
 		}
@@ -522,7 +522,7 @@ func componentLabelSelectorString(isvc string, component v1beta1.ComponentType) 
 	}).String()
 }
 
-// topLevelComponentReadyFromOMENative derives the standard top-level
+// TopLevelComponentReadyFromOMENative derives the standard top-level
 // component-ready condition (EngineReady / DecoderReady / RouterReady)
 // from OMENative counters. Returns nil for unknown Component types so
 // callers leave the condition surface untouched.
@@ -533,7 +533,12 @@ func componentLabelSelectorString(isvc string, component v1beta1.ComponentType) 
 // reconciler, aggregate Ready rollup, and `kubectl wait
 // --for=condition=Ready` treat OMENative the same as RawDeployment /
 // MultiNode.
-func topLevelComponentReadyFromOMENative(component v1beta1.ComponentType, cs *v1beta1.OMENativeComponentStatus) *apis.Condition {
+//
+// Exported so the IR-managed status path (irprojector) can derive the
+// same condition off the IR-mirrored OMENativeComponentStatus without
+// duplicating the rule. Single source of truth — any future change to
+// the Ready predicate lives here only.
+func TopLevelComponentReadyFromOMENative(component v1beta1.ComponentType, cs *v1beta1.OMENativeComponentStatus) *apis.Condition {
 	var readyType apis.ConditionType
 	switch component {
 	case v1beta1.EngineComponent:

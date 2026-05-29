@@ -81,7 +81,7 @@ func TestTopLevelComponentReadyFromOMENative(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := topLevelComponentReadyFromOMENative(tt.component, tt.cs)
+			got := TopLevelComponentReadyFromOMENative(tt.component, tt.cs)
 			if tt.wantNil {
 				if got != nil {
 					t.Fatalf("want nil condition, got %+v", got)

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -302,6 +303,178 @@ func TestAggregateIRStatus_OMENative_PreservesNonOMENativeFields(t *testing.T) {
 		"non-OMENative ComponentStatusSpec fields must survive aggregation")
 	g.Expect(cs.OMENative).NotTo(gomega.BeNil())
 	g.Expect(cs.OMENative.Replicas).To(gomega.Equal(int32(1)))
+}
+
+// TestAggregateIRStatus_EmitsEngineReadyCondition pins the bug fix: the
+// IR-managed path must emit the top-level EngineReady condition derived
+// from the OMENative counters, mirroring what the legacy direct path
+// does (omenative/status_aggregate.go:140-143). Without it, the aggregate
+// Ready rollup stays Unknown forever even though the subtree counters
+// are correct.
+//
+// Real-cluster symptom (round-2 testing): a PD-disagg-shaped single-engine
+// ISVC in OMENative mode had all subtree fields populated (replicas=1,
+// updatedReplicas=1, InstanceStatuses[0].Phase=Ready) and IngressReady=True
+// — but ISVC.Status.Conditions carried only IngressReady + Ready=Unknown.
+// No EngineReady was emitted, so the top-level Ready aggregator never
+// flipped.
+func TestAggregateIRStatus_EmitsEngineReadyCondition(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	// liveIR with replicas=1, all-ready counters — the same shape the
+	// real-cluster ISVC was in when the bug was observed.
+	ir := liveIR("llama", "prod", 1)
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc, ir).
+		Build()
+
+	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+
+	got := &v1beta1.InferenceService{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, got)).To(gomega.Succeed())
+
+	// Existing subtree assertion: the OMENative subtree must still be
+	// populated (regression guard against accidentally moving the
+	// subtree write out of the closure).
+	om := got.Status.Components[v1beta1.EngineComponent].OMENative
+	g.Expect(om).NotTo(gomega.BeNil(), "OMENative subtree must be populated")
+	g.Expect(om.Replicas).To(gomega.Equal(int32(1)))
+	g.Expect(om.ReadyReplicas).To(gomega.Equal(int32(1)))
+
+	// NEW: the EngineReady top-level condition must be emitted with
+	// Status=True. This is the bug fix.
+	cond := got.Status.GetCondition(v1beta1.EngineReady)
+	g.Expect(cond).NotTo(gomega.BeNil(),
+		"EngineReady condition must be emitted alongside the OMENative subtree")
+	g.Expect(cond.Status).To(gomega.Equal(corev1.ConditionTrue),
+		"EngineReady must be True when ReadyReplicas == Replicas > 0")
+	g.Expect(cond.Reason).To(gomega.Equal("Ready"))
+
+	// Mirror onto the in-memory ISVC: the outer reconciler's updateStatus
+	// flush re-copies p.ISVC.Status onto a fresh re-read of the cluster,
+	// so without the mirror the value we just committed gets clobbered
+	// on the next pass.
+	inMemCond := isvc.Status.GetCondition(v1beta1.EngineReady)
+	g.Expect(inMemCond).NotTo(gomega.BeNil(),
+		"EngineReady must be mirrored onto the in-memory ISVC for the outer reconciler to observe")
+	g.Expect(inMemCond.Status).To(gomega.Equal(corev1.ConditionTrue))
+}
+
+// TestAggregateIRStatus_EmitsEngineReadyConditionFalse pins the
+// not-yet-ready branch: when the IR reports Replicas=1, ReadyReplicas=0,
+// EngineReady must be emitted with Status=False / Reason=NotAllReady.
+// Mirrors the legacy direct path's TopLevelComponentReadyFromOMENative
+// derivation for the same input.
+func TestAggregateIRStatus_EmitsEngineReadyConditionFalse(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	ir := liveIR("llama", "prod", 1)
+	// Pull ReadyReplicas down to 0 — pod not yet Ready.
+	ir.Status.ReadyReplicas = 0
+	// Also down the per-Instance Phase so callers reading
+	// InstanceStatuses see the partial-ready state.
+	ir.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceCreating
+	ir.Status.InstanceStatuses[0].ReadyPodCount = 0
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc, ir).
+		Build()
+
+	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+
+	got := &v1beta1.InferenceService{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, got)).To(gomega.Succeed())
+
+	cond := got.Status.GetCondition(v1beta1.EngineReady)
+	g.Expect(cond).NotTo(gomega.BeNil(),
+		"EngineReady must be emitted even when not all replicas are Ready")
+	g.Expect(cond.Status).To(gomega.Equal(corev1.ConditionFalse),
+		"EngineReady must be False when ReadyReplicas < Replicas")
+	g.Expect(cond.Reason).To(gomega.Equal("NotAllReady"))
+}
+
+// TestAggregateIRStatus_MultiComponent_EmitsBothConditions pins the
+// per-Component independence: with engine + decoder both in OMENative
+// mode and both IRs reporting all-ready, both EngineReady and
+// DecoderReady conditions must flip True. The aggregator runs once per
+// Component; each one independently emits its own condition.
+func TestAggregateIRStatus_MultiComponent_EmitsBothConditions(t *testing.T) {
+	g := gomega.NewWithT(t)
+	min := 1
+	isvc := baselineISVC("llama", "prod")
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &min},
+	}
+
+	engineIR := liveIR("llama", "prod", 1)
+	// Build the decoder IR by hand — liveIR hard-codes the engine name
+	// + EngineComponent label; for decoder we need <isvc>-decoder.
+	cc := int32(0)
+	decoderIR := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "llama-decoder",
+			Namespace: "prod",
+			Annotations: map[string]string{
+				constants.InferenceReplicaControllerWriteAnnotationKey: constants.InferenceReplicaControllerWriteAnnotationVal,
+			},
+		},
+		Spec: v1beta1.InferenceReplicaSpec{
+			ParentRef: v1beta1.ParentReference{Name: "llama", UID: "uid"},
+			Component: v1beta1.DecoderComponent,
+		},
+		Status: v1beta1.InferenceReplicaStatus{
+			ObservedGeneration:   1,
+			Replicas:             2,
+			ReadyReplicas:        2,
+			ServingReplicas:      2,
+			AvailableReplicas:    2,
+			UpdatedReplicas:      2,
+			UpdatedReadyReplicas: 2,
+			CurrentRevision:      "llama-decoder-def456",
+			UpdateRevision:       "llama-decoder-def456",
+			CollisionCount:       &cc,
+			LabelSelector:        "ome.io/inferenceservice=llama,component=decoder,ome.io/managed-by=OMENative",
+			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1, ReadyPodCount: 1},
+				{Index: 1, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1, ReadyPodCount: 1},
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc, engineIR, decoderIR).
+		Build()
+
+	componentModes := map[v1beta1.ComponentType]constants.DeploymentModeType{
+		v1beta1.EngineComponent:  constants.OMENative,
+		v1beta1.DecoderComponent: constants.OMENative,
+	}
+	g.Expect(AggregateIRStatus(context.Background(), c, isvc, componentModes)).To(gomega.Succeed())
+
+	got := &v1beta1.InferenceService{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, got)).To(gomega.Succeed())
+
+	// Engine subtree + condition.
+	g.Expect(got.Status.Components[v1beta1.EngineComponent].OMENative).NotTo(gomega.BeNil())
+	g.Expect(got.Status.Components[v1beta1.EngineComponent].OMENative.Replicas).To(gomega.Equal(int32(1)))
+	engineCond := got.Status.GetCondition(v1beta1.EngineReady)
+	g.Expect(engineCond).NotTo(gomega.BeNil(), "EngineReady must be emitted")
+	g.Expect(engineCond.Status).To(gomega.Equal(corev1.ConditionTrue))
+
+	// Decoder subtree + condition.
+	g.Expect(got.Status.Components[v1beta1.DecoderComponent].OMENative).NotTo(gomega.BeNil())
+	g.Expect(got.Status.Components[v1beta1.DecoderComponent].OMENative.Replicas).To(gomega.Equal(int32(2)))
+	decoderCond := got.Status.GetCondition(v1beta1.DecoderReady)
+	g.Expect(decoderCond).NotTo(gomega.BeNil(), "DecoderReady must be emitted")
+	g.Expect(decoderCond.Status).To(gomega.Equal(corev1.ConditionTrue))
 }
 
 // TestIrStatusToComponentStatus_DeepCopiesInstanceStatuses pins the
