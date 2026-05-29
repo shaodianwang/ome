@@ -91,6 +91,12 @@ func init() {
 	utilruntime.Must(schedulerpluginsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(kueuev1beta1.AddToScheme(scheme))
+	// OEP-0013 Slice 2 (decision Q6): KEDA is a hard dependency, not an
+	// optional CRD probe. Register the scheme unconditionally — if KEDA is
+	// absent from the cluster the first ScaledObject Create will fail with
+	// a clear apiserver error, which is the documented cluster-owner
+	// contract per the OEP.
+	utilruntime.Must(kedav1.AddToScheme(scheme))
 }
 
 // Options defines the program-configurable options that may be passed on the command line.
@@ -284,7 +290,6 @@ func main() {
 		{lws.SchemeGroupVersion, constants.LWSKind, lws.AddToScheme},
 		{volcano.SchemeGroupVersion, constants.VolcanoQueueKind, volcano.AddToScheme},
 		{volcanobatch.SchemeGroupVersion, constants.VolcanoJobKind, volcanobatch.AddToScheme},
-		{kedav1.SchemeGroupVersion, constants.KEDAScaledObjectKind, kedav1.AddToScheme},
 		{monitoringv1.SchemeGroupVersion, constants.PodMonitorKind, monitoringv1.AddToScheme},
 	}
 

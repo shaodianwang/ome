@@ -819,10 +819,11 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		return err
 	}
 
-	kedaFound, err := utils.IsCrdAvailable(r.ClientConfig, kedav1.SchemeGroupVersion.String(), constants.KEDAScaledObjectKind)
-	if err != nil {
-		return err
-	}
+	// OEP-0013 Slice 2 (decision Q6): KEDA is a hard dependency, not an
+	// optional CRD probe. Owns(&kedav1.ScaledObject{}) is unconditional
+	// below; if KEDA is absent from the cluster the controller will fail
+	// fast on the first reconcile rather than silently ignoring
+	// scaler-class=keda.
 
 	podMonitorFound, err := utils.IsCrdAvailable(r.ClientConfig, monitoringv1.SchemeGroupVersion.String(), constants.PodMonitorKind)
 	if err != nil {
@@ -880,13 +881,11 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		Watches(
 			&discoveryv1.EndpointSlice{},
 			handler.EnqueueRequestsFromMapFunc(omenative.EndpointSliceToISVC),
-		)
-
-	if kedaFound {
-		ctrlBuilder = ctrlBuilder.Owns(&kedav1.ScaledObject{})
-	} else {
-		r.Log.Info("The InferenceService controller won't watch keda.sh/v1/ScaledObject resources because the CRD is not available.")
-	}
+		).
+		// OEP-0013 Slice 2 (decision Q6): KEDA ScaledObject is owned
+		// unconditionally — the scheme is registered at startup and KEDA
+		// is a hard cluster-side dependency for OME.
+		Owns(&kedav1.ScaledObject{})
 
 	if podMonitorFound {
 		ctrlBuilder = ctrlBuilder.Owns(&monitoringv1.PodMonitor{})

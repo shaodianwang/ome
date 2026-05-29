@@ -85,12 +85,13 @@ func createAutoscaler(client client.Client,
 	switch ac {
 	// HPA and KEDA can not coexist for the same deployment
 	case constants.AutoscalerClassHPA, constants.AutoscalerClassExternal:
-		if scheme.IsGroupRegistered(kedav1.SchemeGroupVersion.Group) {
-			// Before creating HPA, ensure any existing ScaledObject is deleted
-			err := deleteExistingScaledObject(client, componentMeta)
-			if err != nil {
-				return nil, fmt.Errorf("failed to delete existing ScaledObject: %w", err)
-			}
+		// OEP-0013 Slice 2 (decision Q6): KEDA scheme is registered
+		// unconditionally at manager startup, so the prior
+		// IsGroupRegistered probe is dead code — call the cleanup
+		// directly.
+		err := deleteExistingScaledObject(client, componentMeta)
+		if err != nil {
+			return nil, fmt.Errorf("failed to delete existing ScaledObject: %w", err)
 		}
 		return hpa.NewHPAReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Engine.ComponentExtensionSpec), nil
 	case constants.AutoscalerClassKEDA:
@@ -117,8 +118,10 @@ func deleteExistingScaledObject(client client.Client, componentMeta metav1.Objec
 		if apierr.IsNotFound(err) {
 			return nil
 		}
-		// Handle case where KEDA CRD is not available or types not registered in scheme.
-		// This can happen if KEDA was uninstalled after the controller started.
+		// OEP-0013 Slice 2 (decision Q6): KEDA is a hard dependency, so
+		// `IsNotRegisteredError` cannot fire here at steady state. We keep
+		// it as a defensive guard for the narrow window where KEDA was
+		// uninstalled out from under a running manager.
 		if runtime.IsNotRegisteredError(err) {
 			log.Info("KEDA ScaledObject type not registered in scheme, skipping cleanup",
 				"namespace", componentMeta.Namespace, "name", scaledObjectName)

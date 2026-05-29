@@ -26,11 +26,12 @@ const defaultMinReplicas int32 = 1
 
 // KEDAReconciler reconciles the ScaledObject resource.
 //
-// Phase 1 of OEP-0013 stubs the trigger path: if the component declares
-// an Autoscaler.Keda block with at least one trigger, those triggers are
-// passed through verbatim; otherwise no ScaledObject is emitted. Full
-// verbatim pass-through (Advanced, PollingInterval, CooldownPeriod,
-// IdleReplicaCount, Fallback) lands in phase 2.
+// OEP-0013 Slice 2 parameterizes the generator: the constructor accepts a
+// caller-supplied ScaleTarget (Raw Deployment passes apps/v1 Deployment;
+// the IR-managed path introduced by Slice 3 will pass an InferenceReplica
+// target) and a typed *KedaAutoscaler block whose Triggers / Advanced /
+// PollingInterval / CooldownPeriod / IdleReplicaCount / Fallback fields are
+// forwarded verbatim to the ScaledObject spec.
 type KEDAReconciler struct {
 	client       client.Client
 	scheme       *runtime.Scheme
@@ -38,7 +39,11 @@ type KEDAReconciler struct {
 	componentExt *v1beta1.ComponentExtensionSpec
 }
 
-// NewKEDAReconciler creates a new KEDAReconciler.
+// NewKEDAReconciler creates a new KEDAReconciler whose generated ScaledObject
+// targets the caller-supplied Deployment. Preserves the legacy
+// ComponentExtensionSpec behaviour: MinReplicas / MaxReplicas drive the
+// bounds and Autoscaler.Keda.Triggers (when present) drives the trigger list.
+// OEP-0013 Slice 3 introduces a sibling constructor for the IR-managed path.
 func NewKEDAReconciler(
 	client client.Client,
 	scheme *runtime.Scheme,
@@ -46,7 +51,7 @@ func NewKEDAReconciler(
 	componentExt *v1beta1.ComponentExtensionSpec,
 ) (*KEDAReconciler, error) {
 
-	scaledObject := createScaledObject(componentMeta, componentExt)
+	scaledObject := createScaledObjectFromLegacy(componentMeta, componentExt)
 
 	return &KEDAReconciler{
 		client:       client,
@@ -56,12 +61,26 @@ func NewKEDAReconciler(
 	}, nil
 }
 
-// createScaledObject builds the desired ScaledObject. When the component
-// has no Autoscaler.Keda block, Triggers is left empty and Reconcile()
-// will skip the apply.
+// createScaledObject builds the desired ScaledObject from explicit inputs.
+//
+// scaleTargetRef is forwarded verbatim to the ScaledObject spec — callers
+// supply `{apps/v1, Deployment, <name>}` for Raw Deployment dispatch and
+// `{ome.io/v1beta1, InferenceReplica, <ir-name>}` for the IR-managed path
+// introduced by OEP-0013 Slice 3.
+//
+// kedaSpec / minReplicas / maxReplicas come from the resolver (Slice 1) or
+// the legacy shim (createScaledObjectFromLegacy). When kedaSpec is non-nil
+// the Triggers, Advanced, PollingInterval, CooldownPeriod, IdleReplicaCount,
+// and Fallback fields are all forwarded verbatim per OEP-0013 README 678-706.
+// When kedaSpec is nil or kedaSpec.Triggers is empty the generated
+// ScaledObject ends up with no triggers; Reconcile() then skips the apply to
+// avoid creating an invalid (zero-trigger) ScaledObject.
 func createScaledObject(
 	componentMeta metav1.ObjectMeta,
-	componentExt *v1beta1.ComponentExtensionSpec,
+	scaleTargetRef kedav1.ScaleTarget,
+	kedaSpec *v1beta1.KedaAutoscaler,
+	minReplicas int32,
+	maxReplicas int32,
 ) *kedav1.ScaledObject {
 	filteredLabels := make(map[string]string)
 	for key, value := range componentMeta.Labels {
@@ -70,12 +89,20 @@ func createScaledObject(
 			filteredLabels[key] = value
 		}
 	}
-	minReplicas := calculateMinReplicas(componentExt)
-	maxReplicas := calculateMaxReplicas(componentExt, minReplicas)
 
-	var triggers []kedav1.ScaleTriggers
-	if componentExt.Autoscaler != nil && componentExt.Autoscaler.Keda != nil {
-		triggers = componentExt.Autoscaler.Keda.Triggers
+	spec := kedav1.ScaledObjectSpec{
+		ScaleTargetRef:  &scaleTargetRef,
+		MinReplicaCount: &minReplicas,
+		MaxReplicaCount: &maxReplicas,
+	}
+
+	if kedaSpec != nil {
+		spec.Triggers = kedaSpec.Triggers
+		spec.Advanced = kedaSpec.Advanced
+		spec.PollingInterval = kedaSpec.PollingInterval
+		spec.CooldownPeriod = kedaSpec.CooldownPeriod
+		spec.IdleReplicaCount = kedaSpec.IdleReplicaCount
+		spec.Fallback = kedaSpec.Fallback
 	}
 
 	return &kedav1.ScaledObject{
@@ -85,17 +112,35 @@ func createScaledObject(
 			Labels:      filteredLabels,
 			Annotations: componentMeta.Annotations,
 		},
-		Spec: kedav1.ScaledObjectSpec{
-			ScaleTargetRef: &kedav1.ScaleTarget{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       componentMeta.Name,
-			},
-			MinReplicaCount: &minReplicas,
-			MaxReplicaCount: &maxReplicas,
-			Triggers:        triggers,
-		},
+		Spec: spec,
 	}
+}
+
+// createScaledObjectFromLegacy is the byte-identical bridge from the old
+// (componentMeta, componentExt) → ScaledObject generator to the parameterized
+// createScaledObject. Raw Deployment callers reach the KEDA generator through
+// this shim so that the existing OEP-0013 phase 1 stub (which forwards
+// Autoscaler.Keda only) keeps producing byte-identical ScaledObjects. Slice
+// 3 wires the new (resolver-driven) path; Slice 6 deletes any remaining
+// legacy fields and this shim along with them.
+func createScaledObjectFromLegacy(
+	componentMeta metav1.ObjectMeta,
+	componentExt *v1beta1.ComponentExtensionSpec,
+) *kedav1.ScaledObject {
+	scaleTargetRef := kedav1.ScaleTarget{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       componentMeta.Name,
+	}
+	minReplicas := calculateMinReplicas(componentExt)
+	maxReplicas := calculateMaxReplicas(componentExt, minReplicas)
+
+	var kedaSpec *v1beta1.KedaAutoscaler
+	if componentExt.Autoscaler != nil && componentExt.Autoscaler.Keda != nil {
+		kedaSpec = componentExt.Autoscaler.Keda
+	}
+
+	return createScaledObject(componentMeta, scaleTargetRef, kedaSpec, minReplicas, maxReplicas)
 }
 
 // calculateMinReplicas calculates the minimum replicas

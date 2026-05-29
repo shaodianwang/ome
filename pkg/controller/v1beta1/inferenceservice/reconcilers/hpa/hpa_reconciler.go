@@ -29,6 +29,11 @@ type HPAReconciler struct {
 	componentExt *v1beta1.ComponentExtensionSpec
 }
 
+// NewHPAReconciler builds an HPAReconciler whose generated HPA targets the
+// caller-supplied Deployment. Preserves the legacy ComponentExtensionSpec
+// behaviour: ScaleMetric / ScaleTarget drive the synthesized metric and
+// MinReplicas / MaxReplicas drive the bounds. OEP-0013 Slice 3 will introduce
+// a sibling constructor that targets an InferenceReplica instead.
 func NewHPAReconciler(client client.Client,
 	scheme *runtime.Scheme,
 	componentMeta metav1.ObjectMeta,
@@ -37,30 +42,113 @@ func NewHPAReconciler(client client.Client,
 	return &HPAReconciler{
 		client:       client,
 		scheme:       scheme,
-		HPA:          createHPA(componentMeta, componentExt),
+		HPA:          createHPAFromLegacyComponentExt(componentMeta, componentExt),
 		componentExt: componentExt,
 	}
 }
 
-func createHPA(componentMeta metav1.ObjectMeta,
-	componentExt *v1beta1.ComponentExtensionSpec) *autoscalingv2.HorizontalPodAutoscaler {
-
-	minReplicas := calculateMinReplicas(componentExt)
-	maxReplicas := calculateMaxReplicas(componentExt, minReplicas)
-	metrics := getHPAMetrics(componentMeta, componentExt)
+// createHPA builds the desired HorizontalPodAutoscaler from explicit inputs.
+//
+// scaleTargetRef is forwarded verbatim to the HPA spec — callers are expected
+// to supply `{apps/v1, Deployment, <name>}` for Raw Deployment dispatch and
+// `{ome.io/v1beta1, InferenceReplica, <ir-name>}` for the IR-managed path
+// introduced by OEP-0013 Slice 3.
+//
+// hpaSpec / minReplicas / maxReplicas come from the resolver (Slice 1) or the
+// legacy shim (createHPAFromLegacyComponentExt) so that this function has no
+// knowledge of the legacy ScaleTarget / ScaleMetric fields. When hpaSpec is
+// nil or hpaSpec.Metrics is empty the generator emits a single CPU=80%
+// Resource metric per the OEP-0013 default contract (README 731, 1148).
+func createHPA(
+	componentMeta metav1.ObjectMeta,
+	scaleTargetRef autoscalingv2.CrossVersionObjectReference,
+	hpaSpec *v1beta1.HPAAutoscaler,
+	minReplicas int32,
+	maxReplicas int32,
+) *autoscalingv2.HorizontalPodAutoscaler {
+	metrics := defaultHPAMetrics()
+	var behavior *autoscalingv2.HorizontalPodAutoscalerBehavior
+	if hpaSpec != nil {
+		if len(hpaSpec.Metrics) > 0 {
+			metrics = hpaSpec.Metrics
+		}
+		if hpaSpec.Behavior != nil {
+			behavior = hpaSpec.Behavior
+		}
+	}
+	if behavior == nil {
+		behavior = &autoscalingv2.HorizontalPodAutoscalerBehavior{}
+	}
 
 	return &autoscalingv2.HorizontalPodAutoscaler{
 		ObjectMeta: componentMeta,
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
-			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       componentMeta.Name,
+			ScaleTargetRef: scaleTargetRef,
+			MinReplicas:    &minReplicas,
+			MaxReplicas:    maxReplicas,
+			Metrics:        metrics,
+			Behavior:       behavior,
+		},
+	}
+}
+
+// createHPAFromLegacyComponentExt is the byte-identical bridge from the old
+// (componentMeta, componentExt) → HPA generator to the parameterized createHPA.
+// Raw Deployment callers reach the HPA generator through this shim so that
+// the existing OEP-0013 callers (which still read the legacy ScaleTarget /
+// ScaleMetric / MinReplicas / MaxReplicas fields) keep producing byte-identical
+// HPAs. Slice 3 wires the new (resolver-driven) path; Slice 6 deletes the
+// legacy ScaleTarget / ScaleMetric fields and this shim along with them.
+func createHPAFromLegacyComponentExt(
+	componentMeta metav1.ObjectMeta,
+	componentExt *v1beta1.ComponentExtensionSpec,
+) *autoscalingv2.HorizontalPodAutoscaler {
+	scaleTargetRef := autoscalingv2.CrossVersionObjectReference{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       componentMeta.Name,
+	}
+	minReplicas := calculateMinReplicas(componentExt)
+	maxReplicas := calculateMaxReplicas(componentExt, minReplicas)
+
+	// Synthesize an HPAAutoscaler from the legacy fields so createHPA only
+	// ever sees the new shape. Note: getTargetUtilization also reads the
+	// `ome.io/targetUtilizationPercentage` annotation, preserving today's
+	// behaviour.
+	utilization := getTargetUtilization(componentMeta, componentExt)
+	hpaSpec := &v1beta1.HPAAutoscaler{
+		Metrics: []autoscalingv2.MetricSpec{
+			{
+				Type: autoscalingv2.ResourceMetricSourceType,
+				Resource: &autoscalingv2.ResourceMetricSource{
+					Name: getResourceName(componentExt),
+					Target: autoscalingv2.MetricTarget{
+						Type:               "Utilization",
+						AverageUtilization: &utilization,
+					},
+				},
 			},
-			MinReplicas: &minReplicas,
-			MaxReplicas: maxReplicas,
-			Metrics:     metrics,
-			Behavior:    &autoscalingv2.HorizontalPodAutoscalerBehavior{},
+		},
+	}
+
+	return createHPA(componentMeta, scaleTargetRef, hpaSpec, minReplicas, maxReplicas)
+}
+
+// defaultHPAMetrics returns the OEP-0013 default metric list: a single
+// Resource{cpu, 80%} entry. Used when the resolver / shim hands back an
+// HPAAutoscaler with no explicit Metrics.
+func defaultHPAMetrics() []autoscalingv2.MetricSpec {
+	utilization := constants.DefaultCPUUtilization
+	return []autoscalingv2.MetricSpec{
+		{
+			Type: autoscalingv2.ResourceMetricSourceType,
+			Resource: &autoscalingv2.ResourceMetricSource{
+				Name: corev1.ResourceCPU,
+				Target: autoscalingv2.MetricTarget{
+					Type:               "Utilization",
+					AverageUtilization: &utilization,
+				},
+			},
 		},
 	}
 }
@@ -80,26 +168,10 @@ func calculateMaxReplicas(componentExt *v1beta1.ComponentExtensionSpec, minRepli
 	return maxReplicas
 }
 
-func getHPAMetrics(metadata metav1.ObjectMeta, componentExt *v1beta1.ComponentExtensionSpec) []autoscalingv2.MetricSpec {
-	utilization := getTargetUtilization(metadata, componentExt)
-	resourceName := getResourceName(componentExt)
-
-	metricTarget := autoscalingv2.MetricTarget{
-		Type:               "Utilization",
-		AverageUtilization: &utilization,
-	}
-
-	return []autoscalingv2.MetricSpec{
-		{
-			Type: autoscalingv2.ResourceMetricSourceType,
-			Resource: &autoscalingv2.ResourceMetricSource{
-				Name:   resourceName,
-				Target: metricTarget,
-			},
-		},
-	}
-}
-
+// getTargetUtilization derives the legacy HPA target utilisation from the
+// componentExt + annotations. Deprecated: only the legacy shim
+// (createHPAFromLegacyComponentExt) calls this. OEP-0013 Slice 6 deletes the
+// underlying ScaleTarget field and this helper with it.
 func getTargetUtilization(metadata metav1.ObjectMeta, componentExt *v1beta1.ComponentExtensionSpec) int32 {
 	if value, ok := metadata.Annotations[constants.TargetUtilizationPercentage]; ok {
 		utilization, _ := strconv.Atoi(value)
@@ -111,6 +183,10 @@ func getTargetUtilization(metadata metav1.ObjectMeta, componentExt *v1beta1.Comp
 	return constants.DefaultCPUUtilization
 }
 
+// getResourceName derives the legacy HPA resource name from the componentExt.
+// Deprecated: only the legacy shim (createHPAFromLegacyComponentExt) calls
+// this. OEP-0013 Slice 6 deletes the underlying ScaleMetric field and this
+// helper with it.
 func getResourceName(componentExt *v1beta1.ComponentExtensionSpec) corev1.ResourceName {
 	if componentExt.ScaleMetric != nil {
 		return corev1.ResourceName(*componentExt.ScaleMetric)
