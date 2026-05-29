@@ -112,14 +112,12 @@ func (csr *ClusterServingRuntimeValidator) Handle(ctx context.Context, req admis
 		if err := validateServingRuntimeAnnotations(&clusterServingRuntime.Spec); err != nil {
 			return admission.Denied(ChainsawInjectAnnotationNotAllowError)
 		}
-		// NOTE: passing clusterServingRuntime.Name twice mirrors the
-		// pre-quality-pass behavior — the `(existingRuntimeName ==
-		// newRuntimeName)` early-exit in validateServingRuntimePriority
-		// fires for every pairing, effectively skipping cross-runtime
-		// priority validation at the cluster scope. Changing the
-		// arguments here would be a webhook-contract change; tracked for
-		// a separate fix.
-		if err := validateServingRuntimePriority(&clusterServingRuntime.Spec, &existing.Items[i].Spec, clusterServingRuntime.Name, clusterServingRuntime.Name); err != nil {
+		// Pass the existing CSR's name from the loop as
+		// existingRuntimeName so the `existingRuntimeName ==
+		// newRuntimeName` early-exit in validateServingRuntimePriority
+		// only short-circuits self-update (the loop iteration that hits
+		// the same CSR we're admitting), not every cross-CSR pairing.
+		if err := validateServingRuntimePriority(&clusterServingRuntime.Spec, &existing.Items[i].Spec, existing.Items[i].Name, clusterServingRuntime.Name); err != nil {
 			return admission.Denied(fmt.Sprintf(InvalidPriorityClusterServingRuntimeError, err.Error(), existing.Items[i].Name, clusterServingRuntime.Name))
 		}
 	}

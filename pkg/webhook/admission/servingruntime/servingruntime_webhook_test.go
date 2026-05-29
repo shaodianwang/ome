@@ -1,13 +1,19 @@
 package servingruntime
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
 	"github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
+	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -1804,4 +1810,170 @@ func TestContainsComplete(t *testing.T) {
 // StringPointer returns a pointer to the given string value
 func stringPointer(s string) *string {
 	return &s
+}
+
+// mkCSRWithFormat builds a ClusterServingRuntime that auto-selects on
+// `formatName` at the given priority. The pod spec is the minimal valid
+// shape required to pass the webhook's structural checks.
+func mkCSRWithFormat(name, formatName string, priority int32) *v1beta1.ClusterServingRuntime {
+	return &v1beta1.ClusterServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: v1beta1.ServingRuntimeSpec{
+			SupportedModelFormats: []v1beta1.SupportedModelFormat{
+				{
+					Name:       formatName,
+					Version:    proto.String("1"),
+					AutoSelect: proto.Bool(true),
+					Priority:   proto.Int32(priority),
+				},
+			},
+			Disabled: proto.Bool(false),
+			ProtocolVersions: []constants.InferenceServiceProtocol{
+				constants.OpenAIProtocol,
+			},
+			ServingRuntimePodSpec: v1beta1.ServingRuntimePodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  constants.MainContainerName,
+						Image: "ome/vllm:latest",
+						Args:  []string{"--model_name={{.Name}}"},
+					},
+				},
+			},
+		},
+	}
+}
+
+func newCSRDecoder(t *testing.T) admission.Decoder {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := v1beta1.AddToScheme(s); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	return admission.NewDecoder(s)
+}
+
+func encodeCSR(t *testing.T, csr *v1beta1.ClusterServingRuntime) []byte {
+	t.Helper()
+	raw, err := json.Marshal(csr)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return raw
+}
+
+// TestClusterServingRuntimeValidator_PriorityConflictAcrossCSRs is the
+// regression test for the bug where the CSR validator passed the
+// admitted CSR's own name as BOTH `existingRuntimeName` and
+// `newRuntimeName` to validateServingRuntimePriority, causing the
+// self-skip early-exit to fire for every pairing in the loop and
+// silently allowing cross-CSR priority conflicts to slip through.
+//
+// Scenario: two existing CSRs both auto-select `safetensors` at
+// priorities 1 and 2. A third CSR is created auto-selecting
+// `safetensors` at priority 1 (CONFLICTS with the first existing CSR).
+// With the bug, the early-exit `clusterServingRuntime.Name ==
+// clusterServingRuntime.Name` is always true, so the conflict is
+// missed and the CSR is admitted. With the fix, the loop passes the
+// OTHER CSR's name, the equality check no longer short-circuits, and
+// the conflict is detected.
+func TestClusterServingRuntimeValidator_PriorityConflictAcrossCSRs(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	existing1 := mkCSRWithFormat("rt-a", "safetensors", 1)
+	existing2 := mkCSRWithFormat("rt-b", "safetensors", 2)
+
+	c := ctrlclientfake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithObjects(existing1, existing2).
+		Build()
+
+	validator := &ClusterServingRuntimeValidator{Client: c, Decoder: newCSRDecoder(t)}
+
+	// New CSR conflicts with rt-a (both priority 1 on `safetensors`).
+	newCSR := mkCSRWithFormat("rt-c", "safetensors", 1)
+	req := admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Object:    runtime.RawExtension{Raw: encodeCSR(t, newCSR)},
+		},
+	}
+
+	resp := validator.Handle(context.Background(), req)
+
+	g.Expect(resp.Allowed).To(gomega.BeFalse(),
+		"expected priority conflict with rt-a to be REJECTED, got allowed=true")
+	g.Expect(resp.Result).NotTo(gomega.BeNil())
+	g.Expect(resp.Result.Message).To(gomega.ContainSubstring("safetensors"),
+		"rejection should mention the conflicting model format")
+}
+
+// TestClusterServingRuntimeValidator_NoPriorityConflict confirms that
+// a CSR with a non-conflicting priority on the same format is
+// accepted, and (critically) that the fix does NOT over-reject by
+// turning legitimate cross-CSR pairings into false positives.
+func TestClusterServingRuntimeValidator_NoPriorityConflict(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	existing1 := mkCSRWithFormat("rt-a", "safetensors", 1)
+	existing2 := mkCSRWithFormat("rt-b", "safetensors", 2)
+
+	c := ctrlclientfake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithObjects(existing1, existing2).
+		Build()
+
+	validator := &ClusterServingRuntimeValidator{Client: c, Decoder: newCSRDecoder(t)}
+
+	// Priority 3 on `safetensors` — non-conflicting with either existing.
+	newCSR := mkCSRWithFormat("rt-c", "safetensors", 3)
+	req := admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Object:    runtime.RawExtension{Raw: encodeCSR(t, newCSR)},
+		},
+	}
+
+	resp := validator.Handle(context.Background(), req)
+	g.Expect(resp.Allowed).To(gomega.BeTrue(),
+		"expected non-conflicting priority to be admitted, got rejection: %v", resp.Result)
+}
+
+// TestClusterServingRuntimeValidator_SelfUpdateNotFlagged confirms
+// the fix preserves self-update behavior: when an existing CSR is
+// updated, the loop iteration that hits the CSR's OWN current state
+// (same name) is still skipped by the `existingRuntimeName ==
+// newRuntimeName` early-exit, so a CSR can update its own spec
+// without being flagged as a self-conflict.
+func TestClusterServingRuntimeValidator_SelfUpdateNotFlagged(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	// `rt-a` already exists at priority 1; we are updating its spec
+	// (still priority 1 on the same format). With the fix, the loop
+	// iteration that hits `rt-a` itself should skip via the early-exit
+	// because `existing.Items[i].Name == clusterServingRuntime.Name`.
+	original := mkCSRWithFormat("rt-a", "safetensors", 1)
+	c := ctrlclientfake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithObjects(original).
+		Build()
+
+	validator := &ClusterServingRuntimeValidator{Client: c, Decoder: newCSRDecoder(t)}
+
+	// Same name, same format, same priority → self-update.
+	updated := mkCSRWithFormat("rt-a", "safetensors", 1)
+	// Tweak something benign so it's an actual update payload (the
+	// validator doesn't distinguish create vs update for priority, but
+	// this keeps the scenario realistic).
+	updated.Spec.ServingRuntimePodSpec.Containers[0].Image = "ome/vllm:newer"
+	req := admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Update,
+			Object:    runtime.RawExtension{Raw: encodeCSR(t, updated)},
+		},
+	}
+
+	resp := validator.Handle(context.Background(), req)
+	g.Expect(resp.Allowed).To(gomega.BeTrue(),
+		"self-update should not be flagged as a priority conflict; got rejection: %v", resp.Result)
 }
