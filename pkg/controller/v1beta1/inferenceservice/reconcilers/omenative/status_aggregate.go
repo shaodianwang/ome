@@ -118,7 +118,26 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 			}
 		}
 
-		cs.OMENative.ObservedGeneration = fresh.Generation
+		// ObservedGeneration is the generation THIS reconcile actually
+		// observed and computed `target` (hence the UpdateRevision stamped
+		// just above) from — p.ISVC.Generation — NOT the re-read
+		// fresh.Generation. The two diverge when this reconcile ran on a
+		// stale cached ISVC (e.g. triggered by a pod event before the
+		// informer cache caught a fresh spec bump): `target` / UpdateRevision
+		// reflect the OLD spec while `fresh` already carries the NEW
+		// generation. Writing fresh.Generation here would over-claim —
+		// recording "observed generation N" while UpdateRevision still names
+		// the N-1 revision. The Sequential gate reads generation-skew
+		// (ObservedGeneration < isvc.Generation) to know a just-bumped
+		// Component is still pending; that over-claim opened an
+		// "idle-looking" window (gen-skew cleared, revision-skew not yet
+		// present) in which activeSequentialComponent reported "group idle"
+		// and the gate released the NEXT Component early — breaking
+		// Sequential ordering and bypassing the inter-Component soak
+		// (verified on KIND). Pinning ObservedGeneration and UpdateRevision
+		// to the SAME observed snapshot keeps the two skew signals
+		// consistent so the idle window cannot occur.
+		cs.OMENative.ObservedGeneration = p.ISVC.Generation
 		cs.OMENative.LabelSelector = componentLabelSelectorString(p.ISVC.Name, v1component)
 
 		// Component-level Conditions. Derived after counters so

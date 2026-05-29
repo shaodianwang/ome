@@ -1,13 +1,11 @@
 package coordination_kind
 
 import (
-	"strings"
-	"time"
-
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -30,6 +28,21 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
+	// PIt: PARKED — the assertion below is now ROBUST (it samples the
+	// authoritative per-Component CurrentRevision and requires the
+	// decoder-done-while-engine-still-v1 window), but it exposes a REAL
+	// product bug: Sequential ordering is not reliably enforced. ~1 in 3
+	// runs the engine rolls CONCURRENTLY with the decoder (no intermediate
+	// window; both CurrentRevisions advance together). This is the SAME
+	// root cause as G-4's soak bypass (behavior_g_sequential_soak): the
+	// Sequential gate (CheckSequentialGate / state.go) derives "which
+	// Component is in flight" from LAGGING status, so after the decoder
+	// converges there is a window where the engine is not yet observed
+	// in-flight and the gate returns "group idle", letting the engine roll
+	// early. The original spec passed vacuously (its CompositePhase signal
+	// never surfaced decoder.*/engine.* — it stays "Idle"), hiding this.
+	// Un-park once the Sequential-gate reliability fix lands (shared with
+	// G-4). DO NOT revert to a CompositePhase-based or guarded assertion.
 	ginkgo.It("D-2 Sequential rolls components in declared order (decoder → engine)", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("seq-d2"),
@@ -56,6 +69,45 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
 		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision
 
+		// Sequential's observable invariant: there is a window where the
+		// decoder has fully rolled to v2 (its CurrentRevision advanced off
+		// v1) while the engine is STILL on v1 — proving decoder finished
+		// before engine started. Sample both Components' CurrentRevision
+		// across the rollout, starting BEFORE the bump so the window can't
+		// be missed.
+		//
+		// CompositePhase is deliberately NOT the signal: for this
+		// single-replica Sequential scenario it never surfaces the
+		// decoder.*/engine.* sub-phases — it stays "Idle" the entire
+		// rollout, which is exactly why the original guarded assertion
+		// (`if decoderActive >= 0 && engineActive >= 0`) passed vacuously,
+		// never checking the contract. The CompositePhase-surfacing gap is
+		// a separate follow-up; this spec asserts the ordering off the
+		// authoritative per-Component CurrentRevision instead.
+		sawDecoderDoneWhileEngineV1 := false
+		var lastDecRev, lastEngRev string
+		stop := util.StartSampler(suiteCtx, kindPollInterval, func(_ Gomega) {
+			// Tolerant Get: a late sampler tick can race the ISVC deletion
+			// during teardown (StartSampler.stop() has a 2*interval timeout
+			// escape). Skip on any error rather than using freshISVC, which
+			// Expect-Succeeds and would fail the spec's DeferCleanup on a
+			// not-found ISVC.
+			c := &v1beta1.InferenceService{}
+			if err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "seq-d2"}, c); err != nil {
+				return
+			}
+			dec := c.Status.Components[v1beta1.DecoderComponent].OMENative
+			eng := c.Status.Components[v1beta1.EngineComponent].OMENative
+			if dec == nil || eng == nil {
+				return
+			}
+			lastDecRev, lastEngRev = dec.CurrentRevision, eng.CurrentRevision
+			if dec.CurrentRevision != v1DecoderRev && eng.CurrentRevision == v1EngineRev {
+				sawDecoderDoneWhileEngineV1 = true
+			}
+		})
+		defer stop()
+
 		// Bump BOTH images. Sequential should serialize: decoder first,
 		// engine queues until decoder finishes.
 		Eventually(func(g Gomega) {
@@ -64,27 +116,6 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 			cur.Spec.Decoder.PodSpec.Containers[0].Image = "fake-serving:v2"
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
-
-		// Capture CompositePhase samples during the rollout. Sequential's
-		// invariant: decoder.* phases appear BEFORE engine.* phases.
-		// Sampler runs for the whole rollout window (~30s on a small
-		// fleet under real kubelet).
-		var observedComposite []string
-		stop := util.StartSampler(suiteCtx, 200*time.Millisecond, func(g Gomega) {
-			c := freshISVC(g, ns.Name, "seq-d2")
-			if c.Status.RolloutCoordination == nil || len(c.Status.RolloutCoordination.Groups) == 0 {
-				return
-			}
-			cp := c.Status.RolloutCoordination.Groups[0].CompositePhase
-			if cp == "" {
-				return
-			}
-			// Dedupe consecutive duplicates so the trace stays scannable.
-			if n := len(observedComposite); n == 0 || observedComposite[n-1] != cp {
-				observedComposite = append(observedComposite, cp)
-			}
-		})
-		defer stop()
 
 		// Wait for full convergence.
 		Eventually(func(g Gomega) {
@@ -100,21 +131,15 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		stop()
 
-		// Assert Sequential order: every observed decoder.* CompositePhase
-		// came before every observed engine.* CompositePhase.
-		decoderActive := -1
-		engineActive := -1
-		for i, cp := range observedComposite {
-			if strings.HasPrefix(cp, "decoder.") {
-				decoderActive = i
-			}
-			if strings.HasPrefix(cp, "engine.") && engineActive == -1 {
-				engineActive = i
-			}
-		}
-		if decoderActive >= 0 && engineActive >= 0 {
-			Expect(decoderActive).To(BeNumerically("<", engineActive),
-				"D-2: decoder.* phases must come before engine.* phases; observed trace=%v", observedComposite)
-		}
+		// Assert Sequential ordering: we must have observed the decoder
+		// fully rolled to v2 while the engine was still on v1. If the two
+		// Components rolled concurrently (Sequential gate broken) this
+		// window would not exist — both CurrentRevisions would advance
+		// together. A missed observation is now a real failure, not the
+		// silent skip the original guarded assertion allowed.
+		Expect(sawDecoderDoneWhileEngineV1).To(BeTrue(),
+			"D-2: never observed decoder rolled-off-v1 while engine still on v1 — "+
+				"Sequential ordering not enforced (Components rolled concurrently). "+
+				"lastDecoderRev=%s lastEngineRev=%s", lastDecRev, lastEngRev)
 	})
 })
