@@ -99,160 +99,153 @@ func updateReq(t *testing.T, oldObj, newObj *v1beta1.InferenceReplica) admission
 	}}
 }
 
-func TestHandle_CreateWithoutAnnotation_Denied(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	resp := v.Handle(context.Background(), createReq(t, baselineIR(nil)))
-
-	g.Expect(resp.Allowed).To(gomega.BeFalse(),
-		"users should not be able to create InferenceReplicas without the controller-write annotation")
-	g.Expect(resp.Result.Message).To(gomega.ContainSubstring("controller-only resource"))
-	g.Expect(resp.Result.Message).To(gomega.ContainSubstring(constants.InferenceReplicaControllerWriteAnnotationKey))
+// withReplicas returns a clone of `ir` with Replicas set; convenience
+// for the Update-path table cases that need a spec diff.
+func withReplicas(ir *v1beta1.InferenceReplica, n int32) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Spec.Replicas = &n
+	return out
 }
 
-func TestHandle_CreateWithEmptyAnnotationMap_Denied(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	resp := v.Handle(context.Background(), createReq(t, baselineIR(map[string]string{})))
-
-	g.Expect(resp.Allowed).To(gomega.BeFalse(),
-		"empty annotation map should be treated the same as nil")
+// withComponent returns a clone with the Component slot changed.
+func withComponent(ir *v1beta1.InferenceReplica, c v1beta1.ComponentType) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Spec.Component = c
+	return out
 }
 
-func TestHandle_CreateWithWrongAnnotationValue_Denied(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	// Only the literal "true" is accepted — guards against truthy variants
-	// like "True" / "yes" that hand editors might use.
-	resp := v.Handle(context.Background(), createReq(t, baselineIR(
-		map[string]string{constants.InferenceReplicaControllerWriteAnnotationKey: "yes"},
-	)))
-
-	g.Expect(resp.Allowed).To(gomega.BeFalse(),
-		`annotation value must be the literal "true"; truthy variants reject`)
+// withParent returns a clone whose parentRef points at a different ISVC.
+func withParent(ir *v1beta1.InferenceReplica, name string) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Spec.ParentRef.Name = name
+	return out
 }
 
-func TestHandle_CreateWithControllerWriteAnnotation_Allowed(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	resp := v.Handle(context.Background(), createReq(t, baselineIR(withControllerWrite())))
-
-	g.Expect(resp.Allowed).To(gomega.BeTrue(),
-		"ISVC controller writes carrying the annotation must pass")
+// withImage returns a clone whose first runner uses a different image.
+func withImage(ir *v1beta1.InferenceReplica, image string) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Spec.Runners[0].Template.Spec.Containers[0].Image = image
+	return out
 }
 
-func TestHandle_UpdateWithoutAnnotation_Denied(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	old := baselineIR(withControllerWrite())
-	// New object drops the annotation — simulates a hand edit that
-	// preserved the resource but dropped the controller marker.
-	newObj := baselineIR(nil)
-	resp := v.Handle(context.Background(), updateReq(t, old, newObj))
+// TestHandle covers every gate in pkg/webhook/admission/inferencereplica.
+//
+// Each row builds an admission request from `req(t)`, runs Handle, and
+// asserts Allowed plus optional rejection substring(s). Cases not built
+// via createReq/updateReq use the inline `req` builder; that's how
+// Delete and the malformed-body cases stay in the same table.
+func TestHandle(t *testing.T) {
+	wcw := withControllerWrite() // baseline annotation; "controller write"
 
-	g.Expect(resp.Allowed).To(gomega.BeFalse(),
-		"removing the controller-write annotation on update should reject")
-}
+	tests := []struct {
+		name         string
+		req          func(t *testing.T) admission.Request
+		wantAllowed  bool
+		wantContains []string // optional substring matches against resp.Result.Message
+	}{
+		{
+			name:         "create without annotation → denied",
+			req:          func(t *testing.T) admission.Request { return createReq(t, baselineIR(nil)) },
+			wantAllowed:  false,
+			wantContains: []string{"controller-only resource", constants.InferenceReplicaControllerWriteAnnotationKey},
+		},
+		{
+			name:        "create with empty annotation map → denied (same as nil)",
+			req:         func(t *testing.T) admission.Request { return createReq(t, baselineIR(map[string]string{})) },
+			wantAllowed: false,
+		},
+		{
+			name: `create with annotation value other than literal "true" → denied`,
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, baselineIR(map[string]string{
+					constants.InferenceReplicaControllerWriteAnnotationKey: "yes",
+				}))
+			},
+			wantAllowed: false,
+		},
+		{
+			name:        "create with controller-write annotation → allowed",
+			req:         func(t *testing.T) admission.Request { return createReq(t, baselineIR(wcw)) },
+			wantAllowed: true,
+		},
+		{
+			name: "update dropping annotation → denied",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw), baselineIR(nil))
+			},
+			wantAllowed: false,
+		},
+		{
+			name: "update with spec change AND dropped annotation → denied",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw), withReplicas(baselineIR(nil), 7))
+			},
+			wantAllowed: false,
+		},
+		{
+			name: "update with spec change (controller write) → allowed",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw), withReplicas(baselineIR(wcw), 3))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "update changing spec.parentRef → denied",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw), withParent(baselineIR(wcw), "different-isvc"))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"spec.parentRef is immutable"},
+		},
+		{
+			name: "update changing spec.component → denied",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw), withComponent(baselineIR(wcw), v1beta1.DecoderComponent))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"spec.component is immutable"},
+		},
+		{
+			name: "update rerendering runners (controller write) → allowed",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw), withImage(baselineIR(wcw), "sgl:2.0"))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "delete (not registered for this webhook) → allowed",
+			req: func(t *testing.T) admission.Request {
+				return admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Delete,
+					Namespace: "prod-models",
+					Name:      "llama-engine",
+				}}
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "malformed body → errored (Allowed=false)",
+			req: func(t *testing.T) admission.Request {
+				return admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Namespace: "prod-models",
+					Name:      "llama-engine",
+					Object:    runtime.RawExtension{Raw: []byte(`{not json`)},
+				}}
+			},
+			wantAllowed: false,
+		},
+	}
 
-func TestHandle_UpdateWithSpecChangeNoAnnotation_Denied(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	old := baselineIR(withControllerWrite())
-	// Hand-edit bumping replicas + dropping the annotation: this is the
-	// most dangerous path (a user trying to override the controller).
-	newObj := baselineIR(nil)
-	replicas := int32(7)
-	newObj.Spec.Replicas = &replicas
-	resp := v.Handle(context.Background(), updateReq(t, old, newObj))
-
-	g.Expect(resp.Allowed).To(gomega.BeFalse(),
-		"spec edits without the annotation must reject")
-}
-
-func TestHandle_UpdateControllerWriteWithSpecEdit_Allowed(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	old := baselineIR(withControllerWrite())
-	newObj := baselineIR(withControllerWrite())
-	// Controller's normal flow: bumps replicas as part of an HPA-driven
-	// scale-up patch. Annotation stays in place.
-	replicas := int32(3)
-	newObj.Spec.Replicas = &replicas
-	resp := v.Handle(context.Background(), updateReq(t, old, newObj))
-
-	g.Expect(resp.Allowed).To(gomega.BeTrue(),
-		"controller updates (annotation present) should pass even when spec.replicas changes")
-}
-
-func TestHandle_UpdateChangesParentRef_Denied(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	old := baselineIR(withControllerWrite())
-	newObj := baselineIR(withControllerWrite())
-	newObj.Spec.ParentRef.Name = "different-isvc"
-	resp := v.Handle(context.Background(), updateReq(t, old, newObj))
-
-	g.Expect(resp.Allowed).To(gomega.BeFalse(),
-		"spec.parentRef is immutable even from the controller")
-	g.Expect(resp.Result.Message).To(gomega.ContainSubstring("spec.parentRef is immutable"))
-}
-
-func TestHandle_UpdateChangesComponent_Denied(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	old := baselineIR(withControllerWrite())
-	newObj := baselineIR(withControllerWrite())
-	newObj.Spec.Component = v1beta1.DecoderComponent
-	resp := v.Handle(context.Background(), updateReq(t, old, newObj))
-
-	g.Expect(resp.Allowed).To(gomega.BeFalse(),
-		"spec.component is immutable; moving a workload between slots requires recreation")
-	g.Expect(resp.Result.Message).To(gomega.ContainSubstring("spec.component is immutable"))
-}
-
-func TestHandle_UpdateChangesRunners_Allowed_WithAnnotation(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	old := baselineIR(withControllerWrite())
-	newObj := baselineIR(withControllerWrite())
-	// The controller rerenders Runners on every reconcile (image bumps,
-	// env injection, etc.). This MUST be allowed when the annotation is
-	// present.
-	newObj.Spec.Runners[0].Template.Spec.Containers[0].Image = "sgl:2.0"
-	resp := v.Handle(context.Background(), updateReq(t, old, newObj))
-
-	g.Expect(resp.Allowed).To(gomega.BeTrue(),
-		"controller rerenders Runners on every reconcile; must be allowed with annotation")
-}
-
-func TestHandle_DeleteOperation_Allowed(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	// Delete is not in the kubebuilder verbs list, but defensive: if a
-	// future webhook config widens scope, deletes should pass (operators
-	// may need to recover from a stuck CR).
-	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-		Operation: admissionv1.Delete,
-		Namespace: "prod-models",
-		Name:      "llama-engine",
-	}}
-	resp := v.Handle(context.Background(), req)
-
-	g.Expect(resp.Allowed).To(gomega.BeTrue(),
-		"delete operations are not gated by this webhook")
-}
-
-func TestHandle_MalformedObject_Errored(t *testing.T) {
-	g := gomega.NewWithT(t)
-	v := &Validator{Decoder: newDecoder(t)}
-	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-		Operation: admissionv1.Create,
-		Namespace: "prod-models",
-		Name:      "llama-engine",
-		Object:    runtime.RawExtension{Raw: []byte(`{not json`)},
-	}}
-	resp := v.Handle(context.Background(), req)
-
-	g.Expect(resp.Allowed).To(gomega.BeFalse(),
-		"malformed object body should surface as an Errored response, not Denied")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			v := &Validator{Decoder: newDecoder(t)}
+			resp := v.Handle(context.Background(), tc.req(t))
+			g.Expect(resp.Allowed).To(gomega.Equal(tc.wantAllowed))
+			for _, sub := range tc.wantContains {
+				g.Expect(resp.Result.Message).To(gomega.ContainSubstring(sub))
+			}
+		})
+	}
 }

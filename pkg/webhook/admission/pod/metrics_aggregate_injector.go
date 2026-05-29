@@ -34,42 +34,41 @@ func newMetricsAggregator(configMap *v1.ConfigMap) (*MetricsAggregator, error) {
 	return ma, nil
 }
 
+// setMetricAggregationEnvVarsAndPorts tells queue-proxy where to scrape
+// the ome-container metrics and which port to expose the aggregated
+// metrics on. Scrape port/path are inherited from the ServingRuntime
+// YAML; fall back to the kserve container defaults so a transformer
+// using the Python SDK still works without explicit annotations.
 func setMetricAggregationEnvVarsAndPorts(pod *v1.Pod) {
 	for i, container := range pod.Spec.Containers {
-		if container.Name == "queue-proxy" {
-			// The ome-container prometheus port/path is inherited from the ClusterServingRuntime YAML.
-			// If no port is defined (transformer using python SDK), use the default port/path for the ome-container.
-			omeContainerPromPort := defaultKserveContainerPrometheusPort
-			if port, ok := pod.ObjectMeta.Annotations[constants.ContainerPrometheusPortKey]; ok {
-				omeContainerPromPort = port
-			}
-
-			omeContainerPromPath := constants.DefaultPrometheusPath
-			if path, ok := pod.ObjectMeta.Annotations[constants.ContainerPrometheusPathKey]; ok {
-				omeContainerPromPath = path
-			}
-
-			// The ome container port/path is set as an EnvVar in the queue-proxy container
-			// so that it knows which port/path to scrape from the ome-container.
-			pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, v1.EnvVar{Name: constants.ContainerPrometheusMetricsPortEnvVarKey, Value: omeContainerPromPort})
-			pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, v1.EnvVar{Name: constants.ContainerPrometheusMetricsPathEnvVarKey, Value: omeContainerPromPath})
-
-			// Set the port that queue-proxy will use to expose the aggregate metrics.
-			pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, v1.EnvVar{Name: constants.QueueProxyAggregatePrometheusMetricsPortEnvVarKey, Value: strconv.Itoa(constants.QueueProxyAggregatePrometheusMetricsPort)})
-
-			pod.Spec.Containers[i].Ports = utils.AppendPortIfNotExists(pod.Spec.Containers[i].Ports, v1.ContainerPort{
-				Name:          constants.AggregateMetricsPortName,
-				ContainerPort: int32(constants.QueueProxyAggregatePrometheusMetricsPort),
-				Protocol:      "TCP",
-			})
+		if container.Name != "queue-proxy" {
+			continue
 		}
+		omeContainerPromPort := defaultKserveContainerPrometheusPort
+		if port, ok := pod.ObjectMeta.Annotations[constants.ContainerPrometheusPortKey]; ok {
+			omeContainerPromPort = port
+		}
+		omeContainerPromPath := constants.DefaultPrometheusPath
+		if path, ok := pod.ObjectMeta.Annotations[constants.ContainerPrometheusPathKey]; ok {
+			omeContainerPromPath = path
+		}
+		pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env,
+			v1.EnvVar{Name: constants.ContainerPrometheusMetricsPortEnvVarKey, Value: omeContainerPromPort},
+			v1.EnvVar{Name: constants.ContainerPrometheusMetricsPathEnvVarKey, Value: omeContainerPromPath},
+			v1.EnvVar{Name: constants.QueueProxyAggregatePrometheusMetricsPortEnvVarKey, Value: strconv.Itoa(constants.QueueProxyAggregatePrometheusMetricsPort)},
+		)
+		pod.Spec.Containers[i].Ports = utils.AppendPortIfNotExists(pod.Spec.Containers[i].Ports, v1.ContainerPort{
+			Name:          constants.AggregateMetricsPortName,
+			ContainerPort: int32(constants.QueueProxyAggregatePrometheusMetricsPort),
+			Protocol:      "TCP",
+		})
 	}
 }
 
-// InjectMetricsAggregator looks for the annotations to enable aggregate ome-container and queue-proxy metrics and
-// if specified, sets port-related EnvVars in queue-proxy and the aggregate prometheus annotation.
+// InjectMetricsAggregator wires queue-proxy aggregate metrics + the
+// pod-level prometheus.io scrape annotations. Defaults come from the
+// inferenceservice-config ConfigMap; per-pod annotations override.
 func (ma *MetricsAggregator) InjectMetricsAggregator(pod *v1.Pod) error {
-	// Only set metric configs if the required annotations are set
 	enableMetricAggregation, ok := pod.ObjectMeta.Annotations[constants.EnableMetricAggregation]
 	if !ok {
 		if pod.ObjectMeta.Annotations == nil {
@@ -82,15 +81,14 @@ func (ma *MetricsAggregator) InjectMetricsAggregator(pod *v1.Pod) error {
 		setMetricAggregationEnvVarsAndPorts(pod)
 	}
 
-	// Handle setting the pod prometheus annotations
 	setPromAnnotation, ok := pod.ObjectMeta.Annotations[constants.SetPrometheusAnnotation]
 	if !ok {
 		pod.ObjectMeta.Annotations[constants.SetPrometheusAnnotation] = ma.EnablePrometheusScraping
 		setPromAnnotation = ma.EnablePrometheusScraping
 	}
 	if setPromAnnotation == "true" {
-		// Set prometheus port to default queue proxy prometheus metrics port.
-		// If enableMetricAggregation is true, set it as the queue proxy metrics aggregation port.
+		// Aggregation on ⇒ point prometheus at the aggregator port;
+		// off ⇒ the default queue-proxy prometheus port.
 		podPromPort := constants.DefaultPodPrometheusPort
 		if enableMetricAggregation == "true" {
 			podPromPort = strconv.Itoa(constants.QueueProxyAggregatePrometheusMetricsPort)
@@ -98,6 +96,5 @@ func (ma *MetricsAggregator) InjectMetricsAggregator(pod *v1.Pod) error {
 		pod.ObjectMeta.Annotations[constants.PrometheusPortAnnotationKey] = podPromPort
 		pod.ObjectMeta.Annotations[constants.PrometheusPathAnnotationKey] = constants.DefaultPrometheusPath
 	}
-
 	return nil
 }

@@ -16,7 +16,6 @@ const (
 	servingSidecarConfigMapKeyName = "servingSidecar"
 )
 
-// ServingSidecarInjector represents configuration parameters for the Serving sidecar container.
 type ServingSidecarInjector struct {
 	Image                string `json:"image" validate:"required"`
 	MemoryRequest        string `json:"memoryRequest"`
@@ -29,7 +28,6 @@ type ServingSidecarInjector struct {
 	RealmDomainComponent string `json:"realmDomainComponent"`
 }
 
-// newServingSidecarInjector initializes a ServingSidecarInjector from a ConfigMap.
 func newServingSidecarInjector(configMap *v1.ConfigMap) *ServingSidecarInjector {
 	servingSidecarInjector := &ServingSidecarInjector{}
 	if servingSidecarConfigVal, ok := configMap.Data[servingSidecarConfigMapKeyName]; ok {
@@ -40,7 +38,8 @@ func newServingSidecarInjector(configMap *v1.ConfigMap) *ServingSidecarInjector 
 	return servingSidecarInjector
 }
 
-// InjectServingSidecar injects the serving sidecar container into the pod if necessary.
+// InjectServingSidecar injects the serving sidecar container into the
+// pod when ome.io/enable-serving-sidecar=true.
 func (ss *ServingSidecarInjector) InjectServingSidecar(pod *v1.Pod) error {
 	if enableServingSidecar, ok := pod.ObjectMeta.Annotations[constants.ServingSidecarInjectionKey]; ok && enableServingSidecar == "true" {
 		return ss.injectServingSidecar(pod)
@@ -48,18 +47,13 @@ func (ss *ServingSidecarInjector) InjectServingSidecar(pod *v1.Pod) error {
 	return nil
 }
 
-// njectServingSidecar adds the serving sidecar container and its configurations if it doesn’t already exist in the pod.
 func (ss *ServingSidecarInjector) injectServingSidecar(pod *v1.Pod) error {
 	if ss.containerExists(pod) {
 		return nil
 	}
-
-	// general validation
 	if err := ss.validate(); err != nil {
 		return err
 	}
-
-	// validate specially for auth type
 	if err := ss.validateAuth(pod); err != nil {
 		return err
 	}
@@ -68,21 +62,18 @@ func (ss *ServingSidecarInjector) injectServingSidecar(pod *v1.Pod) error {
 	if err != nil {
 		return err
 	}
-
-	servingSidecarMounts := ss.getVolumeMounts(pod, fineTunedWeightFTStrategy)
-	initEnvs := ss.getServingSidecarEnvs(fineTunedWeightFTStrategy)
-
 	securityContext, err := ss.getMainContainerSecurityContext(pod)
 	if err != nil {
 		return err
 	}
 
-	sidecarContainer := ss.createServingSidecarContainer(initEnvs, servingSidecarMounts, securityContext)
+	mounts := ss.getVolumeMounts(pod, fineTunedWeightFTStrategy)
+	envs := ss.getServingSidecarEnvs(fineTunedWeightFTStrategy)
+	sidecarContainer := ss.createServingSidecarContainer(envs, mounts, securityContext)
 	pod.Spec.Containers = append(pod.Spec.Containers, *sidecarContainer)
 	return nil
 }
 
-// containerExists checks if the Serving Sidecar container is already in the pod.
 func (ss *ServingSidecarInjector) containerExists(pod *v1.Pod) bool {
 	for _, container := range pod.Spec.Containers {
 		if container.Name == constants.ServingSidecarContainerName {
@@ -93,28 +84,27 @@ func (ss *ServingSidecarInjector) containerExists(pod *v1.Pod) bool {
 }
 
 func (ss *ServingSidecarInjector) validate() error {
-	validate := validator.New()
-	// Validate by using go-playground validator
-	if err := validate.Struct(ss); err != nil {
+	if err := validator.New().Struct(ss); err != nil {
 		return fmt.Errorf("failed to validate ServingSidecarInjector: %w", err)
 	}
 	return nil
 }
 
-// validateAuth checks if the correct authentication type is set for the Serving Sidecar container.
+// validateAuth enforces that OKEWorkloadIdentity carries a service
+// account and turns on token automounting (the runtime uses the SA token
+// to obtain workload-identity credentials).
 func (ss *ServingSidecarInjector) validateAuth(pod *v1.Pod) error {
-	if ss.AuthType == constants.AuthtypeOKEWorkloadIdentity && len(pod.Spec.ServiceAccountName) == 0 {
+	if ss.AuthType != constants.AuthtypeOKEWorkloadIdentity {
+		return nil
+	}
+	if len(pod.Spec.ServiceAccountName) == 0 {
 		return fmt.Errorf("a service account should be specified when using OKEWorkloadIdentity")
 	}
-
-	if ss.AuthType == constants.AuthtypeOKEWorkloadIdentity {
-		automount := true
-		pod.Spec.AutomountServiceAccountToken = &automount
-	}
+	automount := true
+	pod.Spec.AutomountServiceAccountToken = &automount
 	return nil
 }
 
-// getVolumeMounts defines and returns volume mounts for the Model Init container.
 func (ss *ServingSidecarInjector) getFineTunedWeightFTStrategy(pod *v1.Pod) (string, error) {
 	if fineTunedWeightFTStrategy, ok := pod.ObjectMeta.Annotations[constants.FineTunedWeightFTStrategyKey]; ok {
 		return fineTunedWeightFTStrategy, nil
@@ -122,7 +112,6 @@ func (ss *ServingSidecarInjector) getFineTunedWeightFTStrategy(pod *v1.Pod) (str
 	return "", fmt.Errorf("failed to get the fine-tuned weight FT strategy for the serving sidecar")
 }
 
-// getVolumeMounts defines and returns volume mounts for the Model Init container.
 func (ss *ServingSidecarInjector) getVolumeMounts(pod *v1.Pod, fineTunedWeightFTStrategy string) []v1.VolumeMount {
 	servingSidecarMounts := []v1.VolumeMount{}
 

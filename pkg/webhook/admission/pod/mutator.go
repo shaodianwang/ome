@@ -19,29 +19,22 @@ import (
 // +kubebuilder:webhook:path=/mutate-training-pods,mutating=true,failurePolicy=fail,groups="",resources=pods,verbs=create,versions=v1,name=trainingjob.ome-webhook-server.pod-mutator,reinvocationPolicy=IfNeeded
 var log = logf.Log.WithName(constants.PodMutatorWebhookName)
 
-// Mutator is a webhook that injects incoming pods
 type Mutator struct {
 	Client    client.Client
 	Clientset kubernetes.Interface
 	Decoder   admission.Decoder
 }
 
-// Handle decodes the incoming Pod and executes mutation logic.
 func (mutator *Mutator) Handle(ctx context.Context, req admission.Request) admission.Response {
 	pod := &v1.Pod{}
-
-	podName := getPodName(pod)
-
 	if err := mutator.Decoder.Decode(req, pod); err != nil {
-		log.Error(err, "Failed to decode pod", "name", podName)
+		log.Error(err, "Failed to decode pod", "namespace", req.Namespace, "name", req.Name)
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
 	if !needMutate(pod) {
 		return admission.ValidationResponse(true, "")
 	}
-
-	log.Info("mutating pod", "name", podName)
 
 	configMap, err := mutator.Clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(),
 		constants.InferenceServiceConfigMapName, metav1.GetOptions{})
@@ -50,24 +43,21 @@ func (mutator *Mutator) Handle(ctx context.Context, req admission.Request) admis
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 
-	// For some reason pod namespace is always empty when coming to pod mutator, need to set from admission request
+	// Pod namespace is empty in the admission body; backfill from the
+	// request so downstream injectors and the controller's pod-ownership
+	// queries see the right value.
 	pod.Namespace = req.AdmissionRequest.Namespace
 
 	if err := mutator.mutate(pod, configMap); err != nil {
-		log.Error(err, "Failed to mutate pod", "name", podName)
+		log.Error(err, "Failed to mutate pod", "namespace", pod.Namespace, "name", getPodName(pod))
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
-
-	log.Info("mutating pod completed", "pod", pod)
 
 	patch, err := json.Marshal(pod)
 	if err != nil {
-		log.Error(err, "Failed to marshal pod", "name", podName)
+		log.Error(err, "Failed to marshal pod", "namespace", pod.Namespace, "name", getPodName(pod))
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
-
-	log.Info("parsing pod completed", "name", podName)
-
 	return admission.PatchResponseFromRaw(req.AdmissionRequest.Object.Raw, patch)
 }
 
@@ -117,8 +107,10 @@ func getPodName(pod *v1.Pod) string {
 	return podName
 }
 
+// needMutate reports whether the pod is owned by an InferenceService or
+// a TrainingJob — only those carry the labels the injectors key off, so
+// any other pod passes through unchanged.
 func needMutate(pod *v1.Pod) bool {
-	// Skip webhook if pod not managed by ome
 	_, inferencePodLabel := pod.Labels[constants.InferenceServicePodLabelKey]
 	_, trainingPodLabel := pod.Labels[constants.TrainingJobPodLabelKey]
 	return inferencePodLabel || trainingPodLabel

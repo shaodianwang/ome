@@ -19,15 +19,12 @@ import (
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
-var (
-	validatorLogger = logf.Log.WithName("inferenceservice-v1beta1-validation-webhook")
-)
+var validatorLogger = logf.Log.WithName("inferenceservice-v1beta1-validation-webhook")
 
-// InferenceServiceValidator is responsible for validating the InferenceService resource
-// when it is created, updated, or deleted.
-//
-// NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
-// as this struct is used only for temporary operations and does not need to be deeply copied.
+// InferenceServiceValidator wires the webhook framework into the
+// per-rule validators in pkg/validation. The kubebuilder markers below
+// suppress DeepCopy + OpenAPI codegen since this is a stateless
+// wired-once helper, not a persisted CR.
 // +kubebuilder:object:generate=false
 // +k8s:openapi-gen=false
 type InferenceServiceValidator struct {
@@ -54,25 +51,21 @@ type InferenceServiceValidator struct {
 // +kubebuilder:webhook:verbs=create;update,path=/validate-ome-io-v1beta1-inferenceservice,mutating=false,failurePolicy=fail,groups=ome.io,resources=inferenceservices,versions=v1beta1,name=inferenceservice.ome-webhook-server.validator
 var _ webhook.CustomValidator = &InferenceServiceValidator{}
 
-// ValidateCreate implements webhook.Validator so a webhook will be registered for the type
 func (v *InferenceServiceValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	isvc, err := convertToInferenceService(obj)
 	if err != nil {
 		validatorLogger.Error(err, "Unable to convert object to InferenceService")
 		return nil, err
 	}
-	validatorLogger.Info("validate create", "name", isvc.Name)
 	return v.validateInferenceService(ctx, isvc)
 }
 
-// ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
 func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	isvc, err := convertToInferenceService(newObj)
 	if err != nil {
 		validatorLogger.Error(err, "Unable to convert object to InferenceService")
 		return nil, err
 	}
-	validatorLogger.Info("validate update", "name", isvc.Name)
 	oldIsvc, err := convertToInferenceService(oldObj)
 	if err != nil {
 		validatorLogger.Error(err, "Unable to convert prior object to InferenceService")
@@ -84,14 +77,11 @@ func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldObj, 
 	return v.validateInferenceService(ctx, isvc)
 }
 
-// ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (v *InferenceServiceValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	isvc, err := convertToInferenceService(obj)
-	if err != nil {
+func (v *InferenceServiceValidator) ValidateDelete(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+	if _, err := convertToInferenceService(obj); err != nil {
 		validatorLogger.Error(err, "Unable to convert object to InferenceService")
 		return nil, err
 	}
-	validatorLogger.Info("validate delete", "name", isvc.Name)
 	return nil, nil
 }
 
@@ -108,86 +98,65 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
-	warnings, err := validation.ValidateAutoscalerConfig(isvc)
+	autoscalerWarnings, err := validation.ValidateAutoscalerConfig(isvc)
 	if err != nil {
 		return allWarnings, err
 	}
-	allWarnings = append(allWarnings, warnings...)
+	allWarnings = append(allWarnings, autoscalerWarnings...)
 
 	if err := validation.ValidateAutoscalerTargetUtilizationPercentage(isvc); err != nil {
 		return allWarnings, err
 	}
-
 	if err := validation.ValidateEngineDecoderConfig(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
-
 	if err := validation.ValidateLeaderWorkerPairing(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
-
-	// OEP-0007 multi-node Phase 3: forward-looking guard that the
-	// leader Runner stays at size=1 (today enforced structurally by
-	// LeaderSpec having no Size field; see ValidateLeaderSize).
+	// OEP-0007 Phase 3: forward-looking guard that the leader Runner stays
+	// at size=1 (today enforced structurally by LeaderSpec having no Size
+	// field; see ValidateLeaderSize).
 	if err := validation.ValidateLeaderSize(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
-
-	// OEP-0007 multi-node Phase 3: lean (no-model, no-runtime)
-	// multi-pod specs must declare both leader.runner.image and
-	// worker.runner.image — the controller has no way to fill them
-	// in without a runtime or model.
+	// OEP-0007 Phase 3: lean (no-model, no-runtime) multi-pod specs must
+	// declare both leader.runner.image and worker.runner.image — the
+	// controller has no way to fill them in without a runtime or model.
 	if err := validation.ValidateMultiPodLeanRunner(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
-
 	if err := validation.ValidateEngineDecoderDeploymentMode(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
-
 	if err := validation.ValidateScaleToZero(isvc); err != nil {
 		return allWarnings, err
 	}
 
-	// OEP-0011: validate spec.traffic (typed core: LB algorithm, hash
-	// key, endpoint override).
+	// OEP-0011 traffic block: typed core, ome.io/* annotations, rollout
+	// plan, per-Component canary range + PD coupling.
 	if err := validation.ValidateTrafficSpec(isvc.Spec.Traffic); err != nil {
 		return allWarnings, err
 	}
-
-	// OEP-0011: validate ome.io/* traffic annotations (parsing,
-	// Did-you-mean, cross-rules).
 	trafficWarnings, err := validation.ValidateTrafficAnnotations(isvc.Annotations, isvc.Spec.Traffic, v.KnownPassthroughPrefixes...)
 	if err != nil {
 		return allWarnings, err
 	}
 	allWarnings = append(allWarnings, trafficWarnings...)
-
-	// OEP-0011: validate spec.traffic.rollout (multi-step plan + mutual
-	// exclusivity with the simple canaryTrafficPercent form).
 	if err := validation.ValidateRollout(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
-
-	// OEP-0011: range-check each Component's CanaryTrafficPercent and
-	// enforce PD coupling (engine.canaryTrafficPercent ==
-	// decoder.canaryTrafficPercent).
 	if err := validation.ValidateCanaryPercent(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
 
-	// Cross-Component rollout coordination structural validation
-	// (component membership, sequential order coverage, etc.).
+	// Cross-Component rollout coordination: structural + RatioBalanced
+	// tolerance warning + Sequential-multi-pod loud rejection.
 	if err := validation.ValidateCoordination(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
 	if warning := validation.CoordinationRatioToleranceWarning(&isvc.Spec); warning != "" {
 		allWarnings = append(allWarnings, warning)
 	}
-
-	// OEP-0007.1 + OEP-0007 multi-node Phase 3: louder rejection when
-	// a Sequential group contains a multi-pod Component without Order
-	// — the controller cannot pick a default gang sequencing.
 	if err := validation.ValidateSequentialMultiPodOrder(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
@@ -205,28 +174,23 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	if err := validateRuntimePin(isvc); err != nil {
 		return allWarnings, err
 	}
-
-	// Validate that referenced model exists (for new Engine architecture using isvc.Spec.Model)
 	if err := v.validateModelExists(ctx, isvc); err != nil {
 		return allWarnings, err
 	}
-
 	if err := v.validateOverlays(isvc); err != nil {
 		return allWarnings, err
 	}
 
-	// Validate runtime and model resolution for new architecture
 	if isvc.Spec.Engine != nil {
-		warnings, err := v.validateRuntimeAndModelResolution(ctx, isvc)
+		resWarnings, err := v.validateRuntimeAndModelResolution(ctx, isvc)
 		if err != nil {
 			return allWarnings, err
 		}
-		allWarnings = append(allWarnings, warnings...)
+		allWarnings = append(allWarnings, resWarnings...)
 	}
 	return allWarnings, nil
 }
 
-// Convert runtime.Object into InferenceService
 func convertToInferenceService(obj runtime.Object) (*v1beta1.InferenceService, error) {
 	isvc, ok := obj.(*v1beta1.InferenceService)
 	if !ok {
@@ -235,33 +199,30 @@ func convertToInferenceService(obj runtime.Object) (*v1beta1.InferenceService, e
 	return isvc, nil
 }
 
-// validateModelExists validates that the referenced model (BaseModel or ClusterBaseModel) exists
+// validateModelExists ensures the referenced BaseModel/ClusterBaseModel
+// (and each overlay) is reachable in the ISVC's namespace, and that
+// cross-namespace PVC rules pass per-overlay.
 func (v *InferenceServiceValidator) validateModelExists(ctx context.Context, isvc *v1beta1.InferenceService) error {
-	// Check new architecture model reference (isvc.Spec.Model)
-	if isvc.Spec.Model != nil && isvc.Spec.Model.Name != "" {
-		spec, meta, err := isvcutils.GetBaseModel(v.Client, isvc.Spec.Model.Name, isvc.Namespace)
+	if isvc.Spec.Model == nil || isvc.Spec.Model.Name == "" {
+		return nil
+	}
+	spec, meta, err := isvcutils.GetBaseModel(v.Client, isvc.Spec.Model.Name, isvc.Namespace)
+	if err != nil {
+		return fmt.Errorf("referenced model %q not found in namespace %q: ensure a BaseModel exists in this namespace or a ClusterBaseModel exists cluster-wide with this name",
+			isvc.Spec.Model.Name, isvc.Namespace)
+	}
+	if err := validateClusterBaseModelPVCNamespace(spec, meta, isvc); err != nil {
+		return err
+	}
+	for _, ov := range isvc.Spec.Model.Overlays {
+		ovSpec, ovMeta, err := isvcutils.GetBaseModel(v.Client, ov.Name, isvc.Namespace)
 		if err != nil {
-			return fmt.Errorf("referenced model %q not found in namespace %q: ensure a BaseModel exists in this namespace or a ClusterBaseModel exists cluster-wide with this name",
-				isvc.Spec.Model.Name, isvc.Namespace)
+			return fmt.Errorf("overlay %q not found in namespace %q: %w", ov.Name, isvc.Namespace, err)
 		}
-		if err := validateClusterBaseModelPVCNamespace(spec, meta, isvc); err != nil {
-			return err
-		}
-		// Each overlay's BaseModel must also be reachable. Cross-namespace
-		// PVC rules apply per-overlay since each gets its own mount.
-		if isvc.Spec.Model != nil {
-			for _, ov := range isvc.Spec.Model.Overlays {
-				ovSpec, ovMeta, err := isvcutils.GetBaseModel(v.Client, ov.Name, isvc.Namespace)
-				if err != nil {
-					return fmt.Errorf("overlay %q not found in namespace %q: %w", ov.Name, isvc.Namespace, err)
-				}
-				if err := validateClusterBaseModelPVCNamespace(ovSpec, ovMeta, isvc); err != nil {
-					return fmt.Errorf("overlay %q: %w", ov.Name, err)
-				}
-			}
+		if err := validateClusterBaseModelPVCNamespace(ovSpec, ovMeta, isvc); err != nil {
+			return fmt.Errorf("overlay %q: %w", ov.Name, err)
 		}
 	}
-
 	return nil
 }
 
@@ -275,8 +236,8 @@ func (v *InferenceServiceValidator) validateModelExists(ctx context.Context, isv
 // Skipped for namespaced BaseModel (already same-namespace by construction)
 // and for non-PVC URIs.
 func validateClusterBaseModelPVCNamespace(spec *v1beta1.BaseModelSpec, meta *metav1.ObjectMeta, isvc *v1beta1.InferenceService) error {
+	// namespaced BaseModel ⇒ same-namespace by construction; skip
 	if meta == nil || meta.Namespace != "" {
-		// namespaced BaseModel — same-namespace by construction
 		return nil
 	}
 	if spec == nil || spec.Storage == nil || spec.Storage.StorageUri == nil {
@@ -332,65 +293,54 @@ func (v *InferenceServiceValidator) validateOverlays(isvc *v1beta1.InferenceServ
 	return nil
 }
 
-// validateRuntimeAndModelResolution validates runtime and model resolution for new architecture
+// validateRuntimeAndModelResolution gates runtime/model resolution on
+// the Engine-architecture path. Lean specs (full runner config + no
+// model) short-circuit; everything else needs the runtime selector.
 func (v *InferenceServiceValidator) validateRuntimeAndModelResolution(ctx context.Context, isvc *v1beta1.InferenceService) (admission.Warnings, error) {
 	var warnings admission.Warnings
 
-	// Only validate new architecture if Engine is specified (focusing on new spec)
 	if isvc.Spec.Engine == nil {
 		return warnings, nil
 	}
-
 	if isvc.Spec.Model == nil {
 		if isvc.Spec.Runtime == nil && !hasFullRunnerConfig(isvc.Spec.Engine) {
 			return warnings, fmt.Errorf("model reference is required when runtime is not specified and engine does not have complete runner configuration")
 		}
 		return warnings, nil
 	}
-
 	if isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != "" {
 		return v.resolveModelAndRuntime(ctx, isvc, warnings)
 	}
-
 	if !hasFullRunnerConfig(isvc.Spec.Engine) {
 		return v.resolveModelAndRuntime(ctx, isvc, warnings)
 	}
-
 	return warnings, nil
 }
 
-// resolveModelAndRuntime performs actual model and runtime resolution
 func (v *InferenceServiceValidator) resolveModelAndRuntime(ctx context.Context, isvc *v1beta1.InferenceService, warnings admission.Warnings) (admission.Warnings, error) {
-	// Resolve model using the new architecture approach
 	baseModel, _, err := isvcutils.GetBaseModel(v.Client, isvc.Spec.Model.Name, isvc.Namespace)
 	if err != nil {
 		return warnings, fmt.Errorf("failed to resolve model %s: %w", isvc.Spec.Model.Name, err)
 	}
-
-	// Validate model is not disabled
 	if baseModel.Disabled != nil && *baseModel.Disabled {
 		return warnings, fmt.Errorf("model %s is disabled", isvc.Spec.Model.Name)
 	}
 
-	// Check runtime selection/validation
 	if isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != "" {
-		// Validate specified runtime
 		if err := v.RuntimeSelector.ValidateRuntime(ctx, isvc.Spec.Runtime.Name, baseModel, isvc); err != nil {
 			return warnings, fmt.Errorf("runtime %s does not support model %s: %w",
 				isvc.Spec.Runtime.Name, isvc.Spec.Model.Name, err)
 		}
 		warnings = append(warnings, fmt.Sprintf("Runtime %s is valid for model %s",
 			isvc.Spec.Runtime.Name, isvc.Spec.Model.Name))
-	} else {
-		// Check if runtime can be auto-selected
-		selection, err := v.RuntimeSelector.SelectRuntime(ctx, baseModel, isvc)
-		if err != nil {
-			return warnings, fmt.Errorf("no supporting runtime found for model %s and engine does not have complete runner configuration: %w", isvc.Spec.Model.Name, err)
-		}
-		// Success - runtime will be auto-selected
-		warnings = append(warnings, fmt.Sprintf("Runtime %s will be auto-selected for model %s",
-			selection.Name, isvc.Spec.Model.Name))
+		return warnings, nil
 	}
+	selection, err := v.RuntimeSelector.SelectRuntime(ctx, baseModel, isvc)
+	if err != nil {
+		return warnings, fmt.Errorf("no supporting runtime found for model %s and engine does not have complete runner configuration: %w", isvc.Spec.Model.Name, err)
+	}
+	warnings = append(warnings, fmt.Sprintf("Runtime %s will be auto-selected for model %s",
+		selection.Name, isvc.Spec.Model.Name))
 	return warnings, nil
 }
 
@@ -441,23 +391,20 @@ func expectedPinPattern(kind runtimerevision.SourceKind, sourceNS, runtimeName s
 	}
 }
 
-// hasFullRunnerConfig checks if the engine has complete runner configuration
+// hasFullRunnerConfig reports whether the engine has enough runner
+// configuration to skip runtime selection: either a top-level Runner
+// with image, or matching Leader.Runner + Worker.Runner images (multi-node).
 func hasFullRunnerConfig(engine *v1beta1.EngineSpec) bool {
 	if engine == nil {
 		return false
 	}
-
-	// Check if main runner is defined with required fields
 	if engine.Runner != nil && engine.Runner.Image != "" {
 		return true
 	}
-
-	// Check if both leader and worker runners are defined for multi-node
 	if engine.Leader != nil && engine.Worker != nil {
 		leaderHasRunner := engine.Leader.Runner != nil && engine.Leader.Runner.Image != ""
 		workerHasRunner := engine.Worker.Runner != nil && engine.Worker.Runner.Image != ""
 		return leaderHasRunner && workerHasRunner
 	}
-
 	return false
 }

@@ -14,9 +14,7 @@ import (
 // (probes, /dev/shm, prometheus annotations). Each is gated on its own
 // profile annotation; profiles never overwrite operator-set values.
 
-const (
-	DefaultRuntimeProbePort = 30000
-)
+const DefaultRuntimeProbePort = 30000
 
 func resolveRuntimeTargetContainer(pod *v1.Pod) string {
 	if name, ok := pod.ObjectMeta.Annotations[constants.RuntimeContainerNameAnnotationKey]; ok && name != "" {
