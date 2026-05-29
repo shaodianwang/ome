@@ -219,10 +219,12 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 		spec.UpdateStrategy = &v1beta1.UpdateStrategy{}
 	}
 	if spec.UpdateStrategy.Type == "" {
-		// SurgeThenDrain is the default. It currently delegates to
-		// recreate (no zero-downtime surge yet), which is still safer
-		// than in-place because the dispatcher's MaxUnavailable gate
-		// throttles drains.
+		// SurgeThenDrain is the default. Single-pod Instances get a real
+		// zero-downtime surge (new pod at the alternate ordinal, drain
+		// the old, promote); multi-pod gangs currently fall back to
+		// recreate because per-gang-member surge ordinal allocation is
+		// not yet implemented. Either way it is safer than in-place
+		// because the dispatcher's MaxUnavailable gate throttles drains.
 		spec.UpdateStrategy.Type = v1beta1.UpdateStrategySurgeThenDrain
 	}
 	if spec.UpdateStrategy.InPlaceUpdateStrategy == nil {
