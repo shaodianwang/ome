@@ -49,7 +49,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -123,7 +122,7 @@ func BuildPodGroup(owner client.Object, ownerGVK schema.GroupVersionKind, plan w
 // podGroupLabels are the Component-scoped labels stamped on every
 // PodGroup. Matches the headless Service selector trio so an operator
 // looking at the parent Service can pivot to the gang via the same keys.
-func podGroupLabels(isvcName string, component v1beta1.ComponentType, instanceIdx int32) map[string]string {
+func podGroupLabels(isvcName string, component workload.ComponentType, instanceIdx int32) map[string]string {
 	return map[string]string{
 		"ome.io/inferenceservice": isvcName,
 		"ome.io/component":        string(component),
@@ -200,7 +199,7 @@ func EnsurePodGroup(ctx context.Context, c client.Client, owner client.Object, o
 // owner is taken as the abstract client.Object (rather than a concrete
 // v1beta1.InferenceService) for the same reason BuildPodGroup /
 // EnsurePodGroup do — see those docstrings.
-func DeletePodGroup(ctx context.Context, c client.Client, owner client.Object, component v1beta1.ComponentType, instanceIdx int32) error {
+func DeletePodGroup(ctx context.Context, c client.Client, owner client.Object, component workload.ComponentType, instanceIdx int32) error {
 	if c == nil {
 		return fmt.Errorf("DeletePodGroup: nil client")
 	}

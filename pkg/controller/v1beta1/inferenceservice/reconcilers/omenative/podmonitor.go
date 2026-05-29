@@ -11,6 +11,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -31,7 +32,7 @@ func BuildPodMonitor(isvc *v1beta1.InferenceService, component v1beta1.Component
 	if isvc == nil {
 		return nil, fmt.Errorf("nil InferenceService")
 	}
-	name := query.StableServiceName(isvc.Name, component)
+	name := query.StableServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(component))
 	selector := map[string]string{
 		constants.InferenceServicePodLabelKey: isvc.Name,
 		constants.OMEComponentLabel:           string(component),

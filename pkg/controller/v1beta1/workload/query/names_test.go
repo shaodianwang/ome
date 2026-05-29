@@ -3,14 +3,14 @@ package query
 import (
 	"testing"
 
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 func TestPodName(t *testing.T) {
 	cases := []struct {
 		name      string
 		isvc      string
-		component v1beta1.ComponentType
+		component workload.ComponentType
 		idx       int32
 		runner    string
 		ordinal   int32
@@ -19,7 +19,7 @@ func TestPodName(t *testing.T) {
 		{
 			name:      "single-pod default",
 			isvc:      "llama",
-			component: v1beta1.EngineComponent,
+			component: workload.ComponentEngine,
 			idx:       0,
 			runner:    "default",
 			ordinal:   0,
@@ -28,7 +28,7 @@ func TestPodName(t *testing.T) {
 		{
 			name:      "multi-pod leader",
 			isvc:      "llama-70b",
-			component: v1beta1.EngineComponent,
+			component: workload.ComponentEngine,
 			idx:       0,
 			runner:    "leader",
 			ordinal:   0,
@@ -37,7 +37,7 @@ func TestPodName(t *testing.T) {
 		{
 			name:      "multi-pod worker ordinal 2",
 			isvc:      "llama-70b",
-			component: v1beta1.EngineComponent,
+			component: workload.ComponentEngine,
 			idx:       1,
 			runner:    "worker",
 			ordinal:   2,
@@ -63,13 +63,13 @@ func TestPodGroupName_MatchesInstanceSubdomain(t *testing.T) {
 	cases := []struct {
 		name      string
 		isvc      string
-		component v1beta1.ComponentType
+		component workload.ComponentType
 		idx       int32
 		want      string
 	}{
-		{"engine 0", "llama", v1beta1.EngineComponent, 0, "llama-engine-0"},
-		{"decoder 1", "llama-70b", v1beta1.DecoderComponent, 1, "llama-70b-decoder-1"},
-		{"engine high-index", "llama-70b-instruct", v1beta1.EngineComponent, 12, "llama-70b-instruct-engine-12"},
+		{"engine 0", "llama", workload.ComponentEngine, 0, "llama-engine-0"},
+		{"decoder 1", "llama-70b", workload.ComponentDecoder, 1, "llama-70b-decoder-1"},
+		{"engine high-index", "llama-70b-instruct", workload.ComponentEngine, 12, "llama-70b-instruct-engine-12"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,14 +87,14 @@ func TestPodGroupName_MatchesInstanceSubdomain(t *testing.T) {
 }
 
 func TestHeadlessServiceName(t *testing.T) {
-	got := HeadlessServiceName("llama-70b", v1beta1.EngineComponent)
+	got := HeadlessServiceName("llama-70b", workload.ComponentEngine)
 	if got != "llama-70b-engine-headless" {
 		t.Errorf("HeadlessServiceName: got %q want llama-70b-engine-headless", got)
 	}
 }
 
 func TestStableServiceName(t *testing.T) {
-	got := StableServiceName("llama-70b", v1beta1.DecoderComponent)
+	got := StableServiceName("llama-70b", workload.ComponentDecoder)
 	if got != "llama-70b-decoder" {
 		t.Errorf("StableServiceName: got %q want llama-70b-decoder", got)
 	}

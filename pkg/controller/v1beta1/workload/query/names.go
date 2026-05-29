@@ -3,7 +3,6 @@ package query
 import (
 	"fmt"
 
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -11,7 +10,7 @@ import (
 // of one Instance — <isvc>-<comp>-<inst-idx>-<runner>-<ordinal>. Stable
 // across reconciles so Create can dedup desired-vs-existing by name
 // alone.
-func PodName(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, ordinal int32) string {
+func PodName(isvc string, component workload.ComponentType, instanceIdx int32, runner string, ordinal int32) string {
 	return fmt.Sprintf("%s-%s-%d-%s-%d", isvc, component, instanceIdx, runner, ordinal)
 }
 
@@ -19,7 +18,7 @@ func PodName(isvc string, component v1beta1.ComponentType, instanceIdx int32, ru
 // <isvc>-<comp>-headless. Used by every op to look up the service that
 // publishes the pods it's about to mutate, and by status_aggregate to
 // scan EndpointSlices for ready endpoints.
-func HeadlessServiceName(isvc string, component v1beta1.ComponentType) string {
+func HeadlessServiceName(isvc string, component workload.ComponentType) string {
 	return fmt.Sprintf("%s-%s-headless", isvc, component)
 }
 
@@ -34,7 +33,7 @@ func HeadlessServiceName(isvc string, component v1beta1.ComponentType) string {
 // of revision; it is the cross-revision aggregate ingress target. The
 // per-revision Services (PerRevisionServiceName) remain available for
 // the OEP-0011 weighted-routing path.
-func StableServiceName(isvc string, component v1beta1.ComponentType) string {
+func StableServiceName(isvc string, component workload.ComponentType) string {
 	return fmt.Sprintf("%s-%s", isvc, component)
 }
 
@@ -53,7 +52,7 @@ func PerRevisionServiceName(ownerName string, component workload.ComponentType, 
 // Pod's Spec.Subdomain still points at HeadlessServiceName — but the
 // env var carries the per-instance form so workload code can address
 // its own Instance independently of the shared Service name.
-func InstanceSubdomain(isvc string, component v1beta1.ComponentType, instanceIdx int32) string {
+func InstanceSubdomain(isvc string, component workload.ComponentType, instanceIdx int32) string {
 	return fmt.Sprintf("%s-%s-%d", isvc, component, instanceIdx)
 }
 
@@ -64,6 +63,6 @@ func InstanceSubdomain(isvc string, component v1beta1.ComponentType, instanceIdx
 // `kubectl get pods -l <subdomain>` without re-deriving the prefix.
 // Single-pod Instances do NOT get a PodGroup; callers must check
 // inst.TotalPods() > 1 before invoking the builder.
-func PodGroupName(isvc string, component v1beta1.ComponentType, instanceIdx int32) string {
+func PodGroupName(isvc string, component workload.ComponentType, instanceIdx int32) string {
 	return fmt.Sprintf("%s-%s-%d", isvc, component, instanceIdx)
 }

@@ -72,11 +72,9 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 	}
 
 	multiPod := inst.TotalPods() > 1
-	// Cast at the boundary: plan.UpdateStrategy.Type is still
-	// v1beta1-typed because ComponentPlan embeds v1beta1.UpdateStrategy.
-	// Funnel chooser comparisons through workload.UpdateStrategyType so
-	// enum drift fails type-checking here.
-	strategy := workload.UpdateStrategyType(plan.UpdateStrategy.Type)
+	// Strategy on the plan is the workload-mirror UpdateStrategyType;
+	// the chooser compares against the workload constants directly.
+	strategy := plan.UpdateStrategy.Type
 	mode, err := chooseUpdateModeForInstance(strategy, runningSpec, targetSpec, multiPod)
 	if err != nil {
 		// InPlaceOnly + ineligible diff is the only error path here.

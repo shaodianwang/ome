@@ -1,16 +1,15 @@
-// Package audit owns the per-ISVC migration ledger persisted as a
+// Package audit owns the per-owner migration ledger persisted as a
 // ConfigMap. The ledger lives outside the controller process so UUID
 // dedup, in-flight resume, and capacity gating survive controller
 // restarts and Alfred retries.
 //
 // Boundary: this package is a leaf. It depends only on Kubernetes API
-// machinery + the project's v1beta1 type set. It owns the labels +
-// OwnerReference it stamps on its ConfigMap — the "ome.io/managed-by
-// =OMENative" pair and the InferenceService GroupVersionKind. These
-// match what render.go / discover.go / status_aggregate.go use at
-// the top level (single source of truth would require a separate
-// labels subpackage; the values are stable enough that the
-// duplication is acceptable for now).
+// machinery and is owner-agnostic — callers pass the owner metav1.Object
+// and its GroupVersionKind explicitly, so this package does not import
+// the project's v1beta1 type set. The "ome.io/managed-by=OMENative"
+// label it stamps on the ConfigMap matches the value other workload
+// subpackages use; the owner-specific GVK is passed through from the
+// adapter rather than recomputed here.
 package audit
 
 import (
@@ -25,8 +24,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 const (
@@ -40,10 +37,10 @@ const (
 	// carrying any other value are rejected as UnsupportedSchemaVersion.
 	SchemaV1 = "v1"
 
-	// ConfigMapNameSuffix is appended to the ISVC name to form the audit
-	// ConfigMap name. One CM per ISVC keeps blast radius small and matches
-	// the parent's namespace + lifecycle automatically via OwnerReference
-	// cascade.
+	// ConfigMapNameSuffix is appended to the owner name to form the audit
+	// ConfigMap name. One CM per owner keeps blast radius small and
+	// matches the parent's namespace + lifecycle automatically via
+	// OwnerReference cascade.
 	ConfigMapNameSuffix = "-ome-migration-audit"
 
 	// LedgerKey is the data key inside the audit ConfigMap.
@@ -62,11 +59,6 @@ const (
 	labelManagedBy = "ome.io/managed-by"
 	managedByValue = "OMENative"
 )
-
-// isvcGroupVersionKind is the GroupVersionKind the OwnerReference on
-// the audit ConfigMap points at. Computed from v1beta1.SchemeGroupVersion
-// so a future API version bump flips this in one place.
-var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
 // ErrUnsupportedSchemaVersion is returned by ParseMigrationRequest when
 // the request's schemaVersion isn't one we know how to handle. Callers
@@ -88,7 +80,7 @@ type MigrationRequest struct {
 	RequestedBy     string   `json:"requested_by,omitempty"`
 }
 
-// Entry is one row of the per-ISVC migration ledger. Stored in the
+// Entry is one row of the per-owner migration ledger. Stored in the
 // audit ConfigMap; persists across controller restarts so UUID dedup
 // outlives the in-memory expectations cache.
 type Entry struct {
@@ -112,7 +104,7 @@ type Ledger struct {
 
 // ExtractRequestUUID returns the UUID suffix of a migration-request
 // annotation key, or "" if the key isn't a migration request annotation.
-// Used to scan an ISVC's annotations for pending requests.
+// Used to scan an owner's annotations for pending requests.
 func ExtractRequestUUID(key string) string {
 	if !strings.HasPrefix(key, MigrationRequestAnnotationPrefix) {
 		return ""
@@ -136,28 +128,19 @@ func ParseMigrationRequest(raw string) (*MigrationRequest, error) {
 	return &req, nil
 }
 
-// ConfigMapName returns the deterministic audit ConfigMap name for the
-// ISVC. One ConfigMap per ISVC.
-func ConfigMapName(isvc *v1beta1.InferenceService) string {
-	return isvc.Name + ConfigMapNameSuffix
-}
-
-// ConfigMapNameForOwner is the v1beta1-free ConfigMapName variant for
-// workload-side callers holding the owner opaquely.
+// ConfigMapNameForOwner returns the deterministic audit ConfigMap name
+// for the owner — one ConfigMap per owner object. Adapters compose the
+// owner-typed handle into a metav1.Object; the workload package itself
+// never sees the owner-CRD shape.
 func ConfigMapNameForOwner(owner metav1.Object) string {
 	return owner.GetName() + ConfigMapNameSuffix
 }
 
-// LoadLedger fetches the per-ISVC audit ConfigMap and parses its
-// history.json payload. Returns an empty ledger (and no error) when
-// the ConfigMap doesn't exist yet — first migration on this ISVC.
-func LoadLedger(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService) (*Ledger, error) {
-	return LoadLedgerForOwner(ctx, reads, isvc)
-}
-
-// LoadLedgerForOwner is the v1beta1-free LoadLedger variant. Owner is
-// held as metav1.Object so workload-side callers can use the same
-// persistence path the ISVC adapter does.
+// LoadLedgerForOwner fetches the per-owner audit ConfigMap and parses
+// its history.json payload. Returns an empty ledger (and no error) when
+// the ConfigMap doesn't exist yet — first migration on this owner.
+// Owner is held as metav1.Object so this helper is owner-agnostic; the
+// ISVC adapter and the IR adapter use the same persistence path.
 func LoadLedgerForOwner(ctx context.Context, reads client.Reader, owner metav1.Object) (*Ledger, error) {
 	cm := &corev1.ConfigMap{}
 	key := client.ObjectKey{Namespace: owner.GetNamespace(), Name: ConfigMapNameForOwner(owner)}
@@ -278,24 +261,15 @@ func (l *Ledger) trim() {
 	l.Entries = kept
 }
 
-// PersistLedger writes the ledger back to the per-ISVC audit ConfigMap.
-// Creates the CM on first call stamped with the OMENative-managed-by
-// label + a controller OwnerReference back to the ISVC so the cluster
-// GC sweeps it when the ISVC is deleted. Race-on-create falls through
-// to read-modify-write.
-func PersistLedger(
-	ctx context.Context,
-	c client.Client,
-	isvc *v1beta1.InferenceService,
-	l *Ledger,
-) error {
-	return PersistLedgerForOwner(ctx, c, isvc, isvcGroupVersionKind, l)
-}
-
-// PersistLedgerForOwner is the v1beta1-free PersistLedger variant.
+// PersistLedgerForOwner writes the ledger back to the per-owner audit
+// ConfigMap. Creates the CM on first call stamped with the OMENative-
+// managed-by label + a controller OwnerReference back to the owner so
+// the cluster GC sweeps it when the owner is deleted. Race-on-create
+// falls through to read-modify-write.
+//
 // Owner is held as metav1.Object and the OwnerReference GVK is passed
-// explicitly so workload-side callers can persist via the same path
-// the ISVC adapter does.
+// explicitly so the workload package stays free of CRD-specific imports;
+// the adapter caller knows which owner Kind it owns.
 func PersistLedgerForOwner(
 	ctx context.Context,
 	c client.Client,
@@ -417,7 +391,7 @@ const (
 //
 // The two caps are independent — either tripping rejects the request.
 // The cluster-wide in-flight cap bounds peak destructive work; the
-// per-hour cap bounds sustained churn against the same ISVC.
+// per-hour cap bounds sustained churn against the same owner.
 //
 // `now` is injected so tests can pin a deterministic time and walk the
 // trailing-hour window past the relevant entries.

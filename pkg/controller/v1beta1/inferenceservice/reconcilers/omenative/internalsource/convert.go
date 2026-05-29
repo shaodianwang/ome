@@ -336,3 +336,165 @@ func InstanceStatusSliceFromWorkload(in []workload.InstanceStatus) []v1beta1.OME
 	}
 	return out
 }
+
+// InstanceRestartPolicyToWorkload converts a v1beta1.InstanceRestartPolicy
+// to a workload.RestartPolicy. Unknown values map to the empty policy
+// so adapters tolerate API-version skew without panicking.
+func InstanceRestartPolicyToWorkload(v v1beta1.InstanceRestartPolicy) workload.RestartPolicy {
+	switch v {
+	case v1beta1.InstanceRestartPolicyNone:
+		return workload.RestartPolicyNone
+	case v1beta1.InstanceRestartPolicyRecreateInstance:
+		return workload.RestartPolicyRecreateInstance
+	case v1beta1.InstanceRestartPolicyRecreateISVC:
+		return workload.RestartPolicyRecreateISVC
+	default:
+		return workload.RestartPolicy("")
+	}
+}
+
+// InstanceReadyPolicyToWorkload converts a v1beta1.InstanceReadyPolicy
+// to a workload.InstanceReadyPolicy. Unknown values map to the empty
+// policy so adapters tolerate API-version skew without panicking.
+func InstanceReadyPolicyToWorkload(v v1beta1.InstanceReadyPolicy) workload.InstanceReadyPolicy {
+	switch v {
+	case v1beta1.InstanceReadyPolicyAllPodReady:
+		return workload.InstanceReadyPolicyAllPodReady
+	case v1beta1.InstanceReadyPolicyNone:
+		return workload.InstanceReadyPolicyNone
+	default:
+		return workload.InstanceReadyPolicy("")
+	}
+}
+
+// MigrationModeToWorkload converts a v1beta1.MigrationPolicyMode to a
+// workload.MigrationMode. Unknown values map to the empty mode so
+// adapters tolerate API-version skew without panicking.
+func MigrationModeToWorkload(v v1beta1.MigrationPolicyMode) workload.MigrationMode {
+	switch v {
+	case v1beta1.MigrationPolicyModeAuto:
+		return workload.MigrationModeAuto
+	case v1beta1.MigrationPolicyModeSurge:
+		return workload.MigrationModeSurge
+	case v1beta1.MigrationPolicyModeNever:
+		return workload.MigrationModeNever
+	default:
+		return workload.MigrationMode("")
+	}
+}
+
+// UpdateStrategyToWorkload converts a v1beta1.UpdateStrategy to a
+// workload.UpdateStrategy. The nested InPlaceUpdateStrategy and
+// RollingUpdate pointers are deep-copied so the returned struct can
+// be mutated independently of the source.
+func UpdateStrategyToWorkload(v v1beta1.UpdateStrategy) workload.UpdateStrategy {
+	out := workload.UpdateStrategy{
+		Type: UpdateStrategyTypeToWorkload(v.Type),
+	}
+	if v.InPlaceUpdateStrategy != nil {
+		out.InPlaceUpdateStrategy = &workload.InPlaceUpdateStrategy{}
+		if v.InPlaceUpdateStrategy.GracePeriodSeconds != nil {
+			g := *v.InPlaceUpdateStrategy.GracePeriodSeconds
+			out.InPlaceUpdateStrategy.GracePeriodSeconds = &g
+		}
+		if v.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle != nil {
+			m := *v.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle
+			out.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle = &m
+		}
+	}
+	if v.RollingUpdate != nil {
+		out.RollingUpdate = &workload.RollingUpdate{}
+		if v.RollingUpdate.Partition != nil {
+			p := *v.RollingUpdate.Partition
+			out.RollingUpdate.Partition = &p
+		}
+		if v.RollingUpdate.MaxUnavailable != nil {
+			m := *v.RollingUpdate.MaxUnavailable
+			out.RollingUpdate.MaxUnavailable = &m
+		}
+	}
+	return out
+}
+
+// LifecycleSpecToWorkload converts a v1beta1.LifecycleSpec to a
+// workload.Lifecycle. Nested pointers are deep-copied so the returned
+// struct can be mutated independently of the source. Use this at the
+// adapter boundary so the workload package itself stays free of
+// v1beta1 imports.
+func LifecycleSpecToWorkload(v v1beta1.LifecycleSpec) workload.Lifecycle {
+	out := workload.Lifecycle{}
+	if v.RestartPolicy != nil {
+		p := InstanceRestartPolicyToWorkload(*v.RestartPolicy)
+		out.RestartPolicy = &p
+	}
+	if v.UpdateStrategy != nil {
+		us := UpdateStrategyToWorkload(*v.UpdateStrategy)
+		out.UpdateStrategy = &us
+	}
+	if v.ReadyPolicy != nil {
+		p := InstanceReadyPolicyToWorkload(*v.ReadyPolicy)
+		out.ReadyPolicy = &p
+	}
+	if v.InstanceReadyTimeout != nil {
+		d := *v.InstanceReadyTimeout
+		out.InstanceReadyTimeout = &d
+	}
+	if v.MigrationPolicy != nil {
+		out.MigrationPolicy = &workload.MigrationPolicy{
+			Mode: MigrationModeToWorkload(v.MigrationPolicy.Mode),
+		}
+	}
+	return out
+}
+
+// ComponentTrafficTargetToWorkload converts a v1beta1.ComponentTrafficTarget
+// to a workload.ComponentTrafficTarget. Field-for-field copy; included
+// here so the workload aggregator can read the Traffic slice without
+// importing v1beta1.
+func ComponentTrafficTargetToWorkload(v v1beta1.ComponentTrafficTarget) workload.ComponentTrafficTarget {
+	return workload.ComponentTrafficTarget{
+		RevisionName:   v.RevisionName,
+		Percent:        v.Percent,
+		Tag:            v.Tag,
+		LatestRevision: v.LatestRevision,
+	}
+}
+
+// ComponentTrafficTargetFromWorkload converts a workload.ComponentTrafficTarget
+// to a v1beta1.ComponentTrafficTarget. Field-for-field copy.
+func ComponentTrafficTargetFromWorkload(w workload.ComponentTrafficTarget) v1beta1.ComponentTrafficTarget {
+	return v1beta1.ComponentTrafficTarget{
+		RevisionName:   w.RevisionName,
+		Percent:        w.Percent,
+		Tag:            w.Tag,
+		LatestRevision: w.LatestRevision,
+	}
+}
+
+// ComponentTrafficTargetSliceFromWorkload converts a slice of
+// workload.ComponentTrafficTarget to a slice of v1beta1.ComponentTrafficTarget.
+// Returns nil when in is nil so the round-trip preserves nilness.
+func ComponentTrafficTargetSliceFromWorkload(in []workload.ComponentTrafficTarget) []v1beta1.ComponentTrafficTarget {
+	if in == nil {
+		return nil
+	}
+	out := make([]v1beta1.ComponentTrafficTarget, len(in))
+	for i := range in {
+		out[i] = ComponentTrafficTargetFromWorkload(in[i])
+	}
+	return out
+}
+
+// ComponentTrafficTargetSliceToWorkload converts a slice of
+// v1beta1.ComponentTrafficTarget to a slice of workload.ComponentTrafficTarget.
+// Returns nil when in is nil so the round-trip preserves nilness.
+func ComponentTrafficTargetSliceToWorkload(in []v1beta1.ComponentTrafficTarget) []workload.ComponentTrafficTarget {
+	if in == nil {
+		return nil
+	}
+	out := make([]workload.ComponentTrafficTarget, len(in))
+	for i := range in {
+		out[i] = ComponentTrafficTargetToWorkload(in[i])
+	}
+	return out
+}

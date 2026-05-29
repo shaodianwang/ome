@@ -6,7 +6,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 func TestRevisionTemplateMeta_NilStaysNilForBackCompat(t *testing.T) {
@@ -115,7 +115,7 @@ func TestCollectLiveRevisionNames_UnionAcrossInstanceStatuses(t *testing.T) {
 	// Retention must protect every InstanceStatus.RunningRevision /
 	// TargetRevision — an in-flight migration whose source points at an
 	// older CR would otherwise have that CR swept mid-flight.
-	instances := []v1beta1.OMENativeInstanceStatus{
+	instances := []workload.InstanceStatus{
 		{Index: 0, RunningRevision: "rev-old-source", TargetRevision: ""},
 		{Index: 2, RunningRevision: "rev-current", TargetRevision: "rev-update"},
 		{Index: 3, RunningRevision: "", TargetRevision: ""},
@@ -140,13 +140,13 @@ func TestCollectLiveRevisionNames_HandlesNilStatus(t *testing.T) {
 	if got := CollectLiveRevisionNames("", "", nil); got != nil {
 		t.Errorf("expected nil for empty (no live names), got %v", got)
 	}
-	if got := CollectLiveRevisionNames("", "", []v1beta1.OMENativeInstanceStatus{}); got != nil {
+	if got := CollectLiveRevisionNames("", "", []workload.InstanceStatus{}); got != nil {
 		t.Errorf("expected nil for empty status (no live names), got %v", got)
 	}
 }
 
 func TestCollectLiveRevisionNames_DropsEmpty(t *testing.T) {
-	instances := []v1beta1.OMENativeInstanceStatus{
+	instances := []workload.InstanceStatus{
 		{Index: 0, RunningRevision: "", TargetRevision: ""},
 	}
 	got := CollectLiveRevisionNames("", "rev-a", instances)

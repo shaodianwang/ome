@@ -17,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // ---------------------------------------------------------------------
@@ -50,7 +51,7 @@ func TestIsMultiPodInstance(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestBuildPodGroup_NilISVC(t *testing.T) {
-	plan := core.ComponentPlan{Component: v1beta1.EngineComponent}
+	plan := core.ComponentPlan{Component: workload.ComponentEngine}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
 	if _, err := BuildPodGroup(nil, testPodGroupOwnerGVK, plan, inst); err == nil {
 		t.Fatal("expected error for nil owner")
@@ -59,7 +60,7 @@ func TestBuildPodGroup_NilISVC(t *testing.T) {
 
 func TestBuildPodGroup_SinglePodRejected(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
-	plan := core.ComponentPlan{Component: v1beta1.EngineComponent}
+	plan := core.ComponentPlan{Component: workload.ComponentEngine}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "default", Size: 1}}}
 	if _, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, plan, inst); err == nil {
 		t.Fatal("expected single-pod build to error (caller must guard with IsMultiPodInstance)")
@@ -72,7 +73,7 @@ func TestBuildPodGroup_SinglePodRejected(t *testing.T) {
 func TestBuildPodGroup_Shape(t *testing.T) {
 	isvc := newPodGroupISVC("prod-models", "llama-engine")
 	plan := core.ComponentPlan{
-		Component:            v1beta1.EngineComponent,
+		Component:            workload.ComponentEngine,
 		InstanceReadyTimeout: 15 * time.Minute,
 	}
 	inst := core.InstancePlan{
@@ -154,7 +155,7 @@ func TestBuildPodGroup_TimeoutClamp(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			isvc := newPodGroupISVC("prod", "llama")
 			plan := core.ComponentPlan{
-				Component:            v1beta1.EngineComponent,
+				Component:            workload.ComponentEngine,
 				InstanceReadyTimeout: tc.in,
 			}
 			inst := core.InstancePlan{
@@ -183,7 +184,7 @@ func TestBuildPodGroup_TimeoutClamp(t *testing.T) {
 // with worker count — guards against an off-by-one in the sum.
 func TestBuildPodGroup_HighWorkerCount(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
-	plan := core.ComponentPlan{Component: v1beta1.EngineComponent, InstanceReadyTimeout: 5 * time.Minute}
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
 	inst := core.InstancePlan{
 		Index: 2,
 		Runners: []core.RunnerPlan{
@@ -213,7 +214,7 @@ func TestBuildPodGroup_HighWorkerCount(t *testing.T) {
 func TestEnsurePodGroup_SinglePodNoOp(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	c := newPodGroupClient(t, isvc)
-	plan := core.ComponentPlan{Component: v1beta1.EngineComponent, InstanceReadyTimeout: 5 * time.Minute}
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "default", Size: 1}}}
 
 	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
@@ -233,7 +234,7 @@ func TestEnsurePodGroup_SinglePodNoOp(t *testing.T) {
 func TestEnsurePodGroup_CreatesWhenAbsent(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	c := newPodGroupClient(t, isvc)
-	plan := core.ComponentPlan{Component: v1beta1.EngineComponent, InstanceReadyTimeout: 5 * time.Minute}
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 3}}}
 
 	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
@@ -269,7 +270,7 @@ func TestEnsurePodGroup_DriftCorrected(t *testing.T) {
 		},
 	}
 	c := newPodGroupClient(t, isvc, stale)
-	plan := core.ComponentPlan{Component: v1beta1.EngineComponent, InstanceReadyTimeout: 3 * time.Minute}
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 3 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
 
 	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
@@ -299,7 +300,7 @@ func TestEnsurePodGroup_DriftCorrected(t *testing.T) {
 func TestEnsurePodGroup_Idempotent(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	c := newPodGroupClient(t, isvc)
-	plan := core.ComponentPlan{Component: v1beta1.EngineComponent, InstanceReadyTimeout: 5 * time.Minute}
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 2}}}
 
 	for i := 0; i < 2; i++ {
@@ -328,7 +329,7 @@ func TestDeletePodGroup_Removes(t *testing.T) {
 	}
 	c := newPodGroupClient(t, isvc, existing)
 
-	if err := DeletePodGroup(context.Background(), c, isvc, v1beta1.EngineComponent, 0); err != nil {
+	if err := DeletePodGroup(context.Background(), c, isvc, workload.ComponentEngine, 0); err != nil {
 		t.Fatalf("DeletePodGroup: %v", err)
 	}
 	got := &schedulingv1alpha1.PodGroup{}
@@ -341,7 +342,7 @@ func TestDeletePodGroup_Removes(t *testing.T) {
 func TestDeletePodGroup_AbsentIsNoOp(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	c := newPodGroupClient(t, isvc)
-	if err := DeletePodGroup(context.Background(), c, isvc, v1beta1.EngineComponent, 7); err != nil {
+	if err := DeletePodGroup(context.Background(), c, isvc, workload.ComponentEngine, 7); err != nil {
 		t.Errorf("DeletePodGroup on absent PodGroup should be no-op, got %v", err)
 	}
 }

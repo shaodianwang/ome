@@ -4,13 +4,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 // WorkloadDesiredSpec.Lifecycle and WorkloadAggregateStatus.Traffic
-// reference v1beta1 because those subtrees have no workload mirror
-// yet.
+// use workload-owned mirror types. Adapters project the CRD-shape
+// values into these structs at the boundary.
 
 // WorkloadDesiredSpec is the per-reconcile projection of the source
 // spec the workload pipeline drives toward. Read-only from workload
@@ -46,8 +44,10 @@ type WorkloadDesiredSpec struct {
 	MultiPod bool
 
 	// Lifecycle holds RestartPolicy / UpdateStrategy / ReadyPolicy /
-	// InstanceReadyTimeout / MigrationPolicy.
-	Lifecycle v1beta1.LifecycleSpec
+	// InstanceReadyTimeout / MigrationPolicy as workload-owned mirror
+	// values; adapters project the CRD-shape lifecycle into this struct
+	// at the boundary.
+	Lifecycle Lifecycle
 
 	// Pacing is the projected rollout pacing for this reconcile. Nil
 	// means "no pacing constraint" (treated as allowed).
@@ -105,7 +105,7 @@ type WorkloadAggregateStatus struct {
 	UpdateRevision       string
 	LabelSelector        string
 	Conditions           []metav1.Condition
-	Traffic              []v1beta1.ComponentTrafficTarget
+	Traffic              []ComponentTrafficTarget
 }
 
 // WorkloadPacing is the projected rollout pacing the reconciler reads.

@@ -13,6 +13,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 func newDiscoverTestClient(t *testing.T, objs ...client.Object) client.Client {
@@ -31,7 +32,7 @@ func newDiscoverTestClient(t *testing.T, objs ...client.Object) client.Client {
 // OMENative pod. Duplicated here (rather than importing render.go's
 // podLabels) because that would create a cycle: render.go imports
 // query/.
-func testPodLabels(isvc string, component v1beta1.ComponentType, idx int32, runner string, incarnation int64) map[string]string {
+func testPodLabels(isvc string, component workload.ComponentType, idx int32, runner string, incarnation int64) map[string]string {
 	return map[string]string{
 		constants.InferenceServicePodLabelKey: isvc,
 		constants.OMEComponentLabel:           string(component),
@@ -47,7 +48,7 @@ func newDiscoverPod(name string, instanceIdx int32, incarnation int64, withDelet
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: "ns",
-			Labels:    testPodLabels("isvc", v1beta1.EngineComponent, instanceIdx, "default", incarnation),
+			Labels:    testPodLabels("isvc", workload.ComponentEngine, instanceIdx, "default", incarnation),
 		},
 	}
 	if withDeletionTimestamp {
@@ -64,7 +65,7 @@ func TestLiveListPodsForInstance_FiltersByIndex(t *testing.T) {
 	pod1 := newDiscoverPod("p-1", 1, 1, false)
 	c := newDiscoverTestClient(t, pod0, pod1)
 
-	got, err := LiveListPodsForInstance(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0)
+	got, err := LiveListPodsForInstance(context.Background(), c, "ns", "isvc", workload.ComponentEngine, 0)
 	if err != nil {
 		t.Fatalf("LiveListPodsForInstance: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestLiveListPodsForInstance_FiltersByIndex(t *testing.T) {
 
 func TestLiveOldPodsClearedForRecreate_NoPods(t *testing.T) {
 	c := newDiscoverTestClient(t)
-	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0, 2)
+	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", workload.ComponentEngine, 0, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +93,7 @@ func TestLiveOldPodsClearedForRecreate_OnlyNewIncarnation(t *testing.T) {
 		newDiscoverPod("p-new-0", 0, 2, false),
 		newDiscoverPod("p-new-1", 0, 2, false),
 	)
-	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0, 2)
+	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", workload.ComponentEngine, 0, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestLiveOldPodsClearedForRecreate_OldStillRunning(t *testing.T) {
 	c := newDiscoverTestClient(t,
 		newDiscoverPod("p-old", 0, 1, false),
 	)
-	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0, 2)
+	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", workload.ComponentEngine, 0, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestLiveOldPodsClearedForRecreate_OldTerminatingTolerated(t *testing.T) {
 	c := newDiscoverTestClient(t,
 		newDiscoverPod("p-old", 0, 1, true),
 	)
-	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0, 2)
+	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", workload.ComponentEngine, 0, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -142,7 +143,7 @@ func TestLiveOldPodsClearedForRecreate_MissingLabelDoesNotBlockPhaseB(t *testing
 	delete(pod.Labels, LabelInstanceIncarnation)
 	c := newDiscoverTestClient(t, pod)
 
-	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", v1beta1.EngineComponent, 0, 2)
+	clear, err := LiveOldPodsClearedForRecreate(context.Background(), c, "ns", "isvc", workload.ComponentEngine, 0, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

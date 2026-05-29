@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
@@ -123,7 +124,7 @@ func TestAuditLedger_DedupAcrossPersist(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClientWithDiscovery(t, isvc)
 
-	ledger, err := audit.LoadLedger(context.Background(), c, isvc)
+	ledger, err := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
 	if err != nil {
 		t.Fatalf("load empty ledger: %v", err)
 	}
@@ -132,11 +133,11 @@ func TestAuditLedger_DedupAcrossPersist(t *testing.T) {
 	}
 
 	ledger.UpsertEntry(audit.Entry{RequestUUID: "abc", Phase: audit.PhaseCompleted})
-	if err := audit.PersistLedger(context.Background(), c, isvc, ledger); err != nil {
+	if err := internalsource.PersistAuditLedgerForISVC(context.Background(), c, isvc, ledger); err != nil {
 		t.Fatalf("persist: %v", err)
 	}
 
-	reloaded, err := audit.LoadLedger(context.Background(), c, isvc)
+	reloaded, err := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestDetectMigrationRequest_SkipsCompletedUUID(t *testing.T) {
 	c := newFakeClientWithDiscovery(t, isvc)
 	// Pre-seed audit ledger with the request as Completed.
 	ledger := &audit.Ledger{Entries: []audit.Entry{{RequestUUID: uuid, Phase: audit.PhaseCompleted}}}
-	if err := audit.PersistLedger(context.Background(), c, isvc, ledger); err != nil {
+	if err := internalsource.PersistAuditLedgerForISVC(context.Background(), c, isvc, ledger); err != nil {
 		t.Fatalf("seed ledger: %v", err)
 	}
 	p := minimalParams(t, isvc, c)
@@ -223,7 +224,7 @@ func TestDetectMigrationRequest_RejectsBadSchemaWithFailedLedgerEntry(t *testing
 		t.Errorf("unsupported schema must not be dispatched")
 	}
 	// Ledger should record a Failed entry so we don't keep retrying.
-	ledger, _ := audit.LoadLedger(context.Background(), c, isvc)
+	ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
 	if !ledger.HasCompletedOrFailedRequest(uuid) {
 		t.Errorf("ledger should record failed UUID %q to suppress re-attempts", uuid)
 	}
@@ -232,7 +233,7 @@ func TestDetectMigrationRequest_RejectsBadSchemaWithFailedLedgerEntry(t *testing
 // --- Migrate state machine ---
 
 func TestMigrate_NilClient(t *testing.T) {
-	_, err := Migrate(context.Background(), core.ReconcileParams{}, core.ComponentPlan{Component: v1beta1.EngineComponent}, 0, "uuid", &audit.MigrationRequest{})
+	_, err := Migrate(context.Background(), core.ReconcileParams{}, core.ComponentPlan{Component: workload.ComponentEngine}, 0, "uuid", &audit.MigrationRequest{})
 	if err == nil {
 		t.Fatal("expected error for nil client")
 	}
@@ -243,7 +244,7 @@ func TestMigrate_AlreadyCompleted_NoOp(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClientWithDiscovery(t, isvc)
 	ledger := &audit.Ledger{Entries: []audit.Entry{{RequestUUID: "done", Phase: audit.PhaseCompleted}}}
-	if err := audit.PersistLedger(context.Background(), c, isvc, ledger); err != nil {
+	if err := internalsource.PersistAuditLedgerForISVC(context.Background(), c, isvc, ledger); err != nil {
 		t.Fatalf("seed ledger: %v", err)
 	}
 	p := minimalParams(t, isvc, c)
@@ -348,7 +349,7 @@ func TestMigrate_MissingSourceMarksFailed(t *testing.T) {
 	if !done {
 		t.Errorf("missing source should mark Failed and return done=true")
 	}
-	ledger, _ := audit.LoadLedger(context.Background(), c, isvc)
+	ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
 	if !ledger.HasCompletedOrFailedRequest("req-missing") {
 		t.Errorf("ledger should record Failed entry for the missing-source request")
 	}
@@ -407,7 +408,7 @@ func TestMigrate_MultiPodRejectedWithAuditEntry(t *testing.T) {
 	}
 
 	// Audit ledger must carry the Failed entry naming the reason.
-	ledger, _ := audit.LoadLedger(context.Background(), c, isvc)
+	ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
 	if !ledger.HasCompletedOrFailedRequest("req-multipod") {
 		t.Fatalf("ledger should record Failed entry for the multi-pod request")
 	}
@@ -479,7 +480,7 @@ func TestMigrate_FirstPassAllocatesSurgeAndStampsBothStatuses(t *testing.T) {
 	}
 
 	// Audit ledger should record Started.
-	ledger, _ := audit.LoadLedger(context.Background(), c, isvc)
+	ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
 	if ledger.InFlightEntry("req-1") == nil {
 		t.Errorf("ledger should carry in-flight entry for req-1; got %+v", ledger.Entries)
 	}
@@ -487,7 +488,7 @@ func TestMigrate_FirstPassAllocatesSurgeAndStampsBothStatuses(t *testing.T) {
 	// Surge pod should exist with the anti-affinity overlay.
 	pods := &corev1.PodList{}
 	_ = c.List(context.Background(), pods, client.InNamespace("prod"))
-	surgePodName := query.PodName(isvc.Name, v1beta1.EngineComponent, *src.Operation.SurgeIndex, "default", 0)
+	surgePodName := query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), *src.Operation.SurgeIndex, "default", 0)
 	var surgePod *corev1.Pod
 	for i := range pods.Items {
 		if pods.Items[i].Name == surgePodName {
@@ -540,7 +541,7 @@ func TestMigrate_WaitsForSurgeRotationBeforeDrainingSource(t *testing.T) {
 			synthesizeContainersReady(t, c, &surgePods.Items[i])
 		}
 		core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
-		if src := query.FindInstanceStatus(fresh, v1beta1.EngineComponent, 0); src != nil && src.Operation != nil && src.Operation.SurgeIndex != nil {
+		if src := findInstanceStatusForISVCTest(fresh, v1beta1.EngineComponent, 0); src != nil && src.Operation != nil && src.Operation.SurgeIndex != nil {
 			core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), *src.Operation.SurgeIndex)
 		}
 		done, err := Migrate(context.Background(), pPass, planPass, 0, "req-no-rotation", req)
@@ -575,7 +576,7 @@ func TestMigrate_ResumeFromLedgerWhenSourceStatusLost(t *testing.T) {
 		SurgeInstance: 2,
 		StartedAt:     metav1.Now().UTC().Format(time.RFC3339),
 	}}}
-	if err := audit.PersistLedger(context.Background(), c, isvc, ledger); err != nil {
+	if err := internalsource.PersistAuditLedgerForISVC(context.Background(), c, isvc, ledger); err != nil {
 		t.Fatalf("seed ledger: %v", err)
 	}
 	// Simulate the lost-source-status state by wiping isvc.Status.
@@ -594,7 +595,7 @@ func TestMigrate_ResumeFromLedgerWhenSourceStatusLost(t *testing.T) {
 		t.Fatalf("expected done=false: no source revision available, no progress possible")
 	}
 	// Ledger entry must still point at surge 2 (not re-allocated).
-	reloaded, _ := audit.LoadLedger(context.Background(), c, isvc)
+	reloaded, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
 	if entry := reloaded.InFlightEntry("req-resume"); entry == nil || entry.SurgeInstance != 2 {
 		t.Errorf("ledger surge index must remain 2; got %+v", entry)
 	}
@@ -614,7 +615,7 @@ func TestMigrate_DedupAfterCompletedLedgerEntry(t *testing.T) {
 		StartedAt:   metav1.Now().UTC().Format(time.RFC3339),
 		CompletedAt: metav1.Now().UTC().Format(time.RFC3339),
 	}}}
-	if err := audit.PersistLedger(context.Background(), c, isvc, ledger); err != nil {
+	if err := internalsource.PersistAuditLedgerForISVC(context.Background(), c, isvc, ledger); err != nil {
 		t.Fatalf("seed ledger: %v", err)
 	}
 	p := minimalParams(t, isvc, c)
@@ -673,7 +674,7 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 		ensureDrainedSlice(t, c, isvc, sourcePod)
 		// Simulate the pod-watch observing the prior pass's writes.
 		core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), 0)
-		if src := query.FindInstanceStatus(fresh, v1beta1.EngineComponent, 0); src != nil && src.Operation != nil && src.Operation.SurgeIndex != nil {
+		if src := findInstanceStatusForISVCTest(fresh, v1beta1.EngineComponent, 0); src != nil && src.Operation != nil && src.Operation.SurgeIndex != nil {
 			core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), *src.Operation.SurgeIndex)
 		}
 
@@ -702,7 +703,7 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 					t.Errorf("surge should be Phase=Ready; got %+v", s)
 				}
 			}
-			ledger, _ := audit.LoadLedger(context.Background(), c, final)
+			ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, final)
 			if !ledger.HasCompletedOrFailedRequest("req-end-to-end") {
 				t.Errorf("ledger should record Completed entry; got %+v", ledger.Entries)
 			}
@@ -750,7 +751,7 @@ func ensureDrainedSlice(t *testing.T, c client.Client, isvc *v1beta1.InferenceSe
 	}
 	perRev := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-drained-rev", pod.Name), coordination.PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, hash), pod, false)
 	_ = c.Create(context.Background(), perRev)
-	headless := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-drained-hd", pod.Name), query.HeadlessServiceName(isvc.Name, v1beta1.EngineComponent), pod, false)
+	headless := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-drained-hd", pod.Name), query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, false)
 	_ = c.Create(context.Background(), headless)
 }
 
@@ -762,7 +763,7 @@ func ensureInRotationSlice(t *testing.T, c client.Client, isvc *v1beta1.Inferenc
 	}
 	perRev := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-rotation-rev", pod.Name), coordination.PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, hash), pod, true)
 	_ = c.Create(context.Background(), perRev)
-	headless := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-rotation-hd", pod.Name), query.HeadlessServiceName(isvc.Name, v1beta1.EngineComponent), pod, true)
+	headless := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-rotation-hd", pod.Name), query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
 	_ = c.Create(context.Background(), headless)
 }
 
@@ -783,7 +784,7 @@ func podListNames(pods []corev1.Pod) []string {
 // instances stay at PodCount=0 forever and Migrate never advances
 // past the surge-Available gate.
 func refreshInstanceCounters(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan) error {
-	pods, err := query.ListOMENativePods(ctx, p.Client, p.ISVC, plan.Component)
+	pods, err := query.ListOMENativePodsByName(ctx, p.Client, p.ISVC.Namespace, p.ISVC.Name, plan.Component)
 	if err != nil {
 		return fmt.Errorf("refreshInstanceCounters: list pods: %w", err)
 	}
@@ -810,7 +811,8 @@ func refreshInstanceCounters(ctx context.Context, p core.ReconcileParams, plan c
 	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
 		return fmt.Errorf("refreshInstanceCounters: re-read ISVC: %w", err)
 	}
-	cs := fresh.Status.Components[plan.Component]
+	v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+	cs := fresh.Status.Components[v1component]
 	if cs.OMENative == nil {
 		return nil
 	}
@@ -830,7 +832,7 @@ func refreshInstanceCounters(ctx context.Context, p core.ReconcileParams, plan c
 		s.ReadyPodCount = ready
 		s.AvailablePodCount = avail
 	}
-	fresh.Status.Components[plan.Component] = cs
+	fresh.Status.Components[v1component] = cs
 	return p.Client.Status().Update(ctx, fresh)
 }
 
@@ -888,7 +890,7 @@ func TestMigrate_RejectsNodeAffinityConflict(t *testing.T) {
 
 	// Failed audit row must record the conflict so a re-delivered UUID
 	// short-circuits via hasCompletedOrFailedRequest.
-	ledger, _ := audit.LoadLedger(context.Background(), c, isvc)
+	ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
 	if !ledger.HasCompletedOrFailedRequest("req-conflict") {
 		t.Errorf("ledger should carry a terminal entry for the rejected request")
 	}
@@ -899,7 +901,7 @@ func TestMigrate_RejectsNodeAffinityConflict(t *testing.T) {
 	// with no in-flight Operation.
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	src := query.FindInstanceStatus(fresh, v1beta1.EngineComponent, 0)
+	src := findInstanceStatusForISVCTest(fresh, v1beta1.EngineComponent, 0)
 	if src == nil {
 		t.Fatal("source InstanceStatus should still exist after rejection")
 	}
@@ -910,7 +912,7 @@ func TestMigrate_RejectsNodeAffinityConflict(t *testing.T) {
 		t.Errorf("source Operation = %+v; want nil (rejection must leave no in-flight op)", src.Operation)
 	}
 	// No surge InstanceStatus should exist either.
-	if surge := query.FindInstanceStatus(fresh, v1beta1.EngineComponent, 1); surge != nil {
+	if surge := findInstanceStatusForISVCTest(fresh, v1beta1.EngineComponent, 1); surge != nil {
 		t.Errorf("surge InstanceStatus exists with Phase=%q; want absent (no stamp before rejection)", surge.Phase)
 	}
 }

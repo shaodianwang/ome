@@ -149,7 +149,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			if hash == "" {
 				continue
 			}
-			serviceName := query.PerRevisionServiceName(input.Key.OwnerName, workload.ComponentTypeFromV1beta1(plan.Component), hash)
+			serviceName := query.PerRevisionServiceName(input.Key.OwnerName, plan.Component, hash)
 			drained, err := drain.IsPodDrained(ctx, deps.Reader(), input.Key.Namespace, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)

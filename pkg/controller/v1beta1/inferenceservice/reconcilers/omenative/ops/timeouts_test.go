@@ -11,6 +11,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 )
@@ -42,7 +43,7 @@ func TestOperationDeadlinePassed(t *testing.T) {
 }
 
 func TestExpireOperationsIfDeadlinePassed_NilClient(t *testing.T) {
-	err := ExpireOperationsIfDeadlinePassed(context.Background(), core.ReconcileParams{}, core.ComponentPlan{Component: v1beta1.EngineComponent})
+	err := ExpireOperationsIfDeadlinePassed(context.Background(), core.ReconcileParams{}, core.ComponentPlan{Component: internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)})
 	if err == nil {
 		t.Fatal("expected error for nil client")
 	}
@@ -385,7 +386,7 @@ func TestExpireOperationsIfDeadlinePassed_MigrateAbandonsStuckSurge(t *testing.T
 	}
 
 	// Ledger should carry a Failed entry for the UUID.
-	ledger, _ := audit.LoadLedger(context.Background(), c, fresh)
+	ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, fresh)
 	if !ledger.HasCompletedOrFailedRequest(uuid) {
 		t.Errorf("ledger should record Failed entry for uuid=%s; got %+v", uuid, ledger.Entries)
 	}

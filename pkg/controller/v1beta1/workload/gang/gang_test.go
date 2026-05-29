@@ -108,7 +108,7 @@ func inputWithConditionStore(owner client.Object, multiPod bool, workerSize int3
 
 // planFor builds the workload.ComponentPlan a single-instance
 // multi-pod (or single-pod) reconcile would produce.
-func planFor(component v1beta1.ComponentType, instanceIdxs []int32, multiPod bool, workerSize int32, instanceReadyTimeout time.Duration) workload.ComponentPlan {
+func planFor(component workload.ComponentType, instanceIdxs []int32, multiPod bool, workerSize int32, instanceReadyTimeout time.Duration) workload.ComponentPlan {
 	instances := make([]workload.InstancePlan, 0, len(instanceIdxs))
 	for _, idx := range instanceIdxs {
 		var runners []workload.RunnerPlan
@@ -170,7 +170,7 @@ func TestEnsurePodGroups_SinglePodNoPodGroupConditionFalse(t *testing.T) {
 	owner := newOwner("prod", "llama")
 	c := newGangClient(t, owner)
 	input, store := inputWithConditionStore(owner, false, 0, true, "")
-	plan := planFor(v1beta1.EngineComponent, []int32{0}, false, 0, 5*time.Minute)
+	plan := planFor(workload.ComponentEngine, []int32{0}, false, 0, 5*time.Minute)
 
 	if err := EnsurePodGroups(context.Background(), workload.Deps{Client: c}, input, plan); err != nil {
 		t.Fatalf("EnsurePodGroups: %v", err)
@@ -194,7 +194,7 @@ func TestEnsurePodGroups_MultiPodCRDAvailableCreatesGang(t *testing.T) {
 	owner := newOwner("prod", "llama")
 	c := newGangClient(t, owner)
 	input, store := inputWithConditionStore(owner, true, 2, true, "")
-	plan := planFor(v1beta1.EngineComponent, []int32{0}, true, 2, 5*time.Minute)
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 2, 5*time.Minute)
 
 	if err := EnsurePodGroups(context.Background(), workload.Deps{Client: c}, input, plan); err != nil {
 		t.Fatalf("EnsurePodGroups: %v", err)
@@ -219,7 +219,7 @@ func TestEnsurePodGroups_MultiPodCRDMissingSetsConditionTrueNoPodGroup(t *testin
 	owner := newOwner("prod", "llama")
 	c := newGangClient(t, owner)
 	input, store := inputWithConditionStore(owner, true, 2, false, "") // CRD absent — soft-fail
-	plan := planFor(v1beta1.EngineComponent, []int32{0}, true, 2, 5*time.Minute)
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 2, 5*time.Minute)
 
 	if err := EnsurePodGroups(context.Background(), workload.Deps{Client: c}, input, plan); err != nil {
 		t.Fatalf("EnsurePodGroups: %v", err)
@@ -259,7 +259,7 @@ func TestEnsurePodGroups_ScaleDownDeletesExtraPodGroups(t *testing.T) {
 			{Index: 1, Phase: workload.InstancePhaseReady, Incarnation: 1},
 		},
 	}
-	plan := planFor(v1beta1.EngineComponent, []int32{0}, true, 1, 5*time.Minute)
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
 
 	if err := EnsurePodGroups(context.Background(), workload.Deps{Client: c}, input, plan); err != nil {
 		t.Fatalf("EnsurePodGroups: %v", err)
@@ -284,7 +284,7 @@ func TestEnsurePodGroups_MultiInstanceMultiPodPodGroupsPerInstance(t *testing.T)
 	owner := newOwner("prod", "llama")
 	c := newGangClient(t, owner)
 	input, _ := inputWithConditionStore(owner, true, 1, true, "")
-	plan := planFor(v1beta1.EngineComponent, []int32{0, 1, 2}, true, 1, 5*time.Minute)
+	plan := planFor(workload.ComponentEngine, []int32{0, 1, 2}, true, 1, 5*time.Minute)
 
 	if err := EnsurePodGroups(context.Background(), workload.Deps{Client: c}, input, plan); err != nil {
 		t.Fatalf("EnsurePodGroups: %v", err)
@@ -292,7 +292,7 @@ func TestEnsurePodGroups_MultiInstanceMultiPodPodGroupsPerInstance(t *testing.T)
 
 	for i := int32(0); i < 3; i++ {
 		pg := &schedulingv1alpha1.PodGroup{}
-		key := client.ObjectKey{Namespace: "prod", Name: podGroupNameFor("llama", v1beta1.EngineComponent, i)}
+		key := client.ObjectKey{Namespace: "prod", Name: podGroupNameFor("llama", workload.ComponentEngine, i)}
 		if err := c.Get(context.Background(), key, pg); err != nil {
 			t.Errorf("expected PodGroup %s, got %v", key, err)
 		}
@@ -305,7 +305,7 @@ func TestEnsurePodGroups_Idempotent(t *testing.T) {
 	owner := newOwner("prod", "llama")
 	c := newGangClient(t, owner)
 	input, _ := inputWithConditionStore(owner, true, 1, true, "")
-	plan := planFor(v1beta1.EngineComponent, []int32{0}, true, 1, 5*time.Minute)
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
 
 	for i := 0; i < 2; i++ {
 		if err := EnsurePodGroups(context.Background(), workload.Deps{Client: c}, input, plan); err != nil {
@@ -484,7 +484,7 @@ func TestEnsurePodGroups_MaybeNoGangSchedulerWarning_Matrix(t *testing.T) {
 			c := newGangClient(t, owner)
 			rec := record.NewFakeRecorder(8)
 			input, _ := inputWithConditionStore(owner, tc.multiPod, tc.workerSize, true, tc.schedulerName)
-			plan := planFor(v1beta1.EngineComponent, []int32{0}, tc.multiPod, tc.workerSize, 5*time.Minute)
+			plan := planFor(workload.ComponentEngine, []int32{0}, tc.multiPod, tc.workerSize, 5*time.Minute)
 
 			if err := EnsurePodGroups(context.Background(), workload.Deps{Client: c, Recorder: rec}, input, plan); err != nil {
 				t.Fatalf("EnsurePodGroups: %v", err)
@@ -533,7 +533,7 @@ func TestEnsurePodGroups_MaybeNoGangScheduler_DedupPerProcess(t *testing.T) {
 	rec := record.NewFakeRecorder(16)
 	// Empty schedulerName — should warn.
 	input, _ := inputWithConditionStore(owner, true, 2, true, "")
-	plan := planFor(v1beta1.EngineComponent, []int32{0}, true, 2, 5*time.Minute)
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 2, 5*time.Minute)
 
 	// Two reconciles back-to-back.
 	for i := 0; i < 2; i++ {
@@ -569,7 +569,7 @@ func TestEnsurePodGroups_MaybeNoGangScheduler_DedupSeparateComponents(t *testing
 
 	// Engine reconcile.
 	inputEng, _ := inputWithConditionStore(owner, true, 2, true, "")
-	planEng := planFor(v1beta1.EngineComponent, []int32{0}, true, 2, 5*time.Minute)
+	planEng := planFor(workload.ComponentEngine, []int32{0}, true, 2, 5*time.Minute)
 	if err := EnsurePodGroups(context.Background(), workload.Deps{Client: c, Recorder: rec}, inputEng, planEng); err != nil {
 		t.Fatalf("engine EnsurePodGroups: %v", err)
 	}
@@ -689,7 +689,7 @@ func assertCondition(t *testing.T, store *conditionStore, wantStatus metav1.Cond
 // v1beta1.ComponentType here is the test-side convenience for
 // constructing fixtures; production code uses the workload-typed
 // component throughout.
-func podGroupNameFor(owner string, component v1beta1.ComponentType, idx int32) string {
+func podGroupNameFor(owner string, component workload.ComponentType, idx int32) string {
 	return owner + "-" + string(component) + "-" + itoaSmall(int(idx))
 }
 

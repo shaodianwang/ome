@@ -143,7 +143,7 @@ func EnsurePodGroups(ctx context.Context, deps workload.Deps, input workload.Rec
 	// Heuristic warning when the rendered pod template uses the
 	// default scheduler — see EventReasonMaybeNoGangScheduler. Wired
 	// AFTER EnsurePodGroup so PodGroup-create failures take precedence.
-	maybeWarnNoGangScheduler(deps.Recorder, input, workload.ComponentTypeFromV1beta1(plan.Component), input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec)
+	maybeWarnNoGangScheduler(deps.Recorder, input, plan.Component, input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec)
 
 	// Per-Instance PodGroup GC. Whole-owner teardown is handled by
 	// the cascade-delete OwnerReference.

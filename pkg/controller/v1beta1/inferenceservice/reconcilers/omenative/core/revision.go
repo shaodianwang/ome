@@ -10,6 +10,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 )
@@ -86,11 +87,15 @@ func RetainControllerRevisionsForISVC(
 
 // CollectLiveRevisionNamesForISVC projects an OMENativeComponentStatus
 // to the (current, update, instances) tuple the workload sweeper takes.
+// The InstanceStatuses slice is converted at the adapter boundary —
+// workload.CollectLiveRevisionNames itself reads only the workload-side
+// InstanceStatus type so the revision package stays free of v1beta1
+// imports.
 func CollectLiveRevisionNamesForISVC(cs *v1beta1.OMENativeComponentStatus) []string {
 	if cs == nil {
 		return nil
 	}
-	return revision.CollectLiveRevisionNames(cs.CurrentRevision, cs.UpdateRevision, cs.InstanceStatuses)
+	return revision.CollectLiveRevisionNames(cs.CurrentRevision, cs.UpdateRevision, internalsource.InstanceStatusSliceToWorkload(cs.InstanceStatuses))
 }
 
 // RevisionName composes the legacy CR name `<isvc>-<component>-<hash>`.

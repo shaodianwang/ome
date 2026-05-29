@@ -3,11 +3,13 @@
 // create, retention.
 //
 // Boundary: this package is a leaf. It depends on Kubernetes API
-// machinery + the project's v1beta1 types + constants for the
-// project-wide pod label keys. The labels stamped on emitted CRs are
-// taken from the caller-supplied revision.Key so the same labels
-// carry through the pod-selector composition the rest of the workload
-// pipeline does.
+// machinery and the workload package's own type set; the v1beta1
+// import was removed in slice 7 of the workload-extraction refactor
+// — adapters convert from CRD-typed status into workload.InstanceStatus
+// before calling CollectLiveRevisionNames. The labels stamped on
+// emitted CRs are taken from the caller-supplied revision.Key so the
+// same labels carry through the pod-selector composition the rest of
+// the workload pipeline does.
 //
 // Imports the audit subpackage solely to share the
 // MigrationRequestAnnotationPrefix constant — the controller-written
@@ -34,8 +36,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // Key is the small subset of workload.Key this package needs. Defining
@@ -476,7 +478,7 @@ func nextRevisionNumber(
 // (ISVC path) or an InferenceReplicaStatus (IR path) without needing a
 // type-specific reader. Either adapter projects its status surface into
 // these primitive args.
-func CollectLiveRevisionNames(current, update string, instances []v1beta1.OMENativeInstanceStatus) []string {
+func CollectLiveRevisionNames(current, update string, instances []workload.InstanceStatus) []string {
 	seen := map[string]struct{}{}
 	add := func(name string) {
 		if name == "" {

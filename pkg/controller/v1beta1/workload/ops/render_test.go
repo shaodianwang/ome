@@ -23,10 +23,10 @@ var testISVCGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 // testKey produces the ISVC-form workload.Key the render path consumes:
 // Namespace + OwnerName from the ISVC, Component cast across the type
 // boundary, SelectorLabels = the OMENative pod-selector trio.
-func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.Key {
+func testKey(isvc *v1beta1.InferenceService, component workload.ComponentType) workload.Key {
 	return workload.Key{
 		Namespace: isvc.Namespace,
-		Component: workload.ComponentType(component),
+		Component: component,
 		OwnerName: isvc.Name,
 		SelectorLabels: map[string]string{
 			constants.InferenceServicePodLabelKey: isvc.Name,
@@ -62,7 +62,7 @@ func singlePodPlan() (workload.ComponentPlan, workload.InstancePlan, workload.Ru
 	runner := workload.RunnerPlan{Name: "default", Size: 1}
 	inst := workload.InstancePlan{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{runner}}
 	plan := workload.ComponentPlan{
-		Component: v1beta1.EngineComponent,
+		Component: workload.ComponentEngine,
 		Replicas:  2,
 		Instances: []workload.InstancePlan{inst},
 	}
@@ -78,7 +78,7 @@ func multiPodPlan(workerSize int32) (workload.ComponentPlan, workload.InstancePl
 	}
 	inst := workload.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
 	plan := workload.ComponentPlan{
-		Component: v1beta1.EngineComponent,
+		Component: workload.ComponentEngine,
 		Replicas:  1,
 		Instances: []workload.InstancePlan{inst},
 	}
@@ -219,7 +219,7 @@ func TestRender_MultiPod_PodGroupLabelPerInstance(t *testing.T) {
 	inst0 := workload.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
 	inst1 := workload.InstancePlan{Index: 1, Incarnation: 1, Runners: runners}
 	plan := workload.ComponentPlan{
-		Component: v1beta1.EngineComponent,
+		Component: workload.ComponentEngine,
 		Replicas:  2,
 		Instances: []workload.InstancePlan{inst0, inst1},
 	}
@@ -508,7 +508,7 @@ func TestRender_MultiPod_LeaderAddressPerInstance(t *testing.T) {
 	inst0 := workload.InstancePlan{Index: 0, Incarnation: 1, Runners: runners}
 	inst1 := workload.InstancePlan{Index: 1, Incarnation: 1, Runners: runners}
 	plan := workload.ComponentPlan{
-		Component: v1beta1.EngineComponent,
+		Component: workload.ComponentEngine,
 		Replicas:  2,
 		Instances: []workload.InstancePlan{inst0, inst1},
 	}
@@ -590,17 +590,17 @@ func TestRender_NameVariesWithEachAxis(t *testing.T) {
 	tests := []struct {
 		name      string
 		isvc      string
-		component v1beta1.ComponentType
+		component workload.ComponentType
 		inst      int32
 		runner    string
 		ordinal   int32
 		want      string
 	}{
-		{"engine, single-pod default, ord 0", "llama", v1beta1.EngineComponent, 0, "default", 0, "llama-engine-0-default-0"},
-		{"decoder, instance 2", "llama", v1beta1.DecoderComponent, 2, "default", 0, "llama-decoder-2-default-0"},
-		{"router, instance 5", "llama", v1beta1.RouterComponent, 5, "default", 0, "llama-router-5-default-0"},
-		{"engine, leader runner ord 0 (multi-pod shape preview)", "llama", v1beta1.EngineComponent, 0, "leader", 0, "llama-engine-0-leader-0"},
-		{"engine, worker runner ord 2 (multi-pod shape preview)", "llama", v1beta1.EngineComponent, 0, "worker", 2, "llama-engine-0-worker-2"},
+		{"engine, single-pod default, ord 0", "llama", workload.ComponentEngine, 0, "default", 0, "llama-engine-0-default-0"},
+		{"decoder, instance 2", "llama", workload.ComponentDecoder, 2, "default", 0, "llama-decoder-2-default-0"},
+		{"router, instance 5", "llama", workload.ComponentRouter, 5, "default", 0, "llama-router-5-default-0"},
+		{"engine, leader runner ord 0 (multi-pod shape preview)", "llama", workload.ComponentEngine, 0, "leader", 0, "llama-engine-0-leader-0"},
+		{"engine, worker runner ord 2 (multi-pod shape preview)", "llama", workload.ComponentEngine, 0, "worker", 2, "llama-engine-0-worker-2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -613,10 +613,10 @@ func TestRender_NameVariesWithEachAxis(t *testing.T) {
 }
 
 func TestRender_HeadlessServiceName(t *testing.T) {
-	if got := query.HeadlessServiceName("llama-70b", v1beta1.EngineComponent); got != "llama-70b-engine-headless" {
+	if got := query.HeadlessServiceName("llama-70b", workload.ComponentEngine); got != "llama-70b-engine-headless" {
 		t.Errorf("got %q want llama-70b-engine-headless", got)
 	}
-	if got := query.HeadlessServiceName("llama-70b", v1beta1.DecoderComponent); got != "llama-70b-decoder-headless" {
+	if got := query.HeadlessServiceName("llama-70b", workload.ComponentDecoder); got != "llama-70b-decoder-headless" {
 		t.Errorf("got %q want llama-70b-decoder-headless", got)
 	}
 }

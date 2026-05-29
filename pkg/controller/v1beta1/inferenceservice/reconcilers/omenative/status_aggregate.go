@@ -35,7 +35,13 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		return fmt.Errorf("AggregateAndWriteStatus: nil client")
 	}
 
-	pods, err := query.ListOMENativePods(ctx, p.Client, p.ISVC, plan.Component)
+	// v1component is the v1beta1.ComponentType form of plan.Component for
+	// the v1beta1-typed status / event / map-index sites in this file.
+	// plan.Component itself is the workload-side ComponentType after the
+	// workload boundary purge (slice 7 of N).
+	v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+
+	pods, err := query.ListOMENativePodsByName(ctx, p.Client, p.ISVC.Namespace, p.ISVC.Name, plan.Component)
 	if err != nil {
 		return fmt.Errorf("status: list pods: %w", err)
 	}
@@ -68,7 +74,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		if fresh.Status.Components == nil {
 			fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 		}
-		cs := fresh.Status.Components[plan.Component]
+		cs := fresh.Status.Components[v1component]
 		if cs.OMENative == nil {
 			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
 		}
@@ -113,13 +119,13 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		}
 
 		cs.OMENative.ObservedGeneration = fresh.Generation
-		cs.OMENative.LabelSelector = componentLabelSelectorString(p.ISVC.Name, plan.Component)
+		cs.OMENative.LabelSelector = componentLabelSelectorString(p.ISVC.Name, v1component)
 
 		// Component-level Conditions. Derived after counters so
 		// AvailableReplicas, UpdateRevision, etc. are current.
 		status.ApplyComponentConditions(cs.OMENative, status.ComputeComponentConditions(cs.OMENative, fresh.Generation))
 
-		fresh.Status.Components[plan.Component] = cs
+		fresh.Status.Components[v1component] = cs
 
 		// Top-level component-ready condition (EngineReady /
 		// DecoderReady / RouterReady). Mirrors the contract
@@ -131,7 +137,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// never flips the top-level condition past InitializeComponent
 		// Condition's False/Initializing — and the outer reconciler's
 		// updateStatus flush stamps Ready=False forever.
-		topCond := topLevelComponentReadyFromOMENative(plan.Component, cs.OMENative)
+		topCond := topLevelComponentReadyFromOMENative(v1component, cs.OMENative)
 		if topCond != nil {
 			fresh.Status.SetCondition(topCond.Type, topCond)
 		}
@@ -171,7 +177,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// downstream hash off the wrong value, surfacing as the A-2
 		// orphan-hash drift symptom (status field references a CR
 		// that no longer matches what the controller just decided).
-		mirrorComponentRevisionFields(p.ISVC, plan.Component, cs.OMENative)
+		mirrorComponentRevisionFields(p.ISVC, v1component, cs.OMENative)
 		return nil
 	})
 	if isvcGone {
@@ -219,7 +225,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		p.Client,
 		p.Reader(),
 		p.ISVC,
-		plan.Component,
+		v1component,
 		defaultRevisionRetention,
 		liveRevisionNames...,
 	); rerr != nil {
@@ -262,7 +268,8 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 	if p.ISVC == nil {
 		return nil
 	}
-	cs, ok := p.ISVC.Status.Components[plan.Component]
+	v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+	cs, ok := p.ISVC.Status.Components[v1component]
 	if !ok || cs.OMENative == nil {
 		return nil
 	}
@@ -287,7 +294,7 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 		OwnerObject: p.ISVC,
 		EventTarget: p.ISVC,
 		MutateInstance: func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-			return status.MutateInstance(ctx, p.Client, p.ISVC, plan.Component, idx, func(v *v1beta1.OMENativeInstanceStatus) bool {
+			return status.MutateInstance(ctx, p.Client, p.ISVC, v1component, idx, func(v *v1beta1.OMENativeInstanceStatus) bool {
 				w := internalsource.InstanceStatusToWorkload(*v)
 				if !mutate(&w) {
 					return false
@@ -302,7 +309,7 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 		WarnInstanceFailed: func(idx int32, podName, reason string) {
 			status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonInstanceFailed,
 				"OMENative %s escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)",
-				status.InstanceKey(plan.Component, idx), podName, reason)
+				status.InstanceKey(v1component, idx), podName, reason)
 		},
 	}
 
@@ -341,11 +348,12 @@ func refreshComponentConditionsPostEscalation(ctx context.Context, p ReconcilePa
 	if p.ISVC == nil || p.Client == nil {
 		return nil
 	}
+	v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
 	// Fast-path: compute against the in-memory mirror first. The
 	// escalator's MutateInstance has already mirrored Phase=Failed
 	// back to p.ISVC, so this compute reflects post-escalation state
 	// without any apiserver call.
-	cached, ok := p.ISVC.Status.Components[plan.Component]
+	cached, ok := p.ISVC.Status.Components[v1component]
 	if !ok || cached.OMENative == nil {
 		return nil
 	}
@@ -370,7 +378,7 @@ func refreshComponentConditionsPostEscalation(ctx context.Context, p ReconcilePa
 		if fresh.Status.Components == nil {
 			return nil
 		}
-		cs, ok := fresh.Status.Components[plan.Component]
+		cs, ok := fresh.Status.Components[v1component]
 		if !ok || cs.OMENative == nil {
 			return nil
 		}
@@ -381,7 +389,7 @@ func refreshComponentConditionsPostEscalation(ctx context.Context, p ReconcilePa
 			return nil
 		}
 		status.ApplyComponentConditions(cs.OMENative, fresherDesired)
-		fresh.Status.Components[plan.Component] = cs
+		fresh.Status.Components[v1component] = cs
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil
@@ -395,12 +403,12 @@ func refreshComponentConditionsPostEscalation(ctx context.Context, p ReconcilePa
 		if p.ISVC.Status.Components == nil {
 			p.ISVC.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
 		}
-		mirror := p.ISVC.Status.Components[plan.Component]
+		mirror := p.ISVC.Status.Components[v1component]
 		if mirror.OMENative == nil {
 			mirror.OMENative = &v1beta1.OMENativeComponentStatus{}
 		}
 		mirror.OMENative.Conditions = append(mirror.OMENative.Conditions[:0], cs.OMENative.Conditions...)
-		p.ISVC.Status.Components[plan.Component] = mirror
+		p.ISVC.Status.Components[v1component] = mirror
 		return nil
 	})
 }

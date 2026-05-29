@@ -224,3 +224,119 @@ type Key struct {
 func (k Key) WorkloadName() string {
 	return k.OwnerName + "-" + string(k.Component)
 }
+
+// Lifecycle is the workload-owned mirror of the v1beta1 LifecycleSpec.
+// Adapters project the CRD-shape lifecycle into this struct so the
+// workload package can read it without importing v1beta1. Fields
+// match the CRD field-for-field; nil pointers signal "unset, default
+// at planning time".
+type Lifecycle struct {
+	// RestartPolicy is the per-Instance restart disposition. nil falls
+	// back to the per-shape default (multi-pod → RecreateInstance,
+	// single-pod → None) in BuildPlan.
+	RestartPolicy *RestartPolicy
+
+	// UpdateStrategy controls how OMENative rolls template changes
+	// across the Component's Instances. nil falls back to defaults.
+	UpdateStrategy *UpdateStrategy
+
+	// ReadyPolicy controls how Instance-level readiness is aggregated
+	// from the underlying pods. nil falls back to the per-shape default.
+	ReadyPolicy *InstanceReadyPolicy
+
+	// InstanceReadyTimeout is the wait ceiling on a newly-created
+	// Instance becoming Ready. nil falls back to the 30m default.
+	InstanceReadyTimeout *metav1.Duration
+
+	// MigrationPolicy controls whether and how OMENative honors a
+	// migration request annotation for this Component. nil falls back
+	// to the Auto default.
+	MigrationPolicy *MigrationPolicy
+}
+
+// UpdateStrategy is the workload-owned mirror of the v1beta1
+// UpdateStrategy struct. Adapters project the CRD-shape strategy onto
+// this struct so the workload package can read it without importing
+// v1beta1.
+type UpdateStrategy struct {
+	// Type selects the rollout mechanism. Empty defaults to
+	// SurgeThenDrain in BuildPlan.
+	Type UpdateStrategyType
+
+	// RollingUpdate paces the rollout across Instances of the
+	// Component.
+	RollingUpdate *RollingUpdate
+
+	// InPlaceUpdateStrategy tunes the per-pod in-place update sequence.
+	// Ignored when Type is RecreatePod.
+	InPlaceUpdateStrategy *InPlaceUpdateStrategy
+}
+
+// RollingUpdate paces rollout across Instances of one Component.
+// Workload-owned mirror of v1beta1.RollingUpdate.
+type RollingUpdate struct {
+	// Partition holds back updates for Instances whose index is <
+	// Partition. 0 (the default) updates all Instances.
+	Partition *int32
+
+	// MaxUnavailable is the maximum number of Instances allowed to be
+	// in a non-Ready state during the rollout. nil falls back to the
+	// reconciler default.
+	MaxUnavailable *int32
+}
+
+// InPlaceUpdateStrategy tunes the per-pod in-place update sequence.
+// Workload-owned mirror of v1beta1.InPlaceUpdateStrategy.
+type InPlaceUpdateStrategy struct {
+	// GracePeriodSeconds is the time OMENative waits between marking
+	// the pod not-ready and applying the in-place mutation.
+	GracePeriodSeconds *int32
+
+	// MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False
+	// on the pod before the in-place mutation so EndpointSlice drains
+	// traffic first.
+	MarkNotReadyDuringLifecycle *bool
+}
+
+// InstanceReadyPolicy controls how Instance-level readiness is
+// aggregated from the underlying pods. Workload-owned mirror of the
+// v1beta1.InstanceReadyPolicy enum.
+type InstanceReadyPolicy string
+
+const (
+	// InstanceReadyPolicyAllPodReady reports the Instance Ready only
+	// when every pod has Ready=True. Default for multi-pod Instances.
+	InstanceReadyPolicyAllPodReady InstanceReadyPolicy = "AllPodReady"
+	// InstanceReadyPolicyNone disables Instance-level aggregation; pods
+	// are reported individually. Default for single-pod Instances.
+	InstanceReadyPolicyNone InstanceReadyPolicy = "None"
+)
+
+// MigrationPolicy controls whether and how OMENative honors a
+// migration request annotation for this Component. Workload-owned
+// mirror of v1beta1.MigrationPolicy.
+type MigrationPolicy struct {
+	// Mode selects the migration disposition. Empty defaults to Auto.
+	Mode MigrationMode
+}
+
+// ComponentTrafficTarget describes the percentage of traffic routed to
+// one revision of one Component. Workload-owned mirror of
+// v1beta1.ComponentTrafficTarget; serialized field-for-field by the
+// adapter when projecting onto ISVC status.
+type ComponentTrafficTarget struct {
+	// RevisionName is the per-revision Service name for this target.
+	RevisionName string
+
+	// Percent is the percentage of traffic the consumer should route to
+	// RevisionName. Sum across all entries for one Component is 100.
+	Percent int32
+
+	// Tag is an optional short identifier for the target (e.g.
+	// "latest", "prev"). Cosmetic; not used by the consumer.
+	Tag string
+
+	// LatestRevision is true when this entry corresponds to the
+	// LatestRolledoutRevision for the Component.
+	LatestRevision bool
+}

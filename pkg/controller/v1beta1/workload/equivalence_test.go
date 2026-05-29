@@ -577,7 +577,7 @@ func buildEquivalenceParams(fix fixture, isvc *v1beta1.InferenceService, cli cli
 	return core.ReconcileParams{
 		ISVC: isvc,
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.StableServiceName(isvc.Name, fix.component),
+			Name:      query.StableServiceName(isvc.Name, workload.ComponentType(fix.component)),
 			Namespace: isvc.Namespace,
 		},
 		PodSpec:      &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: fix.image}}},

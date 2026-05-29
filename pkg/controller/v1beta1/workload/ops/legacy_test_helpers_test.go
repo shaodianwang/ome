@@ -53,7 +53,7 @@ func legacyMinimalISVC(name, ns string, replicas int) *v1beta1.InferenceService 
 
 // legacyTestPodLabels reproduces the label set Render stamps on every
 // emitted pod.
-func legacyTestPodLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, incarnation int64, ordinal int32) map[string]string {
+func legacyTestPodLabels(isvc string, component workload.ComponentType, instanceIdx int32, runner string, incarnation int64, ordinal int32) map[string]string {
 	return map[string]string{
 		constants.InferenceServicePodLabelKey: isvc,
 		constants.OMEComponentLabel:           string(component),
@@ -99,11 +99,11 @@ func legacyNewFakeClient(t *testing.T, initObjs ...client.Object) client.Client 
 // legacyPodForInstance fabricates a pod matching what Render() would
 // produce for the given (ISVC, instance) pair.
 func legacyPodForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, serving bool) *corev1.Pod {
-	labels := legacyTestPodLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1, 0)
+	labels := legacyTestPodLabels(isvc.Name, workload.ComponentEngine, instanceIdx, "default", 1, 0)
 	labels[query.LabelRevisionHash] = testRevisionHashLegacy
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodName(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 0),
+			Name:      query.PodName(isvc.Name, workload.ComponentEngine, instanceIdx, "default", 0),
 			Namespace: isvc.Namespace,
 			Labels:    labels,
 		},
@@ -145,7 +145,7 @@ func legacyPodAtIncarnation(isvc *v1beta1.InferenceService, instanceIdx int32, i
 // pointer to, so subsequent passes within the same reconcile observe
 // the just-stamped Phase / Operation without re-reading the
 // apiserver.
-func legacyTestInput(isvc *v1beta1.InferenceService, c client.Client, component v1beta1.ComponentType) workload.ReconcileInput {
+func legacyTestInput(isvc *v1beta1.InferenceService, c client.Client, component workload.ComponentType) workload.ReconcileInput {
 	return workload.ReconcileInput{
 		OwnerObject: isvc,
 		OwnerGVK:    v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
@@ -173,9 +173,9 @@ func legacyTestInput(isvc *v1beta1.InferenceService, c client.Client, component 
 
 // legacyInstanceStatuses pulls + converts the OMENative
 // InstanceStatuses slice into the workload-owned mirror.
-func legacyInstanceStatuses(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) []workload.InstanceStatus {
+func legacyInstanceStatuses(isvc *v1beta1.InferenceService, component workload.ComponentType) []workload.InstanceStatus {
 	var out []workload.InstanceStatus
-	if cs, ok := isvc.Status.Components[component]; ok && cs.OMENative != nil {
+	if cs, ok := isvc.Status.Components[v1beta1.ComponentType(component)]; ok && cs.OMENative != nil {
 		for _, s := range cs.OMENative.InstanceStatuses {
 			out = append(out, workload.InstanceStatus{
 				Index:           s.Index,
@@ -196,7 +196,8 @@ func legacyInstanceStatuses(isvc *v1beta1.InferenceService, component v1beta1.Co
 // client has no optimistic-concurrency failures to retry). Mirrors
 // the post-commit Operation onto the in-memory ISVC.Status snapshot
 // the test holds a pointer to.
-func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+	v1component := v1beta1.ComponentType(component)
 	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 		fresh := &v1beta1.InferenceService{}
 		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
@@ -205,7 +206,7 @@ func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compo
 		if fresh.Status.Components == nil {
 			fresh.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
 		}
-		cs := fresh.Status.Components[component]
+		cs := fresh.Status.Components[v1component]
 		if cs.OMENative == nil {
 			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
 		}
@@ -248,7 +249,7 @@ func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compo
 		} else {
 			cs.OMENative.InstanceStatuses[pos] = updated
 		}
-		fresh.Status.Components[component] = cs
+		fresh.Status.Components[v1component] = cs
 		if err := c.Status().Update(ctx, fresh); err != nil {
 			return err
 		}
@@ -256,7 +257,7 @@ func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compo
 		if isvc.Status.Components == nil {
 			isvc.Status.Components = fresh.Status.Components
 		} else {
-			isvc.Status.Components[component] = fresh.Status.Components[component]
+			isvc.Status.Components[v1component] = fresh.Status.Components[v1component]
 		}
 		return nil
 	}
@@ -368,10 +369,10 @@ func legacySliceWithEndpoint(namespace, sliceName, serviceName string, pod *core
 func legacyEngineRevisionKey(isvc *v1beta1.InferenceService) revision.Key {
 	return revision.Key{
 		Namespace: isvc.Namespace,
-		Name:      isvc.Name + "-" + string(v1beta1.EngineComponent),
+		Name:      isvc.Name + "-" + string(workload.ComponentEngine),
 		Labels: map[string]string{
 			constants.InferenceServicePodLabelKey: isvc.Name,
-			constants.OMEComponentLabel:           string(v1beta1.EngineComponent),
+			constants.OMEComponentLabel:           string(workload.ComponentEngine),
 			query.LabelManagedBy:                  query.ManagedByOMENative,
 		},
 	}
@@ -408,7 +409,7 @@ func legacyEnsureTargetCRWithMeta(t *testing.T, c client.Client, isvc *v1beta1.I
 // name onto InstanceStatus[idx].RunningRevision. The Update state
 // machine's inPlaceEligible reads the recorded baseline (NOT the live
 // pod) when deciding image-only-vs-bigger-diff.
-func legacySeedRunningRevision(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, spec *corev1.PodSpec) {
+func legacySeedRunningRevision(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType, idx int32, spec *corev1.PodSpec) {
 	t.Helper()
 	legacySeedRunningRevisionWithMeta(t, c, isvc, component, idx, spec, nil)
 }
@@ -416,8 +417,9 @@ func legacySeedRunningRevision(t *testing.T, c client.Client, isvc *v1beta1.Infe
 // legacySeedRunningRevisionWithMeta captures the previous-revision
 // PodMeta so the in-place annotation diff has a baseline to subtract
 // from.
-func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, spec *corev1.PodSpec, meta *metav1.ObjectMeta) {
+func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType, idx int32, spec *corev1.PodSpec, meta *metav1.ObjectMeta) {
 	t.Helper()
+	v1component := v1beta1.ComponentType(component)
 	cr, _, err := revision.EnsureControllerRevision(
 		context.Background(), c, c, isvc,
 		v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
@@ -434,21 +436,21 @@ func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1be
 	if fresh.Status.Components == nil {
 		fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
-	cs := fresh.Status.Components[component]
+	cs := fresh.Status.Components[v1component]
 	if cs.OMENative == nil {
 		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
 	}
 	for i := range cs.OMENative.InstanceStatuses {
 		if cs.OMENative.InstanceStatuses[i].Index == idx {
 			cs.OMENative.InstanceStatuses[i].RunningRevision = cr.Name
-			fresh.Status.Components[component] = cs
+			fresh.Status.Components[v1component] = cs
 			if err := c.Status().Update(context.Background(), fresh); err != nil {
 				t.Fatalf("set RunningRevision: %v", err)
 			}
 			if isvc.Status.Components == nil {
 				isvc.Status.Components = fresh.Status.Components
 			} else {
-				isvc.Status.Components[component] = fresh.Status.Components[component]
+				isvc.Status.Components[v1component] = fresh.Status.Components[v1component]
 			}
 			return
 		}
@@ -460,9 +462,9 @@ func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1be
 // used by the Update / SurgeThenDrain tests. Reproduced inline
 // because workload/ops tests can't import omenative/core. strategy
 // controls the UpdateStrategy.Type.
-func legacyComponentPlan(strategy v1beta1.UpdateStrategyType, inPlaceStrategy *v1beta1.InPlaceUpdateStrategy) workload.ComponentPlan {
+func legacyComponentPlan(strategy workload.UpdateStrategyType, inPlaceStrategy *workload.InPlaceUpdateStrategy) workload.ComponentPlan {
 	return workload.ComponentPlan{
-		Component: v1beta1.EngineComponent,
+		Component: workload.ComponentEngine,
 		Replicas:  1,
 		Instances: []workload.InstancePlan{{
 			Index:       0,
@@ -470,7 +472,7 @@ func legacyComponentPlan(strategy v1beta1.UpdateStrategyType, inPlaceStrategy *v
 			Runners:     []workload.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 		InstanceReadyTimeout: 30 * time.Minute,
-		UpdateStrategy: v1beta1.UpdateStrategy{
+		UpdateStrategy: workload.UpdateStrategy{
 			Type:                  strategy,
 			InPlaceUpdateStrategy: inPlaceStrategy,
 		},
@@ -480,9 +482,9 @@ func legacyComponentPlan(strategy v1beta1.UpdateStrategyType, inPlaceStrategy *v
 // legacyMultiPodComponentPlan is legacyComponentPlan's multi-pod
 // sibling — used by the multi-pod SurgeThenDrain fallback tests where
 // the chooser must downgrade surge / in-place to recreate.
-func legacyMultiPodComponentPlan(strategy v1beta1.UpdateStrategyType) workload.ComponentPlan {
+func legacyMultiPodComponentPlan(strategy workload.UpdateStrategyType) workload.ComponentPlan {
 	return workload.ComponentPlan{
-		Component: v1beta1.EngineComponent,
+		Component: workload.ComponentEngine,
 		Replicas:  1,
 		Instances: []workload.InstancePlan{{
 			Index:       0,
@@ -493,7 +495,7 @@ func legacyMultiPodComponentPlan(strategy v1beta1.UpdateStrategyType) workload.C
 			},
 		}},
 		InstanceReadyTimeout: 30 * time.Minute,
-		UpdateStrategy: v1beta1.UpdateStrategy{
+		UpdateStrategy: workload.UpdateStrategy{
 			Type: strategy,
 		},
 	}

@@ -70,7 +70,8 @@ func sliceWithEndpoint(namespace, sliceName, serviceName string, pod *corev1.Pod
 // the entry was already absent. Also forgets workload.DefaultExpectations
 // so a later index reuse doesn't inherit stale counters — matches the
 // production helper.
-func testRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) func(ctx context.Context, idx int32) (bool, error) {
+func testRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) func(ctx context.Context, idx int32) (bool, error) {
+	v1component := v1beta1.ComponentType(component)
 	return func(ctx context.Context, idx int32) (bool, error) {
 		fresh := &v1beta1.InferenceService{}
 		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
@@ -79,7 +80,7 @@ func testRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 		if fresh.Status.Components == nil {
 			return false, nil
 		}
-		cs, ok := fresh.Status.Components[component]
+		cs, ok := fresh.Status.Components[v1component]
 		if !ok || cs.OMENative == nil {
 			return false, nil
 		}
@@ -95,11 +96,11 @@ func testRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 			return false, nil
 		}
 		cs.OMENative.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
-		fresh.Status.Components[component] = cs
+		fresh.Status.Components[v1component] = cs
 		if err := c.Status().Update(ctx, fresh); err != nil {
 			return false, fmt.Errorf("status update: %w", err)
 		}
-		workload.DefaultExpectations.Forget(isvc.Namespace, isvc.Name, workload.ComponentType(component), idx)
+		workload.DefaultExpectations.Forget(isvc.Namespace, isvc.Name, component, idx)
 		return true, nil
 	}
 }
@@ -107,7 +108,7 @@ func testRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 // buildTestInputForDelete is buildTestInput plus the RemoveInstance
 // callback Delete needs. Constructed inline so the test file owns the
 // projection from (isvc, component) onto ReconcileInput end-to-end.
-func buildTestInputForDelete(isvc *v1beta1.InferenceService, c client.Client, component v1beta1.ComponentType) workload.ReconcileInput {
+func buildTestInputForDelete(isvc *v1beta1.InferenceService, c client.Client, component workload.ComponentType) workload.ReconcileInput {
 	input := buildTestInput(isvc, c, component)
 	input.RemoveInstance = testRemoveInstance(c, isvc, component)
 	return input
@@ -115,7 +116,7 @@ func buildTestInputForDelete(isvc *v1beta1.InferenceService, c client.Client, co
 
 func TestDelete_NilClient(t *testing.T) {
 	resetExpectations(t)
-	plan := workload.ComponentPlan{Component: v1beta1.EngineComponent}
+	plan := workload.ComponentPlan{Component: workload.ComponentEngine}
 	if _, err := ops.Delete(context.Background(), workload.Deps{}, workload.ReconcileInput{}, plan, 0); err == nil {
 		t.Fatal("expected error for nil client")
 	}
@@ -126,7 +127,7 @@ func TestDelete_NoPodsNoStatus_ReturnsDone(t *testing.T) {
 	// Both pod list and InstanceStatus are empty — nothing to do.
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClient(t, isvc)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
 	done, err := ops.Delete(context.Background(), workload.Deps{Client: c}, input, plan, 0)
@@ -142,7 +143,7 @@ func TestDelete_PodsGone_RemovesInstanceStatus(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcWithStatus("llama-70b", "prod", 1, 0, v1beta1.OMENativeInstanceReady)
 	c := newFakeClient(t, isvc)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
 	done, err := ops.Delete(context.Background(), workload.Deps{Client: c}, input, plan, 0)
@@ -168,7 +169,7 @@ func TestDelete_FlipsServingFalseAndRequeuesWhileDraining(t *testing.T) {
 	// EndpointSlice still publishes the pod with Ready=true — drain not converged.
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, true)
 	c := newFakeClient(t, isvc, pod, slice)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
 	done, err := ops.Delete(context.Background(), workload.Deps{Client: c}, input, plan, 0)
@@ -207,7 +208,7 @@ func TestDelete_DrainedPodIsDeleted(t *testing.T) {
 	pod := podForInstance(isvc, 0, true, false)
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false)
 	c := newFakeClient(t, isvc, pod, slice)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
 	done, err := ops.Delete(context.Background(), workload.Deps{Client: c}, input, plan, 0)
@@ -241,7 +242,7 @@ func TestDelete_ConvergesAcrossPasses(t *testing.T) {
 	pod := podForInstance(isvc, 0, true, false)
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false)
 	c := newFakeClient(t, isvc, pod, slice)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
 	const maxPasses = 5
@@ -286,7 +287,7 @@ func TestDelete_PodAlreadyTerminatingIsSkipped(t *testing.T) {
 	pod.Finalizers = []string{"omenative.test/keep-around"}
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false)
 	c := newFakeClient(t, isvc, pod, slice)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
 
 	done, err := ops.Delete(context.Background(), workload.Deps{Client: c}, input, plan, 0)

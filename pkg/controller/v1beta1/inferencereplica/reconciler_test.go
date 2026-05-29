@@ -19,6 +19,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
@@ -162,8 +163,8 @@ func TestReconcile_Create_MaterializesPods(t *testing.T) {
 	// Pod names must follow the legacy shape <isvc>-<component>-<idx>-default-0
 	// so existing selectors keep matching.
 	names := podNames(pods.Items)
-	g.Expect(names).To(gomega.ContainElement(query.PodName("llama", v1beta1.EngineComponent, 0, "default", 0)))
-	g.Expect(names).To(gomega.ContainElement(query.PodName("llama", v1beta1.EngineComponent, 1, "default", 0)))
+	g.Expect(names).To(gomega.ContainElement(query.PodName("llama", internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 0)))
+	g.Expect(names).To(gomega.ContainElement(query.PodName("llama", internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 1, "default", 0)))
 
 	// Every pod must be owner-ref'd to the IR (Kind=InferenceReplica),
 	// NOT the legacy ISVC owner.
@@ -233,7 +234,7 @@ func TestReconcile_Create_AlsoCreatesHeadlessService(t *testing.T) {
 	// The Service name is derived from the parent ISVC name (ParentRef.Name)
 	// — pods, services, and selectors all key off the ISVC name so the
 	// shape stays byte-identical to the legacy omenative-controller path.
-	wantName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, ir.Spec.Component)
+	wantName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, internalsource.ComponentTypeToWorkload(ir.Spec.Component))
 	svc := &corev1.Service{}
 	g.Expect(c.Get(context.Background(),
 		types.NamespacedName{Name: wantName, Namespace: ir.Namespace},
@@ -305,8 +306,8 @@ func TestReconcile_ScaleUp_AddsPods(t *testing.T) {
 	g.Expect(len(pods.Items)).To(gomega.BeNumerically(">=", 2),
 		"scale-up should add at least one more pod alongside the existing one")
 	names := podNames(pods.Items)
-	g.Expect(names).To(gomega.ContainElement(query.PodName("llama", v1beta1.EngineComponent, 0, "default", 0)))
-	g.Expect(names).To(gomega.ContainElement(query.PodName("llama", v1beta1.EngineComponent, 1, "default", 0)))
+	g.Expect(names).To(gomega.ContainElement(query.PodName("llama", internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 0)))
+	g.Expect(names).To(gomega.ContainElement(query.PodName("llama", internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 1, "default", 0)))
 }
 
 // TestReconcile_ScaleDown_DeletesExcessInstances pins the scale-down
@@ -429,7 +430,7 @@ func TestReconcile_NilPodSpec_NoRevisionEnsured(t *testing.T) {
 func podForIR(ir *v1beta1.InferenceReplica, instanceIdx int32, runnerName string, ordinal int32, ready, serving bool) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodName(ir.Spec.ParentRef.Name, ir.Spec.Component, instanceIdx, runnerName, ordinal),
+			Name:      query.PodName(ir.Spec.ParentRef.Name, internalsource.ComponentTypeToWorkload(ir.Spec.Component), instanceIdx, runnerName, ordinal),
 			Namespace: ir.Namespace,
 			Labels: map[string]string{
 				constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,

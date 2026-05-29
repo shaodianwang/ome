@@ -97,12 +97,8 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	}
 
 	// 2. Per-Instance restart pass.
-	//
-	// plan.RestartPolicy is v1beta1-typed (residual coupling). Compare
-	// via the workload mirror constant's string value so reconcile.go
-	// itself doesn't take on a v1beta1 import.
 	anyRestarting := false
-	if string(plan.RestartPolicy) == string(RestartPolicyRecreateInstance) {
+	if plan.RestartPolicy == RestartPolicyRecreateInstance {
 		for _, inst := range plan.Instances {
 			needsRestart, reason, derr := workloadops.DetectRestartTrigger(ctx, deps, input, plan, inst)
 			if derr != nil {
@@ -124,10 +120,9 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		return ctrl.Result{RequeueAfter: restartRequeueInterval}, nil
 	}
 
-	// 3. Per-Component migration pass. plan.MigrationMode is
-	// v1beta1-typed (residual coupling). Skip when mode is Never or
-	// the adapter didn't wire a detector.
-	if string(plan.MigrationMode) != string(MigrationModeNever) && input.DetectMigrationRequest != nil {
+	// 3. Per-Component migration pass. Skip when mode is Never or the
+	// adapter didn't wire a detector.
+	if plan.MigrationMode != MigrationModeNever && input.DetectMigrationRequest != nil {
 		uuid, req, sourceIdx, found, mderr := input.DetectMigrationRequest(ctx)
 		if mderr != nil {
 			return ctrl.Result{}, fmt.Errorf("workload.Reconcile: detect migration request (component=%s): %w", plan.Component, mderr)
@@ -189,7 +184,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		// branches on strategy so each is throttled by the budget that
 		// actually applies. Empty Type defaults to SurgeThenDrain —
 		// matches workload.BuildPlan's defaulting.
-		strategy := UpdateStrategyType(plan.UpdateStrategy.Type)
+		strategy := plan.UpdateStrategy.Type
 		if strategy == "" {
 			strategy = UpdateStrategySurgeThenDrain
 		}

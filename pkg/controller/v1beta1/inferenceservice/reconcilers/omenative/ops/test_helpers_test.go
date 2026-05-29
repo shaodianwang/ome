@@ -19,6 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
@@ -32,6 +33,26 @@ import (
 // brings its own test scaffolding with it.
 
 // minimalISVC builds an ISVC with the minimum metadata Create() needs.
+// findInstanceStatusForISVCTest is the test-local replacement for the
+// removed query.FindInstanceStatus. The workload-side query package no
+// longer takes a v1beta1.InferenceService handle (slice 7 boundary
+// purge); adapters now scan their typed status surface directly.
+func findInstanceStatusForISVCTest(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) *v1beta1.OMENativeInstanceStatus {
+	if isvc == nil {
+		return nil
+	}
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.OMENative == nil {
+		return nil
+	}
+	for i := range cs.OMENative.InstanceStatuses {
+		if cs.OMENative.InstanceStatuses[i].Index == idx {
+			return &cs.OMENative.InstanceStatuses[i]
+		}
+	}
+	return nil
+}
+
 func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 	mr := replicas
 	return &v1beta1.InferenceService{
@@ -60,7 +81,7 @@ const testRevisionHash = "testrev1"
 // every emitted pod. Duplicated here (rather than re-exported from
 // workload/ops) because workload/ops keeps the helper private; tests
 // in this package fabricate pods directly without going through Render.
-func testPodLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, incarnation int64, ordinal int32) map[string]string {
+func testPodLabels(isvc string, component workload.ComponentType, instanceIdx int32, runner string, incarnation int64, ordinal int32) map[string]string {
 	return map[string]string{
 		constants.InferenceServicePodLabelKey: isvc,
 		constants.OMEComponentLabel:           string(component),
@@ -229,14 +250,14 @@ func seedRunningRevision(t *testing.T, c client.Client, isvc *v1beta1.InferenceS
 // exactly what the controller is about to write. Synthesizing PodReady
 // in tests would mask the real ordering.
 func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, serving bool) *corev1.Pod {
-	labels := testPodLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1, 0)
+	labels := testPodLabels(isvc.Name, workload.ComponentEngine, instanceIdx, "default", 1, 0)
 	// Production Render stamps ome.io/revision-hash so per-revision
 	// Service selectors match. Test pods must carry it too — the drain
 	// path computes the per-revision routed Service from this label.
 	labels[query.LabelRevisionHash] = testRevisionHash
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodName(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 0),
+			Name:      query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), instanceIdx, "default", 0),
 			Namespace: isvc.Namespace,
 			Labels:    labels,
 		},

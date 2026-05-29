@@ -98,7 +98,7 @@ func minimalInput(t *testing.T) workload.ReconcileInput {
 // index 0 with a single-pod "default" Runner.
 func minimalPlan() workload.ComponentPlan {
 	return workload.ComponentPlan{
-		Component: v1beta1.EngineComponent,
+		Component: workload.ComponentEngine,
 		Replicas:  1,
 		Instances: []workload.InstancePlan{
 			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{
@@ -229,7 +229,7 @@ func TestReconcile_SkipsMigrateWhenModeNever(t *testing.T) {
 		return "", nil, 0, false, nil
 	}
 	plan := minimalPlan()
-	plan.MigrationMode = v1beta1.MigrationPolicyModeNever
+	plan.MigrationMode = workload.MigrationModeNever
 
 	_, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
 	if err != nil {
@@ -251,7 +251,7 @@ func TestReconcile_SkipsMigrateWhenDetectorNil(t *testing.T) {
 	in := minimalInput(t)
 	in.DetectMigrationRequest = nil
 	plan := minimalPlan()
-	plan.MigrationMode = v1beta1.MigrationPolicyModeAuto
+	plan.MigrationMode = workload.MigrationModeAuto
 
 	_, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
 	if err != nil {
@@ -309,7 +309,7 @@ func TestReconcile_UpdateRan_RequeuesAndSkipsCreate(t *testing.T) {
 		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseUpdating, RunningRevision: "prior-rev"},
 	}
 	plan := minimalPlan()
-	plan.UpdateStrategy = v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategySurgeThenDrain}
+	plan.UpdateStrategy = workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain}
 	// Provide a non-nil target so the Update loop is even considered.
 	target := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},

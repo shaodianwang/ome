@@ -91,14 +91,14 @@ func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
 		Runners:  runnersForDesired(p.MultiPod, int32(p.WorkerSize)),
 	}
 	if p.ComponentExt.Lifecycle != nil {
-		desired.Lifecycle = *p.ComponentExt.Lifecycle
+		desired.Lifecycle = internalsource.LifecycleSpecToWorkload(*p.ComponentExt.Lifecycle)
 	}
 
 	observed := workload.WorkloadObservedState{
 		InstanceStatuses: internalsource.InstanceStatusSliceToWorkload(extractInstanceStatuses(p.ISVC, p.Component)),
 	}
 
-	return workload.BuildPlan(p.Component, desired, observed)
+	return workload.BuildPlan(internalsource.ComponentTypeToWorkload(p.Component), desired, observed)
 }
 
 // replicasFromComponentExt projects the ComponentExtensionSpec

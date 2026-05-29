@@ -8,6 +8,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -48,7 +49,7 @@ func componentSelector(isvc *v1beta1.InferenceService, component v1beta1.Compone
 func BuildHeadlessServiceSpec(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workloadtypes.PerComponentServiceSpec {
 	selector := componentSelector(isvc, component)
 	return workloadtypes.PerComponentServiceSpec{
-		Name:      query.HeadlessServiceName(isvc.Name, component),
+		Name:      query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(component)),
 		Namespace: isvc.Namespace,
 		Selector:  selector,
 		Labels:    selector,

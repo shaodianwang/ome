@@ -8,7 +8,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -364,7 +363,7 @@ func hasServingReadinessGate(gates []corev1.PodReadinessGate) bool {
 	return false
 }
 
-func podLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, incarnation int64, ordinal int32) map[string]string {
+func podLabels(isvc string, component workload.ComponentType, instanceIdx int32, runner string, incarnation int64, ordinal int32) map[string]string {
 	return map[string]string{
 		constants.InferenceServicePodLabelKey: isvc,
 		constants.OMEComponentLabel:           string(component),
@@ -439,7 +438,7 @@ func buildOMENativeEnv(plan workload.ComponentPlan, inst workload.InstancePlan, 
 // resolves the same as the fully-qualified
 // `<pod>.<headless>.<ns>.svc.cluster.local` form without the controller
 // needing to discover the cluster's actual DNS domain.
-func leaderAddressForInstance(isvcName string, component v1beta1.ComponentType, inst workload.InstancePlan) string {
+func leaderAddressForInstance(isvcName string, component workload.ComponentType, inst workload.InstancePlan) string {
 	for _, r := range inst.Runners {
 		if r.Name == "leader" {
 			return fmt.Sprintf("%s.%s",

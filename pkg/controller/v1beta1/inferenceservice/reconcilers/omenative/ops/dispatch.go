@@ -95,7 +95,7 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	// workload.MigrationRequestSummary is a type alias for
 	// audit.MigrationRequest so the pointer carries through unchanged.
 	input.DetectMigrationRequest = func(ctx context.Context) (string, *workload.MigrationRequestSummary, int32, bool, error) {
-		return detectMigrationRequest(ctx, p, plan.Component)
+		return detectMigrationRequest(ctx, p, internalsource.ComponentTypeFromWorkload(plan.Component))
 	}
 
 	// UpdateGate wires the coordination stack — workload code can't
@@ -110,19 +110,20 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	// (Sequential group ordering). First denial wins; subsequent
 	// gates short-circuit.
 	input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
-		if allowed, reason := coordination.CheckRatioGate(p.ISVC, plan.Component, inFlightUnavail); !allowed {
+		v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+		if allowed, reason := coordination.CheckRatioGate(p.ISVC, v1component, inFlightUnavail); !allowed {
 			return false, reason
 		}
 		if strategy == workload.UpdateStrategySurgeThenDrain || strategy == "" {
-			if allowed, reason := coordination.CheckSurgeGate(p.ISVC, plan.Component, inFlightSurge); !allowed {
+			if allowed, reason := coordination.CheckSurgeGate(p.ISVC, v1component, inFlightSurge); !allowed {
 				return false, reason
 			}
 		} else {
-			if allowed, reason := coordination.CheckUnavailabilityGate(p.ISVC, plan.Component, inFlightUnavail); !allowed {
+			if allowed, reason := coordination.CheckUnavailabilityGate(p.ISVC, v1component, inFlightUnavail); !allowed {
 				return false, reason
 			}
 		}
-		if allowed, reason := coordination.CheckSequentialGate(p.ISVC, plan.Component); !allowed {
+		if allowed, reason := coordination.CheckSequentialGate(p.ISVC, v1component); !allowed {
 			return false, reason
 		}
 		return true, ""

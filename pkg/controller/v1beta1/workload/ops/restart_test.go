@@ -61,7 +61,7 @@ func buildPlanSinglePodEngineForRestart(isvc *v1beta1.InferenceService) workload
 
 func TestRestart_NilClient(t *testing.T) {
 	resetExpectations(t)
-	plan := workload.ComponentPlan{Component: v1beta1.EngineComponent}
+	plan := workload.ComponentPlan{Component: workload.ComponentEngine}
 	inst := workload.InstancePlan{Index: 0, Incarnation: 1}
 	if _, err := ops.Restart(context.Background(), workload.Deps{}, workload.ReconcileInput{}, plan, inst, ""); err == nil {
 		t.Fatal("expected error for nil client")
@@ -73,7 +73,7 @@ func TestRestart_FirstPassBumpsIncarnationAndPatchesStatus(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	pod := podAtIncarnation(isvc, 0, 1, true /* ready */, true /* serving */)
 	c := newFakeClient(t, isvc, pod)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "test trigger")
@@ -122,7 +122,7 @@ func TestRestart_DrainOldPod_FlipsServingFalse(t *testing.T) {
 	pod := podAtIncarnation(isvc, 0, 1, true, true)
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, true /* still Ready */)
 	c := newFakeClient(t, isvc, pod, slice)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
@@ -154,7 +154,7 @@ func TestRestart_DeletesOldPodOnceDrained(t *testing.T) {
 	pod := podAtIncarnation(isvc, 0, 1, true, false /* already drained */)
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, pod, false /* Ready=false */)
 	c := newFakeClient(t, isvc, pod, slice)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
@@ -186,7 +186,7 @@ func TestRestart_RefusesToDeleteOrphanPod(t *testing.T) {
 	orphan.Name = "orphan-pod"
 	delete(orphan.Labels, query.LabelInstanceIncarnation)
 	c := newFakeClient(t, isvc, orphan)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
@@ -222,7 +222,7 @@ func TestRestart_CreatesNewPodAtBumpedIncarnation(t *testing.T) {
 		},
 	}
 	c := newFakeClient(t, isvc)
-	input := buildTestInputForDelete(isvc, c, v1beta1.EngineComponent)
+	input := buildTestInputForDelete(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(isvc)
 
 	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
@@ -262,7 +262,7 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 		// status to pick up the new incarnation after Restart bumps it.
 		fresh := &v1beta1.InferenceService{}
 		_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-		input := buildTestInputForDelete(fresh, c, v1beta1.EngineComponent)
+		input := buildTestInputForDelete(fresh, c, workload.ComponentEngine)
 		plan := buildPlanSinglePodEngineForRestart(fresh)
 
 		// Fast-forward: simulate the fake watch observing every delete the

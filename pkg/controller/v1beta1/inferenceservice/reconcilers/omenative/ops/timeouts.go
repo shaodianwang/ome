@@ -12,6 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
@@ -38,7 +39,8 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p core.ReconcileParam
 	if p.ISVC == nil {
 		return nil
 	}
-	cs, ok := p.ISVC.Status.Components[plan.Component]
+	v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+	cs, ok := p.ISVC.Status.Components[v1component]
 	if !ok || cs.OMENative == nil {
 		return nil
 	}
@@ -49,12 +51,12 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p core.ReconcileParam
 			continue
 		}
 		if isInPlaceUpdate(s.Operation) {
-			if err := fallbackInPlaceToRecreate(ctx, p, plan.Component, s.Index); err != nil {
+			if err := fallbackInPlaceToRecreate(ctx, p, v1component, s.Index); err != nil {
 				return fmt.Errorf("expire in-place update (instance=%d): %w", s.Index, err)
 			}
 			status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonInPlaceTimeoutFallback,
 				"OMENative %s in-place update timed out; falling back to recreate",
-				status.InstanceKey(plan.Component, s.Index))
+				status.InstanceKey(v1component, s.Index))
 			continue
 		}
 		// Migrate timeouts get a live surge re-check rather than the
@@ -63,7 +65,7 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p core.ReconcileParam
 		// investigate; if not, abandon surge so the Component doesn't
 		// sit forever in a half-finished state.
 		if isMigrate(s.Operation) {
-			abandoned, err := tryAbandonStuckMigration(ctx, p, plan.Component, s)
+			abandoned, err := tryAbandonStuckMigration(ctx, p, v1component, s)
 			if err != nil {
 				return fmt.Errorf("expire migration (instance=%d): %w", s.Index, err)
 			}
@@ -77,13 +79,13 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p core.ReconcileParam
 		// this guard every reconcile pass after the first timeout
 		// would re-emit the event.
 		alreadyStuck := s.Operation != nil && s.Operation.Reason == status.ReasonDeadlineExceeded
-		if err := stampOperationStuck(ctx, p, plan.Component, s.Index); err != nil {
+		if err := stampOperationStuck(ctx, p, v1component, s.Index); err != nil {
 			return fmt.Errorf("stamp stuck (instance=%d): %w", s.Index, err)
 		}
 		if !alreadyStuck && s.Operation != nil {
 			status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonOperationDeadlineExceeded,
 				"OMENative %s operation %s/%s exceeded deadline; operator intervention required",
-				status.InstanceKey(plan.Component, s.Index), s.Operation.Type, s.Operation.Step)
+				status.InstanceKey(v1component, s.Index), s.Operation.Type, s.Operation.Step)
 		}
 		// Phase escalation: stamping OperationStuck leaves the Instance
 		// in its transient Phase (Creating / Updating / Restarting /
@@ -97,7 +99,7 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p core.ReconcileParam
 		// Component.Failed.
 		alreadyFailed := s.Phase == v1beta1.OMENativeInstanceFailed
 		if !alreadyFailed && isEscalatablePhase(s.Phase) {
-			if err := stampInstanceFailed(ctx, p, plan.Component, s.Index); err != nil {
+			if err := stampInstanceFailed(ctx, p, v1component, s.Index); err != nil {
 				return fmt.Errorf("stamp failed (instance=%d): %w", s.Index, err)
 			}
 			// Mirror the just-committed Phase onto the in-memory ISVC
@@ -110,10 +112,10 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p core.ReconcileParam
 			// apiserver — the escalation never sticks and the
 			// InstanceFailed event fires on every reconcile until the
 			// test times out.
-			mirrorInstancePhase(p.ISVC, plan.Component, s.Index, v1beta1.OMENativeInstanceFailed)
+			mirrorInstancePhase(p.ISVC, v1component, s.Index, v1beta1.OMENativeInstanceFailed)
 			status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonInstanceFailed,
 				"OMENative %s escalated to Phase=Failed after deadline; coordination layer will fail the group",
-				status.InstanceKey(plan.Component, s.Index))
+				status.InstanceKey(v1component, s.Index))
 		}
 	}
 	return nil
@@ -188,7 +190,7 @@ func tryAbandonStuckMigration(ctx context.Context, p core.ReconcileParams, compo
 	surgeIdx := *source.Operation.SurgeIndex
 	uuid := source.Operation.RequestUUID
 
-	surgePods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, component, surgeIdx)
+	surgePods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, internalsource.ComponentTypeToWorkload(component), surgeIdx)
 	if err != nil {
 		return false, fmt.Errorf("list surge pods: %w", err)
 	}
@@ -211,7 +213,7 @@ func tryAbandonStuckMigration(ctx context.Context, p core.ReconcileParams, compo
 	// Undo the source-drain key (set during Migrate step 8). If the
 	// drain key was never added (timeout fired before step 8) the
 	// remove is a no-op via podreadiness's idempotency.
-	sourcePods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, component, source.Index)
+	sourcePods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, internalsource.ComponentTypeToWorkload(component), source.Index)
 	if err != nil {
 		return false, fmt.Errorf("list source pods: %w", err)
 	}
@@ -232,7 +234,7 @@ func tryAbandonStuckMigration(ctx context.Context, p core.ReconcileParams, compo
 
 	// Mark Failed in the audit ledger so a re-delivered request
 	// with the same UUID short-circuits.
-	ledger, err := audit.LoadLedger(ctx, p.Reader(), p.ISVC)
+	ledger, err := internalsource.LoadAuditLedgerForISVC(ctx, p.Reader(), p.ISVC)
 	if err != nil {
 		return false, fmt.Errorf("load ledger for abandon: %w", err)
 	}
@@ -246,7 +248,7 @@ func tryAbandonStuckMigration(ctx context.Context, p core.ReconcileParams, compo
 		CompletedAt: now,
 		Outcome:     "surge abandoned after deadline (surge not Ready)",
 	})
-	if err := audit.PersistLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
+	if err := internalsource.PersistAuditLedgerForISVC(ctx, p.Client, p.ISVC, ledger); err != nil {
 		return false, fmt.Errorf("persist Failed ledger after abandon: %w", err)
 	}
 	if err := clearMigrationRequestAnnotation(ctx, p, uuid); err != nil {

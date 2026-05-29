@@ -147,7 +147,7 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 	// without reaching the update branch.
 	var target *appsv1.ControllerRevision
 	if p.PodSpec != nil {
-		t, rerr := ensureRevisionWithCollisionRetry(ctx, p, plan.Component)
+		t, rerr := ensureRevisionWithCollisionRetry(ctx, p, internalsource.ComponentTypeFromWorkload(plan.Component))
 		if rerr != nil {
 			return ctrl.Result{}, fmt.Errorf("OMENative reconciler: ensure revision (component=%s): %w", plan.Component, rerr)
 		}

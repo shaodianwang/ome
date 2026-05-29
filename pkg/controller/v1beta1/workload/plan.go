@@ -5,8 +5,6 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 // BuildPlan computes the desired ComponentPlan from the projected
@@ -23,7 +21,7 @@ import (
 // The mutating webhook fills in Lifecycle fields in production;
 // BuildPlan re-applies defaults inline for robustness against
 // pre-defaulter objects and test fixtures.
-func BuildPlan(component v1beta1.ComponentType, desired WorkloadDesiredSpec, observed WorkloadObservedState) (ComponentPlan, error) {
+func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed WorkloadObservedState) (ComponentPlan, error) {
 	replicas := desired.Replicas
 	if replicas <= 0 {
 		replicas = 1
@@ -89,29 +87,29 @@ func runnersForInstance(multiPod bool, workerSize int32) []RunnerPlan {
 	}
 }
 
-func restartPolicyOrDefault(p *v1beta1.InstanceRestartPolicy, multiPod bool) v1beta1.InstanceRestartPolicy {
+func restartPolicyOrDefault(p *RestartPolicy, multiPod bool) RestartPolicy {
 	if p != nil {
 		return *p
 	}
 	if multiPod {
-		return v1beta1.InstanceRestartPolicyRecreateInstance
+		return RestartPolicyRecreateInstance
 	}
-	return v1beta1.InstanceRestartPolicyNone
+	return RestartPolicyNone
 }
 
-func readyPolicyOrDefault(p *v1beta1.InstanceReadyPolicy, multiPod bool) v1beta1.InstanceReadyPolicy {
+func readyPolicyOrDefault(p *InstanceReadyPolicy, multiPod bool) InstanceReadyPolicy {
 	if p != nil {
 		return *p
 	}
 	if multiPod {
-		return v1beta1.InstanceReadyPolicyAllPodReady
+		return InstanceReadyPolicyAllPodReady
 	}
-	return v1beta1.InstanceReadyPolicyNone
+	return InstanceReadyPolicyNone
 }
 
-func updateStrategyWithDefaults(s *v1beta1.UpdateStrategy) v1beta1.UpdateStrategy {
+func updateStrategyWithDefaults(s *UpdateStrategy) UpdateStrategy {
 	if s == nil {
-		s = &v1beta1.UpdateStrategy{}
+		s = &UpdateStrategy{}
 	}
 	out := *s
 	if out.Type == "" {
@@ -119,10 +117,10 @@ func updateStrategyWithDefaults(s *v1beta1.UpdateStrategy) v1beta1.UpdateStrateg
 		// at the dispatcher gate, whereas in-place at scale could mass-
 		// drain the fleet on a single wake-up. Opt into in-place
 		// explicitly via spec.<component>.omeNative.updateStrategy.type.
-		out.Type = v1beta1.UpdateStrategySurgeThenDrain
+		out.Type = UpdateStrategySurgeThenDrain
 	}
 	if out.InPlaceUpdateStrategy == nil {
-		out.InPlaceUpdateStrategy = &v1beta1.InPlaceUpdateStrategy{}
+		out.InPlaceUpdateStrategy = &InPlaceUpdateStrategy{}
 	}
 	if out.InPlaceUpdateStrategy.GracePeriodSeconds == nil {
 		grace := int32(30)
@@ -142,9 +140,9 @@ func instanceReadyTimeoutOrDefault(d *metav1.Duration) time.Duration {
 	return d.Duration
 }
 
-func migrationModeOrDefault(p *v1beta1.MigrationPolicy) v1beta1.MigrationPolicyMode {
+func migrationModeOrDefault(p *MigrationPolicy) MigrationMode {
 	if p == nil || p.Mode == "" {
-		return v1beta1.MigrationPolicyModeAuto
+		return MigrationModeAuto
 	}
 	return p.Mode
 }

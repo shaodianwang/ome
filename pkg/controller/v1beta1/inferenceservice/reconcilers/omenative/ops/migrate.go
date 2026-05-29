@@ -179,7 +179,7 @@ func detectMigrationRequest(ctx context.Context, p core.ReconcileParams, compone
 		return "", nil, 0, false, nil
 	}
 
-	ledger, err := audit.LoadLedger(ctx, p.Reader(), p.ISVC)
+	ledger, err := internalsource.LoadAuditLedgerForISVC(ctx, p.Reader(), p.ISVC)
 	if err != nil {
 		return "", nil, 0, false, err
 	}
@@ -226,7 +226,7 @@ func detectMigrationRequest(ctx context.Context, p core.ReconcileParams, compone
 				CompletedAt: metav1.Now().UTC().Format(time.RFC3339),
 				Outcome:     perr.Error(),
 			})
-			if err := audit.PersistLedger(ctx, p.Client, p.ISVC, ledger); err != nil {
+			if err := internalsource.PersistAuditLedgerForISVC(ctx, p.Client, p.ISVC, ledger); err != nil {
 				return "", nil, 0, false, fmt.Errorf("persist Failed ledger after parse error: %w", err)
 			}
 			if errors.Is(perr, audit.ErrUnsupportedSchemaVersion) {

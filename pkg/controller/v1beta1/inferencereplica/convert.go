@@ -126,7 +126,7 @@ func buildHeadlessServiceSpec(ir *v1beta1.InferenceReplica) workloadtypes.PerCom
 		query.LabelManagedBy:                  query.ManagedByOMENative,
 	}
 	return workloadtypes.PerComponentServiceSpec{
-		Name:      query.HeadlessServiceName(ir.Spec.ParentRef.Name, ir.Spec.Component),
+		Name:      query.HeadlessServiceName(ir.Spec.ParentRef.Name, internalsource.ComponentTypeToWorkload(ir.Spec.Component)),
 		Namespace: ir.Namespace,
 		Selector:  selector,
 		Labels:    selector,
@@ -162,7 +162,7 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadDesiredSpec {
 		}
 	}
 	if ir.Spec.Lifecycle != nil {
-		desired.Lifecycle = *ir.Spec.Lifecycle
+		desired.Lifecycle = internalsource.LifecycleSpecToWorkload(*ir.Spec.Lifecycle)
 	}
 	// Pull the per-role PodSpec + ObjectMeta out of the rendered IR
 	// runners. The IR contract requires at least one Runner; the

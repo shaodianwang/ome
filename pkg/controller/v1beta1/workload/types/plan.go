@@ -2,8 +2,6 @@ package types
 
 import (
 	"time"
-
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 // ComponentPlan is the desired Component → Instance → Runner → Pod
@@ -11,11 +9,10 @@ import (
 // persisted; policy fields hold the effective values after defaults.
 type ComponentPlan struct {
 	// Component identifies which of router / engine / decoder this plan
-	// describes. Typed as v1beta1.ComponentType because downstream call
-	// sites in pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/
-	// pass plan.Component on to query/, status/, and per-op helpers that
-	// still take v1beta1.ComponentType.
-	Component v1beta1.ComponentType
+	// describes. Typed as the workload-side ComponentType so the
+	// workload package stays free of v1beta1 imports; adapters convert
+	// from v1beta1.ComponentType at the boundary.
+	Component ComponentType
 
 	// Replicas is the desired number of Instances for this Component
 	// (= MinReplicas, or 1 when MinReplicas is unset).
@@ -27,13 +24,13 @@ type ComponentPlan struct {
 	Instances []InstancePlan
 
 	// RestartPolicy is the effective Instance-group restart policy.
-	RestartPolicy v1beta1.InstanceRestartPolicy
+	RestartPolicy RestartPolicy
 
 	// UpdateStrategy is the effective rollout policy across Instances.
-	UpdateStrategy v1beta1.UpdateStrategy
+	UpdateStrategy UpdateStrategy
 
 	// ReadyPolicy is the effective Instance-level readiness aggregation.
-	ReadyPolicy v1beta1.InstanceReadyPolicy
+	ReadyPolicy InstanceReadyPolicy
 
 	// InstanceReadyTimeout is the wait ceiling on a newly-created
 	// Instance becoming Ready.
@@ -41,24 +38,7 @@ type ComponentPlan struct {
 
 	// MigrationMode is the effective migration disposition (auto / surge /
 	// never).
-	MigrationMode v1beta1.MigrationPolicyMode
-}
-
-// ComponentTypeFromV1beta1 converts via an explicit switch. Unknown
-// values map to "" so callers tolerate API-version skew without
-// panicking — a bare T(value) cast would silently accept any drift
-// between the two enums.
-func ComponentTypeFromV1beta1(v v1beta1.ComponentType) ComponentType {
-	switch v {
-	case v1beta1.RouterComponent:
-		return ComponentRouter
-	case v1beta1.EngineComponent:
-		return ComponentEngine
-	case v1beta1.DecoderComponent:
-		return ComponentDecoder
-	default:
-		return ComponentType("")
-	}
+	MigrationMode MigrationMode
 }
 
 // InstancePlan is the desired state for one Instance — the atomic

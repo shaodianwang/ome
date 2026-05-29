@@ -37,6 +37,13 @@ type (
 	EventReason             = types.EventReason
 	ConditionType           = types.ConditionType
 	ConditionReason         = types.ConditionReason
+	Lifecycle               = types.Lifecycle
+	UpdateStrategy          = types.UpdateStrategy
+	RollingUpdate           = types.RollingUpdate
+	InPlaceUpdateStrategy   = types.InPlaceUpdateStrategy
+	InstanceReadyPolicy     = types.InstanceReadyPolicy
+	MigrationPolicy         = types.MigrationPolicy
+	ComponentTrafficTarget  = types.ComponentTrafficTarget
 )
 
 const (
@@ -66,6 +73,9 @@ const (
 	MigrationModeAuto  = types.MigrationModeAuto
 	MigrationModeSurge = types.MigrationModeSurge
 	MigrationModeNever = types.MigrationModeNever
+
+	InstanceReadyPolicyAllPodReady = types.InstanceReadyPolicyAllPodReady
+	InstanceReadyPolicyNone        = types.InstanceReadyPolicyNone
 
 	InstanceOperationCreate  = types.InstanceOperationCreate
 	InstanceOperationUpdate  = types.InstanceOperationUpdate

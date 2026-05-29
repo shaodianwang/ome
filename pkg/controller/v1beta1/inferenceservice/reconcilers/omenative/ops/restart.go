@@ -86,7 +86,7 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 // package, still using v1beta1.InstanceRestartPolicy on the plan)
 // calls it directly. Migrates to workload/ops alongside the dispatcher.
 func detectRestartTrigger(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan) (bool, string, error) {
-	s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index)
+	s := findInstanceStatusForISVC(p.ISVC, p.Component, inst.Index)
 	if s == nil {
 		return false, "", nil
 	}
@@ -100,9 +100,15 @@ func detectRestartTrigger(ctx context.Context, p core.ReconcileParams, plan core
 		return false, "", nil
 	}
 
-	pods, err := query.ListPodsForInstance(ctx, p.Client, p.ISVC, plan.Component, inst.Index)
+	allPods, err := query.ListOMENativePodsByName(ctx, p.Client, p.ISVC.Namespace, p.ISVC.Name, plan.Component)
 	if err != nil {
 		return false, "", err
+	}
+	pods := make([]*corev1.Pod, 0, len(allPods))
+	for _, pod := range allPods {
+		if i, ok := query.InstanceIdxFromLabels(pod); ok && i == inst.Index {
+			pods = append(pods, pod)
+		}
 	}
 	expected := inst.TotalPods()
 
@@ -115,6 +121,26 @@ func detectRestartTrigger(ctx context.Context, p core.ReconcileParams, plan core
 		return true, fmt.Sprintf("pod count %d below desired %d", len(pods), expected), nil
 	}
 	return false, "", nil
+}
+
+// findInstanceStatusForISVC returns the cached InstanceStatus entry for
+// the given (component, idx) from the ISVC.Status, nil if absent. Inline
+// helper here because the workload-side query package is v1beta1-free
+// — adapters resolve their own typed status surface.
+func findInstanceStatusForISVC(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) *v1beta1.OMENativeInstanceStatus {
+	if isvc == nil {
+		return nil
+	}
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.OMENative == nil {
+		return nil
+	}
+	for i := range cs.OMENative.InstanceStatuses {
+		if cs.OMENative.InstanceStatuses[i].Index == idx {
+			return &cs.OMENative.InstanceStatuses[i]
+		}
+	}
+	return nil
 }
 
 // isMigrateOwned reports whether Migrate is the active owner of this

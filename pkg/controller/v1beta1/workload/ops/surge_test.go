@@ -23,7 +23,7 @@ import (
 // so partitionPodsBySurgeOrdinal can place it in the right bucket.
 func surgePodAtOrdinal(isvc *v1beta1.InferenceService, instanceIdx int32, incarnation int64, ordinal int32, ready, serving bool) *corev1.Pod {
 	pod := legacyPodAtIncarnation(isvc, instanceIdx, incarnation, ready, serving)
-	pod.Name = query.PodName(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", ordinal)
+	pod.Name = query.PodName(isvc.Name, workload.ComponentEngine, instanceIdx, "default", ordinal)
 	pod.Labels[query.LabelPodOrdinal] = fmt.Sprintf("%d", ordinal)
 	pod.Spec.Containers = []corev1.Container{{Name: "main", Image: "test:v1"}}
 	return pod
@@ -86,7 +86,7 @@ func makeCR(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, name 
 // test consumes.
 func surgePlan() workload.ComponentPlan {
 	return workload.ComponentPlan{
-		Component: v1beta1.EngineComponent,
+		Component: workload.ComponentEngine,
 		Replicas:  1,
 		Instances: []workload.InstancePlan{{
 			Index:       0,
@@ -94,8 +94,8 @@ func surgePlan() workload.ComponentPlan {
 			Runners:     []workload.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 		InstanceReadyTimeout: 30 * time.Minute,
-		UpdateStrategy: v1beta1.UpdateStrategy{
-			Type: v1beta1.UpdateStrategySurgeThenDrain,
+		UpdateStrategy: workload.UpdateStrategy{
+			Type: workload.UpdateStrategySurgeThenDrain,
 		},
 	}
 }
@@ -133,7 +133,7 @@ func TestPatchInstanceStatusSurgingForUpdate_IdempotentOnSurgeDrainStep(t *testi
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 
 	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", 30*time.Second); err != nil {
 		t.Fatalf("stamp Surge: %v", err)
@@ -176,7 +176,7 @@ func TestMutateInstance_MirrorsCommittedStateOntoInMemoryISVC(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 
 	// Commit a Phase transition.
 	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), input, 0, "rev-abc", 1); err != nil {
@@ -250,7 +250,7 @@ func TestExpectedPodNamesForInstance_RespectsActiveOrdinal(t *testing.T) {
 					},
 				}
 			}
-			input := legacyTestInput(isvc, nil, v1beta1.EngineComponent)
+			input := legacyTestInput(isvc, nil, workload.ComponentEngine)
 			plan := surgePlan()
 			inst := workload.InstancePlan{
 				Index:       0,
@@ -282,7 +282,7 @@ func TestExpectedPodNamesForInstance_StaleActiveOrdinalDoesNotResurrect(t *testi
 	// Simulate post-promote state: ActiveOrdinal=1.
 	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].ActiveOrdinal = 1
 
-	input := legacyTestInput(isvc, nil, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, nil, workload.ComponentEngine)
 	plan := surgePlan()
 	inst := workload.InstancePlan{
 		Index:       0,
@@ -312,7 +312,7 @@ func TestExpectedPodNamesForInstance_MultiPodPreservesAllOrdinals(t *testing.T) 
 			},
 		},
 	}
-	input := legacyTestInput(isvc, nil, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, nil, workload.ComponentEngine)
 	plan := surgePlan()
 	inst := workload.InstancePlan{
 		Index:       0,
@@ -411,7 +411,7 @@ func TestSurgeUpdate_PostPromoteCreateDoesNotResurrectDrainedOrdinal(t *testing.
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	tcr := makeCR(t, c, isvc, "llama-70b-engine-rev-abc12345")
 	// Promote the surge: bumps ActiveOrdinal to 1 and stamps RunningRevision.
 	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), input, 0, tcr.Name, 1); err != nil {
@@ -428,7 +428,7 @@ func TestSurgeUpdate_PostPromoteCreateDoesNotResurrectDrainedOrdinal(t *testing.
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
 		t.Fatalf("re-read ISVC: %v", err)
 	}
-	input2 := legacyTestInput(fresh, c, v1beta1.EngineComponent)
+	input2 := legacyTestInput(fresh, c, workload.ComponentEngine)
 	plan := surgePlan()
 
 	// Drive Create as the dispatcher would after Update returns done=true.
@@ -462,7 +462,7 @@ func TestSurgeUpdate_MultiInstance_NoOrdResurrectionAfterPromote(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCMultiInstance("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	tcr := makeCR(t, c, isvc, "llama-70b-engine-rev-abc12345")
 
 	// Simulate post-promote state for BOTH instances: ActiveOrdinal=1.
@@ -481,9 +481,9 @@ func TestSurgeUpdate_MultiInstance_NoOrdResurrectionAfterPromote(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
 		t.Fatalf("re-read ISVC: %v", err)
 	}
-	input2 := legacyTestInput(fresh, c, v1beta1.EngineComponent)
+	input2 := legacyTestInput(fresh, c, workload.ComponentEngine)
 	plan := workload.ComponentPlan{
-		Component: v1beta1.EngineComponent,
+		Component: workload.ComponentEngine,
 		Replicas:  2,
 		Instances: []workload.InstancePlan{
 			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
@@ -518,7 +518,7 @@ func TestSurgeUpdate_MultiInstance_InterleavedPromotes(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCMultiInstance("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	tcr := makeCR(t, c, isvc, "llama-70b-engine-rev-abc12345")
 
 	// Promote instance 0.
@@ -527,7 +527,7 @@ func TestSurgeUpdate_MultiInstance_InterleavedPromotes(t *testing.T) {
 	}
 	// Build a fresh input from the in-memory ISVC (mirror should have
 	// updated it). Promote instance 1.
-	input2 := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input2 := legacyTestInput(isvc, c, workload.ComponentEngine)
 	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), input2, 1, tcr.Name, 1); err != nil {
 		t.Fatalf("promote 1: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestSurgeUpdate_BumpDuringBump_ConvergesToFinalRev(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
 
 	// Old pod at ord=0.
@@ -590,7 +590,7 @@ func TestSurgeUpdate_BumpDuringBump_ConvergesToFinalRev(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), freshISVC); err != nil {
 		t.Fatalf("re-read ISVC: %v", err)
 	}
-	input2 := legacyTestInput(freshISVC, c, v1beta1.EngineComponent)
+	input2 := legacyTestInput(freshISVC, c, workload.ComponentEngine)
 	s := freshISVC.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
 	if s.Operation == nil || s.Operation.TargetRevision != rev2.Name {
 		t.Fatalf("expected recorded Op.TargetRevision=rev2 after pass 1, got %+v", s.Operation)
@@ -598,7 +598,7 @@ func TestSurgeUpdate_BumpDuringBump_ConvergesToFinalRev(t *testing.T) {
 
 	// Pass 2 against rev3 (the bump-during-bump). surgeUpdate should
 	// pin to the in-flight rev2 — NOT drive to rev3 yet.
-	rev2SurgeName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 1)
+	rev2SurgeName := query.PodName(isvc.Name, workload.ComponentEngine, 0, "default", 1)
 	rev2Surge := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev2SurgeName}, rev2Surge); err != nil {
 		t.Fatalf("rev2 surge pod missing: %v", err)
@@ -626,7 +626,7 @@ func TestSurgeUpdate_SingleBump_DoesNotShiftTarget(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
 
 	oldPod := surgePodAtOrdinal(isvc, 0, 1, 0, true, true)
@@ -648,8 +648,8 @@ func TestSurgeUpdate_SingleBump_DoesNotShiftTarget(t *testing.T) {
 
 	// Re-invoke at the same target (rev2). The Op.TargetRevision should
 	// remain pinned without status churn.
-	input2 := legacyTestInput(freshISVC, c, v1beta1.EngineComponent)
-	rev2SurgeName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 1)
+	input2 := legacyTestInput(freshISVC, c, workload.ComponentEngine)
+	rev2SurgeName := query.PodName(isvc.Name, workload.ComponentEngine, 0, "default", 1)
 	rev2Surge := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev2SurgeName}, rev2Surge); err != nil {
 		t.Fatalf("rev2 surge pod missing: %v", err)
@@ -681,7 +681,7 @@ func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
 
 	// Simulate post-v2-promote state: RunningRevision=rev2, ActiveOrdinal=1.
@@ -695,7 +695,7 @@ func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 		t.Fatalf("seed v2 pod: %v", err)
 	}
 	// Re-read so input observes the post-promote ActiveOrdinal=1 + RunningRevision=rev2.
-	input = legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input = legacyTestInput(isvc, c, workload.ComponentEngine)
 
 	rev3 := makeCR(t, c, isvc, "llama-70b-engine-rev-rev3hash")
 
@@ -704,7 +704,7 @@ func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 	if _, err := surgeUpdate(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], rev3, []*corev1.Pod{v2Pod}); err != nil {
 		t.Fatalf("pass 1 (v3 surge create): %v", err)
 	}
-	rev3SurgeName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 0)
+	rev3SurgeName := query.PodName(isvc.Name, workload.ComponentEngine, 0, "default", 0)
 	rev3Surge := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: rev3SurgeName}, rev3Surge); err != nil {
 		t.Fatalf("v3 surge pod missing after pass 1: %v", err)
@@ -782,7 +782,7 @@ func TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
 
 	rev2 := makeCR(t, c, isvc, "llama-70b-engine-rev-rev2hash")
@@ -803,7 +803,7 @@ func TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained(t *testing.T) {
 		t.Fatalf("seed stale: %v", err)
 	}
 	// Re-read so input observes the post-v2-promote state.
-	input = legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input = legacyTestInput(isvc, c, workload.ComponentEngine)
 
 	rev3 := makeCR(t, c, isvc, "llama-70b-engine-rev-rev3hash")
 
@@ -850,7 +850,7 @@ func TestSurgeUpdate_Phase1StampsStepSurgeAndCreatesSurgePod(t *testing.T) {
 	oldPod := surgePodAtOrdinal(isvc, 0, 1, 0, true, true)
 	target := legacyTargetSpecImage("llama:v2")
 	c := legacyNewFakeClient(t, isvc, oldPod)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
@@ -879,7 +879,7 @@ func TestSurgeUpdate_Phase1StampsStepSurgeAndCreatesSurgePod(t *testing.T) {
 	}
 
 	// Surge pod should now exist at ordinal 1.
-	surgeName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 1)
+	surgeName := query.PodName(isvc.Name, workload.ComponentEngine, 0, "default", 1)
 	surgePod := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: surgeName}, surgePod); err != nil {
 		t.Fatalf("surge pod %s not created: %v", surgeName, err)
@@ -901,7 +901,7 @@ func TestSurgeUpdate_Phase1WaitsForSurgeReady(t *testing.T) {
 	surgePod := surgePodAtOrdinal(isvc, 0, 1, 1, false, false)
 	target := legacyTargetSpecImage("llama:v2")
 	c := legacyNewFakeClient(t, isvc, oldPod, surgePod)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 	// Pre-stamp Step=Surge so we test the "waiting" branch, not the entry.
@@ -939,7 +939,7 @@ func TestSurgeUpdate_Phase3PromotesAndAdvancesActiveOrdinal(t *testing.T) {
 	surgePod := surgePodAtOrdinal(isvc, 0, 1, 1, true, true)
 	target := legacyTargetSpecImage("llama:v2")
 	c := legacyNewFakeClient(t, isvc, surgePod)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 	// Status reflects mid-surge state at Step=Drain.
@@ -989,7 +989,7 @@ func TestSurgeUpdate_AlternatesOrdinalAcrossSurges(t *testing.T) {
 	oldPod := surgePodAtOrdinal(isvc, 0, 1, 1, true, true)
 	target := legacyTargetSpecImage("llama:v3")
 	c := legacyNewFakeClient(t, isvc, oldPod)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
@@ -999,7 +999,7 @@ func TestSurgeUpdate_AlternatesOrdinalAcrossSurges(t *testing.T) {
 	}
 
 	// New surge pod should now exist at ordinal 0 (since old is at 1).
-	newSurgeName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 0)
+	newSurgeName := query.PodName(isvc.Name, workload.ComponentEngine, 0, "default", 0)
 	surgePod := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: newSurgeName}, surgePod); err != nil {
 		t.Fatalf("next-surge pod %s should exist at ordinal 0: %v", newSurgeName, err)
@@ -1016,7 +1016,7 @@ func TestSurgeUpdate_MultiPodRejected(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
 	// Synthesize a multi-pod plan (BuildPlan won't produce this normally,
 	// but the guard must hold for any caller that constructs one).
@@ -1063,7 +1063,7 @@ func TestPatchInstanceStatusReadyOnRevisionWithOrdinal_Idempotent(t *testing.T) 
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
-	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 
 	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(context.Background(), input, 0, "rev-abc", 1); err != nil {
 		t.Fatalf("first call: %v", err)

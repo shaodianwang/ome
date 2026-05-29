@@ -44,12 +44,12 @@ func vfnFixture(t *testing.T, pods ...*corev1.Pod) (workload.Deps, workload.Reco
 			OwnerName: "llama-70b",
 			SelectorLabels: map[string]string{
 				constants.InferenceServicePodLabelKey: "llama-70b",
-				constants.OMEComponentLabel:           string(v1beta1.EngineComponent),
+				constants.OMEComponentLabel:           string(workload.ComponentEngine),
 				query.LabelManagedBy:                  query.ManagedByOMENative,
 			},
 		},
 	}
-	plan := workload.ComponentPlan{Component: v1beta1.EngineComponent}
+	plan := workload.ComponentPlan{Component: workload.ComponentEngine}
 	return workload.Deps{Client: c}, input, plan
 }
 
@@ -63,7 +63,7 @@ func vfnPod(nodeName string) *corev1.Pod {
 			Namespace: "prod",
 			Labels: map[string]string{
 				constants.InferenceServicePodLabelKey: "llama-70b",
-				constants.OMEComponentLabel:           string(v1beta1.EngineComponent),
+				constants.OMEComponentLabel:           string(workload.ComponentEngine),
 				query.LabelInstanceIdx:                "0",
 				query.LabelInstanceIncarnation:        "1",
 				query.LabelRunner:                     "default",
