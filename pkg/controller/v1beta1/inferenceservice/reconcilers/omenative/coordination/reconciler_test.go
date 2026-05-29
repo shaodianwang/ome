@@ -135,6 +135,141 @@ func TestReconcile_WritesTrafficStatus(t *testing.T) {
 	}
 }
 
+// TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents pins
+// the per-Component contract surfaced by PD-disaggregated A-6 testing:
+// for an ISVC running engine + decoder + router (all OMENative, each on
+// a single ControllerRevision), every Component's traffic[0] must carry
+// the same canonical shape — LatestRevision=true, Percent=100, and the
+// per-revision Service name as RevisionName. The cluster repro showed
+// engine.traffic[0] missing the LatestRevision flag while
+// decoder.traffic[0] + router.traffic[0] had it set correctly — caused
+// by the no-op short-circuit in TrafficDiffersMeaningfully treating the
+// flag as cosmetic, so an early reconcile that wrote LatestRevision=false
+// (UpdateRevision not yet observed from the IR Status) stranded the
+// stale value even after the rollout converged.
+func TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents(t *testing.T) {
+	isvc := testOMENativeISVC()
+	// Add decoder + router as OMENative-mode Components.
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{
+				constants.DeploymentMode: string(constants.OMENative),
+			},
+		},
+	}
+	isvc.Spec.Router = &v1beta1.RouterSpec{
+		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+			Annotations: map[string]string{
+				constants.DeploymentMode: string(constants.OMENative),
+			},
+		},
+	}
+	// Seed Components[c].OMENative.UpdateRevision so latestRevisionHash
+	// recovers the per-Component hash (matches the steady-state shape
+	// AggregateIRStatus writes after the IR controller commits Status).
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				UpdateRevision: isvc.Name + "-engine-engineHash",
+			},
+		},
+		v1beta1.DecoderComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				UpdateRevision: isvc.Name + "-decoder-decoderHash",
+			},
+		},
+		v1beta1.RouterComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				UpdateRevision: isvc.Name + "-router-routerHash",
+			},
+		},
+	}
+	pods := []runtime.Object{
+		buildPod(isvc, v1beta1.EngineComponent, "engineHash", 0),
+		buildPod(isvc, v1beta1.DecoderComponent, "decoderHash", 0),
+		buildPod(isvc, v1beta1.RouterComponent, "routerHash", 0),
+	}
+	c := testClient(pods...)
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, comp := range []v1beta1.ComponentType{
+		v1beta1.EngineComponent,
+		v1beta1.DecoderComponent,
+		v1beta1.RouterComponent,
+	} {
+		cs, ok := isvc.Status.Components[comp]
+		if !ok {
+			t.Errorf("%s: status entry missing", comp)
+			continue
+		}
+		if len(cs.Traffic) != 1 {
+			t.Errorf("%s: Traffic len=%d want 1: %+v", comp, len(cs.Traffic), cs.Traffic)
+			continue
+		}
+		if cs.Traffic[0].Percent != 100 {
+			t.Errorf("%s: Percent=%d want 100", comp, cs.Traffic[0].Percent)
+		}
+		if !cs.Traffic[0].LatestRevision {
+			t.Errorf("%s: LatestRevision=false want true (regression: PD-disaggregated A-6 cluster bug)", comp)
+		}
+	}
+}
+
+// TestReconcile_TrafficLatestRevisionFlipPersists is the focused
+// reconcile-level regression for the no-op short-circuit bug. On the
+// first observation the UpdateRevision is empty (matches the
+// first-reconcile race where AggregateIRStatus has not yet mirrored
+// IR.Status). On the second observation UpdateRevision is populated.
+// The writer MUST flip Traffic[0].LatestRevision from false to true on
+// the second pass — without the fix, TrafficDiffersMeaningfully treats
+// the change as cosmetic and skips the write.
+func TestReconcile_TrafficLatestRevisionFlipPersists(t *testing.T) {
+	isvc := testOMENativeISVC()
+	pods := []runtime.Object{
+		buildPod(isvc, v1beta1.EngineComponent, "engineHash", 0),
+	}
+	c := testClient(pods...)
+
+	// First reconcile: UpdateRevision empty → LatestRevision=false.
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+	}); err != nil {
+		t.Fatalf("first reconcile: unexpected error: %v", err)
+	}
+	cs1, ok := isvc.Status.Components[v1beta1.EngineComponent]
+	if !ok || len(cs1.Traffic) != 1 {
+		t.Fatalf("first pass: Traffic missing or wrong len: %+v", cs1.Traffic)
+	}
+	if cs1.Traffic[0].LatestRevision {
+		t.Fatalf("first pass: LatestRevision should be false when UpdateRevision is empty: %+v", cs1.Traffic[0])
+	}
+
+	// Mirror AggregateIRStatus committing the IR-observed
+	// UpdateRevision back onto the in-memory ISVC.
+	cs1.OMENative = &v1beta1.OMENativeComponentStatus{
+		UpdateRevision: isvc.Name + "-engine-engineHash",
+	}
+	isvc.Status.Components[v1beta1.EngineComponent] = cs1
+
+	// Second reconcile: same pod set, but UpdateRevision is now
+	// observed — LatestRevision must flip to true on the next write.
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+	}); err != nil {
+		t.Fatalf("second reconcile: unexpected error: %v", err)
+	}
+	cs2, ok := isvc.Status.Components[v1beta1.EngineComponent]
+	if !ok || len(cs2.Traffic) != 1 {
+		t.Fatalf("second pass: Traffic missing or wrong len: %+v", cs2.Traffic)
+	}
+	if !cs2.Traffic[0].LatestRevision {
+		t.Errorf("second pass: LatestRevision did not flip to true (regression: A-6 engine traffic[].latestRevision stuck stale)")
+	}
+}
+
 // independentEngineGroup returns a minimal RolloutCoordinationSpec
 // that opts the engine Component into the coordination layer without
 // changing rollout semantics (Independent matches today's defaults).

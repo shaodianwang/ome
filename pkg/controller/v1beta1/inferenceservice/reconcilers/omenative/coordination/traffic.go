@@ -140,18 +140,38 @@ func ComputeWeightsFromPods(perRevisionPods map[string]int32, total int32, lates
 // write. Used to avoid no-op status writes that would bounce the
 // apiserver and add reconcile pressure.
 //
-// The comparison is set-aware on RevisionName + Percent and ignores
-// Tag and LatestRevision drift (those are cosmetic).
+// The comparison is set-aware on RevisionName + Percent + LatestRevision
+// and ignores Tag drift (Tag is cosmetic; LatestRevision is operator-
+// visible and consumed by HTTPRoute reconcilers, so a flip MUST trigger
+// a write).
+//
+// Bug context: when the very first reconcile that observed pods saw an
+// empty OMENativeComponentStatus.UpdateRevision (the IR controller had
+// not yet committed Status; common on Component bring-up), the writer
+// stamped LatestRevision=false. A subsequent reconcile saw
+// UpdateRevision populated and computed LatestRevision=true, but the
+// old comparison treated the flag as cosmetic and the no-op short-
+// circuit suppressed the write — leaving traffic[].LatestRevision stuck
+// at false even after the rollout converged at 100% on a single
+// revision. PD-disaggregated A-6 testing surfaced this as
+// engine.traffic[0] missing the flag while decoder/router (whose Status
+// arrived first in the IR controller's processing order on that
+// cluster) had it correctly set.
 func TrafficDiffersMeaningfully(desired, observed []v1beta1.ComponentTrafficTarget) bool {
 	if len(desired) != len(observed) {
 		return true
 	}
-	want := make(map[string]int32, len(desired))
+	type want struct {
+		percent        int32
+		latestRevision bool
+	}
+	wantBy := make(map[string]want, len(desired))
 	for _, t := range desired {
-		want[t.RevisionName] = t.Percent
+		wantBy[t.RevisionName] = want{percent: t.Percent, latestRevision: t.LatestRevision}
 	}
 	for _, t := range observed {
-		if w, ok := want[t.RevisionName]; !ok || w != t.Percent {
+		w, ok := wantBy[t.RevisionName]
+		if !ok || w.percent != t.Percent || w.latestRevision != t.LatestRevision {
 			return true
 		}
 	}

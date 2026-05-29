@@ -180,3 +180,41 @@ func TestTrafficDiffersMeaningfully_TagDriftIgnored(t *testing.T) {
 		t.Errorf("tag-only drift: should not report diff")
 	}
 }
+
+// TestTrafficDiffersMeaningfully_LatestRevisionFlip pins the regression
+// from PD-disaggregated A-6 testing: when the engine's traffic[0] was
+// initially written with LatestRevision=false (because the IR Status had
+// not yet populated OMENativeComponentStatus.UpdateRevision on the first
+// reconcile that observed pods), subsequent reconciles computed the
+// correct LatestRevision=true value but the no-op short-circuit treated
+// the flag as cosmetic and suppressed the write — leaving the engine
+// entry permanently stuck without the flag while decoder/router (which
+// won the IR-Status race on that cluster) had it set correctly.
+//
+// The fix: a LatestRevision flip is meaningful drift (operator-visible
+// and consumed by downstream HTTPRoute reconcilers) and MUST trigger a
+// write.
+func TestTrafficDiffersMeaningfully_LatestRevisionFlipReportsDiff(t *testing.T) {
+	desired := []v1beta1.ComponentTrafficTarget{{RevisionName: "a", Percent: 100, LatestRevision: true}}
+	observed := []v1beta1.ComponentTrafficTarget{{RevisionName: "a", Percent: 100, LatestRevision: false}}
+	if !TrafficDiffersMeaningfully(desired, observed) {
+		t.Errorf("LatestRevision flip false->true: should report diff (otherwise the no-op short-circuit strands the stale flag)")
+	}
+	// Symmetric case: flipping true->false also matters (e.g., when the
+	// rollout advances and the prior LatestRolledoutRevision is demoted).
+	if !TrafficDiffersMeaningfully(observed, desired) {
+		t.Errorf("LatestRevision flip true->false: should report diff")
+	}
+}
+
+// TestTrafficDiffersMeaningfully_LatestRevisionSameNoDiff pins the
+// no-op fast path: when LatestRevision matches across desired and
+// observed (most reconciles), the no-op short-circuit still kicks in
+// and the writer skips the apiserver round-trip.
+func TestTrafficDiffersMeaningfully_LatestRevisionSameNoDiff(t *testing.T) {
+	desired := []v1beta1.ComponentTrafficTarget{{RevisionName: "a", Percent: 100, LatestRevision: true}}
+	observed := []v1beta1.ComponentTrafficTarget{{RevisionName: "a", Percent: 100, LatestRevision: true}}
+	if TrafficDiffersMeaningfully(desired, observed) {
+		t.Errorf("identical LatestRevision: should not report diff")
+	}
+}
