@@ -17,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/rbac"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
@@ -149,6 +150,25 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 	case constants.RawDeployment:
 		return r.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
 	case constants.OMENative:
+		// IR PR 3: per-Component opt-in routes the Component through the
+		// InferenceReplica path. Router is always single-pod
+		// (MultiPod=false; no Worker block) so the projector receives a
+		// nil WorkerPodSpec — matches the omenative ReconcileParams
+		// projection below.
+		if irprojector.IsIRManagedComponent(isvc, v1beta1.RouterComponent) {
+			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
+				ISVC:         isvc,
+				Component:    v1beta1.RouterComponent,
+				ComponentExt: &r.routerSpec.ComponentExtensionSpec,
+				ObjectMeta:   objectMeta,
+				PodSpec:      podSpec,
+				MultiPod:     false,
+				Client:       r.Client,
+			}); err != nil {
+				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for router")
+			}
+			return ctrl.Result{}, nil
+		}
 		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
 			ISVC:                    isvc,
 			ObjectMeta:              objectMeta,

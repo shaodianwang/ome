@@ -18,6 +18,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
@@ -171,6 +172,26 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
 		multiPod := d.decoderSpec.Leader != nil && d.decoderSpec.Worker != nil
+		// IR PR 3: per-Component opt-in routes the Component through the
+		// InferenceReplica path. See the comment on the engine dispatch
+		// for the full design — rollback path stays the omenative direct
+		// case below.
+		if irprojector.IsIRManagedComponent(isvc, v1beta1.DecoderComponent) {
+			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
+				ISVC:          isvc,
+				Component:     v1beta1.DecoderComponent,
+				ComponentExt:  &d.decoderSpec.ComponentExtensionSpec,
+				ObjectMeta:    objectMeta,
+				PodSpec:       podSpec,
+				WorkerPodSpec: workerPodSpec,
+				WorkerSize:    workerSize,
+				MultiPod:      multiPod,
+				Client:        d.Client,
+			}); err != nil {
+				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for decoder")
+			}
+			return ctrl.Result{}, nil
+		}
 		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
 			ISVC:                    isvc,
 			ObjectMeta:              objectMeta,

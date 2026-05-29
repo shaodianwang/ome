@@ -44,6 +44,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/components"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/external_service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	multimodelconfig "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/modelconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
@@ -590,6 +591,24 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
+	// IR PR 3 Piece 2: for every Component opted into the IR-managed
+	// path, read the live IR.Status and copy it onto
+	// ISVC.Status.Components[<component>].OMENative. The IR controller
+	// is the sole writer of IR.Status (no race with the omenative
+	// direct path — the predicate guarantees one writer per Component).
+	// Direct-path Components are not touched here; their status was
+	// already written by omenative.AggregateAndWriteStatus during the
+	// per-Component dispatcher pass above.
+	//
+	// Errors propagate so a transient apiserver read failure triggers
+	// a retry; first-reconcile NotFound is swallowed inside the
+	// helper (the next reconcile picks up the IR's fresh status once
+	// the cache observes it).
+	if err = irprojector.AggregateIRStatus(ctx, r.Client, isvc); err != nil {
+		r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
+		return reconcile.Result{}, err
+	}
+
 	if err = r.updateStatus(isvc, deploymentMode); err != nil {
 		r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 		return reconcile.Result{}, err
@@ -827,6 +846,15 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		// OEP-0007 OMENative: revision history is owned by the ISVC
 		// so revision-driven status writes enqueue the parent.
 		Owns(&appsv1.ControllerRevision{}).
+		// IR PR 3: InferenceReplica is owned by the ISVC controller —
+		// the projector at the dispatch site (irprojector.EnsureInferenceReplica)
+		// stamps the ISVC as the IR's controller OwnerReference so
+		// foreground GC cascades on ISVC delete, and Owns() re-enqueues
+		// the parent ISVC when the IR controller flips IR.Status
+		// (Replicas / ReadyReplicas / phase progression). This is what
+		// lets the ISVC status aggregator (status_aggregator.go in
+		// commit 2) pick up IR-side counter updates without polling.
+		Owns(&v1beta1.InferenceReplica{}).
 		// OEP-0007 OMENative Loop B: a Pod event handler that updates
 		// the per-controller Expectations cache before enqueueing the
 		// parent ISVC. The predicate restricts the watch to

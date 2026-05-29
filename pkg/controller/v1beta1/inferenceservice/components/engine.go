@@ -18,6 +18,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
@@ -177,6 +178,28 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
 		multiPod := e.engineSpec.Leader != nil && e.engineSpec.Worker != nil
+		// IR PR 3: per-Component opt-in routes the Component through the
+		// InferenceReplica path. The ISVC controller projects the desired
+		// per-Component spec onto an InferenceReplica object; the IR
+		// controller drives per-Instance lifecycle from there. Without the
+		// annotation, the Component keeps using the omenative direct
+		// path for rollback safety.
+		if irprojector.IsIRManagedComponent(isvc, v1beta1.EngineComponent) {
+			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
+				ISVC:          isvc,
+				Component:     v1beta1.EngineComponent,
+				ComponentExt:  &e.engineSpec.ComponentExtensionSpec,
+				ObjectMeta:    objectMeta,
+				PodSpec:       podSpec,
+				WorkerPodSpec: workerPodSpec,
+				WorkerSize:    workerSize,
+				MultiPod:      multiPod,
+				Client:        e.Client,
+			}); err != nil {
+				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for engine")
+			}
+			return ctrl.Result{}, nil
+		}
 		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
 			ISVC:                    isvc,
 			ObjectMeta:              objectMeta,

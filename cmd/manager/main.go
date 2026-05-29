@@ -43,6 +43,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	v1beta1inferencereplicacontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	trafficfactory "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/factory"
 	v1beta1runtimerevisioncontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/runtimerevision"
@@ -105,7 +106,14 @@ type Options struct {
 	runtimeRevisionRetention   int
 	runtimeRevisionGracePeriod time.Duration
 	enableInferenceReplicaCtrl bool
-	zapOpts                    zap.Options
+	// disableIRManagedOmenative is the cluster-operator kill switch
+	// for the IR-managed OMENative dispatch path (IR PR 3). When true,
+	// the ISVC controller ignores the per-Component
+	// ome.io/use-ir-managed annotation and routes every OMENative
+	// Component through the legacy direct path. Defaults false: opt-in
+	// annotations work normally.
+	disableIRManagedOmenative bool
+	zapOpts                   zap.Options
 }
 
 // DefaultOptions returns the default values for the program options.
@@ -127,6 +135,9 @@ func DefaultOptions() Options {
 		// project IRs). The flag exists so operators can disable the
 		// controller if a regression lands.
 		enableInferenceReplicaCtrl: true,
+		// IR PR 3: opt-in annotations are honored by default. The
+		// kill switch is opt-out (flip to true to disable).
+		disableIRManagedOmenative: false,
 		zapOpts: zap.Options{
 			TimeEncoder: zapcore.RFC3339TimeEncoder,
 			ZapOpts:     []zaplog.Option{zaplog.AddCaller()},
@@ -156,6 +167,8 @@ func GetOptions() Options {
 		"How long an OME-owned ControllerRevision stays after first being observed unreferenced + over retention.")
 	flag.BoolVar(&opts.enableInferenceReplicaCtrl, "enable-inferencereplica-controller", opts.enableInferenceReplicaCtrl,
 		"Run the InferenceReplica controller. Defaults true; flip to false to disable if the per-IR lifecycle code ships a regression.")
+	flag.BoolVar(&opts.disableIRManagedOmenative, "disable-ir-managed-omenative", opts.disableIRManagedOmenative,
+		"Cluster-wide kill switch for the IR-managed OMENative dispatch path. When true, the ISVC controller ignores every per-Component ome.io/use-ir-managed=true annotation and routes every OMENative Component through the legacy omenative direct path. Defaults false (opt-in annotations are honored). Operator escape hatch for an IR-path regression — flip to true to immediately route every workload back to the legacy path without editing per-ISVC annotations.")
 	opts.zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	return opts
@@ -166,6 +179,16 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&options.zapOpts)))
 
 	setupLog.Info("Initializing", "gitVersion", version.GitVersion, "gitCommit", version.GitCommit)
+
+	// IR PR 3: wire the IR-managed kill switch into the irprojector
+	// package's process-wide flag. Single load per dispatch (atomic
+	// int32) so the per-Component predicate check stays cheap.
+	// Logged at startup so the operator-visible state is obvious from
+	// the manager's startup banner.
+	irprojector.SetGlobalDisableIRManaged(options.disableIRManagedOmenative)
+	if options.disableIRManagedOmenative {
+		setupLog.Info("IR-managed OMENative path DISABLED via --disable-ir-managed-omenative; per-Component ome.io/use-ir-managed annotations will be ignored")
+	}
 
 	// Get a config to talk to the apiserver
 	setupLog.Info("Configuring API client connection")
