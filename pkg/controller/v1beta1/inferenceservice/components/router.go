@@ -240,26 +240,7 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		// — matches the omenative ReconcileParams projection below.
 		// Fallback to the omenative direct path is gated on the
 		// cluster-wide --disable-ir-managed-omenative manager flag.
-		//
-		// DIAGNOSTIC LOGS (A-2 investigation, to be reverted): trace the
-		// dispatch decision + per-Component annotation/label counts so we
-		// can pinpoint where ISVC spec.router.annotations stop
-		// propagating into IR.spec.runners[0].template.metadata.
-		irManaged := irprojector.IsIRManagedComponent(r.DeploymentMode, irprojector.IsManagerDisableFlagSet())
-		r.Log.Info("OMENative dispatch decision",
-			"inferenceService", isvc.Name,
-			"namespace", isvc.Namespace,
-			"component", "router",
-			"irManaged", irManaged,
-			"managerDisableFlagSet", irprojector.IsManagerDisableFlagSet(),
-			"routerSpecAnnotationsCount", len(r.routerSpec.Annotations),
-			"routerSpecLabelsCount", len(r.routerSpec.Labels),
-			"objectMetaAnnotationsCount", len(objectMeta.Annotations),
-			"objectMetaLabelsCount", len(objectMeta.Labels),
-		)
-		if irManaged {
-			r.Log.Info("Dispatching to IR projector",
-				"inferenceService", isvc.Name, "component", "router")
+		if irprojector.IsIRManagedComponent(r.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
 			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
 				ISVC:         isvc,
 				Component:    v1beta1.RouterComponent,
@@ -273,8 +254,6 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			}
 			return ctrl.Result{}, nil
 		}
-		r.Log.Info("Dispatching to legacy omenative path",
-			"inferenceService", isvc.Name, "component", "router")
 		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
 			ISVC:                    isvc,
 			ObjectMeta:              objectMeta,
