@@ -19,6 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
@@ -299,16 +300,25 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		// false and routing falls through to the omenative direct path
 		// below.
 		if irprojector.IsIRManagedComponent(e.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
+			// Resolve the authoritative ComponentAutoscaler from the
+			// ISVC → runtime → default chain (OEP-0013 §"Inheritance
+			// chain"). The resolved block is projected onto
+			// ir.Spec.Autoscaler by the projector. Slice 3 reads it
+			// off the IR and dispatches HPA / KEDA / external / none.
+			// Today (Slice 1) the projection is a no-op at runtime;
+			// no scaler is emitted until Slice 3 lands.
+			resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(e.Runtime, isvc, v1beta1.EngineComponent)
 			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
-				ISVC:          isvc,
-				Component:     v1beta1.EngineComponent,
-				ComponentExt:  &e.engineSpec.ComponentExtensionSpec,
-				ObjectMeta:    objectMeta,
-				PodSpec:       podSpec,
-				WorkerPodSpec: workerPodSpec,
-				WorkerSize:    workerSize,
-				MultiPod:      multiPod,
-				Client:        e.Client,
+				ISVC:               isvc,
+				Component:          v1beta1.EngineComponent,
+				ComponentExt:       &e.engineSpec.ComponentExtensionSpec,
+				ObjectMeta:         objectMeta,
+				PodSpec:            podSpec,
+				WorkerPodSpec:      workerPodSpec,
+				WorkerSize:         workerSize,
+				MultiPod:           multiPod,
+				ResolvedAutoscaler: resolvedAS,
+				Client:             e.Client,
 			}); err != nil {
 				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for engine")
 			}

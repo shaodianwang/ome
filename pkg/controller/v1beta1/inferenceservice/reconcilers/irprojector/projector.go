@@ -180,6 +180,18 @@ type Params struct {
 	// through this bag.
 	MultiPod bool
 
+	// ResolvedAutoscaler is the authoritative per-Component
+	// ComponentAutoscaler the autoscaler.ResolveComponentAutoscaler
+	// helper picked from the ISVC → runtime → default chain. The
+	// projector deep-copies this onto ir.Spec.Autoscaler with
+	// whole-block replace semantics (operator-side ISVC / runtime
+	// edits always win over any drifted IR.spec.autoscaler — see
+	// OEP-0013 §"Inheritance chain" + §"Generated autoscaler
+	// resources"). nil is accepted and projects to nil ir.Spec
+	// .Autoscaler (no spurious empty block); callers should normally
+	// pass the resolver's non-nil return value.
+	ResolvedAutoscaler *v1beta1.ComponentAutoscaler
+
 	// Client is the controller-runtime client used to CreateOrUpdate
 	// the IR. The ISVC controller already holds this.
 	Client client.Client
@@ -354,6 +366,17 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	ir.Spec.Replicas = replicasFromComponentExt(p.ComponentExt)
 	ir.Spec.Runners = runnersFromParams(p)
 	ir.Spec.Lifecycle = lifecycleFromComponentExt(p.ComponentExt)
+	// Project the resolved Autoscaler onto the IR. Whole-block replace
+	// semantics — operator-side changes to isvc.spec.<comp>.autoscaler
+	// always win over any drifted IR.spec.autoscaler. See OEP-0013
+	// §"Generated autoscaler resources" + §"Inheritance chain".
+	// DeepCopy keeps the IR's pointer disjoint from the resolver's
+	// return value so a downstream caller mutating the IR cannot
+	// corrupt the next reconcile's resolution. nil
+	// ResolvedAutoscaler clears ir.Spec.Autoscaler — defensive
+	// against a dispatch site that hasn't been wired through Slice 1
+	// yet (no spurious empty block lands on the IR).
+	ir.Spec.Autoscaler = p.ResolvedAutoscaler.DeepCopy()
 }
 
 // replicasFromComponentExt projects ComponentExtensionSpec.MinReplicas

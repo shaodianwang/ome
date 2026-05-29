@@ -19,6 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
@@ -261,16 +262,23 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 		// full design — fallback to the omenative direct path is gated on
 		// the cluster-wide --disable-ir-managed-omenative manager flag.
 		if irprojector.IsIRManagedComponent(d.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
+			// Resolve the authoritative ComponentAutoscaler from the
+			// ISVC → runtime → default chain (OEP-0013 §"Inheritance
+			// chain"). See engine dispatch for the full design — the
+			// projection is a no-op at runtime until Slice 3 dispatches
+			// HPA / KEDA / external / none from ir.Spec.Autoscaler.
+			resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(d.Runtime, isvc, v1beta1.DecoderComponent)
 			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
-				ISVC:          isvc,
-				Component:     v1beta1.DecoderComponent,
-				ComponentExt:  &d.decoderSpec.ComponentExtensionSpec,
-				ObjectMeta:    objectMeta,
-				PodSpec:       podSpec,
-				WorkerPodSpec: workerPodSpec,
-				WorkerSize:    workerSize,
-				MultiPod:      multiPod,
-				Client:        d.Client,
+				ISVC:               isvc,
+				Component:          v1beta1.DecoderComponent,
+				ComponentExt:       &d.decoderSpec.ComponentExtensionSpec,
+				ObjectMeta:         objectMeta,
+				PodSpec:            podSpec,
+				WorkerPodSpec:      workerPodSpec,
+				WorkerSize:         workerSize,
+				MultiPod:           multiPod,
+				ResolvedAutoscaler: resolvedAS,
+				Client:             d.Client,
 			}); err != nil {
 				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for decoder")
 			}

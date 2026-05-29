@@ -4,7 +4,9 @@ import (
 	"context"
 	"testing"
 
+	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/onsi/gomega"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -663,4 +665,187 @@ func TestEnsureInferenceReplica_ComponentAnnotationUpdate_RepatchesTemplate(t *t
 		"test.ome.io/rollout-trigger", "bumped"),
 		"annotation bump must repatch the IR runner template — "+
 			"this is the canonical no-image-bump rollout trigger")
+}
+
+// autoscalerBlockA returns a distinctive KEDA-class ComponentAutoscaler
+// for the projector autoscaler-propagation tests. The block carries a
+// non-empty Triggers list + a non-default PollingInterval so a buggy
+// shallow projection trips the deep-equality assertions.
+func autoscalerBlockA() *v1beta1.ComponentAutoscaler {
+	return &v1beta1.ComponentAutoscaler{
+		Class: v1beta1.AutoscalerKEDA,
+		Keda: &v1beta1.KedaAutoscaler{
+			Triggers: []kedav1.ScaleTriggers{
+				{Type: "prometheus", Metadata: map[string]string{"v": "A"}},
+			},
+			PollingInterval: ptr.To(int32(15)),
+		},
+	}
+}
+
+// autoscalerBlockB returns a second, distinct ComponentAutoscaler so
+// the update-replaces-whole-block test can distinguish "no projection"
+// from "projection took". Differs from autoscalerBlockA in Class, Keda
+// shape (nil), and HPA shape (non-nil) — the swap exercises every
+// pointer in ComponentAutoscaler.
+func autoscalerBlockB() *v1beta1.ComponentAutoscaler {
+	return &v1beta1.ComponentAutoscaler{
+		Class: v1beta1.AutoscalerHPA,
+		HPA: &v1beta1.HPAAutoscaler{
+			Metrics: []autoscalingv2.MetricSpec{
+				{
+					Type: autoscalingv2.ResourceMetricSourceType,
+					Resource: &autoscalingv2.ResourceMetricSource{
+						Name: "cpu",
+						Target: autoscalingv2.MetricTarget{
+							Type:               autoscalingv2.UtilizationMetricType,
+							AverageUtilization: ptr.To(int32(60)),
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// TestEnsureInferenceReplica_PropagatesResolvedAutoscaler pins the
+// Slice 1 contract: a non-nil p.ResolvedAutoscaler lands on the IR
+// at Create time. Slice 3's autoscaler dispatch reads ir.Spec
+// .Autoscaler — if the projector drops it, the entire OEP-0013 chain
+// is dead on arrival.
+//
+// The block is deep-equal-asserted so a half-applied projection (e.g.,
+// Class only, Keda dropped) trips the test instead of slipping through.
+func TestEnsureInferenceReplica_PropagatesResolvedAutoscaler(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	p := minimalParams(t, isvc, c)
+	p.ResolvedAutoscaler = autoscalerBlockA()
+
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
+
+	g.Expect(got.Spec.Autoscaler).NotTo(gomega.BeNil(),
+		"non-nil p.ResolvedAutoscaler must land on ir.Spec.Autoscaler at Create — "+
+			"the autoscaler dispatch (Slice 3) reads this field")
+	g.Expect(got.Spec.Autoscaler).To(gomega.Equal(autoscalerBlockA()),
+		"projection must be deep-equal — Class + Keda + HPA all preserved verbatim")
+}
+
+// TestEnsureInferenceReplica_UpdateAutoscalerRepatchesIR pins the
+// whole-block replace semantics: a second projection with a different
+// ResolvedAutoscaler swaps the IR's autoscaler wholesale, not merges.
+// Operator-side changes to isvc.spec.<comp>.autoscaler always win over
+// any drifted ir.spec.autoscaler — see OEP-0013 §"Generated autoscaler
+// resources" + §"Inheritance chain".
+//
+// Failure shape this catches: a projector that only merges sub-fields
+// (e.g., keeps Class from A while overwriting Keda with B's HPA) would
+// leave the IR in a corrupted half-A/half-B state where the dispatch
+// can't decide which scaler to emit.
+func TestEnsureInferenceReplica_UpdateAutoscalerRepatchesIR(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	// First projection: block A (KEDA, Triggers set, HPA nil).
+	p := minimalParams(t, isvc, c)
+	p.ResolvedAutoscaler = autoscalerBlockA()
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	first := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, first)).To(gomega.Succeed())
+	g.Expect(first.Spec.Autoscaler).To(gomega.Equal(autoscalerBlockA()),
+		"sanity: first projection lands block A")
+
+	// Second projection: block B (HPA, Keda nil, Metrics set). The
+	// dispatch site re-resolves the autoscaler every reconcile, so a
+	// different ResolvedAutoscaler is the normal case (operator bumped
+	// isvc.spec.engine.autoscaler.class from keda to hpa).
+	p2 := minimalParams(t, isvc, c)
+	p2.ResolvedAutoscaler = autoscalerBlockB()
+	_, err = EnsureInferenceReplica(context.Background(), p2)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	second := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, second)).To(gomega.Succeed())
+
+	g.Expect(second.Spec.Autoscaler).To(gomega.Equal(autoscalerBlockB()),
+		"second projection must REPLACE the whole block — not merge — so block B fully wins")
+	g.Expect(second.Spec.Autoscaler.Class).To(gomega.Equal(v1beta1.AutoscalerHPA),
+		"Class must flip from KEDA to HPA")
+	g.Expect(second.Spec.Autoscaler.Keda).To(gomega.BeNil(),
+		"Keda block must be cleared — block B doesn't have one")
+	g.Expect(second.Spec.Autoscaler.HPA).NotTo(gomega.BeNil(),
+		"HPA block must be set — block B has one")
+}
+
+// TestEnsureInferenceReplica_NilResolvedAutoscaler_NoRegression pins
+// the defensive path: a nil ResolvedAutoscaler (e.g., a dispatch site
+// that hasn't been wired through Slice 1 yet) projects to nil ir.Spec
+// .Autoscaler. No spurious empty {Class: ""} block lands.
+//
+// Without this guard, the projector would either (a) panic on a nil
+// deref of p.ResolvedAutoscaler.DeepCopy() or (b) leave the IR with
+// a partially-defaulted block the dispatch can't interpret.
+func TestEnsureInferenceReplica_NilResolvedAutoscaler_NoRegression(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	p := minimalParams(t, isvc, c)
+	// p.ResolvedAutoscaler intentionally nil.
+
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred(),
+		"nil ResolvedAutoscaler must not panic — defensive against unwired dispatch sites")
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
+
+	g.Expect(got.Spec.Autoscaler).To(gomega.BeNil(),
+		"nil ResolvedAutoscaler must project to nil ir.Spec.Autoscaler — "+
+			"no spurious empty block")
+}
+
+// TestEnsureInferenceReplica_AutoscalerProjection_DeepCopies pins the
+// memory-isolation guard: the IR's ir.Spec.Autoscaler MUST NOT alias
+// p.ResolvedAutoscaler. A downstream mutator (e.g., the IR controller
+// reading the field, the autoscaler dispatch building an HPA spec)
+// must not be able to corrupt the resolver's source-of-truth.
+func TestEnsureInferenceReplica_AutoscalerProjection_DeepCopies(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	p := minimalParams(t, isvc, c)
+	original := autoscalerBlockA()
+	p.ResolvedAutoscaler = autoscalerBlockA() // separate instance, deep-equal to `original`
+
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
+
+	// Mutate the input AFTER projection. If the projector aliased the
+	// pointer, the live IR would show the mutation through Get's
+	// fake-client round-trip (fake client stores by reference for in-memory).
+	p.ResolvedAutoscaler.Class = v1beta1.AutoscalerNone
+	p.ResolvedAutoscaler.Keda.Triggers[0].Type = "mutated"
+
+	got2 := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got2)).To(gomega.Succeed())
+	g.Expect(got2.Spec.Autoscaler).To(gomega.Equal(original),
+		"post-projection input mutation must NOT leak into the stored IR — "+
+			"ir.Spec.Autoscaler must be a deep copy of p.ResolvedAutoscaler")
 }

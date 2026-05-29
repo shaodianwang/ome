@@ -18,6 +18,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
@@ -241,14 +242,21 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		// Fallback to the omenative direct path is gated on the
 		// cluster-wide --disable-ir-managed-omenative manager flag.
 		if irprojector.IsIRManagedComponent(r.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
+			// Resolve the authoritative ComponentAutoscaler from the
+			// ISVC → runtime → default chain (OEP-0013 §"Inheritance
+			// chain"). See engine dispatch for the full design — the
+			// projection is a no-op at runtime until Slice 3 dispatches
+			// HPA / KEDA / external / none from ir.Spec.Autoscaler.
+			resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(r.Runtime, isvc, v1beta1.RouterComponent)
 			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
-				ISVC:         isvc,
-				Component:    v1beta1.RouterComponent,
-				ComponentExt: &r.routerSpec.ComponentExtensionSpec,
-				ObjectMeta:   objectMeta,
-				PodSpec:      podSpec,
-				MultiPod:     false,
-				Client:       r.Client,
+				ISVC:               isvc,
+				Component:          v1beta1.RouterComponent,
+				ComponentExt:       &r.routerSpec.ComponentExtensionSpec,
+				ObjectMeta:         objectMeta,
+				PodSpec:            podSpec,
+				MultiPod:           false,
+				ResolvedAutoscaler: resolvedAS,
+				Client:             r.Client,
 			}); err != nil {
 				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for router")
 			}
