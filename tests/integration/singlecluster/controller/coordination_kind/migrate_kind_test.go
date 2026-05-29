@@ -159,6 +159,30 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 				"surge must promote to Ready after source drain")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
+		ginkgo.By("expecting the surge pod to land on a DIFFERENT node than the source")
+		// This is the actual point of migration: move the Instance off
+		// its source node. The controller stamps NodeAffinity excluding
+		// sourceNode, so on the 2-node suite cluster the surge must
+		// schedule onto the other node. (A single-node cluster left the
+		// surge Pending forever — the original reason these specs only
+		// pinned the state machine and not the node move.)
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, "mig-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
+			surgeIdx := cs.OMENative.InstanceStatuses[0].Index
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name,
+				Name:      fmt.Sprintf("mig-isvc-engine-%d-default-0", surgeIdx),
+			}, pod)).To(Succeed())
+			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty(), "surge pod must be scheduled")
+			g.Expect(pod.Spec.NodeName).NotTo(Equal(sourceNode),
+				"migration must move the Instance OFF source node %s; surge landed on %s",
+				sourceNode, pod.Spec.NodeName)
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
 		ginkgo.By("expecting the audit ledger to record a Completed entry for this UUID")
 		Eventually(func(g Gomega) {
 			ledger := loadLedger(g, ns.Name, "mig-isvc")

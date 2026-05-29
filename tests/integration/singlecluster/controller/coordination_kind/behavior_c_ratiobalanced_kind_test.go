@@ -1,6 +1,7 @@
 package coordination_kind
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -71,11 +72,18 @@ var _ = ginkgo.Describe("behavior — BlueGreen + RatioBalanced", ginkgo.Ordered
 		// Sampler asserts C-1: live serving ratio in band [1.5, 2.5].
 		// Failure messages name the observed counts so a band violation
 		// is debuggable from the test log (no need to re-instrument).
+		var samples atomic.Int64
 		stop := util.StartSampler(suiteCtx, 100*time.Millisecond, func(g Gomega) {
+			// Tolerant snapshot: a late tick can race the ISVC deletion
+			// during teardown — skip rather than fail the spec on a
+			// transient list error.
 			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, "ratio-c")
-			g.Expect(err).NotTo(HaveOccurred())
+			if err != nil {
+				return
+			}
 			eng := snap.Serving(v1beta1.EngineComponent)
 			dec := snap.Serving(v1beta1.DecoderComponent)
+			samples.Add(1)
 			g.Expect(dec).To(BeNumerically(">=", 1),
 				"C-1: decoder serving=%d (would zero-out and violate band)", dec)
 			if dec == 0 {
@@ -109,14 +117,18 @@ var _ = ginkgo.Describe("behavior — BlueGreen + RatioBalanced", ginkgo.Ordered
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Stop the sampler. A band violation would have surfaced via
-		// the GinkgoRecover→Fail path inside the goroutine; the sample
-		// count itself is intentionally not asserted on KIND because
-		// the in-goroutine assertion can race with the post-convergence
-		// wait window and return 0 even on clean runs. Coverage rests
-		// on the band assertion above + the convergence Eventually
-		// before this stop().
+		// Stop the sampler. A band violation would have surfaced via the
+		// GinkgoRecover→Fail path inside the goroutine. We also assert the
+		// sampler actually observed the rollout: without this, a sampler
+		// that never ticked during the in-flight window would pass the
+		// spec WITHOUT ever checking the ratio band (vacuous). The count
+		// is tracked via an atomic incremented per sample — NOT stop()'s
+		// return, which can spuriously report 0 via its 2×interval timeout
+		// escape under load. The rollout is ~6 sequential recreate cycles
+		// (seconds) at 100ms cadence, so >=3 samples is a wide margin.
 		stop()
+		Expect(samples.Load()).To(BeNumerically(">=", 3),
+			"C-1: sampler observed only %d samples during the rollout; the serving-ratio band was not meaningfully checked in-flight", samples.Load())
 	})
 
 	// PIt: covered by unit test TestEvaluateSurge_RejectsWhenPeerSerivngWouldBeZero plus C-1 sampler invariant.

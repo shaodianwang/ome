@@ -71,7 +71,12 @@ func EnsureCluster(ctx context.Context, name string, workers int) (*rest.Config,
 		return nil, fmt.Errorf("EnsureCluster: list clusters: %w", err)
 	}
 	if exists && envEnabled(envRecreateCluster) {
-		if err := DeleteCluster(ctx, name); err != nil {
+		// KIND_RECREATE forces a fresh cluster even when KIND_KEEP_CLUSTER
+		// is also set — an explicit recreate request wins over reuse. Use
+		// the unconditional delete; DeleteCluster would no-op on
+		// KIND_KEEP_CLUSTER, leaving the stale cluster in place so the
+		// subsequent createCluster fails with "node(s) already exist".
+		if err := deleteClusterNow(ctx, name); err != nil {
 			return nil, fmt.Errorf("EnsureCluster: recreate-requested delete: %w", err)
 		}
 		exists = false
@@ -85,15 +90,25 @@ func EnsureCluster(ctx context.Context, name string, workers int) (*rest.Config,
 }
 
 // DeleteCluster tears down the named KIND cluster. No-op when the
-// cluster doesn't exist. Honors KIND_KEEP_CLUSTER=1 by skipping the
+// cluster doesn't exist. Honors KIND_KEEP_CLUSTER by skipping the
 // delete entirely so iterative `go test` runs reuse the cluster.
+// KIND_RECREATE callers want a fresh cluster regardless and go through
+// deleteClusterNow instead.
 func DeleteCluster(ctx context.Context, name string) error {
 	if envEnabled(envKeepCluster) {
 		return nil
 	}
+	return deleteClusterNow(ctx, name)
+}
+
+// deleteClusterNow deletes the named cluster unconditionally — it does
+// NOT honor KIND_KEEP_CLUSTER. No-op when the cluster doesn't exist.
+// Used by the KIND_RECREATE path (which must win over KIND_KEEP_CLUSTER)
+// and by DeleteCluster once the keep guard has passed.
+func deleteClusterNow(ctx context.Context, name string) error {
 	exists, err := clusterExists(ctx, name)
 	if err != nil {
-		return fmt.Errorf("DeleteCluster: list clusters: %w", err)
+		return fmt.Errorf("deleteClusterNow: list clusters: %w", err)
 	}
 	if !exists {
 		return nil
@@ -102,7 +117,7 @@ func DeleteCluster(ctx context.Context, name string) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("DeleteCluster: kind delete cluster --name %s: %w (stderr: %s)",
+		return fmt.Errorf("deleteClusterNow: kind delete cluster --name %s: %w (stderr: %s)",
 			name, err, stderr.String())
 	}
 	return nil

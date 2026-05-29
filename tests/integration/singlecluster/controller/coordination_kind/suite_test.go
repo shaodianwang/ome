@@ -45,12 +45,19 @@ func TestCoordinationKindController(t *testing.T) {
 
 	state := kindutil.RunKindSuite(t, kindutil.SuiteOpts{
 		ClusterName: "ome-coord-kind",
-		// 1 worker = 2 total nodes. Migration tests (PD-5, PDA-1, INT-*)
-		// move a pod OFF its source node, so the controller needs at
-		// least one OTHER node to schedule the surge pod onto. With
-		// Workers=0 (single-node) the surge pod stays Pending forever
-		// because NodeAffinity can't satisfy "not this node".
-		Workers: 1,
+		// 2 workers. Migration tests (PD-5, PDA-1, PDX-5, INT-*) move a pod
+		// OFF its source node: the surge pod gets a required NodeAffinity
+		// excluding the source node, so it needs another SCHEDULABLE node
+		// to land on. The kind control-plane node carries the default
+		// node-role.kubernetes.io/control-plane:NoSchedule taint (and the
+		// rendered pods don't tolerate it), so it does NOT count — with
+		// Workers=1 the source lands on the single worker and the surge has
+		// nowhere to go (worker excluded by anti-affinity, control-plane by
+		// taint) → Pending forever → 300s timeout. Two workers give the
+		// surge a real off-source home. (Workers=0 single-node fails for
+		// the same reason; the old "1 worker = 2 nodes" reasoning ignored
+		// the control-plane taint.)
+		Workers: 2,
 		BuildImages: []kindutil.ImageBuildSpec{
 			{
 				ContextDir: "tests/integration/kindutil/fake-serving",
