@@ -80,9 +80,23 @@ type Message struct {
 }
 
 // AddNotReadyKey appends msg to the readiness condition's message list
-// and sets Status=False. No-op if msg is already present. Patches only
-// the single condition slot so kubelet's concurrent status writes are
-// preserved; wrapped in retry.RetryOnConflict.
+// and sets Status=False. No-op if msg is already present AND the
+// condition Status is already False (the writer slot is already held).
+// Patches only the single condition slot so kubelet's concurrent
+// status writes are preserved; wrapped in retry.RetryOnConflict.
+//
+// Self-healing branch: when the message list already contains msg but
+// Status is True we still issue a patch to flip Status back to False.
+// This recovers from the pre-fix shape — older builds of patchCondition
+// dropped the empty Message field (json:",omitempty") on the
+// last-writer-removed patch, leaving stale {UserAgent, Key} entries
+// in the message while Status had already flipped True. Without this
+// recovery, a fresh in-place update reusing the same {idx, incarnation}
+// key would short-circuit as "already held", no NotReady patch fires,
+// drain.IsPodDrained sees the pod still Ready in the EndpointSlice,
+// and the Instance hangs at Phase=Updating forever. With this branch,
+// the first Add after a controller restart resyncs Status to match
+// the message-list reality.
 func AddNotReadyKey(ctx context.Context, c client.Client, pod *corev1.Pod, msg Message) error {
 	if pod == nil {
 		return fmt.Errorf("AddNotReadyKey: nil pod")
@@ -94,11 +108,16 @@ func AddNotReadyKey(ctx context.Context, c client.Client, pod *corev1.Pod, msg M
 		}
 		cond := findCondition(fresh, ConditionType)
 		var base string
+		var existingStatus corev1.ConditionStatus
 		if cond != nil {
 			base = cond.Message
+			existingStatus = cond.Status
 		}
 		changed, list := addMessage(base, msg)
-		if !changed {
+		if !changed && existingStatus == corev1.ConditionFalse {
+			// Nothing to do — key already in the list AND Status is
+			// already False (writer slot already held; everything
+			// consistent).
 			return nil
 		}
 		return patchCondition(ctx, c, fresh, corev1.PodCondition{
@@ -291,10 +310,31 @@ const KeyLifecycleInstanceReady = "InstanceReady"
 // the other Pod.Status.Conditions entries (PodScheduled, Initialized,
 // ContainersReady, Ready, ...) are preserved because patch-merge-key
 // on PodCondition is `type`.
+//
+// The patch is hand-marshaled (not via corev1.PodCondition) because
+// PodCondition.Message has `json:",omitempty"` — when the controller
+// removes the last writer and writes Status=True with Message="" the
+// typed Marshal omits the message field entirely, so strategic-merge
+// keeps the stale message list from the previous Status=False patch.
+// The next AddNotReadyKey call then sees the orphaned key still in
+// the list, addMessage returns changed=false, no patch fires, the
+// pod stays Status=True with a stale writer in the message, and
+// drain.IsPodDrained never observes the pod leaving rotation — the
+// in-place update stalls forever in Phase=Updating. Forcing the
+// "message" field into the patch payload (even when empty) makes
+// strategic-merge clear the stale list so the next writer cycle
+// starts from a clean slate.
 func patchCondition(ctx context.Context, c client.Client, pod *corev1.Pod, cond corev1.PodCondition) error {
+	condMap := map[string]any{
+		"type":               string(cond.Type),
+		"status":             string(cond.Status),
+		"reason":             cond.Reason,
+		"message":            cond.Message,
+		"lastTransitionTime": cond.LastTransitionTime,
+	}
 	patch := map[string]any{
 		"status": map[string]any{
-			"conditions": []corev1.PodCondition{cond},
+			"conditions": []any{condMap},
 		},
 	}
 	raw, err := json.Marshal(patch)

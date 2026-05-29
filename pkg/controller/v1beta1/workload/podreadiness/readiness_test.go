@@ -257,6 +257,147 @@ func TestRemoveNotReadyKey_NilPodRejected(t *testing.T) {
 	}
 }
 
+// TestRemoveLastKey_ClearsMessageField pins the bug where in-place
+// updates stalled forever after a second annotation-only patch.
+//
+// Background: PodCondition.Message has `json:",omitempty"`, so the
+// typed corev1.PodCondition.MarshalJSON drops the field when empty.
+// When the controller removed the last writer and re-issued the patch
+// with Status=True + Message="" the strategic-merge payload contained
+// no `message` key, so the apiserver preserved the prior Status=False
+// message list. The pod ended up Status=True with a stale writer
+// still in the message — the next in-place update's AddNotReadyKey
+// found its (UserAgent, Key) tuple already present, short-circuited
+// without issuing a Status=False patch, and drain.IsPodDrained
+// observed the pod still in rotation. The Instance state machine
+// stalled at Phase=Updating; readyReplicas read 0 for the entire
+// post-patch window.
+//
+// Assertion: after the last writer is removed the message field is
+// actually empty on the persisted pod. Without the patchCondition
+// hand-marshal fix the assertion fails — the message survives.
+func TestRemoveLastKey_ClearsMessageField(t *testing.T) {
+	pod := newReadinessTestPod("p")
+	c := newReadinessTestClient(t, pod)
+
+	// Add a writer to populate Status=False + non-empty message.
+	if err := AddNotReadyKey(context.Background(), c, pod, Message{UserAgent: "Update-in-place", Key: "0-1"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	mid := &corev1.Pod{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(pod), mid)
+	if cond := findCondition(mid, ConditionType); cond == nil || cond.Status != corev1.ConditionFalse || cond.Message == "" {
+		t.Fatalf("seed: expected Status=False with non-empty message, got %+v", cond)
+	}
+
+	// Remove the writer — list becomes empty, Status flips True.
+	if err := RemoveNotReadyKey(context.Background(), c, mid, Message{UserAgent: "Update-in-place", Key: "0-1"}); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	got := &corev1.Pod{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(pod), got)
+	cond := findCondition(got, ConditionType)
+	if cond == nil {
+		t.Fatalf("condition not found after Remove")
+	}
+	if cond.Status != corev1.ConditionTrue {
+		t.Errorf("expected Status=True after removing last writer, got %s", cond.Status)
+	}
+	if cond.Message != "" {
+		t.Errorf("expected empty message after removing last writer, got %q (stale entry would deadlock the next in-place update)", cond.Message)
+	}
+}
+
+// TestSecondInPlaceCycle_CanReDrain pins the end-to-end shape of the
+// reported regression: two back-to-back in-place updates on the same
+// (Instance, Incarnation) must each be able to flip the pod to
+// Status=False. The first cycle drains, ContainersReady stays True,
+// we re-mark Serving; the second cycle issues the same {UserAgent,
+// Key} tuple — it MUST take effect, not short-circuit on a stale
+// message list.
+func TestSecondInPlaceCycle_CanReDrain(t *testing.T) {
+	pod := newReadinessTestPod("p")
+	c := newReadinessTestClient(t, pod)
+	key := Message{UserAgent: WriterUpdateInPlace, Key: "0-1"}
+
+	// Cycle 1: drain → un-drain.
+	if err := AddNotReadyKey(context.Background(), c, pod, key); err != nil {
+		t.Fatalf("cycle 1 Add: %v", err)
+	}
+	mid := &corev1.Pod{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(pod), mid)
+	if err := RemoveNotReadyKey(context.Background(), c, mid, key); err != nil {
+		t.Fatalf("cycle 1 Remove: %v", err)
+	}
+
+	// Cycle 2: drain again — MUST flip Status to False.
+	cycle2Start := &corev1.Pod{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(pod), cycle2Start)
+	if !IsServing(cycle2Start) {
+		t.Fatalf("cycle 2 precondition: expected Serving=True after cycle 1 finished")
+	}
+	if err := AddNotReadyKey(context.Background(), c, cycle2Start, key); err != nil {
+		t.Fatalf("cycle 2 Add: %v", err)
+	}
+	after := &corev1.Pod{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(pod), after)
+	cond := findCondition(after, ConditionType)
+	if cond == nil {
+		t.Fatalf("cycle 2: condition missing")
+	}
+	if cond.Status != corev1.ConditionFalse {
+		t.Errorf("cycle 2 expected Status=False after Add, got %s — second-cycle drain would never converge", cond.Status)
+	}
+	list := parseList(cond.Message)
+	if len(list) != 1 || list[0] != key {
+		t.Errorf("cycle 2 expected single {%s, %s} entry, got %v", key.UserAgent, key.Key, list)
+	}
+}
+
+// TestAddNotReadyKey_RecoversInconsistentStatusTrueWithStaleMessage
+// pins the self-healing branch in AddNotReadyKey. Existing pods that
+// ran the pre-fix controller may be sitting at the paradoxical
+// {Status=True, Message=[stale-writer]} state because the
+// last-writer-removed patch omitted Message via json:",omitempty".
+// The next in-place update cycle MUST be able to drain those pods —
+// otherwise the only recovery path is operator-triggered pod restarts.
+//
+// Setup: synthesize a pod in the paradoxical state. Call
+// AddNotReadyKey for the same {UserAgent, Key} tuple that's already
+// in the list (mirroring a follow-up update reusing the same
+// {Instance, Incarnation}). Assert Status flips to False so drain
+// can proceed.
+func TestAddNotReadyKey_RecoversInconsistentStatusTrueWithStaleMessage(t *testing.T) {
+	staleMsg := Message{UserAgent: WriterUpdateInPlace, Key: "0-1"}
+	staleList := messageList{staleMsg}
+	pod := newReadinessTestPod("p")
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type:    ConditionType,
+		Status:  corev1.ConditionTrue, // paradox: True but list non-empty
+		Reason:  "Serving",
+		Message: staleList.dump(),
+	}}
+	c := newReadinessTestClient(t, pod)
+
+	if err := AddNotReadyKey(context.Background(), c, pod, staleMsg); err != nil {
+		t.Fatalf("AddNotReadyKey: %v", err)
+	}
+
+	got := &corev1.Pod{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(pod), got)
+	cond := findCondition(got, ConditionType)
+	if cond == nil {
+		t.Fatalf("condition missing after Add")
+	}
+	if cond.Status != corev1.ConditionFalse {
+		t.Errorf("expected Status=False after self-heal Add on paradoxical condition, got %s — drain would never converge for an in-place rollout reusing the same key", cond.Status)
+	}
+	list := parseList(cond.Message)
+	if len(list) != 1 || list[0] != staleMsg {
+		t.Errorf("expected single {%s, %s} entry after self-heal, got %v", staleMsg.UserAgent, staleMsg.Key, list)
+	}
+}
+
 func TestMessageListSerialization_Deterministic(t *testing.T) {
 	// Two writers adding in opposite orders should produce the same
 	// serialized list, so operators inspecting the pod see stable
