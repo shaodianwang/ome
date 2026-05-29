@@ -298,7 +298,26 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		// operator escape hatch — when set, IsIRManagedComponent returns
 		// false and routing falls through to the omenative direct path
 		// below.
-		if irprojector.IsIRManagedComponent(e.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
+		//
+		// DIAGNOSTIC LOGS (A-2 investigation, to be reverted): trace the
+		// dispatch decision + per-Component annotation/label counts so we
+		// can pinpoint where ISVC spec.engine.annotations stop propagating
+		// into IR.spec.runners[0].template.metadata.
+		irManaged := irprojector.IsIRManagedComponent(e.DeploymentMode, irprojector.IsManagerDisableFlagSet())
+		e.Log.Info("OMENative dispatch decision",
+			"inferenceService", isvc.Name,
+			"namespace", isvc.Namespace,
+			"component", "engine",
+			"irManaged", irManaged,
+			"managerDisableFlagSet", irprojector.IsManagerDisableFlagSet(),
+			"engineSpecAnnotationsCount", len(e.engineSpec.Annotations),
+			"engineSpecLabelsCount", len(e.engineSpec.Labels),
+			"objectMetaAnnotationsCount", len(objectMeta.Annotations),
+			"objectMetaLabelsCount", len(objectMeta.Labels),
+		)
+		if irManaged {
+			e.Log.Info("Dispatching to IR projector",
+				"inferenceService", isvc.Name, "component", "engine")
 			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
 				ISVC:          isvc,
 				Component:     v1beta1.EngineComponent,
@@ -314,6 +333,8 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			}
 			return ctrl.Result{}, nil
 		}
+		e.Log.Info("Dispatching to legacy omenative path",
+			"inferenceService", isvc.Name, "component", "engine")
 		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
 			ISVC:                    isvc,
 			ObjectMeta:              objectMeta,

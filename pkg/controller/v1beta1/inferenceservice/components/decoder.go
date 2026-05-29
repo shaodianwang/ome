@@ -260,7 +260,26 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 		// path by default. See the comment on the engine dispatch for the
 		// full design — fallback to the omenative direct path is gated on
 		// the cluster-wide --disable-ir-managed-omenative manager flag.
-		if irprojector.IsIRManagedComponent(d.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
+		//
+		// DIAGNOSTIC LOGS (A-2 investigation, to be reverted): trace the
+		// dispatch decision + per-Component annotation/label counts so we
+		// can pinpoint where ISVC spec.decoder.annotations stop
+		// propagating into IR.spec.runners[0].template.metadata.
+		irManaged := irprojector.IsIRManagedComponent(d.DeploymentMode, irprojector.IsManagerDisableFlagSet())
+		d.Log.Info("OMENative dispatch decision",
+			"inferenceService", isvc.Name,
+			"namespace", isvc.Namespace,
+			"component", "decoder",
+			"irManaged", irManaged,
+			"managerDisableFlagSet", irprojector.IsManagerDisableFlagSet(),
+			"decoderSpecAnnotationsCount", len(d.decoderSpec.Annotations),
+			"decoderSpecLabelsCount", len(d.decoderSpec.Labels),
+			"objectMetaAnnotationsCount", len(objectMeta.Annotations),
+			"objectMetaLabelsCount", len(objectMeta.Labels),
+		)
+		if irManaged {
+			d.Log.Info("Dispatching to IR projector",
+				"inferenceService", isvc.Name, "component", "decoder")
 			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
 				ISVC:          isvc,
 				Component:     v1beta1.DecoderComponent,
@@ -276,6 +295,8 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 			}
 			return ctrl.Result{}, nil
 		}
+		d.Log.Info("Dispatching to legacy omenative path",
+			"inferenceService", isvc.Name, "component", "decoder")
 		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
 			ISVC:                    isvc,
 			ObjectMeta:              objectMeta,

@@ -49,6 +49,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -204,6 +205,21 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		return nil, err
 	}
 
+	// DIAGNOSTIC LOGS (A-2 investigation, to be reverted): trace the
+	// projector entry point with the input sizes that drive
+	// templateObjectMeta's merge so we can pinpoint where ISVC per-
+	// Component annotations stop landing on IR.spec.runners[].template.
+	logger := log.FromContext(ctx).WithName("irprojector")
+	logger.Info("EnsureInferenceReplica entry",
+		"isvc", p.ISVC.Namespace+"/"+p.ISVC.Name,
+		"component", string(p.Component),
+		"componentExtAnnotationsCount", componentExtAnnotationsCount(p),
+		"componentExtLabelsCount", componentExtLabelsCount(p),
+		"objectMetaAnnotationsCount", len(p.ObjectMeta.Annotations),
+		"objectMetaLabelsCount", len(p.ObjectMeta.Labels),
+		"multiPod", p.MultiPod,
+	)
+
 	name := InferenceReplicaName(p.ISVC.Name, p.Component)
 	key := types.NamespacedName{Namespace: p.ISVC.Namespace, Name: name}
 
@@ -213,6 +229,10 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		getErr := p.Client.Get(ctx, key, ir)
 		switch {
 		case apierrors.IsNotFound(getErr):
+			logger.Info("IR not found — creating fresh",
+				"isvc", p.ISVC.Namespace+"/"+p.ISVC.Name,
+				"component", string(p.Component),
+			)
 			ir = newInferenceReplica(p, name)
 			if err := p.Client.Create(ctx, ir); err != nil {
 				if apierrors.IsAlreadyExists(err) {
@@ -234,6 +254,19 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		// preserving ResourceVersion. We don't clobber Spec fields the
 		// projector doesn't own (Pacing, Paused — owned by the ISVC
 		// controller's coordination layer in future PRs).
+		//
+		// DIAGNOSTIC LOGS (A-2 investigation, to be reverted): dry-run
+		// templateObjectMeta and log the resulting annotation/label
+		// counts so we can see what the projector is about to write to
+		// IR.spec.runners[].template.metadata.
+		tmplMetaForDebug := templateObjectMeta(p)
+		logger.Info("IR exists — applying desired spec",
+			"isvc", p.ISVC.Namespace+"/"+p.ISVC.Name,
+			"component", string(p.Component),
+			"tmplAnnotationsCount", len(tmplMetaForDebug.Annotations),
+			"tmplLabelsCount", len(tmplMetaForDebug.Labels),
+			"existingIRGeneration", ir.Generation,
+		)
 		applyDesiredSpec(ir, p, name)
 		if err := p.Client.Update(ctx, ir); err != nil {
 			return fmt.Errorf("update IR %s/%s: %w", p.ISVC.Namespace, name, err)
@@ -498,4 +531,26 @@ func copyMap(m map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// componentExtAnnotationsCount returns the size of
+// ComponentExt.Annotations, or 0 if nil. Diagnostic helper (A-2
+// investigation, to be reverted) used by EnsureInferenceReplica's
+// entry log to attribute per-Component annotation propagation.
+func componentExtAnnotationsCount(p Params) int {
+	if p.ComponentExt == nil {
+		return 0
+	}
+	return len(p.ComponentExt.Annotations)
+}
+
+// componentExtLabelsCount returns the size of ComponentExt.Labels, or
+// 0 if nil. Diagnostic helper (A-2 investigation, to be reverted)
+// used by EnsureInferenceReplica's entry log to attribute per-
+// Component label propagation.
+func componentExtLabelsCount(p Params) int {
+	if p.ComponentExt == nil {
+		return 0
+	}
+	return len(p.ComponentExt.Labels)
 }
