@@ -19,39 +19,30 @@ type DefaultRuntimeFetcher struct {
 	client client.Client
 }
 
-// NewDefaultRuntimeFetcher creates a new DefaultRuntimeFetcher.
 func NewDefaultRuntimeFetcher(client client.Client) RuntimeFetcher {
 	return &DefaultRuntimeFetcher{
 		client: client,
 	}
 }
 
-// FetchRuntimes returns both namespace and cluster scoped runtimes.
-// The results are sorted by creation timestamp (newest first) and then by name.
 func (f *DefaultRuntimeFetcher) FetchRuntimes(ctx context.Context, namespace string) (*RuntimeCollection, error) {
 	logger := log.FromContext(ctx)
 
-	// Fetch namespace-scoped runtimes
-	logger.V(1).Info("Fetching namespace-scoped runtimes", "namespace", namespace)
 	runtimes := &v1beta1.ServingRuntimeList{}
 	if err := f.client.List(ctx, runtimes, client.InNamespace(namespace)); err != nil {
 		return nil, err
 	}
 
-	// Fetch cluster-scoped runtimes
-	logger.V(1).Info("Fetching cluster-scoped runtimes")
 	clusterRuntimes := &v1beta1.ClusterServingRuntimeList{}
 	if err := f.client.List(ctx, clusterRuntimes); err != nil {
 		return nil, err
 	}
 
-	// Sort namespace-scoped runtimes
 	sortServingRuntimeList(runtimes)
-
-	// Sort cluster-scoped runtimes
 	sortClusterServingRuntimeList(clusterRuntimes)
 
 	logger.V(1).Info("Fetched runtimes",
+		"namespace", namespace,
 		"namespaceRuntimes", len(runtimes.Items),
 		"clusterRuntimes", len(clusterRuntimes.Items))
 
@@ -61,14 +52,10 @@ func (f *DefaultRuntimeFetcher) FetchRuntimes(ctx context.Context, namespace str
 	}, nil
 }
 
-// GetRuntime fetches a runtime by name and returns its OEP-0012
-// merged spec. Namespace-scoped takes precedence over cluster-scoped
-// on name collision.
+// GetRuntime resolves a runtime to its OEP-0012 merged spec. Namespace-scoped
+// takes precedence over cluster-scoped on name collision.
 func (f *DefaultRuntimeFetcher) GetRuntime(ctx context.Context, name string, namespace string) (*v1beta1.ServingRuntimeSpec, bool, error) {
-	logger := log.FromContext(ctx)
-
 	if _, err := f.getNamespacedHead(ctx, namespace, name); err == nil {
-		logger.V(1).Info("Found namespace-scoped runtime", "name", name, "namespace", namespace)
 		spec, _, resolveErr := runtimeinheritance.ResolveNamespacedRuntime(ctx, f.client, namespace, name)
 		return spec, false, resolveErr
 	} else if !errors.IsNotFound(err) {
@@ -76,7 +63,6 @@ func (f *DefaultRuntimeFetcher) GetRuntime(ctx context.Context, name string, nam
 	}
 
 	if _, err := f.getClusterHead(ctx, name); err == nil {
-		logger.V(1).Info("Found cluster-scoped runtime", "name", name)
 		spec, _, resolveErr := runtimeinheritance.ResolveClusterRuntime(ctx, f.client, name)
 		return spec, true, resolveErr
 	} else if errors.IsNotFound(err) {
@@ -105,14 +91,12 @@ func (f *DefaultRuntimeFetcher) getClusterHead(ctx context.Context, name string)
 	return csr, nil
 }
 
-// sortServingRuntimeList sorts a list of ServingRuntimes by creation timestamp (desc) and name (asc).
 func sortServingRuntimeList(runtimes *v1beta1.ServingRuntimeList) {
 	sortByCreationTimestampThenName(runtimes.Items, func(r *v1beta1.ServingRuntime) (metav1.Time, string) {
 		return r.CreationTimestamp, r.Name
 	})
 }
 
-// sortClusterServingRuntimeList sorts a list of ClusterServingRuntimes by creation timestamp (desc) and name (asc).
 func sortClusterServingRuntimeList(runtimes *v1beta1.ClusterServingRuntimeList) {
 	sortByCreationTimestampThenName(runtimes.Items, func(r *v1beta1.ClusterServingRuntime) (metav1.Time, string) {
 		return r.CreationTimestamp, r.Name
@@ -120,7 +104,9 @@ func sortClusterServingRuntimeList(runtimes *v1beta1.ClusterServingRuntimeList) 
 }
 
 // sortByCreationTimestampThenName sorts items in place: newest first, then
-// alphabetical by name as a tiebreaker.
+// alphabetical by name as a tiebreaker. Newest-first gives operators a way
+// to roll out a replacement runtime by creating it side-by-side with the old
+// one and letting auto-selection naturally prefer the fresh definition.
 func sortByCreationTimestampThenName[T any](items []T, key func(*T) (metav1.Time, string)) {
 	sort.Slice(items, func(i, j int) bool {
 		ti, ni := key(&items[i])
