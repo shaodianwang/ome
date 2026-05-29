@@ -20,14 +20,15 @@ import (
 // dispatch-side helpers).
 var testISVCGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
-// testKey produces the ISVC-form WorkloadKey: Namespace from the ISVC,
-// Name = "<isvc>-<component>", Labels = the OMENative pod-selector trio.
-func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.WorkloadKey {
-	return workload.WorkloadKey{
+// testKey produces the ISVC-form workload.Key the render path consumes:
+// Namespace + OwnerName from the ISVC, Component cast across the type
+// boundary, SelectorLabels = the OMENative pod-selector trio.
+func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.Key {
+	return workload.Key{
 		Namespace: isvc.Namespace,
-		Name:      isvc.Name + "-" + string(component),
 		Component: workload.ComponentType(component),
-		Labels: map[string]string{
+		OwnerName: isvc.Name,
+		SelectorLabels: map[string]string{
 			constants.InferenceServicePodLabelKey: isvc.Name,
 			constants.OMEComponentLabel:           string(component),
 			query.LabelManagedBy:                  query.ManagedByOMENative,
@@ -42,7 +43,7 @@ func testRender(isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, plan wo
 	if isvc == nil {
 		// Tests rely on Render rejecting a nil owner — pass nil
 		// through to exercise that branch.
-		return Render(nil, testISVCGVK, workload.WorkloadKey{}, podSpec, plan, inst, runner, ordinal, nil)
+		return Render(nil, testISVCGVK, workload.Key{}, podSpec, plan, inst, runner, ordinal, nil)
 	}
 	return Render(isvc, testISVCGVK, testKey(isvc, plan.Component), podSpec, plan, inst, runner, ordinal, nil)
 }
@@ -52,7 +53,7 @@ func testRender(isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, plan wo
 // signature test bodies use directly.
 func testRenderWithRevision(isvc *v1beta1.InferenceService, podSpec *corev1.PodSpec, meta *metav1.ObjectMeta, plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, ordinal int32, revisionHash string) (*corev1.Pod, error) {
 	if isvc == nil {
-		return RenderWithRevision(nil, testISVCGVK, workload.WorkloadKey{}, podSpec, meta, plan, inst, runner, ordinal, revisionHash, nil)
+		return RenderWithRevision(nil, testISVCGVK, workload.Key{}, podSpec, meta, plan, inst, runner, ordinal, revisionHash, nil)
 	}
 	return RenderWithRevision(isvc, testISVCGVK, testKey(isvc, plan.Component), podSpec, meta, plan, inst, runner, ordinal, revisionHash, nil)
 }

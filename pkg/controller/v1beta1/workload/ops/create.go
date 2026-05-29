@@ -253,7 +253,7 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 		pod, err := RenderWithRevision(
 			input.OwnerObject,
 			input.OwnerGVK,
-			renderKeyFromInput(input),
+			input.Key,
 			template,
 			input.DesiredSpec.PodTemplateObjectMeta,
 			plan,
@@ -281,19 +281,6 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 		created++
 	}
 	return created, nil
-}
-
-// renderKeyFromInput projects the workload.ReconcileInput's identity
-// into the workload.WorkloadKey shape ops/render.go consumes.
-// WorkloadKey.Name is "<owner>-<component>" — the pod-naming
-// convention every adapter shares so selectors line up.
-func renderKeyFromInput(input workload.ReconcileInput) workload.WorkloadKey {
-	return workload.WorkloadKey{
-		Namespace: input.Key.Namespace,
-		Name:      input.Key.OwnerName + "-" + string(input.Key.Component),
-		Component: input.Key.Component,
-		Labels:    input.Key.SelectorLabels,
-	}
 }
 
 // revisionHashFromTarget extracts the hash suffix from a target

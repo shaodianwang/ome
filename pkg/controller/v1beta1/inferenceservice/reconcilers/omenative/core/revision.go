@@ -19,13 +19,13 @@ import (
 // flips this in one place.
 var isvcGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
-// isvcWorkloadKey is the per-Component WorkloadKey projection for one
-// OMENative-on-ISVC reconcile. Mirrors what the ISVC adapter
-// (commit 9) will compute; centralized here so the legacy dispatch
-// callers in commits 4-8 don't repeat the build-up.
-func isvcWorkloadKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) revision.WorkloadKey {
+// isvcRevisionKey is the per-Component revision.Key projection for one
+// OMENative-on-ISVC reconcile. Mirrors what the ISVC adapter computes
+// at the workload boundary; centralized here so the legacy dispatch
+// callers don't repeat the build-up.
+func isvcRevisionKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) revision.Key {
 	name := isvc.Name + "-" + string(component)
-	return revision.WorkloadKey{
+	return revision.Key{
 		Namespace: isvc.Namespace,
 		Name:      name,
 		Labels: map[string]string{
@@ -38,9 +38,8 @@ func isvcWorkloadKey(isvc *v1beta1.InferenceService, component v1beta1.Component
 
 // EnsureControllerRevisionForISVC is the (isvc, component) shape of
 // workload/revision.EnsureControllerRevision used by the legacy
-// OMENative-on-ISVC dispatch path. Adapter callers in commit 9 skip
-// this wrapper and call workload/revision directly with their own
-// projected WorkloadKey.
+// OMENative-on-ISVC dispatch path. Adapter callers skip this wrapper
+// and call workload/revision directly with their own projected Key.
 func EnsureControllerRevisionForISVC(
 	ctx context.Context,
 	c client.Client,
@@ -51,7 +50,7 @@ func EnsureControllerRevisionForISVC(
 	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
 ) (*appsv1.ControllerRevision, bool, error) {
-	return revision.EnsureControllerRevision(ctx, c, reads, isvc, isvcGVK, isvcWorkloadKey(isvc, component), template, templateMeta, collisionCount)
+	return revision.EnsureControllerRevision(ctx, c, reads, isvc, isvcGVK, isvcRevisionKey(isvc, component), template, templateMeta, collisionCount)
 }
 
 // EnsureControllerRevisionForISVCWithWorker is the multi-pod sibling of
@@ -68,7 +67,7 @@ func EnsureControllerRevisionForISVCWithWorker(
 	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
 ) (*appsv1.ControllerRevision, bool, error) {
-	return revision.EnsureControllerRevisionWithWorker(ctx, c, reads, isvc, isvcGVK, isvcWorkloadKey(isvc, component), template, workerSpec, templateMeta, collisionCount)
+	return revision.EnsureControllerRevisionWithWorker(ctx, c, reads, isvc, isvcGVK, isvcRevisionKey(isvc, component), template, workerSpec, templateMeta, collisionCount)
 }
 
 // RetainControllerRevisionsForISVC is the (isvc, component) shape of
@@ -82,7 +81,7 @@ func RetainControllerRevisionsForISVC(
 	maxNonLive int,
 	liveNames ...string,
 ) error {
-	return revision.RetainControllerRevisions(ctx, c, reads, isvcWorkloadKey(isvc, component), maxNonLive, liveNames...)
+	return revision.RetainControllerRevisions(ctx, c, reads, isvcRevisionKey(isvc, component), maxNonLive, liveNames...)
 }
 
 // CollectLiveRevisionNamesForISVC projects an OMENativeComponentStatus
@@ -95,14 +94,14 @@ func CollectLiveRevisionNamesForISVC(cs *v1beta1.OMENativeComponentStatus) []str
 }
 
 // RevisionName composes the legacy CR name `<isvc>-<component>-<hash>`.
-// Wrapper around workload/revision.Name with the ISVC-form WorkloadKey.
+// Wrapper around workload/revision.Name with the ISVC-form key.
 func RevisionName(isvcName string, component v1beta1.ComponentType, hash string) string {
-	return revision.Name(revision.WorkloadKey{Name: isvcName + "-" + string(component)}, hash)
+	return revision.Name(revision.Key{Name: isvcName + "-" + string(component)}, hash)
 }
 
 // RevisionLabels returns the ISVC-form revision label set.
 func RevisionLabels(isvcName string, component v1beta1.ComponentType) map[string]string {
-	return revision.Labels(revision.WorkloadKey{
+	return revision.Labels(revision.Key{
 		Labels: map[string]string{
 			constants.InferenceServicePodLabelKey: isvcName,
 			constants.OMEComponentLabel:           string(component),

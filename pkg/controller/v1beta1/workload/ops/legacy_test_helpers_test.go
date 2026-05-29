@@ -400,12 +400,12 @@ func legacySliceWithEndpoint(namespace, sliceName, serviceName string, pod *core
 	}
 }
 
-// legacyEngineWorkloadKey is the per-Component revision.WorkloadKey
-// that EnsureControllerRevision needs. Centralized here so the
-// ensureCR / seedRunningRevision helpers below produce the same key the
-// production ISVC adapter (core.isvcWorkloadKey) emits.
-func legacyEngineWorkloadKey(isvc *v1beta1.InferenceService) revision.WorkloadKey {
-	return revision.WorkloadKey{
+// legacyEngineRevisionKey is the per-Component revision.Key that
+// EnsureControllerRevision needs. Centralized here so the ensureCR /
+// seedRunningRevision helpers below produce the same key the
+// production ISVC adapter (core.isvcRevisionKey) emits.
+func legacyEngineRevisionKey(isvc *v1beta1.InferenceService) revision.Key {
+	return revision.Key{
 		Namespace: isvc.Namespace,
 		Name:      isvc.Name + "-" + string(v1beta1.EngineComponent),
 		Labels: map[string]string{
@@ -420,7 +420,7 @@ func legacyEngineWorkloadKey(isvc *v1beta1.InferenceService) revision.WorkloadKe
 // creates it in the fake client so Update has something to dispatch
 // against. Mirrors omenative/ops/update_test.go.ensureTargetCR but goes
 // through workload/revision directly — the omenative wrapper just
-// composes the WorkloadKey we now build inline.
+// composes the revision.Key we now build inline.
 func legacyEnsureTargetCR(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, spec *corev1.PodSpec) *appsv1.ControllerRevision {
 	t.Helper()
 	return legacyEnsureTargetCRWithMeta(t, c, isvc, spec, nil)
@@ -437,7 +437,7 @@ func legacyEnsureTargetCRWithMeta(t *testing.T, c client.Client, isvc *v1beta1.I
 	cr, _, err := revision.EnsureControllerRevision(
 		context.Background(), c, c, isvc,
 		v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
-		legacyEngineWorkloadKey(isvc),
+		legacyEngineRevisionKey(isvc),
 		spec, meta, nil,
 	)
 	if err != nil {
@@ -466,7 +466,7 @@ func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1be
 	cr, _, err := revision.EnsureControllerRevision(
 		context.Background(), c, c, isvc,
 		v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
-		legacyEngineWorkloadKey(isvc),
+		legacyEngineRevisionKey(isvc),
 		spec, meta, nil,
 	)
 	if err != nil {
@@ -553,10 +553,10 @@ func legacyTestDeps(c client.Client) workload.Deps {
 	return workload.Deps{Client: c}
 }
 
-// (legacyEngineWorkloadKey / revision import live above.)
+// (legacyEngineRevisionKey / revision import live above.)
 //
 // Suppress the "imported and not used" warning on the revision package
 // during piecemeal builds: the helpers above all reference it, but the
 // linker emits a friendlier diagnostic if at least one var-level
 // reference exists.
-var _ = revision.WorkloadKey{}
+var _ = revision.Key{}

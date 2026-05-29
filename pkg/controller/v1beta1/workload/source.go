@@ -13,37 +13,6 @@ import (
 // 4 string enums) and the traffic target struct have no workload
 // mirror yet.
 
-// WorkloadKey identifies one logical workload and seeds label/selector
-// composition for the ops/render.go entry points. Both adapters produce
-// a Name of "<isvc>-<component>" so existing pod selectors,
-// ControllerRevision names, and Service names line up across adapters.
-//
-// Distinct from `Key` (types.go) which is the workload-owned identity
-// the ReconcileInput carries. `WorkloadKey` carries the ops/render.go
-// shape (Name + Labels) consumed by leaf packages.
-type WorkloadKey struct {
-	// Namespace is the namespace every pod / revision / service the
-	// reconciler emits is created in.
-	Namespace string
-
-	// Name is the composed identity used for ControllerRevision naming
-	// and as the prefix on emitted pod / PodGroup / PDB names.
-	Name string
-
-	// Component identifies which of router / engine / decoder this
-	// workload represents. Used by status conditions, events, and
-	// the pod-selector label set.
-	Component ComponentType
-
-	// Labels is the seed label set the workload reconciler stamps on
-	// every emitted pod. Includes ome.io/inferenceservice,
-	// component, and the managed-by=OMENative marker; adapters may
-	// add adapter-specific labels (the IR adapter may add
-	// ome.io/inferencereplica). The reconciler treats this map as
-	// read-only; copy before mutating.
-	Labels map[string]string
-}
-
 // WorkloadDesiredSpec is the per-reconcile projection of the source
 // spec the workload pipeline drives toward. Adapters compute this once
 // at the top of Reconcile; the reconciler treats every field as

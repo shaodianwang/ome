@@ -71,9 +71,9 @@ func ListPodsForInstance(ctx context.Context, c client.Reader, isvc *v1beta1.Inf
 //
 // Takes primitive args (reader + namespace + isvcName + component) so
 // the workload/query leaf doesn't take on a backward import to either
-// workload.Deps / workload.WorkloadKey or to a Component-spec carrier
-// type — keeps the leaf importable by both adapter paths without
-// closing a cycle. Adapters compose these from their own Deps + key.
+// workload.Deps / workload.Key or to a Component-spec carrier type —
+// keeps the leaf importable by both adapter paths without closing a
+// cycle. Adapters compose these from their own Deps + key.
 func LiveListPodsForInstance(ctx context.Context, reader client.Reader, namespace, isvcName string, component v1beta1.ComponentType, idx int32) ([]*corev1.Pod, error) {
 	pods, err := ListOMENativePodsByName(ctx, reader, namespace, isvcName, component)
 	if err != nil {

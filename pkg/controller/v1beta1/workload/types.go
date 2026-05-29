@@ -219,10 +219,6 @@ type InstanceStatus struct {
 // SelectorLabels with the ISVC pod-label-key seed; the IR adapter
 // sets OwnerName=ir.Name and SelectorLabels with the IR pod-label-key
 // seed.
-//
-// Distinct from `WorkloadKey` in source.go which carries the
-// ops/render.go shape (Name + Labels). `Key` is the decoupled,
-// label-seed identity carried on ReconcileInput.
 type Key struct {
 	// Namespace is the namespace every emitted pod / revision /
 	// service is created in.
@@ -248,4 +244,13 @@ type Key struct {
 	// every pod LIST selector and per-revision Service selector.
 	// workload code treats this map as read-only.
 	SelectorLabels map[string]string
+}
+
+// WorkloadName is the composed identity used for ControllerRevision
+// naming and as the prefix on emitted pod / PodGroup / PDB names.
+// Always "<OwnerName>-<Component>" — the legacy pod-naming convention
+// every adapter shares so existing selectors keep matching across the
+// refactor.
+func (k Key) WorkloadName() string {
+	return k.OwnerName + "-" + string(k.Component)
 }

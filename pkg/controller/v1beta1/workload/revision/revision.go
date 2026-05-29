@@ -5,9 +5,9 @@
 // Boundary: this package is a leaf. It depends on Kubernetes API
 // machinery + the project's v1beta1 types + constants for the
 // project-wide pod label keys. The labels stamped on emitted CRs are
-// taken from the caller-supplied workload.WorkloadKey so the same
-// labels carry through the pod-selector composition the rest of the
-// workload pipeline does.
+// taken from the caller-supplied revision.Key so the same labels
+// carry through the pod-selector composition the rest of the workload
+// pipeline does.
 //
 // Imports the audit subpackage solely to share the
 // MigrationRequestAnnotationPrefix constant — the controller-written
@@ -38,13 +38,12 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 )
 
-// WorkloadKey is the small subset of workload.WorkloadKey this package
-// needs. Defining it locally (rather than importing workload) keeps
-// this leaf importable by both the workload top-level package (commit
-// 9) and by adapters that hold their own composition of these fields.
-// Adapters typically build it from the workload.WorkloadKey they
-// already have in scope.
-type WorkloadKey struct {
+// Key is the small subset of workload.Key this package needs. Defining
+// it locally (rather than importing the workload top-level) keeps this
+// leaf importable by both the workload top-level package and by
+// adapters that hold their own composition of these fields. Adapters
+// typically build it from the workload.Key they already have in scope.
+type Key struct {
 	Namespace string
 	Name      string
 	Labels    map[string]string
@@ -204,8 +203,8 @@ func isLifecycleAnnotation(key string) bool {
 	return key == pausedRolloutAnnotation
 }
 
-// Name composes the ControllerRevision object name from the WorkloadKey
-// and the hash — `<key.Name>-<hash>`. Deterministic, so "reuse-if-exists"
+// Name composes the ControllerRevision object name from the Key and
+// the hash — `<key.Name>-<hash>`. Deterministic, so "reuse-if-exists"
 // works.
 //
 // For the ISVC adapter, key.Name = "<isvc>-<component>", producing the
@@ -213,16 +212,15 @@ func isLifecycleAnnotation(key string) bool {
 // IR-adapter callers set key.Name the same way (since one IR is one
 // (ISVC, Component) tuple), so cross-adapter CRs share the same name and
 // the in-place migration window stays seamless.
-func Name(key WorkloadKey, hash string) string {
+func Name(key Key, hash string) string {
 	return fmt.Sprintf("%s-%s", key.Name, hash)
 }
 
 // Labels are stamped on every ControllerRevision so the list selector
-// picks them up. Taken directly from the WorkloadKey's seed label set,
-// which the adapter populated with the {ome.io/inferenceservice,
-// component, managed-by} trio so the existing pod selector also picks
-// up the CRs.
-func Labels(key WorkloadKey) map[string]string {
+// picks them up. Taken directly from the Key's seed label set, which
+// the adapter populated with the {ome.io/inferenceservice, component,
+// managed-by} trio so the existing pod selector also picks up the CRs.
+func Labels(key Key) map[string]string {
 	out := make(map[string]string, len(key.Labels))
 	for k, v := range key.Labels {
 		out[k] = v
@@ -252,7 +250,7 @@ func EnsureControllerRevision(
 	reads client.Reader,
 	owner client.Object,
 	ownerGVK schema.GroupVersionKind,
-	key WorkloadKey,
+	key Key,
 	template *corev1.PodSpec,
 	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
@@ -271,7 +269,7 @@ func EnsureControllerRevisionWithWorker(
 	reads client.Reader,
 	owner client.Object,
 	ownerGVK schema.GroupVersionKind,
-	key WorkloadKey,
+	key Key,
 	template *corev1.PodSpec,
 	workerSpec *corev1.PodSpec,
 	templateMeta *metav1.ObjectMeta,
@@ -372,7 +370,7 @@ func RetainControllerRevisions(
 	ctx context.Context,
 	c client.Client,
 	reads client.Reader,
-	key WorkloadKey,
+	key Key,
 	maxNonLive int,
 	liveNames ...string,
 ) error {
@@ -430,7 +428,7 @@ func RetainControllerRevisions(
 func listControllerRevisions(
 	ctx context.Context,
 	reads client.Reader,
-	key WorkloadKey,
+	key Key,
 ) ([]appsv1.ControllerRevision, error) {
 	list := &appsv1.ControllerRevisionList{}
 	sel := labels.SelectorFromSet(labels.Set(Labels(key)))
@@ -451,7 +449,7 @@ func listControllerRevisions(
 func nextRevisionNumber(
 	ctx context.Context,
 	reads client.Reader,
-	key WorkloadKey,
+	key Key,
 ) (int64, error) {
 	existing, err := listControllerRevisions(ctx, reads, key)
 	if err != nil {

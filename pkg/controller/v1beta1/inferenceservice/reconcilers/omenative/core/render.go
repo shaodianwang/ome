@@ -4,9 +4,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // RenderWithRevisionForISVC is the (ReconcileParams, plan, inst,
@@ -41,20 +43,19 @@ func RenderWithRevisionForISVC(
 	)
 }
 
-// isvcRenderKey is the WorkloadKey projection for the legacy ISVC
-// dispatch path. After slice 3 of the workload-extraction refactor
-// WorkloadKey.Component is workload.ComponentType — the v1beta1
+// isvcRenderKey is the workload.Key projection for the legacy ISVC
+// dispatch path. Key.Component is workload.ComponentType — the v1beta1
 // component the caller already holds gets cast at the boundary (the
 // two share the same string underlying so the conversion is free).
-func isvcRenderKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.WorkloadKey {
-	return workload.WorkloadKey{
+func isvcRenderKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.Key {
+	return workload.Key{
 		Namespace: isvc.Namespace,
-		Name:      isvc.Name + "-" + string(component),
 		Component: workload.ComponentType(component),
-		Labels: map[string]string{
-			"ome.io/inferenceservice": isvc.Name,
-			"ome.io/component":        string(component),
-			"ome.io/managed-by":       "OMENative",
+		OwnerName: isvc.Name,
+		SelectorLabels: map[string]string{
+			constants.InferenceServicePodLabelKey: isvc.Name,
+			constants.OMEComponentLabel:           string(component),
+			query.LabelManagedBy:                  query.ManagedByOMENative,
 		},
 	}
 }

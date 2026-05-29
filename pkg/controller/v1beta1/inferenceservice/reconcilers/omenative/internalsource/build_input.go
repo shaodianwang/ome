@@ -140,7 +140,7 @@ func BuildReconcileInput(d BuildInputDeps) workload.ReconcileInput {
 		OwnerObject: d.ISVC,
 		OwnerGVK:    isvcGVK,
 		EventTarget: d.ISVC,
-		Key:         buildWorkloadKey(d.ISVC, d.Component),
+		Key:         buildKey(d.ISVC, d.Component),
 		DesiredSpec: workload.WorkloadDesiredSpec{
 			PodSpec:                 d.PodSpec,
 			WorkerPodSpec:           d.WorkerPodSpec,
@@ -312,12 +312,12 @@ func buildWriteAggregateCondition(c client.Client, isvc *v1beta1.InferenceServic
 	}
 }
 
-// buildWorkloadKey is the ISVC-side workload.Key projection. The
+// buildKey is the ISVC-side workload.Key projection. The
 // SelectorLabels carry the ISVC-specific label-key constants — this
 // is the ONLY place those constants surface in the dispatch path that
 // workload code observes. Workload code reads input.Key.SelectorLabels
 // opaquely.
-func buildWorkloadKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.Key {
+func buildKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.Key {
 	var namespace, ownerName string
 	var ownerLabels map[string]string
 	if isvc != nil {

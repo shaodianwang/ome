@@ -56,11 +56,11 @@ const (
 // package because that package depends on workload (cyclic).
 var testISVCGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
-// testKey builds the WorkloadKey for an ISVC: Namespace =
+// testKey builds the revision.Key for an ISVC: Namespace =
 // isvc.Namespace, Name = "<isvc>-<component>", Labels = the ISVC
 // pod-selector trio.
-func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) WorkloadKey {
-	return WorkloadKey{
+func testKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) Key {
+	return Key{
 		Namespace: isvc.Namespace,
 		Name:      isvc.Name + "-" + string(component),
 		Labels: map[string]string{

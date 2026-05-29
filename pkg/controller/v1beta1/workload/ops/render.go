@@ -21,13 +21,13 @@ import (
 // in scope.
 //
 // Owner reference comes from owner + ownerGVK; the workload key seeds
-// label/selector composition (key.Labels carries the
+// label/selector composition (key.SelectorLabels carries the
 // {ome.io/inferenceservice, component, managed-by} trio adapters
 // populate at construction time).
 func Render(
 	owner client.Object,
 	ownerGVK schema.GroupVersionKind,
-	key workload.WorkloadKey,
+	key workload.Key,
 	podSpec *corev1.PodSpec,
 	plan workload.ComponentPlan,
 	inst workload.InstancePlan,
@@ -68,7 +68,7 @@ func Render(
 func RenderWithRevision(
 	owner client.Object,
 	ownerGVK schema.GroupVersionKind,
-	key workload.WorkloadKey,
+	key workload.Key,
 	podSpec *corev1.PodSpec,
 	podTemplateObjectMeta *metav1.ObjectMeta,
 	plan workload.ComponentPlan,
@@ -85,11 +85,10 @@ func RenderWithRevision(
 		return nil, fmt.Errorf("nil PodSpec")
 	}
 
-	// Pod-naming inputs derived from the WorkloadKey + plan. The
-	// query.PodName helper still takes (isvc-from-labels, component,
-	// idx, runner, ordinal) — the isvc name comes from
-	// key.Labels["ome.io/inferenceservice"] which adapters populated.
-	isvcName := key.Labels[constants.InferenceServicePodLabelKey]
+	// Pod-naming inputs derived from the Key + plan. The query.PodName
+	// helper takes (isvc-from-OwnerName, component, idx, runner, ordinal);
+	// adapters populate Key.OwnerName with the owner's bare name.
+	isvcName := key.OwnerName
 	name := query.PodName(isvcName, plan.Component, inst.Index, runner.Name, ordinal)
 	subdomain := query.HeadlessServiceName(isvcName, plan.Component)
 
