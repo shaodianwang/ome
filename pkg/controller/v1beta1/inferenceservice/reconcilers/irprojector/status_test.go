@@ -14,15 +14,19 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
-// optInISVC returns the baseline ISVC with the per-Component opt-in
-// annotation set on engine. Decoder/Router are nil so the aggregator
-// only looks up the engine IR.
-func optInISVC(name, namespace string) *v1beta1.InferenceService {
-	isvc := baselineISVC(name, namespace)
-	isvc.Spec.Engine.Annotations = map[string]string{
-		constants.UseIRManagedAnnotationKey: constants.UseIRManagedAnnotationVal,
-	}
-	return isvc
+// engineOMENativeModes is the per-Component mode map for tests whose
+// engine flows through the IR-managed path. Mirrors what
+// controller.go builds from isvcutils.DetermineDeploymentModes after
+// the OMENative cutover.
+var engineOMENativeModes = map[v1beta1.ComponentType]constants.DeploymentModeType{
+	v1beta1.EngineComponent: constants.OMENative,
+}
+
+// engineDirectModes is the per-Component mode map for tests whose
+// engine flows through the legacy direct path (Raw / MultiNode /
+// missing). Drives the "skip aggregation" branch.
+var engineDirectModes = map[v1beta1.ComponentType]constants.DeploymentModeType{
+	v1beta1.EngineComponent: constants.RawDeployment,
 }
 
 // liveIR returns an IR fixture with realistic Status fields the
@@ -63,11 +67,11 @@ func liveIR(parentName, namespace string, replicas int32) *v1beta1.InferenceRepl
 	}
 }
 
-// TestAggregateIRStatus_NoOptIn_NoOp pins the gate: ISVC without the
-// IR-managed annotation skips the aggregator entirely. The status
-// subtree must NOT be populated from any IR (which may not even
-// exist).
-func TestAggregateIRStatus_NoOptIn_NoOp(t *testing.T) {
+// TestAggregateIRStatus_NonOMENativeMode_NoOp pins the gate: when a
+// Component's resolved deployment mode is NOT OMENative, the
+// aggregator skips it entirely. The status subtree must NOT be
+// populated from any IR (which may not even exist).
+func TestAggregateIRStatus_NonOMENativeMode_NoOp(t *testing.T) {
 	g := gomega.NewWithT(t)
 	isvc := baselineISVC("llama", "prod")
 	// Pre-populate the ISVC status with a sentinel so we can detect
@@ -83,40 +87,40 @@ func TestAggregateIRStatus_NoOptIn_NoOp(t *testing.T) {
 		WithObjects(isvc).
 		Build()
 
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineDirectModes)).To(gomega.Succeed())
 
 	// The pre-populated sentinel must survive — we didn't touch the status.
 	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].OMENative).NotTo(gomega.BeNil())
 	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].OMENative.Replicas).To(gomega.Equal(int32(99)),
-		"omenative direct-path status sentinel must NOT be overwritten when annotation is absent")
+		"direct-path status sentinel must NOT be overwritten when the resolved mode is not OMENative")
 }
 
-// TestAggregateIRStatus_OptIn_NoIR_NoErr pins the first-reconcile
-// race: opt-in is set but the IR hasn't been created yet (the
-// projector's CreateOrUpdate landed but the cache hasn't observed
-// it yet). AggregateIRStatus must NOT error — the next reconcile
-// will pick up the IR.
-func TestAggregateIRStatus_OptIn_NoIR_NoErr(t *testing.T) {
+// TestAggregateIRStatus_OMENative_NoIR_NoErr pins the first-reconcile
+// race: engine resolves to OMENative but the IR hasn't been created
+// yet (the projector's CreateOrUpdate landed but the cache hasn't
+// observed it yet). AggregateIRStatus must NOT error — the next
+// reconcile will pick up the IR.
+func TestAggregateIRStatus_OMENative_NoIR_NoErr(t *testing.T) {
 	g := gomega.NewWithT(t)
-	isvc := optInISVC("llama", "prod")
+	isvc := baselineISVC("llama", "prod")
 	c := fake.NewClientBuilder().
 		WithScheme(testScheme(t)).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
 		WithObjects(isvc).
 		Build()
 
-	err := AggregateIRStatus(context.Background(), c, isvc)
+	err := AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)
 	g.Expect(err).NotTo(gomega.HaveOccurred(),
-		"missing IR on first reconcile after opt-in must be a clean no-op")
+		"missing IR on first reconcile after OMENative dispatch must be a clean no-op")
 }
 
-// TestAggregateIRStatus_OptIn_CopiesStatusFromIR pins the happy
-// path: opt-in is set, IR exists with realistic Status. The
-// aggregator must write a 1:1 copy of IR.Status into
+// TestAggregateIRStatus_OMENative_CopiesStatusFromIR pins the happy
+// path: engine resolves to OMENative, IR exists with realistic
+// Status. The aggregator must write a 1:1 copy of IR.Status into
 // ISVC.Status.Components[engine].OMENative.
-func TestAggregateIRStatus_OptIn_CopiesStatusFromIR(t *testing.T) {
+func TestAggregateIRStatus_OMENative_CopiesStatusFromIR(t *testing.T) {
 	g := gomega.NewWithT(t)
-	isvc := optInISVC("llama", "prod")
+	isvc := baselineISVC("llama", "prod")
 	ir := liveIR("llama", "prod", 3)
 	c := fake.NewClientBuilder().
 		WithScheme(testScheme(t)).
@@ -124,7 +128,7 @@ func TestAggregateIRStatus_OptIn_CopiesStatusFromIR(t *testing.T) {
 		WithObjects(isvc, ir).
 		Build()
 
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
 
 	// Read the post-write ISVC from the apiserver — the aggregator
 	// writes via Status().Update so we can't rely on the in-memory
@@ -161,18 +165,21 @@ func TestAggregateIRStatus_OptIn_CopiesStatusFromIR(t *testing.T) {
 	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].OMENative.Replicas).To(gomega.Equal(int32(3)))
 }
 
-// TestAggregateIRStatus_OptIn_OnlyTouchesOptedComponents pins the
-// per-Component isolation: when engine is IR-managed but decoder is
-// direct-path, the aggregator must NOT touch the decoder OMENative
-// subtree (the omenative direct path is the sole writer for it).
-func TestAggregateIRStatus_OptIn_OnlyTouchesOptedComponents(t *testing.T) {
+// TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents pins
+// the per-Component isolation: when engine resolves to OMENative but
+// decoder resolves to Raw/MultiNode, the aggregator must NOT touch
+// the decoder OMENative subtree (the omenative direct path is the
+// sole writer for non-OMENative-mode Components — defensive
+// preservation in case downstream code re-uses the OMENative subtree
+// shape).
+func TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents(t *testing.T) {
 	g := gomega.NewWithT(t)
 	min := 1
-	isvc := optInISVC("llama", "prod")
+	isvc := baselineISVC("llama", "prod")
 	isvc.Spec.Decoder = &v1beta1.DecoderSpec{
 		ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &min},
 	}
-	// Decoder explicitly does NOT have the opt-in annotation.
+	// Decoder's resolved mode is intentionally NOT OMENative.
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.DecoderComponent: {
 			OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 42}, // sentinel from direct path
@@ -186,7 +193,11 @@ func TestAggregateIRStatus_OptIn_OnlyTouchesOptedComponents(t *testing.T) {
 		WithObjects(isvc, ir).
 		Build()
 
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc)).To(gomega.Succeed())
+	componentModes := map[v1beta1.ComponentType]constants.DeploymentModeType{
+		v1beta1.EngineComponent:  constants.OMENative,
+		v1beta1.DecoderComponent: constants.RawDeployment,
+	}
+	g.Expect(AggregateIRStatus(context.Background(), c, isvc, componentModes)).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceService{}
 	g.Expect(c.Get(context.Background(),
@@ -203,13 +214,46 @@ func TestAggregateIRStatus_OptIn_OnlyTouchesOptedComponents(t *testing.T) {
 		"decoder direct-path sentinel must survive the IR-managed engine aggregation")
 }
 
+// TestAggregateIRStatus_KillSwitch_NoOp pins the cluster-wide
+// escape hatch: when SetGlobalDisableIRManaged(true) is in effect,
+// even an OMENative-mode Component is treated as direct-path — the
+// aggregator skips it. Status sentinels survive.
+func TestAggregateIRStatus_KillSwitch_NoOp(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 77},
+		},
+	}
+	ir := liveIR("llama", "prod", 5)
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc, ir).
+		Build()
+
+	SetGlobalDisableIRManaged(true)
+	t.Cleanup(func() { SetGlobalDisableIRManaged(false) })
+
+	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+
+	got := &v1beta1.InferenceService{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, got)).To(gomega.Succeed())
+
+	// Sentinel survives even though an IR existed and the engine mode is OMENative.
+	g.Expect(got.Status.Components[v1beta1.EngineComponent].OMENative.Replicas).To(gomega.Equal(int32(77)),
+		"kill switch must skip aggregation even when an OMENative IR exists")
+}
+
 // TestAggregateIRStatus_NilClient_Rejected pins the validation
 // guard: nil client at the aggregator means the dispatch site
 // dropped r.Client.
 func TestAggregateIRStatus_NilClient_Rejected(t *testing.T) {
 	g := gomega.NewWithT(t)
-	isvc := optInISVC("llama", "prod")
-	err := AggregateIRStatus(context.Background(), nil, isvc)
+	isvc := baselineISVC("llama", "prod")
+	err := AggregateIRStatus(context.Background(), nil, isvc, engineOMENativeModes)
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(err.Error()).To(gomega.ContainSubstring("nil client"))
 }
@@ -220,19 +264,19 @@ func TestAggregateIRStatus_NilClient_Rejected(t *testing.T) {
 func TestAggregateIRStatus_NilISVC_Rejected(t *testing.T) {
 	g := gomega.NewWithT(t)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	err := AggregateIRStatus(context.Background(), c, nil)
+	err := AggregateIRStatus(context.Background(), c, nil, engineOMENativeModes)
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(err.Error()).To(gomega.ContainSubstring("nil ISVC"))
 }
 
-// TestAggregateIRStatus_IROptIn_PreservesNonOMENativeFields pins
+// TestAggregateIRStatus_OMENative_PreservesNonOMENativeFields pins
 // the field-isolation contract: the aggregator only touches
 // ISVC.Status.Components[<comp>].OMENative — other fields on the
 // ComponentStatusSpec (URL, RestURL, Address, RolloutPhase) must
 // survive.
-func TestAggregateIRStatus_IROptIn_PreservesNonOMENativeFields(t *testing.T) {
+func TestAggregateIRStatus_OMENative_PreservesNonOMENativeFields(t *testing.T) {
 	g := gomega.NewWithT(t)
-	isvc := optInISVC("llama", "prod")
+	isvc := baselineISVC("llama", "prod")
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
 			// Pre-existing non-OMENative fields the outer reconciler
@@ -247,7 +291,7 @@ func TestAggregateIRStatus_IROptIn_PreservesNonOMENativeFields(t *testing.T) {
 		WithObjects(isvc, ir).
 		Build()
 
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc)).To(gomega.Succeed())
+	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceService{}
 	g.Expect(c.Get(context.Background(),

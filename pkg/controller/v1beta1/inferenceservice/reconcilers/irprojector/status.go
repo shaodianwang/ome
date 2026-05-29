@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // AggregateIRStatus reads the live InferenceReplica for each
@@ -30,6 +31,15 @@ import (
 // controller reconciles + writes IR.Status; THIS function reads
 // IR.Status back onto the parent ISVC.
 //
+// componentModes carries the resolved DeploymentModeType for each
+// declared Component on the ISVC (engine/decoder/router). The
+// caller already computes this via isvcutils.DetermineDeploymentModes
+// for its dispatch decisions — passing the map through avoids
+// recomputing per-Component modes here and keeps the IR-managed
+// predicate (IsIRManagedComponent) reading the same resolved mode the
+// dispatch site read. Components missing from the map are treated as
+// non-OMENative and skipped.
+//
 // Writes directly via Status().Update rather than mutating the
 // passed-in ISVC for the outer updateStatus to flush, because the
 // outer flush's retry.RetryOnConflict path re-Gets latest + merges
@@ -45,15 +55,16 @@ import (
 //
 // Sequence per Component:
 //
-//  1. Skip Components not opted into IR-managed — the omenative
-//     direct path already wrote ISVC.Status.Components[c].OMENative
-//     in its own AggregateAndWriteStatus pass.
+//  1. Skip Components whose resolved deployment mode is not
+//     OMENative — the omenative direct path (or RawDeployment /
+//     MultiNode path) already wrote
+//     ISVC.Status.Components[c].OMENative in its own pass.
 //
 //  2. Fetch the IR by name. NotFound is non-fatal — the IR may not
-//     yet exist on the first reconcile after opt-in, OR the IR was
-//     deleted between the projector's CreateOrUpdate and our read.
-//     In either case, leaving the ISVC status entry empty is the
-//     right behavior (the next reconcile re-creates / re-reads).
+//     yet exist on the first reconcile, OR the IR was deleted between
+//     the projector's CreateOrUpdate and our read. In either case,
+//     leaving the ISVC status entry empty is the right behavior (the
+//     next reconcile re-creates / re-reads).
 //
 //  3. Status().Update under retry.RetryOnConflict to merge the
 //     IR-derived OMENative subtree onto the live ISVC. Re-read on
@@ -64,7 +75,7 @@ import (
 // ability in operator logs. A real read/write error (apiserver
 // outage, permission denied) is returned to the caller so the
 // reconcile retries; transient NotFound on the IR Get is swallowed.
-func AggregateIRStatus(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService) error {
+func AggregateIRStatus(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, componentModes map[v1beta1.ComponentType]constants.DeploymentModeType) error {
 	if c == nil {
 		return fmt.Errorf("AggregateIRStatus: nil client")
 	}
@@ -72,8 +83,10 @@ func AggregateIRStatus(ctx context.Context, c client.Client, isvc *v1beta1.Infer
 		return fmt.Errorf("AggregateIRStatus: nil ISVC")
 	}
 
+	managerDisabled := IsManagerDisableFlagSet()
 	for _, comp := range allDeclaredComponents(isvc) {
-		if !IsIRManagedComponent(isvc, comp) {
+		mode := componentModes[comp]
+		if !IsIRManagedComponent(mode, managerDisabled) {
 			continue
 		}
 		if err := aggregateOneComponent(ctx, c, isvc, comp); err != nil {

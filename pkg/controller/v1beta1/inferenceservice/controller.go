@@ -591,20 +591,26 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	// IR PR 3 Piece 2: for every Component opted into the IR-managed
-	// path, read the live IR.Status and copy it onto
-	// ISVC.Status.Components[<component>].OMENative. The IR controller
-	// is the sole writer of IR.Status (no race with the omenative
-	// direct path — the predicate guarantees one writer per Component).
-	// Direct-path Components are not touched here; their status was
-	// already written by omenative.AggregateAndWriteStatus during the
-	// per-Component dispatcher pass above.
+	// For every Component whose resolved deployment mode is OMENative
+	// (i.e. flows through the IR-managed path), read the live IR.Status
+	// and copy it onto ISVC.Status.Components[<component>].OMENative.
+	// The IR controller is the sole writer of IR.Status (no race with
+	// the omenative direct path — the predicate guarantees one writer
+	// per Component). Components on non-OMENative paths are not touched
+	// here; their status was already written by
+	// omenative.AggregateAndWriteStatus (or the equivalent for Raw /
+	// MultiNode) during the per-Component dispatcher pass above.
 	//
 	// Errors propagate so a transient apiserver read failure triggers
 	// a retry; first-reconcile NotFound is swallowed inside the
 	// helper (the next reconcile picks up the IR's fresh status once
 	// the cache observes it).
-	if err = irprojector.AggregateIRStatus(ctx, r.Client, isvc); err != nil {
+	componentModes := map[v1beta1.ComponentType]constants.DeploymentModeType{
+		v1beta1.EngineComponent:  engineDeploymentMode,
+		v1beta1.DecoderComponent: decoderDeploymentMode,
+		v1beta1.RouterComponent:  routerDeploymentMode,
+	}
+	if err = irprojector.AggregateIRStatus(ctx, r.Client, isvc, componentModes); err != nil {
 		r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 		return reconcile.Result{}, err
 	}

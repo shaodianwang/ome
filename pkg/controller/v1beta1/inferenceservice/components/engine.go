@@ -178,13 +178,15 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
 		multiPod := e.engineSpec.Leader != nil && e.engineSpec.Worker != nil
-		// IR PR 3: per-Component opt-in routes the Component through the
-		// InferenceReplica path. The ISVC controller projects the desired
+		// OMENative-mode Components dispatch through the InferenceReplica
+		// path by default: the ISVC controller projects the desired
 		// per-Component spec onto an InferenceReplica object; the IR
-		// controller drives per-Instance lifecycle from there. Without the
-		// annotation, the Component keeps using the omenative direct
-		// path for rollback safety.
-		if irprojector.IsIRManagedComponent(isvc, v1beta1.EngineComponent) {
+		// controller drives per-Instance lifecycle from there. The
+		// cluster-wide --disable-ir-managed-omenative manager flag is the
+		// operator escape hatch — when set, IsIRManagedComponent returns
+		// false and routing falls through to the omenative direct path
+		// below.
+		if irprojector.IsIRManagedComponent(e.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
 			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
 				ISVC:          isvc,
 				Component:     v1beta1.EngineComponent,

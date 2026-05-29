@@ -94,75 +94,67 @@ func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client
 	}
 }
 
-// TestIsIRManagedComponent_NoAnnotation_FalsePins the default state:
-// an ISVC without the use-ir-managed annotation routes through the
-// omenative direct path.
-func TestIsIRManagedComponent_NoAnnotation_False(t *testing.T) {
+// TestIsIRManagedComponent_OMENativeMode_True pins the default state
+// post-cutover: an OMENative-mode Component routes through the
+// IR-managed path automatically (no per-Component opt-in required).
+func TestIsIRManagedComponent_OMENativeMode_True(t *testing.T) {
 	g := gomega.NewWithT(t)
-	isvc := baselineISVC("llama", "prod")
-	g.Expect(IsIRManagedComponent(isvc, v1beta1.EngineComponent)).To(gomega.BeFalse(),
-		"absent annotation must default to omenative direct path")
-	g.Expect(IsIRManagedComponent(isvc, v1beta1.DecoderComponent)).To(gomega.BeFalse(),
-		"nil DecoderSpec must default to omenative direct path")
-	g.Expect(IsIRManagedComponent(isvc, v1beta1.RouterComponent)).To(gomega.BeFalse(),
-		"nil RouterSpec must default to omenative direct path")
+	g.Expect(IsIRManagedComponent(constants.OMENative, false)).To(gomega.BeTrue(),
+		"OMENative-mode Component must route through the IR-managed path by default")
 }
 
-// TestIsIRManagedComponent_AnnotationTrue_True pins the opt-in path:
-// per-Component annotation set to "true" enables the IR-managed path.
-func TestIsIRManagedComponent_AnnotationTrue_True(t *testing.T) {
+// TestIsIRManagedComponent_NonOMENativeMode_False pins the routing
+// boundary: only OMENative-mode Components flow through the
+// IR-managed path. RawDeployment, MultiNode, PDDisaggregated,
+// VirtualDeployment all fall through to their own dispatch branches.
+func TestIsIRManagedComponent_NonOMENativeMode_False(t *testing.T) {
 	g := gomega.NewWithT(t)
-	isvc := baselineISVC("llama", "prod")
-	isvc.Spec.Engine.Annotations = map[string]string{
-		constants.UseIRManagedAnnotationKey: constants.UseIRManagedAnnotationVal,
-	}
-	g.Expect(IsIRManagedComponent(isvc, v1beta1.EngineComponent)).To(gomega.BeTrue(),
-		"per-Component annotation set to true must enable IR-managed path")
-	g.Expect(IsIRManagedComponent(isvc, v1beta1.DecoderComponent)).To(gomega.BeFalse(),
-		"engine annotation must not bleed into decoder routing")
-}
-
-// TestIsIRManagedComponent_AnnotationNotTrue_False pins the parsing:
-// values other than the literal "true" don't enable opt-in.
-func TestIsIRManagedComponent_AnnotationNotTrue_False(t *testing.T) {
-	g := gomega.NewWithT(t)
-	isvc := baselineISVC("llama", "prod")
-	for _, v := range []string{"TRUE", "True", "1", "yes", ""} {
-		isvc.Spec.Engine.Annotations = map[string]string{
-			constants.UseIRManagedAnnotationKey: v,
-		}
-		g.Expect(IsIRManagedComponent(isvc, v1beta1.EngineComponent)).To(gomega.BeFalse(),
-			"annotation value %q must NOT enable IR-managed path", v)
+	for _, mode := range []constants.DeploymentModeType{
+		constants.RawDeployment,
+		constants.MultiNode,
+		constants.PDDisaggregated,
+		constants.VirtualDeployment,
+		constants.DeploymentModeType(""), // unresolved / unknown
+	} {
+		g.Expect(IsIRManagedComponent(mode, false)).To(gomega.BeFalse(),
+			"non-OMENative mode %q must NOT route through the IR-managed path", mode)
 	}
 }
 
-// TestIsIRManagedComponent_GlobalKillSwitch_OverridesAnnotation pins
-// the operator kill switch: even if a Component has the opt-in
-// annotation, SetGlobalDisableIRManaged(true) forces the predicate
-// false. Cleanup at the end restores the default so subsequent tests
-// aren't surprised.
-func TestIsIRManagedComponent_GlobalKillSwitch_OverridesAnnotation(t *testing.T) {
+// TestIsIRManagedComponent_GlobalKillSwitch_OverridesMode pins the
+// operator kill switch: even on an OMENative-mode Component,
+// passing managerDisableFlag=true forces the predicate false. The
+// flag is sourced from the process-wide atomic toggled by
+// SetGlobalDisableIRManaged; tests pass it explicitly so the
+// predicate stays pure.
+func TestIsIRManagedComponent_GlobalKillSwitch_OverridesMode(t *testing.T) {
 	g := gomega.NewWithT(t)
-	isvc := baselineISVC("llama", "prod")
-	isvc.Spec.Engine.Annotations = map[string]string{
-		constants.UseIRManagedAnnotationKey: constants.UseIRManagedAnnotationVal,
-	}
-	g.Expect(IsIRManagedComponent(isvc, v1beta1.EngineComponent)).To(gomega.BeTrue(),
-		"sanity: opt-in works before the kill switch fires")
+	g.Expect(IsIRManagedComponent(constants.OMENative, false)).To(gomega.BeTrue(),
+		"sanity: OMENative routes through IR by default")
+	g.Expect(IsIRManagedComponent(constants.OMENative, true)).To(gomega.BeFalse(),
+		"managerDisableFlag must force the predicate false regardless of mode")
+}
+
+// TestIsManagerDisableFlagSet_ReflectsAtomic pins the live read of
+// the package-level atomic toggled by SetGlobalDisableIRManaged.
+// cmd/manager/main.go calls SetGlobalDisableIRManaged once at
+// startup; dispatch sites + status aggregators call
+// IsManagerDisableFlagSet on every reconcile to fetch the current
+// value. Cleanup at the end restores the default so subsequent
+// tests aren't surprised.
+func TestIsManagerDisableFlagSet_ReflectsAtomic(t *testing.T) {
+	g := gomega.NewWithT(t)
+	g.Expect(IsManagerDisableFlagSet()).To(gomega.BeFalse(),
+		"default state: kill switch is NOT set")
 
 	SetGlobalDisableIRManaged(true)
 	t.Cleanup(func() { SetGlobalDisableIRManaged(false) })
-	g.Expect(IsIRManagedComponent(isvc, v1beta1.EngineComponent)).To(gomega.BeFalse(),
-		"global kill switch must override the per-Component annotation")
-}
+	g.Expect(IsManagerDisableFlagSet()).To(gomega.BeTrue(),
+		"after SetGlobalDisableIRManaged(true), the helper must reflect the new state")
 
-// TestIsIRManagedComponent_NilISVC_False pins the nil guard:
-// IsIRManagedComponent is called from the dispatch site with a
-// non-nil ISVC, but the explicit guard surfaces wiring bugs cleanly
-// instead of a nil deref.
-func TestIsIRManagedComponent_NilISVC_False(t *testing.T) {
-	g := gomega.NewWithT(t)
-	g.Expect(IsIRManagedComponent(nil, v1beta1.EngineComponent)).To(gomega.BeFalse())
+	SetGlobalDisableIRManaged(false)
+	g.Expect(IsManagerDisableFlagSet()).To(gomega.BeFalse(),
+		"after SetGlobalDisableIRManaged(false), the helper must reflect the new state")
 }
 
 // TestEnsureInferenceReplica_Create_NewIR pins the create-from-scratch

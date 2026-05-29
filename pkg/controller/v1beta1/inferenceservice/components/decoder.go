@@ -172,11 +172,11 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
 		multiPod := d.decoderSpec.Leader != nil && d.decoderSpec.Worker != nil
-		// IR PR 3: per-Component opt-in routes the Component through the
-		// InferenceReplica path. See the comment on the engine dispatch
-		// for the full design — rollback path stays the omenative direct
-		// case below.
-		if irprojector.IsIRManagedComponent(isvc, v1beta1.DecoderComponent) {
+		// OMENative-mode Components dispatch through the InferenceReplica
+		// path by default. See the comment on the engine dispatch for the
+		// full design — fallback to the omenative direct path is gated on
+		// the cluster-wide --disable-ir-managed-omenative manager flag.
+		if irprojector.IsIRManagedComponent(d.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
 			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
 				ISVC:          isvc,
 				Component:     v1beta1.DecoderComponent,

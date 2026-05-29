@@ -4,21 +4,22 @@
 //
 // The projector is the bridge between the legacy "ISVC controller
 // directly reconciles per-Component pods" world and the IR-driven
-// world: when a Component opts in via the
-// `ome.io/use-ir-managed=true` per-Component annotation, the ISVC
-// controller stops calling omenative.ReconcileComponent and instead
-// hands the desired per-Component spec to ensureInferenceReplica.
-// The IR controller then takes over the per-Instance lifecycle —
-// Create / Update / Restart / Migrate / Delete — owning its own
-// pods, ControllerRevisions, and per-Component headless Service.
+// world: when a Component's effective deployment mode is OMENative,
+// the ISVC controller stops calling omenative.ReconcileComponent and
+// instead hands the desired per-Component spec to
+// ensureInferenceReplica. The IR controller then takes over the
+// per-Instance lifecycle — Create / Update / Restart / Migrate /
+// Delete — owning its own pods, ControllerRevisions, and per-Component
+// headless Service.
 //
 // The package is intentionally narrow:
 //
-//   - IsIRManagedComponent reads the per-Component opt-in annotation
-//     and the manager-wide kill switch, returning the predicate the
-//     dispatch sites in components/{engine,decoder,router}.go branch
-//     on. The kill switch is a process-level boolean set in
-//     cmd/manager/main.go (see SetGlobalDisableIRManaged).
+//   - IsIRManagedComponent reads the resolved deployment mode and the
+//     manager-wide kill switch, returning the predicate the dispatch
+//     sites in components/{engine,decoder,router}.go branch on. The
+//     kill switch is a process-level boolean set in
+//     cmd/manager/main.go (see SetGlobalDisableIRManaged) and surfaced
+//     to callers via IsManagerDisableFlagSet.
 //
 //   - EnsureInferenceReplica is the CreateOrUpdate driver: build the
 //     desired IR Spec from the same inputs omenative.ReconcileParams
@@ -56,7 +57,7 @@ import (
 // disableIRManaged is the process-wide kill switch toggled from
 // cmd/manager/main.go via SetGlobalDisableIRManaged. When true,
 // IsIRManagedComponent always returns false regardless of the
-// per-Component annotation — operators can flip the manager flag
+// resolved deployment mode — operators can flip the manager flag
 // `--disable-ir-managed-omenative=true` to immediately route every
 // OMENative Component back to the omenative direct path without
 // touching individual ISVCs.
@@ -72,7 +73,7 @@ var disableIRManaged atomic.Int32
 // kill switch. Called once from cmd/manager/main.go after flag
 // parsing. Setting to true forces IsIRManagedComponent to return
 // false everywhere; setting to false (the default) re-enables the
-// per-Component annotation path.
+// IR-managed path for every OMENative Component.
 //
 // Idempotent and safe to call concurrently — the underlying atomic
 // store has the right memory ordering.
@@ -84,61 +85,39 @@ func SetGlobalDisableIRManaged(disabled bool) {
 	}
 }
 
+// IsManagerDisableFlagSet returns the current value of the
+// process-wide kill switch (SetGlobalDisableIRManaged). Exposed so
+// dispatch sites + status aggregators can fetch the live value when
+// calling IsIRManagedComponent. Cheap atomic load — safe to call on
+// every reconcile.
+func IsManagerDisableFlagSet() bool {
+	return disableIRManaged.Load() == 1
+}
+
 // IsIRManagedComponent returns true when the given Component should be
 // driven through the InferenceReplica path. The predicate consults two
 // inputs:
 //
-//   - The process-wide kill switch (SetGlobalDisableIRManaged). When
-//     set, every Component routes to the omenative direct path.
+//   - managerDisableFlag — the process-wide kill switch
+//     (SetGlobalDisableIRManaged / IsManagerDisableFlagSet). When
+//     true, the predicate is false regardless of mode and the
+//     Component routes to the omenative direct path.
 //
-//   - The per-Component opt-in annotation on the corresponding
-//     ComponentExtensionSpec (Engine / Decoder / Router each carry
-//     their own Annotations map via ComponentExtensionSpec). The
-//     annotation key is ome.io/use-ir-managed; value must literally be
-//     "true" to opt in. Absent or any other value falls through to the
-//     omenative direct path.
+//   - deploymentMode — the resolved per-Component DeploymentModeType.
+//     Only constants.OMENative routes through the IR-managed path;
+//     every other mode (RawDeployment, MultiNode, …) falls through to
+//     its own dispatch branch in components/{engine,decoder,router}.go.
 //
-// Single ISVC handle + ComponentType keeps the call sites at the
-// dispatch points readable: each component's reconcileDeployment
-// branches on this predicate before choosing between
-// ensureInferenceReplica and omenative.ReconcileComponent.
-func IsIRManagedComponent(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) bool {
-	if disableIRManaged.Load() == 1 {
+// The previous `ome.io/use-ir-managed` per-Component opt-in annotation
+// has been removed. OMENative-mode Components now ALWAYS route through
+// the IR-managed path by default; operators rely solely on the
+// cluster-wide --disable-ir-managed-omenative manager flag as the
+// escape hatch.
+func IsIRManagedComponent(deploymentMode constants.DeploymentModeType, managerDisableFlag bool) bool {
+	if managerDisableFlag {
 		return false
 	}
-	if isvc == nil {
-		return false
-	}
-	annotations := componentAnnotations(isvc, component)
-	if annotations == nil {
-		return false
-	}
-	return annotations[constants.UseIRManagedAnnotationKey] == constants.UseIRManagedAnnotationVal
-}
-
-// componentAnnotations returns the per-Component annotation map for
-// the given ComponentType. Returns nil when the Component is not
-// declared on the ISVC spec — caller treats nil as "no opt-in".
-func componentAnnotations(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[string]string {
-	switch component {
-	case v1beta1.EngineComponent:
-		if isvc.Spec.Engine == nil {
-			return nil
-		}
-		return isvc.Spec.Engine.Annotations
-	case v1beta1.DecoderComponent:
-		if isvc.Spec.Decoder == nil {
-			return nil
-		}
-		return isvc.Spec.Decoder.Annotations
-	case v1beta1.RouterComponent:
-		if isvc.Spec.Router == nil {
-			return nil
-		}
-		return isvc.Spec.Router.Annotations
-	default:
-		return nil
-	}
+	return deploymentMode == constants.OMENative
 }
 
 // isvcGVK identifies the parent ISVC for owner-ref stamping on

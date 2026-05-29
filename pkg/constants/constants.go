@@ -179,25 +179,6 @@ var (
 	// §"Access model — controller-only resource".
 	InferenceReplicaControllerWriteAnnotationKey = OMEAPIGroupName + "/controller-write"
 	InferenceReplicaControllerWriteAnnotationVal = "true"
-
-	// UseIRManagedAnnotationKey opts a single Component into the
-	// IR-managed path. Set on the per-Component annotation map
-	// (ISVC.spec.<component>.annotations) — engine, decoder, and router
-	// each opt in independently so operators can roll out granularly.
-	// Absent or set to anything other than "true" routes the Component
-	// through the existing omenative direct path (status quo).
-	//
-	// Per-Component opt-in mirrors OEP-0007's
-	// `ome.io/deploymentMode=OMENative` precedent: each Component
-	// declares its own preference, the ISVC controller respects it.
-	//
-	// Read by the per-Component dispatch in
-	// pkg/controller/v1beta1/inferenceservice/components/{engine,decoder,router}.go
-	// via the IsIRManagedComponent predicate. Cluster-operator
-	// kill-switch: the --disable-ir-managed-omenative manager flag
-	// forces the predicate to false regardless of annotation.
-	UseIRManagedAnnotationKey = OMEAPIGroupName + "/use-ir-managed"
-	UseIRManagedAnnotationVal = "true"
 )
 
 // Label Constants

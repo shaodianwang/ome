@@ -281,8 +281,9 @@ func runDirectPath(t *testing.T, fix shadowFixture) shadowSnapshot {
 
 // runIRManagedPath drives the projector + IR controller against a
 // fresh fixture and snapshots the resulting cluster state. Mirrors
-// what the ISVC controller's dispatch site does WITH the
-// per-Component opt-in annotation.
+// what the ISVC controller's dispatch site does for an
+// OMENative-mode Component (which now always routes through the
+// IR-managed path by default).
 //
 // Two-step:
 //  1. irprojector.EnsureInferenceReplica creates the IR.
@@ -297,13 +298,6 @@ func runIRManagedPath(t *testing.T, fix shadowFixture) shadowSnapshot {
 	t.Helper()
 	ctx := context.Background()
 	isvc := buildShadowISVC(fix)
-	// Set the per-Component opt-in annotation so the projector path
-	// would fire in production. Not strictly necessary for the test
-	// (we call EnsureInferenceReplica directly), but keeps the
-	// fixture shape representative of the production opt-in state.
-	setComponentAnnotation(isvc, fix.component,
-		constants.UseIRManagedAnnotationKey,
-		constants.UseIRManagedAnnotationVal)
 	c := newShadowClient(t, isvc)
 
 	objMeta := metav1.ObjectMeta{
@@ -528,38 +522,6 @@ func componentExtFromISVC(isvc *v1beta1.InferenceService, component v1beta1.Comp
 		return &isvc.Spec.Router.ComponentExtensionSpec
 	}
 	return nil
-}
-
-// setComponentAnnotation sets the given key=value on the
-// per-Component Annotations map of the ISVC. Centralized so the
-// shadow-mode fixtures don't repeat the per-Component switch.
-func setComponentAnnotation(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, key, value string) {
-	switch component {
-	case v1beta1.EngineComponent:
-		if isvc.Spec.Engine == nil {
-			return
-		}
-		if isvc.Spec.Engine.Annotations == nil {
-			isvc.Spec.Engine.Annotations = map[string]string{}
-		}
-		isvc.Spec.Engine.Annotations[key] = value
-	case v1beta1.DecoderComponent:
-		if isvc.Spec.Decoder == nil {
-			return
-		}
-		if isvc.Spec.Decoder.Annotations == nil {
-			isvc.Spec.Decoder.Annotations = map[string]string{}
-		}
-		isvc.Spec.Decoder.Annotations[key] = value
-	case v1beta1.RouterComponent:
-		if isvc.Spec.Router == nil {
-			return
-		}
-		if isvc.Spec.Router.Annotations == nil {
-			isvc.Spec.Router.Annotations = map[string]string{}
-		}
-		isvc.Spec.Router.Annotations[key] = value
-	}
 }
 
 // newShadowClient builds a controller-runtime fake client with the

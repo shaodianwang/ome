@@ -150,12 +150,13 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 	case constants.RawDeployment:
 		return r.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
 	case constants.OMENative:
-		// IR PR 3: per-Component opt-in routes the Component through the
-		// InferenceReplica path. Router is always single-pod
-		// (MultiPod=false; no Worker block) so the projector receives a
-		// nil WorkerPodSpec — matches the omenative ReconcileParams
-		// projection below.
-		if irprojector.IsIRManagedComponent(isvc, v1beta1.RouterComponent) {
+		// OMENative-mode Components dispatch through the InferenceReplica
+		// path by default. Router is always single-pod (MultiPod=false;
+		// no Worker block) so the projector receives a nil WorkerPodSpec
+		// — matches the omenative ReconcileParams projection below.
+		// Fallback to the omenative direct path is gated on the
+		// cluster-wide --disable-ir-managed-omenative manager flag.
+		if irprojector.IsIRManagedComponent(r.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
 			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
 				ISVC:         isvc,
 				Component:    v1beta1.RouterComponent,
