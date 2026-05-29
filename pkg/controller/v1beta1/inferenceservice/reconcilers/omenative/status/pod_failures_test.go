@@ -98,6 +98,27 @@ func TestPodStuckPullFailure_CreateContainerErrorPastGrace(t *testing.T) {
 	}
 }
 
+// Bug #52: CrashLoopBackOff is the kubelet-stable steady state for a
+// container that pulls cleanly but exits non-zero on every restart
+// attempt. Permanent until the spec changes.
+func TestPodStuckPullFailure_CrashLoopBackOffPastGrace(t *testing.T) {
+	pod := makePodWithWaiting(-2*time.Minute, "CrashLoopBackOff", "")
+	ok, reason := PodStuckPullFailure(pod, time.Now(), 60*time.Second)
+	if !ok || reason != "CrashLoopBackOff" {
+		t.Errorf("CrashLoopBackOff past grace should fire; got ok=%v reason=%q", ok, reason)
+	}
+}
+
+// RunContainerError fires when the container runtime rejects the start
+// (missing shared libraries, exec format mismatch). Permanent.
+func TestPodStuckPullFailure_RunContainerErrorPastGrace(t *testing.T) {
+	pod := makePodWithWaiting(-2*time.Minute, "RunContainerError", "")
+	ok, reason := PodStuckPullFailure(pod, time.Now(), 60*time.Second)
+	if !ok || reason != "RunContainerError" {
+		t.Errorf("RunContainerError past grace should fire; got ok=%v reason=%q", ok, reason)
+	}
+}
+
 func TestPodStuckPullFailure_InitContainerImagePullBackOff(t *testing.T) {
 	// Init container with ImagePullBackOff; main container has no status
 	// (kubelet doesn't start regular containers until init succeeds).

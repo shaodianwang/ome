@@ -185,18 +185,30 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 	// phase (Creating / Updating / Restarting / Migrating) whose pods
 	// have been stuck in a non-recoverable kubelet waiting state
 	// (ImagePullBackOff / ErrImagePull / InvalidImageName /
-	// CreateContainerError) past the stuck-pod grace window gets
-	// escalated to Phase=Failed immediately, without waiting for the
-	// (default 30 min) per-Instance Operation deadline. This is the
-	// operator-visible fix for the SurgeThenDrain bad-image scenario
-	// — bumping a Component to a missing image tag now surfaces
-	// Component.Failed within seconds of the kubelet stabilizing on
-	// ImagePullBackOff, not 30+ minutes later. The slow Deadline path
-	// in ops/timeouts.go is the backstop for other op-step wedges
-	// (drain races, runtime hangs, etc.) where there's no kubelet
-	// signal to act on early.
+	// CreateContainerError / CrashLoopBackOff / RunContainerError) past
+	// the stuck-pod grace window gets escalated to Phase=Failed
+	// immediately, without waiting for the (default 30 min)
+	// per-Instance Operation deadline. This is the operator-visible fix
+	// for the SurgeThenDrain bad-image scenario — bumping a Component
+	// to a missing image tag now surfaces Component.Failed within
+	// seconds of the kubelet stabilizing on the terminal reason, not
+	// 30+ minutes later. The slow Deadline path in ops/timeouts.go is
+	// the backstop for other op-step wedges (drain races, runtime
+	// hangs, etc.) where there's no kubelet signal to act on early.
 	if eerr := escalateStuckPodFailures(ctx, p, plan, byIndex); eerr != nil {
 		return fmt.Errorf("status: escalate stuck pod failures: %w", eerr)
+	}
+	// Component-level Conditions read InstanceStatus.Phase; the
+	// escalator above may have just flipped one to Failed. Re-run the
+	// Component-level condition compute against the post-escalation
+	// state so the same-reconcile-pass condition write reflects reality
+	// — without the refresh, Progressing stays True/RolloutInProgress
+	// until the NEXT reconcile pass, hiding the failure from operators
+	// who page on `kubectl wait --for=condition=Progressing=False`.
+	// No-op when nothing escalated: the closure returns false on
+	// idempotent passes and the apiserver write is skipped.
+	if cerr := refreshComponentConditionsPostEscalation(ctx, p, plan); cerr != nil {
+		return fmt.Errorf("status: refresh conditions post-escalation: %w", cerr)
 	}
 
 	// Retention runs post-commit. The liveNames union ensures in-flight
@@ -300,6 +312,126 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 		CurrentRevisionHash: query.RevisionHashFromControllerRevisionName(cs.OMENative.CurrentRevision),
 		RevisionHashLabel:   query.LabelRevisionHash,
 	})
+}
+
+// refreshComponentConditionsPostEscalation re-runs ComputeComponentConditions
+// against the post-escalation Component status and writes the result
+// when the desired condition set differs from what's already there.
+// The escalator above may have flipped an Instance Phase from
+// transient to Failed; the Component-level Progressing / Available
+// conditions read InstanceStatus.Phase to derive their values, so
+// without this refresh the conditions written by the AggregateAndWriteStatus
+// retry loop reflect the pre-escalation state and operators see
+// `Progressing=True/RolloutInProgress` on a rollout that has terminally
+// failed (bug #52).
+//
+// Fast-path skip: the escalator mirrors any Phase mutation back onto
+// p.ISVC via status.MutateInstance. We read off the in-memory cache
+// first to compute the desired condition set; if it matches what's
+// already on the Component, we skip the apiserver round-trip entirely.
+// The happy path (no stuck pods) is therefore zero-allocation +
+// zero-network past the in-memory equality check.
+//
+// On a real escalation (Phase=Failed lands), the helper does ONE
+// apiserver Get + Update via retry.RetryOnConflict, mirroring the
+// post-write Component status onto p.ISVC so coordination.Reconcile
+// in controller.go reads the fresh conditions instead of the stale
+// pre-escalation slice.
+func refreshComponentConditionsPostEscalation(ctx context.Context, p ReconcileParams, plan ComponentPlan) error {
+	if p.ISVC == nil || p.Client == nil {
+		return nil
+	}
+	// Fast-path: compute against the in-memory mirror first. The
+	// escalator's MutateInstance has already mirrored Phase=Failed
+	// back to p.ISVC, so this compute reflects post-escalation state
+	// without any apiserver call.
+	cached, ok := p.ISVC.Status.Components[plan.Component]
+	if !ok || cached.OMENative == nil {
+		return nil
+	}
+	desired := status.ComputeComponentConditions(cached.OMENative, p.ISVC.Generation)
+	if conditionSetUnchanged(cached.OMENative.Conditions, desired) {
+		// Escalator was a no-op (no pods stuck) OR escalator fired but
+		// nothing meaningful changed on the Component conditions
+		// (e.g., already in Failed state from a prior pass). Either
+		// way, the in-memory cache matches what the retry loop wrote,
+		// so the apiserver state matches too. Skip the round-trip.
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &v1beta1.InferenceService{}
+		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				// ISVC deleted mid-reconcile — nothing to refresh.
+				return nil
+			}
+			return fmt.Errorf("re-read ISVC for post-escalation refresh: %w", err)
+		}
+		if fresh.Status.Components == nil {
+			return nil
+		}
+		cs, ok := fresh.Status.Components[plan.Component]
+		if !ok || cs.OMENative == nil {
+			return nil
+		}
+		// Recompute against fresh state in case a peer reconcile bumped
+		// counters between the cached read and now.
+		fresherDesired := status.ComputeComponentConditions(cs.OMENative, fresh.Generation)
+		if conditionSetUnchanged(cs.OMENative.Conditions, fresherDesired) {
+			return nil
+		}
+		status.ApplyComponentConditions(cs.OMENative, fresherDesired)
+		fresh.Status.Components[plan.Component] = cs
+		if err := p.Client.Status().Update(ctx, fresh); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("write refreshed component conditions: %w", err)
+		}
+		// Mirror onto the caller's in-memory ISVC so coordination.Reconcile
+		// (which runs after every per-Component reconciler in
+		// controller.go) reads the fresh conditions instead of the
+		// stale pre-escalation slice.
+		if p.ISVC.Status.Components == nil {
+			p.ISVC.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
+		}
+		mirror := p.ISVC.Status.Components[plan.Component]
+		if mirror.OMENative == nil {
+			mirror.OMENative = &v1beta1.OMENativeComponentStatus{}
+		}
+		mirror.OMENative.Conditions = append(mirror.OMENative.Conditions[:0], cs.OMENative.Conditions...)
+		p.ISVC.Status.Components[plan.Component] = mirror
+		return nil
+	})
+}
+
+// conditionSetUnchanged reports whether desired's condition Type+Status+
+// Reason set is a subset of existing. ApplyComponentConditions uses
+// apimeta.SetStatusCondition under the hood, which only touches a
+// condition when one of those three fields changes — so this comparison
+// matches the "would the write actually mutate anything" predicate.
+//
+// Message / ObservedGeneration / LastTransitionTime intentionally are
+// not compared: SetStatusCondition treats those as derived. Comparing
+// them would force a write on every reconcile even when the meaningful
+// state is unchanged, defeating the idempotency goal.
+func conditionSetUnchanged(existing, desired []metav1.Condition) bool {
+	for _, want := range desired {
+		var matched bool
+		for _, have := range existing {
+			if have.Type != want.Type {
+				continue
+			}
+			if have.Status == want.Status && have.Reason == want.Reason {
+				matched = true
+			}
+			break
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 // defaultRevisionRetention is the legacy alias for the workload-side

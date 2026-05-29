@@ -33,6 +33,11 @@ import (
 // been observed in the wild as a wedge that requires either a spec
 // change (fix the image tag) or a node-level fix (registry creds);
 // neither is something the controller can do on its own.
+//
+// MUST stay in lockstep with the workload-side mirror
+// (pkg/controller/v1beta1/workload/status_aggregate.go) — the workload
+// copy is the one production code hits via FirstStuckPodForInstance.
+// This file's variant is exported for tests + future direct callers.
 var terminalPullFailureReasons = map[string]struct{}{
 	// ErrImagePull is kubelet's initial signal that the registry pull
 	// failed (404, unauthorized, network timeout). After a few retries
@@ -58,6 +63,20 @@ var terminalPullFailureReasons = map[string]struct{}{
 	// missing volume mounts, etc.). The grace window distinguishes
 	// transient hiccups from persistent failures.
 	"CreateContainerError": {},
+	// CrashLoopBackOff lands when the container repeatedly exits
+	// non-zero and kubelet's restart backoff has converged on its
+	// per-pod cap (~5 minutes between attempts). Common operator-
+	// reported triggers: bad command-line args, missing config, image
+	// with broken entrypoint. Permanent until the spec changes.
+	// Closes bug #52: a bumped image that pulls cleanly but crashes
+	// immediately was not classified as terminal and the rollout sat
+	// at Phase=Updating for the full 30-minute InstanceReadyTimeout.
+	"CrashLoopBackOff": {},
+	// RunContainerError signals the container runtime rejected the
+	// start (corrupt manifest, missing required shared libraries,
+	// exec-format mismatch — e.g., amd64 image on arm64 node).
+	// Permanent until the image is fixed.
+	"RunContainerError": {},
 }
 
 // PodStuckPullFailure returns true when pod has at least one container

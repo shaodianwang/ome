@@ -38,11 +38,18 @@ const (
 // `kubectl get isvc -o jsonpath='...conditions[?(@.type=="Available")].reason'`
 // is grep-friendly.
 const (
-	ReasonReady                     = "Ready"
-	ReasonNoReplicas                = "NoReplicas"
-	ReasonNotAllAvailable           = "NotAllAvailable"
-	ReasonRolloutInProgress         = "RolloutInProgress"
-	ReasonNoRollout                 = "NoRollout"
+	ReasonReady             = "Ready"
+	ReasonNoReplicas        = "NoReplicas"
+	ReasonNotAllAvailable   = "NotAllAvailable"
+	ReasonRolloutInProgress = "RolloutInProgress"
+	ReasonNoRollout         = "NoRollout"
+	// ReasonFailed stamps the Component-level Progressing condition
+	// (Status=False) when at least one Instance has terminally failed
+	// (stuck-pod escalation or InstanceReadyTimeout). Distinct from
+	// ReasonNoRollout (steady-state convergence) so operators can
+	// tell "nothing in flight, all good" from "rollout wedged, fix
+	// the spec or wait for stuck pods to clear."
+	ReasonFailed                    = "Failed"
 	ReasonOperationDeadlineExceeded = "OperationDeadlineExceeded"
 	ReasonNoStuckOperations         = "NoStuckOperations"
 	ReasonAllPodsScheduled          = "AllPodsScheduled"
@@ -129,7 +136,30 @@ func availableCondition(cs *v1beta1.OMENativeComponentStatus, generation int64, 
 // progressingCondition reports whether a rollout is in flight —
 // UpdateRevision != CurrentRevision, or any Instance is in a
 // transient phase (Creating/Updating/Restarting/Migrating/Deleting).
+//
+// Failed carve-out: when at least one Instance has been escalated to
+// Phase=Failed (stuck-pod fast path or InstanceReadyTimeout slow path),
+// Progressing flips to False/Reason=Failed regardless of the revision
+// diff. The rollout is permanently wedged and operator action is
+// required; reporting RolloutInProgress would lie to operators who
+// kubectl-wait on the condition or page on stuck rollouts.
+//
+// Closes the bug #52 follow-up: SurgeThenDrain bumps to a bad image
+// left Progressing=True/RolloutInProgress forever even after the
+// per-Instance escalator stamped Phase=Failed, because
+// CurrentRevision (the old rev) never advanced to UpdateRevision (the
+// new bad rev).
 func progressingCondition(cs *v1beta1.OMENativeComponentStatus, generation int64, now metav1.Time) metav1.Condition {
+	if hasFailedInstance(cs) {
+		return metav1.Condition{
+			Type:               ConditionProgressing,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonFailed,
+			Message:            failedInstancesMessage(cs),
+			LastTransitionTime: now,
+			ObservedGeneration: generation,
+		}
+	}
 	if isProgressing(cs) {
 		return metav1.Condition{
 			Type:               ConditionProgressing,
@@ -165,6 +195,40 @@ func isProgressing(cs *v1beta1.OMENativeComponentStatus) bool {
 		}
 	}
 	return false
+}
+
+// hasFailedInstance reports whether at least one Instance has been
+// escalated to Phase=Failed (the stuck-pod fast path or the
+// InstanceReadyTimeout slow path both land here). Used by
+// progressingCondition to suppress the misleading
+// "RolloutInProgress" message when the rollout is actually wedged.
+func hasFailedInstance(cs *v1beta1.OMENativeComponentStatus) bool {
+	for _, s := range cs.InstanceStatuses {
+		if s.Phase == v1beta1.OMENativeInstanceFailed {
+			return true
+		}
+	}
+	return false
+}
+
+// failedInstancesMessage formats the operator-facing failure summary
+// the Progressing condition carries when the failed-instance carve-out
+// fires. Stays short — the per-Instance breadcrumb (Operation.Step) +
+// the InstanceFailed event carry the full detail.
+func failedInstancesMessage(cs *v1beta1.OMENativeComponentStatus) string {
+	var indices []int32
+	for _, s := range cs.InstanceStatuses {
+		if s.Phase == v1beta1.OMENativeInstanceFailed {
+			indices = append(indices, s.Index)
+		}
+	}
+	if len(indices) == 0 {
+		return ""
+	}
+	if len(indices) == 1 {
+		return "Rollout failed: instance " + itoa(int(indices[0])) + " in Phase=Failed"
+	}
+	return "Rollout failed: instances " + commaJoinInt32(indices) + " in Phase=Failed"
 }
 
 func progressingMessage(cs *v1beta1.OMENativeComponentStatus) string {

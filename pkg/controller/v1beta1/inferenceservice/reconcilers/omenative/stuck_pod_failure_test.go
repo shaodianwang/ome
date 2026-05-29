@@ -6,11 +6,14 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -62,6 +65,67 @@ func surgeStuckPodEnv(t *testing.T, podAge time.Duration, reason string) (*v1bet
 		},
 	}
 	return isvc, oldPod, surgePod
+}
+
+// TestSurgeUpdate_CrashLoopBackOff_MarksInstanceFailed pins the bug #52
+// gap: a surge pod that pulls successfully but then crashes immediately
+// (kubelet flips it into CrashLoopBackOff) is just as wedged as one
+// stuck in ImagePullBackOff — operators cannot recover without a spec
+// change, and waiting 30 minutes for the InstanceReadyTimeout deadline
+// is the wrong UX. CrashLoopBackOff must escalate the Instance to
+// Phase=Failed within the same grace window the pull-failure reasons
+// honor. Prior to the fix the escalator's terminal-reason set covered
+// only the pull-side failures; pods that crash after a successful pull
+// fall through the slow-path 30-min deadline.
+func TestSurgeUpdate_CrashLoopBackOff_MarksInstanceFailed(t *testing.T) {
+	resetExpectations(t)
+	withStuckPodGracePeriod(t, 1*time.Second)
+	isvc, oldPod, surgePod := surgeStuckPodEnv(t, 5*time.Second, "CrashLoopBackOff")
+	c := newFakeClientWithDiscovery(t, isvc, oldPod, surgePod)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	if err := AggregateAndWriteStatus(context.Background(), p, plan, nil); err != nil {
+		t.Fatalf("AggregateAndWriteStatus: %v", err)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Errorf("Phase: got %q want Failed (surge pod CrashLoopBackOff past grace should fast-fail)", s.Phase)
+	}
+	if s.Operation == nil {
+		t.Fatalf("Operation must be preserved on stuck-pod escalation; got nil")
+	}
+	if s.Operation.Step != "Surge" {
+		t.Errorf("Operation.Step: got %q want Surge (Step preserved as breadcrumb)", s.Operation.Step)
+	}
+}
+
+// TestSurgeUpdate_RunContainerError_MarksInstanceFailed pins the
+// runtime-rejection escalation: kubelet pulled the image OK but the
+// container runtime refuses to start it (corrupt manifest, missing
+// shared library, exec format error). RunContainerError is permanent
+// until the image is fixed; the controller surfaces it the same as
+// ImagePullBackOff.
+func TestSurgeUpdate_RunContainerError_MarksInstanceFailed(t *testing.T) {
+	resetExpectations(t)
+	withStuckPodGracePeriod(t, 1*time.Second)
+	isvc, oldPod, surgePod := surgeStuckPodEnv(t, 5*time.Second, "RunContainerError")
+	c := newFakeClientWithDiscovery(t, isvc, oldPod, surgePod)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	if err := AggregateAndWriteStatus(context.Background(), p, plan, nil); err != nil {
+		t.Fatalf("AggregateAndWriteStatus: %v", err)
+	}
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Errorf("Phase: got %q want Failed (surge pod RunContainerError past grace should fast-fail)", s.Phase)
+	}
 }
 
 // TestSurgeUpdate_ImagePullBackOff_MarksInstanceFailed is the primary
@@ -325,6 +389,130 @@ func TestSurgeUpdate_WedgedSurgePod_HashMatchesCurrent_NoEscalation(t *testing.T
 	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceReady {
 		t.Errorf("Phase: got %q want Ready (stuck pod whose hash matches CurrentRevision must not escalate)", s.Phase)
+	}
+}
+
+// TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd is the
+// bug #52 end-to-end repro: AggregateAndWriteStatus (escalator) followed
+// by coordination.Reconcile must flip the group's Phase to Failed AND
+// stamp the RolloutCoordinationReady=False/Reason=Failed condition on
+// the parent ISVC. Without the full chain working, operators reported
+// the group sitting at Idle (or RolloutInProgress) for the full
+// 30-minute InstanceReadyTimeout even though the surge pod was wedged
+// from second 5.
+//
+// This test exercises both halves of the contract at once:
+//
+//  1. AggregateAndWriteStatus stamps Phase=Failed on the InstanceStatus
+//     once the surge pod's CreationTimestamp is past
+//     StuckPodFailureGracePeriod.
+//  2. coordination.Reconcile reads the Phase=Failed signal,
+//     buildComponentObservation flips Component.Failed=true,
+//     blueGreenTransition returns Phase=CoordinationPhaseFailed, and
+//     SetRolloutCoordinationReady stamps RolloutCoordinationReady=False.
+//
+// Pairs with TestSurgeUpdate_FailedInstanceSurfacesAtComponentObservation
+// which pins step (2) in isolation; this test pins the full chain so a
+// regression in either step is caught by the same red light.
+func TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd(t *testing.T) {
+	resetExpectations(t)
+	withStuckPodGracePeriod(t, 1*time.Second)
+
+	isvc, oldPod, surgePod := surgeStuckPodEnv(t, 5*time.Second, "ImagePullBackOff")
+	// Declare an explicit BlueGreen group so the coordination state
+	// machine has something to drive; the engine annotation routes the
+	// Component through the OMENative collectOMENativeComponents path.
+	if isvc.Spec.Engine.Annotations == nil {
+		isvc.Spec.Engine.Annotations = map[string]string{}
+	}
+	isvc.Spec.Engine.Annotations[constants.DeploymentMode] = string(constants.OMENative)
+	isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+		Groups: []v1beta1.RolloutCoordinationGroup{{
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+			Policy:     v1beta1.CoordinationPolicyBlueGreen,
+		}},
+	}
+	// CurrentRevision != UpdateRevision so coordination sees a rollout
+	// in flight (the SurgeThenDrain failure case operators reported).
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision = "llama-70b-engine-old"
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.UpdateRevision = "llama-70b-engine-new"
+	isvc.Status.Components[v1beta1.EngineComponent].OMENative.Replicas = 1
+	// Pod revision-hash labels so the per-revision observation has data
+	// to feed the group transition.
+	oldPod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName("llama-70b-engine-old")
+	surgePod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName("llama-70b-engine-new")
+
+	c := newFakeClientWithDiscovery(t, isvc, oldPod, surgePod)
+	p := minimalParams(t, isvc, c)
+	plan, _ := BuildPlan(p)
+
+	// Step 1: AggregateAndWriteStatus stamps Phase=Failed on the
+	// InstanceStatus via the stuck-pod escalator. The status_aggregate
+	// retry loop also stamps UpdateRevision (passed via the nil target
+	// arg here means the writer skips the revision write — the
+	// pre-seeded CurrentRevision/UpdateRevision on isvc carry through).
+	if err := AggregateAndWriteStatus(context.Background(), p, plan, nil); err != nil {
+		t.Fatalf("AggregateAndWriteStatus: %v", err)
+	}
+
+	// Sanity check step 1: per-Instance Phase is Failed.
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("get fresh isvc after step 1: %v", err)
+	}
+	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	if s.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Fatalf("step 1: Phase: got %q want Failed", s.Phase)
+	}
+
+	// Verify the Component-level Progressing condition reflects the
+	// failure (the bug #52 follow-up: previously this stayed at
+	// True/RolloutInProgress because CurrentRevision != UpdateRevision).
+	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	progressing := apimeta.FindStatusCondition(cs.Conditions, status.ConditionProgressing)
+	if progressing == nil {
+		t.Fatalf("Progressing condition missing on Component status")
+	}
+	if progressing.Status != metav1.ConditionFalse {
+		t.Errorf("Progressing.Status: got %s want False (rollout permanently failed; should not report InProgress)", progressing.Status)
+	}
+	if progressing.Reason != status.ReasonFailed {
+		t.Errorf("Progressing.Reason: got %q want %q", progressing.Reason, status.ReasonFailed)
+	}
+
+	// Step 2: coordination.Reconcile reads the Phase=Failed signal,
+	// rolls up to Component.Failed=true, and the BlueGreen state
+	// machine returns Phase=Failed for the group.
+	res, err := coordination.Reconcile(context.Background(), coordination.ReconcileInputs{
+		ISVC:   fresh,
+		Client: c,
+		Reader: c,
+		Now:    time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("coordination.Reconcile: %v", err)
+	}
+	if len(res.GroupStatuses) != 1 {
+		t.Fatalf("expected 1 group status; got %d", len(res.GroupStatuses))
+	}
+	if res.GroupStatuses[0].Phase != v1beta1.CoordinationPhaseFailed {
+		t.Errorf("group Phase: got %q want %q (Phase=Failed Instance must escalate group to Failed)",
+			res.GroupStatuses[0].Phase, v1beta1.CoordinationPhaseFailed)
+	}
+	// RolloutCoordinationReady=False with Reason=Failed surfaces the
+	// failure on the top-level condition surface kubectl wait reads.
+	if fresh.Status.RolloutCoordination == nil {
+		t.Fatalf("RolloutCoordination status block missing after Reconcile")
+	}
+	rcReady := fresh.Status.GetCondition(v1beta1.RolloutCoordinationReady)
+	if rcReady == nil {
+		t.Fatalf("RolloutCoordinationReady condition missing")
+	}
+	if string(rcReady.Status) != string(corev1.ConditionFalse) {
+		t.Errorf("RolloutCoordinationReady.Status: got %s want False", rcReady.Status)
+	}
+	if rcReady.Reason != "Failed" {
+		t.Errorf("RolloutCoordinationReady.Reason: got %q want %q", rcReady.Reason, "Failed")
 	}
 }
 

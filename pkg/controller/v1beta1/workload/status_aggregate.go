@@ -34,12 +34,38 @@ const DefaultRevisionRetention = 10
 // has been observed in the wild as a wedge that requires either a
 // spec change (fix the image tag) or a node-level fix (registry
 // creds).
+//
+// The set covers both pull-side failures (image cannot be obtained)
+// and post-pull failures (image obtained but the container cannot
+// run or stay running). Naming retains the historical "pull" prefix
+// for backwards compatibility, but the classifier is the generic
+// terminal-waiting-reason matcher the escalator delegates to —
+// every reason that lands a container in Waiting forever without
+// hope of self-recovery belongs here.
 var terminalPullFailureReasons = map[string]struct{}{
 	"ErrImagePull":               {},
 	"ImagePullBackOff":           {},
 	"InvalidImageName":           {},
 	"CreateContainerConfigError": {},
 	"CreateContainerError":       {},
+	// CrashLoopBackOff lands when the container repeatedly exits
+	// non-zero and kubelet's restart backoff has converged on its
+	// per-pod cap (~5 minutes between attempts). Common operator-
+	// reported triggers: bad command-line args, missing config, image
+	// with broken entrypoint. Permanent until the spec changes — even
+	// if the pod briefly transitions through Running between attempts,
+	// the kubelet's stable steady-state for a wedged container is
+	// Waiting{Reason=CrashLoopBackOff}. Closes the bug #52 follow-up
+	// where a bumped image that pulls cleanly but crashes immediately
+	// was not classified as terminal and the rollout sat at
+	// Phase=Updating for the full 30-minute InstanceReadyTimeout.
+	"CrashLoopBackOff": {},
+	// RunContainerError signals the container runtime rejected the
+	// start (corrupt manifest, missing required shared libraries,
+	// exec-format mismatch — e.g., amd64 image on arm64 node).
+	// Permanent until the image is fixed; the controller cannot
+	// retry past a broken binary.
+	"RunContainerError": {},
 }
 
 // PodStuckPullFailure returns (true, reason) when pod has at least

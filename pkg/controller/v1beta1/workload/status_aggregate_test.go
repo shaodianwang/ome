@@ -174,6 +174,34 @@ func TestPodStuckPullFailure(t *testing.T) {
 			wantStuck:  true,
 			wantReason: "ImagePullBackOff",
 		},
+		// Bug #52: CrashLoopBackOff is the steady-state for a container
+		// that pulls cleanly but exits immediately. kubelet's restart
+		// backoff caps at ~5 min/attempt; without the carve-out the
+		// rollout sat at Phase=Updating until the 30-min Deadline fired.
+		{
+			name: "past grace, CrashLoopBackOff: stuck",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Second))},
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}}},
+				},
+			},
+			wantStuck:  true,
+			wantReason: "CrashLoopBackOff",
+		},
+		// RunContainerError fires on runtime-rejected starts (missing
+		// .so, exec-format mismatch). Same permanence as ImagePullBackOff.
+		{
+			name: "past grace, RunContainerError: stuck",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Second))},
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "RunContainerError"}}}},
+				},
+			},
+			wantStuck:  true,
+			wantReason: "RunContainerError",
+		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {

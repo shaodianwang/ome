@@ -90,6 +90,37 @@ func TestProgressingCondition_RolloutAndPhaseTransitions(t *testing.T) {
 			},
 			wantStatus: metav1.ConditionTrue,
 		},
+		// Bug #52 follow-up: a stuck-pod escalation lands Phase=Failed on
+		// the per-Instance status while UpdateRevision is still ahead of
+		// CurrentRevision (the rollout never finished). Without the
+		// failed-instance carve-out the Progressing condition reports
+		// True/RolloutInProgress, lying to the operator about a rollout
+		// that is permanently wedged. The per-Instance Failed phase MUST
+		// short-circuit the revision-diff branch so the condition reflects
+		// reality: Progressing=False, Reason=Failed.
+		{
+			name: "rollout failed: revision diff but every Instance is Phase=Failed",
+			cs: &v1beta1.OMENativeComponentStatus{
+				CurrentRevision: "r1", UpdateRevision: "r2",
+				Replicas: 1, UpdatedReadyReplicas: 0,
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+					{Index: 0, Phase: v1beta1.OMENativeInstanceFailed},
+				},
+			},
+			wantStatus: metav1.ConditionFalse,
+		},
+		{
+			name: "mixed: any Failed Instance suppresses Progressing even when peers are mid-update",
+			cs: &v1beta1.OMENativeComponentStatus{
+				CurrentRevision: "r1", UpdateRevision: "r2",
+				Replicas: 2, UpdatedReadyReplicas: 0,
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+					{Index: 0, Phase: v1beta1.OMENativeInstanceFailed},
+					{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating},
+				},
+			},
+			wantStatus: metav1.ConditionFalse,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -102,6 +133,43 @@ func TestProgressingCondition_RolloutAndPhaseTransitions(t *testing.T) {
 				t.Errorf("Status: got %s want %s", progressing.Status, tc.wantStatus)
 			}
 		})
+	}
+}
+
+// TestProgressingCondition_FailedReasonAndMessage pins the operator-
+// facing string surface for the failed-instance carve-out: Reason
+// MUST be the constant `Failed` and Message MUST name the failed
+// Instance index so a `kubectl describe isvc` line is actionable.
+// Without these the operator sees Status=False but has to dig into
+// the per-Instance breadcrumbs to find out why.
+func TestProgressingCondition_FailedReasonAndMessage(t *testing.T) {
+	cs := &v1beta1.OMENativeComponentStatus{
+		CurrentRevision: "rev-old", UpdateRevision: "rev-new",
+		Replicas: 2,
+		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceFailed},
+			{Index: 2, Phase: v1beta1.OMENativeInstanceFailed},
+		},
+	}
+	conditions := ComputeComponentConditions(cs, 1)
+	progressing := apimeta.FindStatusCondition(conditions, ConditionProgressing)
+	if progressing == nil {
+		t.Fatalf("Progressing condition missing")
+	}
+	if progressing.Status != metav1.ConditionFalse {
+		t.Errorf("Status: got %s want False", progressing.Status)
+	}
+	if progressing.Reason != ReasonFailed {
+		t.Errorf("Reason: got %q want %q", progressing.Reason, ReasonFailed)
+	}
+	if progressing.Message == "" {
+		t.Errorf("Message must not be empty when surfacing a failed rollout")
+	}
+	// Operators want to see WHICH Instance failed. We index by sparse
+	// integers, so the message MUST name at least one of the failed
+	// indices.
+	if !contains(progressing.Message, "0") || !contains(progressing.Message, "2") {
+		t.Errorf("Message must name failed Instance indices 0 and 2; got %q", progressing.Message)
 	}
 }
 
