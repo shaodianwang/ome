@@ -69,14 +69,16 @@ stacks. Per stack, the chart emits:
 | `deployments[].prefill.env` | array | `[]` | Extra container env vars. Each entry is a corev1.EnvVar (`{name, value}` or `{name, valueFrom: ...}`). Forwarded to the tenant CSR's `runner.env`, where they merge with the vendor's env list **by `name` key** (per-key strategic merge — predictable, additive). See "Env merge" below. |
 | `deployments[].prefill.autoscaling.enabled` | bool | `false` | Placeholder. KEDA wiring is reserved for a follow-up. |
 | `deployments[].prefill.autoscaling.metrics` | array | `[]` | Placeholder. Shape reserved; v0.1 templates ignore it. |
-| `deployments[].decode.*` | object |  | Same shape as `prefill.*` (including the 4 typed model knobs, `speculative.*`, `env: []`, and `args: []`). `pd` only. |
-| `deployments[].engine.*` | object |  | Same shape as `prefill.*` (including the 4 typed model knobs, `speculative.*`, `env: []`, and `args: []`), plus `workerSize`. `standalone` or `multinode` only. |
+| `deployments[].prefill.lifecycle.*` | object |  | OMENative lifecycle override. STRICT pass-through, defaults come from the controller defaulter. See "Lifecycle overrides" below. |
+| `deployments[].decode.*` | object |  | Same shape as `prefill.*` (including the 4 typed model knobs, `speculative.*`, `env: []`, `args: []`, and `lifecycle.*`). `pd` only. |
+| `deployments[].engine.*` | object |  | Same shape as `prefill.*` (including the 4 typed model knobs, `speculative.*`, `env: []`, `args: []`, and `lifecycle.*`), plus `workerSize`. `standalone` or `multinode` only. |
 | `deployments[].engine.workerSize` | int |  | Multinode only: number of worker pods per leader gang. |
 | `deployments[].router.enabled` | bool | `true` | `pd` only. Whether to emit the router Component. |
 | `deployments[].router.image` | string | `""` | Router image override. |
 | `deployments[].router.replicas.{min,max}` | int |  | Router replica counts. |
 | `deployments[].router.args` | array | `[]` | Extra router CLI flags appended after the synthesised flags; user overrides win on duplicate flags. Chart-owned list. |
 | `deployments[].router.env` | array | `[]` | Extra router container env vars (same shape + merge semantics as `prefill.env`). |
+| `deployments[].router.lifecycle.*` | object |  | Router OMENative lifecycle override (same schema as `prefill.lifecycle.*`). |
 | `deployments[].router.timeoutSeconds` | int | `30` | Request-completion deadline; synthesised as `--backend-timeout <N>` on the router runner. |
 | `deployments[].router.streamingTimeoutSeconds` | int | `600` | SSE/token-stream deadline (so long generations don't time out mid-stream); synthesised as `--streaming-timeout-secs <N>`. The exact sglang router flag name may differ between versions; adjust in `_helpers.tpl::ome-isvc.renderRouter` if upstream renames it. |
 | `deployments[].router.loadBalancingAlgorithm` | string |  | Synthesised as `--load-balancer <value>` (placeholder; see open work items). |
@@ -380,7 +382,92 @@ optional router for `pd`; engine for `standalone` / `multinode`).
   prefill:decode pods (use with `pacing.ratioTolerance` to bound how
   far the ratio may drift mid-rollout).
 
-## 8. Autoscaling
+### Defaults
+
+When a `pacing:` block is declared but a sub-key is omitted, the
+controller defaulter stamps:
+
+| Field             | Default              |
+| ----------------- | -------------------- |
+| `type`            | `PerComponent`       |
+| `maxSurge`        | `"25%"`              |
+| `maxUnavailable`  | `0`                  |
+| `ratioTolerance`  | `5` (RatioBalanced only) |
+
+`soak` is `0` (no inter-Component wait) unless explicitly set; only
+honored for `policy: Sequential`.
+
+## 8. Lifecycle overrides
+
+Each Component (`prefill`, `decode`, `engine`, `router`) accepts an
+optional `lifecycle:` block that maps 1:1 to OMENative's
+`LifecycleSpec` (see `pkg/apis/ome/v1beta1/lifecycle_types.go`). This
+governs **per-Component instance rollout** (how Instances within ONE
+Component roll). Cross-Component coordination (`Sequential`,
+`RatioBalanced`, etc.) lives at `deployments[].coordination` — see §7.
+
+The chart is a **strict pass-through**: it never defaults a field, and
+only emits a key when the scientist has explicitly set it. Leave the
+block off entirely (or omit individual sub-keys) to inherit controller
+defaults.
+
+### Schema
+
+```yaml
+deployments:
+  - name: <name>
+    prefill:        # or decode / engine / router
+      # ... other knobs ...
+      lifecycle:
+        restartPolicy: None  # None | RecreateInstanceOnPodRestart | RecreateISVCOnPodRestart
+        updateStrategy:
+          type: SurgeThenDrain  # SurgeThenDrain | RecreatePod | InPlaceIfPossible | InPlaceOnly
+          rollingUpdate:
+            partition: 0           # canary hold: skip indices < partition
+            maxUnavailable: 1      # max Instances allowed non-Ready during rollout
+          inPlaceUpdateStrategy:
+            gracePeriodSeconds: 30          # wait between marking not-ready and mutating
+            markNotReadyDuringLifecycle: true  # drain via EndpointSlice before mutating
+        readyPolicy: None         # None (single-pod default) | AllPodReady (multi-pod default)
+        instanceReadyTimeout: 30m # Go-style duration string
+        migrationPolicy:
+          mode: auto              # auto | surge | never
+```
+
+### Defaults
+
+When `lifecycle:` is omitted, the controller defaulter stamps:
+
+| Field                                              | Single-pod              | Multi-pod (Leader+Worker)         |
+| -------------------------------------------------- | ----------------------- | --------------------------------- |
+| `restartPolicy`                                    | `None`                  | `RecreateInstanceOnPodRestart`    |
+| `updateStrategy.type`                              | `SurgeThenDrain`        | `SurgeThenDrain`                  |
+| `updateStrategy.inPlaceUpdateStrategy.gracePeriodSeconds` | `30`             | `30`                              |
+| `updateStrategy.inPlaceUpdateStrategy.markNotReadyDuringLifecycle` | `true`  | `true`                            |
+| `readyPolicy`                                      | `None`                  | `AllPodReady`                     |
+| `instanceReadyTimeout`                             | `30m`                   | `30m`                             |
+| `migrationPolicy.mode`                             | `auto`                  | `auto`                            |
+
+`rollingUpdate.partition` and `rollingUpdate.maxUnavailable` are
+not defaulted — leave unset for no canary hold / no concurrent
+non-Ready Instances.
+
+### Emission rules
+
+Every key is optional and emitted only when set. Specifically:
+
+- The outer `lifecycle:` line emits only if at least one leaf is set.
+- `updateStrategy:` emits only if `type`, `rollingUpdate.*`, or
+  `inPlaceUpdateStrategy.*` is set.
+- `rollingUpdate:` emits only if `partition` or `maxUnavailable` is set.
+- `inPlaceUpdateStrategy:` emits only if `gracePeriodSeconds` or
+  `markNotReadyDuringLifecycle` is set.
+- `migrationPolicy:` emits only if `mode` is set.
+
+This avoids producing empty `lifecycle: {}` / `updateStrategy: {}` maps
+that would override the controller defaulter with meaningless empties.
+
+## 9. Autoscaling
 
 The per-component `autoscaling:` block (`enabled`, `metrics`) is
 reserved for KEDA wiring and is **not yet plumbed** into the rendered
@@ -389,7 +476,7 @@ adding the body in v0.2 does not change values. Use the
 `InferenceService.spec.<component>.minReplicas` / `maxReplicas` derived
 from `replicas: { min, max }` for v0.1 scaling bounds.
 
-## 9. Open work items
+## 10. Open work items
 
 The current chart explicitly defers the following:
 

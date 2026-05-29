@@ -193,6 +193,66 @@
         "draftModelQuantization": {"type": "string", "description": "Quantization scheme for the draft model (e.g. `unquant`). Emits `--speculative-draft-model-quantization <value>` only when `algorithm` is set."}
       }
     },
+    "lifecycleBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "OMENative lifecycle overrides. STRICT pass-through: chart never defaults a field; the controller's defaulter stamps the canonical defaults (SurgeThenDrain, instanceReadyTimeout=30m, etc.). Mirrors pkg/apis/ome/v1beta1/lifecycle_types.go::LifecycleSpec. Every sub-key is optional; the chart emits a sub-tree only when at least one of its leaves is set.",
+      "properties": {
+        "restartPolicy": {
+          "type": "string",
+          "enum": ["None", "RecreateInstanceOnPodRestart", "RecreateISVCOnPodRestart"],
+          "description": "What OMENative does when a managed pod fails. Distinct from corev1.PodSpec.restartPolicy (which tells kubelet about container-level restarts)."
+        },
+        "updateStrategy": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "How OMENative rolls template changes across the Component's Instances.",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["SurgeThenDrain", "RecreatePod", "InPlaceIfPossible", "InPlaceOnly"],
+              "description": "Rollout mechanism. Controller default is SurgeThenDrain (preserves serving capacity)."
+            },
+            "rollingUpdate": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "partition":      {"type": "integer", "minimum": 0, "description": "Hold back updates for Instances whose index is < partition. 0 updates all."},
+                "maxUnavailable": {"type": "integer", "minimum": 0, "description": "Max Instances allowed to be non-Ready during the rollout."}
+              }
+            },
+            "inPlaceUpdateStrategy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "gracePeriodSeconds":          {"type": "integer", "minimum": 0, "description": "Time OMENative waits between marking the pod not-ready and applying the in-place mutation."},
+                "markNotReadyDuringLifecycle": {"type": "boolean", "description": "When true, flips ome.io/serving=False on the pod before the mutation so EndpointSlice drains traffic first. Controller default is true."}
+              }
+            }
+          }
+        },
+        "readyPolicy": {
+          "type": "string",
+          "enum": ["AllPodReady", "None"],
+          "description": "How Instance-level readiness aggregates from underlying pods. Controller default for multi-pod Instances is AllPodReady."
+        },
+        "instanceReadyTimeout": {
+          "type": "string",
+          "description": "Go-style duration string (e.g. \"30m\"). Upper bound for waiting on a newly-created Instance to become Ready during migration, rollout, or initial creation. Controller default is 30m."
+        },
+        "migrationPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["auto", "surge", "never"],
+              "description": "Migration disposition. Controller default is auto (resolves to surge or rejection)."
+            }
+          }
+        }
+      }
+    },
     "componentBlock": {
       "type": "object",
       "additionalProperties": false,
@@ -211,7 +271,8 @@
         "kvCacheDtype":          {"type": "string", "enum": ["", "bfloat16", "fp16", "fp8", "auto"], "description": "KV cache dtype. Empty string omits the flag (sglang default applies); set to a known sglang value to synthesise `--kv-cache-dtype <value>`."},
         "moeRunnerBackend":      {"type": "string", "description": "MoE-only runner backend (e.g. flashinfer_trtllm). Synthesised as `--moe-runner-backend <value>`; empty string omits the flag."},
         "speculative":           {"$ref": "#/$defs/speculativeBlock"},
-        "autoscaling":           {"$ref": "#/$defs/autoscalingBlock"}
+        "autoscaling":           {"$ref": "#/$defs/autoscalingBlock"},
+        "lifecycle":             {"$ref": "#/$defs/lifecycleBlock"}
       }
     },
     "engineBlock": {
@@ -233,7 +294,8 @@
         "moeRunnerBackend":      {"type": "string", "description": "MoE-only runner backend (e.g. flashinfer_trtllm). Synthesised as `--moe-runner-backend <value>`; empty string omits the flag."},
         "speculative":           {"$ref": "#/$defs/speculativeBlock"},
         "workerSize":            {"type": "integer", "minimum": 1, "description": "Number of worker pods per leader gang (multinode servingMode only)."},
-        "autoscaling":           {"$ref": "#/$defs/autoscalingBlock"}
+        "autoscaling":           {"$ref": "#/$defs/autoscalingBlock"},
+        "lifecycle":             {"$ref": "#/$defs/lifecycleBlock"}
       }
     },
     "routerBlock": {
@@ -248,7 +310,8 @@
         "env":                      {"$ref": "#/$defs/envList"},
         "timeoutSeconds":           {"type": "integer", "minimum": 1, "description": "Request-completion deadline; synthesised as `--backend-timeout <N>` on the router runner."},
         "streamingTimeoutSeconds":  {"type": "integer", "minimum": 1, "description": "SSE/token-stream deadline (default 600); synthesised as `--streaming-timeout-secs <N>` (sglang router flag name may differ; see template)."},
-        "loadBalancingAlgorithm":   {"type": "string"}
+        "loadBalancingAlgorithm":   {"type": "string"},
+        "lifecycle":                {"$ref": "#/$defs/lifecycleBlock"}
       }
     },
     "envList": {

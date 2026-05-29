@@ -390,10 +390,86 @@ site to materialise back to a Helm list, then `toYaml`).
 {{- end -}}
 
 {{/*
+ome-isvc.renderLifecycle — emit the OMENative `lifecycle:` block (or
+nothing) for a scientist-facing component. STRICT pass-through: only
+emits a key when the user has set it, never defaults in the chart.
+Each nested subtree (updateStrategy, rollingUpdate, inPlaceUpdateStrategy,
+migrationPolicy) is emitted only when at least one of its sub-keys is
+set, and the outer `lifecycle:` line is emitted only when at least one
+leaf field is set. This avoids producing an empty `lifecycle: {}` /
+`updateStrategy: {}` that would override the controller defaulter with
+an empty map.
+
+Mirrors pkg/apis/ome/v1beta1/lifecycle_types.go::LifecycleSpec.
+
+Args:  dict "block" .prefill | .decode | .engine | .router
+*/}}
+{{- define "ome-isvc.renderLifecycle" -}}
+{{- $b := .block -}}
+{{- $lc := $b.lifecycle -}}
+{{- if $lc -}}
+{{- /* Pre-compute whether any sub-tree has a set value. We only emit the
+       outer `lifecycle:` line when something would actually be written
+       beneath it. */ -}}
+{{- $us := $lc.updateStrategy -}}
+{{- $ru := and $us $us.rollingUpdate -}}
+{{- $ip := and $us $us.inPlaceUpdateStrategy -}}
+{{- $mp := $lc.migrationPolicy -}}
+{{- $hasRU := and $ru (or (hasKey $ru "partition") (hasKey $ru "maxUnavailable")) -}}
+{{- $hasIP := and $ip (or (hasKey $ip "gracePeriodSeconds") (hasKey $ip "markNotReadyDuringLifecycle")) -}}
+{{- $hasUS := and $us (or $us.type $hasRU $hasIP) -}}
+{{- $hasMP := and $mp $mp.mode -}}
+{{- $hasAny := or $lc.restartPolicy $lc.readyPolicy $lc.instanceReadyTimeout $hasUS $hasMP -}}
+{{- if $hasAny }}
+lifecycle:
+  {{- if $lc.restartPolicy }}
+  restartPolicy: {{ $lc.restartPolicy }}
+  {{- end }}
+  {{- if $hasUS }}
+  updateStrategy:
+    {{- if $us.type }}
+    type: {{ $us.type }}
+    {{- end }}
+    {{- if $hasRU }}
+    rollingUpdate:
+      {{- if hasKey $ru "partition" }}
+      partition: {{ $ru.partition }}
+      {{- end }}
+      {{- if hasKey $ru "maxUnavailable" }}
+      maxUnavailable: {{ $ru.maxUnavailable }}
+      {{- end }}
+    {{- end }}
+    {{- if $hasIP }}
+    inPlaceUpdateStrategy:
+      {{- if hasKey $ip "gracePeriodSeconds" }}
+      gracePeriodSeconds: {{ $ip.gracePeriodSeconds }}
+      {{- end }}
+      {{- if hasKey $ip "markNotReadyDuringLifecycle" }}
+      markNotReadyDuringLifecycle: {{ $ip.markNotReadyDuringLifecycle }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+  {{- if $lc.readyPolicy }}
+  readyPolicy: {{ $lc.readyPolicy }}
+  {{- end }}
+  {{- if $lc.instanceReadyTimeout }}
+  instanceReadyTimeout: {{ $lc.instanceReadyTimeout | quote }}
+  {{- end }}
+  {{- if $hasMP }}
+  migrationPolicy:
+    mode: {{ $mp.mode }}
+  {{- end }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 ome-isvc.renderComponent — emit the InferenceService engine/decoder
 spec for a scientist-facing component block. Renders replicas + a
 runner override (image, command args if `image`/`args` are set) without
-producing an empty runner subtree when both are unset.
+producing an empty runner subtree when both are unset. Optionally
+appends a `lifecycle:` block when the scientist sets any
+`block.lifecycle.*` field.
 
 Args:  dict
   "block"          .prefill | .decode | .engine
@@ -420,12 +496,14 @@ runner:
   args:
     {{- toYaml $b.args | nindent 4 }}
   {{- end }}
-{{- end -}}
+{{- end }}
+{{- include "ome-isvc.renderLifecycle" (dict "block" $b) -}}
 {{- end -}}
 
 {{/*
 ome-isvc.renderEngineComponent — like renderComponent but also handles
-multinode worker.size when block.workerSize is set.
+multinode worker.size when block.workerSize is set. Also forwards any
+scientist-set `block.lifecycle.*` via the shared renderLifecycle helper.
 Args:  dict "block" .engine "servingMode" .servingMode
 */}}
 {{- define "ome-isvc.renderEngineComponent" -}}
@@ -453,7 +531,8 @@ runner:
 {{- if and (eq $servingMode "multinode") $b.workerSize }}
 worker:
   size: {{ $b.workerSize }}
-{{- end -}}
+{{- end }}
+{{- include "ome-isvc.renderLifecycle" (dict "block" $b) -}}
 {{- end -}}
 
 {{/*
@@ -514,7 +593,8 @@ ome-isvc.renderRouter — emit the InferenceService router spec from a
 scientist-facing router block. Adds the merged router args list onto
 the runner because the OME router runner is a single container that
 takes them as CLI flags. Same image/args override mechanic as the
-prefill/decode/engine components.
+prefill/decode/engine components, plus the same `lifecycle:` pass-through
+via renderLifecycle.
 
 Args:  dict "block" .router
 */}}
@@ -539,7 +619,8 @@ runner:
   args:
     {{- toYaml $merged | nindent 4 }}
   {{- end }}
-{{- end -}}
+{{- end }}
+{{- include "ome-isvc.renderLifecycle" (dict "block" $b) -}}
 {{- end -}}
 
 {{/*

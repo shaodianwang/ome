@@ -39,6 +39,7 @@ deployments:
         draftModelQuantization: ""# e.g., unquant
       args: []                    # extra flags; user wins on duplicate --flag (see README "Args layering")
       env: []                     # merged into vendor env by name (per-key strategic merge)
+      # lifecycle: {}  # per-Component instance rollout; see README §8 for schema + defaults.
 
     decode:
       replicas: { min: 2, max: 4 }
@@ -56,6 +57,7 @@ deployments:
         draftModelQuantization: ""
       args: []                    # extra flags; user wins on duplicate --flag (see README "Args layering")
       env: []                     # merged into vendor env by name (per-key strategic merge)
+      # lifecycle: {}  # per-Component instance rollout; see README §8.
 
     router:
       enabled: true
@@ -65,8 +67,13 @@ deployments:
       loadBalancingAlgorithm: round-robin
       args: []                    # extra flags appended after synthesized ones
       env: []                     # merged into vendor env by name (per-key strategic merge)
+      # lifecycle: {}  # per-Component instance rollout; see README §8.
 
     coordination:
+      # Cross-Component rollout coordination. See README §7 for full schema:
+      #   policy:       BlueGreen | Sequential | RollingUpdate | Independent
+      #   pacing.type:  PerComponent (default) | RatioBalanced
+      #   soak / pacing.ratioTolerance: see §7 for usage + defaults.
       policy: Sequential
       order: [decode, prefill]
       pacing:
