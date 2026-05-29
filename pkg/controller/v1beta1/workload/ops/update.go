@@ -101,7 +101,7 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 
 	multiPod := inst.TotalPods() > 1
 	// Cast at the boundary: plan.UpdateStrategy.Type is still v1beta1-typed
-	// because ComponentPlan currently embeds v1beta1.OMENativeUpdateStrategy
+	// because ComponentPlan currently embeds v1beta1.UpdateStrategy
 	// (the InPlace knobs haven't been mirrored yet). The cast funnels every
 	// chooser comparison through workload.UpdateStrategyType — drift between
 	// enums now fails type-checking at this single seam.

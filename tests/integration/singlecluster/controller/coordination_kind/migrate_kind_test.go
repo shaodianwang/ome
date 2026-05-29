@@ -583,9 +583,9 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 			WithoutDecoder(),
 			WithEngineImage("fake-serving:v1"))
 		// Apply MigrationMode=Never on the engine component.
-		neverMode := v1beta1.OMENativeMigrationPolicyModeNever
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
-			MigrationPolicy: &v1beta1.OMENativeMigrationPolicy{Mode: neverMode},
+		neverMode := v1beta1.MigrationPolicyModeNever
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
+			MigrationPolicy: &v1beta1.MigrationPolicy{Mode: neverMode},
 		}
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)

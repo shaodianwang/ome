@@ -56,7 +56,7 @@ import (
 
 // maxScheduleTimeoutSeconds caps the per-PodGroup
 // scheduleTimeoutSeconds value derived from
-// OMENativeComponentSpec.InstanceReadyTimeout. The OEP keeps the
+// LifecycleSpec.InstanceReadyTimeout. The OEP keeps the
 // instanceReadyTimeout default at 30 minutes (large-model loading);
 // the gang-scheduling wait should NOT block that long because the
 // scheduler can only ever fail-fast on infeasibility, never wait for

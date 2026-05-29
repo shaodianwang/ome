@@ -109,7 +109,7 @@ func InstancePhaseFromWorkload(w workload.InstancePhase) v1beta1.OMENativeInstan
 	}
 }
 
-// UpdateStrategyTypeToWorkload converts a v1beta1.OMENativeUpdateStrategyType
+// UpdateStrategyTypeToWorkload converts a v1beta1.UpdateStrategyType
 // to a workload.UpdateStrategyType. Unknown values map to the empty string
 // so adapters tolerate API-version skew without panicking.
 //
@@ -117,15 +117,15 @@ func InstancePhaseFromWorkload(w workload.InstancePhase) v1beta1.OMENativeInstan
 // constants exclusively — this converter is the only seam where the
 // CRD-shape strategy enters workload code, so any future drift between
 // the v1beta1 enum and the workload enum becomes a compile-time error.
-func UpdateStrategyTypeToWorkload(v v1beta1.OMENativeUpdateStrategyType) workload.UpdateStrategyType {
+func UpdateStrategyTypeToWorkload(v v1beta1.UpdateStrategyType) workload.UpdateStrategyType {
 	switch v {
-	case v1beta1.OMENativeUpdateStrategySurgeThenDrain:
+	case v1beta1.UpdateStrategySurgeThenDrain:
 		return workload.UpdateStrategySurgeThenDrain
-	case v1beta1.OMENativeUpdateStrategyRecreatePod:
+	case v1beta1.UpdateStrategyRecreatePod:
 		return workload.UpdateStrategyRecreatePod
-	case v1beta1.OMENativeUpdateStrategyInPlaceIfPossible:
+	case v1beta1.UpdateStrategyInPlaceIfPossible:
 		return workload.UpdateStrategyInPlaceIfPossible
-	case v1beta1.OMENativeUpdateStrategyInPlaceOnly:
+	case v1beta1.UpdateStrategyInPlaceOnly:
 		return workload.UpdateStrategyInPlaceOnly
 	default:
 		return workload.UpdateStrategyType("")
@@ -133,20 +133,20 @@ func UpdateStrategyTypeToWorkload(v v1beta1.OMENativeUpdateStrategyType) workloa
 }
 
 // UpdateStrategyTypeFromWorkload converts a workload.UpdateStrategyType
-// to a v1beta1.OMENativeUpdateStrategyType. Unknown values map to the
+// to a v1beta1.UpdateStrategyType. Unknown values map to the
 // empty string so adapters tolerate API-version skew without panicking.
-func UpdateStrategyTypeFromWorkload(w workload.UpdateStrategyType) v1beta1.OMENativeUpdateStrategyType {
+func UpdateStrategyTypeFromWorkload(w workload.UpdateStrategyType) v1beta1.UpdateStrategyType {
 	switch w {
 	case workload.UpdateStrategySurgeThenDrain:
-		return v1beta1.OMENativeUpdateStrategySurgeThenDrain
+		return v1beta1.UpdateStrategySurgeThenDrain
 	case workload.UpdateStrategyRecreatePod:
-		return v1beta1.OMENativeUpdateStrategyRecreatePod
+		return v1beta1.UpdateStrategyRecreatePod
 	case workload.UpdateStrategyInPlaceIfPossible:
-		return v1beta1.OMENativeUpdateStrategyInPlaceIfPossible
+		return v1beta1.UpdateStrategyInPlaceIfPossible
 	case workload.UpdateStrategyInPlaceOnly:
-		return v1beta1.OMENativeUpdateStrategyInPlaceOnly
+		return v1beta1.UpdateStrategyInPlaceOnly
 	default:
-		return v1beta1.OMENativeUpdateStrategyType("")
+		return v1beta1.UpdateStrategyType("")
 	}
 }
 

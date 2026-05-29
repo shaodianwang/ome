@@ -60,9 +60,9 @@ var _ = ginkgo.Describe("behavior — RollingUpdate + RecreatePod", ginkgo.Order
 				},
 			}),
 			WithEngineImage("fake-serving:v1"))
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
-			UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-				Type: v1beta1.OMENativeUpdateStrategyRecreatePod,
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{
+				Type: v1beta1.UpdateStrategyRecreatePod,
 			},
 		}
 		applyFixture(Default, fix)

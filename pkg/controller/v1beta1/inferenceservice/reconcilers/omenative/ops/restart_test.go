@@ -26,7 +26,7 @@ import (
 
 // restartPolicyPtr is a tiny pointer helper used by the
 // restart-policy-explicit tests below.
-func restartPolicyPtr(v v1beta1.OMENativeRestartPolicy) *v1beta1.OMENativeRestartPolicy {
+func restartPolicyPtr(v v1beta1.InstanceRestartPolicy) *v1beta1.InstanceRestartPolicy {
 	return &v
 }
 
@@ -271,8 +271,8 @@ func TestReconcileComponentOps_RestartTriggerDispatches(t *testing.T) {
 	// Restart, bump Incarnation, and requeue.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		RestartPolicy: restartPolicyPtr(v1beta1.OMENativeRestartPolicyRecreateInstance),
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		RestartPolicy: restartPolicyPtr(v1beta1.InstanceRestartPolicyRecreateInstance),
 	}
 	failed := podAtIncarnation(isvc, 0, 1, true, true)
 	failed.Status.Phase = corev1.PodFailed

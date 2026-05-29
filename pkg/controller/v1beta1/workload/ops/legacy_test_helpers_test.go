@@ -506,7 +506,7 @@ func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1be
 // core.BuildPlan(minimalParams(...)) produced in the omenative
 // fixtures; reproduced inline because workload/ops tests can't reach
 // for omenative/core. strategy controls the UpdateStrategy.Type.
-func legacyComponentPlan(strategy v1beta1.OMENativeUpdateStrategyType, inPlaceStrategy *v1beta1.OMENativeInPlaceUpdateStrategy) workload.ComponentPlan {
+func legacyComponentPlan(strategy v1beta1.UpdateStrategyType, inPlaceStrategy *v1beta1.InPlaceUpdateStrategy) workload.ComponentPlan {
 	return workload.ComponentPlan{
 		Component: v1beta1.EngineComponent,
 		Replicas:  1,
@@ -516,7 +516,7 @@ func legacyComponentPlan(strategy v1beta1.OMENativeUpdateStrategyType, inPlaceSt
 			Runners:     []workload.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 		InstanceReadyTimeout: 30 * time.Minute,
-		UpdateStrategy: v1beta1.OMENativeUpdateStrategy{
+		UpdateStrategy: v1beta1.UpdateStrategy{
 			Type:                  strategy,
 			InPlaceUpdateStrategy: inPlaceStrategy,
 		},
@@ -526,7 +526,7 @@ func legacyComponentPlan(strategy v1beta1.OMENativeUpdateStrategyType, inPlaceSt
 // legacyMultiPodComponentPlan is legacyComponentPlan's multi-pod
 // sibling — used by the multi-pod SurgeThenDrain fallback tests where
 // the chooser must downgrade surge / in-place to recreate.
-func legacyMultiPodComponentPlan(strategy v1beta1.OMENativeUpdateStrategyType) workload.ComponentPlan {
+func legacyMultiPodComponentPlan(strategy v1beta1.UpdateStrategyType) workload.ComponentPlan {
 	return workload.ComponentPlan{
 		Component: v1beta1.EngineComponent,
 		Replicas:  1,
@@ -539,7 +539,7 @@ func legacyMultiPodComponentPlan(strategy v1beta1.OMENativeUpdateStrategyType) w
 			},
 		}},
 		InstanceReadyTimeout: 30 * time.Minute,
-		UpdateStrategy: v1beta1.OMENativeUpdateStrategy{
+		UpdateStrategy: v1beta1.UpdateStrategy{
 			Type: strategy,
 		},
 	}

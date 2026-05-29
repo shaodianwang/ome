@@ -36,6 +36,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":            schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                     schema_pkg_apis_ome_v1beta1_HashCookie(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                     schema_pkg_apis_ome_v1beta1_HashHeader(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InPlaceUpdateStrategy":          schema_pkg_apis_ome_v1beta1_InPlaceUpdateStrategy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplica":               schema_pkg_apis_ome_v1beta1_InferenceReplica(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaList":           schema_pkg_apis_ome_v1beta1_InferenceReplicaList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing":         schema_pkg_apis_ome_v1beta1_InferenceReplicaPacing(ref),
@@ -48,8 +49,10 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation":              schema_pkg_apis_ome_v1beta1_InstanceOperation(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig":                     schema_pkg_apis_ome_v1beta1_KedaConfig(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                     schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec":                  schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":                 schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry":          schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationPolicy":                schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus":               schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCopies":                    schema_pkg_apis_ome_v1beta1_ModelCopies(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelExtensionSpec":             schema_pkg_apis_ome_v1beta1_ModelExtensionSpec(ref),
@@ -62,16 +65,12 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus":                    schema_pkg_apis_ome_v1beta1_ModelStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatusSpec":                schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay":                 schema_pkg_apis_ome_v1beta1_MountedOverlay(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec":         schema_pkg_apis_ome_v1beta1_OMENativeComponentSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus":       schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInPlaceUpdateStrategy": schema_pkg_apis_ome_v1beta1_OMENativeInPlaceUpdateStrategy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":        schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeMigrationPolicy":       schema_pkg_apis_ome_v1beta1_OMENativeMigrationPolicy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeRollingUpdate":         schema_pkg_apis_ome_v1beta1_OMENativeRollingUpdate(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeUpdateStrategy":        schema_pkg_apis_ome_v1beta1_OMENativeUpdateStrategy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":                schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                schema_pkg_apis_ome_v1beta1_ParentReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                        schema_pkg_apis_ome_v1beta1_PodSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate":                  schema_pkg_apis_ome_v1beta1_RollingUpdate(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus": schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationRatio":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationRatio(ref),
@@ -95,6 +94,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedRuntime":               schema_pkg_apis_ome_v1beta1_SupportedRuntime(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec":                    schema_pkg_apis_ome_v1beta1_TrafficSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus":                  schema_pkg_apis_ome_v1beta1_TrafficStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.UpdateStrategy":                 schema_pkg_apis_ome_v1beta1_UpdateStrategy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec":                     schema_pkg_apis_ome_v1beta1_WorkerSpec(ref),
 	}
 }
@@ -726,17 +726,17 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 							Ref: ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig"),
 						},
 					},
-					"omenative": {
+					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "OMENative groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. Mirrors the status side: spec.<component>.omenative <-> status.components.<component>.omenative.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec"),
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -1535,10 +1535,10 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 							Ref: ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig"),
 						},
 					},
-					"omenative": {
+					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "OMENative groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. Mirrors the status side: spec.<component>.omenative <-> status.components.<component>.omenative.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec"),
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
 					"runner": {
@@ -1563,7 +1563,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -2281,10 +2281,10 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 							Ref: ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig"),
 						},
 					},
-					"omenative": {
+					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "OMENative groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. Mirrors the status side: spec.<component>.omenative <-> status.components.<component>.omenative.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec"),
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
 					"runner": {
@@ -2309,7 +2309,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -2602,6 +2602,33 @@ func schema_pkg_apis_ome_v1beta1_HashHeader(ref common.ReferenceCallback) common
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_InPlaceUpdateStrategy(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InPlaceUpdateStrategy tunes the per-pod in-place update sequence.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"gracePeriodSeconds": {
+						SchemaProps: spec.SchemaProps{
+							Description: "GracePeriodSeconds is the time OMENative waits between marking the pod not-ready and applying the in-place mutation.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"markNotReadyDuringLifecycle": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on the pod before the in-place mutation so EndpointSlice drains traffic first. Defaults to true.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_InferenceReplica(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -2702,12 +2729,12 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaPacing(ref common.ReferenceCall
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "InferenceReplicaPacing is the per-replica projection of the active RolloutCoordinationGroup pacing. Mirrors the corresponding OMENativeRollingUpdate subset so the projection is a verbatim copy.",
+				Description: "InferenceReplicaPacing is the per-replica projection of the active RolloutCoordinationGroup pacing. Mirrors the corresponding RollingUpdate subset so the projection is a verbatim copy.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"partition": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Partition holds back updates for Instances whose index is less than Partition. Mirrors OMENativeRollingUpdate.Partition. 0 (the default) updates all Instances. Used for canary holds.",
+							Description: "Partition holds back updates for Instances whose index is less than Partition. Mirrors RollingUpdate.Partition. 0 (the default) updates all Instances. Used for canary holds.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
@@ -2786,8 +2813,8 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle holds the OMENative lifecycle policies (RestartPolicy, UpdateStrategy, ReadyPolicy, InstanceReadyTimeout, MigrationPolicy). Reuses the existing OMENativeComponentSpec type so the projection from ISVC.spec.<component>.omenative is a verbatim copy.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec"),
+							Description: "Lifecycle holds the OMENative lifecycle policies (RestartPolicy, UpdateStrategy, ReadyPolicy, InstanceReadyTimeout, MigrationPolicy). Reuses the existing LifecycleSpec type so the projection from ISVC.spec.<component>.lifecycle is a verbatim copy.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
 					"pacing": {
@@ -2808,7 +2835,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner"},
 	}
 }
 
@@ -3967,6 +3994,53 @@ func schema_pkg_apis_ome_v1beta1_LeaderSpec(ref common.ReferenceCallback) common
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "LifecycleSpec groups OMENative-specific lifecycle policies on a Component. Embedded via ComponentExtensionSpec.Lifecycle; all fields are no-ops unless the Component is annotated ome.io/deploymentMode=OMENative. Nested under `lifecycle:` so the fields don't collide with corev1.PodSpec fields (notably restartPolicy) that are also inlined into EngineSpec / DecoderSpec / RouterSpec.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"restartPolicy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RestartPolicy controls what OMENative does when a managed pod fails. Distinct from the inlined corev1.PodSpec.RestartPolicy: that one tells kubelet whether to restart a container in-place; this one tells the OMENative controller whether to recreate the whole Instance.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"updateStrategy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdateStrategy controls how OMENative rolls template changes across the Component's Instances.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.UpdateStrategy"),
+						},
+					},
+					"readyPolicy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReadyPolicy controls how Instance-level readiness is aggregated from the underlying pods.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"instanceReadyTimeout": {
+						SchemaProps: spec.SchemaProps{
+							Description: "InstanceReadyTimeout is OMENative's upper bound for waiting on a newly-created Instance to become Ready (during migration, rollout, or initial creation).",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+					"migrationPolicy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MigrationPolicy controls whether and how OMENative honors a migration request annotation for this Component.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationPolicy"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.UpdateStrategy", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_MigrationEvent(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -4115,6 +4189,26 @@ func schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref common.ReferenceCallb
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "MigrationPolicy controls whether and how OMENative honors a migration request annotation for this Component.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"mode": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Mode selects the migration disposition. Defaults to auto.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -4656,53 +4750,6 @@ func schema_pkg_apis_ome_v1beta1_MountedOverlay(ref common.ReferenceCallback) co
 	}
 }
 
-func schema_pkg_apis_ome_v1beta1_OMENativeComponentSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "OMENativeComponentSpec groups OMENative-specific lifecycle policies on a Component. Embedded via ComponentExtensionSpec.OMENative; all fields are no-ops unless the Component is annotated ome.io/deploymentMode=OMENative. Nested under `omenative:` so the fields don't collide with corev1.PodSpec fields (notably restartPolicy) that are also inlined into EngineSpec / DecoderSpec / RouterSpec.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"restartPolicy": {
-						SchemaProps: spec.SchemaProps{
-							Description: "RestartPolicy controls what OMENative does when a managed pod fails. Distinct from the inlined corev1.PodSpec.RestartPolicy: that one tells kubelet whether to restart a container in-place; this one tells the OMENative controller whether to recreate the whole Instance.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"updateStrategy": {
-						SchemaProps: spec.SchemaProps{
-							Description: "UpdateStrategy controls how OMENative rolls template changes across the Component's Instances.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeUpdateStrategy"),
-						},
-					},
-					"readyPolicy": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ReadyPolicy controls how Instance-level readiness is aggregated from the underlying pods.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"instanceReadyTimeout": {
-						SchemaProps: spec.SchemaProps{
-							Description: "InstanceReadyTimeout is OMENative's upper bound for waiting on a newly-created Instance to become Ready (during migration, rollout, or initial creation).",
-							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
-						},
-					},
-					"migrationPolicy": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MigrationPolicy controls whether and how OMENative honors a migration request annotation for this Component.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeMigrationPolicy"),
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeMigrationPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeUpdateStrategy", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
-	}
-}
-
 func schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -4836,33 +4883,6 @@ func schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref common.ReferenceCa
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_OMENativeInPlaceUpdateStrategy(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "OMENativeInPlaceUpdateStrategy tunes the per-pod in-place update sequence.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"gracePeriodSeconds": {
-						SchemaProps: spec.SchemaProps{
-							Description: "GracePeriodSeconds is the time OMENative waits between marking the pod not-ready and applying the in-place mutation.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"markNotReadyDuringLifecycle": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on the pod before the in-place mutation so EndpointSlice drains traffic first. Defaults to true.",
-							Type:        []string{"boolean"},
-							Format:      "",
-						},
-					},
-				},
-			},
-		},
 	}
 }
 
@@ -5006,87 +5026,6 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_OMENativeMigrationPolicy(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "OMENativeMigrationPolicy controls whether and how OMENative honors a migration request annotation for this Component.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"mode": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Mode selects the migration disposition. Defaults to auto.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_OMENativeRollingUpdate(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "OMENativeRollingUpdate paces rollout across Instances of one Component.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"partition": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Partition holds back updates for Instances whose index is < Partition. 0 (the default) updates all Instances. Used for canary holds.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"maxUnavailable": {
-						SchemaProps: spec.SchemaProps{
-							Description: "MaxUnavailable is the maximum number of Instances allowed to be in a non-Ready state during the rollout.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_OMENativeUpdateStrategy(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "OMENativeUpdateStrategy controls how OMENative rolls template changes across an Instance's pods.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"type": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Type selects the rollout mechanism. Defaults to SurgeThenDrain for safety — preserves serving capacity throughout the rollout.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"rollingUpdate": {
-						SchemaProps: spec.SchemaProps{
-							Description: "RollingUpdate paces the rollout across Instances of the Component.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeRollingUpdate"),
-						},
-					},
-					"inPlaceUpdateStrategy": {
-						SchemaProps: spec.SchemaProps{
-							Description: "InPlaceUpdateStrategy tunes the per-pod in-place update sequence. Ignored when Type is RecreatePod.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInPlaceUpdateStrategy"),
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInPlaceUpdateStrategy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeRollingUpdate"},
 	}
 }
 
@@ -5627,6 +5566,33 @@ func schema_pkg_apis_ome_v1beta1_PodSpec(ref common.ReferenceCallback) common.Op
 		},
 		Dependencies: []string{
 			"k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RollingUpdate(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RollingUpdate paces rollout across Instances of one Component.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"partition": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Partition holds back updates for Instances whose index is < Partition. 0 (the default) updates all Instances. Used for canary holds.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"maxUnavailable": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxUnavailable is the maximum number of Instances allowed to be in a non-Ready state during the rollout.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -6640,10 +6606,10 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 							Ref: ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig"),
 						},
 					},
-					"omenative": {
+					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "OMENative groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. Mirrors the status side: spec.<component>.omenative <-> status.components.<component>.omenative.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec"),
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
 					"runner": {
@@ -6672,7 +6638,7 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaConfig", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -8019,6 +7985,40 @@ func schema_pkg_apis_ome_v1beta1_TrafficStatus(ref common.ReferenceCallback) com
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_UpdateStrategy(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "UpdateStrategy controls how OMENative rolls template changes across an Instance's pods.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Type selects the rollout mechanism. Defaults to SurgeThenDrain for safety — preserves serving capacity throughout the rollout.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"rollingUpdate": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RollingUpdate paces the rollout across Instances of the Component.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate"),
+						},
+					},
+					"inPlaceUpdateStrategy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "InPlaceUpdateStrategy tunes the per-pod in-place update sequence. Ignored when Type is RecreatePod.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InPlaceUpdateStrategy"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InPlaceUpdateStrategy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate"},
 	}
 }
 

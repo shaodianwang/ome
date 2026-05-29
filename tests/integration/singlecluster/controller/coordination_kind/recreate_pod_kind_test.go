@@ -69,9 +69,9 @@ var _ = ginkgo.Describe("RecreatePod end-to-end", ginkgo.Ordered, func() {
 		// different code path). RP-* must exercise the explicit
 		// strategy so a future divergence between the two paths is
 		// caught.
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
-			UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-				Type: v1beta1.OMENativeUpdateStrategyRecreatePod,
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{
+				Type: v1beta1.UpdateStrategyRecreatePod,
 			},
 		}
 		applyFixture(Default, fix)

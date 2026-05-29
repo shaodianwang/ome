@@ -56,7 +56,7 @@ var _ = ginkgo.Describe("behavior — bad-image failure", ginkgo.Ordered, func()
 			WithEngineImage("fake-serving:v1"))
 		// Shorten the per-Instance Ready timeout so we don't sit on
 		// the default 30 minutes.
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
 			InstanceReadyTimeout: &shortTimeout,
 		}
 		applyFixture(Default, fix)

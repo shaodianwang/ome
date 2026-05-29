@@ -329,7 +329,7 @@ controller-owned drain or surge migration.
 | Reimplementing LWS-equivalent semantics introduces bugs LWS already fixed | Greenfield implementation informed by LWS and RBG source — patterns studied, not code-copied. Beta graduation gates on chaos tests covering known group-lifecycle edge cases. |
 | Divergence from the sgl-project ecosystem (RBG) | Accepted trade-off. RBG's CRD surface is a non-starter for OME's UX. Shared patterns (not code) are sufficient; a Go helper library can be extracted later if it emerges. |
 | Feature gaps versus LWS | Per-feature classification: subgroup policies out of scope; exclusive placement via standard `topologySpreadConstraints`; partition rollouts adopted; mutable `size` out of scope. Coexistence with LWS is long enough for users needing unsupported features. |
-| Migration-induced service disruption | Cluster-wide rate limits (default 3 in-flight, 10/hour). Every migration emits events and status updates. `spec.<component>.omenative.migrationPolicy.mode: never` opts specific workloads out. Alfred has its own rate limiting. |
+| Migration-induced service disruption | Cluster-wide rate limits (default 3 in-flight, 10/hour). Every migration emits events and status updates. `spec.<component>.lifecycle.migrationPolicy.mode: never` opts specific workloads out. Alfred has its own rate limiting. |
 | Annotation-based migration-request surface is fragile | Annotation is idempotent via UUID. Lifecycle semantics (30s clear, 5m retry, 1h stale) are precise. OMENative's clear is best-effort; Alfred's retry handles contention. A subresource shim is straightforward if operator UX demands one later. |
 | Operators confuse OMENative errors with native Kubernetes errors | Owner references flow from `InferenceService` to pods. OMENative emits its own event stream on the `InferenceService` summarizing lower-level events. Errors clearly distinguish OMENative-issued from native. |
 | Engine/decoder coupling rule surprises users | Admission webhook rejects mismatched `ome.io/deploymentMode` between engine and decoder with `InvalidDeploymentModeCombination`. Users see the rejection at `kubectl apply` time. |
@@ -444,16 +444,16 @@ so worker-only changes correctly trigger a new `ControllerRevision`.
 
 ### Restart Policy
 
-A typed enum nested under each Component's `omenative` sub-block:
+A typed enum nested under each Component's `lifecycle` sub-block:
 
 ```yaml
 spec:
   engine:
-    omenative:
+    lifecycle:
       restartPolicy: RecreateInstanceOnPodRestart
 ```
 
-OMENative spec fields nest under `omenative` because `EngineSpec` /
+OMENative spec fields nest under `lifecycle` because `EngineSpec` /
 `DecoderSpec` / `RouterSpec` already inline `corev1.PodSpec` via
 `json:",inline"`, exposing the kubelet-facing `restartPolicy`
 (`Always`/`OnFailure`/`Never`) at the same level. Adding the
@@ -461,9 +461,9 @@ Instance-group restart policy as a flat sibling would shadow that
 field. The two policies have different scopes (container restart vs.
 Instance-group restart) and legitimately coexist on the same spec, so
 all OMENative-specific fields live under a single sub-block. The
-nesting also mirrors the status side
-(`status.components.<component>.omenative.{...}`) and signals "applies
-only when `ome.io/deploymentMode: OMENative`".
+status side keeps its historical `omenative` key
+(`status.components.<component>.omenative.{...}`) so existing status
+consumers don't break; only the spec side is renamed.
 
 Three values:
 
@@ -488,13 +488,13 @@ lifecycle in that window.
 
 ### Update Strategy
 
-Per-Component field nested under `omenative`. Default
+Per-Component field nested under `lifecycle`. Default
 `InPlaceIfPossible`.
 
 ```yaml
 spec:
   engine:
-    omenative:
+    lifecycle:
       updateStrategy:
         type: InPlaceIfPossible
         rollingUpdate:
@@ -688,7 +688,7 @@ Per-Component fields nested under `omenative`:
 ```yaml
 spec:
   engine:
-    omenative:
+    lifecycle:
       readyPolicy: AllPodReady       # AllPodReady | None
       instanceReadyTimeout: 30m
 ```

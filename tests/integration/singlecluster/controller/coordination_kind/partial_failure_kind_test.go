@@ -57,8 +57,8 @@ var _ = ginkgo.Describe("partial failure recovery", ginkgo.Ordered, func() {
 		// Incarnation. Opt into RecreateInstance so the Restart path
 		// fires + Incarnation bumps. PF-3 below pins the None
 		// behavior as the negative.
-		restartRecreate := v1beta1.OMENativeRestartPolicyRecreateInstance
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+		restartRecreate := v1beta1.InstanceRestartPolicyRecreateInstance
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
 			RestartPolicy: &restartRecreate,
 		}
 		applyFixture(Default, fix)
@@ -120,8 +120,8 @@ var _ = ginkgo.Describe("partial failure recovery", ginkgo.Ordered, func() {
 			WithoutDecoder(),
 			WithEngineReplicas(3),
 			WithEngineImage("fake-serving:v1"))
-		restartRecreate := v1beta1.OMENativeRestartPolicyRecreateInstance
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+		restartRecreate := v1beta1.InstanceRestartPolicyRecreateInstance
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
 			RestartPolicy: &restartRecreate,
 		}
 		applyFixture(Default, fix)
@@ -174,8 +174,8 @@ var _ = ginkgo.Describe("partial failure recovery", ginkgo.Ordered, func() {
 		// Restart and Create are distinct paths, and the per-Instance
 		// lifecycle token (Incarnation) only advances when the Restart
 		// path explicitly fires.
-		restartNone := v1beta1.OMENativeRestartPolicyNone
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+		restartNone := v1beta1.InstanceRestartPolicyNone
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
 			RestartPolicy: &restartNone,
 		}
 		applyFixture(Default, fix)

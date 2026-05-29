@@ -93,8 +93,8 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 		fix := newCoordFixture(ns.Name, WithISVCName("evt-restart-isvc"),
 			WithoutDecoder(),
 			WithEngineImage("fake-serving:v1"))
-		restartRecreate := v1beta1.OMENativeRestartPolicyRecreateInstance
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+		restartRecreate := v1beta1.InstanceRestartPolicyRecreateInstance
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
 			RestartPolicy: &restartRecreate,
 		}
 		applyFixture(Default, fix)
@@ -242,8 +242,8 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 		fix := newCoordFixture(ns.Name, WithISVCName("evt-orphan-isvc"),
 			WithoutDecoder(),
 			WithEngineImage("fake-serving:v1"))
-		restartRecreate := v1beta1.OMENativeRestartPolicyRecreateInstance
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+		restartRecreate := v1beta1.InstanceRestartPolicyRecreateInstance
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
 			RestartPolicy: &restartRecreate,
 		}
 		applyFixture(Default, fix)

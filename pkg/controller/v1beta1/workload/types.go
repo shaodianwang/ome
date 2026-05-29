@@ -60,7 +60,7 @@ const (
 )
 
 // UpdateStrategyType is the workload-internal rollout-mechanism
-// selector. Mirrors the CRD OMENativeUpdateStrategyType at the string
+// selector. Mirrors the CRD UpdateStrategyType at the string
 // level so the adapter conversion is a verbatim cast; the distinct Go
 // type prevents accidental drift between workload-side dispatch logic
 // and the v1beta1 enum (slice 4f-followup audit requirement: the prior

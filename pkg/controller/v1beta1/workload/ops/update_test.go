@@ -59,10 +59,10 @@ func TestUpdate_NilClient(t *testing.T) {
 func TestUpdate_InPlace_RechecksServingBeforePatch(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
 				MarkNotReadyDuringLifecycle: legacyBoolPtr(true),
 			},
 		},
@@ -113,8 +113,8 @@ func TestUpdate_InPlace_RechecksServingBeforePatch(t *testing.T) {
 
 	legacySeedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, legacyTargetSpecImage("llama:v1"))
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-		&v1beta1.OMENativeInPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyInPlaceIfPossible,
+		&v1beta1.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
@@ -141,10 +141,10 @@ func TestUpdate_InPlace_RechecksServingBeforePatch(t *testing.T) {
 func TestUpdate_InPlaceEligibleImageOnly_PatchesPodImage(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
 				MarkNotReadyDuringLifecycle: legacyBoolPtr(true),
 			},
 		},
@@ -155,8 +155,8 @@ func TestUpdate_InPlaceEligibleImageOnly_PatchesPodImage(t *testing.T) {
 	c := legacyNewFakeClient(t, isvc, pod, slice)
 	legacySeedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, legacyTargetSpecImage("llama:v1"))
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-		&v1beta1.OMENativeInPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyInPlaceIfPossible,
+		&v1beta1.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
@@ -192,10 +192,10 @@ func TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision(t *testing.T) {
 			Type: v1beta1.InstanceOperationUpdate, Step: updateStepInPlace,
 		},
 	}
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
 				MarkNotReadyDuringLifecycle: legacyBoolPtr(true),
 			},
 		},
@@ -211,8 +211,8 @@ func TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision(t *testing.T) {
 	c := legacyNewFakeClient(t, isvc, pod)
 	legacySeedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, legacyTargetSpecImage("llama:v1"))
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-		&v1beta1.OMENativeInPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyInPlaceIfPossible,
+		&v1beta1.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
@@ -262,10 +262,10 @@ func TestUpdate_InPlaceWaitsForRuntimeImageRoll(t *testing.T) {
 			Type: v1beta1.InstanceOperationUpdate, Step: updateStepInPlace,
 		},
 	}
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
 				MarkNotReadyDuringLifecycle: legacyBoolPtr(true),
 			},
 		},
@@ -279,8 +279,8 @@ func TestUpdate_InPlaceWaitsForRuntimeImageRoll(t *testing.T) {
 	c := legacyNewFakeClient(t, isvc, pod)
 	legacySeedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, legacyTargetSpecImage("llama:v1"))
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-		&v1beta1.OMENativeInPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyInPlaceIfPossible,
+		&v1beta1.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(true)})
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
@@ -312,9 +312,9 @@ func TestUpdate_InPlaceWaitsForRuntimeImageRoll(t *testing.T) {
 func TestUpdate_InPlaceIfPossible_FallsThroughToRecreateOnBigDiff(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
 		},
 	}
 	pod := legacyPodAtIncarnation(isvc, 0, 1, true, true)
@@ -330,7 +330,7 @@ func TestUpdate_InPlaceIfPossible_FallsThroughToRecreateOnBigDiff(t *testing.T) 
 	}}
 	legacySeedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, runningSpec)
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyInPlaceIfPossible, nil)
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
@@ -356,9 +356,9 @@ func TestUpdate_InPlaceIfPossible_FallsThroughToRecreateOnBigDiff(t *testing.T) 
 func TestUpdate_InPlaceOnly_RejectsBigDiff(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceOnly,
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceOnly,
 		},
 	}
 	pod := legacyPodAtIncarnation(isvc, 0, 1, true, true)
@@ -372,7 +372,7 @@ func TestUpdate_InPlaceOnly_RejectsBigDiff(t *testing.T) {
 	}}
 	legacySeedRunningRevision(t, c, isvc, v1beta1.EngineComponent, 0, runningSpec)
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyInPlaceOnly, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyInPlaceOnly, nil)
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
 	_, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
@@ -416,13 +416,13 @@ func TestUpdate_StrategyChangeMidRollout_RecreateStillBumpsIncarnation(t *testin
 	isvc.Status = fresh.Status
 
 	// Now the strategy flips to RecreatePod.
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyRecreatePod,
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyRecreatePod,
 		},
 	}
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyRecreatePod, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyRecreatePod, nil)
 
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
@@ -452,9 +452,9 @@ func TestUpdate_StrategyChangeMidRollout_RecreateStillBumpsIncarnation(t *testin
 func TestUpdate_NoRunningRevision_ForcesRecreate(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
 		},
 	}
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
@@ -464,7 +464,7 @@ func TestUpdate_NoRunningRevision_ForcesRecreate(t *testing.T) {
 	// NOTE: deliberately not calling legacySeedRunningRevision — Instance
 	// has no recorded baseline.
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyInPlaceIfPossible, nil)
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
@@ -488,9 +488,9 @@ func TestUpdate_NoRunningRevision_ForcesRecreate(t *testing.T) {
 func TestUpdate_RecreatePod_BumpsIncarnationAndDrainsOld(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyRecreatePod,
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyRecreatePod,
 		},
 	}
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
@@ -498,7 +498,7 @@ func TestUpdate_RecreatePod_BumpsIncarnationAndDrainsOld(t *testing.T) {
 	slice := legacySliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-headless", pod, true)
 	c := legacyNewFakeClient(t, isvc, pod, slice)
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyRecreatePod, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyRecreatePod, nil)
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
@@ -534,9 +534,9 @@ func TestUpdate_RecreatePod_BumpsIncarnationAndDrainsOld(t *testing.T) {
 func TestUpdate_MultiPodSurgeFallsBackToRecreate(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategySurgeThenDrain,
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategySurgeThenDrain,
 		},
 	}
 
@@ -548,8 +548,8 @@ func TestUpdate_MultiPodSurgeFallsBackToRecreate(t *testing.T) {
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
 	// Multi-pod plan via legacyMultiPodComponentPlan — TotalPods()=2 → chooser
 	// downgrades surge to recreate.
-	plan := legacyMultiPodComponentPlan(v1beta1.OMENativeUpdateStrategySurgeThenDrain)
-	if plan.UpdateStrategy.Type != v1beta1.OMENativeUpdateStrategySurgeThenDrain {
+	plan := legacyMultiPodComponentPlan(v1beta1.UpdateStrategySurgeThenDrain)
+	if plan.UpdateStrategy.Type != v1beta1.UpdateStrategySurgeThenDrain {
 		t.Fatalf("test setup: expected SurgeThenDrain strategy, got %q", plan.UpdateStrategy.Type)
 	}
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
@@ -781,7 +781,7 @@ func TestDetectUpdateTrigger_PhaseUpdatingAlwaysTrue(t *testing.T) {
 	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceUpdating
 	c := legacyNewFakeClient(t, isvc)
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategySurgeThenDrain, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategySurgeThenDrain, nil)
 	target := legacyTargetSpecImage("llama:v1")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
@@ -803,7 +803,7 @@ func TestDetectUpdateTrigger_PhaseMigratingSuppressed(t *testing.T) {
 	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceMigrating
 	c := legacyNewFakeClient(t, isvc)
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategySurgeThenDrain, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategySurgeThenDrain, nil)
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
@@ -829,7 +829,7 @@ func TestDetectUpdateTrigger_OperationMigrateSuppressed(t *testing.T) {
 	}
 	c := legacyNewFakeClient(t, isvc)
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategySurgeThenDrain, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategySurgeThenDrain, nil)
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
@@ -856,7 +856,7 @@ func TestDetectUpdateTrigger_RunningRevisionMatchesTarget(t *testing.T) {
 		t.Fatalf("seed status: %v", err)
 	}
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategySurgeThenDrain, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategySurgeThenDrain, nil)
 
 	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
@@ -878,7 +878,7 @@ func TestDetectUpdateTrigger_PodImageDiffersTriggersUpdate(t *testing.T) {
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategySurgeThenDrain, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategySurgeThenDrain, nil)
 
 	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
@@ -902,7 +902,7 @@ func TestDetectUpdateTrigger_LegacyMatchedPodsBackfillRunningRevision(t *testing
 	c := legacyNewFakeClient(t, isvc, pod)
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategySurgeThenDrain, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategySurgeThenDrain, nil)
 
 	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
@@ -931,7 +931,7 @@ func TestDetectUpdateTrigger_PhaseCreatingNotInterruptible(t *testing.T) {
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategySurgeThenDrain, nil)
+	plan := legacyComponentPlan(v1beta1.UpdateStrategySurgeThenDrain, nil)
 
 	trigger, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
@@ -1067,12 +1067,12 @@ func TestPodRuntimeImagesMatch_RegistryNormalization(t *testing.T) {
 func TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
 			// markNotReady=false so we don't need to wire EndpointSlice
 			// drain fixtures — annotation propagation is orthogonal.
-			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
 				MarkNotReadyDuringLifecycle: legacyBoolPtr(false),
 			},
 		},
@@ -1091,8 +1091,8 @@ func TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod(t *testing.T) {
 	legacySeedRunningRevisionWithMeta(t, c, isvc, v1beta1.EngineComponent, 0, spec,
 		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1"}})
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-		&v1beta1.OMENativeInPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(false)})
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyInPlaceIfPossible,
+		&v1beta1.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(false)})
 	// Target revision: identical spec, new annotation set {a:1, b:2}.
 	target := legacyEnsureTargetCRWithMeta(t, c, isvc, spec,
 		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1", "b": "2"}})
@@ -1127,10 +1127,10 @@ func TestUpdate_InPlaceUpdate_PropagatesAnnotationsToPod(t *testing.T) {
 func TestUpdate_InPlaceUpdate_RemovesAnnotationDroppedFromSpec(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
 				MarkNotReadyDuringLifecycle: legacyBoolPtr(false),
 			},
 		},
@@ -1147,8 +1147,8 @@ func TestUpdate_InPlaceUpdate_RemovesAnnotationDroppedFromSpec(t *testing.T) {
 	legacySeedRunningRevisionWithMeta(t, c, isvc, v1beta1.EngineComponent, 0, spec,
 		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1", "b": "2"}})
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-		&v1beta1.OMENativeInPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(false)})
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyInPlaceIfPossible,
+		&v1beta1.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(false)})
 	// Target revision: user removed 'b' from spec.
 	target := legacyEnsureTargetCRWithMeta(t, c, isvc, spec,
 		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1"}})
@@ -1184,10 +1184,10 @@ func TestUpdate_InPlaceUpdate_LifecycleAnnotationFilterStillWorks(t *testing.T) 
 	isvc.Annotations = map[string]string{
 		"ome.io/rollout-paused": "true",
 	}
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
 				MarkNotReadyDuringLifecycle: legacyBoolPtr(false),
 			},
 		},
@@ -1203,8 +1203,8 @@ func TestUpdate_InPlaceUpdate_LifecycleAnnotationFilterStillWorks(t *testing.T) 
 	legacySeedRunningRevisionWithMeta(t, c, isvc, v1beta1.EngineComponent, 0, spec,
 		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1"}})
 	input := legacyTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := legacyComponentPlan(v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-		&v1beta1.OMENativeInPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(false)})
+	plan := legacyComponentPlan(v1beta1.UpdateStrategyInPlaceIfPossible,
+		&v1beta1.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: legacyBoolPtr(false)})
 	// Target adds {b:2}; lifecycle annotation is again stripped from PodMeta.
 	target := legacyEnsureTargetCRWithMeta(t, c, isvc, spec,
 		&metav1.ObjectMeta{Annotations: map[string]string{"a": "1", "b": "2"}})

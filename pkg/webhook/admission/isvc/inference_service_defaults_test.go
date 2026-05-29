@@ -314,27 +314,27 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 			Annotations: map[string]string{constants.DeploymentMode: string(constants.MultiNode)},
 		}
 		defaultOMENativeComponent(ext, true)
-		assert.Nil(t, ext.OMENative)
+		assert.Nil(t, ext.Lifecycle)
 	})
 
 	t.Run("no annotation — omenative block untouched", func(t *testing.T) {
 		ext := &v1beta1.ComponentExtensionSpec{}
 		defaultOMENativeComponent(ext, true)
-		assert.Nil(t, ext.OMENative)
+		assert.Nil(t, ext.Lifecycle)
 	})
 
 	t.Run("OMENative + multi-pod — full defaults applied", func(t *testing.T) {
 		ext := &v1beta1.ComponentExtensionSpec{Annotations: omenativeMode}
 		defaultOMENativeComponent(ext, true)
 
-		require.NotNil(t, ext.OMENative)
-		spec := ext.OMENative
+		require.NotNil(t, ext.Lifecycle)
+		spec := ext.Lifecycle
 
 		require.NotNil(t, spec.RestartPolicy)
-		assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *spec.RestartPolicy)
+		assert.Equal(t, v1beta1.InstanceRestartPolicyRecreateInstance, *spec.RestartPolicy)
 
 		require.NotNil(t, spec.UpdateStrategy)
-		assert.Equal(t, v1beta1.OMENativeUpdateStrategySurgeThenDrain, spec.UpdateStrategy.Type)
+		assert.Equal(t, v1beta1.UpdateStrategySurgeThenDrain, spec.UpdateStrategy.Type)
 		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy)
 		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
 		assert.Equal(t, int32(30), *spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
@@ -342,32 +342,32 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		assert.True(t, *spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
 
 		require.NotNil(t, spec.ReadyPolicy)
-		assert.Equal(t, v1beta1.OMENativeReadyPolicyAllPodReady, *spec.ReadyPolicy)
+		assert.Equal(t, v1beta1.InstanceReadyPolicyAllPodReady, *spec.ReadyPolicy)
 
 		require.NotNil(t, spec.InstanceReadyTimeout)
 		assert.Equal(t, 30*time.Minute, spec.InstanceReadyTimeout.Duration)
 
 		require.NotNil(t, spec.MigrationPolicy)
-		assert.Equal(t, v1beta1.OMENativeMigrationPolicyModeAuto, spec.MigrationPolicy.Mode)
+		assert.Equal(t, v1beta1.MigrationPolicyModeAuto, spec.MigrationPolicy.Mode)
 	})
 
 	t.Run("OMENative + single-pod — restart/ready default to None", func(t *testing.T) {
 		ext := &v1beta1.ComponentExtensionSpec{Annotations: omenativeMode}
 		defaultOMENativeComponent(ext, false)
 
-		require.NotNil(t, ext.OMENative)
-		require.NotNil(t, ext.OMENative.RestartPolicy)
-		assert.Equal(t, v1beta1.OMENativeRestartPolicyNone, *ext.OMENative.RestartPolicy)
-		require.NotNil(t, ext.OMENative.ReadyPolicy)
-		assert.Equal(t, v1beta1.OMENativeReadyPolicyNone, *ext.OMENative.ReadyPolicy)
+		require.NotNil(t, ext.Lifecycle)
+		require.NotNil(t, ext.Lifecycle.RestartPolicy)
+		assert.Equal(t, v1beta1.InstanceRestartPolicyNone, *ext.Lifecycle.RestartPolicy)
+		require.NotNil(t, ext.Lifecycle.ReadyPolicy)
+		assert.Equal(t, v1beta1.InstanceReadyPolicyNone, *ext.Lifecycle.ReadyPolicy)
 	})
 
 	t.Run("OMENative + existing values — preserved, nil siblings filled", func(t *testing.T) {
-		customRestart := v1beta1.OMENativeRestartPolicyRecreateISVC
+		customRestart := v1beta1.InstanceRestartPolicyRecreateISVC
 		customTimeout := metav1.Duration{Duration: 5 * time.Minute}
 		ext := &v1beta1.ComponentExtensionSpec{
 			Annotations: omenativeMode,
-			OMENative: &v1beta1.OMENativeComponentSpec{
+			Lifecycle: &v1beta1.LifecycleSpec{
 				RestartPolicy:        &customRestart,
 				InstanceReadyTimeout: &customTimeout,
 			},
@@ -375,28 +375,28 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		defaultOMENativeComponent(ext, true)
 
 		// preserved
-		require.NotNil(t, ext.OMENative.RestartPolicy)
-		assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateISVC, *ext.OMENative.RestartPolicy)
-		assert.Equal(t, 5*time.Minute, ext.OMENative.InstanceReadyTimeout.Duration)
+		require.NotNil(t, ext.Lifecycle.RestartPolicy)
+		assert.Equal(t, v1beta1.InstanceRestartPolicyRecreateISVC, *ext.Lifecycle.RestartPolicy)
+		assert.Equal(t, 5*time.Minute, ext.Lifecycle.InstanceReadyTimeout.Duration)
 
 		// filled
-		require.NotNil(t, ext.OMENative.UpdateStrategy)
-		assert.Equal(t, v1beta1.OMENativeUpdateStrategySurgeThenDrain, ext.OMENative.UpdateStrategy.Type)
-		require.NotNil(t, ext.OMENative.ReadyPolicy)
-		assert.Equal(t, v1beta1.OMENativeReadyPolicyAllPodReady, *ext.OMENative.ReadyPolicy)
-		require.NotNil(t, ext.OMENative.MigrationPolicy)
-		assert.Equal(t, v1beta1.OMENativeMigrationPolicyModeAuto, ext.OMENative.MigrationPolicy.Mode)
+		require.NotNil(t, ext.Lifecycle.UpdateStrategy)
+		assert.Equal(t, v1beta1.UpdateStrategySurgeThenDrain, ext.Lifecycle.UpdateStrategy.Type)
+		require.NotNil(t, ext.Lifecycle.ReadyPolicy)
+		assert.Equal(t, v1beta1.InstanceReadyPolicyAllPodReady, *ext.Lifecycle.ReadyPolicy)
+		require.NotNil(t, ext.Lifecycle.MigrationPolicy)
+		assert.Equal(t, v1beta1.MigrationPolicyModeAuto, ext.Lifecycle.MigrationPolicy.Mode)
 	})
 
 	t.Run("OMENative + partial UpdateStrategy — only nil leaves filled", func(t *testing.T) {
-		customType := v1beta1.OMENativeUpdateStrategyRecreatePod
+		customType := v1beta1.UpdateStrategyRecreatePod
 		customGrace := int32(60)
 		ext := &v1beta1.ComponentExtensionSpec{
 			Annotations: omenativeMode,
-			OMENative: &v1beta1.OMENativeComponentSpec{
-				UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
+			Lifecycle: &v1beta1.LifecycleSpec{
+				UpdateStrategy: &v1beta1.UpdateStrategy{
 					Type: customType,
-					InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+					InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
 						GracePeriodSeconds: &customGrace,
 					},
 				},
@@ -404,11 +404,11 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		}
 		defaultOMENativeComponent(ext, true)
 
-		assert.Equal(t, v1beta1.OMENativeUpdateStrategyRecreatePod, ext.OMENative.UpdateStrategy.Type)
-		assert.Equal(t, int32(60), *ext.OMENative.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
+		assert.Equal(t, v1beta1.UpdateStrategyRecreatePod, ext.Lifecycle.UpdateStrategy.Type)
+		assert.Equal(t, int32(60), *ext.Lifecycle.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
 		// MarkNotReadyDuringLifecycle was nil → defaulted to true
-		require.NotNil(t, ext.OMENative.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
-		assert.True(t, *ext.OMENative.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
+		require.NotNil(t, ext.Lifecycle.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
+		assert.True(t, *ext.Lifecycle.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
 	})
 }
 
@@ -452,9 +452,9 @@ func TestDefaultEngine_OMENativeAnnotationTriggersDefaults(t *testing.T) {
 		Worker: &v1beta1.WorkerSpec{Size: func() *int { v := 3; return &v }()},
 	}
 	defaultEngine(engine)
-	require.NotNil(t, engine.OMENative)
-	require.NotNil(t, engine.OMENative.RestartPolicy)
-	assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *engine.OMENative.RestartPolicy)
+	require.NotNil(t, engine.Lifecycle)
+	require.NotNil(t, engine.Lifecycle.RestartPolicy)
+	assert.Equal(t, v1beta1.InstanceRestartPolicyRecreateInstance, *engine.Lifecycle.RestartPolicy)
 }
 
 func TestDefaultRouter_OMENativeAlwaysSinglePod(t *testing.T) {
@@ -464,9 +464,9 @@ func TestDefaultRouter_OMENativeAlwaysSinglePod(t *testing.T) {
 		},
 	}
 	defaultRouter(router)
-	require.NotNil(t, router.OMENative)
-	require.NotNil(t, router.OMENative.RestartPolicy)
-	assert.Equal(t, v1beta1.OMENativeRestartPolicyNone, *router.OMENative.RestartPolicy)
+	require.NotNil(t, router.Lifecycle)
+	require.NotNil(t, router.Lifecycle.RestartPolicy)
+	assert.Equal(t, v1beta1.InstanceRestartPolicyNone, *router.Lifecycle.RestartPolicy)
 }
 
 // TestDefaultWorkerSize_MultiPodWithoutSize covers the OEP-0007
@@ -487,11 +487,11 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 		require.NotNil(t, engine.Worker.Size)
 		assert.Equal(t, 1, *engine.Worker.Size)
 		// downstream multi-pod detection should kick in:
-		require.NotNil(t, engine.OMENative)
-		require.NotNil(t, engine.OMENative.RestartPolicy)
-		assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *engine.OMENative.RestartPolicy)
-		require.NotNil(t, engine.OMENative.ReadyPolicy)
-		assert.Equal(t, v1beta1.OMENativeReadyPolicyAllPodReady, *engine.OMENative.ReadyPolicy)
+		require.NotNil(t, engine.Lifecycle)
+		require.NotNil(t, engine.Lifecycle.RestartPolicy)
+		assert.Equal(t, v1beta1.InstanceRestartPolicyRecreateInstance, *engine.Lifecycle.RestartPolicy)
+		require.NotNil(t, engine.Lifecycle.ReadyPolicy)
+		assert.Equal(t, v1beta1.InstanceReadyPolicyAllPodReady, *engine.Lifecycle.ReadyPolicy)
 	})
 
 	t.Run("engine leader + worker with size=3 — preserved", func(t *testing.T) {
@@ -547,9 +547,9 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 		defaultDecoder(decoder)
 		require.NotNil(t, decoder.Worker.Size)
 		assert.Equal(t, 1, *decoder.Worker.Size)
-		require.NotNil(t, decoder.OMENative)
-		require.NotNil(t, decoder.OMENative.RestartPolicy)
-		assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *decoder.OMENative.RestartPolicy)
+		require.NotNil(t, decoder.Lifecycle)
+		require.NotNil(t, decoder.Lifecycle.RestartPolicy)
+		assert.Equal(t, v1beta1.InstanceRestartPolicyRecreateInstance, *decoder.Lifecycle.RestartPolicy)
 	})
 
 	t.Run("single-pod engine — Worker field unset, no panic", func(t *testing.T) {
@@ -576,22 +576,22 @@ func TestDefaultOMENativeComponent_MultiPodPhase3(t *testing.T) {
 	}
 
 	// before
-	assert.Nil(t, ext.OMENative)
+	assert.Nil(t, ext.Lifecycle)
 
 	defaultOMENativeComponent(ext, true /* multiPod */)
 
 	// after
-	require.NotNil(t, ext.OMENative)
-	require.NotNil(t, ext.OMENative.RestartPolicy)
-	assert.Equal(t, v1beta1.OMENativeRestartPolicyRecreateInstance, *ext.OMENative.RestartPolicy,
+	require.NotNil(t, ext.Lifecycle)
+	require.NotNil(t, ext.Lifecycle.RestartPolicy)
+	assert.Equal(t, v1beta1.InstanceRestartPolicyRecreateInstance, *ext.Lifecycle.RestartPolicy,
 		"multi-pod must default to RecreateInstanceOnPodRestart per OEP-0007 §Restart Policy")
 
-	require.NotNil(t, ext.OMENative.ReadyPolicy)
-	assert.Equal(t, v1beta1.OMENativeReadyPolicyAllPodReady, *ext.OMENative.ReadyPolicy,
+	require.NotNil(t, ext.Lifecycle.ReadyPolicy)
+	assert.Equal(t, v1beta1.InstanceReadyPolicyAllPodReady, *ext.Lifecycle.ReadyPolicy,
 		"multi-pod must default to AllPodReady so Instance Ready iff every gang pod Ready")
 
-	require.NotNil(t, ext.OMENative.UpdateStrategy)
-	assert.Equal(t, v1beta1.OMENativeUpdateStrategySurgeThenDrain, ext.OMENative.UpdateStrategy.Type,
+	require.NotNil(t, ext.Lifecycle.UpdateStrategy)
+	assert.Equal(t, v1beta1.UpdateStrategySurgeThenDrain, ext.Lifecycle.UpdateStrategy.Type,
 		"multi-pod must default to SurgeThenDrain — same as single-pod — so Phase 5 lights up auto")
 }
 
@@ -603,15 +603,15 @@ func TestDefaultOMENativeComponent_SinglePodPhase3(t *testing.T) {
 	}
 	defaultOMENativeComponent(ext, false /* singlePod */)
 
-	require.NotNil(t, ext.OMENative)
-	require.NotNil(t, ext.OMENative.RestartPolicy)
-	assert.Equal(t, v1beta1.OMENativeRestartPolicyNone, *ext.OMENative.RestartPolicy,
+	require.NotNil(t, ext.Lifecycle)
+	require.NotNil(t, ext.Lifecycle.RestartPolicy)
+	assert.Equal(t, v1beta1.InstanceRestartPolicyNone, *ext.Lifecycle.RestartPolicy,
 		"single-pod must keep RestartPolicy=None — no gang restart needed for one pod")
-	require.NotNil(t, ext.OMENative.ReadyPolicy)
-	assert.Equal(t, v1beta1.OMENativeReadyPolicyNone, *ext.OMENative.ReadyPolicy,
+	require.NotNil(t, ext.Lifecycle.ReadyPolicy)
+	assert.Equal(t, v1beta1.InstanceReadyPolicyNone, *ext.Lifecycle.ReadyPolicy,
 		"single-pod must keep ReadyPolicy=None — no aggregation needed for one pod")
-	require.NotNil(t, ext.OMENative.UpdateStrategy)
-	assert.Equal(t, v1beta1.OMENativeUpdateStrategySurgeThenDrain, ext.OMENative.UpdateStrategy.Type,
+	require.NotNil(t, ext.Lifecycle.UpdateStrategy)
+	assert.Equal(t, v1beta1.UpdateStrategySurgeThenDrain, ext.Lifecycle.UpdateStrategy.Type,
 		"single-pod UpdateStrategy unchanged — Phase 3 must not regress this")
 }
 

@@ -152,8 +152,8 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 			WithEngineReplicas(3),
 			WithEngineImage("fake-serving:v1"))
 		// Restart on pod-delete (real kubelet flavor of trigger).
-		restartRecreate := v1beta1.OMENativeRestartPolicyRecreateInstance
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+		restartRecreate := v1beta1.InstanceRestartPolicyRecreateInstance
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
 			RestartPolicy: &restartRecreate,
 		}
 		applyFixture(Default, fix)

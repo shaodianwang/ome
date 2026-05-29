@@ -66,8 +66,8 @@ var _ = ginkgo.Describe("OMENative status surface (extras)", ginkgo.Ordered, fun
 		// RestartPolicy=None so deleting the pod here doesn't trigger
 		// Restart on the controller side — we want the pod stuck in
 		// terminating state for the AvailableReplicas assertion.
-		restartNone := v1beta1.OMENativeRestartPolicyNone
-		fix.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+		restartNone := v1beta1.InstanceRestartPolicyNone
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
 			RestartPolicy: &restartNone,
 		}
 		applyFixture(Default, fix)

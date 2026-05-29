@@ -90,7 +90,7 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 // otherwise trip the "pod count below desired" trigger on the source.
 //
 // Kept here as a v1beta1-typed function because dispatch.go (in this
-// package, still using v1beta1.OMENativeRestartPolicy on the plan)
+// package, still using v1beta1.InstanceRestartPolicy on the plan)
 // calls it directly. Migrates to workload/ops alongside the dispatcher.
 func detectRestartTrigger(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan) (bool, string, error) {
 	s := query.FindInstanceStatus(p.ISVC, plan.Component, inst.Index)

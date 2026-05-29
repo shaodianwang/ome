@@ -112,8 +112,8 @@ var _ = ginkgo.Describe("OMENative Loop B watches (extras)", ginkgo.Ordered, fun
 			WithEngineImage("fake-serving:v1"))
 		// Restart on pod-delete (real kubelet) so ISVC-B bumps
 		// Incarnation observably.
-		restartRecreate := v1beta1.OMENativeRestartPolicyRecreateInstance
-		fixB.ISVC.Spec.Engine.OMENative = &v1beta1.OMENativeComponentSpec{
+		restartRecreate := v1beta1.InstanceRestartPolicyRecreateInstance
+		fixB.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
 			RestartPolicy: &restartRecreate,
 		}
 		applyFixture(Default, fixB)

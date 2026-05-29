@@ -101,11 +101,11 @@ type InferenceReplicaSpec struct {
 
 	// Lifecycle holds the OMENative lifecycle policies (RestartPolicy,
 	// UpdateStrategy, ReadyPolicy, InstanceReadyTimeout,
-	// MigrationPolicy). Reuses the existing OMENativeComponentSpec
-	// type so the projection from ISVC.spec.<component>.omenative is
+	// MigrationPolicy). Reuses the existing LifecycleSpec
+	// type so the projection from ISVC.spec.<component>.lifecycle is
 	// a verbatim copy.
 	// +optional
-	Lifecycle *OMENativeComponentSpec `json:"lifecycle,omitempty"`
+	Lifecycle *LifecycleSpec `json:"lifecycle,omitempty"`
 
 	// Pacing is the InferenceService controller's projection of the
 	// active RolloutCoordinationGroup pacing for this replica.
@@ -183,11 +183,11 @@ type Runner struct {
 
 // InferenceReplicaPacing is the per-replica projection of the active
 // RolloutCoordinationGroup pacing. Mirrors the corresponding
-// OMENativeRollingUpdate subset so the projection is a verbatim
+// RollingUpdate subset so the projection is a verbatim
 // copy.
 type InferenceReplicaPacing struct {
 	// Partition holds back updates for Instances whose index is less
-	// than Partition. Mirrors OMENativeRollingUpdate.Partition. 0
+	// than Partition. Mirrors RollingUpdate.Partition. 0
 	// (the default) updates all Instances. Used for canary holds.
 	// +optional
 	// +kubebuilder:validation:Minimum=0

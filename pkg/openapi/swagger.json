@@ -334,6 +334,10 @@
             "default": ""
           }
         },
+        "lifecycle": {
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.omenative.",
+          "$ref": "#/definitions/v1beta1.LifecycleSpec"
+        },
         "maxReplicas": {
           "description": "Maximum number of replicas for autoscaling.",
           "type": "integer",
@@ -351,10 +355,6 @@
           "description": "Minimum number of replicas, defaults to 1 but can be set to 0 to enable scale-to-zero.",
           "type": "integer",
           "format": "int32"
-        },
-        "omenative": {
-          "description": "OMENative groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. Mirrors the status side: spec.\u003ccomponent\u003e.omenative \u003c-\u003e status.components.\u003ccomponent\u003e.omenative.",
-          "$ref": "#/definitions/v1beta1.OMENativeComponentSpec"
         },
         "scaleMetric": {
           "description": "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
@@ -652,6 +652,10 @@
           "description": "Leader node configuration (only used for MultiNode deployment) Defines the pod and container spec for the leader node that coordinates distributed token generation in multi-node deployments.",
           "$ref": "#/definitions/v1beta1.LeaderSpec"
         },
+        "lifecycle": {
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.omenative.",
+          "$ref": "#/definitions/v1beta1.LifecycleSpec"
+        },
         "maxReplicas": {
           "description": "Maximum number of replicas for autoscaling.",
           "type": "integer",
@@ -682,10 +686,6 @@
             "default": ""
           },
           "x-kubernetes-map-type": "atomic"
-        },
-        "omenative": {
-          "description": "OMENative groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. Mirrors the status side: spec.\u003ccomponent\u003e.omenative \u003c-\u003e status.components.\u003ccomponent\u003e.omenative.",
-          "$ref": "#/definitions/v1beta1.OMENativeComponentSpec"
         },
         "os": {
           "description": "Specifies the OS of the containers in the pod. Some pod and container fields are restricted if this is set.\n\nIf the OS field is set to linux, the following fields must be unset: -securityContext.windowsOptions\n\nIf the OS field is set to windows, following fields must be unset: - spec.hostPID - spec.hostIPC - spec.hostUsers - spec.securityContext.appArmorProfile - spec.securityContext.seLinuxOptions - spec.securityContext.seccompProfile - spec.securityContext.fsGroup - spec.securityContext.fsGroupChangePolicy - spec.securityContext.sysctls - spec.shareProcessNamespace - spec.securityContext.runAsUser - spec.securityContext.runAsGroup - spec.securityContext.supplementalGroups - spec.securityContext.supplementalGroupsPolicy - spec.containers[*].securityContext.appArmorProfile - spec.containers[*].securityContext.seLinuxOptions - spec.containers[*].securityContext.seccompProfile - spec.containers[*].securityContext.capabilities - spec.containers[*].securityContext.readOnlyRootFilesystem - spec.containers[*].securityContext.privileged - spec.containers[*].securityContext.allowPrivilegeEscalation - spec.containers[*].securityContext.procMount - spec.containers[*].securityContext.runAsUser - spec.containers[*].securityContext.runAsGroup",
@@ -1078,6 +1078,10 @@
           "description": "Leader node configuration (only used for MultiNode deployment) Defines the pod and container spec for the leader node that coordinates distributed inference in multi-node deployments.",
           "$ref": "#/definitions/v1beta1.LeaderSpec"
         },
+        "lifecycle": {
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.omenative.",
+          "$ref": "#/definitions/v1beta1.LifecycleSpec"
+        },
         "maxReplicas": {
           "description": "Maximum number of replicas for autoscaling.",
           "type": "integer",
@@ -1108,10 +1112,6 @@
             "default": ""
           },
           "x-kubernetes-map-type": "atomic"
-        },
-        "omenative": {
-          "description": "OMENative groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. Mirrors the status side: spec.\u003ccomponent\u003e.omenative \u003c-\u003e status.components.\u003ccomponent\u003e.omenative.",
-          "$ref": "#/definitions/v1beta1.OMENativeComponentSpec"
         },
         "os": {
           "description": "Specifies the OS of the containers in the pod. Some pod and container fields are restricted if this is set.\n\nIf the OS field is set to linux, the following fields must be unset: -securityContext.windowsOptions\n\nIf the OS field is set to windows, following fields must be unset: - spec.hostPID - spec.hostIPC - spec.hostUsers - spec.securityContext.appArmorProfile - spec.securityContext.seLinuxOptions - spec.securityContext.seccompProfile - spec.securityContext.fsGroup - spec.securityContext.fsGroupChangePolicy - spec.securityContext.sysctls - spec.shareProcessNamespace - spec.securityContext.runAsUser - spec.securityContext.runAsGroup - spec.securityContext.supplementalGroups - spec.securityContext.supplementalGroupsPolicy - spec.containers[*].securityContext.appArmorProfile - spec.containers[*].securityContext.seLinuxOptions - spec.containers[*].securityContext.seccompProfile - spec.containers[*].securityContext.capabilities - spec.containers[*].securityContext.readOnlyRootFilesystem - spec.containers[*].securityContext.privileged - spec.containers[*].securityContext.allowPrivilegeEscalation - spec.containers[*].securityContext.procMount - spec.containers[*].securityContext.runAsUser - spec.containers[*].securityContext.runAsGroup",
@@ -1445,6 +1445,21 @@
         }
       }
     },
+    "v1beta1.InPlaceUpdateStrategy": {
+      "description": "InPlaceUpdateStrategy tunes the per-pod in-place update sequence.",
+      "type": "object",
+      "properties": {
+        "gracePeriodSeconds": {
+          "description": "GracePeriodSeconds is the time OMENative waits between marking the pod not-ready and applying the in-place mutation.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "markNotReadyDuringLifecycle": {
+          "description": "MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on the pod before the in-place mutation so EndpointSlice drains traffic first. Defaults to true.",
+          "type": "boolean"
+        }
+      }
+    },
     "v1beta1.InferenceReplica": {
       "description": "InferenceReplica is the per-Component workload abstraction for OMENative-managed InferenceService Components. One InferenceReplica exists per (ISVC, Component) tuple. The ISVC controller writes the spec; the InferenceReplica controller writes the status.\n\nThe scale subresource lets HPA/KEDA target the InferenceReplica directly rather than indirecting through the parent ISVC.",
       "type": "object",
@@ -1500,7 +1515,7 @@
       }
     },
     "v1beta1.InferenceReplicaPacing": {
-      "description": "InferenceReplicaPacing is the per-replica projection of the active RolloutCoordinationGroup pacing. Mirrors the corresponding OMENativeRollingUpdate subset so the projection is a verbatim copy.",
+      "description": "InferenceReplicaPacing is the per-replica projection of the active RolloutCoordinationGroup pacing. Mirrors the corresponding RollingUpdate subset so the projection is a verbatim copy.",
       "type": "object",
       "properties": {
         "maxUnavailable": {
@@ -1508,7 +1523,7 @@
           "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
         },
         "partition": {
-          "description": "Partition holds back updates for Instances whose index is less than Partition. Mirrors OMENativeRollingUpdate.Partition. 0 (the default) updates all Instances. Used for canary holds.",
+          "description": "Partition holds back updates for Instances whose index is less than Partition. Mirrors RollingUpdate.Partition. 0 (the default) updates all Instances. Used for canary holds.",
           "type": "integer",
           "format": "int32"
         }
@@ -1529,8 +1544,8 @@
           "default": ""
         },
         "lifecycle": {
-          "description": "Lifecycle holds the OMENative lifecycle policies (RestartPolicy, UpdateStrategy, ReadyPolicy, InstanceReadyTimeout, MigrationPolicy). Reuses the existing OMENativeComponentSpec type so the projection from ISVC.spec.\u003ccomponent\u003e.omenative is a verbatim copy.",
-          "$ref": "#/definitions/v1beta1.OMENativeComponentSpec"
+          "description": "Lifecycle holds the OMENative lifecycle policies (RestartPolicy, UpdateStrategy, ReadyPolicy, InstanceReadyTimeout, MigrationPolicy). Reuses the existing LifecycleSpec type so the projection from ISVC.spec.\u003ccomponent\u003e.lifecycle is a verbatim copy.",
+          "$ref": "#/definitions/v1beta1.LifecycleSpec"
         },
         "minReadySeconds": {
           "description": "MinReadySeconds is propagated from the ISVC spec.",
@@ -2234,6 +2249,32 @@
         }
       }
     },
+    "v1beta1.LifecycleSpec": {
+      "description": "LifecycleSpec groups OMENative-specific lifecycle policies on a Component. Embedded via ComponentExtensionSpec.Lifecycle; all fields are no-ops unless the Component is annotated ome.io/deploymentMode=OMENative. Nested under `lifecycle:` so the fields don't collide with corev1.PodSpec fields (notably restartPolicy) that are also inlined into EngineSpec / DecoderSpec / RouterSpec.",
+      "type": "object",
+      "properties": {
+        "instanceReadyTimeout": {
+          "description": "InstanceReadyTimeout is OMENative's upper bound for waiting on a newly-created Instance to become Ready (during migration, rollout, or initial creation).",
+          "$ref": "#/definitions/v1.Duration"
+        },
+        "migrationPolicy": {
+          "description": "MigrationPolicy controls whether and how OMENative honors a migration request annotation for this Component.",
+          "$ref": "#/definitions/v1beta1.MigrationPolicy"
+        },
+        "readyPolicy": {
+          "description": "ReadyPolicy controls how Instance-level readiness is aggregated from the underlying pods.",
+          "type": "string"
+        },
+        "restartPolicy": {
+          "description": "RestartPolicy controls what OMENative does when a managed pod fails. Distinct from the inlined corev1.PodSpec.RestartPolicy: that one tells kubelet whether to restart a container in-place; this one tells the OMENative controller whether to recreate the whole Instance.",
+          "type": "string"
+        },
+        "updateStrategy": {
+          "description": "UpdateStrategy controls how OMENative rolls template changes across the Component's Instances.",
+          "$ref": "#/definitions/v1beta1.UpdateStrategy"
+        }
+      }
+    },
     "v1beta1.MigrationEvent": {
       "description": "MigrationEvent is one observation logged during a migration.",
       "type": "object",
@@ -2328,6 +2369,16 @@
         "startedAt": {
           "description": "StartedAt is the time the controller began executing the migration.",
           "$ref": "#/definitions/v1.Time"
+        }
+      }
+    },
+    "v1beta1.MigrationPolicy": {
+      "description": "MigrationPolicy controls whether and how OMENative honors a migration request annotation for this Component.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "Mode selects the migration disposition. Defaults to auto.",
+          "type": "string"
         }
       }
     },
@@ -2626,32 +2677,6 @@
         }
       }
     },
-    "v1beta1.OMENativeComponentSpec": {
-      "description": "OMENativeComponentSpec groups OMENative-specific lifecycle policies on a Component. Embedded via ComponentExtensionSpec.OMENative; all fields are no-ops unless the Component is annotated ome.io/deploymentMode=OMENative. Nested under `omenative:` so the fields don't collide with corev1.PodSpec fields (notably restartPolicy) that are also inlined into EngineSpec / DecoderSpec / RouterSpec.",
-      "type": "object",
-      "properties": {
-        "instanceReadyTimeout": {
-          "description": "InstanceReadyTimeout is OMENative's upper bound for waiting on a newly-created Instance to become Ready (during migration, rollout, or initial creation).",
-          "$ref": "#/definitions/v1.Duration"
-        },
-        "migrationPolicy": {
-          "description": "MigrationPolicy controls whether and how OMENative honors a migration request annotation for this Component.",
-          "$ref": "#/definitions/v1beta1.OMENativeMigrationPolicy"
-        },
-        "readyPolicy": {
-          "description": "ReadyPolicy controls how Instance-level readiness is aggregated from the underlying pods.",
-          "type": "string"
-        },
-        "restartPolicy": {
-          "description": "RestartPolicy controls what OMENative does when a managed pod fails. Distinct from the inlined corev1.PodSpec.RestartPolicy: that one tells kubelet whether to restart a container in-place; this one tells the OMENative controller whether to recreate the whole Instance.",
-          "type": "string"
-        },
-        "updateStrategy": {
-          "description": "UpdateStrategy controls how OMENative rolls template changes across the Component's Instances.",
-          "$ref": "#/definitions/v1beta1.OMENativeUpdateStrategy"
-        }
-      }
-    },
     "v1beta1.OMENativeComponentStatus": {
       "description": "OMENativeComponentStatus reports OMENative-managed state for one Component. Nil when the Component does not use OMENative.",
       "type": "object",
@@ -2731,21 +2756,6 @@
           "description": "UpdatedReplicas is the number of Instances on UpdateRevision.",
           "type": "integer",
           "format": "int32"
-        }
-      }
-    },
-    "v1beta1.OMENativeInPlaceUpdateStrategy": {
-      "description": "OMENativeInPlaceUpdateStrategy tunes the per-pod in-place update sequence.",
-      "type": "object",
-      "properties": {
-        "gracePeriodSeconds": {
-          "description": "GracePeriodSeconds is the time OMENative waits between marking the pod not-ready and applying the in-place mutation.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "markNotReadyDuringLifecycle": {
-          "description": "MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on the pod before the in-place mutation so EndpointSlice drains traffic first. Defaults to true.",
-          "type": "boolean"
         }
       }
     },
@@ -2834,50 +2844,6 @@
         },
         "targetRevision": {
           "description": "TargetRevision is the ControllerRevision the live pods are converging toward.",
-          "type": "string"
-        }
-      }
-    },
-    "v1beta1.OMENativeMigrationPolicy": {
-      "description": "OMENativeMigrationPolicy controls whether and how OMENative honors a migration request annotation for this Component.",
-      "type": "object",
-      "properties": {
-        "mode": {
-          "description": "Mode selects the migration disposition. Defaults to auto.",
-          "type": "string"
-        }
-      }
-    },
-    "v1beta1.OMENativeRollingUpdate": {
-      "description": "OMENativeRollingUpdate paces rollout across Instances of one Component.",
-      "type": "object",
-      "properties": {
-        "maxUnavailable": {
-          "description": "MaxUnavailable is the maximum number of Instances allowed to be in a non-Ready state during the rollout.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "partition": {
-          "description": "Partition holds back updates for Instances whose index is \u003c Partition. 0 (the default) updates all Instances. Used for canary holds.",
-          "type": "integer",
-          "format": "int32"
-        }
-      }
-    },
-    "v1beta1.OMENativeUpdateStrategy": {
-      "description": "OMENativeUpdateStrategy controls how OMENative rolls template changes across an Instance's pods.",
-      "type": "object",
-      "properties": {
-        "inPlaceUpdateStrategy": {
-          "description": "InPlaceUpdateStrategy tunes the per-pod in-place update sequence. Ignored when Type is RecreatePod.",
-          "$ref": "#/definitions/v1beta1.OMENativeInPlaceUpdateStrategy"
-        },
-        "rollingUpdate": {
-          "description": "RollingUpdate paces the rollout across Instances of the Component.",
-          "$ref": "#/definitions/v1beta1.OMENativeRollingUpdate"
-        },
-        "type": {
-          "description": "Type selects the rollout mechanism. Defaults to SurgeThenDrain for safety — preserves serving capacity throughout the rollout.",
           "type": "string"
         }
       }
@@ -3187,6 +3153,22 @@
           "x-kubernetes-list-type": "map",
           "x-kubernetes-patch-merge-key": "name",
           "x-kubernetes-patch-strategy": "merge,retainKeys"
+        }
+      }
+    },
+    "v1beta1.RollingUpdate": {
+      "description": "RollingUpdate paces rollout across Instances of one Component.",
+      "type": "object",
+      "properties": {
+        "maxUnavailable": {
+          "description": "MaxUnavailable is the maximum number of Instances allowed to be in a non-Ready state during the rollout.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "partition": {
+          "description": "Partition holds back updates for Instances whose index is \u003c Partition. 0 (the default) updates all Instances. Used for canary holds.",
+          "type": "integer",
+          "format": "int32"
         }
       }
     },
@@ -3581,6 +3563,10 @@
             "default": ""
           }
         },
+        "lifecycle": {
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.omenative.",
+          "$ref": "#/definitions/v1beta1.LifecycleSpec"
+        },
         "maxReplicas": {
           "description": "Maximum number of replicas for autoscaling.",
           "type": "integer",
@@ -3611,10 +3597,6 @@
             "default": ""
           },
           "x-kubernetes-map-type": "atomic"
-        },
-        "omenative": {
-          "description": "OMENative groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. Mirrors the status side: spec.\u003ccomponent\u003e.omenative \u003c-\u003e status.components.\u003ccomponent\u003e.omenative.",
-          "$ref": "#/definitions/v1beta1.OMENativeComponentSpec"
         },
         "os": {
           "description": "Specifies the OS of the containers in the pod. Some pod and container fields are restricted if this is set.\n\nIf the OS field is set to linux, the following fields must be unset: -securityContext.windowsOptions\n\nIf the OS field is set to windows, following fields must be unset: - spec.hostPID - spec.hostIPC - spec.hostUsers - spec.securityContext.appArmorProfile - spec.securityContext.seLinuxOptions - spec.securityContext.seccompProfile - spec.securityContext.fsGroup - spec.securityContext.fsGroupChangePolicy - spec.securityContext.sysctls - spec.shareProcessNamespace - spec.securityContext.runAsUser - spec.securityContext.runAsGroup - spec.securityContext.supplementalGroups - spec.securityContext.supplementalGroupsPolicy - spec.containers[*].securityContext.appArmorProfile - spec.containers[*].securityContext.seLinuxOptions - spec.containers[*].securityContext.seccompProfile - spec.containers[*].securityContext.capabilities - spec.containers[*].securityContext.readOnlyRootFilesystem - spec.containers[*].securityContext.privileged - spec.containers[*].securityContext.allowPrivilegeEscalation - spec.containers[*].securityContext.procMount - spec.containers[*].securityContext.runAsUser - spec.containers[*].securityContext.runAsGroup",
@@ -4510,6 +4492,24 @@
             "default": ""
           },
           "x-kubernetes-list-type": "atomic"
+        }
+      }
+    },
+    "v1beta1.UpdateStrategy": {
+      "description": "UpdateStrategy controls how OMENative rolls template changes across an Instance's pods.",
+      "type": "object",
+      "properties": {
+        "inPlaceUpdateStrategy": {
+          "description": "InPlaceUpdateStrategy tunes the per-pod in-place update sequence. Ignored when Type is RecreatePod.",
+          "$ref": "#/definitions/v1beta1.InPlaceUpdateStrategy"
+        },
+        "rollingUpdate": {
+          "description": "RollingUpdate paces the rollout across Instances of the Component.",
+          "$ref": "#/definitions/v1beta1.RollingUpdate"
+        },
+        "type": {
+          "description": "Type selects the rollout mechanism. Defaults to SurgeThenDrain for safety — preserves serving capacity throughout the rollout.",
+          "type": "string"
         }
       }
     },

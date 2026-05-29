@@ -31,13 +31,13 @@ type ComponentPlan struct {
 	Instances []InstancePlan
 
 	// RestartPolicy is the effective Instance-group restart policy.
-	RestartPolicy v1beta1.OMENativeRestartPolicy
+	RestartPolicy v1beta1.InstanceRestartPolicy
 
 	// UpdateStrategy is the effective rollout policy across Instances.
-	UpdateStrategy v1beta1.OMENativeUpdateStrategy
+	UpdateStrategy v1beta1.UpdateStrategy
 
 	// ReadyPolicy is the effective Instance-level readiness aggregation.
-	ReadyPolicy v1beta1.OMENativeReadyPolicy
+	ReadyPolicy v1beta1.InstanceReadyPolicy
 
 	// InstanceReadyTimeout is the wait ceiling on a newly-created
 	// Instance becoming Ready.
@@ -45,7 +45,7 @@ type ComponentPlan struct {
 
 	// MigrationMode is the effective migration disposition (auto / surge /
 	// never).
-	MigrationMode v1beta1.OMENativeMigrationPolicyMode
+	MigrationMode v1beta1.MigrationPolicyMode
 }
 
 // ComponentTypeFromV1beta1 converts a v1beta1.ComponentType to a
@@ -245,29 +245,29 @@ func runnersForInstance(multiPod bool, workerSize int32) []RunnerPlan {
 	}
 }
 
-func restartPolicyOrDefault(p *v1beta1.OMENativeRestartPolicy, multiPod bool) v1beta1.OMENativeRestartPolicy {
+func restartPolicyOrDefault(p *v1beta1.InstanceRestartPolicy, multiPod bool) v1beta1.InstanceRestartPolicy {
 	if p != nil {
 		return *p
 	}
 	if multiPod {
-		return v1beta1.OMENativeRestartPolicyRecreateInstance
+		return v1beta1.InstanceRestartPolicyRecreateInstance
 	}
-	return v1beta1.OMENativeRestartPolicyNone
+	return v1beta1.InstanceRestartPolicyNone
 }
 
-func readyPolicyOrDefault(p *v1beta1.OMENativeReadyPolicy, multiPod bool) v1beta1.OMENativeReadyPolicy {
+func readyPolicyOrDefault(p *v1beta1.InstanceReadyPolicy, multiPod bool) v1beta1.InstanceReadyPolicy {
 	if p != nil {
 		return *p
 	}
 	if multiPod {
-		return v1beta1.OMENativeReadyPolicyAllPodReady
+		return v1beta1.InstanceReadyPolicyAllPodReady
 	}
-	return v1beta1.OMENativeReadyPolicyNone
+	return v1beta1.InstanceReadyPolicyNone
 }
 
-func updateStrategyWithDefaults(s *v1beta1.OMENativeUpdateStrategy) v1beta1.OMENativeUpdateStrategy {
+func updateStrategyWithDefaults(s *v1beta1.UpdateStrategy) v1beta1.UpdateStrategy {
 	if s == nil {
-		s = &v1beta1.OMENativeUpdateStrategy{}
+		s = &v1beta1.UpdateStrategy{}
 	}
 	out := *s
 	if out.Type == "" {
@@ -278,10 +278,10 @@ func updateStrategyWithDefaults(s *v1beta1.OMENativeUpdateStrategy) v1beta1.OMEN
 		// back into in-place explicitly via
 		// spec.<component>.omeNative.updateStrategy.type if you have a
 		// reason (pod-UID preservation, tight capacity).
-		out.Type = v1beta1.OMENativeUpdateStrategySurgeThenDrain
+		out.Type = v1beta1.UpdateStrategySurgeThenDrain
 	}
 	if out.InPlaceUpdateStrategy == nil {
-		out.InPlaceUpdateStrategy = &v1beta1.OMENativeInPlaceUpdateStrategy{}
+		out.InPlaceUpdateStrategy = &v1beta1.InPlaceUpdateStrategy{}
 	}
 	if out.InPlaceUpdateStrategy.GracePeriodSeconds == nil {
 		grace := int32(30)
@@ -301,9 +301,9 @@ func instanceReadyTimeoutOrDefault(d *metav1.Duration) time.Duration {
 	return d.Duration
 }
 
-func migrationModeOrDefault(p *v1beta1.OMENativeMigrationPolicy) v1beta1.OMENativeMigrationPolicyMode {
+func migrationModeOrDefault(p *v1beta1.MigrationPolicy) v1beta1.MigrationPolicyMode {
 	if p == nil || p.Mode == "" {
-		return v1beta1.OMENativeMigrationPolicyModeAuto
+		return v1beta1.MigrationPolicyModeAuto
 	}
 	return p.Mode
 }

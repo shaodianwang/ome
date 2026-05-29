@@ -584,9 +584,9 @@ func TestSurgeUpdate_SingleBump_URMatchesCR_OnlyOneNewCR(t *testing.T) {
 	// rendered ObjectMeta and thus into the hash → bumping it triggers a
 	// new revision exactly like the cluster repro.
 	isvc := minimalISVC("a1", "sandbox", 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategySurgeThenDrain,
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategySurgeThenDrain,
 		},
 	}
 	isvc.Spec.Engine.Annotations = map[string]string{

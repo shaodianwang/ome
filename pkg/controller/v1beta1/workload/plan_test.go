@@ -13,17 +13,17 @@ import (
 func intPtr(v int) *int       { return &v }
 func int32Ptr(v int32) *int32 { return &v }
 func boolPtr(v bool) *bool    { return &v }
-func restartPolicyPtr(v v1beta1.OMENativeRestartPolicy) *v1beta1.OMENativeRestartPolicy {
+func restartPolicyPtr(v v1beta1.InstanceRestartPolicy) *v1beta1.InstanceRestartPolicy {
 	return &v
 }
-func readyPolicyPtr(v v1beta1.OMENativeReadyPolicy) *v1beta1.OMENativeReadyPolicy {
+func readyPolicyPtr(v v1beta1.InstanceReadyPolicy) *v1beta1.InstanceReadyPolicy {
 	return &v
 }
 
 // singlePodDesired builds a single-pod WorkloadDesiredSpec for tests.
 // replicas <= 0 mirrors the production path where MinReplicas=nil/0
 // defaults to 1.
-func singlePodDesired(replicas int32, lifecycle v1beta1.OMENativeComponentSpec) WorkloadDesiredSpec {
+func singlePodDesired(replicas int32, lifecycle v1beta1.LifecycleSpec) WorkloadDesiredSpec {
 	return WorkloadDesiredSpec{
 		Replicas:  replicas,
 		Runners:   []Runner{{Name: "default", Size: 1}},
@@ -31,7 +31,7 @@ func singlePodDesired(replicas int32, lifecycle v1beta1.OMENativeComponentSpec) 
 	}
 }
 
-func multiPodDesired(replicas, workerSize int32, lifecycle v1beta1.OMENativeComponentSpec) WorkloadDesiredSpec {
+func multiPodDesired(replicas, workerSize int32, lifecycle v1beta1.LifecycleSpec) WorkloadDesiredSpec {
 	return WorkloadDesiredSpec{
 		Replicas: replicas,
 		MultiPod: true,
@@ -47,7 +47,7 @@ func multiPodDesired(replicas, workerSize int32, lifecycle v1beta1.OMENativeComp
 // layout: one leader runner of size 1 plus one worker runner of size
 // WorkerSize.
 func TestBuildPlan_MultiPodEmitsLeaderWorkerRunners(t *testing.T) {
-	desired := multiPodDesired(2, 3, v1beta1.OMENativeComponentSpec{})
+	desired := multiPodDesired(2, 3, v1beta1.LifecycleSpec{})
 	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -76,15 +76,15 @@ func TestBuildPlan_MultiPodEmitsLeaderWorkerRunners(t *testing.T) {
 // for multi-pod Instances: RestartPolicy=RecreateInstance,
 // ReadyPolicy=AllPodReady. Single-pod defaults stay None for both.
 func TestBuildPlan_MultiPodDefaultsMatchOEP(t *testing.T) {
-	desired := multiPodDesired(1, 1, v1beta1.OMENativeComponentSpec{})
+	desired := multiPodDesired(1, 1, v1beta1.LifecycleSpec{})
 	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if plan.RestartPolicy != v1beta1.OMENativeRestartPolicyRecreateInstance {
+	if plan.RestartPolicy != v1beta1.InstanceRestartPolicyRecreateInstance {
 		t.Errorf("RestartPolicy: got %q want RecreateInstanceOnPodRestart", plan.RestartPolicy)
 	}
-	if plan.ReadyPolicy != v1beta1.OMENativeReadyPolicyAllPodReady {
+	if plan.ReadyPolicy != v1beta1.InstanceReadyPolicyAllPodReady {
 		t.Errorf("ReadyPolicy: got %q want AllPodReady", plan.ReadyPolicy)
 	}
 }
@@ -93,7 +93,7 @@ func TestBuildPlan_MultiPodDefaultsMatchOEP(t *testing.T) {
 // produces leader+worker entries; the webhook validator rejects orphan
 // leader without worker.size>0, but BuildPlan stays defensive.
 func TestBuildPlan_MultiPodWithZeroWorkerSize(t *testing.T) {
-	desired := multiPodDesired(1, 0, v1beta1.OMENativeComponentSpec{})
+	desired := multiPodDesired(1, 0, v1beta1.LifecycleSpec{})
 	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -113,18 +113,18 @@ func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
 	// Simulates a WorkloadDesiredSpec produced by an adapter whose source
 	// went through the mutating webhook defaulter — lifecycle is fully
 	// populated.
-	desired := singlePodDesired(2, v1beta1.OMENativeComponentSpec{
-		RestartPolicy: restartPolicyPtr(v1beta1.OMENativeRestartPolicyNone),
-		ReadyPolicy:   readyPolicyPtr(v1beta1.OMENativeReadyPolicyNone),
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+	desired := singlePodDesired(2, v1beta1.LifecycleSpec{
+		RestartPolicy: restartPolicyPtr(v1beta1.InstanceRestartPolicyNone),
+		ReadyPolicy:   readyPolicyPtr(v1beta1.InstanceReadyPolicyNone),
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
 				GracePeriodSeconds:          int32Ptr(30),
 				MarkNotReadyDuringLifecycle: boolPtr(true),
 			},
 		},
 		InstanceReadyTimeout: &metav1.Duration{Duration: 30 * time.Minute},
-		MigrationPolicy:      &v1beta1.OMENativeMigrationPolicy{Mode: v1beta1.OMENativeMigrationPolicyModeAuto},
+		MigrationPolicy:      &v1beta1.MigrationPolicy{Mode: v1beta1.MigrationPolicyModeAuto},
 	})
 	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
@@ -138,17 +138,17 @@ func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
 			{Index: 0, Incarnation: 1, Runners: []RunnerPlan{{Name: "default", Size: 1}}},
 			{Index: 1, Incarnation: 1, Runners: []RunnerPlan{{Name: "default", Size: 1}}},
 		},
-		RestartPolicy: v1beta1.OMENativeRestartPolicyNone,
-		UpdateStrategy: v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &v1beta1.OMENativeInPlaceUpdateStrategy{
+		RestartPolicy: v1beta1.InstanceRestartPolicyNone,
+		UpdateStrategy: v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
 				GracePeriodSeconds:          int32Ptr(30),
 				MarkNotReadyDuringLifecycle: boolPtr(true),
 			},
 		},
-		ReadyPolicy:          v1beta1.OMENativeReadyPolicyNone,
+		ReadyPolicy:          v1beta1.InstanceReadyPolicyNone,
 		InstanceReadyTimeout: 30 * time.Minute,
-		MigrationMode:        v1beta1.OMENativeMigrationPolicyModeAuto,
+		MigrationMode:        v1beta1.MigrationPolicyModeAuto,
 	}
 	if diff := cmp.Diff(want, plan); diff != "" {
 		t.Fatalf("plan mismatch (-want +got):\n%s", diff)
@@ -158,7 +158,7 @@ func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
 func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
 	// Simulates a pre-defaulter object — adapter projected an empty
 	// lifecycle. BuildPlan applies the same defaults inline.
-	desired := singlePodDesired(1, v1beta1.OMENativeComponentSpec{})
+	desired := singlePodDesired(1, v1beta1.LifecycleSpec{})
 	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -166,13 +166,13 @@ func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
 	if plan.Replicas != 1 {
 		t.Errorf("Replicas: got %d want 1", plan.Replicas)
 	}
-	if plan.RestartPolicy != v1beta1.OMENativeRestartPolicyNone {
+	if plan.RestartPolicy != v1beta1.InstanceRestartPolicyNone {
 		t.Errorf("RestartPolicy: got %q want None", plan.RestartPolicy)
 	}
-	if plan.ReadyPolicy != v1beta1.OMENativeReadyPolicyNone {
+	if plan.ReadyPolicy != v1beta1.InstanceReadyPolicyNone {
 		t.Errorf("ReadyPolicy: got %q want None", plan.ReadyPolicy)
 	}
-	if plan.UpdateStrategy.Type != v1beta1.OMENativeUpdateStrategySurgeThenDrain {
+	if plan.UpdateStrategy.Type != v1beta1.UpdateStrategySurgeThenDrain {
 		t.Errorf("UpdateStrategy.Type: got %q want SurgeThenDrain (default)", plan.UpdateStrategy.Type)
 	}
 	if plan.UpdateStrategy.InPlaceUpdateStrategy == nil ||
@@ -183,7 +183,7 @@ func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
 	if plan.InstanceReadyTimeout != 30*time.Minute {
 		t.Errorf("InstanceReadyTimeout: got %v want 30m", plan.InstanceReadyTimeout)
 	}
-	if plan.MigrationMode != v1beta1.OMENativeMigrationPolicyModeAuto {
+	if plan.MigrationMode != v1beta1.MigrationPolicyModeAuto {
 		t.Errorf("MigrationMode: got %q want auto", plan.MigrationMode)
 	}
 }
@@ -205,7 +205,7 @@ func TestBuildPlan_ReplicaCount(t *testing.T) {
 			if tt.minRep != nil {
 				rep = int32(*tt.minRep)
 			}
-			desired := singlePodDesired(rep, v1beta1.OMENativeComponentSpec{})
+			desired := singlePodDesired(rep, v1beta1.LifecycleSpec{})
 			plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -233,7 +233,7 @@ func TestBuildPlan_ReplicaCount(t *testing.T) {
 func TestBuildPlan_IncarnationDefaultsToOneOnFirstReconcile(t *testing.T) {
 	// Observed state has no InstanceStatuses — every Instance gets
 	// Incarnation=1.
-	desired := singlePodDesired(3, v1beta1.OMENativeComponentSpec{})
+	desired := singlePodDesired(3, v1beta1.LifecycleSpec{})
 	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -248,7 +248,7 @@ func TestBuildPlan_IncarnationDefaultsToOneOnFirstReconcile(t *testing.T) {
 func TestBuildPlan_IncarnationPreservedFromStatus(t *testing.T) {
 	// Observed state carries InstanceStatuses with explicit Incarnations —
 	// BuildPlan reads them back instead of resetting to 1.
-	desired := singlePodDesired(2, v1beta1.OMENativeComponentSpec{})
+	desired := singlePodDesired(2, v1beta1.LifecycleSpec{})
 	observed := WorkloadObservedState{
 		InstanceStatuses: []InstanceStatus{
 			{Index: 0, Incarnation: 4},
@@ -272,7 +272,7 @@ func TestBuildPlan_IncarnationScopedToWorkload(t *testing.T) {
 	// returns only this Component's statuses), so cross-Component leakage
 	// is impossible at the call site. The test pins the BuildPlan contract:
 	// no InstanceStatuses → default to 1 for every Instance.
-	desired := singlePodDesired(1, v1beta1.OMENativeComponentSpec{})
+	desired := singlePodDesired(1, v1beta1.LifecycleSpec{})
 	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -283,14 +283,14 @@ func TestBuildPlan_IncarnationScopedToWorkload(t *testing.T) {
 }
 
 func TestBuildPlan_RestartPolicyExplicitWinsOverDefault(t *testing.T) {
-	desired := singlePodDesired(0, v1beta1.OMENativeComponentSpec{
-		RestartPolicy: restartPolicyPtr(v1beta1.OMENativeRestartPolicyRecreateISVC),
+	desired := singlePodDesired(0, v1beta1.LifecycleSpec{
+		RestartPolicy: restartPolicyPtr(v1beta1.InstanceRestartPolicyRecreateISVC),
 	})
 	plan, err := BuildPlan(v1beta1.EngineComponent, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if plan.RestartPolicy != v1beta1.OMENativeRestartPolicyRecreateISVC {
+	if plan.RestartPolicy != v1beta1.InstanceRestartPolicyRecreateISVC {
 		t.Errorf("RestartPolicy: got %q want RecreateISVCOnPodRestart", plan.RestartPolicy)
 	}
 }

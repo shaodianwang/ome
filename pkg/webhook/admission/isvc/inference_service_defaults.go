@@ -240,31 +240,31 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 	if ext.Annotations[constants.DeploymentMode] != string(constants.OMENative) {
 		return
 	}
-	if ext.OMENative == nil {
-		ext.OMENative = &v1beta1.OMENativeComponentSpec{}
+	if ext.Lifecycle == nil {
+		ext.Lifecycle = &v1beta1.LifecycleSpec{}
 	}
-	spec := ext.OMENative
+	spec := ext.Lifecycle
 
 	if spec.RestartPolicy == nil {
-		rp := v1beta1.OMENativeRestartPolicyNone
+		rp := v1beta1.InstanceRestartPolicyNone
 		if multiPod {
-			rp = v1beta1.OMENativeRestartPolicyRecreateInstance
+			rp = v1beta1.InstanceRestartPolicyRecreateInstance
 		}
 		spec.RestartPolicy = &rp
 	}
 
 	if spec.UpdateStrategy == nil {
-		spec.UpdateStrategy = &v1beta1.OMENativeUpdateStrategy{}
+		spec.UpdateStrategy = &v1beta1.UpdateStrategy{}
 	}
 	if spec.UpdateStrategy.Type == "" {
 		// SurgeThenDrain is the default. It currently delegates to
 		// recreate (no zero-downtime surge yet), which is still safer
 		// than in-place because the dispatcher's MaxUnavailable gate
 		// throttles drains.
-		spec.UpdateStrategy.Type = v1beta1.OMENativeUpdateStrategySurgeThenDrain
+		spec.UpdateStrategy.Type = v1beta1.UpdateStrategySurgeThenDrain
 	}
 	if spec.UpdateStrategy.InPlaceUpdateStrategy == nil {
-		spec.UpdateStrategy.InPlaceUpdateStrategy = &v1beta1.OMENativeInPlaceUpdateStrategy{}
+		spec.UpdateStrategy.InPlaceUpdateStrategy = &v1beta1.InPlaceUpdateStrategy{}
 	}
 	if spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds == nil {
 		grace := int32(30)
@@ -276,9 +276,9 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 	}
 
 	if spec.ReadyPolicy == nil {
-		rp := v1beta1.OMENativeReadyPolicyNone
+		rp := v1beta1.InstanceReadyPolicyNone
 		if multiPod {
-			rp = v1beta1.OMENativeReadyPolicyAllPodReady
+			rp = v1beta1.InstanceReadyPolicyAllPodReady
 		}
 		spec.ReadyPolicy = &rp
 	}
@@ -288,10 +288,10 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 	}
 
 	if spec.MigrationPolicy == nil {
-		spec.MigrationPolicy = &v1beta1.OMENativeMigrationPolicy{}
+		spec.MigrationPolicy = &v1beta1.MigrationPolicy{}
 	}
 	if spec.MigrationPolicy.Mode == "" {
-		spec.MigrationPolicy.Mode = v1beta1.OMENativeMigrationPolicyModeAuto
+		spec.MigrationPolicy.Mode = v1beta1.MigrationPolicyModeAuto
 	}
 }
 

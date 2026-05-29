@@ -178,10 +178,10 @@ func TestMigrationPhase_Values(t *testing.T) {
 	}
 }
 
-func TestOMENativeComponentSpec_JSONRoundTrip(t *testing.T) {
-	restartPolicy := OMENativeRestartPolicyRecreateInstance
-	updateType := OMENativeUpdateStrategyInPlaceIfPossible
-	readyPolicy := OMENativeReadyPolicyAllPodReady
+func TestLifecycleSpec_JSONRoundTrip(t *testing.T) {
+	restartPolicy := InstanceRestartPolicyRecreateInstance
+	updateType := UpdateStrategyInPlaceIfPossible
+	readyPolicy := InstanceReadyPolicyAllPodReady
 	timeout := metav1.Duration{Duration: 30 * time.Minute}
 	graceSecs := int32(30)
 	markNotReady := true
@@ -190,23 +190,23 @@ func TestOMENativeComponentSpec_JSONRoundTrip(t *testing.T) {
 
 	original := EngineSpec{
 		ComponentExtensionSpec: ComponentExtensionSpec{
-			OMENative: &OMENativeComponentSpec{
+			Lifecycle: &LifecycleSpec{
 				RestartPolicy: &restartPolicy,
-				UpdateStrategy: &OMENativeUpdateStrategy{
+				UpdateStrategy: &UpdateStrategy{
 					Type: updateType,
-					RollingUpdate: &OMENativeRollingUpdate{
+					RollingUpdate: &RollingUpdate{
 						Partition:      &partition,
 						MaxUnavailable: &maxUnavail,
 					},
-					InPlaceUpdateStrategy: &OMENativeInPlaceUpdateStrategy{
+					InPlaceUpdateStrategy: &InPlaceUpdateStrategy{
 						GracePeriodSeconds:          &graceSecs,
 						MarkNotReadyDuringLifecycle: &markNotReady,
 					},
 				},
 				ReadyPolicy:          &readyPolicy,
 				InstanceReadyTimeout: &timeout,
-				MigrationPolicy: &OMENativeMigrationPolicy{
-					Mode: OMENativeMigrationPolicyModeSurge,
+				MigrationPolicy: &MigrationPolicy{
+					Mode: MigrationPolicyModeSurge,
 				},
 			},
 		},
@@ -227,14 +227,14 @@ func TestOMENativeComponentSpec_JSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestOMENativeComponentSpec_JSONKeyIsNestedUnderOmenative(t *testing.T) {
+func TestLifecycleSpec_JSONKeyIsNestedUnderLifecycle(t *testing.T) {
 	// Confirm the OMENative restart policy serializes under
-	// `omenative.restartPolicy`, not at the top level where it would collide
+	// `lifecycle.restartPolicy`, not at the top level where it would collide
 	// with the inlined corev1.PodSpec.RestartPolicy.
-	policy := OMENativeRestartPolicyRecreateInstance
+	policy := InstanceRestartPolicyRecreateInstance
 	spec := EngineSpec{
 		ComponentExtensionSpec: ComponentExtensionSpec{
-			OMENative: &OMENativeComponentSpec{RestartPolicy: &policy},
+			Lifecycle: &LifecycleSpec{RestartPolicy: &policy},
 		},
 	}
 	encoded, err := json.Marshal(spec)
@@ -242,16 +242,16 @@ func TestOMENativeComponentSpec_JSONKeyIsNestedUnderOmenative(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	got := string(encoded)
-	if !strings.Contains(got, `"omenative":{"restartPolicy":"RecreateInstanceOnPodRestart"}`) {
-		t.Fatalf("expected nested omenative.restartPolicy, got: %s", got)
+	if !strings.Contains(got, `"lifecycle":{"restartPolicy":"RecreateInstanceOnPodRestart"}`) {
+		t.Fatalf("expected nested lifecycle.restartPolicy, got: %s", got)
 	}
 }
 
-func TestOMENativeRestartPolicy_Values(t *testing.T) {
-	pairs := map[OMENativeRestartPolicy]string{
-		OMENativeRestartPolicyNone:             "None",
-		OMENativeRestartPolicyRecreateInstance: "RecreateInstanceOnPodRestart",
-		OMENativeRestartPolicyRecreateISVC:     "RecreateISVCOnPodRestart",
+func TestInstanceRestartPolicy_Values(t *testing.T) {
+	pairs := map[InstanceRestartPolicy]string{
+		InstanceRestartPolicyNone:             "None",
+		InstanceRestartPolicyRecreateInstance: "RecreateInstanceOnPodRestart",
+		InstanceRestartPolicyRecreateISVC:     "RecreateISVCOnPodRestart",
 	}
 	for got, want := range pairs {
 		if string(got) != want {
@@ -260,11 +260,11 @@ func TestOMENativeRestartPolicy_Values(t *testing.T) {
 	}
 }
 
-func TestOMENativeUpdateStrategyType_Values(t *testing.T) {
-	pairs := map[OMENativeUpdateStrategyType]string{
-		OMENativeUpdateStrategyRecreatePod:       "RecreatePod",
-		OMENativeUpdateStrategyInPlaceIfPossible: "InPlaceIfPossible",
-		OMENativeUpdateStrategyInPlaceOnly:       "InPlaceOnly",
+func TestUpdateStrategyType_Values(t *testing.T) {
+	pairs := map[UpdateStrategyType]string{
+		UpdateStrategyRecreatePod:       "RecreatePod",
+		UpdateStrategyInPlaceIfPossible: "InPlaceIfPossible",
+		UpdateStrategyInPlaceOnly:       "InPlaceOnly",
 	}
 	for got, want := range pairs {
 		if string(got) != want {
@@ -273,11 +273,11 @@ func TestOMENativeUpdateStrategyType_Values(t *testing.T) {
 	}
 }
 
-func TestOMENativeMigrationPolicyMode_Values(t *testing.T) {
-	pairs := map[OMENativeMigrationPolicyMode]string{
-		OMENativeMigrationPolicyModeAuto:  "auto",
-		OMENativeMigrationPolicyModeSurge: "surge",
-		OMENativeMigrationPolicyModeNever: "never",
+func TestMigrationPolicyMode_Values(t *testing.T) {
+	pairs := map[MigrationPolicyMode]string{
+		MigrationPolicyModeAuto:  "auto",
+		MigrationPolicyModeSurge: "surge",
+		MigrationPolicyModeNever: "never",
 	}
 	for got, want := range pairs {
 		if string(got) != want {

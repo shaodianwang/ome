@@ -40,9 +40,9 @@ func surgePodAtOrdinal(isvc *v1beta1.InferenceService, instanceIdx int32, incarn
 // ActiveOrdinal=0).
 func surgeISVCMultiInstance(name, ns string, incarnation int64) *v1beta1.InferenceService {
 	isvc := legacyMinimalISVC(name, ns, 2)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategySurgeThenDrain,
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategySurgeThenDrain,
 		},
 	}
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
@@ -100,8 +100,8 @@ func surgePlan() workload.ComponentPlan {
 			Runners:     []workload.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 		InstanceReadyTimeout: 30 * time.Minute,
-		UpdateStrategy: v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategySurgeThenDrain,
+		UpdateStrategy: v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategySurgeThenDrain,
 		},
 	}
 }
@@ -111,9 +111,9 @@ func surgePlan() workload.ComponentPlan {
 // test seeds them).
 func surgeISVCReady(name, ns string, incarnation int64) *v1beta1.InferenceService {
 	isvc := legacyMinimalISVC(name, ns, 1)
-	isvc.Spec.Engine.ComponentExtensionSpec.OMENative = &v1beta1.OMENativeComponentSpec{
-		UpdateStrategy: &v1beta1.OMENativeUpdateStrategy{
-			Type: v1beta1.OMENativeUpdateStrategySurgeThenDrain,
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategySurgeThenDrain,
 		},
 	}
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{

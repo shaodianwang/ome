@@ -49,10 +49,10 @@ type WorkloadDesiredSpec struct {
 
 	// Lifecycle holds the OMENative lifecycle policies (RestartPolicy,
 	// UpdateStrategy, ReadyPolicy, InstanceReadyTimeout,
-	// MigrationPolicy). Reuses the existing OMENativeComponentSpec
+	// MigrationPolicy). Reuses the existing LifecycleSpec
 	// type — adapters either project ISVC.Spec.<comp>.OMENative or
 	// dereference IR.Spec.Lifecycle.
-	Lifecycle v1beta1.OMENativeComponentSpec
+	Lifecycle v1beta1.LifecycleSpec
 
 	// Pacing is the projected rollout pacing for this reconcile. Nil
 	// means "no pacing constraint" (treated as allowed).

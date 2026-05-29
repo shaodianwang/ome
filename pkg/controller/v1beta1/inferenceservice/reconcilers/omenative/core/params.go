@@ -90,8 +90,8 @@ func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
 		MultiPod: p.MultiPod,
 		Runners:  runnersForDesired(p.MultiPod, int32(p.WorkerSize)),
 	}
-	if p.ComponentExt.OMENative != nil {
-		desired.Lifecycle = *p.ComponentExt.OMENative
+	if p.ComponentExt.Lifecycle != nil {
+		desired.Lifecycle = *p.ComponentExt.Lifecycle
 	}
 
 	observed := workload.WorkloadObservedState{

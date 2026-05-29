@@ -307,8 +307,8 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 			WithRouter(),
 			WithEngineImage("fake-serving:v1"))
 		// Restart on pod-delete for the Router component.
-		restartRecreate := v1beta1.OMENativeRestartPolicyRecreateInstance
-		fix.ISVC.Spec.Router.OMENative = &v1beta1.OMENativeComponentSpec{
+		restartRecreate := v1beta1.InstanceRestartPolicyRecreateInstance
+		fix.ISVC.Spec.Router.Lifecycle = &v1beta1.LifecycleSpec{
 			RestartPolicy: &restartRecreate,
 		}
 		applyFixture(Default, fix)

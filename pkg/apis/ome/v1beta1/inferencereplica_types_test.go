@@ -83,12 +83,12 @@ func TestInferenceReplica_JSONRoundTrip(t *testing.T) {
 					},
 				},
 			},
-			Lifecycle: &OMENativeComponentSpec{
-				RestartPolicy:        omenativeRestartPolicyPtr(OMENativeRestartPolicyRecreateInstance),
+			Lifecycle: &LifecycleSpec{
+				RestartPolicy:        omenativeRestartPolicyPtr(InstanceRestartPolicyRecreateInstance),
 				InstanceReadyTimeout: &timeout,
-				UpdateStrategy: &OMENativeUpdateStrategy{
-					Type: OMENativeUpdateStrategySurgeThenDrain,
-					RollingUpdate: &OMENativeRollingUpdate{
+				UpdateStrategy: &UpdateStrategy{
+					Type: UpdateStrategySurgeThenDrain,
+					RollingUpdate: &RollingUpdate{
 						Partition: &partition,
 					},
 				},
@@ -238,6 +238,6 @@ func TestRunner_RoleNames(t *testing.T) {
 	}
 }
 
-func omenativeRestartPolicyPtr(p OMENativeRestartPolicy) *OMENativeRestartPolicy {
+func omenativeRestartPolicyPtr(p InstanceRestartPolicy) *InstanceRestartPolicy {
 	return &p
 }

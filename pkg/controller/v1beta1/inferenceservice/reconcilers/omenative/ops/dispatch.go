@@ -72,7 +72,7 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 
 	// Per-Instance restart pass.
 	anyRestarting := false
-	if plan.RestartPolicy == v1beta1.OMENativeRestartPolicyRecreateInstance {
+	if plan.RestartPolicy == v1beta1.InstanceRestartPolicyRecreateInstance {
 		for _, inst := range plan.Instances {
 			needsRestart, reason, derr := detectRestartTrigger(ctx, p, plan, inst)
 			if derr != nil {
@@ -95,7 +95,7 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	}
 
 	// Per-Component migration pass.
-	if plan.MigrationMode != v1beta1.OMENativeMigrationPolicyModeNever {
+	if plan.MigrationMode != v1beta1.MigrationPolicyModeNever {
 		uuid, req, sourceIdx, found, mderr := detectMigrationRequest(ctx, p, plan.Component)
 		if mderr != nil {
 			return ctrl.Result{}, fmt.Errorf("OMENative reconciler: detect migration request (component=%s): %w", plan.Component, mderr)
@@ -139,7 +139,7 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 		// pod per Instance. Gate selection at the dispatcher level
 		// branches on the strategy in plan.UpdateStrategy.Type so each
 		// strategy is throttled by the budget that actually applies.
-		isSurgeStrategy := plan.UpdateStrategy.Type == v1beta1.OMENativeUpdateStrategySurgeThenDrain ||
+		isSurgeStrategy := plan.UpdateStrategy.Type == v1beta1.UpdateStrategySurgeThenDrain ||
 			plan.UpdateStrategy.Type == ""
 		for _, inst := range plan.Instances {
 			needs, derr := detectUpdateTrigger(ctx, p, plan, inst, target, p.PodSpec)

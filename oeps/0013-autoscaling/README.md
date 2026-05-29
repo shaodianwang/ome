@@ -237,7 +237,7 @@ type ComponentExtensionSpec struct {
     MinAvailable        *intstr.IntOrString           `json:"minAvailable,omitempty"`
     MaxUnavailable      *intstr.IntOrString           `json:"maxUnavailable,omitempty"`
     DeploymentStrategy  *appsv1.DeploymentStrategy    `json:"deploymentStrategy,omitempty"`
-    OMENative           *OMENativeComponentSpec       `json:"omenative,omitempty"`
+    Lifecycle           *LifecycleSpec                `json:"lifecycle,omitempty"`
     // KedaConfig removed in OEP-0013 — replaced by Autoscaler.Keda.
 
     // New in OEP-0013.

@@ -8083,28 +8083,7 @@ spec:
                             - name
                           x-kubernetes-list-type: map
                       type: object
-                    maxReplicas:
-                      type: integer
-                    maxUnavailable:
-                      anyOf:
-                        - type: integer
-                        - type: string
-                      x-kubernetes-int-or-string: true
-                    minAvailable:
-                      anyOf:
-                        - type: integer
-                        - type: string
-                      x-kubernetes-int-or-string: true
-                    minReplicas:
-                      type: integer
-                    nodeName:
-                      type: string
-                    nodeSelector:
-                      additionalProperties:
-                        type: string
-                      type: object
-                      x-kubernetes-map-type: atomic
-                    omenative:
+                    lifecycle:
                       properties:
                         instanceReadyTimeout:
                           type: string
@@ -8159,6 +8138,27 @@ spec:
                               type: string
                           type: object
                       type: object
+                    maxReplicas:
+                      type: integer
+                    maxUnavailable:
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-int-or-string: true
+                    minAvailable:
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-int-or-string: true
+                    minReplicas:
+                      type: integer
+                    nodeName:
+                      type: string
+                    nodeSelector:
+                      additionalProperties:
+                        type: string
+                      type: object
+                      x-kubernetes-map-type: atomic
                     os:
                       properties:
                         name:
@@ -21049,28 +21049,7 @@ spec:
                             - name
                           x-kubernetes-list-type: map
                       type: object
-                    maxReplicas:
-                      type: integer
-                    maxUnavailable:
-                      anyOf:
-                        - type: integer
-                        - type: string
-                      x-kubernetes-int-or-string: true
-                    minAvailable:
-                      anyOf:
-                        - type: integer
-                        - type: string
-                      x-kubernetes-int-or-string: true
-                    minReplicas:
-                      type: integer
-                    nodeName:
-                      type: string
-                    nodeSelector:
-                      additionalProperties:
-                        type: string
-                      type: object
-                      x-kubernetes-map-type: atomic
-                    omenative:
+                    lifecycle:
                       properties:
                         instanceReadyTimeout:
                           type: string
@@ -21125,6 +21104,27 @@ spec:
                               type: string
                           type: object
                       type: object
+                    maxReplicas:
+                      type: integer
+                    maxUnavailable:
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-int-or-string: true
+                    minAvailable:
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-int-or-string: true
+                    minReplicas:
+                      type: integer
+                    nodeName:
+                      type: string
+                    nodeSelector:
+                      additionalProperties:
+                        type: string
+                      type: object
+                      x-kubernetes-map-type: atomic
                     os:
                       properties:
                         name:
@@ -29777,28 +29777,7 @@ spec:
                       additionalProperties:
                         type: string
                       type: object
-                    maxReplicas:
-                      type: integer
-                    maxUnavailable:
-                      anyOf:
-                        - type: integer
-                        - type: string
-                      x-kubernetes-int-or-string: true
-                    minAvailable:
-                      anyOf:
-                        - type: integer
-                        - type: string
-                      x-kubernetes-int-or-string: true
-                    minReplicas:
-                      type: integer
-                    nodeName:
-                      type: string
-                    nodeSelector:
-                      additionalProperties:
-                        type: string
-                      type: object
-                      x-kubernetes-map-type: atomic
-                    omenative:
+                    lifecycle:
                       properties:
                         instanceReadyTimeout:
                           type: string
@@ -29853,6 +29832,27 @@ spec:
                               type: string
                           type: object
                       type: object
+                    maxReplicas:
+                      type: integer
+                    maxUnavailable:
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-int-or-string: true
+                    minAvailable:
+                      anyOf:
+                        - type: integer
+                        - type: string
+                      x-kubernetes-int-or-string: true
+                    minReplicas:
+                      type: integer
+                    nodeName:
+                      type: string
+                    nodeSelector:
+                      additionalProperties:
+                        type: string
+                      type: object
+                      x-kubernetes-map-type: atomic
                     os:
                       properties:
                         name:
