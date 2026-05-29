@@ -22,6 +22,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // ---------------------------------------------------------------------
@@ -811,6 +812,344 @@ func crNamesSlice(items []appsv1.ControllerRevision) []string {
 		out = append(out, cr.Name)
 	}
 	return out
+}
+
+// TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler pins the
+// X-2 bug #58: when a second spec bump (v2 → v3) arrives WHILE the
+// first bump's (v1 → v2) surge is still in flight (surge pod created
+// but not yet promoted), the controller MUST:
+//
+//  1. Create the v3 ControllerRevision (it MUST exist after the
+//     bump-during-bump reconcile, not just after v2 promotes).
+//  2. Eventually drive every pod to v3 (no v2 stragglers).
+//  3. Stamp status.CurrentRevision = v3 once convergence completes.
+//
+// Production observation (cluster sandbox, X-2 spec): the v3 CR was
+// never created, a v2-flavored pod lingered (+1 vs expected), and
+// status.CurrentRevision stayed at v2 forever. The spec bumps via the
+// `test.ome.io/rollout-trigger` annotation (no image change), exactly
+// like the X-2 SRT test does.
+//
+// The test drives the full surge cycle through ReconcileComponent so
+// the bug surfaces from the same code path the cluster exercises.
+func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
+	resetExpectations(t)
+	// Single-replica SurgeThenDrain ISVC — the simplest reproducer for
+	// the bump-during-bump bug. Multi-replica would multiply the in-
+	// flight surge count but the failure mode is per-Instance: v3 must
+	// be ensured even when v2 surge for the SAME Instance is in flight.
+	isvc := minimalISVC("x2", "sandbox", 1)
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type: v1beta1.UpdateStrategySurgeThenDrain,
+		},
+	}
+	isvc.Spec.Engine.Annotations = map[string]string{
+		"test.ome.io/rollout-trigger": "v1",
+	}
+	c := newFakeClientWithDiscovery(t, isvc)
+
+	// Seed steady-state on v1: a single CR with the initial annotation,
+	// a Ready+Serving pod at ord=0, status reflecting both.
+	v1Spec := &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "main", Image: "engine:v1"}},
+	}
+	v1Meta := &metav1.ObjectMeta{
+		Annotations: map[string]string{
+			"test.ome.io/rollout-trigger": "v1",
+		},
+	}
+	v1CR, _, err := core.EnsureControllerRevisionForISVC(context.Background(), c, c, isvc, v1beta1.EngineComponent, v1Spec, v1Meta, nil)
+	if err != nil {
+		t.Fatalf("seed v1 CR: %v", err)
+	}
+	v1Pod := podAtIncarnation(isvc, 0, 1, true /* ready */, true /* serving */)
+	v1Pod.Labels[query.LabelPodOrdinal] = "0"
+	v1Pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(v1CR.Name)
+	if err := c.Create(context.Background(), v1Pod); err != nil {
+		t.Fatalf("seed v1 pod: %v", err)
+	}
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				CurrentRevision: v1CR.Name,
+				UpdateRevision:  v1CR.Name,
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
+					Index:           0,
+					Incarnation:     1,
+					Phase:           v1beta1.OMENativeInstanceReady,
+					RunningRevision: v1CR.Name,
+				}},
+			},
+		},
+	}
+	if err := c.Status().Update(context.Background(), isvc); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+
+	// --- BUMP #1: v1 → v2 ---
+	// Mutate the annotation; render the new ObjectMeta (matches what
+	// engine.go would produce on the next reconcile).
+	isvc.Spec.Engine.Annotations["test.ome.io/rollout-trigger"] = "v2"
+	v2Meta := metav1.ObjectMeta{
+		Name:      query.StableServiceName(isvc.Name, v1beta1.EngineComponent),
+		Namespace: isvc.Namespace,
+		Annotations: map[string]string{
+			"test.ome.io/rollout-trigger": "v2",
+		},
+	}
+	pV2 := ReconcileParams{
+		ISVC:         isvc,
+		ObjectMeta:   v2Meta,
+		PodSpec:      v1Spec, // same PodSpec — bump comes from annotation only
+		Component:    v1beta1.EngineComponent,
+		ComponentExt: &isvc.Spec.Engine.ComponentExtensionSpec,
+		Client:       c,
+	}
+
+	// Pass 1 (v2): ensureRevisionWithCollisionRetry creates v2 CR.
+	// surgeUpdate stamps Op{Surge, v2}, creates v2 surge pod at ord=1.
+	if _, err := ReconcileComponent(context.Background(), pV2); err != nil {
+		t.Fatalf("v2 pass 1: %v", err)
+	}
+	postV2List := &appsv1.ControllerRevisionList{}
+	_ = c.List(context.Background(), postV2List, client.InNamespace("sandbox"))
+	if len(postV2List.Items) != 2 {
+		t.Fatalf("after v2 bump: CR count got %d want 2 (v1 + v2)", len(postV2List.Items))
+	}
+	var v2CR *appsv1.ControllerRevision
+	for i := range postV2List.Items {
+		cr := &postV2List.Items[i]
+		if cr.Name != v1CR.Name {
+			v2CR = cr
+			break
+		}
+	}
+	if v2CR == nil {
+		t.Fatalf("could not find v2 CR")
+	}
+	// Confirm v2 surge pod exists. NOT yet ready — this is the
+	// "in-flight surge" state where the bump-during-bump arrives.
+	v2SurgePodName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 1)
+	v2SurgePod := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: v2SurgePodName}, v2SurgePod); err != nil {
+		t.Fatalf("v2 surge pod missing after v2 pass 1: %v", err)
+	}
+
+	// --- BUMP #2: v2 → v3 (DURING the v2 surge — v2 pod NOT yet ready) ---
+	// This is the X-2 bump-during-bump trigger.
+	isvc.Spec.Engine.Annotations["test.ome.io/rollout-trigger"] = "v3"
+	v3Meta := metav1.ObjectMeta{
+		Name:      query.StableServiceName(isvc.Name, v1beta1.EngineComponent),
+		Namespace: isvc.Namespace,
+		Annotations: map[string]string{
+			"test.ome.io/rollout-trigger": "v3",
+		},
+	}
+	pV3 := ReconcileParams{
+		ISVC:         isvc,
+		ObjectMeta:   v3Meta,
+		PodSpec:      v1Spec,
+		Component:    v1beta1.EngineComponent,
+		ComponentExt: &isvc.Spec.Engine.ComponentExtensionSpec,
+		Client:       c,
+	}
+
+	// Pass 1 (v3 bump): ensureRevisionWithCollisionRetry MUST create the
+	// v3 CR even while the v2 surge is in flight. This is the
+	// load-bearing assertion for bug #58 — the production cluster
+	// observed the v3 CR was NEVER created.
+	if _, err := ReconcileComponent(context.Background(), pV3); err != nil {
+		t.Fatalf("v3 bump pass 1: %v", err)
+	}
+	postV3List := &appsv1.ControllerRevisionList{}
+	_ = c.List(context.Background(), postV3List, client.InNamespace("sandbox"))
+	if len(postV3List.Items) != 3 {
+		names := make([]string, 0, len(postV3List.Items))
+		for _, cr := range postV3List.Items {
+			names = append(names, cr.Name)
+		}
+		t.Fatalf("after v3 bump: CR count got %d (%v) want 3 (v1+v2+v3) — bug #58 fires here when v3 CR is never created",
+			len(postV3List.Items), names)
+	}
+	var v3CR *appsv1.ControllerRevision
+	for i := range postV3List.Items {
+		cr := &postV3List.Items[i]
+		if cr.Name != v1CR.Name && cr.Name != v2CR.Name {
+			v3CR = cr
+			break
+		}
+	}
+	if v3CR == nil {
+		t.Fatalf("could not find v3 CR after bump-during-bump")
+	}
+
+	// Drive the surge cycle to completion. Each reconcile pass simulates
+	// kubelet acks: surge pod containers ready, drain finishes (old pod
+	// deleted), serving flip, then promote.
+	//
+	// Note: at this point, the v2 surge is in-flight (Op pinned to v2).
+	// We drive it to completion FIRST (PR #256 contract: pinned target
+	// continues), then the post-v2-promote reconcile fires the v3 surge.
+
+	// Step: flip v2 surge pod to ContainersReady.
+	v2SurgePodFresh := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: v2SurgePodName}, v2SurgePodFresh); err != nil {
+		t.Fatalf("re-read v2 surge pod: %v", err)
+	}
+	v2SurgePodFresh.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionFalse},
+	}
+	if err := c.Status().Update(context.Background(), v2SurgePodFresh); err != nil {
+		t.Fatalf("flip v2 surge ContainersReady: %v", err)
+	}
+
+	// Pass 2 (v3): surge advances Step=SurgeDrain; v1 pod flipped to NotServing.
+	if _, err := ReconcileComponent(context.Background(), pV3); err != nil {
+		t.Fatalf("v3 pass 2: %v", err)
+	}
+
+	// Simulate drain completing: delete v1 pod, flip v2 surge serving=True.
+	if err := c.Delete(context.Background(), v1Pod); err != nil {
+		t.Fatalf("delete v1 pod: %v", err)
+	}
+	v2SurgePodAfterDrain := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: v2SurgePodName}, v2SurgePodAfterDrain); err != nil {
+		t.Fatalf("re-read v2 surge after drain: %v", err)
+	}
+	v2SurgePodAfterDrain.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
+	}
+	if err := c.Status().Update(context.Background(), v2SurgePodAfterDrain); err != nil {
+		t.Fatalf("flip v2 surge serving=True: %v", err)
+	}
+
+	// Pass 3 (v3): v2 surge promotes (RunningRev=v2, ActiveOrdinal=1).
+	// Bug #58 fix: workload.Reconcile now requeues without running
+	// Create when any Update fired, so the in-place ObservedState
+	// staleness window after promote can't corrupt RunningRevision.
+	if _, err := ReconcileComponent(context.Background(), pV3); err != nil {
+		t.Fatalf("v3 pass 3 (promote v2): %v", err)
+	}
+	core.DefaultExpectations.Forget("sandbox", "x2", workload.ComponentEngine, 0)
+
+	// Pass 4 (v3): now Phase=Ready + RunningRev=v2 (genuine).
+	// detectUpdateTrigger fires (RunningRev != target=v3) and a fresh
+	// v3 surge cycle starts — creates v3 surge pod at ord=0. This is
+	// the v3 cycle the original X-2 bug failed to reach.
+	if _, err := ReconcileComponent(context.Background(), pV3); err != nil {
+		t.Fatalf("v3 pass 4 (fire v3 surge): %v", err)
+	}
+
+	// Confirm v3 surge pod created at ord=0 (alternate slot since
+	// ActiveOrdinal moved to 1 after v2 promote).
+	v3SurgePodName := query.PodName(isvc.Name, v1beta1.EngineComponent, 0, "default", 0)
+	v3SurgePod := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: v3SurgePodName}, v3SurgePod); err != nil {
+		t.Fatalf("v3 surge pod missing after v3 pass 4: %v", err)
+	}
+	v3HashLabel := query.RevisionHashFromControllerRevisionName(v3CR.Name)
+	if got := v3SurgePod.Labels[query.LabelRevisionHash]; got != v3HashLabel {
+		t.Errorf("v3 surge pod revision-hash label: got %q want %q", got, v3HashLabel)
+	}
+
+	// Step: flip v3 surge pod to ContainersReady.
+	v3SurgePodFresh := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: v3SurgePodName}, v3SurgePodFresh); err != nil {
+		t.Fatalf("re-read v3 surge: %v", err)
+	}
+	v3SurgePodFresh.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionFalse},
+	}
+	if err := c.Status().Update(context.Background(), v3SurgePodFresh); err != nil {
+		t.Fatalf("flip v3 surge ContainersReady: %v", err)
+	}
+
+	// Pass 5 (v3): drain v2 surge pod.
+	if _, err := ReconcileComponent(context.Background(), pV3); err != nil {
+		t.Fatalf("v3 pass 5 (drain v2): %v", err)
+	}
+
+	// Simulate drain completing: delete v2 surge pod, flip v3 surge serving=True.
+	v2PodNow := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: v2SurgePodName}, v2PodNow); err == nil {
+		if err := c.Delete(context.Background(), v2PodNow); err != nil {
+			t.Fatalf("delete v2 surge: %v", err)
+		}
+	}
+	v3SurgePodFinal := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: v3SurgePodName}, v3SurgePodFinal); err != nil {
+		t.Fatalf("re-read v3 surge: %v", err)
+	}
+	v3SurgePodFinal.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
+	}
+	if err := c.Status().Update(context.Background(), v3SurgePodFinal); err != nil {
+		t.Fatalf("flip v3 surge serving=True: %v", err)
+	}
+	core.DefaultExpectations.Forget("sandbox", "x2", workload.ComponentEngine, 0)
+
+	// Pass 6 (v3): v3 surge promotes.
+	if _, err := ReconcileComponent(context.Background(), pV3); err != nil {
+		t.Fatalf("v3 pass 6 (promote v3): %v", err)
+	}
+	// Pass 7 (v3): idempotent settle (CurrentRevision promote).
+	if _, err := ReconcileComponent(context.Background(), pV3); err != nil {
+		t.Fatalf("v3 pass 7 (settle): %v", err)
+	}
+
+	// --- FINAL ASSERTIONS ---
+
+	// 1. The v3 CR exists (the load-bearing assertion for bug #58).
+	finalCRs := &appsv1.ControllerRevisionList{}
+	_ = c.List(context.Background(), finalCRs, client.InNamespace("sandbox"))
+	crByName := make(map[string]struct{}, len(finalCRs.Items))
+	for _, cr := range finalCRs.Items {
+		crByName[cr.Name] = struct{}{}
+	}
+	if _, ok := crByName[v3CR.Name]; !ok {
+		t.Errorf("v3 CR %q missing from cluster — bug #58 fires here (have: %v)",
+			v3CR.Name, crNamesSlice(finalCRs.Items))
+	}
+
+	// 2. status.CurrentRevision == v3CR.Name (final converged state).
+	freshFinal := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), freshFinal); err != nil {
+		t.Fatalf("re-read ISVC final: %v", err)
+	}
+	csFinal := freshFinal.Status.Components[v1beta1.EngineComponent].OMENative
+	if csFinal == nil {
+		t.Fatalf("OMENativeComponentStatus missing on final read")
+	}
+	if csFinal.CurrentRevision != v3CR.Name {
+		t.Errorf("final CurrentRevision: got %q want %q (rollout should converge to v3)",
+			csFinal.CurrentRevision, v3CR.Name)
+	}
+
+	// 3. No v2 stragglers: every live pod is on v1 (the seed, which
+	// was untouched in the spec's "ALLOWED=V1+FINAL" set) or v3. The
+	// v2 hash MUST NOT survive in any pod label.
+	livePods := &corev1.PodList{}
+	_ = c.List(context.Background(), livePods, client.InNamespace("sandbox"))
+	v1Hash := query.RevisionHashFromControllerRevisionName(v1CR.Name)
+	v2Hash := query.RevisionHashFromControllerRevisionName(v2CR.Name)
+	v3Hash := query.RevisionHashFromControllerRevisionName(v3CR.Name)
+	for i := range livePods.Items {
+		pod := &livePods.Items[i]
+		hash := pod.Labels[query.LabelRevisionHash]
+		if hash == v2Hash {
+			t.Errorf("X-2 FAIL: pod %s/%s labeled with v2 hash %q — v2 straggler survived (bug #58)",
+				pod.Namespace, pod.Name, v2Hash)
+		}
+		if hash != v1Hash && hash != v3Hash {
+			t.Errorf("X-2 FAIL: pod %s/%s labeled with unexpected hash %q (allowed: v1=%q v3=%q)",
+				pod.Namespace, pod.Name, hash, v1Hash, v3Hash)
+		}
+	}
 }
 
 // TestAggregateAndWriteStatus_MirrorsCommittedRevisionFieldsOntoInMemoryISVC

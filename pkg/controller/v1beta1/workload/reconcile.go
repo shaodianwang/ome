@@ -154,6 +154,28 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	if target != nil {
 		anyUpdating := false
 		anyGated := false
+		// anyUpdateRan tracks whether ANY Update call fired this wake-up
+		// — including ones that returned done=true (e.g., a surge that
+		// just promoted Phase to Ready and stamped RunningRevision). Even
+		// a "done" Update mutates InstanceStatus; the subsequent Create
+		// pass would observe the pre-Update ObservedState snapshot, which
+		// is stale wrt ActiveOrdinal / RunningRevision / Phase. Letting
+		// Create run on stale state leads to two bugs:
+		//
+		//   1. Create's Ready-promote stamps RunningRevision=target.Name
+		//      even when the existing pods carry a different revision
+		//      (the X-2 bump-during-bump corruption mode where status
+		//      says vN but pods are still on vN-1). Bug #58.
+		//   2. Create's scale-up reads activeOrdinalForInstance from
+		//      stale ObservedState, sees a "missing" pod at the
+		//      pre-promote ordinal slot, and creates a duplicate
+		//      alongside the post-surge canonical pod.
+		//
+		// Skipping Create + requeue when Update fired forces the next
+		// reconcile to read fresh ObservedState that reflects the just-
+		// committed mutations, so Create's per-pod decisions are made
+		// against the current cluster state.
+		anyUpdateRan := false
 		// Track only instances STARTING a new update this wake-up.
 		// Instances already in Phase=Updating from a prior wake-up are
 		// already reflected in status.ServingReplicas — counting them
@@ -194,6 +216,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 			if uerr != nil {
 				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: update instance %d: %w", inst.Index, uerr)
 			}
+			anyUpdateRan = true
 			if startingFresh {
 				// Charge the wake-up budget only for fresh starts —
 				// subsequent gate checks must account for this pod.
@@ -212,6 +235,14 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		}
 		if anyGated {
 			return ctrl.Result{RequeueAfter: ratioGateRequeueInterval}, nil
+		}
+		// All Updates that ran returned done=true (steady-state for those
+		// instances). Requeue without running Create so the next pass
+		// sees fresh ObservedState — see anyUpdateRan comment above for
+		// the bug #58 (X-2 bump-during-bump) corruption modes this guards
+		// against.
+		if anyUpdateRan {
+			return ctrl.Result{Requeue: true}, nil
 		}
 	}
 

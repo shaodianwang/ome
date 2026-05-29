@@ -503,18 +503,26 @@ func TestCreate_IdempotentOnAlreadyExists(t *testing.T) {
 // fast path short-circuits on the next reconcile. Without it, every
 // fresh Instance triggers a spurious recreate on its second pass (the
 // per-pod diff false-positives against post-Render mutations).
+//
+// Bug #58 guard: Create's promote only stamps RunningRevision=target.Name
+// when the existing pods actually carry target's revision hash — see
+// existingPodsMatchTargetRevision. The test pod is given a rev-hash
+// label matching the target so the normal-flow promote fires.
 func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
-	// Pre-seed a runtime-ready, serving pod so reconcileInstance jumps
-	// straight to the promote step.
-	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
-	c := newFakeClient(t, isvc, pod)
-	input := buildTestInput(isvc, c, v1beta1.EngineComponent)
-	plan := buildPlanSinglePodEngine(1)
 	target := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-deadbeef", Namespace: "prod"},
 	}
+	// Pre-seed a runtime-ready, serving pod so reconcileInstance jumps
+	// straight to the promote step. The pod's rev-hash matches target's
+	// suffix — the production-normal case (createMissingPods stamps the
+	// label from revisionHashFromTarget(target)).
+	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(target.Name)
+	c := newFakeClient(t, isvc, pod)
+	input := buildTestInput(isvc, c, v1beta1.EngineComponent)
+	plan := buildPlanSinglePodEngine(1)
 
 	if _, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, target); err != nil {
 		t.Fatalf("Create: %v", err)
@@ -534,6 +542,70 @@ func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 	if s.RunningRevision != target.Name {
 		t.Errorf("RunningRevision: got %q want %q (Create promote must record target hash)",
 			s.RunningRevision, target.Name)
+	}
+}
+
+// TestCreate_PromoteSkipsRunningRevisionForOffTargetPods pins the bug
+// #58 (X-2 bump-during-bump) guard in Create.reconcileInstance:
+// when existing pods are runtime-ready but carry a different revision
+// hash from target (e.g., they were created by an earlier surge cycle
+// pinned to a now-superseded target), the promote MUST NOT stamp
+// RunningRevision=target.Name — that would falsely advertise the pods
+// as on target. patchInstanceStatusReady (no RunningRevision write)
+// preserves whatever revision the prior op recorded, so the next
+// reconcile's detectUpdateTrigger fires a fresh surge cycle to roll
+// the pods to target.
+func TestCreate_PromoteSkipsRunningRevisionForOffTargetPods(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	// Seed status: Instance is in a transient Phase (e.g., Creating
+	// after an earlier surge promote) with the prior revision recorded
+	// as RunningRevision. The Create promote should NOT clobber this.
+	priorRev := "llama-70b-engine-priorrev"
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			OMENative: &v1beta1.OMENativeComponentStatus{
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
+					Index:           0,
+					Incarnation:     1,
+					Phase:           v1beta1.OMENativeInstanceCreating,
+					RunningRevision: priorRev,
+				}},
+			},
+		},
+	}
+	// Pre-seed a runtime-ready, serving pod labeled with the PRIOR
+	// revision's hash (not target's). reconcileInstance will find the
+	// pod, see it's runtime-ready, and reach the promote step.
+	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(priorRev)
+	c := newFakeClient(t, isvc, pod)
+	input := buildTestInput(isvc, c, v1beta1.EngineComponent)
+	plan := buildPlanSinglePodEngine(1)
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+
+	if _, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, target); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("get isvc: %v", err)
+	}
+	s := query.FindInstanceStatus(fresh, v1beta1.EngineComponent, 0)
+	if s == nil {
+		t.Fatal("InstanceStatus[0] must exist after promote")
+	}
+	if s.Phase != v1beta1.OMENativeInstanceReady {
+		t.Errorf("Phase: got %q want Ready", s.Phase)
+	}
+	// The load-bearing assertion: RunningRevision must NOT have been
+	// updated to target.Name — the pod is genuinely on priorRev.
+	if s.RunningRevision != priorRev {
+		t.Errorf("RunningRevision: got %q want %q (bug #58 — Create promote must NOT clobber RunningRevision when pods are off-target)",
+			s.RunningRevision, priorRev)
 	}
 }
 

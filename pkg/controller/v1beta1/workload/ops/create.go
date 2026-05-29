@@ -122,7 +122,22 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 		wasReady = true
 	}
 	var promoteErr error
-	if target != nil {
+	// Only stamp RunningRevision=target.Name when the existing pods
+	// actually carry that revision hash. The Create pass can run after a
+	// surge promote in the SAME reconcile (with stale ObservedState
+	// showing the pre-promote ActiveOrdinal) or in a follow-up reconcile
+	// where target has since moved past the in-flight surge's pinned
+	// rev — both are the X-2 bump-during-bump scenario (bug #58). Naively
+	// promoting to target.Name here writes
+	// `RunningRevision=<latest-target>` while the pod is on the prior
+	// rev. The next reconcile sees RunningRev==target and short-circuits
+	// detectUpdateTrigger, leaving the pod stranded on the intermediate
+	// revision forever. Falling back to patchInstanceStatusReady (no
+	// RunningRevision write) preserves whatever revision the surge
+	// promote actually recorded; the next reconcile's detectUpdateTrigger
+	// observes the genuine RunningRev != target mismatch and fires a
+	// fresh surge cycle.
+	if target != nil && existingPodsMatchTargetRevision(existing, target) {
 		promoteErr = patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, target.Name)
 	} else {
 		promoteErr = patchInstanceStatusReady(ctx, input, inst.Index)
@@ -136,6 +151,48 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 			instanceKey(input.Key.Component, inst.Index), len(existing))
 	}
 	return true, nil
+}
+
+// existingPodsMatchTargetRevision reports whether every existing pod
+// for an Instance carries the rev-hash label of `target`. Used by the
+// Create pass's Ready promote to avoid stamping
+// RunningRevision=target.Name on pods that are actually on a different
+// (typically intermediate) revision — the X-2 bump-during-bump
+// corruption mode (bug #58).
+//
+// Returns true when:
+//   - existing is non-empty AND
+//   - every pod's `ome.io/revision-hash` label equals
+//     RevisionHashFromControllerRevisionName(target.Name).
+//
+// Returns false otherwise. An empty existing slice returns false (no
+// pods to promote against; caller short-circuits earlier on the
+// no-missing-pods branch anyway, so this only safeguards the path
+// where the slice is unexpectedly empty).
+//
+// A pod missing the rev-hash label is treated as a mismatch — we
+// can't prove it's on target, so refuse to promote. Legacy pods
+// (pre-LabelRevisionHash) would hit this path and stay on their
+// prior RunningRevision; a fresh recreate would label them and the
+// next pass would promote correctly.
+func existingPodsMatchTargetRevision(existing []*corev1.Pod, target *appsv1.ControllerRevision) bool {
+	if len(existing) == 0 || target == nil {
+		return false
+	}
+	want := query.RevisionHashFromControllerRevisionName(target.Name)
+	if want == "" {
+		return false
+	}
+	for _, pod := range existing {
+		if pod == nil {
+			return false
+		}
+		got, ok := pod.Labels[query.LabelRevisionHash]
+		if !ok || got != want {
+			return false
+		}
+	}
+	return true
 }
 
 // podTarget describes one pod to create within an Instance.

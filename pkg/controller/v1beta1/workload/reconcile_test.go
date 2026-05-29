@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +37,9 @@ func makeScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1beta1: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add appsv1: %v", err)
 	}
 	return scheme
 }
@@ -272,5 +276,57 @@ func TestReconcile_UpdateGateNil_AllowsAll(t *testing.T) {
 	_, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
+	}
+}
+
+// TestReconcile_UpdateRan_RequeuesAndSkipsCreate pins the bug #58
+// (X-2 bump-during-bump) fix: when ANY Update.call fires in the per-
+// Instance loop (even one returning done=true), the dispatcher MUST
+// return Requeue WITHOUT running the Create pass. The Create pass
+// reads ObservedState (a snapshot) which is now stale wrt the mutations
+// the Update calls just committed; running Create on stale state
+// corrupts RunningRevision (Create promotes pods to target.Name even
+// when the pods are on a different revision) and creates duplicate
+// pods (Create's scale-up reads the pre-promote ActiveOrdinal and
+// thinks the canonical slot is missing). Both are the bug #58 X-2
+// corruption modes.
+//
+// We exercise the path by seeding an Instance with Phase=Updating —
+// DetectUpdateTrigger returns true on this phase, so Update fires —
+// and asserting the dispatcher returns Requeue. The minimal stub
+// MutateInstance keeps the test focused on the dispatcher contract
+// (not on per-op behavior); the surge/recreate state machines have
+// their own per-op tests.
+func TestReconcile_UpdateRan_RequeuesAndSkipsCreate(t *testing.T) {
+	scheme := makeScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	deps := workload.Deps{Client: c}
+
+	in := minimalInput(t)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		// Phase=Updating triggers DetectUpdateTrigger → true regardless
+		// of RunningRevision; the dispatcher MUST call Update.
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseUpdating, RunningRevision: "prior-rev"},
+	}
+	plan := minimalPlan()
+	plan.UpdateStrategy = v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategySurgeThenDrain}
+	// Provide a non-nil target so the Update loop is even considered.
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+
+	result, err := workload.Reconcile(context.Background(), deps, in, plan, target)
+	if err != nil {
+		// Update can error if its per-op machine refuses (e.g., InPlaceOnly
+		// + ineligible diff). For this dispatch-shape test we only care
+		// about the Requeue contract; ignore op-level errors and only
+		// assert when the dispatcher returns nil-error.
+		t.Logf("Reconcile op error (expected for dispatch-shape test): %v", err)
+	}
+	// The load-bearing assertion: dispatcher returned Requeue=true (or
+	// RequeueAfter > 0) — Create did NOT run. Without the bug #58 fix,
+	// the dispatcher returned Create's result (possibly Requeue=false).
+	if !result.Requeue && result.RequeueAfter == 0 {
+		t.Errorf("dispatcher must Requeue when any Update fired (bug #58 guard); got %+v", result)
 	}
 }
