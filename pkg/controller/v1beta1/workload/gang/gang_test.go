@@ -184,7 +184,7 @@ func TestEnsurePodGroups_SinglePodNoPodGroupConditionFalse(t *testing.T) {
 	}
 
 	// Condition=False, reason=GangSchedulingAvailable.
-	assertCondition(t, store, metav1.ConditionFalse, ReasonGangSchedulingAvailable)
+	assertCondition(t, store, metav1.ConditionFalse, string(workload.ReasonGangSchedulingAvailable))
 }
 
 // TestEnsurePodGroups_MultiPodCRDAvailableCreatesGang — multi-pod
@@ -210,7 +210,7 @@ func TestEnsurePodGroups_MultiPodCRDAvailableCreatesGang(t *testing.T) {
 	}
 
 	// Condition=False (gang available, not degraded).
-	assertCondition(t, store, metav1.ConditionFalse, ReasonGangSchedulingAvailable)
+	assertCondition(t, store, metav1.ConditionFalse, string(workload.ReasonGangSchedulingAvailable))
 }
 
 // TestEnsurePodGroups_MultiPodCRDMissingSetsConditionTrueNoPodGroup —
@@ -233,7 +233,7 @@ func TestEnsurePodGroups_MultiPodCRDMissingSetsConditionTrueNoPodGroup(t *testin
 	}
 
 	// Condition=True, reason=PodGroupCRDNotInstalled.
-	assertCondition(t, store, metav1.ConditionTrue, ReasonPodGroupCRDNotInstalled)
+	assertCondition(t, store, metav1.ConditionTrue, string(workload.ReasonPodGroupCRDNotInstalled))
 }
 
 // TestEnsurePodGroups_ScaleDownDeletesExtraPodGroups — when an
@@ -342,9 +342,9 @@ func TestPatchGangSchedulingCondition_StatusUpdateFlipsCondition(t *testing.T) {
 	store := newConditionStore()
 	// Pre-seed with True (degraded) so the test exercises the flip.
 	_ = store.write(context.Background(), metav1.Condition{
-		Type:    ConditionGangSchedulingUnavailable,
+		Type:    string(workload.ConditionGangSchedulingUnavailable),
 		Status:  metav1.ConditionTrue,
-		Reason:  ReasonPodGroupCRDNotInstalled,
+		Reason:  string(workload.ReasonPodGroupCRDNotInstalled),
 		Message: "scheduler-plugins scheduling.x-k8s.io/v1alpha1 PodGroup CRD is not installed; multi-pod Instances may schedule partially",
 	})
 	input := workload.ReconcileInput{
@@ -357,15 +357,15 @@ func TestPatchGangSchedulingCondition_StatusUpdateFlipsCondition(t *testing.T) {
 		t.Fatalf("patchGangSchedulingCondition: %v", err)
 	}
 
-	got := store.find(ConditionGangSchedulingUnavailable)
+	got := store.find(string(workload.ConditionGangSchedulingUnavailable))
 	if got == nil {
 		t.Fatal("GangSchedulingUnavailable condition missing")
 	}
 	if got.Status != metav1.ConditionFalse {
 		t.Errorf("Status: got %s want False (CRD now available)", got.Status)
 	}
-	if got.Reason != ReasonGangSchedulingAvailable {
-		t.Errorf("Reason: got %q want %q", got.Reason, ReasonGangSchedulingAvailable)
+	if got.Reason != string(workload.ReasonGangSchedulingAvailable) {
+		t.Errorf("Reason: got %q want %q", got.Reason, string(workload.ReasonGangSchedulingAvailable))
 	}
 }
 
@@ -493,7 +493,7 @@ func TestEnsurePodGroups_MaybeNoGangSchedulerWarning_Matrix(t *testing.T) {
 			events := drainGangSchedulerEvents(rec)
 			fired := false
 			for _, e := range events {
-				if strings.Contains(e, EventReasonMaybeNoGangScheduler) {
+				if strings.Contains(e, string(workload.EventReasonMaybeNoGangScheduler)) {
 					fired = true
 					break
 				}
@@ -506,7 +506,7 @@ func TestEnsurePodGroups_MaybeNoGangSchedulerWarning_Matrix(t *testing.T) {
 				// scheduler so the operator has a copy-paste fix.
 				var warning string
 				for _, e := range events {
-					if strings.Contains(e, EventReasonMaybeNoGangScheduler) {
+					if strings.Contains(e, string(workload.EventReasonMaybeNoGangScheduler)) {
 						warning = e
 						break
 					}
@@ -545,7 +545,7 @@ func TestEnsurePodGroups_MaybeNoGangScheduler_DedupPerProcess(t *testing.T) {
 	events := drainGangSchedulerEvents(rec)
 	count := 0
 	for _, e := range events {
-		if strings.Contains(e, EventReasonMaybeNoGangScheduler) {
+		if strings.Contains(e, string(workload.EventReasonMaybeNoGangScheduler)) {
 			count++
 		}
 	}
@@ -582,7 +582,7 @@ func TestEnsurePodGroups_MaybeNoGangScheduler_DedupSeparateComponents(t *testing
 	events := drainGangSchedulerEvents(rec)
 	count := 0
 	for _, e := range events {
-		if strings.Contains(e, EventReasonMaybeNoGangScheduler) {
+		if strings.Contains(e, string(workload.EventReasonMaybeNoGangScheduler)) {
 			count++
 		}
 	}
@@ -668,10 +668,10 @@ func drainGangSchedulerEvents(rec *record.FakeRecorder) []string {
 }
 
 // assertCondition asserts the condition store recorded the named
-// (status, reason) pair for ConditionGangSchedulingUnavailable.
+// (status, reason) pair for workload.ConditionGangSchedulingUnavailable.
 func assertCondition(t *testing.T, store *conditionStore, wantStatus metav1.ConditionStatus, wantReason string) {
 	t.Helper()
-	cond := store.find(ConditionGangSchedulingUnavailable)
+	cond := store.find(string(workload.ConditionGangSchedulingUnavailable))
 	if cond == nil {
 		t.Fatalf("GangSchedulingUnavailable condition missing")
 	}

@@ -28,37 +28,13 @@ import (
 // workload-side code. A typo or future drift between the two enums is
 // therefore a compile-time error instead of a silent dispatch break.
 
-// Event reasons emitted by the workload Update state machine. The
-// strings match the legacy omenative/status constants byte-for-byte so
-// existing operator dashboards and `kubectl describe` output keep
-// matching after the extraction.
-const (
-	// EventReasonInPlaceUpdateStarted fires the first time an Instance
-	// transitions to Phase=Updating with Step=InPlace.
-	EventReasonInPlaceUpdateStarted = "InPlaceUpdateStarted"
-
-	// EventReasonInPlaceUpdateCompleted fires when an in-place rollout
-	// converges to Phase=Ready with the new RunningRevision recorded.
-	EventReasonInPlaceUpdateCompleted = "InPlaceUpdateCompleted"
-
-	// EventReasonInPlaceUpdateNotPossible fires when InPlaceOnly is
-	// configured but the diff exceeds container images.
-	EventReasonInPlaceUpdateNotPossible = "InPlaceUpdateNotPossible"
-
-	// EventReasonRecreateUpdateStarted fires the first time an Instance
-	// transitions to Phase=Updating with Step=Drain (recreate or surge).
-	EventReasonRecreateUpdateStarted = "RecreateUpdateStarted"
-
-	// EventReasonRecreateUpdateCompleted fires when a recreate/surge
-	// rollout converges to Phase=Ready with the new RunningRevision.
-	EventReasonRecreateUpdateCompleted = "RecreateUpdateCompleted"
-
-	// NOTE: EventReasonFoundOrphan is declared in restart.go in this
-	// package — both Update and Restart emit the same reason string for
-	// the same orphan-pod condition (missing per-Instance incarnation /
-	// ordinal labels), so we share a single constant rather than
-	// duplicating it.
-)
+// Event reasons emitted by the Update state machine are declared once
+// in workload/events.go (as workload.EventReason values); call sites
+// in this file reach for workload.EventReasonInPlaceUpdate{Started,
+// Completed,NotPossible}, workload.EventReasonRecreateUpdate{Started,
+// Completed}, and workload.workload.EventReasonFoundOrphan directly. See that
+// file for the per-reason documentation and the byte-for-byte
+// rationale against the legacy omenative/status copies.
 
 // updateDrainKey identifies an in-place or recreate Update writer
 // against a specific Instance materialization. Same key on Add and
@@ -133,7 +109,7 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 	mode, err := chooseUpdateModeForInstance(strategy, runningSpec, targetSpec, multiPod)
 	if err != nil {
 		// InPlaceOnly + ineligible diff is the only error path here.
-		recordWarning(deps.Recorder, eventTarget(input), EventReasonInPlaceUpdateNotPossible,
+		recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonInPlaceUpdateNotPossible,
 			"OMENative %s rejected update: %v",
 			instanceKey(input.Key.Component, inst.Index), err)
 		return false, fmt.Errorf("choose update mode (instance=%d): %w", inst.Index, err)
@@ -147,7 +123,7 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 	// real implementation lands, this fallback goes away with zero
 	// user-facing churn.
 	if multiPod && strategy == workload.UpdateStrategySurgeThenDrain && mode == updateModeRecreate {
-		recordNormal(deps.Recorder, eventTarget(input), EventReasonRecreateUpdateStarted,
+		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
 			"OMENative %s: multi-pod SurgeThenDrain falls back to recreate (per-gang-member surge deferred)",
 			instanceKey(input.Key.Component, inst.Index))
 	}
@@ -404,7 +380,7 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 		return false, fmt.Errorf("patch status Updating (instance=%d): %w", inst.Index, err)
 	}
 	if wasNotUpdating {
-		recordNormal(deps.Recorder, eventTarget(input), EventReasonInPlaceUpdateStarted,
+		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInPlaceUpdateStarted,
 			"OMENative %s in-place update to revision %s",
 			instanceKey(input.Key.Component, inst.Index), target.Name)
 	}
@@ -540,7 +516,7 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 	if err := patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, target.Name); err != nil {
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
 	}
-	recordNormal(deps.Recorder, eventTarget(input), EventReasonInPlaceUpdateCompleted,
+	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInPlaceUpdateCompleted,
 		"OMENative %s in-place update to revision %s complete",
 		instanceKey(input.Key.Component, inst.Index), target.Name)
 	return true, nil
@@ -564,7 +540,7 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 		return false, fmt.Errorf("bump Incarnation (instance=%d): %w", inst.Index, err)
 	}
 	if wasNotRecreating {
-		recordNormal(deps.Recorder, eventTarget(input), EventReasonRecreateUpdateStarted,
+		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
 			"OMENative %s recreate to revision %s (incarnation=%d)",
 			instanceKey(input.Key.Component, inst.Index), target.Name, newInc)
 	}
@@ -576,7 +552,7 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 	// down by Phase A. Same rationale as Restart.
 	if len(unknownPods) > 0 {
 		for _, pod := range unknownPods {
-			recordWarning(deps.Recorder, eventTarget(input), EventReasonFoundOrphan,
+			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonFoundOrphan,
 				"OMENative %s found orphan pod %s/%s without ome.io/instance-incarnation; refusing to recreate-update",
 				instanceKey(input.Key.Component, inst.Index), pod.Namespace, pod.Name)
 		}
@@ -678,7 +654,7 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 	if err := patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, target.Name); err != nil {
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
 	}
-	recordNormal(deps.Recorder, eventTarget(input), EventReasonRecreateUpdateCompleted,
+	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateCompleted,
 		"OMENative %s recreate to revision %s complete",
 		instanceKey(input.Key.Component, inst.Index), target.Name)
 	return true, nil
@@ -1202,7 +1178,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		// or label corruption. Refuse to proceed (same shape recreate
 		// uses for unknownPods).
 		for _, pod := range stragglers {
-			recordWarning(deps.Recorder, eventTarget(input), EventReasonFoundOrphan,
+			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonFoundOrphan,
 				"OMENative %s found pod %s/%s with unexpected ordinal label; refusing to surge-update",
 				instanceKey(input.Key.Component, inst.Index), pod.Namespace, pod.Name)
 		}
@@ -1258,7 +1234,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		return false, fmt.Errorf("stamp surge step (instance=%d): %w", inst.Index, err)
 	}
 	if wasNotSurging {
-		recordNormal(deps.Recorder, eventTarget(input), EventReasonRecreateUpdateStarted,
+		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
 			"OMENative %s surge to revision %s (newOrdinal=%d)",
 			instanceKey(input.Key.Component, inst.Index), surgeTargetName, newOrdinal)
 	}
@@ -1428,7 +1404,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	if err := patchInstanceStatusReadyOnRevisionWithOrdinal(ctx, input, inst.Index, surgeTargetName, newOrdinal); err != nil {
 		return false, fmt.Errorf("promote surge (instance=%d): %w", inst.Index, err)
 	}
-	recordNormal(deps.Recorder, eventTarget(input), EventReasonRecreateUpdateCompleted,
+	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateCompleted,
 		"OMENative %s surge to revision %s complete (activeOrdinal=%d)",
 		instanceKey(input.Key.Component, inst.Index), surgeTargetName, newOrdinal)
 	return true, nil

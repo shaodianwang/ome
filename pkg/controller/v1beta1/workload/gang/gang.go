@@ -29,52 +29,14 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podgroup"
 )
 
-// Condition types / reasons / event reasons stamped by the gang
-// reconciler. The omenative/status package retains its own copies of
-// these constants for the v1beta1-typed status helpers; values are
-// kept in lockstep by convention.
-const (
-	// ConditionGangSchedulingUnavailable is True when the Component
-	// has at least one multi-pod Instance but the cluster does not
-	// have the scheduler-plugins
-	// `scheduling.x-k8s.io/v1alpha1` PodGroup CRD installed. The
-	// reconciler still creates pods — gang scheduling is a soft
-	// requirement per OEP-0007 §"Gang Scheduling" — but partial-gang
-	// placement is possible and the runtime may hang waiting for
-	// missing peer pods. False when the CRD is present or the
-	// Component is single-pod.
-	ConditionGangSchedulingUnavailable = "GangSchedulingUnavailable"
-
-	// ReasonPodGroupCRDNotInstalled stamps the
-	// GangSchedulingUnavailable condition with a precise diagnostic
-	// — the cluster does not have the scheduler-plugins PodGroup CRD
-	// installed.
-	ReasonPodGroupCRDNotInstalled = "PodGroupCRDNotInstalled"
-
-	// ReasonGangSchedulingAvailable stamps the condition Status=False
-	// (the controller has gang scheduling and is using it, OR the
-	// Component is single-pod and doesn't need it).
-	ReasonGangSchedulingAvailable = "GangSchedulingAvailable"
-
-	// EventReasonMaybeNoGangScheduler is a soft Warning fired the
-	// first time a multi-pod Instance's PodGroup is created under a
-	// pod template whose `spec.schedulerName` is unset OR equals the
-	// upstream default ("default-scheduler"). The PodGroup itself
-	// was created successfully — but a stock kube-scheduler does NOT
-	// read `scheduling.x-k8s.io/v1alpha1` PodGroup objects, so the
-	// gang contract degrades to per-pod scheduling silently.
-	// Operators must either install scheduler-plugins as a secondary
-	// scheduler and set
-	// `runtime.spec.schedulerName=scheduler-plugins-scheduler`, OR
-	// install it as a default-scheduler plugin (in which case the
-	// warning is a false positive — the workload reconciler cannot
-	// detect that arrangement from inside the cluster, so we err on
-	// the side of surfacing the heuristic). De-duplicated per
-	// (owner, Component) per controller process so reconciles do not
-	// spam the event log; see maybeWarnNoGangScheduler for the dedup
-	// map.
-	EventReasonMaybeNoGangScheduler = "MaybeNoGangScheduler"
-)
+// Condition types, reasons, and event reasons stamped by the gang
+// reconciler are declared once in workload/conditions.go (types and
+// reasons) and workload/events.go (event reasons); call sites in this
+// file reach for workload.ConditionGangSchedulingUnavailable,
+// workload.ReasonPodGroupCRDNotInstalled / workload.ReasonGangSchedulingAvailable,
+// and workload.EventReasonMaybeNoGangScheduler directly. See those
+// files for the per-constant documentation and the byte-for-byte
+// rationale against the legacy omenative/status copies.
 
 // maybeNoGangSchedulerSeen tracks which (owner, Component) pairs
 // have already received the `MaybeNoGangScheduler` Warning event so
@@ -206,12 +168,12 @@ func EnsurePodGroups(ctx context.Context, deps workload.Deps, input workload.Rec
 	// (or no scheduler at all), the PodGroup we just created will be
 	// ignored by the stock kube-scheduler and the gang contract
 	// degrades to per-pod scheduling. Emit a one-shot Warning so
-	// operators notice; see EventReasonMaybeNoGangScheduler for why
+	// operators notice; see workload.EventReasonMaybeNoGangScheduler for why
 	// this is a heuristic rather than a hard check. Wired AFTER the
 	// EnsurePodGroup loop so PodGroup-create failures take precedence
 	// (event would otherwise fire alongside a hard error and add
 	// noise).
-	maybeWarnNoGangScheduler(deps.Recorder, input, workload.ComponentType(plan.Component), input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec)
+	maybeWarnNoGangScheduler(deps.Recorder, input, workload.ComponentTypeFromV1beta1(plan.Component), input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec)
 
 	// Scale-down PodGroup GC. The pod scale-down logic in ops.Delete
 	// drives pods to gone; this loop ensures the matching PodGroup
@@ -265,18 +227,18 @@ func gangSchedulingUnavailableCondition(crdPresent, anyMultiPodInstance bool, ge
 		// Single-pod-only Component OR the gang scheduler is
 		// available — either way, no degradation to flag.
 		return metav1.Condition{
-			Type:               ConditionGangSchedulingUnavailable,
+			Type:               string(workload.ConditionGangSchedulingUnavailable),
 			Status:             metav1.ConditionFalse,
-			Reason:             ReasonGangSchedulingAvailable,
+			Reason:             string(workload.ReasonGangSchedulingAvailable),
 			Message:            "Gang scheduling is available or not required",
 			LastTransitionTime: now,
 			ObservedGeneration: generation,
 		}
 	}
 	return metav1.Condition{
-		Type:               ConditionGangSchedulingUnavailable,
+		Type:               string(workload.ConditionGangSchedulingUnavailable),
 		Status:             metav1.ConditionTrue,
-		Reason:             ReasonPodGroupCRDNotInstalled,
+		Reason:             string(workload.ReasonPodGroupCRDNotInstalled),
 		Message:            "scheduler-plugins scheduling.x-k8s.io/v1alpha1 PodGroup CRD is not installed; multi-pod Instances may schedule partially",
 		LastTransitionTime: now,
 		ObservedGeneration: generation,
@@ -335,7 +297,7 @@ func maybeWarnNoGangScheduler(rec record.EventRecorder, input workload.Reconcile
 	if rec == nil {
 		return
 	}
-	rec.Eventf(target, corev1.EventTypeWarning, EventReasonMaybeNoGangScheduler,
+	rec.Eventf(target, corev1.EventTypeWarning, string(workload.EventReasonMaybeNoGangScheduler),
 		"OMENative component=%s created scheduler-plugins PodGroup objects but pod template's spec.schedulerName is %q (default kube-scheduler does not enforce PodGroup gang); set runtime.spec.schedulerName to a gang-aware scheduler (e.g. scheduler-plugins-scheduler) or install scheduler-plugins as a plugin in the default scheduler",
 		component, name)
 }

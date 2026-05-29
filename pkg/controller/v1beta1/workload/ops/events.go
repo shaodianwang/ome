@@ -13,21 +13,24 @@ import (
 // recordNormal emits a Normal K8s Event against target. nil-safe: when
 // the recorder isn't wired (tests that construct workload.Deps{}
 // directly) OR the target is nil, this is a no-op so callers don't have
-// to plumb a recorder.
-func recordNormal(rec record.EventRecorder, target client.Object, reason, messageFmt string, args ...any) {
+// to plumb a recorder. Reason is typed as workload.EventReason — call
+// sites pass the workload-owned constant rather than a raw string so a
+// typo or drift between reasons becomes a compile-time error.
+func recordNormal(rec record.EventRecorder, target client.Object, reason workload.EventReason, messageFmt string, args ...any) {
 	if rec == nil || target == nil {
 		return
 	}
-	rec.Eventf(target, corev1.EventTypeNormal, reason, messageFmt, args...)
+	rec.Eventf(target, corev1.EventTypeNormal, string(reason), messageFmt, args...)
 }
 
 // recordWarning emits a Warning K8s Event against target. Same nil-safe
-// semantics as recordNormal.
-func recordWarning(rec record.EventRecorder, target client.Object, reason, messageFmt string, args ...any) {
+// semantics as recordNormal. Reason is workload-typed for the same
+// drift-resistance rationale.
+func recordWarning(rec record.EventRecorder, target client.Object, reason workload.EventReason, messageFmt string, args ...any) {
 	if rec == nil || target == nil {
 		return
 	}
-	rec.Eventf(target, corev1.EventTypeWarning, reason, messageFmt, args...)
+	rec.Eventf(target, corev1.EventTypeWarning, string(reason), messageFmt, args...)
 }
 
 // eventTarget returns the object emitted events should be stamped

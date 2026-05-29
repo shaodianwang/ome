@@ -28,6 +28,10 @@ const (
 	ComponentDecoder ComponentType = "decoder"
 )
 
+// ComponentTypeFromV1beta1 lives in plan.go (which already carries the
+// residual v1beta1 dependency for ComponentPlan.Component); kept out
+// of this file so types.go itself stays free of v1beta1 imports.
+
 // InstancePhase is the workload-internal lifecycle phase of one
 // Instance. Mirrors the CRD OMENativeInstancePhase at the string level.
 type InstancePhase string

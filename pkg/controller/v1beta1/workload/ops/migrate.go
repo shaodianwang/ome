@@ -113,7 +113,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		case defer_:
 			return false, nil
 		case mismatch != "":
-			recordWarning(deps.Recorder, eventTarget(input), EventReasonMigrationFromNodeMismatch,
+			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationFromNodeMismatch,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, mismatch)
 			return failMigration(ctx, deps, input, ledger, req, requestUUID, mismatch)
 		}
@@ -121,7 +121,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// Cluster-wide capacity / rate-limit gate (in-flight + last-hour
 		// counts across the audit ledger).
 		if ok, reason := audit.ValidateCapacity(ledger, time.Now()); !ok {
-			recordWarning(deps.Recorder, eventTarget(input), EventReasonRateLimited,
+			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonRateLimited,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
 			return failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
 		}
@@ -144,7 +144,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			HintTargetNodes: req.HintTargetNodes,
 		}) {
 			reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
-			recordWarning(deps.Recorder, eventTarget(input), EventReasonMigrationNodeAffinityConflict,
+			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationNodeAffinityConflict,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
 			return failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
 		}
@@ -165,7 +165,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if err := clearMigrationRequest(ctx, input, requestUUID); err != nil {
 			return false, fmt.Errorf("Migrate: clear request annotation: %w", err)
 		}
-		recordNormal(deps.Recorder, eventTarget(input), EventReasonMigrationRequestAccepted,
+		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonMigrationRequestAccepted,
 			"OMENative %s migration accepted (uuid=%s, source-node=%s, surge-index=%d)",
 			instanceKey(input.Key.Component, sourceIdx), requestUUID, req.FromNode, surgeIdx)
 	}
@@ -206,7 +206,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// surge sits Pending until timeout — silent rejection vs. early fail.
 	if WouldOverlayConflictWithNodeAffinity(surgeRevSpec, surgeInst.MigrationOverlay) {
 		reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
-		recordWarning(deps.Recorder, eventTarget(input), EventReasonMigrationNodeAffinityConflict,
+		recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationNodeAffinityConflict,
 			"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
 		return failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
 	}
@@ -347,7 +347,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if err := clearMigrationRequest(ctx, input, requestUUID); err != nil {
 		return false, fmt.Errorf("Migrate: clear request annotation on completion: %w", err)
 	}
-	recordNormal(deps.Recorder, eventTarget(input), EventReasonMigrationCompleted,
+	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonMigrationCompleted,
 		"OMENative migration uuid=%s complete: %s -> instance=%d (revision=%s)",
 		requestUUID, instanceKey(input.Key.Component, sourceIdx), surgeIdx, surgeRev.Name)
 	return true, nil
@@ -415,7 +415,7 @@ func failMigration(ctx context.Context, deps workload.Deps, input workload.Recon
 	if err := clearMigrationRequest(ctx, input, uuid); err != nil {
 		return false, fmt.Errorf("Migrate: clear request annotation on rejection: %w", err)
 	}
-	recordWarning(deps.Recorder, eventTarget(input), EventReasonMigrationRequestRejected,
+	recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationRequestRejected,
 		"OMENative migration uuid=%s rejected: %s", uuid, reason)
 	return true, nil
 }
@@ -553,7 +553,7 @@ func drainServiceForPod(input workload.ReconcileInput, plan workload.ComponentPl
 	if hash == "" {
 		return ""
 	}
-	return query.PerRevisionServiceName(input.Key.OwnerName, workload.ComponentType(plan.Component), hash)
+	return query.PerRevisionServiceName(input.Key.OwnerName, workload.ComponentTypeFromV1beta1(plan.Component), hash)
 }
 
 // clearMigrationRequest forwards to input.ClearMigrationRequest.

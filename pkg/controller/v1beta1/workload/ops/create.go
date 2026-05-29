@@ -20,25 +20,11 @@ import (
 // readiness when an Instance is still coming up.
 const createRequeueInterval = 5 * time.Second
 
-// Event reasons emitted by the workload Create state machine.
-const (
-	// EventReasonInstanceCreated fires the first time an Instance's
-	// pods are materialized (first transition into Phase=Creating).
-	EventReasonInstanceCreated = "InstanceCreated"
-
-	// EventReasonInstanceReady fires when an Instance transitions from
-	// any non-Ready phase to Phase=Ready (every pod runtime-ready and
-	// ome.io/serving=True).
-	EventReasonInstanceReady = "InstanceReady"
-
-	// Migration request lifecycle.
-	EventReasonMigrationRequestAccepted      = "MigrationRequestAccepted"
-	EventReasonMigrationRequestRejected      = "MigrationRequestRejected"
-	EventReasonMigrationCompleted            = "MigrationCompleted"
-	EventReasonRateLimited                   = "RateLimited"
-	EventReasonMigrationFromNodeMismatch     = "MigrationFromNodeMismatch"
-	EventReasonMigrationNodeAffinityConflict = "MigrationNodeAffinityConflict"
-)
+// Event reasons emitted by the Create / Migration ops are declared
+// once in workload/events.go (as workload.EventReason values) so every
+// op file in this package shares the same constants — see that file
+// for the per-reason documentation and the byte-for-byte rationale
+// against the legacy omenative/status copies.
 
 // Create drives Create / Scale-Up toward each desired Instance. Multi-pass:
 //
@@ -111,7 +97,7 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 			return false, fmt.Errorf("patch status Creating (instance=%d): %w", inst.Index, err)
 		}
 		if isFirstCreate {
-			recordNormal(deps.Recorder, eventTarget(input), EventReasonInstanceCreated,
+			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceCreated,
 				"OMENative %s materialized; %d pod(s) requested",
 				instanceKey(input.Key.Component, inst.Index), len(missing))
 		}
@@ -157,7 +143,7 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, promoteErr)
 	}
 	if !wasReady {
-		recordNormal(deps.Recorder, eventTarget(input), EventReasonInstanceReady,
+		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceReady,
 			"OMENative %s is Ready (%d pod(s) serving)",
 			instanceKey(input.Key.Component, inst.Index), len(existing))
 	}

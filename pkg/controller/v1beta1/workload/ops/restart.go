@@ -15,22 +15,12 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// Event reasons emitted by the workload Restart state machine.
-const (
-	// EventReasonRestartTriggered fires the first time an Instance
-	// transitions into Phase=Restarting from a non-Restarting baseline.
-	EventReasonRestartTriggered = "RestartTriggered"
-
-	// EventReasonRestartCompleted fires when an Instance transitions
-	// from Phase=Restarting back to Phase=Ready (Operation=nil).
-	EventReasonRestartCompleted = "RestartCompleted"
-
-	// EventReasonFoundOrphan fires when Restart finds a pod under the
-	// OMENative selector but missing the ome.io/instance-incarnation
-	// label. Restart refuses to delete it; the operator must
-	// re-classify or remove the pod manually.
-	EventReasonFoundOrphan = "FoundOrphan"
-)
+// Event reasons emitted by the Restart state machine are declared
+// once in workload/events.go (as workload.EventReason values); call
+// sites in this file reach for workload.EventReasonRestart{Triggered,
+// Completed} and workload.EventReasonFoundOrphan directly. See that
+// file for the per-reason documentation and the byte-for-byte
+// rationale against the legacy omenative/status copies.
 
 // restartDrainKey identifies a Restart drain writer against one Instance
 // materialization. Same shape as the Update drain key, but the writer
@@ -73,7 +63,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, fmt.Errorf("patch status Restarting (instance=%d): %w", inst.Index, err)
 	}
 	if wasNotRestarting {
-		recordWarning(deps.Recorder, eventTarget(input), EventReasonRestartTriggered,
+		recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonRestartTriggered,
 			"OMENative %s restart triggered: %s (incarnation=%d)",
 			instanceKey(input.Key.Component, inst.Index), reason, newInc)
 	}
@@ -90,7 +80,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// must re-classify or delete the pod for Restart to proceed.
 	if len(unknownPods) > 0 {
 		for _, pod := range unknownPods {
-			recordWarning(deps.Recorder, eventTarget(input), EventReasonFoundOrphan,
+			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonFoundOrphan,
 				"OMENative %s found orphan pod %s/%s without ome.io/instance-incarnation; refusing to delete",
 				instanceKey(input.Key.Component, inst.Index), pod.Namespace, pod.Name)
 		}
@@ -119,7 +109,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			if hash == "" {
 				continue
 			}
-			serviceName := query.PerRevisionServiceName(input.Key.OwnerName, workload.ComponentType(plan.Component), hash)
+			serviceName := query.PerRevisionServiceName(input.Key.OwnerName, workload.ComponentTypeFromV1beta1(plan.Component), hash)
 			drained, err := drain.IsPodDrained(ctx, deps.Reader(), input.Key.Namespace, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
@@ -202,7 +192,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if err := patchInstanceStatusReady(ctx, input, inst.Index); err != nil {
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
 	}
-	recordNormal(deps.Recorder, eventTarget(input), EventReasonRestartCompleted,
+	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRestartCompleted,
 		"OMENative %s restart complete (incarnation=%d)",
 		instanceKey(input.Key.Component, inst.Index), newInc)
 	return true, nil

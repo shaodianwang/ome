@@ -48,6 +48,35 @@ type ComponentPlan struct {
 	MigrationMode v1beta1.OMENativeMigrationPolicyMode
 }
 
+// ComponentTypeFromV1beta1 converts a v1beta1.ComponentType to a
+// workload.ComponentType through an explicit switch — the same shape
+// internalsource.ComponentTypeToWorkload uses at the omenative adapter
+// boundary, but available in-package so workload subpackages can reach
+// for it without closing the internalsource → workload import cycle.
+// Unknown values map to the empty string so callers tolerate
+// API-version skew without panicking; the bare T(value) cast workload
+// subpackages previously used silently accepted any v1beta1 spelling,
+// including drift between the two enums.
+//
+// Lives in plan.go (not types.go) because this file already carries
+// the residual v1beta1 dependency for ComponentPlan.Component; keeping
+// the converter alongside the field that motivates it avoids adding a
+// new v1beta1 import to types.go. When ComponentPlan.Component flips
+// to workload.ComponentType (see the field comment above), this
+// converter goes away along with the v1beta1 import.
+func ComponentTypeFromV1beta1(v v1beta1.ComponentType) ComponentType {
+	switch v {
+	case v1beta1.RouterComponent:
+		return ComponentRouter
+	case v1beta1.EngineComponent:
+		return ComponentEngine
+	case v1beta1.DecoderComponent:
+		return ComponentDecoder
+	default:
+		return ComponentType("")
+	}
+}
+
 // InstancePlan is the desired state for one Instance — the atomic unit of
 // gang scheduling, restart, and migration.
 type InstancePlan struct {
