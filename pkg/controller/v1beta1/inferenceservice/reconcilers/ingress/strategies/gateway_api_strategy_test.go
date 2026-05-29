@@ -325,6 +325,99 @@ func TestGatewayAPIStrategy_ReconcileComponentHTTPRoute(t *testing.T) {
 	}
 }
 
+// typedNilHTTPRouteBuilder is a stub HTTPRouteBuilder that always returns
+// a (*gatewayapiv1.HTTPRoute)(nil) wrapped in a non-nil client.Object — the
+// exact shape of the value that triggered the production panic before the
+// builder-side dispatcher was hardened. The strategy must defend against
+// this shape even if a future dispatcher regression reintroduces it.
+type typedNilHTTPRouteBuilder struct{}
+
+func (typedNilHTTPRouteBuilder) GetResourceType() string { return "HTTPRoute" }
+
+func (typedNilHTTPRouteBuilder) Build(_ context.Context, _ *v1beta1.InferenceService) (client.Object, error) {
+	return (*gatewayapiv1.HTTPRoute)(nil), nil
+}
+
+func (typedNilHTTPRouteBuilder) BuildHTTPRoute(_ context.Context, _ *v1beta1.InferenceService, _ string) (client.Object, error) {
+	// Wrap a typed-nil *HTTPRoute in the interface return — this is the
+	// shape that crashed the reconciler at gateway_api_strategy.go:165
+	// pre-fix. `result == nil` returns FALSE for this value because the
+	// interface header carries non-nil type info; only the inner value
+	// is nil. The strategy's typed-nil guard must catch this.
+	return (*gatewayapiv1.HTTPRoute)(nil), nil
+}
+
+// TestGatewayAPIStrategy_ReconcileComponentHTTPRoute_TypedNilBuilderDoesNotPanic
+// pins the layer-2 defense for the typed-nil-through-interface panic.
+//
+// Production trace (PD-disaggregated ISVC sandbox/sglang-llama4x-nvfp4-pd-cc-fallback):
+//
+//	panic: runtime error: invalid memory address or nil pointer dereference
+//	  gateway_api_strategy.go:165
+//	  → reconciler.go:99
+//	  → controller.go:516
+//
+// Root cause: BuildHTTPRoute returned a typed-nil *HTTPRoute wrapped in a
+// non-nil client.Object interface. The `desired == nil` check at the top
+// of reconcileComponentHTTPRoute returned FALSE (interface non-nil), the
+// type assertion succeeded with ok=true, and the subsequent
+// controllerutil.SetControllerReference call dereferenced the typed-nil
+// pointer.
+//
+// The layer-1 fix (BuildHTTPRoute dispatcher returns interface-nil for the
+// not-ready branch) closes the source. This test exercises layer-2 — a
+// defensive nil check inside the strategy that catches any future caller
+// (test stub, dispatcher regression, third-party builder) that still
+// hands the strategy a typed-nil-wrapped-in-interface. We deliberately
+// inject the stub builder directly into the strategy struct, bypassing
+// the dispatcher fix, so this test pins the defense regardless of any
+// future change to BuildHTTPRoute.
+func TestGatewayAPIStrategy_ReconcileComponentHTTPRoute_TypedNilBuilderDoesNotPanic(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	require.NoError(t, gatewayapiv1.Install(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	isvc := createTestInferenceServiceWithDecoderGateway("test-isvc", "default")
+	// Deliberately do NOT call setComponentStatusReadyGateway — even though
+	// our stub builder ignores readiness anyway, leaving it not-ready mirrors
+	// the production trigger (decoder component not yet ready).
+
+	fakeClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(isvc).Build()
+
+	opts := interfaces.ReconcilerOptions{
+		Client:        fakeClient,
+		Scheme:        scheme,
+		IngressConfig: &controllerconfig.IngressConfig{EnableGatewayAPI: true},
+		IsvcConfig:    &controllerconfig.InferenceServicesConfig{},
+	}
+	strategy := NewGatewayAPIStrategy(opts, services.NewDomainService(), services.NewPathService()).(*GatewayAPIStrategy)
+
+	// Swap in the stub builder. This bypasses the layer-1 dispatcher fix so
+	// the strategy sees the bad shape directly and we exercise the layer-2
+	// defense in isolation.
+	strategy.httpRouteBuilder = typedNilHTTPRouteBuilder{}
+
+	// The pre-fix behavior was a panic at SetControllerReference. Wrap in a
+	// recover() check to give a precise diagnostic if the defense regresses.
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("reconcileComponentHTTPRoute panicked on a typed-nil HTTPRoute (this is the bug we are guarding against): %v", r)
+			}
+		}()
+		err = strategy.reconcileComponentHTTPRoute(context.Background(), isvc, builders.DecoderComponent)
+	}()
+
+	require.NoError(t, err, "strategy must return nil error (not a panic and not a real failure) when builder hands it a typed-nil HTTPRoute")
+
+	cond := isvc.Status.GetCondition(v1beta1.IngressReady)
+	require.NotNil(t, cond, "IngressReady condition must be set by the typed-nil guard")
+	assert.Equal(t, corev1.ConditionFalse, cond.Status, "IngressReady must be False when component is not ready")
+	assert.Equal(t, "ComponentNotReady", cond.Reason, "IngressReady reason must identify the not-ready component cause")
+}
+
 func TestGatewayAPIStrategy_CheckHTTPRouteStatuses(t *testing.T) {
 	tests := []struct {
 		name              string

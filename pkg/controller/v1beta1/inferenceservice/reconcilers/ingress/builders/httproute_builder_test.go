@@ -423,6 +423,79 @@ func TestHTTPRouteBuilder_TopLevelEngineFallback_UsesEngineService(t *testing.T)
 		"top-level HTTPRoute (engine fallback) must back the <isvc>-engine Service when there is no router")
 }
 
+// TestHTTPRouteBuilder_BuildHTTPRoute_ReturnsInterfaceNilWhenComponentNotReady
+// pins the layer-1 source fix for the typed-nil-through-interface panic.
+//
+// Pre-fix, the BuildHTTPRoute dispatcher returned the per-component builder's
+// (*HTTPRoute, error) directly. When a per-component builder returned
+// (nil, nil) for the "component not ready" branch, Go wrapped the typed-nil
+// pointer into the returned client.Object interface — the interface itself
+// is non-nil (carries type info), only the inner value is nil. Callers
+// checking `if obj == nil` saw FALSE and proceeded to dereference the
+// typed-nil pointer, crashing the reconciler in
+// controllerutil.SetControllerReference (gateway_api_strategy.go:165).
+//
+// The fix is to detect the typed-nil in the dispatcher and explicitly return
+// untyped nil so `desired == nil` in the caller is true.
+//
+// NOTE: testify's `assert.Nil` uses reflect.IsNil under the hood and would
+// pass even for a typed-nil wrapped in an interface — so this test uses the
+// raw `== nil` comparison, which is the actual check the strategy performs.
+func TestHTTPRouteBuilder_BuildHTTPRoute_ReturnsInterfaceNilWhenComponentNotReady(t *testing.T) {
+	cases := []struct {
+		name          string
+		componentType string
+		isvc          *v1beta1.InferenceService
+	}{
+		{
+			name:          "engine not ready",
+			componentType: EngineComponent,
+			isvc:          createTestInferenceServiceHTTPRoute("test-isvc", "default"),
+		},
+		{
+			name:          "router not ready",
+			componentType: RouterComponent,
+			isvc:          createTestInferenceServiceWithRouterHTTPRoute("test-isvc", "default"),
+		},
+		{
+			name:          "decoder not ready",
+			componentType: DecoderComponent,
+			isvc:          createTestInferenceServiceWithDecoderHTTPRoute("test-isvc", "default"),
+		},
+		{
+			name:          "top-level engine fallback not ready",
+			componentType: TopLevelComponent,
+			isvc:          createTestInferenceServiceHTTPRoute("test-isvc", "default"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := createHTTPRouteBuilder()
+
+			// Deliberately do NOT mark any condition Ready, so the inner
+			// per-component builders take the "component not ready" branch
+			// and return (nil, nil).
+			result, err := builder.BuildHTTPRoute(context.Background(), tc.isvc, tc.componentType)
+			require.NoError(t, err)
+
+			// The bug: result is a (*HTTPRoute)(nil) wrapped in a non-nil
+			// client.Object interface, so `result == nil` returns false and
+			// the strategy panics on the subsequent SetControllerReference.
+			// The fix returns interface-nil instead, so this assertion holds.
+			//
+			// We deliberately use bare `== nil` here, NOT assert.Nil, since
+			// the former is the exact check the strategy performs.
+			if result != nil {
+				t.Fatalf("BuildHTTPRoute(%s) must return interface-nil (== nil) when the component is not ready, "+
+					"but returned a typed-nil-wrapped-in-interface (%T). This is the typed-nil-through-interface bug "+
+					"that crashed the controller's reconcile loop on PD-disaggregated ISVCs.",
+					tc.componentType, result)
+			}
+		})
+	}
+}
+
 func TestHTTPRouteBuilder_BuildHTTPRoute_UnsupportedComponent(t *testing.T) {
 	builder := createHTTPRouteBuilder()
 	isvc := createTestInferenceServiceHTTPRoute("test-isvc", "default")

@@ -60,18 +60,31 @@ func (b *HTTPRouteBuilder) Build(ctx context.Context, isvc *v1beta1.InferenceSer
 }
 
 func (b *HTTPRouteBuilder) BuildHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService, componentType string) (client.Object, error) {
+	var route *gatewayapiv1.HTTPRoute
+	var err error
 	switch componentType {
 	case EngineComponent:
-		return b.buildEngineHTTPRoute(isvc)
+		route, err = b.buildEngineHTTPRoute(isvc)
 	case RouterComponent:
-		return b.buildRouterHTTPRoute(isvc)
+		route, err = b.buildRouterHTTPRoute(isvc)
 	case DecoderComponent:
-		return b.buildDecoderHTTPRoute(isvc)
+		route, err = b.buildDecoderHTTPRoute(isvc)
 	case TopLevelComponent:
-		return b.buildTopLevelHTTPRoute(isvc)
+		route, err = b.buildTopLevelHTTPRoute(isvc)
 	default:
 		return nil, fmt.Errorf("unsupported component type: %s", componentType)
 	}
+	if route == nil {
+		// Return an explicit interface-nil rather than letting Go wrap a
+		// typed-nil (*HTTPRoute)(nil) into a non-nil client.Object. The
+		// caller checks `desired == nil`, which is false for a typed-nil
+		// inside an interface — that gap caused a panic when a per-
+		// component builder returned (nil, nil) for the "component not
+		// ready" branch and the strategy then tried to call
+		// controllerutil.SetControllerReference on the typed-nil pointer.
+		return nil, err
+	}
+	return route, err
 }
 
 // toGatewayAPIDuration converts seconds to gatewayapiv1.Duration

@@ -161,6 +161,21 @@ func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, is
 	if !ok {
 		return fmt.Errorf("builder returned unexpected type %T, expected *gatewayapiv1.HTTPRoute", desired)
 	}
+	if httpRoute == nil {
+		// Defensive: BuildHTTPRoute now returns interface-nil for not-ready
+		// components, but guard here too so any future caller that hands us
+		// a typed-nil pointer (e.g. via a stub builder in tests, or a future
+		// dispatcher regression) does not crash the reconciler in
+		// controllerutil.SetControllerReference below.
+		isvc.Status.SetCondition(v1beta1.IngressReady, &knapis.Condition{
+			Type:    v1beta1.IngressReady,
+			Status:  corev1.ConditionFalse,
+			Reason:  "ComponentNotReady",
+			Message: fmt.Sprintf("%s component not ready for HTTPRoute creation", componentType),
+		})
+		klog.Info("Builder returned typed-nil HTTPRoute - component not ready", "isvc", isvc.Name, "component", componentType)
+		return nil
+	}
 
 	if err := controllerutil.SetControllerReference(isvc, httpRoute, g.scheme); err != nil {
 		return fmt.Errorf("failed to set controller reference for %s HttpRoute %s: %w", componentType, httpRoute.Name, err)
