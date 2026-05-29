@@ -654,6 +654,15 @@ spec:
                         properties:
                           metadata:
                             type: object
+                            properties:
+                              annotations:
+                                type: object
+                                additionalProperties:
+                                  type: string
+                              labels:
+                                type: object
+                                additionalProperties:
+                                  type: string
                           spec:
                             properties:
                               activeDeadlineSeconds:
