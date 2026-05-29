@@ -204,3 +204,42 @@ podMonitor:
   additionalLabels: {}
   relabelings: []
   metricRelabelings: []
+
+# Optional single-replica Prometheus bundled by this chart so KEDA
+# autoscaling triggers (OEP-0013) have a metrics source out of the
+# box. Disable when your cluster already runs a Prometheus that
+# scrapes OME pods — point KEDA at that one instead. NOT intended
+# for long-term observability or alerting; retention is deliberately
+# short and storage is emptyDir.
+prometheus:
+  enabled: false
+  # Retention window. Short by design — this Prometheus exists for
+  # autoscaling input, not long-term observability. Keeps emptyDir
+  # usage bounded.
+  retention: 30m
+  scrapeInterval: 15s
+  image:
+    repository: prom/prometheus
+    tag: "v3.0.1"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  service:
+    type: ClusterIP
+    port: 9090
+  storage:
+    # emptyDir size cap. ~30 min retention at 15s scrape interval
+    # for a typical OME cluster fits well under 1Gi; the cap exists
+    # to protect the node from runaway disk use.
+    sizeLimit: 2Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Extra labels merged onto every Prometheus-related resource.
+  # Useful for fleet labels or cost-attribution tags.
+  additionalLabels: {}

@@ -1,0 +1,99 @@
+{{- if .Values.prometheus.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ome-prometheus-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ome-prometheus.labels" . | nindent 4 }}
+data:
+  # Scrape config covers two pod populations:
+  #   1. InferenceService-owned pods (every deployment mode stamps
+  #      the `ome.io/inferenceservice` label on its pods — that's
+  #      the canonical OME-wide pod selector, not the OMENative-only
+  #      `ome.io/managed-by`).
+  #   2. OME control-plane pods (controller-manager, model-agent)
+  #      that opt in via the standard `prometheus.io/scrape: "true"`
+  #      pod annotation.
+  # Port + path resolve from the standard `prometheus.io/port` and
+  # `prometheus.io/path` annotations when set; otherwise Prometheus
+  # falls back to its discovery defaults.
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ .Values.prometheus.scrapeInterval }}
+      scrape_timeout: 10s
+      external_labels:
+        cluster: ome
+    scrape_configs:
+      - job_name: ome-inferenceservice-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          # Only pods owned by an InferenceService.
+          - source_labels: [__meta_kubernetes_pod_label_ome_io_inferenceservice]
+            regex: .+
+            action: keep
+          # Drop pods that are not yet running (avoids scrape errors
+          # during pod startup; KEDA reads instantaneous values).
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Running
+            action: keep
+          # Honor the standard prometheus.io/scrape opt-out: setting
+          # it explicitly to "false" on an ISVC pod skips it.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            regex: "false"
+            action: drop
+          # Address: replace the discovered port with prometheus.io/port
+          # when set on the pod.
+          - source_labels:
+              - __address__
+              - __meta_kubernetes_pod_annotation_prometheus_io_port
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+            action: replace
+          # Metrics path: replace /metrics with prometheus.io/path
+          # when set on the pod.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            regex: (.+)
+            target_label: __metrics_path__
+            action: replace
+          # Convenience labels for KEDA / dashboards.
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_label_ome_io_inferenceservice]
+            target_label: inferenceservice
+          - source_labels: [__meta_kubernetes_pod_label_ome_io_component]
+            target_label: component
+
+      - job_name: ome-control-plane
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          # Opt-in via the standard prometheus.io/scrape annotation.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            regex: "true"
+            action: keep
+          # Restrict to this release's namespace so we don't pick up
+          # unrelated annotated pods cluster-wide.
+          - source_labels: [__meta_kubernetes_namespace]
+            regex: {{ .Release.Namespace }}
+            action: keep
+          - source_labels:
+              - __address__
+              - __meta_kubernetes_pod_annotation_prometheus_io_port
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+            action: replace
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            regex: (.+)
+            target_label: __metrics_path__
+            action: replace
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+{{- end }}

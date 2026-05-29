@@ -16,3 +16,26 @@ Parameters:
 {{- printf "%s:%s" $repo $tag -}}
 {{- end }}
 {{- end }}
+
+{{/*
+Selector labels for the bundled Prometheus (Deployment + Service
+selector). Kept minimal so they stay stable across re-renders.
+*/}}
+{{- define "ome-prometheus.selectorLabels" -}}
+app.kubernetes.io/name: ome-prometheus
+app.kubernetes.io/component: ome-prometheus
+{{- end }}
+
+{{/*
+Full label set stamped on bundled Prometheus resources. Mirrors the
+selector labels and folds in operator-supplied
+.Values.prometheus.additionalLabels.
+*/}}
+{{- define "ome-prometheus.labels" -}}
+{{ include "ome-prometheus.selectorLabels" . }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: ome
+{{- with .Values.prometheus.additionalLabels }}
+{{ toYaml . }}
+{{- end }}
+{{- end }}
