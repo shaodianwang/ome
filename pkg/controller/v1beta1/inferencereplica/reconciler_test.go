@@ -199,6 +199,78 @@ func TestReconcile_Create_MaterializesPods(t *testing.T) {
 		"UpdateRevision must point at the target ControllerRevision")
 }
 
+// TestReconcile_Create_AlsoCreatesHeadlessService pins the headless
+// Service wire-in (IR PR 2.1): a fresh IR reconcile must call
+// workload.ReconcileHeadlessService alongside workload.Reconcile so a
+// per-Component headless Service appears in the same pass that creates
+// the pods. The Service rendering itself is unit-tested in
+// workload/services_test.go — this test only verifies the wire-in.
+//
+// Asserts on the canonical shape:
+//   - Name == query.HeadlessServiceName(parent, component) so any
+//     tooling that looks for `<isvc>-<component>-headless` keeps working
+//   - ClusterIP == None so DNS returns per-pod A records (no
+//     kube-proxy load-balancing) — required for gang-init peer discovery
+//   - PublishNotReadyAddresses == true so peer DNS resolves before
+//     pods flip Ready (workers must discover each other during init)
+//   - Selector carries the legacy OMENative pod-selector trio
+//     (ome.io/inferenceservice + component + managed-by=OMENative) so
+//     the Service matches the same pods the workload renderer stamps
+//   - Owner ref points at the IR (Kind=InferenceReplica), NOT the
+//     parent ISVC — the IR is the per-Component lifecycle owner; on
+//     IR deletion the Service must cascade with it
+func TestReconcile_Create_AlsoCreatesHeadlessService(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 2)
+	r, c := newReconciler(t, ir)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred(),
+		"Reconcile should not error on the first Create pass with headless Service wire-in")
+
+	// The Service name is derived from the parent ISVC name (ParentRef.Name)
+	// — pods, services, and selectors all key off the ISVC name so the
+	// shape stays byte-identical to the legacy omenative-controller path.
+	wantName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, ir.Spec.Component)
+	svc := &corev1.Service{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: wantName, Namespace: ir.Namespace},
+		svc)).To(gomega.Succeed(),
+		"headless Service %s/%s should be created by the IR reconciler", ir.Namespace, wantName)
+
+	// Headless contract: ClusterIP=None + PublishNotReadyAddresses=true
+	// so peer DNS works during gang init before pods flip Ready.
+	g.Expect(svc.Spec.ClusterIP).To(gomega.Equal(corev1.ClusterIPNone),
+		"headless Service must have ClusterIP=None (DNS returns per-pod A records)")
+	g.Expect(svc.Spec.PublishNotReadyAddresses).To(gomega.BeTrue(),
+		"headless Service must publish not-ready addresses for gang init")
+
+	// Selector must match the legacy OMENative pod-selector trio so the
+	// Service selects the same pods workload renderer stamps. Both paths
+	// (ISVC-direct + IR-driven) use the same selector — this is what
+	// makes shadow-mode diffs byte-identical.
+	g.Expect(svc.Spec.Selector).To(gomega.Equal(map[string]string{
+		constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
+		constants.OMEComponentLabel:           string(ir.Spec.Component),
+		query.LabelManagedBy:                  query.ManagedByOMENative,
+	}))
+
+	// Owner ref points at the IR — not the parent ISVC — so deletion of
+	// the IR cascades to the Service. The ISVC controller manages IR
+	// lifecycle at the per-Component layer (PR 3); inside its lifetime,
+	// the IR controller owns the per-Component supporting resources.
+	g.Expect(svc.OwnerReferences).To(gomega.HaveLen(1))
+	ref := svc.OwnerReferences[0]
+	g.Expect(ref.Kind).To(gomega.Equal("InferenceReplica"),
+		"headless Service owner ref should point at the IR, not the ISVC")
+	g.Expect(ref.Name).To(gomega.Equal(ir.Name))
+	g.Expect(ref.UID).To(gomega.Equal(ir.UID))
+	g.Expect(ref.Controller).NotTo(gomega.BeNil())
+	g.Expect(*ref.Controller).To(gomega.BeTrue())
+}
+
 // TestReconcile_ScaleUp_AddsPods pins the scale-up path: a steady
 // IR at replicas=1 with a Ready Instance grows to replicas=2; the next
 // reconcile must reach the Create pass and add the second pod.

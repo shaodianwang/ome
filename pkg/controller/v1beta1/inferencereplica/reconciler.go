@@ -170,7 +170,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	result, err = workload.Reconcile(ctx, deps, input, plan, target)
 
-	// TODO(IR PR 2.1): wire workload.ReconcileHeadlessService once Lane B lands
+	// Reconcile the per-Component headless Service. The Service gives every
+	// pod a stable FQDN for peer discovery during gang init (multi-node) and
+	// for any downstream proxy that wants per-pod addresses. Idempotent +
+	// drift-correcting; safe to call every reconcile.
+	//
+	// Called AFTER workload.Reconcile so the Service exists by the time pods
+	// flip Ready and downstream consumers start resolving them. Earlier
+	// placement would risk creating a Service before the pods exist —
+	// harmless but produces a brief "no endpoints" window.
+	//
+	// Service errors don't clobber a real workload.Reconcile error; only
+	// surface them when the dispatcher succeeded. Same pattern the deferred
+	// status-write uses above.
+	if serr := workload.ReconcileHeadlessService(ctx, r.Client, buildHeadlessServiceSpec(ir)); serr != nil {
+		if err == nil {
+			err = fmt.Errorf("InferenceReplica reconciler: reconcile headless service: %w", serr)
+		}
+	}
 	return result, err
 }
 

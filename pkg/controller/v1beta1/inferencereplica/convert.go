@@ -17,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // irGVK is the GroupVersionKind every IR-driven workload reconcile
@@ -95,6 +96,42 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent cl
 			r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, "InstanceFailed",
 				"InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)",
 				ir.Namespace, ir.Name, ir.Spec.Component, idx, podName, reason)
+		},
+	}
+}
+
+// buildHeadlessServiceSpec adapts an InferenceReplica into the typed
+// workload.PerComponentServiceSpec the workload renderer consumes.
+// Mirrors omenative.BuildHeadlessServiceSpec byte-for-byte except for:
+// (a) the v1beta1.InferenceReplica handle, (b) the owner-ref shape —
+// the IR owns its per-Component headless Service so deletion of the IR
+// cascades to the Service. The ISVC controller continues to manage the
+// IR lifecycle (PR 3); inside its own lifetime, the IR controller is
+// the sole Service writer.
+//
+// OwnerName on the Service name resolves through the parent ISVC
+// (ir.Spec.ParentRef.Name) so the Service name stays byte-identical to
+// the legacy `<isvc>-<component>-headless` shape — every tool that
+// looks for that name keeps working unchanged.
+//
+// Selector matches the labels the workload renderer stamps on pods
+// (see render.go::podLabels): ome.io/inferenceservice + component +
+// managed-by=OMENative. The trio is identical to the ISVC adapter so
+// the Services from both paths select the same pod set; this is what
+// keeps the shadow-mode diff in PR 3 byte-identical.
+func buildHeadlessServiceSpec(ir *v1beta1.InferenceReplica) workloadtypes.PerComponentServiceSpec {
+	selector := map[string]string{
+		constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
+		constants.OMEComponentLabel:           string(ir.Spec.Component),
+		query.LabelManagedBy:                  query.ManagedByOMENative,
+	}
+	return workloadtypes.PerComponentServiceSpec{
+		Name:      query.HeadlessServiceName(ir.Spec.ParentRef.Name, ir.Spec.Component),
+		Namespace: ir.Namespace,
+		Selector:  selector,
+		Labels:    selector,
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(ir, irGVK),
 		},
 	}
 }
