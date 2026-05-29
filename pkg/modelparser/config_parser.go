@@ -22,11 +22,26 @@ import (
 )
 
 const (
-	// DefaultConfigFileName Default config file name used by Hugging Face models
+	// DefaultConfigFileName is the HuggingFace transformer model config filename.
 	DefaultConfigFileName = "config.json"
-	// DefaultModelIndexFileName Default model index file name used by diffusers models
+	// DefaultModelIndexFileName is the diffusers pipeline manifest filename.
 	DefaultModelIndexFileName = "model_index.json"
+
+	// Model format / framework names emitted into BaseModel.Spec.
+	formatNameSafetensors = "safetensors"
+	formatNameDiffusers   = "diffusers"
+	frameworkTransformers = "transformers"
+	// safetensorsFormatVersion is the wire version we tag every
+	// safetensors-backed BaseModel with. Bumped only when we change
+	// how we encode metadata.ModelFormat.Version, not when upstream
+	// safetensors changes — those bumps are transparent.
+	safetensorsFormatVersion = "1.0.0"
 )
+
+// commonConfigSubdirs lists subdirectory names HuggingFace bundles
+// commonly nest config.json (or hf_quant_config.json) under when the
+// repository root holds metadata rather than the model itself.
+var commonConfigSubdirs = []string{"safetensors", "pytorch_model", "model"}
 
 // ModelConfigFileInput provides one file to a model config parse operation.
 // Path must be relative to the logical model root and use slash separators.
@@ -35,39 +50,41 @@ type ModelConfigFileInput struct {
 	Data []byte
 }
 
-// modelConfigLoader is a function type for loading model configurations
-// This allows for easy mocking in tests
+// modelConfigLoader loads model configurations from a path. Swappable
+// for tests.
 type modelConfigLoader func(configPath string) (modelconfig.HuggingFaceModel, error)
 
-// ModelConfigParser is responsible for parsing model config files
-// and updating the corresponding Model CRD
+// ModelConfigParser parses model config files and applies the extracted
+// metadata to BaseModel / ClusterBaseModel CRD specs.
 type ModelConfigParser struct {
 	logger          *zap.SugaredLogger
 	omeClient       versioned.Interface
-	loadModelConfig modelConfigLoader // Function to load model configs
+	loadModelConfig modelConfigLoader
 }
 
-// NewModelConfigParser creates a new model config parser
+// NewModelConfigParser creates a parser backed by modelconfig.LoadModelConfig.
 func NewModelConfigParser(omeClient versioned.Interface, logger *zap.SugaredLogger) *ModelConfigParser {
 	return &ModelConfigParser{
 		logger:          logger,
 		omeClient:       omeClient,
-		loadModelConfig: modelconfig.LoadModelConfig, // Use the real implementation by default
+		loadModelConfig: modelconfig.LoadModelConfig,
 	}
 }
 
-// ParseModelConfig reads model_index.json (if present) or config.json from the model directory and extracts metadata
-// without updating any resources. This allows the caller to control when and how updates happen.
+// ParseModelConfig reads model_index.json (if present) or config.json
+// from modelDir and extracts metadata without writing to the API
+// server — callers decide when (and whether) to persist via
+// ApplyModelMetadata or by passing baseModel/clusterBaseModel.
 func (p *ModelConfigParser) ParseModelConfig(modelDir string, baseModel *v1beta1.BaseModel, clusterBaseModel *v1beta1.ClusterBaseModel) (*ModelMetadata, error) {
 	return p.parseModelConfigDir(modelDir, nil, baseModel, clusterBaseModel)
 }
 
-// ParseModelConfigFromFiles reads model metadata from an explicit set of files.
-// Config JSON and safetensors headers are parsed directly from bytes by
-// pkg/modelconfig.
+// ParseModelConfigFromFiles parses model metadata from an explicit set
+// of in-memory files (path/data tuples), bypassing the local
+// filesystem. Used by the basemodel reconciler's sharded backend, which
+// streams config + safetensors headers from object storage.
 func (p *ModelConfigParser) ParseModelConfigFromFiles(ctx context.Context, files []ModelConfigFileInput, baseModel *v1beta1.BaseModel, clusterBaseModel *v1beta1.ClusterBaseModel) (*ModelMetadata, error) {
-	if shouldSkip := p.shouldSkipConfigParsing(baseModel, clusterBaseModel); shouldSkip {
-		p.logger.Infof("Skipping config parsing due to annotation")
+	if p.shouldSkipConfigParsing(baseModel, clusterBaseModel) {
 		return nil, nil
 	}
 	if len(files) == 0 {
@@ -91,7 +108,7 @@ func (p *ModelConfigParser) ParseModelConfigFromFiles(ctx context.Context, files
 	if len(hfQuantConfigBytes) > 0 {
 		parsed, perr := modelconfig.ParseHFQuantConfig(hfQuantConfigBytes)
 		if perr != nil {
-			p.logger.Warnf("Failed to parse %s: %v", modelconfig.HFQuantConfigFileName, perr)
+			p.logger.Warnw("parse hf_quant_config.json failed", "error", perr)
 		} else {
 			hfQuantConfig = parsed
 		}
@@ -99,7 +116,7 @@ func (p *ModelConfigParser) ParseModelConfigFromFiles(ctx context.Context, files
 
 	hfModel, err := modelconfig.ParseModelConfig(*configInput)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse model config file input %s with hf_model_config: %w", configInput.Path, err)
+		return nil, fmt.Errorf("parse model config %s: %w", configInput.Path, err)
 	}
 	if hfQuantConfig == nil {
 		hfQuantConfig = hfModel.GetHFQuantConfig()
@@ -107,9 +124,9 @@ func (p *ModelConfigParser) ParseModelConfigFromFiles(ctx context.Context, files
 
 	var parameterCountOverride *int64
 	if len(safetensorsFiles) > 0 {
-		parameterCount, err := modelconfig.FindAndParseSafetensorsFilesWithQuantConfig(safetensorsFiles, hfQuantConfig)
-		if err != nil {
-			return nil, fmt.Errorf("parse safetensors metadata from file inputs: %w", err)
+		parameterCount, perr := modelconfig.FindAndParseSafetensorsFilesWithQuantConfig(safetensorsFiles, hfQuantConfig)
+		if perr != nil {
+			return nil, fmt.Errorf("parse safetensors metadata from file inputs: %w", perr)
 		}
 		parameterCountOverride = &parameterCount
 	}
@@ -131,24 +148,20 @@ func applyQuantizationFromConfig(metadata *ModelMetadata, hfQuantConfig *modelco
 	algo := hfQuantConfig.Quantization.QuantAlgo
 	if mapped := QuantAlgoToOMEEnum(algo); mapped != "" {
 		metadata.Quantization = mapped
-		logger.Infof("Setting quantization to %s from quant config (quant_algo=%s)", mapped, algo)
-	} else if algo != "" {
-		logger.Warnf("Quant config declared quant_algo=%q which OME does not yet recognize; spec.Quantization will be left unset", algo)
+		return
+	}
+	if algo != "" {
+		logger.Warnw("unrecognized quant_algo; leaving spec.Quantization unset", "quant_algo", algo)
 	}
 }
 
 func (p *ModelConfigParser) parseModelConfigDir(modelDir string, parameterCountOverride *int64, baseModel *v1beta1.BaseModel, clusterBaseModel *v1beta1.ClusterBaseModel) (*ModelMetadata, error) {
-	p.logger.Infof("Parsing model config at: %s", modelDir)
-
-	// Skip if the directory doesn't exist
 	if _, err := os.Stat(modelDir); os.IsNotExist(err) {
-		p.logger.Warnf("Model directory doesn't exist: %s", modelDir)
+		p.logger.Warnw("model directory does not exist", "dir", modelDir)
 		return nil, nil
 	}
 
-	// Check if model should skip config parsing
-	if shouldSkip := p.shouldSkipConfigParsing(baseModel, clusterBaseModel); shouldSkip {
-		p.logger.Infof("Skipping config parsing due to annotation")
+	if p.shouldSkipConfigParsing(baseModel, clusterBaseModel) {
 		return nil, nil
 	}
 
@@ -178,13 +191,12 @@ func (p *ModelConfigParser) parseModelConfigDir(modelDir string, parameterCountO
 		if count, cerr := modelconfig.FindAndParseSafetensorsWithQuantConfig(modelConfigPath, hfQuantConfig); cerr == nil && count > 0 {
 			countCopy := count
 			parameterCountOverride = &countCopy
-			p.logger.Infof("Using quant-aware safetensors count: %d (algo=%s)",
-				count, hfQuantConfig.Quantization.QuantAlgo)
+			p.logger.Debugw("using quant-aware safetensors count",
+				"count", count, "algo", hfQuantConfig.Quantization.QuantAlgo)
 		}
 	}
 
 	metadata := p.extractModelMetadataFromHFWithParameterCount(hfModel, parameterCountOverride)
-	p.logger.Infof("Extracted metadata: %+v", metadata)
 	applyQuantizationFromConfig(&metadata, hfQuantConfig, p.logger)
 	p.updateParsedModelMetadata(baseModel, clusterBaseModel, metadata)
 	return &metadata, nil
@@ -196,97 +208,87 @@ func (p *ModelConfigParser) parseModelConfigDir(modelDir string, parameterCountO
 // helpers' directory lookup.
 func (p *ModelConfigParser) loadModelConfigFromDir(modelDir string) (modelconfig.HuggingFaceModel, string, error) {
 	if modelIndexPath, err := p.findModelIndexFile(modelDir); err == nil {
-		p.logger.Infof("Found model_index.json at: %s", modelIndexPath)
 		hfModel, loadErr := p.loadModelConfig(modelIndexPath)
 		if loadErr != nil {
-			return nil, "", fmt.Errorf("failed to parse model_index.json with hf_model_config: %w", loadErr)
+			return nil, "", fmt.Errorf("parse model_index.json at %s: %w", modelIndexPath, loadErr)
 		}
 		return hfModel, modelIndexPath, nil
 	}
 	configPath, findErr := p.findConfigFile(modelDir)
 	if findErr != nil {
-		p.logger.Infof("Config file not found: %v", findErr)
 		return nil, "", nil
 	}
-	p.logger.Infof("Found config file at: %s", configPath)
 	hfModel, loadErr := p.loadModelConfig(configPath)
 	if loadErr != nil {
-		return nil, "", fmt.Errorf("failed to parse config file with hf_model_config: %w", loadErr)
+		return nil, "", fmt.Errorf("parse config.json at %s: %w", configPath, loadErr)
 	}
 	return hfModel, configPath, nil
 }
 
 func (p *ModelConfigParser) updateParsedModelMetadata(baseModel *v1beta1.BaseModel, clusterBaseModel *v1beta1.ClusterBaseModel, metadata ModelMetadata) {
-	if baseModel != nil {
+	switch {
+	case baseModel != nil:
 		if err := p.updateBaseModel(baseModel, metadata); err != nil {
-			p.logger.Errorf("Failed to update BaseModel: %v", err)
+			p.logger.Errorw("update BaseModel failed",
+				"namespace", baseModel.Namespace, "name", baseModel.Name, "error", err)
 		}
-	} else if clusterBaseModel != nil {
+	case clusterBaseModel != nil:
 		if err := p.updateClusterBaseModel(clusterBaseModel, metadata); err != nil {
-			p.logger.Errorf("Failed to update ClusterBaseModel: %v", err)
+			p.logger.Errorw("update ClusterBaseModel failed",
+				"name", clusterBaseModel.Name, "error", err)
 		}
 	}
 }
 
-type normalizedModelConfigFileInput struct {
-	Path string
-	Data []byte
-}
-
+// splitModelConfigFileInputs normalizes paths and sorts the file set
+// (so iteration is deterministic across producers), then routes each
+// file to the appropriate bucket: model_index.json → diffusion,
+// config.json → transformer, hf_quant_config.json → standalone quant
+// config, safetensors / .index.json → counting helper. Files outside
+// the recognized basename set are dropped silently.
 func splitModelConfigFileInputs(ctx context.Context, files []ModelConfigFileInput) (*modelconfig.ModelConfigInput, []modelconfig.SafetensorsFileInput, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	normalized := make([]normalizedModelConfigFileInput, 0, len(files))
+	normalized := make([]ModelConfigFileInput, 0, len(files))
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, err
 		}
-
 		relativePath, err := cleanInputFilePath(file.Path)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		normalized = append(normalized, normalizedModelConfigFileInput{
-			Path: relativePath,
-			Data: file.Data,
-		})
+		normalized = append(normalized, ModelConfigFileInput{Path: relativePath, Data: file.Data})
 	}
 	sort.Slice(normalized, func(i, j int) bool {
 		return normalized[i].Path < normalized[j].Path
 	})
 
-	var modelIndexInput *modelconfig.ModelConfigInput
-	var configInput *modelconfig.ModelConfigInput
-	var hfQuantConfigBytes []byte
-	safetensorsFiles := make([]modelconfig.SafetensorsFileInput, 0)
+	var (
+		modelIndexInput    *modelconfig.ModelConfigInput
+		configInput        *modelconfig.ModelConfigInput
+		hfQuantConfigBytes []byte
+		safetensorsFiles   = make([]modelconfig.SafetensorsFileInput, 0)
+	)
 	for _, file := range normalized {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, err
 		}
 		if isSafetensorsFileInput(file.Path) {
-			safetensorsFiles = append(safetensorsFiles, modelconfig.SafetensorsFileInput{
-				Path: file.Path,
-				Data: file.Data,
-			})
+			safetensorsFiles = append(safetensorsFiles, modelconfig.SafetensorsFileInput{Path: file.Path, Data: file.Data})
 			continue
 		}
 		switch path.Base(file.Path) {
 		case DefaultModelIndexFileName:
 			if modelIndexInput == nil {
-				input := modelconfig.ModelConfigInput{
-					Path: file.Path,
-					Data: file.Data,
-				}
+				input := modelconfig.ModelConfigInput{Path: file.Path, Data: file.Data}
 				modelIndexInput = &input
 			}
 		case DefaultConfigFileName:
 			if configInput == nil {
-				input := modelconfig.ModelConfigInput{
-					Path: file.Path,
-					Data: file.Data,
-				}
+				input := modelconfig.ModelConfigInput{Path: file.Path, Data: file.Data}
 				configInput = &input
 			}
 		case modelconfig.HFQuantConfigFileName:
@@ -296,6 +298,8 @@ func splitModelConfigFileInputs(ctx context.Context, files []ModelConfigFileInpu
 		}
 	}
 
+	// model_index.json (diffusion) beats config.json — we prefer the
+	// pipeline manifest when both exist.
 	if modelIndexInput != nil {
 		return modelIndexInput, safetensorsFiles, hfQuantConfigBytes, nil
 	}
@@ -320,68 +324,60 @@ func cleanInputFilePath(filePath string) (string, error) {
 
 func isSafetensorsFileInput(filePath string) bool {
 	base := path.Base(filePath)
-	return base == "model.safetensors.index.json" || strings.HasSuffix(base, ".safetensors")
+	return base == modelconfig.SafetensorsIndexFileName || strings.HasSuffix(base, modelconfig.SafetensorsExt)
 }
 
-// findConfigFile searches for the config.json file in the model directory
-// It checks the root directory and common subdirectories
+// findConfigFile locates config.json in the model directory, checking
+// the root and commonConfigSubdirs first, then falling back to a
+// bounded recursive walk.
 func (p *ModelConfigParser) findConfigFile(modelDir string) (string, error) {
-	// Check the root directory first
-	rootConfigPath := filepath.Join(modelDir, DefaultConfigFileName)
-	if _, err := os.Stat(rootConfigPath); err == nil {
-		return rootConfigPath, nil
+	if path := findInCommonLocations(modelDir, DefaultConfigFileName); path != "" {
+		return path, nil
 	}
 
-	// Common places where config.json might be located
-	possiblePaths := []string{
-		filepath.Join(modelDir, "safetensors", DefaultConfigFileName),
-		filepath.Join(modelDir, "pytorch_model", DefaultConfigFileName),
-		filepath.Join(modelDir, "model", DefaultConfigFileName),
-	}
-
-	// Check if config.json exists in any of the possible paths
-	for _, path := range possiblePaths {
-		if _, err := os.Stat(path); err == nil {
-			return path, nil
-		}
-	}
-
-	// If not found in common locations, do a recursive search (limited to avoid deep searching)
 	var configPath string
 	err := filepath.Walk(modelDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // Skip error files
+			return nil
 		}
 		if !info.IsDir() && info.Name() == DefaultConfigFileName {
 			configPath = path
-			return filepath.SkipDir // Found it, stop searching
+			return filepath.SkipDir
 		}
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-
 	if configPath == "" {
 		return "", fmt.Errorf("config.json not found in %s", modelDir)
 	}
 	return configPath, nil
 }
 
-// findHFQuantConfigFile searches the same locations as findConfigFile.
-// Returns "" if absent — the file is optional.
+// findHFQuantConfigFile checks the same locations as findConfigFile but
+// returns "" rather than an error — the file is optional.
 func (p *ModelConfigParser) findHFQuantConfigFile(modelDir string) string {
-	rootPath := filepath.Join(modelDir, modelconfig.HFQuantConfigFileName)
-	if _, err := os.Stat(rootPath); err == nil {
-		return rootPath
+	return findInCommonLocations(modelDir, modelconfig.HFQuantConfigFileName)
+}
+
+// findInCommonLocations returns the first match of filename in modelDir
+// or any of commonConfigSubdirs, or "" if none exists.
+func findInCommonLocations(modelDir, filename string) string {
+	if path := filepath.Join(modelDir, filename); fileExists(path) {
+		return path
 	}
-	for _, sub := range []string{"safetensors", "pytorch_model", "model"} {
-		p := filepath.Join(modelDir, sub, modelconfig.HFQuantConfigFileName)
-		if _, err := os.Stat(p); err == nil {
-			return p
+	for _, sub := range commonConfigSubdirs {
+		if path := filepath.Join(modelDir, sub, filename); fileExists(path) {
+			return path
 		}
 	}
 	return ""
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // loadHFQuantConfig returns nil for both "absent" and "parse failed"
@@ -393,183 +389,123 @@ func (p *ModelConfigParser) loadHFQuantConfig(modelDir string) *modelconfig.HFQu
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		p.logger.Warnf("Found %s at %s but failed to read it: %v", modelconfig.HFQuantConfigFileName, path, err)
+		p.logger.Warnw("read hf_quant_config.json failed", "path", path, "error", err)
 		return nil
 	}
 	cfg, err := modelconfig.ParseHFQuantConfig(data)
 	if err != nil {
-		p.logger.Warnf("Failed to parse %s at %s: %v", modelconfig.HFQuantConfigFileName, path, err)
+		p.logger.Warnw("parse hf_quant_config.json failed", "path", path, "error", err)
 		return nil
 	}
 	return cfg
 }
 
-// findModelIndexFile searches for the model_index.json file in the model directory
-// It checks the root directory and common subdirectories
+// findModelIndexFile locates model_index.json in the model directory,
+// checking the root first, then falling back to a bounded recursive walk.
 func (p *ModelConfigParser) findModelIndexFile(modelDir string) (string, error) {
-	// Check the root directory first
-	rootIndexPath := filepath.Join(modelDir, DefaultModelIndexFileName)
-	if _, err := os.Stat(rootIndexPath); err == nil {
-		return rootIndexPath, nil
+	if path := filepath.Join(modelDir, DefaultModelIndexFileName); fileExists(path) {
+		return path, nil
 	}
 
-	// If not found in rootdir, do a recursive search (limited to avoid deep searching)
 	var indexPath string
 	err := filepath.Walk(modelDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // Skip error files
+			return nil
 		}
 		if !info.IsDir() && info.Name() == DefaultModelIndexFileName {
 			indexPath = path
-			return filepath.SkipDir // Found it, stop searching
+			return filepath.SkipDir
 		}
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-
 	if indexPath == "" {
 		return "", fmt.Errorf("model_index.json not found in %s", modelDir)
 	}
 	return indexPath, nil
 }
 
-// updateModel is a generic function to update either a BaseModel or ClusterBaseModel
+// updateModel applies metadata to a BaseModel or ClusterBaseModel CRD,
+// re-fetching the latest revision on conflict so the merge isn't lost
+// to a parallel writer.
 func (p *ModelConfigParser) updateModel(model interface{}, metadata ModelMetadata) error {
-	// Get model info for logging
-	var modelInfo string
-	var namespace, name string
+	var namespace, name, kind string
 
-	// Update model spec fields from the extracted metadata
 	switch m := model.(type) {
 	case *v1beta1.BaseModel:
 		p.updateModelSpec(&m.Spec, metadata)
-		namespace, name = m.Namespace, m.Name
-		modelInfo = fmt.Sprintf("BaseModel %s/%s", namespace, name)
+		namespace, name, kind = m.Namespace, m.Name, "BaseModel"
 	case *v1beta1.ClusterBaseModel:
 		p.updateModelSpec(&m.Spec, metadata)
-		name = m.Name
-		modelInfo = fmt.Sprintf("ClusterBaseModel %s", name)
+		name, kind = m.Name, "ClusterBaseModel"
 	default:
 		return fmt.Errorf("unsupported model type: %T", model)
 	}
 
-	p.logger.Infof("Updating %s with extracted metadata", modelInfo)
-
-	// Update the model in Kubernetes
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var latest interface{}
 		var err error
-
-		// Get the latest version of the model
 		switch model.(type) {
 		case *v1beta1.BaseModel:
 			latest, err = p.omeClient.OmeV1beta1().BaseModels(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 		case *v1beta1.ClusterBaseModel:
 			latest, err = p.omeClient.OmeV1beta1().ClusterBaseModels().Get(context.TODO(), name, metav1.GetOptions{})
 		}
-
 		if err != nil {
-			return fmt.Errorf("failed to get latest model: %w", err)
+			return fmt.Errorf("get latest %s %s/%s: %w", kind, namespace, name, err)
 		}
 
-		// Update the spec with our changes (reapply them to the latest version)
 		switch m := latest.(type) {
 		case *v1beta1.BaseModel:
 			p.updateModelSpec(&m.Spec, metadata)
-		case *v1beta1.ClusterBaseModel:
-			p.updateModelSpec(&m.Spec, metadata)
-		}
-
-		// Update the model
-		switch m := latest.(type) {
-		case *v1beta1.BaseModel:
 			_, err = p.omeClient.OmeV1beta1().BaseModels(namespace).Update(context.TODO(), m, metav1.UpdateOptions{})
 		case *v1beta1.ClusterBaseModel:
+			p.updateModelSpec(&m.Spec, metadata)
 			_, err = p.omeClient.OmeV1beta1().ClusterBaseModels().Update(context.TODO(), m, metav1.UpdateOptions{})
 		}
-
 		if err != nil {
-			return fmt.Errorf("failed to update model: %w", err)
+			return fmt.Errorf("update %s %s/%s: %w", kind, namespace, name, err)
 		}
-
-		p.logger.Debugf("Successfully updated %s", modelInfo)
 		return nil
 	})
 }
 
-// updateBaseModel updates the BaseModel CRD with information from the extracted metadata
 func (p *ModelConfigParser) updateBaseModel(model *v1beta1.BaseModel, metadata ModelMetadata) error {
 	return p.updateModel(model, metadata)
 }
 
-// updateClusterBaseModel updates the ClusterBaseModel CRD with information from the extracted metadata
 func (p *ModelConfigParser) updateClusterBaseModel(model *v1beta1.ClusterBaseModel, metadata ModelMetadata) error {
 	return p.updateModel(model, metadata)
 }
 
-// extractModelMetadataFromHF extracts relevant metadata using the HuggingFaceModel interface
+// extractModelMetadataFromHF is a thin shim used only by the
+// mock-driven unit tests; production paths call
+// extractModelMetadataFromHFWithParameterCount directly.
 func (p *ModelConfigParser) extractModelMetadataFromHF(hfModel modelconfig.HuggingFaceModel) ModelMetadata {
 	return p.extractModelMetadataFromHFWithParameterCount(hfModel, nil)
 }
 
 func (p *ModelConfigParser) extractModelMetadataFromHFWithParameterCount(hfModel modelconfig.HuggingFaceModel, parameterCountOverride *int64) ModelMetadata {
-	p.logger.Infof("Extracting metadata from HuggingFace model: type=%s, architecture=%s",
-		hfModel.GetModelType(), hfModel.GetArchitecture())
-
 	var diffusionModel *modelconfig.DiffusionPipelineSpec
 	if dm, ok := hfModel.(modelconfig.HuggingFaceDiffusionModel); ok {
 		diffusionModel = dm.GetDiffusionModel()
 	}
-	isDiffusion := diffusionModel != nil
-	modelType := hfModel.GetModelType()
-	var parameterCount int64
+
+	parameterCount := hfModel.GetParameterCount()
 	if parameterCountOverride != nil {
 		parameterCount = *parameterCountOverride
-	} else {
-		parameterCount = hfModel.GetParameterCount()
 	}
 
 	metadata := ModelMetadata{
-		ModelType:          modelType,
+		ModelType:          hfModel.GetModelType(),
 		ModelArchitecture:  hfModel.GetArchitecture(),
 		ModelParameterSize: modelconfig.FormatParamCount(parameterCount),
 		MaxTokens:          int32(hfModel.GetContextLength()),
 		ModelCapabilities:  capabilitiesAsStrings(hfModel, p.logger),
 	}
-
-	if isDiffusion {
-		metadata.ModelFormat = v1beta1.ModelFormat{
-			Name:    "diffusers",
-			Version: &diffusionModel.DiffusersVersion,
-		}
-		metadata.ModelFramework = &v1beta1.ModelFrameworkSpec{
-			Name:    "diffusers",
-			Version: &diffusionModel.DiffusersVersion,
-		}
-		metadata.DiffusionPipeline = convertDiffusionPipelineSpec(diffusionModel)
-	} else {
-		// Set the model format (most models use SafeTensors)
-		version := "1.0.0"
-		metadata.ModelFormat = v1beta1.ModelFormat{
-			Name:    "safetensors",
-			Version: &version,
-		}
-
-		metadata.ModelFramework = &v1beta1.ModelFrameworkSpec{
-			Name: "transformers",
-		}
-	}
-
-	// Set transformer version if available
-	if !isDiffusion {
-		transformerVersion := hfModel.GetTransformerVersion()
-		if transformerVersion != "" {
-			metadata.ModelFramework.Version = &transformerVersion
-			p.logger.Infof("Setting transformer version: %s", transformerVersion)
-		}
-	}
+	p.populateFormatAndFramework(&metadata, hfModel, diffusionModel)
 
 	// metadata.Quantization is intentionally NOT set here. The parser
 	// callers (ParseModelConfigFromFiles + parseModelConfigDir) resolve
@@ -580,30 +516,67 @@ func (p *ModelConfigParser) extractModelMetadataFromHFWithParameterCount(hfModel
 	// config that drove the safetensors parameter counting — otherwise
 	// you can get NVFP4 count + FP8 spec on a model that ships both.
 
-	// Get the model size in bytes
-	var modelSizeBytes int64
+	modelSizeBytes := hfModel.GetModelSizeBytes()
 	if parameterCountOverride != nil {
 		modelSizeBytes = modelconfig.EstimateModelSizeBytes(parameterCount, hfModel.GetTorchDtype())
-	} else {
-		modelSizeBytes = hfModel.GetModelSizeBytes()
-	}
-	if modelSizeBytes > 0 {
-		p.logger.Infof("Model size in bytes: %d (%.2f GB)",
-			modelSizeBytes, float64(modelSizeBytes)/1000000000.0)
 	}
 
-	// Get the raw JSON configuration for status
-	configJSON, err := json.Marshal(struct {
-		ModelType          string `json:"model_type"`
-		Architecture       string `json:"architecture"`
-		ContextLength      int    `json:"context_length"`
-		ParameterCount     string `json:"parameter_count"`
-		HasVision          bool   `json:"has_vision"`
-		IsEmbedding        bool   `json:"is_embedding"`
-		TransformerVersion string `json:"transformers_version"`
-		TorchDtype         string `json:"torch_dtype"`
-		ModelSizeBytes     int64  `json:"model_size_bytes"`
-	}{
+	configJSON, err := marshalModelConfiguration(hfModel, parameterCount, modelSizeBytes)
+	if err != nil {
+		p.logger.Warnw("marshal model configuration failed", "error", err)
+	} else {
+		metadata.ModelConfiguration = configJSON
+	}
+
+	p.logger.Infow("extracted model metadata",
+		"model_type", metadata.ModelType,
+		"architecture", metadata.ModelArchitecture,
+		"size", metadata.ModelParameterSize,
+		"max_tokens", metadata.MaxTokens,
+		"capabilities", metadata.ModelCapabilities)
+	return metadata
+}
+
+// populateFormatAndFramework sets ModelFormat, ModelFramework, and (for
+// diffusion models) DiffusionPipeline. Diffusion uses the diffusers
+// library version end-to-end; transformer models default to
+// safetensors + transformers, with the version overridden if the
+// config reports one.
+func (p *ModelConfigParser) populateFormatAndFramework(metadata *ModelMetadata, hfModel modelconfig.HuggingFaceModel, diffusionModel *modelconfig.DiffusionPipelineSpec) {
+	if diffusionModel != nil {
+		version := diffusionModel.DiffusersVersion
+		metadata.ModelFormat = v1beta1.ModelFormat{Name: formatNameDiffusers, Version: &version}
+		metadata.ModelFramework = &v1beta1.ModelFrameworkSpec{Name: formatNameDiffusers, Version: &version}
+		metadata.DiffusionPipeline = convertDiffusionPipelineSpec(diffusionModel)
+		return
+	}
+
+	version := safetensorsFormatVersion
+	metadata.ModelFormat = v1beta1.ModelFormat{Name: formatNameSafetensors, Version: &version}
+	metadata.ModelFramework = &v1beta1.ModelFrameworkSpec{Name: frameworkTransformers}
+	if transformerVersion := hfModel.GetTransformerVersion(); transformerVersion != "" {
+		metadata.ModelFramework.Version = &transformerVersion
+	}
+}
+
+// modelConfigurationSnapshot is the JSON shape we serialize into
+// BaseModel.Spec.ModelConfiguration. Keep field names stable — they're
+// read by downstream tooling and consumed verbatim by the agent's
+// status path.
+type modelConfigurationSnapshot struct {
+	ModelType          string `json:"model_type"`
+	Architecture       string `json:"architecture"`
+	ContextLength      int    `json:"context_length"`
+	ParameterCount     string `json:"parameter_count"`
+	HasVision          bool   `json:"has_vision"`
+	IsEmbedding        bool   `json:"is_embedding"`
+	TransformerVersion string `json:"transformers_version"`
+	TorchDtype         string `json:"torch_dtype"`
+	ModelSizeBytes     int64  `json:"model_size_bytes"`
+}
+
+func marshalModelConfiguration(hfModel modelconfig.HuggingFaceModel, parameterCount, modelSizeBytes int64) ([]byte, error) {
+	return json.Marshal(modelConfigurationSnapshot{
 		ModelType:          hfModel.GetModelType(),
 		Architecture:       hfModel.GetArchitecture(),
 		ContextLength:      hfModel.GetContextLength(),
@@ -614,98 +587,86 @@ func (p *ModelConfigParser) extractModelMetadataFromHFWithParameterCount(hfModel
 		TorchDtype:         hfModel.GetTorchDtype(),
 		ModelSizeBytes:     modelSizeBytes,
 	})
-	if err == nil {
-		metadata.ModelConfiguration = configJSON
-	} else {
-		p.logger.Warnf("Failed to marshal model configuration: %v", err)
-	}
-
-	p.logger.Infof("Extracted metadata: type=%s, architecture=%s, size=%s, maxTokens=%d, capabilities=%v",
-		metadata.ModelType, metadata.ModelArchitecture, metadata.ModelParameterSize,
-		metadata.MaxTokens, metadata.ModelCapabilities)
-
-	return metadata
 }
 
+// updateModelSpec merges parsed metadata into spec, only writing fields
+// the operator left unset. Returns whether any field was changed. The
+// "only fill what's nil" rule lets operators pin overrides in the CR
+// and have the parser leave them alone on every reconcile.
 func (p *ModelConfigParser) updateModelSpec(spec *v1beta1.BaseModelSpec, metadata ModelMetadata) bool {
-	p.logger.Info("Updating model spec with extracted metadata")
-
 	updated := false
-
-	// Use a helper function for updating fields
-	updateField := func(current interface{}, new interface{}, fieldName string) bool {
-		isUpdated := false
-		switch c := current.(type) {
-		case **string:
-			if *c == nil && new != nil {
-				val := new.(string)
-				*c = &val
-				isUpdated = true
-			}
-		case *[]string:
-			if len(*c) == 0 && len(new.([]string)) > 0 {
-				*c = new.([]string)
-				isUpdated = true
-			}
-		case *v1beta1.ModelFormat:
-			if c.Name == "" {
-				*c = new.(v1beta1.ModelFormat)
-				isUpdated = true
-			}
-		case **v1beta1.ModelFrameworkSpec:
-			if *c == nil && new != nil {
-				*c = new.(*v1beta1.ModelFrameworkSpec)
-				isUpdated = true
-			}
-		case **int32:
-			if *c == nil {
-				if val, ok := new.(int32); ok && val > 0 {
-					*c = &val
-					isUpdated = true
-				}
-			}
-		case **v1beta1.DiffusionPipelineSpec:
-			if *c == nil && new != nil {
-				*c = new.(*v1beta1.DiffusionPipelineSpec)
-				isUpdated = true
-			}
-		case **v1beta1.ModelQuantization:
-			if *c == nil && new.(v1beta1.ModelQuantization) != "" {
-				val := new.(v1beta1.ModelQuantization)
-				*c = &val
-				isUpdated = true
-			}
-		case *runtime.RawExtension:
-			if new != nil && len(new.([]byte)) > 0 && !bytes.Equal(c.Raw, new.([]byte)) {
-				c.Raw = append(c.Raw[:0], new.([]byte)...)
-				isUpdated = true
-			}
+	for _, set := range []func() bool{
+		func() bool { return updateField(&spec.ModelType, metadata.ModelType) },
+		func() bool { return updateField(&spec.ModelArchitecture, metadata.ModelArchitecture) },
+		func() bool { return updateField(&spec.ModelFramework, metadata.ModelFramework) },
+		func() bool { return updateField(&spec.ModelFormat, metadata.ModelFormat) },
+		func() bool { return updateField(&spec.ModelParameterSize, metadata.ModelParameterSize) },
+		func() bool { return updateField(&spec.MaxTokens, metadata.MaxTokens) },
+		func() bool { return updateField(&spec.ModelCapabilities, metadata.ModelCapabilities) },
+		func() bool { return updateField(&spec.ApiCapabilities, metadata.ApiCapabilities) },
+		func() bool { return updateField(&spec.Quantization, metadata.Quantization) },
+		func() bool { return updateField(&spec.ModelConfiguration, metadata.ModelConfiguration) },
+		func() bool { return updateField(&spec.DiffusionPipeline, metadata.DiffusionPipeline) },
+	} {
+		if set() {
+			updated = true
 		}
-
-		if isUpdated {
-			p.logger.Debugf("Setting %s: %v", fieldName, new)
-		} else if current != nil {
-			p.logger.Debugf("%s already set, not updating", fieldName)
-		}
-
-		return isUpdated
 	}
-
-	// Update each field using the helper function
-	updated = updateField(&spec.ModelType, metadata.ModelType, "ModelType") || updated
-	updated = updateField(&spec.ModelArchitecture, metadata.ModelArchitecture, "ModelArchitecture") || updated
-	updated = updateField(&spec.ModelFramework, metadata.ModelFramework, "ModelFramework") || updated
-	updated = updateField(&spec.ModelFormat, metadata.ModelFormat, "ModelFormat") || updated
-	updated = updateField(&spec.ModelParameterSize, metadata.ModelParameterSize, "ModelParameterSize") || updated
-	updated = updateField(&spec.MaxTokens, metadata.MaxTokens, "MaxTokens") || updated
-	updated = updateField(&spec.ModelCapabilities, metadata.ModelCapabilities, "ModelCapabilities") || updated
-	updated = updateField(&spec.ApiCapabilities, metadata.ApiCapabilities, "ApiCapabilities") || updated
-	updated = updateField(&spec.Quantization, metadata.Quantization, "Quantization") || updated
-	updated = updateField(&spec.ModelConfiguration, metadata.ModelConfiguration, "ModelConfiguration") || updated
-	updated = updateField(&spec.DiffusionPipeline, metadata.DiffusionPipeline, "DiffusionPipeline") || updated
-
-	p.logger.Info("Model spec update complete", "updated", updated)
 	return updated
+}
+
+// updateField writes new into current only when current is the zero
+// value for its type (nil pointer, empty slice, empty struct). Returns
+// whether the write happened. The type switch covers every pointer/slice
+// kind that BaseModelSpec uses for parser-derived fields.
+func updateField(current interface{}, new interface{}) bool {
+	switch c := current.(type) {
+	case **string:
+		if *c == nil && new != nil {
+			val := new.(string)
+			*c = &val
+			return true
+		}
+	case *[]string:
+		if len(*c) == 0 && len(new.([]string)) > 0 {
+			*c = new.([]string)
+			return true
+		}
+	case *v1beta1.ModelFormat:
+		if c.Name == "" {
+			*c = new.(v1beta1.ModelFormat)
+			return true
+		}
+	case **v1beta1.ModelFrameworkSpec:
+		if *c == nil && new != nil {
+			*c = new.(*v1beta1.ModelFrameworkSpec)
+			return true
+		}
+	case **int32:
+		if *c == nil {
+			if val, ok := new.(int32); ok && val > 0 {
+				*c = &val
+				return true
+			}
+		}
+	case **v1beta1.DiffusionPipelineSpec:
+		if *c == nil && new != nil {
+			*c = new.(*v1beta1.DiffusionPipelineSpec)
+			return true
+		}
+	case **v1beta1.ModelQuantization:
+		if *c == nil && new.(v1beta1.ModelQuantization) != "" {
+			val := new.(v1beta1.ModelQuantization)
+			*c = &val
+			return true
+		}
+	case *runtime.RawExtension:
+		if new != nil && len(new.([]byte)) > 0 && !bytes.Equal(c.Raw, new.([]byte)) {
+			c.Raw = append(c.Raw[:0], new.([]byte)...)
+			return true
+		}
+	}
+	return false
 }
 
 // ApplyModelMetadata updates unset BaseModel spec fields from parsed metadata.
@@ -751,63 +712,39 @@ func convertDiffusionComponent(component *modelconfig.DiffusionComponentSpec) *v
 	return &v1beta1.DiffusionComponentSpec{Library: component.Library, Type: component.Type}
 }
 
-// shouldSkipConfigParsing checks if config parsing should be skipped for this model
+// shouldSkipConfigParsing honors the per-object skip annotation
+// (truthy string). Returns false when neither object carries it.
 func (p *ModelConfigParser) shouldSkipConfigParsing(baseModel *v1beta1.BaseModel, clusterBaseModel *v1beta1.ClusterBaseModel) bool {
-	// Check base model annotations
-	if baseModel != nil {
-		if value, exists := baseModel.Annotations[ConfigParsingAnnotation]; exists {
-			if strings.ToLower(value) == "true" {
-				p.logger.Infof("Skipping config parsing for BaseModel %s/%s due to annotation", baseModel.Namespace, baseModel.Name)
-				return true
-			}
-		}
+	if baseModel != nil && hasSkipParsingAnnotation(baseModel.Annotations) {
+		return true
 	}
-
-	// Check cluster base model annotations
-	if clusterBaseModel != nil {
-		if value, exists := clusterBaseModel.Annotations[ConfigParsingAnnotation]; exists {
-			if strings.ToLower(value) == "true" {
-				p.logger.Infof("Skipping config parsing for ClusterBaseModel %s due to annotation", clusterBaseModel.Name)
-				return true
-			}
-		}
+	if clusterBaseModel != nil && hasSkipParsingAnnotation(clusterBaseModel.Annotations) {
+		return true
 	}
-
 	return false
 }
 
-// PopulateArtifactAttribute returns a pointer to an updated copy of currentModelMetadata
-// where the Artifact field is set to the provided artifact pointer
-//
-// Parameters:
-//   - artifact: pointer to built artifact based on reusability
-//   - currentModelMetadata: pointer of current model metadata
-//
-// Returns:
-//   - *ModelMetadata: pointer to the updated metadata with Artifact populated
+func hasSkipParsingAnnotation(annotations map[string]string) bool {
+	return strings.EqualFold(annotations[ConfigParsingAnnotation], "true")
+}
+
+// PopulateArtifactAttribute writes the provided Artifact onto
+// currentModelMetadata in place and returns it. A nil artifact is a
+// no-op so callers can pass through unconditionally.
 func (p *ModelConfigParser) PopulateArtifactAttribute(artifact *Artifact, currentModelMetadata *ModelMetadata) *ModelMetadata {
 	if artifact != nil {
 		currentModelMetadata.Artifact = *artifact
-		p.logger.Infof("current artifact is :%s", currentModelMetadata.Artifact)
 	}
 	return currentModelMetadata
 }
 
-/*
-BuildArtifactAttribute constructs an Artifact instance from the provided SHA and parent information.
-
-Fields set:
-  - Sha: set to the provided commit SHA identifying the artifact version
-  - ParentPath: a single-entry map {matchedParentName: parentPath} pointing to the parent artifact location
-  - ChildrenPaths: initialized to an empty (non-nil) slice so it can be safely appended to later
-
-Returns a pointer to the created Artifact.
-*/
+// BuildArtifactAttribute constructs an Artifact pointing at a single
+// parent path keyed by matchedParentName. ChildrenPaths is passed
+// through verbatim (callers append to it later).
 func (p *ModelConfigParser) BuildArtifactAttribute(sha string, matchedParentName string, parentPath string, childrenPaths []string) *Artifact {
-	artifact := Artifact{
+	return &Artifact{
 		Sha:           sha,
 		ParentPath:    map[string]string{matchedParentName: parentPath},
 		ChildrenPaths: childrenPaths,
 	}
-	return &artifact
 }

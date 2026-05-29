@@ -14,7 +14,15 @@ import (
 	"strings"
 )
 
-const maxSafetensorsHeaderSize = 10 * 1024 * 1024
+const (
+	maxSafetensorsHeaderSize = 10 * 1024 * 1024
+
+	// SafetensorsExt is the file extension of a safetensors shard.
+	SafetensorsExt = ".safetensors"
+	// SafetensorsIndexFileName is the manifest sharded safetensors
+	// models ship listing tensor_name → shard_filename.
+	SafetensorsIndexFileName = "model.safetensors.index.json"
+)
 
 // SafetensorsFileInput provides a safetensors-related file from a non-filesystem source.
 // Data for .safetensors files only needs to contain the 8-byte header length followed by
@@ -34,54 +42,50 @@ func FindAndParseSafetensors(configPath string) (int64, error) {
 // FindAndParseSafetensorsWithQuantConfig is the quant-aware variant.
 // Non-nil quantConfig enables per-tensor classification (packed-quant
 // storage multiplier + scale-tensor skip + exclude_modules); nil
-// preserves the legacy naive-count behavior.
+// preserves the legacy naive-count behavior. Prefers a sibling
+// model.safetensors.index.json over scanning *.safetensors files
+// because the index gives us deterministic shard ordering.
 func FindAndParseSafetensorsWithQuantConfig(configPath string, quantConfig *HFQuantConfig) (int64, error) {
 	if configPath == "" {
 		return 0, fmt.Errorf("config path cannot be empty")
 	}
 
 	dir := filepath.Dir(configPath)
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, fmt.Errorf("failed to list directory '%s': %w", dir, err)
-	}
 
-	// Look for index.json file first, which might point to sharded safetensors
-	indexPath := filepath.Join(dir, "model.safetensors.index.json")
+	indexPath := filepath.Join(dir, SafetensorsIndexFileName)
 	if _, err := os.Stat(indexPath); err == nil {
 		count, err := parseSafetensorsIndexFile(indexPath, quantConfig)
 		if err != nil {
-			return 0, fmt.Errorf("failed to parse safetensors index '%s': %w", indexPath, err)
+			return 0, fmt.Errorf("parse safetensors index %s: %w", indexPath, err)
 		}
 		return count, nil
 	}
 
-	// If no index file, process all safetensors files and sum their parameters
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, fmt.Errorf("list directory %s: %w", dir, err)
+	}
+
 	var totalParams int64
 	safetensorsFound := false
-
 	for _, f := range files {
-		if strings.HasSuffix(f.Name(), ".safetensors") {
-			fullPath := filepath.Join(dir, f.Name())
-			params, err := parseSafetensorsFile(fullPath, quantConfig)
-			if err != nil {
-				return 0, fmt.Errorf("failed to parse safetensors file '%s': %w", fullPath, err)
-			}
-
-			// Check for overflow when adding
-			if totalParams > math.MaxInt64-params {
-				return 0, fmt.Errorf("parameter count overflow when processing '%s': total would exceed maximum value", fullPath)
-			}
-
-			totalParams += params
-			safetensorsFound = true
+		if !strings.HasSuffix(f.Name(), SafetensorsExt) {
+			continue
 		}
+		fullPath := filepath.Join(dir, f.Name())
+		params, err := parseSafetensorsFile(fullPath, quantConfig)
+		if err != nil {
+			return 0, fmt.Errorf("parse safetensors file %s: %w", fullPath, err)
+		}
+		if totalParams > math.MaxInt64-params {
+			return 0, fmt.Errorf("parameter count overflow when processing %s", fullPath)
+		}
+		totalParams += params
+		safetensorsFound = true
 	}
-
 	if !safetensorsFound {
-		return 0, fmt.Errorf("no .safetensors files found in directory '%s'", dir)
+		return 0, fmt.Errorf("no .safetensors files found in directory %s", dir)
 	}
-
 	return totalParams, nil
 }
 
@@ -110,10 +114,10 @@ func FindAndParseSafetensorsFilesWithQuantConfig(files []SafetensorsFileInput, q
 		}
 		byPath[filePath] = file.Data
 		switch path.Base(filePath) {
-		case "model.safetensors.index.json":
+		case SafetensorsIndexFileName:
 			indexPaths = append(indexPaths, filePath)
 		default:
-			if strings.HasSuffix(path.Base(filePath), ".safetensors") {
+			if strings.HasSuffix(path.Base(filePath), SafetensorsExt) {
 				safetensorsPaths = append(safetensorsPaths, filePath)
 			}
 		}
@@ -200,21 +204,21 @@ func parseSafetensorsReader(reader io.Reader, label string, quantConfig *HFQuant
 
 	headerLenBuf := make([]byte, 8)
 	if _, err := io.ReadFull(reader, headerLenBuf); err != nil {
-		return 0, fmt.Errorf("failed to read header length from '%s': %w", label, err)
+		return 0, fmt.Errorf("read header length from %s: %w", label, err)
 	}
 	headerLen := binary.LittleEndian.Uint64(headerLenBuf)
 
-	// Sanity check for header length to prevent excessive memory allocation
+	// Defensive cap — a corrupted file can claim an absurd header
+	// length and exhaust memory if we blindly allocate.
 	if headerLen > maxSafetensorsHeaderSize {
-		return 0, fmt.Errorf("header length %d in '%s' exceeds maximum allowed size of %d bytes",
+		return 0, fmt.Errorf("header length %d in %s exceeds maximum %d bytes",
 			headerLen, label, maxSafetensorsHeaderSize)
 	}
 
 	headerBytes := make([]byte, headerLen)
 	if _, err := io.ReadFull(reader, headerBytes); err != nil {
-		return 0, fmt.Errorf("failed to read JSON header from '%s': %w", label, err)
+		return 0, fmt.Errorf("read JSON header from %s: %w", label, err)
 	}
-
 	return ParseSafetensorsHeaderQuantAware(headerBytes, label, quantConfig)
 }
 
@@ -308,25 +312,24 @@ func parseSafetensorsIndexData(data []byte, indexPath string, parseShard func(st
 	var index struct {
 		WeightMap map[string]string `json:"weight_map"`
 	}
-
 	if err := json.Unmarshal(data, &index); err != nil {
-		return 0, fmt.Errorf("failed to parse safetensors index JSON from '%s': %w", indexPath, err)
+		return 0, fmt.Errorf("parse safetensors index JSON from %s: %w", indexPath, err)
 	}
-
 	if len(index.WeightMap) == 0 {
-		return 0, fmt.Errorf("no weight mappings found in safetensors index '%s'", indexPath)
+		return 0, fmt.Errorf("no weight mappings found in safetensors index %s", indexPath)
 	}
 
-	shardFiles := make(map[string]bool)
+	// Dedupe shard filenames; the index maps every tensor name to a
+	// shard, so the same shard appears many times.
+	shardSet := make(map[string]struct{})
 	for _, shard := range index.WeightMap {
 		if shard == "" {
-			return 0, fmt.Errorf("empty shard filename found in index '%s'", indexPath)
+			return 0, fmt.Errorf("empty shard filename found in index %s", indexPath)
 		}
-		shardFiles[shard] = true
+		shardSet[shard] = struct{}{}
 	}
-
-	shards := make([]string, 0, len(shardFiles))
-	for shard := range shardFiles {
+	shards := make([]string, 0, len(shardSet))
+	for shard := range shardSet {
 		shards = append(shards, shard)
 	}
 	sort.Strings(shards)
@@ -335,14 +338,13 @@ func parseSafetensorsIndexData(data []byte, indexPath string, parseShard func(st
 	for _, shard := range shards {
 		count, err := parseShard(shard)
 		if err != nil {
-			return 0, fmt.Errorf("failed to parse shard '%s' referenced in index '%s': %w", shard, indexPath, err)
+			return 0, fmt.Errorf("parse shard %s referenced in index %s: %w", shard, indexPath, err)
 		}
 		if total > math.MaxInt64-count {
-			return 0, fmt.Errorf("parameter count overflow when processing shards from '%s': total would exceed maximum value", indexPath)
+			return 0, fmt.Errorf("parameter count overflow processing shards from %s", indexPath)
 		}
 		total += count
 	}
-
 	return total, nil
 }
 

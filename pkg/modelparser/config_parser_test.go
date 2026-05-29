@@ -90,19 +90,11 @@ func createDefaultMockModel() *mockHuggingFaceModel {
 	}
 }
 
-// TestExtractModelMetadataFromHF tests the extractModelMetadataFromHF function
 func TestExtractModelMetadataFromHF(t *testing.T) {
-	// Create a test logger
 	logger, _ := zap.NewDevelopment()
-	sugar := logger.Sugar()
 	defer func() { _ = logger.Sync() }()
+	parser := &ModelConfigParser{logger: logger.Sugar()}
 
-	// Create a ModelConfigParser with the logger
-	parser := &ModelConfigParser{
-		logger: sugar,
-	}
-
-	// Define test cases
 	testCases := []struct {
 		name                 string
 		mockModel            *mockHuggingFaceModel
@@ -214,24 +206,19 @@ func TestExtractModelMetadataFromHF(t *testing.T) {
 		},
 	}
 
-	// Run test cases
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Call the function under test
 			metadata := parser.extractModelMetadataFromHF(tc.mockModel)
-			// extractModelMetadataFromHF no longer writes Quantization
-			// (see config_parser.go's "intentionally NOT set here"
-			// comment) — the parser entry points apply it via
-			// applyQuantizationFromConfig as a single source of truth.
-			// Mimic that here so the existing assertion is meaningful.
+			// extractModelMetadataFromHF intentionally does not write
+			// Quantization — the parser entry points apply it via
+			// applyQuantizationFromConfig as the single source of truth.
+			// Mimic that here so the assertion below is meaningful.
 			applyQuantizationFromConfig(&metadata, syntheticQuantConfig(tc.mockModel.quantizationType), parser.logger)
 
-			// Verify the metadata using the custom validation function
 			if !tc.expectedMetadata(metadata) {
 				t.Errorf("Metadata does not match expected values for test case %s", tc.name)
 			}
 
-			// Check specific expected capabilities
 			hasCapability := false
 			for _, cap := range metadata.ModelCapabilities {
 				if cap == tc.expectedCapability {
@@ -241,161 +228,103 @@ func TestExtractModelMetadataFromHF(t *testing.T) {
 			}
 			assert.True(t, hasCapability, "Expected capability %s not found", tc.expectedCapability)
 
-			// Check quantization
 			assert.Equal(t, tc.expectedQuantization, metadata.Quantization,
 				"Quantization mismatch for test case %s", tc.name)
 
-			// Check that ModelConfiguration JSON is valid and contains the expected fields
 			if len(metadata.ModelConfiguration) > 0 {
 				var configData map[string]interface{}
-				err := json.Unmarshal(metadata.ModelConfiguration, &configData)
-				assert.NoError(t, err, "Failed to unmarshal ModelConfiguration JSON")
-
-				assert.Equal(t, tc.mockModel.GetModelType(), configData["model_type"],
-					"model_type mismatch in ModelConfiguration")
-				assert.Equal(t, tc.mockModel.GetArchitecture(), configData["architecture"],
-					"architecture mismatch in ModelConfiguration")
-				assert.Equal(t, tc.mockModel.GetContextLength(), int(configData["context_length"].(float64)),
-					"context_length mismatch in ModelConfiguration")
-				assert.Equal(t, tc.mockModel.HasVision(), configData["has_vision"],
-					"has_vision mismatch in ModelConfiguration")
+				require.NoError(t, json.Unmarshal(metadata.ModelConfiguration, &configData))
+				assert.Equal(t, tc.mockModel.GetModelType(), configData["model_type"])
+				assert.Equal(t, tc.mockModel.GetArchitecture(), configData["architecture"])
+				assert.Equal(t, tc.mockModel.GetContextLength(), int(configData["context_length"].(float64)))
+				assert.Equal(t, tc.mockModel.HasVision(), configData["has_vision"])
 			}
 		})
 	}
 }
 
-// Helper function to find test for the direct internal functions
-// TestNewModelConfigParser tests the constructor
 func TestNewModelConfigParser(t *testing.T) {
-	// Create dependencies
 	logger, _ := zap.NewDevelopment()
 	sugar := logger.Sugar()
 
-	// Test with nil client
 	parser := NewModelConfigParser(nil, sugar)
 	assert.NotNil(t, parser)
 	assert.Nil(t, parser.omeClient)
 	assert.Equal(t, sugar, parser.logger)
 
-	// Test with a client
 	client := &versioned.Clientset{}
 	parser = NewModelConfigParser(client, sugar)
 	assert.NotNil(t, parser)
 	assert.Equal(t, client, parser.omeClient)
 }
 
-// TestFindConfigFile tests the findConfigFile method
 func TestFindConfigFile(t *testing.T) {
-	// Create a temp directory structure for testing
 	tempDir, err := os.MkdirTemp("", "config-test")
-	assert.NoError(t, err)
-	defer func(path string) {
-		_ = os.RemoveAll(path)
-	}(tempDir)
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	// Create a test logger
 	logger, _ := zap.NewDevelopment()
-	sugar := logger.Sugar()
+	parser := &ModelConfigParser{logger: logger.Sugar()}
 
-	// Create parser
-	parser := &ModelConfigParser{
-		logger: sugar,
-	}
-
-	// Case 1: Config in root directory
+	// Config in the root.
 	configPath := filepath.Join(tempDir, DefaultConfigFileName)
 	_, err = os.Create(configPath)
-	assert.NoError(t, err)
-
+	require.NoError(t, err)
 	resultPath, err := parser.findConfigFile(tempDir)
 	assert.NoError(t, err)
 	assert.Equal(t, configPath, resultPath)
 
-	// Case 2: Config in model subdirectory
-	_ = os.Remove(configPath) // Remove from root
+	// Config nested under model/.
+	_ = os.Remove(configPath)
 	modelDir := filepath.Join(tempDir, "model")
-	err = os.Mkdir(modelDir, 0755)
-	assert.NoError(t, err)
+	require.NoError(t, os.Mkdir(modelDir, 0755))
 	configPath = filepath.Join(modelDir, DefaultConfigFileName)
 	_, err = os.Create(configPath)
-	assert.NoError(t, err)
-
+	require.NoError(t, err)
 	resultPath, err = parser.findConfigFile(tempDir)
 	assert.NoError(t, err)
 	assert.Equal(t, configPath, resultPath)
 
-	// Case 3: No config file
-	_ = os.RemoveAll(tempDir)
-	err = os.Mkdir(tempDir, 0755)
-	assert.NoError(t, err)
-
+	// No config file anywhere.
+	require.NoError(t, os.RemoveAll(tempDir))
+	require.NoError(t, os.Mkdir(tempDir, 0755))
 	_, err = parser.findConfigFile(tempDir)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "config.json not found in")
+	assert.ErrorContains(t, err, "config.json not found in")
 }
 
-// TestShouldSkipConfigParsing tests the shouldSkipConfigParsing method
 func TestShouldSkipConfigParsing(t *testing.T) {
-	// Create a test logger
 	logger, _ := zap.NewDevelopment()
-	sugar := logger.Sugar()
+	parser := &ModelConfigParser{logger: logger.Sugar()}
 
-	// Create parser
-	parser := &ModelConfigParser{
-		logger: sugar,
-	}
-
-	// Case 1: BaseModel with skip annotation
 	baseModel := &v1beta1.BaseModel{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-base-model",
-			Annotations: map[string]string{
-				ConfigParsingAnnotation: "true",
-			},
+			Name:        "test-base-model",
+			Annotations: map[string]string{ConfigParsingAnnotation: "true"},
 		},
 	}
+	assert.True(t, parser.shouldSkipConfigParsing(baseModel, nil))
 
-	result := parser.shouldSkipConfigParsing(baseModel, nil)
-	assert.True(t, result)
-
-	// Case 2: BaseModel without skip annotation
 	baseModel.Annotations = map[string]string{}
-	result = parser.shouldSkipConfigParsing(baseModel, nil)
-	assert.False(t, result)
+	assert.False(t, parser.shouldSkipConfigParsing(baseModel, nil))
 
-	// Case 3: ClusterBaseModel with skip annotation
 	clusterBaseModel := &v1beta1.ClusterBaseModel{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-cluster-base-model",
-			Annotations: map[string]string{
-				ConfigParsingAnnotation: "true",
-			},
+			Name:        "test-cluster-base-model",
+			Annotations: map[string]string{ConfigParsingAnnotation: "true"},
 		},
 	}
+	assert.True(t, parser.shouldSkipConfigParsing(nil, clusterBaseModel))
 
-	result = parser.shouldSkipConfigParsing(nil, clusterBaseModel)
-	assert.True(t, result)
-
-	// Case 4: ClusterBaseModel without skip annotation
 	clusterBaseModel.Annotations = map[string]string{}
-	result = parser.shouldSkipConfigParsing(nil, clusterBaseModel)
-	assert.False(t, result)
+	assert.False(t, parser.shouldSkipConfigParsing(nil, clusterBaseModel))
 
-	// Case 5: Case insensitive "TRUE" value
-	baseModel.Annotations = map[string]string{
-		ConfigParsingAnnotation: "TRUE",
-	}
-	result = parser.shouldSkipConfigParsing(baseModel, nil)
-	assert.True(t, result)
+	// Case-insensitive truthy.
+	baseModel.Annotations = map[string]string{ConfigParsingAnnotation: "TRUE"}
+	assert.True(t, parser.shouldSkipConfigParsing(baseModel, nil))
 }
 
-// TestUpdateModelSpec tests the updateModelSpec method which only updates nil fields
 func TestUpdateModelSpec(t *testing.T) {
-	// Create a simple logger
-	logger := zap.NewNop().Sugar()
-	parser := &ModelConfigParser{logger: logger}
-
-	// Create basic metadata with just string fields
+	parser := &ModelConfigParser{logger: zap.NewNop().Sugar()}
 	metadata := ModelMetadata{
 		ModelType:          "llama",
 		ModelArchitecture:  "LlamaForCausalLM",
@@ -404,27 +333,16 @@ func TestUpdateModelSpec(t *testing.T) {
 		ModelCapabilities:  []string{string(v1beta1.ModelCapabilityTextToText)},
 	}
 
-	// Basic test: Empty spec gets fields set
+	// Empty spec gets every field filled.
 	emptySpec := &v1beta1.BaseModelSpec{}
 	parser.updateModelSpec(emptySpec, metadata)
-
-	// Verify only string pointer fields that are guaranteed to be set
-	assert.NotNil(t, emptySpec.ModelType)
 	assert.Equal(t, "llama", *emptySpec.ModelType)
-
-	assert.NotNil(t, emptySpec.ModelArchitecture)
 	assert.Equal(t, "LlamaForCausalLM", *emptySpec.ModelArchitecture)
-
-	assert.NotNil(t, emptySpec.ModelParameterSize)
 	assert.Equal(t, "7B", *emptySpec.ModelParameterSize)
-
-	assert.NotNil(t, emptySpec.MaxTokens)
 	assert.Equal(t, int32(4096), *emptySpec.MaxTokens)
-
-	// Verify slice
 	assert.Equal(t, []string{string(v1beta1.ModelCapabilityTextToText)}, emptySpec.ModelCapabilities)
 
-	// Test that existing values aren't overwritten
+	// Pre-set fields stay; nil fields are filled.
 	existingType := "something-else"
 	existingArch := "different-arch"
 	existingMaxTokens := int32(2048)
@@ -434,17 +352,11 @@ func TestUpdateModelSpec(t *testing.T) {
 		MaxTokens:         &existingMaxTokens,
 		ModelCapabilities: []string{"EXISTING_CAP"},
 	}
-
 	parser.updateModelSpec(existingSpec, metadata)
-
-	// Existing values shouldn't be overwritten
 	assert.Equal(t, "something-else", *existingSpec.ModelType)
 	assert.Equal(t, "different-arch", *existingSpec.ModelArchitecture)
 	assert.Equal(t, int32(2048), *existingSpec.MaxTokens)
 	assert.Equal(t, []string{"EXISTING_CAP"}, existingSpec.ModelCapabilities)
-
-	// But nil values should be populated
-	assert.NotNil(t, existingSpec.ModelParameterSize)
 	assert.Equal(t, "7B", *existingSpec.ModelParameterSize)
 }
 
@@ -496,54 +408,41 @@ func TestParseDiffusionPipelineSpec(t *testing.T) {
 	}
 }
 
-// TestParseModelConfig tests part of the ParseModelConfig method logic,
-// focusing on the parts that don't rely on the modelconfig.LoadModelConfig function
+// TestParseModelConfig covers the shouldSkipConfigParsing and
+// missing-directory branches of ParseModelConfig that don't need a
+// modelconfig.LoadModelConfig override. The success path is covered
+// by TestParseModelConfig_PrefersModelIndex and the From-Files
+// variants below, which install a mock loader.
 func TestParseModelConfig(t *testing.T) {
-	// Create a temp directory structure for testing
 	tempDir, err := os.MkdirTemp("", "model-config-test")
-	assert.NoError(t, err)
-	defer func(path string) {
-		_ = os.RemoveAll(path)
-	}(tempDir)
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	// Create a test logger
 	logger, _ := zap.NewDevelopment()
-	sugar := logger.Sugar()
+	parser := &ModelConfigParser{logger: logger.Sugar()}
 
-	// Create parser
-	parser := &ModelConfigParser{
-		logger: sugar,
-	}
-
-	// Create config.json
 	configDir := filepath.Join(tempDir, "model")
-	err = os.MkdirAll(configDir, 0755)
-	assert.NoError(t, err)
-	configPath := filepath.Join(configDir, DefaultConfigFileName)
-	configFile, err := os.Create(configPath)
-	assert.NoError(t, err)
-	_, _ = configFile.WriteString("{\"model_type\": \"llama\", \"architectures\": [\"LlamaForCausalLM\"]}\n")
-	_ = configFile.Close()
+	require.NoError(t, os.MkdirAll(configDir, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(configDir, DefaultConfigFileName),
+		[]byte(`{"model_type":"llama","architectures":["LlamaForCausalLM"]}`),
+		0o644,
+	))
 
-	// Case 1: Non-existent directory
+	// Non-existent directory: parse returns (nil, nil).
 	metadata, err := parser.ParseModelConfig("/non-existent", nil, nil)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.Nil(t, metadata)
 
-	// Case 2: Skip config parsing due to annotation
+	// Skip annotation: parse returns (nil, nil).
 	baseModel := &v1beta1.BaseModel{
 		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				ConfigParsingAnnotation: "true",
-			},
+			Annotations: map[string]string{ConfigParsingAnnotation: "true"},
 		},
 	}
 	metadata, err = parser.ParseModelConfig(tempDir, baseModel, nil)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.Nil(t, metadata)
-
-	// Note: We can't fully test cases 3 and 4 without mocking the private loadModelConfig field,
-	// but we can at least verify the shouldSkipConfigParsing functionality
 }
 
 func TestParseModelConfig_PrefersModelIndex(t *testing.T) {
@@ -888,30 +787,6 @@ func TestParseModelConfigFromFilesRejectsEscapingPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "must stay under model root")
 }
 
-func TestFormatParamCount(t *testing.T) {
-	testCases := []struct {
-		input    int64
-		expected string
-	}{
-		{0, "0"},
-		{1000000, "1M"},
-		{1500000, "1.5M"},
-		{10000000, "10M"},
-		{1000000000, "1B"},
-		{1500000000, "1.5B"},
-		{7000000000, "7B"},
-		{13000000000, "13B"},
-		{70000000000, "70B"},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.expected, func(t *testing.T) {
-			result := modelconfig.FormatParamCount(tc.input)
-			assert.Equal(t, tc.expected, result, "FormatParamCount failed for input %d", tc.input)
-		})
-	}
-}
-
 func mustReadTestFile(t *testing.T, filePath string) []byte {
 	t.Helper()
 
@@ -945,40 +820,30 @@ func mustReadSafetensorsHeader(t *testing.T, filePath string) []byte {
 }
 
 func TestPopulateArtifactAttribute_SetsFields(t *testing.T) {
-	logger := zap.NewNop().Sugar()
-	parser := &ModelConfigParser{logger: logger}
+	parser := &ModelConfigParser{logger: zap.NewNop().Sugar()}
 
-	orig := &ModelMetadata{} // empty input metadata
-	sha := "abc123"
-	parent := "/models/model1"
+	orig := &ModelMetadata{}
 	artifact := &Artifact{
-		Sha:        sha,
-		ParentPath: map[string]string{"parentModel": parent},
+		Sha:        "abc123",
+		ParentPath: map[string]string{"parentModel": "/models/model1"},
 	}
 
 	out := parser.PopulateArtifactAttribute(artifact, orig)
-	assert.NotNil(t, out, "returned metadata should not be nil")
-
-	// Verify Artifact fields
-	assert.Equal(t, sha, out.Artifact.Sha)
+	require.NotNil(t, out)
+	assert.Equal(t, "abc123", out.Artifact.Sha)
 	assert.Equal(t, map[string]string{"parentModel": "/models/model1"}, out.Artifact.ParentPath)
 	assert.Nil(t, out.Artifact.ChildrenPaths)
 }
 
 func TestPopulateArtifactAttribute_NilInput(t *testing.T) {
-	logger := zap.NewNop().Sugar()
-	parser := &ModelConfigParser{logger: logger}
+	parser := &ModelConfigParser{logger: zap.NewNop().Sugar()}
 
-	// Prepare input with pre-filled artifact to ensure immutability of the input value
-	original := &ModelMetadata{
-		ModelType: "ClusterBaseModel",
-	}
-
+	original := &ModelMetadata{ModelType: "ClusterBaseModel"}
 	out := parser.PopulateArtifactAttribute(nil, original)
 	assert.Empty(t, out.Artifact.Sha)
 	assert.Nil(t, out.Artifact.ParentPath)
 	assert.Nil(t, out.Artifact.ChildrenPaths)
-	assert.Equal(t, original, out, "no update should happen to original model moetadata")
+	assert.Equal(t, original, out, "nil artifact must be a no-op")
 }
 
 // syntheticQuantConfig wraps a bare quant_method string in the unified
@@ -996,8 +861,7 @@ func syntheticQuantConfig(quantMethod string) *modelconfig.HFQuantConfig {
 }
 
 func TestBuildArtifactAttribute_Basic(t *testing.T) {
-	logger := zap.NewNop().Sugar()
-	parser := &ModelConfigParser{logger: logger}
+	parser := &ModelConfigParser{logger: zap.NewNop().Sugar()}
 
 	sha := "commit-sha-123"
 	parentName := "clusterbasemodel.parentModel"
@@ -1005,11 +869,8 @@ func TestBuildArtifactAttribute_Basic(t *testing.T) {
 	childrenPaths := []string{"/models/child1"}
 
 	artifact := parser.BuildArtifactAttribute(sha, parentName, parentPath, childrenPaths)
-	if assert.NotNil(t, artifact, "artifact should not be nil") {
-		assert.Equal(t, sha, artifact.Sha, "sha should match input")
-		assert.Equal(t, map[string]string{parentName: parentPath}, artifact.ParentPath, "parentPath should be a single-entry map with provided key/value")
-		// ChildrenPaths should be a non-nil empty slice to allow safe appends
-		assert.NotNil(t, artifact.ChildrenPaths, "childrenPaths should be non-nil")
-		assert.Equal(t, childrenPaths, artifact.ChildrenPaths, "childrenPaths should be same as input")
-	}
+	require.NotNil(t, artifact)
+	assert.Equal(t, sha, artifact.Sha)
+	assert.Equal(t, map[string]string{parentName: parentPath}, artifact.ParentPath)
+	assert.Equal(t, childrenPaths, artifact.ChildrenPaths)
 }

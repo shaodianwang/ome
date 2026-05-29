@@ -96,14 +96,56 @@ func estimateMoEParams(hiddenSize, numLayers, intermediateSize, moeIntermediateS
 }
 
 // nestedLLMConfigKeys lists the JSON keys under which multimodal
-// models commonly store their language/LLM sub-configuration.
+// models commonly store their language/LLM sub-configuration. First
+// matching key wins when probing for fallback fields.
 var nestedLLMConfigKeys = []string{"text_config", "llm_config", "language_config"}
 
+// visionShapeKeys are top-level JSON keys whose mere presence signals
+// the model is multimodal/vision-capable. Any one is enough; we don't
+// combine. Coverage:
+//   - vision_config: most VL models (Qwen-VL, Gemma3, Llama4,
+//     MLlama, DeepSeek-VL, Janus, ...).
+//   - mm_vision_tower: pre-vision_config LLaVA convention
+//     (LLaVA v1.5 raw checkpoints).
+//   - image_token_id / image_token_index: VL models that thread
+//     a single image token through tokenization (Qwen2/3-VL,
+//     Gemma3, Llama4, LLaVA-1.5-HF, MLlama).
+//   - img_processor: Phi-3 Vision style (nests CLIP vision
+//     model spec under this key).
+var visionShapeKeys = []string{
+	"vision_config",
+	"mm_vision_tower",
+	"image_token_id",
+	"image_token_index",
+	"img_processor",
+}
+
+// nestedLLMConfig is the shape of fields we fish out of nested
+// sub-configs in multimodal models. Dtype is a duplicate field because
+// the qwen3_5 family writes the data type under "dtype" rather than
+// "torch_dtype".
+type nestedLLMConfig struct {
+	Architectures         []string `json:"architectures"`
+	HiddenSize            int      `json:"hidden_size"`
+	NumHiddenLayers       int      `json:"num_hidden_layers"`
+	NumAttentionHeads     int      `json:"num_attention_heads"`
+	IntermediateSize      int      `json:"intermediate_size"`
+	MaxPositionEmbeddings int      `json:"max_position_embeddings"`
+	VocabSize             int      `json:"vocab_size"`
+	TransformersVersion   string   `json:"transformers_version"`
+	TorchDtype            string   `json:"torch_dtype"`
+	Dtype                 string   `json:"dtype"`
+	NRoutedExperts        int      `json:"n_routed_experts"`
+	NumLocalExperts       int      `json:"num_local_experts"`
+	NumExperts            int      `json:"num_experts"`
+	NSharedExperts        int      `json:"n_shared_experts"`
+	MoeIntermediateSize   int      `json:"moe_intermediate_size"`
+}
+
 // probeNestedConfig fills zero-valued fields in config from nested
-// sub-configurations commonly found in multimodal model configs. It
-// only fills fields that are zero/empty, so it is safe to call
-// unconditionally. It also detects vision multimodality from JSON
-// shape and resolves top-level MoE field name variants.
+// sub-configurations commonly found in multimodal model configs and
+// detects vision multimodality from JSON shape. Safe to call
+// unconditionally — only zero/empty fields are touched.
 func probeNestedConfig(data []byte, config *GenericModelConfig) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -115,120 +157,95 @@ func probeNestedConfig(data []byte, config *GenericModelConfig) {
 		if !ok {
 			continue
 		}
-		var nested struct {
-			Architectures         []string `json:"architectures"`
-			HiddenSize            int      `json:"hidden_size"`
-			NumHiddenLayers       int      `json:"num_hidden_layers"`
-			NumAttentionHeads     int      `json:"num_attention_heads"`
-			IntermediateSize      int      `json:"intermediate_size"`
-			MaxPositionEmbeddings int      `json:"max_position_embeddings"`
-			VocabSize             int      `json:"vocab_size"`
-			TransformersVersion   string   `json:"transformers_version"`
-			TorchDtype            string   `json:"torch_dtype"`
-			Dtype                 string   `json:"dtype"` // qwen3_5 family stores dtype here
-			// MoE fields — try all common JSON key names via multiple fields.
-			NRoutedExperts      int `json:"n_routed_experts"`
-			NumLocalExperts     int `json:"num_local_experts"`
-			NumExperts          int `json:"num_experts"`
-			NSharedExperts      int `json:"n_shared_experts"`
-			MoeIntermediateSize int `json:"moe_intermediate_size"`
-		}
+		var nested nestedLLMConfig
 		if err := json.Unmarshal(sub, &nested); err != nil {
 			continue
 		}
-
-		if len(config.Architectures) == 0 && len(nested.Architectures) > 0 {
-			config.Architectures = nested.Architectures
-		}
-		if config.HiddenSize == 0 {
-			config.HiddenSize = nested.HiddenSize
-		}
-		if config.NumHiddenLayers == 0 {
-			config.NumHiddenLayers = nested.NumHiddenLayers
-		}
-		if config.NumAttentionHeads == 0 {
-			config.NumAttentionHeads = nested.NumAttentionHeads
-		}
-		if config.IntermediateSize == 0 {
-			config.IntermediateSize = nested.IntermediateSize
-		}
-		if config.MaxPositionEmbeddings == 0 {
-			config.MaxPositionEmbeddings = nested.MaxPositionEmbeddings
-		}
-		if config.VocabSize == 0 {
-			config.VocabSize = nested.VocabSize
-		}
-		if config.TransformerVersion == "" {
-			config.TransformerVersion = nested.TransformersVersion
-		}
-		if config.TorchDtype == "" {
-			config.TorchDtype = nested.TorchDtype
-		}
-		if config.TorchDtype == "" && nested.Dtype != "" {
-			config.TorchDtype = nested.Dtype
-		}
-
-		if config.NRoutedExperts == 0 {
-			switch {
-			case nested.NRoutedExperts > 0:
-				config.NRoutedExperts = nested.NRoutedExperts
-			case nested.NumLocalExperts > 0:
-				config.NRoutedExperts = nested.NumLocalExperts
-			case nested.NumExperts > 0:
-				config.NRoutedExperts = nested.NumExperts
-			}
-		}
-		if config.NSharedExperts == 0 {
-			config.NSharedExperts = nested.NSharedExperts
-		}
-		if config.MoeIntermediateSize == 0 {
-			config.MoeIntermediateSize = nested.MoeIntermediateSize
-		}
-
-		break // First matching nested config wins.
+		mergeNestedIntoConfig(config, &nested)
+		break
 	}
 
-	// Resolve top-level MoE field name variants (num_local_experts,
-	// num_experts) that don't match the GenericModelConfig JSON tags.
 	if config.NRoutedExperts == 0 {
-		var topLevel struct {
-			NumLocalExperts int `json:"num_local_experts"`
-			NumExperts      int `json:"num_experts"`
-		}
-		if err := json.Unmarshal(data, &topLevel); err == nil {
-			switch {
-			case topLevel.NumLocalExperts > 0:
-				config.NRoutedExperts = topLevel.NumLocalExperts
-			case topLevel.NumExperts > 0:
-				config.NRoutedExperts = topLevel.NumExperts
-			}
-		}
+		config.NRoutedExperts = resolveTopLevelMoEExpertCount(data)
 	}
 
-	// Detect vision multimodality from JSON shape. Any of these
-	// top-level keys is enough on its own; we don't combine them.
-	//   - vision_config: most VL models (Qwen-VL, Gemma3, Llama4,
-	//     MLlama, DeepSeek-VL, Janus, ...).
-	//   - mm_vision_tower: pre-vision_config LLaVA convention
-	//     (LLaVA v1.5 raw checkpoints).
-	//   - image_token_id / image_token_index: VL models that thread
-	//     a single image token through tokenization (Qwen2/3-VL,
-	//     Gemma3, Llama4, LLaVA-1.5-HF, MLlama).
-	//   - img_processor: Phi-3 Vision style (nests CLIP vision
-	//     model spec under this key).
-	visionShapeKeys := []string{
-		"vision_config",
-		"mm_vision_tower",
-		"image_token_id",
-		"image_token_index",
-		"img_processor",
-	}
 	for _, key := range visionShapeKeys {
 		if _, ok := raw[key]; ok {
 			config.hasVisionConfig = true
 			break
 		}
 	}
+}
+
+// mergeNestedIntoConfig copies non-zero fields from nested into config,
+// preserving any value already set at the top level (first writer
+// wins).
+func mergeNestedIntoConfig(config *GenericModelConfig, nested *nestedLLMConfig) {
+	if len(config.Architectures) == 0 && len(nested.Architectures) > 0 {
+		config.Architectures = nested.Architectures
+	}
+	if config.HiddenSize == 0 {
+		config.HiddenSize = nested.HiddenSize
+	}
+	if config.NumHiddenLayers == 0 {
+		config.NumHiddenLayers = nested.NumHiddenLayers
+	}
+	if config.NumAttentionHeads == 0 {
+		config.NumAttentionHeads = nested.NumAttentionHeads
+	}
+	if config.IntermediateSize == 0 {
+		config.IntermediateSize = nested.IntermediateSize
+	}
+	if config.MaxPositionEmbeddings == 0 {
+		config.MaxPositionEmbeddings = nested.MaxPositionEmbeddings
+	}
+	if config.VocabSize == 0 {
+		config.VocabSize = nested.VocabSize
+	}
+	if config.TransformerVersion == "" {
+		config.TransformerVersion = nested.TransformersVersion
+	}
+	if config.TorchDtype == "" {
+		config.TorchDtype = nested.TorchDtype
+	}
+	if config.TorchDtype == "" {
+		config.TorchDtype = nested.Dtype
+	}
+
+	if config.NRoutedExperts == 0 {
+		config.NRoutedExperts = firstPositive(nested.NRoutedExperts, nested.NumLocalExperts, nested.NumExperts)
+	}
+	if config.NSharedExperts == 0 {
+		config.NSharedExperts = nested.NSharedExperts
+	}
+	if config.MoeIntermediateSize == 0 {
+		config.MoeIntermediateSize = nested.MoeIntermediateSize
+	}
+}
+
+// resolveTopLevelMoEExpertCount probes the top-level JSON for MoE
+// field-name variants (num_local_experts, num_experts) that don't map
+// to GenericModelConfig's JSON tags. Returns 0 if neither is set.
+func resolveTopLevelMoEExpertCount(data []byte) int {
+	var topLevel struct {
+		NumLocalExperts int `json:"num_local_experts"`
+		NumExperts      int `json:"num_experts"`
+	}
+	if err := json.Unmarshal(data, &topLevel); err != nil {
+		return 0
+	}
+	return firstPositive(topLevel.NumLocalExperts, topLevel.NumExperts)
+}
+
+// firstPositive returns the first strictly positive value, or 0 if
+// none.
+func firstPositive(values ...int) int {
+	for _, v := range values {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 func (c *GenericModelConfig) GetQuantizationType() string {

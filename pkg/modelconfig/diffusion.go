@@ -32,75 +32,73 @@ func LoadDiffusionPipelineSpec(modelIndexPath string) (*DiffusionPipelineSpec, e
 	if modelIndexPath == "" {
 		return nil, fmt.Errorf("model index path cannot be empty")
 	}
-
 	data, err := os.ReadFile(modelIndexPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read model_index.json at %s: %w", modelIndexPath, err)
+		return nil, fmt.Errorf("read model_index.json at %s: %w", modelIndexPath, err)
 	}
-
-	data = SanitizeJSONBytes(data)
-
-	pipeline, err := ParseDiffusionPipelineSpec(data)
-	if err != nil {
-		return nil, err
-	}
-
-	return pipeline, nil
+	return ParseDiffusionPipelineSpec(SanitizeJSONBytes(data))
 }
 
 // ParseDiffusionPipelineSpec parses a diffusers model_index.json payload.
 func ParseDiffusionPipelineSpec(data []byte) (*DiffusionPipelineSpec, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("failed to parse model_index.json: %w", err)
+		return nil, fmt.Errorf("parse model_index.json: %w", err)
 	}
 
 	pipeline := &DiffusionPipelineSpec{}
 	pipeline.ClassName = parseJSONStringField(raw, "_class_name", "class_name", "className")
 	pipeline.DiffusersVersion = parseJSONStringField(raw, "_diffusers_version", "diffusers_version")
 
+	// Map well-known pipeline sub-component keys to the typed fields on
+	// DiffusionPipelineSpec. "unet" and "transformer" collapse to the
+	// same field — the diffusers library renamed the convention but
+	// older SD1.x/SD2.x checkpoints still ship the legacy key.
+	knownComponents := map[string]func(*DiffusionComponentSpec){
+		"scheduler":    func(c *DiffusionComponentSpec) { pipeline.Scheduler = c },
+		"text_encoder": func(c *DiffusionComponentSpec) { pipeline.TextEncoder = c },
+		"tokenizer":    func(c *DiffusionComponentSpec) { pipeline.Tokenizer = c },
+		"transformer":  func(c *DiffusionComponentSpec) { pipeline.Transformer = c },
+		"unet":         func(c *DiffusionComponentSpec) { pipeline.Transformer = c },
+		"vae":          func(c *DiffusionComponentSpec) { pipeline.VAE = c },
+	}
+
 	additional := map[string]DiffusionComponentSpec{}
 	for key, value := range raw {
 		if strings.HasPrefix(key, "_") {
 			continue
 		}
-
 		component, ok := parseDiffusersComponent(value)
 		if !ok {
 			continue
 		}
-
-		switch strings.ToLower(key) {
-		case "scheduler":
-			pipeline.Scheduler = component
-		case "text_encoder":
-			pipeline.TextEncoder = component
-		case "tokenizer":
-			pipeline.Tokenizer = component
-		case "transformer", "unet":
-			pipeline.Transformer = component
-		case "vae":
-			pipeline.VAE = component
-		default:
+		if setter, known := knownComponents[strings.ToLower(key)]; known {
+			setter(component)
+		} else {
 			additional[key] = *component
 		}
 	}
-
 	if len(additional) > 0 {
 		pipeline.AdditionalComponents = additional
 	}
 
-	if pipeline.ClassName == "" &&
-		pipeline.Scheduler == nil &&
-		pipeline.TextEncoder == nil &&
-		pipeline.Tokenizer == nil &&
-		pipeline.Transformer == nil &&
-		pipeline.VAE == nil &&
-		len(pipeline.AdditionalComponents) == 0 {
+	if !pipelineHasMetadata(pipeline) {
 		return nil, fmt.Errorf("model_index.json did not contain diffusion pipeline metadata")
 	}
-
 	return pipeline, nil
+}
+
+// pipelineHasMetadata reports whether at least one diffusion pipeline
+// field was populated; an entirely empty pipeline is treated as a
+// parse failure.
+func pipelineHasMetadata(p *DiffusionPipelineSpec) bool {
+	return p.ClassName != "" ||
+		p.Scheduler != nil ||
+		p.TextEncoder != nil ||
+		p.Tokenizer != nil ||
+		p.Transformer != nil ||
+		p.VAE != nil ||
+		len(p.AdditionalComponents) > 0
 }
 
 func parseDiffusersComponent(raw json.RawMessage) (*DiffusionComponentSpec, bool) {
@@ -161,74 +159,85 @@ func (c *GenericDiffusionModelConfig) GetDiffusionModel() *DiffusionPipelineSpec
 	return c.DiffusionPipeline
 }
 
+// requiredDiffusionComponents lists the three component sub-directories
+// every diffusion pipeline must have for a valid parameter count.
+// transformer/ falls back to unet/ because older SD1.x/SD2.x checkpoints
+// use the UNet naming.
+var requiredDiffusionComponents = []string{"text_encoder", "transformer", "vae"}
+
+// GetParameterCount sums safetensors counts across each required
+// diffusion component plus any AdditionalComponents in the pipeline.
+// Returns 0 if any required component fails to load — diffusion params
+// are best-effort estimates, and a partial total is worse than no
+// total.
 func (c *GenericDiffusionModelConfig) GetParameterCount() int64 {
 	if c.ConfigPath == "" {
 		return 0
 	}
 
 	baseDir := filepath.Dir(c.ConfigPath)
-	textEncoderConfig := filepath.Join(baseDir, "text_encoder", "config.json")
-	transformerConfig := filepath.Join(baseDir, "transformer", "config.json")
-	if _, err := os.Stat(transformerConfig); err != nil {
-		unetConfig := filepath.Join(baseDir, "unet", "config.json")
-		if _, unetErr := os.Stat(unetConfig); unetErr == nil {
-			transformerConfig = unetConfig
-		}
-	}
-	vaeConfig := filepath.Join(baseDir, "vae", "config.json")
+	var total int64
 
-	total := int64(0)
-
-	add := func(label, configPath string, required bool) bool {
-		if configPath == "" {
-			if required {
-				fmt.Printf("Warning: %s config path is empty\n", label)
-				return false
-			}
-			return true
-		}
-		if _, err := os.Stat(configPath); err != nil {
-			if required {
-				fmt.Printf("Warning: %s config not found at '%s': %v\n", label, configPath, err)
-				return false
-			}
-			return true
-		}
-
-		count, err := FindAndParseSafetensors(configPath)
-		if err != nil {
-			if required {
-				fmt.Printf("Warning: failed to parse %s safetensors: %v\n", label, err)
-				return false
-			}
-			return true
+	for _, name := range requiredDiffusionComponents {
+		configPath := componentConfigPath(baseDir, name)
+		count, ok := safetensorsCountForComponent(configPath)
+		if !ok {
+			return 0
 		}
 		if total > math.MaxInt64-count {
-			fmt.Printf("Warning: parameter count overflow when adding %s\n", label)
-			return false
+			return 0
 		}
 		total += count
-		return true
 	}
 
-	if !add("text_encoder", textEncoderConfig, true) {
-		return 0
-	}
-	if !add("transformer", transformerConfig, true) {
-		return 0
-	}
-	if !add("vae", vaeConfig, true) {
-		return 0
-	}
-
+	// AdditionalComponents (safety_checker, image_encoder, ...) are
+	// optional: a missing or unparseable sub-directory contributes 0
+	// rather than zeroing out the entire total.
 	for name := range c.DiffusionPipeline.AdditionalComponents {
 		configPath := filepath.Join(baseDir, name, "config.json")
-		if !add(name, configPath, false) {
-			return 0
+		if count, ok := safetensorsCountForComponent(configPath); ok {
+			if total > math.MaxInt64-count {
+				return 0
+			}
+			total += count
 		}
 	}
 
 	return total
+}
+
+// componentConfigPath returns the path to <baseDir>/<name>/config.json,
+// substituting unet/ for transformer/ on older SD checkpoints that
+// pre-date the diffusers transformer-naming convention.
+func componentConfigPath(baseDir, name string) string {
+	primary := filepath.Join(baseDir, name, "config.json")
+	if name == "transformer" {
+		if _, err := os.Stat(primary); err != nil {
+			unet := filepath.Join(baseDir, "unet", "config.json")
+			if _, err := os.Stat(unet); err == nil {
+				return unet
+			}
+		}
+	}
+	return primary
+}
+
+// safetensorsCountForComponent returns (count, true) on success and
+// (0, false) when the sub-directory is missing or unparseable. The bool
+// lets the caller distinguish "no params" from "couldn't load" without
+// printing to stdout from inside library code.
+func safetensorsCountForComponent(configPath string) (int64, bool) {
+	if configPath == "" {
+		return 0, false
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		return 0, false
+	}
+	count, err := FindAndParseSafetensors(configPath)
+	if err != nil {
+		return 0, false
+	}
+	return count, true
 }
 
 func (c *GenericDiffusionModelConfig) GetQuantizationType() string {

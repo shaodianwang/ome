@@ -18,24 +18,13 @@ func ParseModelConfig(input ModelConfigInput) (HuggingFaceModel, error) {
 
 // LoadModelConfig reads a HuggingFace model configuration from a
 // config.json or model_index.json file and returns a HuggingFaceModel.
-//
-// Example:
-//
-//	config, err := modelconfig.LoadModelConfig("/path/to/config.json")
-//	if err != nil {
-//		// handle error
-//	}
-//	paramCount := config.GetParameterCount()
-//	contextLength := config.GetContextLength()
 func LoadModelConfig(configPath string) (HuggingFaceModel, error) {
 	if configPath == "" {
 		return nil, fmt.Errorf("config path cannot be empty")
 	}
-
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read model config file '%s': %w", configPath, err)
+		return nil, fmt.Errorf("read model config %s: %w", configPath, err)
 	}
-
 	return parseGenericModelConfig(ModelConfigInput{Path: configPath, Data: data})
 }
