@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/pkg/errors"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -12,6 +13,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -20,8 +22,10 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/rbac"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -136,12 +140,92 @@ func (r *Router) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 		return deploymentResult, err
 	}
 
+	// Per-Component stable Service + PodMonitor for OMENative. See the
+	// rationale on Engine.reconcileOMENativeSubresources; this method is
+	// the router equivalent.
+	if r.DeploymentMode == constants.OMENative {
+		if err := r.reconcileOMENativeSubresources(ctx, isvc, objectMeta, podSpec); err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to reconcile router OMENative sub-resources")
+		}
+	}
+
 	// Update router status
 	if err := r.updateRouterStatus(isvc, objectMeta); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	return deploymentResult, nil
+}
+
+// reconcileOMENativeSubresources ensures the per-Component stable
+// Service (`<isvc>-<comp>`) and PodMonitor for OMENative-managed
+// router. Engine and Decoder have their own equivalent methods —
+// repetition is accepted here over a shared helper so the omenative
+// package can stay pure (pods + headless Service ONLY). See
+// Engine.reconcileOMENativeSubresources for the full rationale.
+func (r *Router) reconcileOMENativeSubresources(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec) error {
+	if podSpec == nil {
+		return nil
+	}
+	selector := map[string]string{
+		constants.InferenceServicePodLabelKey: isvc.Name,
+		constants.OMEComponentLabel:           string(v1beta1.RouterComponent),
+		query.LabelManagedBy:                  query.ManagedByOMENative,
+	}
+	componentMeta := objectMeta.DeepCopy()
+	componentMeta.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+	}
+
+	// Stable Service via the SAME top-level reconciler RawDeployment and
+	// MultiNode use; only the selector + owner refs are OMENative-shaped.
+	sr := service.NewServiceReconciler(r.Client, r.Scheme, *componentMeta, &r.routerSpec.ComponentExtensionSpec, podSpec, selector)
+	if _, err := sr.Reconcile(); err != nil {
+		return errors.Wrap(err, "stable service")
+	}
+
+	// PodMonitor — build inline (shared podmonitor reconciler hardcodes
+	// the `app=<name>` selector that matches Raw / MultiNode pods but
+	// NOT OMENative pods). Scrape port: prefer "metrics", else first
+	// declared port, else "http".
+	portName := "http"
+	if len(podSpec.Containers) > 0 {
+		ports := podSpec.Containers[0].Ports
+		for _, p := range ports {
+			if p.Name == "metrics" {
+				portName = "metrics"
+				break
+			}
+		}
+		if portName == "http" && len(ports) > 0 && ports[0].Name != "" {
+			portName = ports[0].Name
+		}
+	}
+	target := &monitoringv1.PodMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      objectMeta.Name,
+			Namespace: objectMeta.Namespace,
+		},
+	}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, target, func() error {
+		target.Spec.NamespaceSelector = monitoringv1.NamespaceSelector{
+			MatchNames: []string{objectMeta.Namespace},
+		}
+		target.Spec.Selector = metav1.LabelSelector{MatchLabels: selector}
+		target.Spec.PodMetricsEndpoints = []monitoringv1.PodMetricsEndpoint{{
+			Port:     &portName,
+			Path:     "/metrics",
+			Interval: "10s",
+		}}
+		target.Labels = selector
+		target.OwnerReferences = []metav1.OwnerReference{
+			*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrapf(err, "pod monitor %s/%s", target.Namespace, target.Name)
+	}
+	return nil
 }
 
 // reconcileDeployment manages the deployment logic for different deployment modes

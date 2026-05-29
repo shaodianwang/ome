@@ -307,6 +307,27 @@ func runLegacyN(t *testing.T, fix fixture, passes int) clusterState {
 		// in practice. A real error surfaces as a divergence at
 		// the snapshot stage (no pods created, etc.).
 		_, _ = omenative.ReconcileComponent(ctx, params)
+		// The per-Component stable Service reconciliation was moved out
+		// of omenative.ReconcileComponent to the per-Component Reconcile()
+		// in components/{engine,decoder,router}.go's
+		// reconcileOMENativeSubresources method so it fires for both
+		// OMENative sub-paths (direct and IR-managed). Mirror that call
+		// here so the legacy snapshot includes the same stable Service
+		// the workload-path snapshot does — without this mirror, the
+		// Services list diverges by one entry per Component.
+		if params.PodSpec != nil {
+			stableMeta := params.ObjectMeta.DeepCopy()
+			stableMeta.OwnerReferences = []metav1.OwnerReference{
+				*metav1.NewControllerRef(params.ISVC, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+			}
+			stableSelector := map[string]string{
+				"ome.io/inferenceservice": params.ISVC.Name,
+				"component":               string(params.Component),
+				query.LabelManagedBy:      query.ManagedByOMENative,
+			}
+			sr := service.NewServiceReconciler(params.Client, nil, *stableMeta, params.ComponentExt, params.PodSpec, stableSelector)
+			_, _ = sr.Reconcile()
+		}
 	}
 
 	return snapshotClusterState(t, ctx, cli, isvc, fix.component)

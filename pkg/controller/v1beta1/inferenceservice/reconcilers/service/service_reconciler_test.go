@@ -342,8 +342,8 @@ func TestServiceReconciler_OMENativeShape(t *testing.T) {
 	// componentMeta as the OMENative caller assembles it: name matches
 	// query.StableServiceName(isvcName, component), with the
 	// per-Component OwnerReferences stamped on it (mirrors the
-	// ensureStableServiceViaTopLevel wiring in
-	// omenative/services.go).
+	// reconcileOMENativeSubresources wiring in
+	// components/{engine,decoder,router}.go).
 	componentMeta := metav1.ObjectMeta{
 		Name:      serviceName,
 		Namespace: ns,

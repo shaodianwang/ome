@@ -99,14 +99,17 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 	// op runs. Every drain check downstream (drain.IsPodDrained /
 	// drain.IsPodInRotation) reads the EndpointSlices owned by this Service;
 	// without it, drain would fail-loud rather than silently complete.
+	//
+	// The per-Component stable Service + PodMonitor used to be reconciled
+	// here too. Both moved out of the OMENative dispatch — they live on
+	// the per-Component Reconcile() in
+	// components/{engine,decoder,router}.go's
+	// reconcileOMENativeSubresources method so they fire for BOTH OMENative
+	// sub-paths (direct and IR-managed). The omenative package now manages
+	// only pods + the per-Component headless Service (whose naming is tied
+	// to the per-Component pod template renderer); every other top-level
+	// sub-resource is owned by the ISVC controller.
 	if err := ensureHeadlessService(ctx, p); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// PodMonitor lives alongside the headless / stable Services so the
-	// supporting-resource surface OMENative emits matches Raw / MultiNode.
-	// No-op when PodSpec is nil (MinReplicas=0 — nothing to scrape yet).
-	if err := EnsurePodMonitor(ctx, p); err != nil {
 		return ctrl.Result{}, err
 	}
 

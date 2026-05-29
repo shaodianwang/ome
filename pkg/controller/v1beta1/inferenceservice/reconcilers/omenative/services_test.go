@@ -125,16 +125,17 @@ func TestBuildHeadlessServiceSpec_SelectorMatchesRenderedPodLabels(t *testing.T)
 }
 
 // ---------------------------------------------------------------------
-// ensureHeadlessService — exercises the wired-through path that
-// reconciles BOTH the per-Component headless Service (via workload/)
-// AND the per-Component stable Service (via the top-level
-// service.ServiceReconciler).
+// ensureHeadlessService — exercises the workload-delegated path that
+// reconciles ONLY the per-Component headless Service.
 //
-// The stable Service shape itself (selector, ports, owner refs, type)
-// is asserted in the top-level reconciler test
-// (pkg/controller/v1beta1/inferenceservice/reconcilers/service/
-// service_reconciler_test.go::TestServiceReconciler_OMENativeShape).
-// Here we only assert that both Services land in the cluster.
+// The per-Component stable Service + PodMonitor used to be reconciled
+// here too, but moved out to the per-Component Reconcile() in
+// components/{engine,decoder,router}.go's reconcileOMENativeSubresources
+// method so they fire for both OMENative sub-paths (direct and
+// IR-managed). The stable Service behavior is asserted in the
+// per-Component tests (components/{engine,decoder,router}_test.go) and
+// the shape itself in service/service_reconciler_test.go::
+// TestServiceReconciler_OMENativeShape.
 // ---------------------------------------------------------------------
 
 // newServiceReconcilerTestClient builds a fake client wired with the
@@ -183,7 +184,7 @@ func newServiceReconcilerPodSpec() *corev1.PodSpec {
 	}
 }
 
-func TestEnsureHeadlessService_CreatesBothServices(t *testing.T) {
+func TestEnsureHeadlessService_CreatesHeadlessService(t *testing.T) {
 	isvc := newServiceReconcilerISVC("prod", "llama-70b")
 	c := newServiceReconcilerTestClient(t, isvc)
 	p := ReconcileParams{
@@ -201,11 +202,16 @@ func TestEnsureHeadlessService_CreatesBothServices(t *testing.T) {
 		t.Fatalf("ensureHeadlessService: %v", err)
 	}
 
-	for _, name := range []string{"llama-70b-engine-headless", "llama-70b-engine"} {
-		got := &corev1.Service{}
-		if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: name}, got); err != nil {
-			t.Errorf("missing Service %q: %v", name, err)
-		}
+	got := &corev1.Service{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "llama-70b-engine-headless"}, got); err != nil {
+		t.Errorf("missing headless Service: %v", err)
+	}
+	// Stable Service is no longer reconciled from ensureHeadlessService —
+	// it moved out to the per-Component Reconcile() so it covers both
+	// OMENative sub-paths uniformly. Verified in
+	// components/{engine,decoder,router}_test.go.
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "llama-70b-engine"}, got); err == nil {
+		t.Errorf("stable Service should NOT be created from ensureHeadlessService anymore — it was moved out")
 	}
 }
 
@@ -217,12 +223,13 @@ func TestEnsureHeadlessService_NilISVCRejected(t *testing.T) {
 	}
 }
 
-func TestEnsureHeadlessService_NilPodSpecSkipsStableService(t *testing.T) {
-	// MinReplicas=0 cold-start: PodSpec is nil, top-level reconciler
-	// would emit a portless Service. We skip the stable-Service call
-	// in that case (mirrors EnsurePodMonitor's behaviour) but still
-	// emit the headless Service so peer-DNS discovery wiring is in
-	// place for the eventual scale-up.
+func TestEnsureHeadlessService_NilPodSpecOK(t *testing.T) {
+	// MinReplicas=0 cold-start: PodSpec is nil but the headless Service
+	// MUST still be reconciled so peer-DNS discovery wiring is in place
+	// for the eventual scale-up. The per-Component
+	// reconcileOMENativeSubresources method skips both stable Service +
+	// PodMonitor on nil PodSpec — that's covered in
+	// components/{engine,decoder,router}_test.go.
 	isvc := newServiceReconcilerISVC("prod", "llama-70b")
 	c := newServiceReconcilerTestClient(t, isvc)
 	p := ReconcileParams{
@@ -239,8 +246,5 @@ func TestEnsureHeadlessService_NilPodSpecSkipsStableService(t *testing.T) {
 	got := &corev1.Service{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "llama-70b-engine-headless"}, got); err != nil {
 		t.Errorf("headless Service should be created even with nil PodSpec: %v", err)
-	}
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "llama-70b-engine"}, got); err == nil {
-		t.Errorf("stable Service should NOT be created with nil PodSpec")
 	}
 }

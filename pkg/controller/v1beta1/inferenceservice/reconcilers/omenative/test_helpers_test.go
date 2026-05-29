@@ -59,9 +59,10 @@ func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 
 // minimalParams builds a single-pod / engine ReconcileParams.
 // ObjectMeta is populated with the per-Component name + namespace the
-// dispatch site in components/engine.go would supply at runtime — the
-// top-level service.ServiceReconciler used by ensureHeadlessService
-// reads componentMeta.Name to derive the stable Service name.
+// dispatch site in components/engine.go would supply at runtime — kept
+// in this shape because some reconciler-level tests still rely on it
+// even though the stable Service + PodMonitor reconciliation moved out
+// of ReconcileComponent to the per-Component Reconcile() method.
 func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client) ReconcileParams {
 	t.Helper()
 	return ReconcileParams{
@@ -97,9 +98,11 @@ func newFakeClientWithDiscovery(t *testing.T, initObjs ...client.Object) client.
 	if err := discoveryv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add discoveryv1: %v", err)
 	}
-	// ReconcileComponent now emits a PodMonitor alongside the headless +
-	// stable Services (see podmonitor.go); the fake client needs the
-	// monitoring scheme registered so CreateOrUpdate can serialize it.
+	// PodMonitor + stable Service reconciliation moved out of
+	// ReconcileComponent to the per-Component Reconcile() in
+	// components/{engine,decoder,router}.go. The scheme registration
+	// stays so any test that uses this fake client to GET a PodMonitor
+	// (e.g. asserting absence) can serialize the type.
 	if err := monitoringv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add monitoringv1: %v", err)
 	}
