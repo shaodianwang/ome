@@ -31,14 +31,22 @@
 //   - ExpireOperationsIfDeadlinePassed (v1beta1-typed; reads
 //     ISVC.Status.Components.OMENative.InstanceStatuses.Operation
 //     fields directly; the caller runs it before invoking Reconcile).
-//   - ensureHeadlessService / EnsurePodMonitor (ISVC-shape supporting
-//     resources owned by the omenative reconciler).
+//   - PodMonitor (handled by the top-level
+//     pkg/controller/v1beta1/inferenceservice/reconcilers/podmonitor/
+//     reconciler — deployment-mode-agnostic, works against any
+//     per-Component pod label selector).
 //   - ensureRevisionWithCollisionRetry (ISVC-shape collision-counter
 //     bookkeeping; the caller computes the target ControllerRevision
 //     and passes it in).
 //   - AggregateAndWriteStatus (ISVC-shape counters + top-level
 //     EngineReady / DecoderReady / RouterReady condition; the caller
 //     runs it after Reconcile returns).
+//
+// Per-Component headless Service rendering lives in this package
+// (workload.ReconcileHeadlessService in services.go) but is invoked by
+// the caller, not by workload.Reconcile itself. This keeps Reconcile
+// focused on the per-Instance lifecycle while letting both the ISVC
+// adapter and the future IR adapter share the same Service renderer.
 //
 // Those stay on the ISVC adapter; this dispatcher only owns the per-
 // Instance dispatch loop.

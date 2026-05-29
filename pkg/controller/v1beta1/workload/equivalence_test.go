@@ -47,8 +47,10 @@ package workload_test
 //     adapter projection wrapper around `workload.BuildPlan`).
 //
 //  3. Ensure supporting resources (headless Service,
-//     ControllerRevision) via the shared `omenative.BuildHeadlessService`
-//     and `core.EnsureControllerRevisionForISVC` helpers — both pure
+//     ControllerRevision) via the shared
+//     `workload.BuildHeadlessService` (fed by the ISVC adapter's
+//     `omenative.BuildHeadlessServiceSpec`) and
+//     `core.EnsureControllerRevisionForISVC` helpers — both pure
 //     compute / source-agnostic.
 //
 //  4. Call `workloadops.Create` (and Delete) directly against the
@@ -425,8 +427,9 @@ func runWorkloadN(t *testing.T, fix fixture, passes int) clusterState {
 // the workload package owns the helper:
 //
 //  1. Ensure supporting Services (shared helpers:
-//     omenative.BuildHeadlessService + omenative.BuildStableService —
-//     both pure compute; the legacy path uses the same builders).
+//     workload.BuildHeadlessService fed by omenative.BuildHeadlessServiceSpec
+//     + omenative.BuildStableService — both pure compute; the legacy
+//     path uses the same builders).
 //
 //  2. Compute the ComponentPlan via `core.BuildPlan` (the ISVC-side
 //     wrapper around `workload.BuildPlan`).
@@ -451,7 +454,8 @@ func runWorkloadOnce(ctx context.Context, params core.ReconcileParams) error {
 	// emits BOTH the per-Component headless Service AND the per-
 	// Component stable Service. The new path mirrors both so the
 	// Service-name snapshot matches between paths.
-	headless, err := omenative.BuildHeadlessService(params.ISVC, params.Component)
+	headlessSpec := omenative.BuildHeadlessServiceSpec(params.ISVC, params.Component)
+	headless, err := workload.BuildHeadlessService(headlessSpec)
 	if err != nil {
 		return err
 	}
@@ -699,7 +703,7 @@ func mustAddToScheme(t *testing.T, s *runtime.Scheme, add func(*runtime.Scheme) 
 }
 
 // ensureService creates the Service if absent. Mirrors what
-// omenative.reconcileHeadlessService does at the wire level so the
+// workload.ReconcileHeadlessService does at the wire level so the
 // "new path" produces the same Service shape the legacy path would.
 // For the cold-start / two-pass scenarios this harness covers, the
 // Service is byte-identical between passes so a present-Service

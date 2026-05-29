@@ -11,7 +11,9 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // stableServicePort is the port the per-Component stable Service
@@ -30,123 +32,51 @@ const stableServicePort int32 = 8080
 // dispatches into ops/).
 var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
-// BuildHeadlessService produces the per-Component headless Service that
-// gives every OMENative-managed pod a stable FQDN of the form
-//
-//	<pod-name>.<isvc>-<component>-headless.<namespace>.svc.<cluster-domain>
-//
-// Properties:
-//   - ClusterIP=None — no kube-proxy load-balancing; DNS lookups return
-//     per-pod A records.
-//   - PublishNotReadyAddresses=true — peer DNS resolves during gang init
-//     before all pods are Ready, so workers can discover each other while
-//     the controller-owned ome.io/serving gate is still False.
-//   - Selector scoped to ome.io/managed-by=OMENative so the Service does
-//     not pick up legacy LWS-managed or RawDeployment pods that share the
-//     bare component label.
-//   - One OwnerReference back to the parent InferenceService; deletion of
-//     the ISVC cascades to this Service.
-//
-// Pure compute, no I/O.
-func BuildHeadlessService(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) (*corev1.Service, error) {
-	if isvc == nil {
-		return nil, fmt.Errorf("nil InferenceService")
-	}
-
-	selector := map[string]string{
+// componentSelector builds the pod-label selector that scopes every
+// per-Component Service (headless + stable) to the OMENative-managed
+// pods of one (ISVC, component) pair. Shared between the headless
+// spec builder and the stable Service builder so the two Services
+// always select the same pod set — drift between the two would let
+// ingress routing publish pods that peer-DNS resolution couldn't see
+// (or vice versa).
+func componentSelector(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[string]string {
+	return map[string]string{
 		constants.InferenceServicePodLabelKey: isvc.Name,
 		constants.OMEComponentLabel:           string(component),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
 	}
-
-	return &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.HeadlessServiceName(isvc.Name, component),
-			Namespace: isvc.Namespace,
-			Labels:    selector,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(isvc, isvcGroupVersionKind),
-			},
-		},
-		Spec: corev1.ServiceSpec{
-			ClusterIP:                corev1.ClusterIPNone,
-			PublishNotReadyAddresses: true,
-			Selector:                 selector,
-			// Ports omitted by design: this Service exists for DNS-based
-			// peer discovery, not for kube-proxy routing. Each runtime
-			// resolves <pod-name>.<this-service>... and dials whatever
-			// port it cares about. Adding a placeholder port would imply
-			// load-balanceable endpoints, which is the opposite of what
-			// the headless contract is for.
-			Type: corev1.ServiceTypeClusterIP,
-		},
-	}, nil
 }
 
-// reconcileHeadlessService ensures the per-Component headless Service
-// (`<isvc>-<component>-headless`) exists and matches the spec
-// BuildHeadlessService produces. Idempotent and drift-correcting: on
-// every reconcile it patches Selector / PublishNotReadyAddresses /
-// Type / Labels / OwnerReferences back to the controller-desired
-// shape, but never touches ClusterIP after Create (immutable
-// post-create).
-//
-// Called at the top of ReconcileComponent before any per-Instance
-// work so the drain path's EndpointSlice reads have a Service to
-// look at on the first reconcile. Without this, drain.IsPodDrained would
-// fall through its "no slices == drained" branch on every drain
-// check and skip the wait entirely — see drain.go's revised
-// fail-loud behavior.
-func reconcileHeadlessService(ctx context.Context, p ReconcileParams) error {
-	if p.Client == nil {
-		return fmt.Errorf("reconcileHeadlessService: nil client")
-	}
-	if p.ISVC == nil {
-		return fmt.Errorf("reconcileHeadlessService: nil ISVC")
-	}
-
-	desired, err := BuildHeadlessService(p.ISVC, p.Component)
-	if err != nil {
-		return fmt.Errorf("reconcileHeadlessService: build desired: %w", err)
-	}
-
-	target := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      desired.Name,
-			Namespace: desired.Namespace,
+// BuildHeadlessServiceSpec adapts an InferenceService + ComponentType
+// into the typed workload.PerComponentServiceSpec the workload
+// renderer consumes. This IS the adapter between the v1beta1 ISVC
+// shape and the owner-agnostic workload boundary — workload/services.go
+// never sees the ISVC. The future IR adapter will have its own
+// equivalent helper populating PerComponentServiceSpec from
+// InferenceReplica fields.
+func BuildHeadlessServiceSpec(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workloadtypes.PerComponentServiceSpec {
+	selector := componentSelector(isvc, component)
+	return workloadtypes.PerComponentServiceSpec{
+		Name:      query.HeadlessServiceName(isvc.Name, component),
+		Namespace: isvc.Namespace,
+		Selector:  selector,
+		Labels:    selector,
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(isvc, isvcGroupVersionKind),
 		},
 	}
-
-	_, err = controllerutil.CreateOrUpdate(ctx, p.Client, target, func() error {
-		// ClusterIP is immutable after create. Only stamp it on the
-		// fresh-create path; existing Services keep whatever the
-		// apiserver assigned (or kept from previous reconciles, since
-		// we always declare ClusterIPNone).
-		if target.CreationTimestamp.IsZero() {
-			target.Spec.ClusterIP = desired.Spec.ClusterIP
-		}
-		target.Spec.PublishNotReadyAddresses = desired.Spec.PublishNotReadyAddresses
-		target.Spec.Selector = desired.Spec.Selector
-		target.Spec.Type = desired.Spec.Type
-		// Ports stay nil — see BuildHeadlessService comment for why
-		// (peer-DNS only, no kube-proxy routing).
-		target.Labels = desired.Labels
-		target.OwnerReferences = desired.OwnerReferences
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("reconcileHeadlessService: CreateOrUpdate %s/%s: %w",
-			target.Namespace, target.Name, err)
-	}
-	return nil
 }
 
 // ensureHeadlessService is the entry point ReconcileComponent calls.
-// Wrapped for symmetry with future per-Component service emissions
-// (routing Service, ingress Service) that will join this top-of-
-// reconcile block as separate small helpers under one umbrella.
+// Reconciles BOTH the per-Component headless Service (delegated to
+// workload.ReconcileHeadlessService) AND the per-Component stable
+// Service (still owned by this package — see BuildStableService).
 func ensureHeadlessService(ctx context.Context, p ReconcileParams) error {
-	if err := reconcileHeadlessService(ctx, p); err != nil {
+	if p.ISVC == nil {
+		return fmt.Errorf("OMENative reconciler: ensure headless service (component=%s): nil ISVC", p.Component)
+	}
+	spec := BuildHeadlessServiceSpec(p.ISVC, p.Component)
+	if err := workload.ReconcileHeadlessService(ctx, p.Client, spec); err != nil {
 		return fmt.Errorf("OMENative reconciler: ensure headless service (component=%s): %w", p.Component, err)
 	}
 	if err := reconcileStableService(ctx, p); err != nil {
@@ -176,11 +106,7 @@ func BuildStableService(isvc *v1beta1.InferenceService, component v1beta1.Compon
 	if isvc == nil {
 		return nil, fmt.Errorf("nil InferenceService")
 	}
-	selector := map[string]string{
-		constants.InferenceServicePodLabelKey: isvc.Name,
-		constants.OMEComponentLabel:           string(component),
-		query.LabelManagedBy:                  query.ManagedByOMENative,
-	}
+	selector := componentSelector(isvc, component)
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      query.StableServiceName(isvc.Name, component),
@@ -203,11 +129,11 @@ func BuildStableService(isvc *v1beta1.InferenceService, component v1beta1.Compon
 	}, nil
 }
 
-// reconcileStableService is the CreateOrUpdate companion to
-// reconcileHeadlessService for the stable Service. Idempotent +
-// drift-correcting on Selector / Ports / Labels / OwnerReferences;
-// ClusterIP stays whatever the apiserver assigned on Create (immutable
-// post-create).
+// reconcileStableService is the CreateOrUpdate companion to the
+// workload-owned headless Service reconciler for the stable Service.
+// Idempotent + drift-correcting on Selector / Ports / Labels /
+// OwnerReferences; ClusterIP stays whatever the apiserver assigned on
+// Create (immutable post-create).
 func reconcileStableService(ctx context.Context, p ReconcileParams) error {
 	if p.Client == nil {
 		return fmt.Errorf("reconcileStableService: nil client")
