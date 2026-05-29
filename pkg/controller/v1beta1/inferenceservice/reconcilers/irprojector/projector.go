@@ -388,12 +388,13 @@ func replicasFromComponentExt(c *v1beta1.ComponentExtensionSpec) *int32 {
 // PodTemplateObjectMeta — that's how the rendered template flows
 // into the workload renderer without re-rendering.
 func runnersFromParams(p Params) []v1beta1.Runner {
+	tmplMeta := templateObjectMeta(p)
 	if !p.MultiPod {
 		return []v1beta1.Runner{{
 			Name: v1beta1.RunnerNameDefault,
 			Size: 1,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: trimObjectMetaForTemplate(p.ObjectMeta),
+				ObjectMeta: tmplMeta,
 				Spec:       *p.PodSpec,
 			},
 		}}
@@ -403,7 +404,7 @@ func runnersFromParams(p Params) []v1beta1.Runner {
 			Name: v1beta1.RunnerNameLeader,
 			Size: 1,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: trimObjectMetaForTemplate(p.ObjectMeta),
+				ObjectMeta: tmplMeta,
 				Spec:       *p.PodSpec,
 			},
 		},
@@ -413,7 +414,7 @@ func runnersFromParams(p Params) []v1beta1.Runner {
 			Name: v1beta1.RunnerNameWorker,
 			Size: int32(p.WorkerSize),
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: trimObjectMetaForTemplate(p.ObjectMeta),
+				ObjectMeta: tmplMeta,
 				Spec:       *p.WorkerPodSpec,
 			},
 		})
@@ -421,20 +422,57 @@ func runnersFromParams(p Params) []v1beta1.Runner {
 	return out
 }
 
-// trimObjectMetaForTemplate strips fields that don't belong on a
-// PodTemplateSpec.ObjectMeta. Name / Namespace / GenerateName /
-// CreationTimestamp / ResourceVersion / UID are owner-object fields
-// and stamping them on the template would leak the per-Component
-// ObjectMeta identity onto every emitted pod.
+// templateObjectMeta builds the PodTemplateSpec.ObjectMeta stamped on
+// every Runner. It merges TWO sources:
 //
-// The omenative path passes the full ObjectMeta through and the
-// renderer drops these fields before emit; for byte-equality with
-// the IR path we drop them at the projection step instead so the
-// IR Spec itself reflects the cleaned shape.
-func trimObjectMetaForTemplate(om metav1.ObjectMeta) metav1.ObjectMeta {
+//  1. p.ObjectMeta.{Labels,Annotations} — the rendered per-Component
+//     metadata the dispatch site computed via reconcileObjectMeta
+//     (which already folds in BaseModel / ServingRuntime / ISVC-level
+//     labels + annotations).
+//
+//  2. p.ComponentExt.{Labels,Annotations} — the user-declared
+//     per-Component overrides from spec.<component>.{labels,annotations}.
+//     These take precedence (last-write-wins) so an operator bumping
+//     spec.engine.annotations to force a rollout sees that key land on
+//     the pod template, which in turn flips the revision hash and
+//     triggers the ControllerRevision / rollout machinery the IR
+//     controller drives. Mirrors the components/{engine,decoder,router}.go
+//     processAnnotations / processLabels merge order.
+//
+// Name / Namespace / GenerateName / CreationTimestamp / ResourceVersion
+// / UID are intentionally dropped — those are owner-object fields and
+// stamping them on the template would leak the per-Component ObjectMeta
+// identity onto every emitted pod.
+//
+// Defensive against caller bugs: even when the dispatch site forgets
+// to merge p.ComponentExt.{Labels,Annotations} into p.ObjectMeta, the
+// projector still emits them on the template. Annotation-only ISVC
+// edits (the canonical no-image-bump rollout trigger) only work if
+// the projector treats ComponentExt as authoritative for these keys.
+func templateObjectMeta(p Params) metav1.ObjectMeta {
+	labels := copyMap(p.ObjectMeta.Labels)
+	annotations := copyMap(p.ObjectMeta.Annotations)
+	if p.ComponentExt != nil {
+		if len(p.ComponentExt.Labels) > 0 {
+			if labels == nil {
+				labels = make(map[string]string, len(p.ComponentExt.Labels))
+			}
+			for k, v := range p.ComponentExt.Labels {
+				labels[k] = v
+			}
+		}
+		if len(p.ComponentExt.Annotations) > 0 {
+			if annotations == nil {
+				annotations = make(map[string]string, len(p.ComponentExt.Annotations))
+			}
+			for k, v := range p.ComponentExt.Annotations {
+				annotations[k] = v
+			}
+		}
+	}
 	return metav1.ObjectMeta{
-		Labels:      copyMap(om.Labels),
-		Annotations: copyMap(om.Annotations),
+		Labels:      labels,
+		Annotations: annotations,
 	}
 }
 

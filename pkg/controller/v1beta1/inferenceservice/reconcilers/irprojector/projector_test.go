@@ -434,3 +434,233 @@ func TestEnsureInferenceReplica_AlreadyExists_PropagatedAsUpdate(t *testing.T) {
 	g.Expect(apierrors.IsNotFound(getErr)).To(gomega.BeFalse(),
 		"sanity: post-create Get must succeed")
 }
+
+// TestEnsureInferenceReplica_PropagatesComponentAnnotations pins the
+// A-2 real-cluster bug fix: spec.<component>.annotations bumps MUST
+// land on every Runner.Template.ObjectMeta.Annotations so the workload
+// renderer stamps the new annotation on every emitted pod AND so the
+// revision hash flips and triggers the ControllerRevision / rollout
+// machinery.
+//
+// Real-cluster failure shape (pre-fix): operator bumps
+// spec.engine.annotations.test.ome.io/rollout-trigger to a fresh
+// timestamp; ISVC generation bumps; IR.spec.runners[].template
+// .metadata.annotations stays EMPTY; no new ControllerRevision; the
+// rollout never fires. The fix is for the projector to treat
+// p.ComponentExt.Annotations as authoritative — even when the dispatch
+// site forgets to merge them into p.ObjectMeta, the projector still
+// emits them.
+//
+// Same bug class as task #51 (legacy direct-omenative path); this is
+// the IR-managed analog.
+func TestEnsureInferenceReplica_PropagatesComponentAnnotations(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	isvc.Spec.Engine.Annotations = map[string]string{
+		"test.ome.io/rollout-trigger": "2026-05-29T01:02:03.456789Z",
+		"linkerd.io/inject":           "enabled",
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	p := minimalParams(t, isvc, c)
+	// Deliberately leave p.ObjectMeta.Annotations as the minimal fixture
+	// value to prove the projector pulls from p.ComponentExt directly —
+	// not just from a caller-side merge. The real dispatch site DOES
+	// merge them upstream (engine.go::processAnnotations), but the
+	// projector must remain self-contained for the A-2 scenario.
+
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
+
+	g.Expect(got.Spec.Runners).To(gomega.HaveLen(1))
+	tmplAnns := got.Spec.Runners[0].Template.ObjectMeta.Annotations
+	g.Expect(tmplAnns).To(gomega.HaveKeyWithValue(
+		"test.ome.io/rollout-trigger", "2026-05-29T01:02:03.456789Z"),
+		"rollout-trigger annotation must reach the Runner template — "+
+			"the revision hash flips off this key, no propagation means no rollout")
+	g.Expect(tmplAnns).To(gomega.HaveKeyWithValue(
+		"linkerd.io/inject", "enabled"),
+		"all per-Component annotations must propagate, not just the rollout-trigger")
+	// Baseline ObjectMeta annotation also propagates (no regression).
+	g.Expect(tmplAnns).To(gomega.HaveKeyWithValue(
+		"ome.io/some-annotation", "value"),
+		"existing ObjectMeta annotations must still propagate alongside ComponentExt")
+}
+
+// TestEnsureInferenceReplica_PropagatesComponentLabels pins the label
+// half of the A-2 fix: spec.<component>.labels MUST land on every
+// Runner.Template.ObjectMeta.Labels for pod affinity / NetworkPolicy
+// selectors / kubectl filtering. Same defensive-merge contract as
+// annotations.
+func TestEnsureInferenceReplica_PropagatesComponentLabels(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	isvc.Spec.Engine.Labels = map[string]string{
+		"team":        "ml-platform",
+		"cost-center": "1234",
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	p := minimalParams(t, isvc, c)
+
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
+
+	g.Expect(got.Spec.Runners).To(gomega.HaveLen(1))
+	tmplLabels := got.Spec.Runners[0].Template.ObjectMeta.Labels
+	g.Expect(tmplLabels).To(gomega.HaveKeyWithValue("team", "ml-platform"),
+		"per-Component labels must reach the Runner template for selector matching")
+	g.Expect(tmplLabels).To(gomega.HaveKeyWithValue("cost-center", "1234"))
+	// Baseline ObjectMeta labels also propagate.
+	g.Expect(tmplLabels).To(gomega.HaveKeyWithValue(
+		constants.InferenceServicePodLabelKey, isvc.Name),
+		"existing ObjectMeta labels must still propagate alongside ComponentExt")
+}
+
+// TestEnsureInferenceReplica_NilComponentAnnotationsAndLabels_NoRegression
+// pins the negative case: ISVCs with no per-Component annotations /
+// labels see the same Runner.Template.ObjectMeta they always saw —
+// only the existing p.ObjectMeta content, no spurious empty maps,
+// no nil-deref panics in the merge path.
+func TestEnsureInferenceReplica_NilComponentAnnotationsAndLabels_NoRegression(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	// ComponentExt has nil Annotations + nil Labels (the baseline).
+	g.Expect(isvc.Spec.Engine.Annotations).To(gomega.BeNil(),
+		"sanity: baseline fixture has no per-Component annotations")
+	g.Expect(isvc.Spec.Engine.Labels).To(gomega.BeNil(),
+		"sanity: baseline fixture has no per-Component labels")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	_, err := EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
+
+	g.Expect(got.Spec.Runners).To(gomega.HaveLen(1))
+	// Only the minimalParams ObjectMeta content lands on the template.
+	g.Expect(got.Spec.Runners[0].Template.ObjectMeta.Labels).To(gomega.HaveKeyWithValue(
+		constants.InferenceServicePodLabelKey, isvc.Name),
+		"baseline ObjectMeta labels must still propagate when ComponentExt is empty")
+	g.Expect(got.Spec.Runners[0].Template.ObjectMeta.Annotations).To(gomega.HaveKeyWithValue(
+		"ome.io/some-annotation", "value"),
+		"baseline ObjectMeta annotations must still propagate when ComponentExt is empty")
+}
+
+// TestEnsureInferenceReplica_ComponentExt_PropagatesToBothRunners pins
+// that on a multi-pod Component, the per-Component annotations + labels
+// land on BOTH the leader and worker Runner templates — not just the
+// leader. The renderer reads them off both templates for its respective
+// pods, so missing the worker template would silently break per-Component
+// rollout for the worker pod set.
+func TestEnsureInferenceReplica_ComponentExt_PropagatesToBothRunners(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	isvc.Spec.Engine.Annotations = map[string]string{
+		"test.ome.io/rollout-trigger": "2026-05-29T04:05:06Z",
+	}
+	isvc.Spec.Engine.Labels = map[string]string{
+		"team": "ml-platform",
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	p := minimalParams(t, isvc, c)
+	p.MultiPod = true
+	p.WorkerSize = 3
+	p.WorkerPodSpec = &corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "worker", Image: "worker:1.0"}},
+	}
+
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
+
+	g.Expect(got.Spec.Runners).To(gomega.HaveLen(2))
+	for _, r := range got.Spec.Runners {
+		g.Expect(r.Template.ObjectMeta.Annotations).To(gomega.HaveKeyWithValue(
+			"test.ome.io/rollout-trigger", "2026-05-29T04:05:06Z"),
+			"runner %q template must carry per-Component rollout-trigger annotation", r.Name)
+		g.Expect(r.Template.ObjectMeta.Labels).To(gomega.HaveKeyWithValue(
+			"team", "ml-platform"),
+			"runner %q template must carry per-Component team label", r.Name)
+	}
+}
+
+// TestEnsureInferenceReplica_ComponentExt_OverridesObjectMetaOnCollision
+// pins the merge precedence: when p.ObjectMeta AND p.ComponentExt both
+// declare the same key, p.ComponentExt wins. Mirrors the dispatch site's
+// merge order (engine.go::processAnnotations does
+// utils.Union(annotations, engineAnnotations) — last-write-wins for
+// engineAnnotations). The projector must produce the same result if a
+// future caller diverges from the canonical merge.
+func TestEnsureInferenceReplica_ComponentExt_OverridesObjectMetaOnCollision(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	isvc.Spec.Engine.Annotations = map[string]string{
+		"ome.io/some-annotation": "from-component-ext",
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	p := minimalParams(t, isvc, c)
+	// p.ObjectMeta.Annotations["ome.io/some-annotation"] == "value" (from minimalParams).
+
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
+
+	g.Expect(got.Spec.Runners).To(gomega.HaveLen(1))
+	g.Expect(got.Spec.Runners[0].Template.ObjectMeta.Annotations).To(gomega.HaveKeyWithValue(
+		"ome.io/some-annotation", "from-component-ext"),
+		"ComponentExt annotation MUST win over ObjectMeta on key collision (matches engine.go merge order)")
+}
+
+// TestEnsureInferenceReplica_ComponentAnnotationUpdate_RepatchesTemplate
+// pins the update path: a re-projection with a different
+// p.ComponentExt.Annotations value MUST land on the live IR's runner
+// template. Without this the second reconcile after an annotation bump
+// would leave the IR carrying the stale value — the exact A-2 failure
+// shape.
+func TestEnsureInferenceReplica_ComponentAnnotationUpdate_RepatchesTemplate(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	isvc.Spec.Engine.Annotations = map[string]string{
+		"test.ome.io/rollout-trigger": "initial",
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	_, err := EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	first := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, first)).To(gomega.Succeed())
+	g.Expect(first.Spec.Runners[0].Template.ObjectMeta.Annotations).To(gomega.HaveKeyWithValue(
+		"test.ome.io/rollout-trigger", "initial"),
+		"sanity: first projection lands the initial value")
+
+	// Operator bumps the annotation; the dispatch site re-runs with the
+	// updated ComponentExt. The projector must patch the IR.
+	isvc.Spec.Engine.Annotations["test.ome.io/rollout-trigger"] = "bumped"
+	_, err = EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	second := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, second)).To(gomega.Succeed())
+	g.Expect(second.Spec.Runners[0].Template.ObjectMeta.Annotations).To(gomega.HaveKeyWithValue(
+		"test.ome.io/rollout-trigger", "bumped"),
+		"annotation bump must repatch the IR runner template — "+
+			"this is the canonical no-image-bump rollout trigger")
+}
