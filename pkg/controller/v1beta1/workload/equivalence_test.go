@@ -85,8 +85,10 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // fixture is the (ISVC, image, replicas, component) tuple both paths
@@ -426,10 +428,11 @@ func runWorkloadN(t *testing.T, fix fixture, passes int) clusterState {
 // pipeline but routes every step through the workload package wherever
 // the workload package owns the helper:
 //
-//  1. Ensure supporting Services (shared helpers:
-//     workload.BuildHeadlessService fed by omenative.BuildHeadlessServiceSpec
-//     + omenative.BuildStableService — both pure compute; the legacy
-//     path uses the same builders).
+//  1. Ensure supporting Services (workload.BuildHeadlessService fed
+//     by omenative.BuildHeadlessServiceSpec for the headless Service;
+//     the top-level service.ServiceReconciler for the stable Service —
+//     same path the legacy ReconcileComponent now uses after the
+//     stable-Service unification refactor).
 //
 //  2. Compute the ComponentPlan via `core.BuildPlan` (the ISVC-side
 //     wrapper around `workload.BuildPlan`).
@@ -453,7 +456,10 @@ func runWorkloadOnce(ctx context.Context, params core.ReconcileParams) error {
 	// `ensureHeadlessService` helper is misleadingly named — it
 	// emits BOTH the per-Component headless Service AND the per-
 	// Component stable Service. The new path mirrors both so the
-	// Service-name snapshot matches between paths.
+	// Service-name snapshot matches between paths. The stable Service
+	// is now built by the top-level service.ServiceReconciler (same
+	// reconciler RawDeployment / MultiNode use); we invoke it here
+	// directly so this harness mirrors the legacy path's emission.
 	headlessSpec := omenative.BuildHeadlessServiceSpec(params.ISVC, params.Component)
 	headless, err := workload.BuildHeadlessService(headlessSpec)
 	if err != nil {
@@ -462,12 +468,24 @@ func runWorkloadOnce(ctx context.Context, params core.ReconcileParams) error {
 	if err := ensureService(ctx, params.Client, headless); err != nil {
 		return err
 	}
-	stable, err := omenative.BuildStableService(params.ISVC, params.Component)
-	if err != nil {
-		return err
-	}
-	if err := ensureService(ctx, params.Client, stable); err != nil {
-		return err
+	if params.PodSpec != nil {
+		stableMeta := params.ObjectMeta.DeepCopy()
+		stableMeta.OwnerReferences = []metav1.OwnerReference{
+			*metav1.NewControllerRef(params.ISVC, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+		}
+		// Selector mirrors what omenative.componentSelector emits — the
+		// three keys must match componentSelector exactly so the
+		// snapshot diff (which doesn't compare selector contents per-se
+		// but DOES compare Service names) stays valid across paths.
+		stableSelector := map[string]string{
+			"ome.io/inferenceservice": params.ISVC.Name,
+			"component":               string(params.Component),
+			query.LabelManagedBy:      query.ManagedByOMENative,
+		}
+		sr := service.NewServiceReconciler(params.Client, nil, *stableMeta, params.ComponentExt, params.PodSpec, stableSelector)
+		if _, err := sr.Reconcile(); err != nil {
+			return err
+		}
 	}
 
 	// Step 2: ComponentPlan.
@@ -666,7 +684,11 @@ func buildEquivalenceParams(fix fixture, isvc *v1beta1.InferenceService, cli cli
 		ext = &isvc.Spec.Router.ComponentExtensionSpec
 	}
 	return core.ReconcileParams{
-		ISVC:         isvc,
+		ISVC: isvc,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      query.StableServiceName(isvc.Name, fix.component),
+			Namespace: isvc.Namespace,
+		},
 		PodSpec:      &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: fix.image}}},
 		Component:    fix.component,
 		ComponentExt: ext,

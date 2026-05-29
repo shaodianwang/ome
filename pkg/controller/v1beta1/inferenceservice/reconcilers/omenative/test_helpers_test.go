@@ -57,10 +57,18 @@ func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 }
 
 // minimalParams builds a single-pod / engine ReconcileParams.
+// ObjectMeta is populated with the per-Component name + namespace the
+// dispatch site in components/engine.go would supply at runtime — the
+// top-level service.ServiceReconciler used by ensureHeadlessService
+// reads componentMeta.Name to derive the stable Service name.
 func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client) ReconcileParams {
 	t.Helper()
 	return ReconcileParams{
-		ISVC:         isvc,
+		ISVC: isvc,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      query.StableServiceName(isvc.Name, v1beta1.EngineComponent),
+			Namespace: isvc.Namespace,
+		},
 		PodSpec:      &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}},
 		Component:    v1beta1.EngineComponent,
 		ComponentExt: &isvc.Spec.Engine.ComponentExtensionSpec,

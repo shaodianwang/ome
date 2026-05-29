@@ -660,6 +660,8 @@ func TestSurgeUpdate_SingleBump_URMatchesCR_OnlyOneNewCR(t *testing.T) {
 		Containers: []corev1.Container{{Name: "main", Image: "engine:initial"}},
 	}
 	bumpedMeta := metav1.ObjectMeta{
+		Name:      query.StableServiceName(isvc.Name, v1beta1.EngineComponent),
+		Namespace: isvc.Namespace,
 		Annotations: map[string]string{
 			"test.ome.io/rollout-trigger": "bumped",
 		},

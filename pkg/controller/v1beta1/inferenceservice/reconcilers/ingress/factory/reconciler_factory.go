@@ -30,10 +30,11 @@ func NewStrategyFactory(clientset kubernetes.Interface) interfaces.StrategyFacto
 // CreateStrategyWithOptions creates the appropriate ingress strategy with options
 func (f *DefaultStrategyFactory) CreateStrategyWithOptions(deploymentMode string, opts interfaces.ReconcilerOptions) (interfaces.IngressStrategy, error) {
 	switch deploymentMode {
-	// OMENative joins the Raw / MultiNode case: it now emits the same
-	// `<isvc>-<comp>` stable Service the GatewayAPI / KubernetesIngress
-	// strategies target (see omenative/services.go BuildStableService),
-	// so the existing strategies work without per-mode routing logic.
+	// OMENative joins the Raw / MultiNode case: all three modes emit the
+	// same `<isvc>-<comp>` stable Service via the top-level
+	// service.ServiceReconciler, so the GatewayAPI / KubernetesIngress
+	// strategies — which target `<isvc>-<comp>` — work for every mode
+	// without per-mode routing logic.
 	case string(constants.RawDeployment), string(constants.MultiNode), string(constants.OMENative):
 		if opts.IngressConfig == nil {
 			return nil, fmt.Errorf("ingress config is required for deployment mode: %s", deploymentMode)
