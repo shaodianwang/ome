@@ -25,8 +25,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podgroup"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // Condition types, reasons, and event reasons stamped by the gang

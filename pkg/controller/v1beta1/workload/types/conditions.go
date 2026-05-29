@@ -1,4 +1,4 @@
-package workload
+package types
 
 // ConditionType is the workload-internal Type identifier stamped on
 // metav1.Condition entries the workload reconciler writes through the

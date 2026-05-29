@@ -25,11 +25,6 @@ import (
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 )
 
-// updateRequeueInterval is the wait between passes while an Update is
-// in flight. Aliased to the workload-side constant so the dispatcher
-// (dispatch.go) and the per-Instance state machine cannot drift.
-const updateRequeueInterval = workloadops.UpdateRequeueInterval
-
 // updateStepInPlace identifies the InPlace step a Type=Update operation
 // uses while the in-place image patch is being driven. The omenative
 // timeouts handler reads this constant to recognize in-flight in-place
@@ -86,38 +81,6 @@ func Update(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan
 	return workloadops.Update(ctx, deps, input, workloadPlan, workloadInst, target, targetSpec)
 }
 
-// detectUpdateTrigger fires when the Instance is mid-update, or when
-// Phase=Ready and a pod's PodSpec hashes to a non-target revision.
-// Creating / Deleting / Restarting / Migrating are not interruptible.
-// The Migrate-owned suppression is explicit because a just-promoted
-// surge briefly carries RunningRevision=sourceRev while the post-
-// promote scale-down pass runs — without the guard the spec-bump that
-// triggered the migration would race the surge promote.
-//
-// Shim that wraps workloadops.DetectUpdateTrigger. Kept as a
-// package-internal helper because the dispatcher (dispatch.go) calls
-// it directly and dispatch.go has not migrated to workload/ops yet.
-func detectUpdateTrigger(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, inst core.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec) (bool, error) {
-	deps := workload.Deps{
-		Client:       p.Client,
-		APIReader:    p.APIReader,
-		Recorder:     p.Recorder,
-		Expectations: p.ExpectationsCache(),
-	}
-	input := internalsource.BuildReconcileInput(internalsource.BuildInputDeps{
-		ISVC:          p.ISVC,
-		Component:     p.Component,
-		ObjectMeta:    p.ObjectMeta,
-		PodSpec:       p.PodSpec,
-		WorkerPodSpec: p.WorkerPodSpec,
-		Client:        p.Client,
-		Expectations:  p.ExpectationsCache(),
-	})
-	workloadInst := workloadInstancePlanFromCore(inst)
-	workloadPlan := workloadComponentPlanFromCore(plan)
-	return workloadops.DetectUpdateTrigger(ctx, deps, input, workloadPlan, workloadInst, target, targetSpec)
-}
-
 // workloadInstancePlanFromCore projects the legacy core.InstancePlan
 // onto the workload.InstancePlan shape that the workload-side state
 // machines consume. Field-for-field copy; the runner sub-type also
@@ -125,7 +88,7 @@ func detectUpdateTrigger(ctx context.Context, p core.ReconcileParams, plan core.
 func workloadInstancePlanFromCore(inst core.InstancePlan) workload.InstancePlan {
 	runners := make([]workload.RunnerPlan, len(inst.Runners))
 	for i, r := range inst.Runners {
-		runners[i] = workload.RunnerPlan{Name: r.Name, Size: r.Size}
+		runners[i] = workload.RunnerPlan(r)
 	}
 	return workload.InstancePlan{
 		Index:       inst.Index,

@@ -33,12 +33,6 @@ import (
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 )
 
-// migrateRequeueInterval is the wait between Migrate passes while a
-// surge migration is in flight. Kept here (mirrors
-// workloadops.MigrateRequeueInterval byte-for-byte) because dispatch.go
-// reads it and dispatch.go has not yet migrated to workload/ops.
-const migrateRequeueInterval = workloadops.MigrateRequeueInterval
-
 // Migrate is the ISVC-adapter entry point. It projects the legacy
 // core.ReconcileParams onto workload.Deps + workload.ReconcileInput
 // (wiring the local clearMigrationRequestAnnotation helper into

@@ -17,10 +17,10 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // Test file is in package ops_test so the tests only see the
@@ -285,6 +285,10 @@ func buildPlanSinglePodEngine(replicas int32) workload.ComponentPlan {
 
 // resetExpectations re-seats the workload-level expectations singleton
 // so back-to-back tests don't observe prior ExpectCreates entries.
+// `workload` here is the workload/types subpackage (workload root would
+// close the workload→workload/ops cycle via reconcile.go); reseating
+// types.DefaultExpectations directly is enough because
+// `Deps.ExpectationsCache()` reads it.
 func resetExpectations(t *testing.T) {
 	t.Helper()
 	workload.DefaultExpectations = workload.NewExpectations()

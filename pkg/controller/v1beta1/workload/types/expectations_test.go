@@ -1,4 +1,4 @@
-package workload
+package types
 
 import (
 	"testing"

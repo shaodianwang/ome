@@ -6,21 +6,76 @@ import (
 	"strconv"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // Event reasons emitted by the Restart state machine are declared
-// once in workload/events.go (as workload.EventReason values); call
-// sites in this file reach for workload.EventReasonRestart{Triggered,
+// once in workload/types/events.go (as workload.EventReason values);
+// call sites in this file reach for workload.EventReasonRestart{Triggered,
 // Completed} and workload.EventReasonFoundOrphan directly. See that
 // file for the per-reason documentation and the byte-for-byte
 // rationale against the legacy omenative/status copies.
+
+// RestartRequeueInterval is the wait between passes while a Restart is
+// in flight. Exported so the workload-level dispatcher
+// (workload.Reconcile) and any source-side dispatcher can reach the
+// same pacing without redeclaring it.
+const RestartRequeueInterval = 5 * time.Second
+
+// DetectRestartTrigger fires when the Instance is mid-restart, or when
+// Phase=Ready and a pod is Failed / the live pod count is below desired.
+// Creating / Deleting are not interruptible — they finish first. A
+// Migrate-owned Instance (source mid-drain, surge mid-create) is
+// suppressed explicitly because Migrate's source-pod deletion will
+// otherwise trip the "pod count below desired" trigger on the source.
+//
+// Returns (needsRestart, reason, err). When needsRestart is true the
+// reason string lands on Operation.Reason on the first pass through
+// Restart. The dispatcher (workload.Reconcile) walks every Instance and
+// consults this before invoking Restart.
+//
+// Mirrors the v1beta1-typed detectRestartTrigger that lives in
+// omenative/ops/restart.go byte-for-byte at the policy level; the
+// underlying pod source uses query.LiveListPodsForInstance
+// (string-keyed) so workload code doesn't reach back into v1beta1.
+func DetectRestartTrigger(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan) (bool, string, error) {
+	s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+	if s == nil {
+		return false, "", nil
+	}
+	if isMigrateOwnedStatus(s) {
+		return false, "", nil
+	}
+	if s.Phase == workload.InstancePhaseRestarting {
+		return true, "", nil
+	}
+	if s.Phase != workload.InstancePhaseReady {
+		return false, "", nil
+	}
+
+	pods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, inst.Index)
+	if err != nil {
+		return false, "", err
+	}
+	expected := inst.TotalPods()
+
+	for _, pod := range pods {
+		if pod.Status.Phase == corev1.PodFailed {
+			return true, fmt.Sprintf("pod %s Failed", pod.Name), nil
+		}
+	}
+	if int32(len(pods)) < expected {
+		return true, fmt.Sprintf("pod count %d below desired %d", len(pods), expected), nil
+	}
+	return false, "", nil
+}
 
 // restartDrainKey identifies a Restart drain writer against one Instance
 // materialization. Same shape as the Update drain key, but the writer

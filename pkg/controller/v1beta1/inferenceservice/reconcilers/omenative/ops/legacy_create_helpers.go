@@ -13,7 +13,6 @@ package ops
 import (
 	"context"
 	"fmt"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,14 +25,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
-
-// deleteRequeueInterval is the wait between scale-down passes; the
-// dispatcher requeues after this when at least one extra Instance is
-// still draining. Mirrors the workload-side
-// workload/ops.deleteRequeueInterval byte-for-byte (5s); kept here
-// because dispatch.go reads it and dispatch.go has not yet migrated
-// to workload/ops.
-const deleteRequeueInterval = 5 * time.Second
 
 // revisionHashFromTarget extracts the hash suffix from a target
 // ControllerRevision. Returns "" when target is nil so callers can

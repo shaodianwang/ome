@@ -86,14 +86,16 @@ func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client
 
 // resetExpectations clears the process-level expectations singletons so
 // per-test create attempts aren't blocked by entries from a previous
-// test. Reseats BOTH core.DefaultExpectations and workload.DefaultExpectations
-// because the dispatch shim's `deps.ExpectationsCache()` fallback path
-// reads workload's copy when params.Expectations is nil (every test
-// fixture in this package leaves it nil).
+// test. Reseats BOTH core.DefaultExpectations and the workload
+// singleton because the dispatch shim's `deps.ExpectationsCache()`
+// fallback path reads workload's copy when params.Expectations is nil
+// (every test fixture in this package leaves it nil). The workload
+// singleton lives in workload/types; SetDefaultExpectations keeps the
+// workload alias mirror and the types-side var in lock-step.
 func resetExpectations(t *testing.T) {
 	t.Helper()
 	core.DefaultExpectations = core.NewExpectations()
-	workload.DefaultExpectations = workload.NewExpectations()
+	workload.SetDefaultExpectations(workload.NewExpectations())
 }
 
 // newFakeClientWithDiscovery builds a controller-runtime fake client with

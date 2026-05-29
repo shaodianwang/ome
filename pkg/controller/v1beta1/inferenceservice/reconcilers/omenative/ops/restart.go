@@ -14,7 +14,6 @@ package ops
 import (
 	"context"
 	"fmt"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -25,12 +24,6 @@ import (
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
-
-// restartRequeueInterval is the wait between passes while a Restart is
-// in flight. Mirrors the workload-side workload/ops package's internal
-// timing byte-for-byte (5s); kept here because dispatch.go reads it
-// and dispatch.go has not yet migrated to workload/ops.
-const restartRequeueInterval = 5 * time.Second
 
 // Restart is the ISVC-adapter entry point for the per-Instance Restart
 // state machine. It projects the legacy core.ReconcileParams onto
@@ -71,7 +64,7 @@ func Restart(ctx context.Context, p core.ReconcileParams, plan core.ComponentPla
 		Incarnation: inst.Incarnation,
 	}
 	for _, r := range inst.Runners {
-		winst.Runners = append(winst.Runners, workload.RunnerPlan{Name: r.Name, Size: r.Size})
+		winst.Runners = append(winst.Runners, workload.RunnerPlan(r))
 	}
 	if inst.MigrationOverlay != nil {
 		winst.MigrationOverlay = &workload.MigrationOverlay{

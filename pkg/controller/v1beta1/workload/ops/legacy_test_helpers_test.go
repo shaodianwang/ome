@@ -17,9 +17,9 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // Test scaffolding for the Surge / Update bug-fix tests that moved from
@@ -81,7 +81,11 @@ func legacyTestPodLabels(isvc string, component v1beta1.ComponentType, instanceI
 // back-to-back tests don't observe prior ExpectCreates entries. Mirrors
 // the omenative resetExpectations helper at the workload layer; the
 // legacy tests called the omenative version, which already reset both
-// caches.
+// caches. The `workload` import alias in this file points at
+// workload/types (the parent workload package would close an
+// import-cycle with workload.Reconcile importing workload/ops);
+// reseating types.DefaultExpectations directly is sufficient because
+// `Deps.ExpectationsCache()` reads the same var.
 func legacyResetExpectations(t *testing.T) {
 	t.Helper()
 	workload.DefaultExpectations = workload.NewExpectations()

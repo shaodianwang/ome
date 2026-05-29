@@ -1,4 +1,4 @@
-package workload
+package types
 
 import (
 	"context"
@@ -6,7 +6,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 )
+
+// MigrationRequestSummary is the type the DetectMigrationRequest
+// adapter callback returns to the workload dispatcher. Today it is a
+// direct alias of audit.MigrationRequest because the workload Migrate
+// state machine consumes that exact type; an alias here documents the
+// dispatcher↔state-machine contract without redeclaring fields.
+type MigrationRequestSummary = audit.MigrationRequest
 
 // ReconcileInput carries everything a workload reconcile needs as plain
 // data. The caller (the ISVC OMENative dispatcher today, the future
@@ -142,4 +151,44 @@ type ReconcileInput struct {
 	// recorder (workload-side unit tests that don't assert on events)
 	// wire an explicit `func(_ int32, _, _ string) {}` stub.
 	WarnInstanceFailed func(idx int32, podName, reason string)
+
+	// DetectMigrationRequest, when non-nil, is called once per per-
+	// Component reconcile pass and returns the next migration to drive.
+	// Source-of-truth carriers (ISVC annotations + audit ledger today;
+	// IR-side annotation + ledger tomorrow) are adapter-specific so
+	// workload code delegates the lookup to the adapter rather than
+	// importing v1beta1 directly.
+	//
+	// Returns (uuid, req, sourceIdx, found, err): found=false means
+	// "no migration in flight"; the dispatcher skips the Migrate pass.
+	// Nil callback is treated as found=false — the dispatcher skips
+	// Migrate entirely. The ISVC adapter wires this to the legacy
+	// detectMigrationRequest that reads ISVC annotations + the audit
+	// ledger; workload-side unit tests that don't exercise Migrate
+	// leave it nil.
+	DetectMigrationRequest func(ctx context.Context) (uuid string, req *MigrationRequestSummary, sourceIdx int32, found bool, err error)
+
+	// UpdateGate, when non-nil, is called once per Instance in the
+	// Update pass right before the dispatcher would start a fresh
+	// Update operation. It lets the adapter inject cross-Component
+	// coordination gates (ratio-balanced pacing, surge / unavailability
+	// budgets, sequential-rollout ordering) that workload code itself
+	// MUST NOT know about — coordination decisions are ISVC-shaped and
+	// live in the omenative/coordination package the workload boundary
+	// keeps out.
+	//
+	// Returns (allowed, denyReason). allowed=false skips this Instance
+	// for this reconcile pass; the dispatcher counts at least one
+	// gated Instance to emit a short requeue (ratioGateRequeueInterval).
+	// inFlightSurge / inFlightUnavail are the dispatcher's
+	// within-pass in-flight counters so the adapter's gate can project
+	// against the post-this-pass shape (closes the stale-snapshot hole
+	// the legacy dispatcher tracked manually).
+	//
+	// Nil callback is treated as always-allowed — the dispatcher fires
+	// every triggered Update without gating. Workload-side unit tests
+	// that don't exercise pacing leave it nil; the IR adapter (when it
+	// lands) wires its own gate or leaves it nil (rate-limited via
+	// Pacing.Partition + MaxUnavailable instead).
+	UpdateGate func(strategy UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (allowed bool, denyReason string)
 }

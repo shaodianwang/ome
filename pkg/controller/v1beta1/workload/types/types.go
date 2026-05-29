@@ -1,4 +1,10 @@
-// Package workload — workload-owned value types.
+// Package types holds the workload package's value types — the
+// per-Instance / per-Component / per-Plan data structures every layer
+// of the workload pipeline reads and writes. Splitting these out of
+// the parent `workload` package breaks an import cycle: `workload/ops`
+// depends on these types, and the new `workload.Reconcile` entry point
+// in turn depends on `workload/ops`. Without this subpackage the two
+// directions would close (workload → workload/ops → workload).
 //
 // The constraint this file enforces: the workload package owns its own
 // status / operation / component / phase / key types and does NOT
@@ -7,7 +13,12 @@
 // OMENative-on-ISVC status type field-for-field; the adapter boundary
 // in `omenative/internalsource/` (ISVC adapter) and the future
 // `inferencereplica/` adapter performs the two-way conversion.
-package workload
+//
+// External callers should keep referencing `workload.X` — the parent
+// `workload` package re-exports every type defined here as a Go alias
+// (`type X = types.X`, `const Y = types.Y`) so the move is transparent
+// to consumers outside the workload subpackage tree.
+package types
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -84,6 +95,46 @@ const (
 	// UpdateStrategyInPlaceOnly mirrors the InPlaceOnly CRD strategy:
 	// image-patch in place when eligible; error otherwise.
 	UpdateStrategyInPlaceOnly UpdateStrategyType = "InPlaceOnly"
+)
+
+// RestartPolicy is the workload-internal Instance-group restart policy.
+// Mirrors the CRD InstanceRestartPolicy at the string level so the
+// adapter conversion is a verbatim cast; the distinct Go type prevents
+// accidental drift between the workload-side dispatch logic and the
+// v1beta1 enum (same rationale as UpdateStrategyType above).
+type RestartPolicy string
+
+const (
+	// RestartPolicyNone mirrors the None CRD policy: restart only the
+	// failed pod; OMENative leaves the Instance Phase=Ready and lets
+	// the kubelet recover the single pod in place.
+	RestartPolicyNone RestartPolicy = "None"
+	// RestartPolicyRecreateInstance mirrors the
+	// RecreateInstanceOnPodRestart CRD policy: drain, delete, and
+	// recreate every pod in the Instance at a bumped Incarnation.
+	RestartPolicyRecreateInstance RestartPolicy = "RecreateInstanceOnPodRestart"
+	// RestartPolicyRecreateISVC mirrors the RecreateISVCOnPodRestart
+	// CRD policy: trigger a fresh top-level rollout. Driven by the
+	// parent ISVC controller, not the workload dispatcher.
+	RestartPolicyRecreateISVC RestartPolicy = "RecreateISVCOnPodRestart"
+)
+
+// MigrationMode is the workload-internal migration disposition.
+// Mirrors the CRD MigrationPolicyMode at the string level
+// so the adapter conversion is a verbatim cast.
+type MigrationMode string
+
+const (
+	// MigrationModeAuto mirrors the auto CRD mode: the operator may
+	// trigger migration via the per-UUID annotation; the controller
+	// drives the surge cycle to completion.
+	MigrationModeAuto MigrationMode = "auto"
+	// MigrationModeSurge mirrors the surge CRD mode: same behavior as
+	// auto but spelled differently — surge IS the strategy.
+	MigrationModeSurge MigrationMode = "surge"
+	// MigrationModeNever mirrors the never CRD mode: the controller
+	// refuses to drive any migration; annotations are ignored.
+	MigrationModeNever MigrationMode = "never"
 )
 
 // InstanceOperationType is the workload-internal kind of an in-flight

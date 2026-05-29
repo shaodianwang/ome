@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // PodName returns the stable pod name for one ordinal of one Runner

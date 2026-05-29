@@ -1,4 +1,4 @@
-package workload
+package types
 
 // EventReason is the workload-internal event-reason identifier the ops
 // state machines stamp on K8s Events emitted against the owner object.
