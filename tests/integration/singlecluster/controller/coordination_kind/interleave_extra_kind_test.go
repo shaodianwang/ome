@@ -22,11 +22,12 @@ import (
 // INT-5 (rapid spec bumps converge + CR retention cap) is already
 // covered by interleave_kind_test.go, so it's omitted here.
 //
-// Single-node KIND limitation: a "migration to a different node"
-// assertion can't be made — every surge pod lands on the same node.
-// We pin the controller-side state machine (audit ledger, surge index
-// allocation, peer-Component non-interference) which doesn't need a
-// multi-node cluster.
+// The suite runs a 2-node cluster, so the migration surge pod schedules
+// onto the other node (a single-node cluster would leave it Pending).
+// These specs pin the controller-side state machine (audit ledger,
+// surge index allocation, peer-Component non-interference); a direct
+// "migrated to a different node" assertion is now feasible and is a
+// candidate follow-up.
 var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 

@@ -13,17 +13,33 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// envKeepCluster, when set to "1", keeps the KIND cluster running
-// across test sessions for fast iteration. Set this in your shell
-// while iterating; the spec contract is "cluster reuse drops the
-// per-run overhead from ~25s to <5s."
+// envKeepCluster, when set to a truthy value (see envEnabled), keeps
+// the KIND cluster running across test sessions for fast iteration. Set
+// this in your shell while iterating; the spec contract is "cluster
+// reuse drops the per-run overhead from ~25s to <5s."
 const envKeepCluster = "KIND_KEEP_CLUSTER"
 
-// envRecreateCluster, when set to "1", forces RunKindSuite to delete
-// and recreate any pre-existing cluster with the same name. Useful
-// after a partial-state corruption or a CRD change that requires a
-// fresh apiserver.
+// envRecreateCluster, when set to a truthy value (see envEnabled),
+// forces RunKindSuite to delete and recreate any pre-existing cluster
+// with the same name. Useful after a partial-state corruption or a CRD
+// change that requires a fresh apiserver.
 const envRecreateCluster = "KIND_RECREATE"
+
+// envEnabled reports whether the named env var is set to a truthy
+// value. Accepts "1", "true", "yes", "on" (case-insensitive) so the
+// flag behaves the same whether it's set by `make test-kind`
+// (KIND_KEEP_CLUSTER=true) or by hand (KIND_KEEP_CLUSTER=1). Before
+// this, the code checked only == "1" while the Makefile and READMEs
+// documented =true, so `make test-kind` silently never reused the
+// cluster — every run paid the full ~25s recreate.
+func envEnabled(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 // clusterCreateTimeout caps how long `kind create cluster --wait`
 // may take before we give up. KIND's own --wait defaults to 60s; we
@@ -54,7 +70,7 @@ func EnsureCluster(ctx context.Context, name string, workers int) (*rest.Config,
 	if err != nil {
 		return nil, fmt.Errorf("EnsureCluster: list clusters: %w", err)
 	}
-	if exists && os.Getenv(envRecreateCluster) == "1" {
+	if exists && envEnabled(envRecreateCluster) {
 		if err := DeleteCluster(ctx, name); err != nil {
 			return nil, fmt.Errorf("EnsureCluster: recreate-requested delete: %w", err)
 		}
@@ -72,7 +88,7 @@ func EnsureCluster(ctx context.Context, name string, workers int) (*rest.Config,
 // cluster doesn't exist. Honors KIND_KEEP_CLUSTER=1 by skipping the
 // delete entirely so iterative `go test` runs reuse the cluster.
 func DeleteCluster(ctx context.Context, name string) error {
-	if os.Getenv(envKeepCluster) == "1" {
+	if envEnabled(envKeepCluster) {
 		return nil
 	}
 	exists, err := clusterExists(ctx, name)

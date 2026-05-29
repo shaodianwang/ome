@@ -17,6 +17,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	mcfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -93,6 +94,19 @@ func TestCoordinationKindController(t *testing.T) {
 // KIND apiserver. Same controller code as production — just a different
 // cluster behind the manager's RestConfig.
 func mgrSetup(ctx context.Context, mgr ctrl.Manager) error {
+	// Route OMENative-mode Components through the legacy omenative direct
+	// path, NOT the IR-managed projection. As of #320 IR-managed is the
+	// default for OMENative components, but the cross-Component rollout
+	// COORDINATION this suite exercises (Sequential / BlueGreen / RatioBalanced
+	// / soak) lives ONLY on the omenative direct path — the IR controller
+	// leaves UpdateGate nil (inferencereplica/convert.go) and does no
+	// coordination. Without this, the ISVC controller would project every
+	// Component to an InferenceReplica that no reconciler in this suite
+	// manages, so no pods are ever created and every spec times out. This
+	// mirrors the production `--disable-ir-managed-omenative` escape hatch.
+	// (IR-managed-path coverage is a separate suite — see TODO/Goal 2.)
+	irprojector.SetGlobalDisableIRManaged(true)
+
 	// Seed the inferenceservice-config ConfigMap so the reconciler can
 	// read it at first reconcile. Use a direct apiserver client here —
 	// mgr.GetClient() is cached and the cache isn't started yet during

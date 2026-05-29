@@ -91,11 +91,14 @@ func writeMigrationRequestWithComponent(g Gomega, isvcKey client.ObjectKey, reqU
 // audit-ledger dedup, surge allocation, source drain, and surge
 // promotion.
 //
-// Single-node KIND limitation: the "surge lands on a different node"
-// assertion can't be made since the cluster has only one node. The
-// state machine contracts pinned here (audit ledger, surge index
-// allocation, annotation lifecycle, event emission, MigrationMode,
-// schema validation) are observable regardless of node placement.
+// The suite runs a 2-node cluster (1 control-plane + 1 worker), so the
+// off-source surge pod CAN schedule onto the other node — that is why
+// these migration specs pass at all (a single-node cluster left the
+// surge pod Pending forever). They pin the state-machine contracts
+// (audit ledger, surge index allocation, annotation lifecycle, event
+// emission, MigrationMode, schema validation); a direct "surge landed
+// on a different node than the source" assertion is now feasible on the
+// 2-node cluster and is a candidate follow-up.
 var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 
