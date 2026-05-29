@@ -258,6 +258,17 @@ func (g *GatewayAPIStrategy) checkHTTPRouteStatuses(ctx context.Context, isvc *v
 			Name:      comp.name,
 			Namespace: isvc.Namespace,
 		}, httpRoute); err != nil {
+			if apierr.IsNotFound(err) {
+				// Per-component HTTPRoute was correctly skipped by
+				// reconcileComponentHTTPRoute when the component wasn't
+				// Ready (Builder returned nil). The create-path already
+				// set IngressReady=False/ComponentNotReady; nothing to
+				// do here. Keep iterating so any other component with an
+				// existing HTTPRoute still has its status checked, and
+				// let the next reconcile pick up after the component
+				// becomes Ready and the HTTPRoute materializes.
+				continue
+			}
 			return err
 		}
 

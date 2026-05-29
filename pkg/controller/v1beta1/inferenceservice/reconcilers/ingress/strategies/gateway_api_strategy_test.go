@@ -477,6 +477,61 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses(t *testing.T) {
 	}
 }
 
+// TestGatewayAPIStrategy_CheckHTTPRouteStatuses_NotFoundIsTolerated guards
+// against a regression of the live-cluster bug where checkHTTPRouteStatuses
+// returned IsNotFound as a hard error, crashing the reconcile every loop
+// during PD-disaggregated bring-up. PR #316 made reconcileComponentHTTPRoute
+// correctly skip create when a component isn't Ready (Builder returns nil);
+// this test asserts the downstream status-check tolerates the resulting
+// absence of HTTPRoutes by continuing past them rather than failing.
+//
+// Production trace (sandbox/sglang-llama4x-nvfp4-pd-cc-fallback):
+//
+//	ERROR Reconciler error ...
+//	  error: "fails to reconcile ingress: HTTPRoute.gateway.networking.k8s.io
+//	         \"sglang-llama4x-nvfp4-pd-cc-fallback-engine\" not found"
+func TestGatewayAPIStrategy_CheckHTTPRouteStatuses_NotFoundIsTolerated(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	require.NoError(t, gatewayapiv1.Install(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	// ISVC declares Engine + Router + Decoder so checkHTTPRouteStatuses
+	// will iterate all four name slots ("<isvc>-engine", "<isvc>-router",
+	// "<isvc>-decoder", "<isvc>"). None of them exist in the client.
+	isvc := createTestInferenceServiceWithRouterGateway("test-isvc", "default")
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{}
+
+	// Pre-seed an IngressReady condition the way reconcileComponentHTTPRoute
+	// would when it skipped a component (False / ComponentNotReady). The
+	// status-check must not corrupt this.
+	isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
+		Type:    v1beta1.IngressReady,
+		Status:  corev1.ConditionFalse,
+		Reason:  "ComponentNotReady",
+		Message: "engine component not ready for HTTPRoute creation",
+	})
+
+	// Fake client with NO HTTPRoutes pre-created.
+	fakeClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(isvc).
+		Build()
+
+	strategy := createGatewayAPIStrategyWithClient(t, fakeClient)
+
+	err := strategy.(*GatewayAPIStrategy).checkHTTPRouteStatuses(context.Background(), isvc)
+	assert.NoError(t, err, "checkHTTPRouteStatuses must tolerate NotFound and not return an error")
+
+	// The pre-seeded condition from the create-path is preserved
+	// (status-check did not touch it).
+	condition := isvc.Status.GetCondition(v1beta1.IngressReady)
+	require.NotNil(t, condition)
+	assert.Equal(t, corev1.ConditionFalse, condition.Status,
+		"pre-existing IngressReady=False set by reconcileComponentHTTPRoute must be preserved")
+	assert.Equal(t, "ComponentNotReady", condition.Reason)
+}
+
 func TestGatewayAPIStrategy_CreateRawURL(t *testing.T) {
 	tests := []struct {
 		name        string
