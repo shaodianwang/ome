@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"strings"
 	"testing"
 
 	"k8s.io/utils/ptr"
@@ -220,22 +221,9 @@ func TestGetFormatMismatchReason(t *testing.T) {
 			if reason == "" {
 				t.Fatal("expected non-empty reason")
 			}
-			if !containsSubstring(reason, tc.contains) {
+			if !strings.Contains(reason, tc.contains) {
 				t.Fatalf("reason %q does not contain %q", reason, tc.contains)
 			}
 		})
 	}
-}
-
-func containsSubstring(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

@@ -214,9 +214,6 @@ const (
 	IsvcNamespaceHeader    = "OME-Isvc-Namespace"
 )
 
-// StorageSpec Constants
-var ()
-
 // Controller Constants
 var (
 	DefaultMinReplicas = 1
@@ -590,10 +587,6 @@ const (
 	OpenAI ModelVendor = "openai"
 )
 
-var (
-// JobCompletionIndexFieldPath is the field path for the Job completion index annotation.
-)
-
 // BaseModelType enum
 type BaseModelType string
 
@@ -819,16 +812,6 @@ func truncateWithHash(original string, maxLength int) string {
 	return fmt.Sprintf("%s-%s", hashPrefix, suffix)
 }
 
-// truncateModelName truncates a model name to fit within the given constraints
-func truncateModelName(modelName string, maxLength int) string {
-	return truncateWithHash(modelName, maxLength)
-}
-
-// truncateNamespace truncates a namespace name to fit within the given constraints
-func truncateNamespace(namespace string, maxLength int) string {
-	return truncateWithHash(namespace, maxLength)
-}
-
 // GetClusterBaseModelLabel returns the deterministic label key for ClusterBaseModel
 // Format: models.ome.io/clusterbasemodel.{model_name}
 // Handles long model names by truncating with hash for uniqueness
@@ -839,7 +822,7 @@ func GetClusterBaseModelLabel(modelName string) string {
 		// No truncation needed
 		return fmt.Sprintf("%s/%s.%s", ModelLabelDomain, ClusterBaseModelLabelType, modelName)
 	}
-	truncatedModelName := truncateModelName(modelName, maxModelNameLength)
+	truncatedModelName := truncateWithHash(modelName, maxModelNameLength)
 	return fmt.Sprintf("%s/%s.%s", ModelLabelDomain, ClusterBaseModelLabelType, truncatedModelName)
 }
 
@@ -880,8 +863,8 @@ func GetBaseModelLabel(namespace, modelName string) string {
 		}
 	}
 
-	truncatedNamespace := truncateNamespace(namespace, namespaceMaxLength)
-	truncatedModelName := truncateModelName(modelName, modelNameMaxLength)
+	truncatedNamespace := truncateWithHash(namespace, namespaceMaxLength)
+	truncatedModelName := truncateWithHash(modelName, modelNameMaxLength)
 
 	return fmt.Sprintf("%s/%s.%s.%s", ModelLabelDomain, truncatedNamespace, BaseModelLabelType, truncatedModelName)
 }
@@ -898,7 +881,7 @@ func GetModelConfigMapKey(namespace, modelName string, isClusterBaseModel bool) 
 			// No truncation needed
 			return fmt.Sprintf("%s.%s", ClusterBaseModelLabelType, modelName)
 		}
-		truncatedModelName := truncateModelName(modelName, maxModelNameLength)
+		truncatedModelName := truncateWithHash(modelName, maxModelNameLength)
 		return fmt.Sprintf("%s.%s", ClusterBaseModelLabelType, truncatedModelName)
 	}
 
@@ -934,8 +917,8 @@ func GetModelConfigMapKey(namespace, modelName string, isClusterBaseModel bool) 
 		}
 	}
 
-	truncatedNamespace := truncateNamespace(namespace, namespaceMaxLength)
-	truncatedModelName := truncateModelName(modelName, modelNameMaxLength)
+	truncatedNamespace := truncateWithHash(namespace, namespaceMaxLength)
+	truncatedModelName := truncateWithHash(modelName, modelNameMaxLength)
 
 	return fmt.Sprintf("%s.%s.%s", truncatedNamespace, BaseModelLabelType, truncatedModelName)
 }

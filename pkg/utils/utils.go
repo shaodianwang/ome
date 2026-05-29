@@ -244,14 +244,13 @@ func SetAvailableResourcesForApi(groupVersion string, resources *metav1.APIResou
 	gvResourcesCache[groupVersion] = resources
 }
 
-// IsStringEmptyOrWithWhitespaces checks if the string is empty or with whitespaces
 var blankRegex = regexp.MustCompile(`\s`)
 
+// IsStringEmptyOrWithWhitespaces reports whether input is empty or contains any
+// whitespace character (per the \s regex class). Name is misleading — kept for
+// backward compatibility with callers that grep for the symbol.
 func IsStringEmptyOrWithWhitespaces(input string) bool {
-	if blankRegex.MatchString(input) || input == "" {
-		return true
-	}
-	return false
+	return input == "" || blankRegex.MatchString(input)
 }
 
 func Retry(attempts int, sleep time.Duration, f func() error) (err error) {
