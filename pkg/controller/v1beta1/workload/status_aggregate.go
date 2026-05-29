@@ -16,40 +16,24 @@ import (
 // StuckPodFailureGracePeriod is the wait window after a pod's
 // CreationTimestamp before a terminal kubelet waiting state
 // (ImagePullBackOff, ErrImagePull, InvalidImageName,
-// CreateContainerConfigError, CreateContainerError) escalates the owning
-// Instance to Phase=Failed. Tuned to debounce the transient
-// ContainerCreating / ImagePulling states that a real kubelet briefly
-// passes through on initial pod placement — 60 seconds is comfortable
-// headroom for a 5–10 second pull cycle on a healthy node before
-// committing to "this is genuinely stuck."
+// CreateContainerConfigError, CreateContainerError) escalates the
+// owning Instance to Phase=Failed. 60 seconds is comfortable
+// headroom over a 5–10 second pull cycle while debouncing transient
+// ContainerCreating / ImagePulling states.
 //
-// Exported so tests can lower the value to keep test runtime sane while
-// still exercising the real escalation path (a hardcoded constant would
-// force tests to spin for 60+ seconds per case, gating the suite on a
-// wall-clock that adds nothing to coverage).
-//
-// Lives in workload/ rather than the ISVC-shaped omenative/ because the
-// IR adapter will consume the same escalator behavior; the value is
-// shared across both adapters.
+// Exported so tests can lower the value to keep test runtime sane.
 var StuckPodFailureGracePeriod = 60 * time.Second
 
 // DefaultRevisionRetention caps non-live ControllerRevisions per
 // workload (StatefulSet default; rollback headroom without unbounded
-// etcd growth). Exposed for adapters that drive
-// revision.RetainControllerRevisions from their own retention policy.
+// etcd growth).
 const DefaultRevisionRetention = 10
 
-// terminalPullFailureReasons enumerates kubelet container state.Waiting
-// reasons that cannot self-recover. Distinct from PodInitializing or
-// ContainerCreating, which are transient and resolve once the kubelet
-// finishes its setup. Conservative list — every entry below has been
-// observed in the wild as a wedge that requires either a spec change
-// (fix the image tag) or a node-level fix (registry creds); neither is
-// something the controller can do on its own.
-//
-// Mirrors the same constant in omenative/status/pod_failures.go so the
-// workload-side PodStuckPullFailure has no dependency on the omenative
-// status package.
+// terminalPullFailureReasons enumerates kubelet container
+// state.Waiting reasons that cannot self-recover. Every entry below
+// has been observed in the wild as a wedge that requires either a
+// spec change (fix the image tag) or a node-level fix (registry
+// creds).
 var terminalPullFailureReasons = map[string]struct{}{
 	"ErrImagePull":               {},
 	"ImagePullBackOff":           {},
@@ -58,30 +42,15 @@ var terminalPullFailureReasons = map[string]struct{}{
 	"CreateContainerError":       {},
 }
 
-// PodStuckPullFailure returns true when pod has at least one container
-// in a terminal pull-failure waiting state AND that container has been
-// stuck for ≥ grace from `now`. The grace window debounces transient
-// kubelet states (ContainerCreating → ImagePullBackOff transitions on
-// slow registries) so the controller doesn't fire on a pod that's about
-// to recover within seconds.
+// PodStuckPullFailure returns (true, reason) when pod has at least
+// one container in a terminal pull-failure waiting state that has
+// been stuck for ≥ grace from `now`, otherwise (false, "").
 //
-// Returns (true, reason) when stuck, (false, "") otherwise. The reason
-// is the kubelet's Waiting.Reason string for the first stuck container,
-// suitable for the operator-facing event message.
-//
-// Timing source: stuck duration is measured from the pod's
-// CreationTimestamp, NOT from the container's individual state
-// transition time (which kubelet doesn't expose per-state). For
-// ImagePullBackOff specifically, kubelet has already retried at least
-// once before flipping to BackOff (typically ~30s after pod creation
-// on a 404), so a 60s grace from pod creation reliably catches stuck
-// pulls while ignoring the brief startup window where the container
-// transitions through normal Waiting states (PodInitializing,
-// ContainerCreating, ImagePulling).
-//
-// Adapter-agnostic counterpart of omenative/status.PodStuckPullFailure;
-// the omenative copy delegates to this one so both adapters share a
-// single classifier.
+// Stuck duration is measured from CreationTimestamp (kubelet doesn't
+// expose per-state transition time). For ImagePullBackOff kubelet
+// retries at least once before flipping to BackOff (~30s on a 404),
+// so a 60s grace catches stuck pulls while ignoring the brief
+// PodInitializing / ContainerCreating / ImagePulling window.
 func PodStuckPullFailure(pod *corev1.Pod, now time.Time, grace time.Duration) (bool, string) {
 	if pod == nil {
 		return false, ""
@@ -113,9 +82,10 @@ func PodStuckPullFailure(pod *corev1.Pod, now time.Time, grace time.Duration) (b
 }
 
 // AvailablePodSet returns pod names that are Ready and non-terminating
-// in any EndpointSlice for serviceName. drain.EndpointAvailable excludes
-// terminating-but-Ready endpoints — they're not getting new traffic.
-// Single slice list (vs. drain.IsPodInRotation per pod) avoids N+1 reads.
+// in any EndpointSlice for serviceName. drain.EndpointAvailable
+// excludes terminating-but-Ready endpoints — they're not getting new
+// traffic. Single slice list avoids the N+1 reads
+// drain.IsPodInRotation per pod would do.
 //
 // Adapter-agnostic: takes the namespace and headless-service name
 // directly, no v1beta1 ISVC handle needed.
@@ -140,8 +110,7 @@ func AvailablePodSet(ctx context.Context, reads client.Reader, namespace, servic
 }
 
 // CountReadyPods returns the number of pods whose ContainersReady
-// condition is True. Workload-agnostic counter consumed by the
-// per-Instance aggregator.
+// condition is True.
 func CountReadyPods(pods []*corev1.Pod) int32 {
 	var n int32
 	for _, p := range pods {
@@ -194,10 +163,9 @@ func CountAvailablePods(pods []*corev1.Pod, availableByName map[string]struct{})
 }
 
 // UniqueNodes returns the deterministically-sorted set of node names
-// hosting at least one pod in pods. Unscheduled pods are skipped.
-// Returns nil for an empty input or an all-unscheduled set so the
-// per-Instance NodesOccupied field round-trips through nil ↔ nil
-// rather than nil ↔ empty-slice.
+// hosting at least one pod. Returns nil for empty / all-unscheduled
+// so NodesOccupied round-trips through nil ↔ nil rather than nil ↔
+// empty-slice.
 func UniqueNodes(pods []*corev1.Pod) []string {
 	if len(pods) == 0 {
 		return nil
@@ -223,12 +191,7 @@ func UniqueNodes(pods []*corev1.Pod) []string {
 // DesiredPodCountByInstance maps each planned Instance index to its
 // desired canonical pod count (sum of Runner sizes). Returns nil for
 // an empty plan so callers fall back to the observed PodCount
-// comparison (pre-existing behavior for Instances absent from the
-// plan — e.g., during scale-down with stale status entries).
-//
-// Workload-typed counterpart of the omenative-side helper; takes the
-// workload.ComponentPlan so both adapters' aggregators consume the
-// same shape.
+// comparison (during scale-down with stale status entries).
 func DesiredPodCountByInstance(plan ComponentPlan) map[int32]int32 {
 	if len(plan.Instances) == 0 {
 		return nil
@@ -242,8 +205,7 @@ func DesiredPodCountByInstance(plan ComponentPlan) map[int32]int32 {
 
 // DesiredFor returns the desired pod count for idx — the plan entry's
 // value when present, otherwise the observed PodCount (no plan info ⇒
-// use the observed count, matching pre-fix behavior for stale-status
-// scale-down Instances).
+// use the observed count, for stale-status scale-down Instances).
 func DesiredFor(desiredByIdx map[int32]int32, idx int32, observedPodCount int32) int32 {
 	if desiredByIdx == nil {
 		return observedPodCount
@@ -255,17 +217,15 @@ func DesiredFor(desiredByIdx map[int32]int32, idx int32, observedPodCount int32)
 }
 
 // InstanceMeetsThreshold is the shared classifier the Count*Instances
-// helpers share: an Instance "counts" when at least its desired pod
-// count of pods satisfy the relevant predicate (Ready / Serving /
-// Available). Differs from the pre-fix `observed == PodCount`
-// comparison: SurgeThenDrain transiently puts an extra pod alive on
-// the Instance, lifting PodCount above desired. The old comparison
-// would mis-classify mid-surge Instances as not-Ready / not-Serving
-// the whole time the surge pod is starting up — that's the user-
-// visible serving dip seen in PR #238 sampler runs.
+// helpers use: an Instance counts when at least its desired pod count
+// of pods satisfy the relevant predicate (Ready / Serving / Available).
 //
-// The desired value falls back to observedPodCount when the plan
-// has no entry for this index (scale-down with stale status).
+// Surge-tolerant: a naive `observed == PodCount` would mis-classify
+// mid-surge Instances as not-Ready the whole time the +1 surge pod is
+// starting up — the visible serving dip we explicitly want to avoid.
+//
+// desired falls back to observedPodCount when the plan has no entry
+// for this index (scale-down with stale status).
 func InstanceMeetsThreshold(observedPodCount, observedSatisfying, desired int32) bool {
 	if observedPodCount == 0 {
 		return false
@@ -389,23 +349,19 @@ func FirstStuckPodForInstance(pods []*corev1.Pod, now time.Time, grace time.Dura
 	return nil, ""
 }
 
-// HasWedgedPodAgainstCurrent reports whether any pod in pods carries a
-// revision-hash label that disagrees with currentHash — i.e., the pod
-// was created for a revision the controller no longer (or doesn't yet)
-// recognize as current. The label key is taken from selectorLabels —
-// the workload adapter populates input.Key.SelectorLabels with the
-// adapter-specific revision-hash key, and the workload-side escalator
-// reads the value through that label.
+// HasWedgedPodAgainstCurrent reports whether any pod carries a
+// revision-hash label disagreeing with currentHash — i.e., a pod
+// created for a revision the controller doesn't yet (or no longer)
+// recognize as current.
 //
 // Pods missing the label are skipped (no signal). Empty currentHash
-// means the workload has never promoted a revision — treat every pod
-// hash as matching so the wedged-recovery branch doesn't over-fire on
-// the initial Create.
+// means no revision has been promoted yet — treat every pod hash as
+// matching so the wedged-recovery branch doesn't over-fire on the
+// initial Create.
 //
-// Used by the wedged-pod recovery branch of the escalator (task #52
-// follow-up to PR #257): catches the post-surge cluster shape where
-// the per-Instance state machine has been reset out of the transient
-// phase set but a real wedged surge pod still exists.
+// Used by the wedged-pod recovery branch of the escalator: catches
+// the post-surge shape where the state machine has been reset out of
+// the transient phase set but a real wedged surge pod still exists.
 func HasWedgedPodAgainstCurrent(pods []*corev1.Pod, currentHash, revisionHashLabel string) bool {
 	if currentHash == "" || revisionHashLabel == "" {
 		return false
@@ -425,12 +381,9 @@ func HasWedgedPodAgainstCurrent(pods []*corev1.Pod, currentHash, revisionHashLab
 	return false
 }
 
-// CountersForInstance computes the per-Instance counter set the
-// aggregator stamps onto an InstanceStatus from the live pod bucket.
-// Returns the field values in the order the consumer assigns them.
-//
-// availableByPod is the map of EndpointSlice-Ready pod names returned
-// by AvailablePodSet.
+// CountersForInstance computes the per-Instance counter set from the
+// live pod bucket. availableByPod is the map returned by
+// AvailablePodSet.
 func CountersForInstance(pods []*corev1.Pod, availableByPod map[string]struct{}) InstanceCounters {
 	return InstanceCounters{
 		PodCount:          int32(len(pods)),
@@ -443,9 +396,7 @@ func CountersForInstance(pods []*corev1.Pod, availableByPod map[string]struct{})
 }
 
 // InstanceCounters is the field-level result of CountersForInstance.
-// The aggregator caller maps the fields onto the per-Instance status
-// (v1beta1.OMENativeInstanceStatus for the ISVC adapter,
-// InferenceReplicaInstanceStatus for the IR adapter) by assignment.
+// The caller maps fields onto the per-Instance status by assignment.
 type InstanceCounters struct {
 	PodCount          int32
 	ReadyPodCount     int32
@@ -487,39 +438,20 @@ func ComputeComponentCounters(insts []InstanceStatus, desiredByIdx map[int32]int
 	return out
 }
 
-// String formats InstanceCounters for debug / log output. Useful in
-// tests that want a single-line representation of the counter set.
+// String formats InstanceCounters for debug output.
 func (c InstanceCounters) String() string {
 	return fmt.Sprintf("pods=%d ready=%d serving=%d scheduled=%d available=%d nodes=%v",
 		c.PodCount, c.ReadyPodCount, c.ServingPodCount, c.ScheduledPodCount, c.AvailablePodCount, c.NodesOccupied)
 }
 
-// EscalationParams bundles the inputs the workload-side stuck-pod
-// escalator needs. Pulled into its own struct so the (already-wide)
-// EscalateStuckPodFailures signature stays single-line.
+// EscalationParams bundles the inputs the stuck-pod escalator needs.
 //
-// Instances is the workload-typed view of the per-Component
-// InstanceStatuses the caller observes AFTER any retry-loop status
-// commit has landed. The escalator reads Phase / Operation / Index off
-// each entry to decide whether to escalate.
-//
-// PodsByIndex is the per-Instance pod bucket the caller already
-// computed for counters (see query.BucketPodsByInstanceIdx). The
-// escalator reads it via the InstanceStatus.Index to avoid re-listing
-// pods.
-//
-// CurrentRevisionHash is the workload's CurrentRevision hash (the
-// ControllerRevision-name suffix, NOT the full name). The wedged-pod
-// recovery branch compares it against each pod's revision-hash label
-// to detect post-#257 cluster shapes where a stuck surge pod still
-// exists but the per-Instance state machine has been reset. Empty
-// hash suppresses the wedged branch (no rollout has ever promoted →
-// nothing to escalate from).
-//
-// RevisionHashLabel is the pod-label key the wedged-pod branch reads
-// the per-pod revision hash from. The caller (the ISVC adapter today,
-// the IR adapter tomorrow) passes the adapter-specific constant — for
-// ISVC this is `ome.io/revision-hash` via workload/query.LabelRevisionHash.
+// Instances is observed AFTER any retry-loop status commit has
+// landed. PodsByIndex is the per-Instance pod bucket the caller
+// already computed for counters. CurrentRevisionHash is the
+// ControllerRevision-name suffix (empty hash suppresses the wedged
+// branch; nothing has been promoted yet). RevisionHashLabel is the
+// adapter-specific pod-label key holding the per-pod revision hash.
 type EscalationParams struct {
 	Instances           []InstanceStatus
 	PodsByIndex         map[int32][]*corev1.Pod

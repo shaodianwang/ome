@@ -38,24 +38,11 @@ func StableServiceName(isvc string, component v1beta1.ComponentType) string {
 	return fmt.Sprintf("%s-%s", isvc, component)
 }
 
-// PerRevisionServiceName returns the per-revision *routed* Service name
-// for one (owner, component, revisionHash) tuple. Format:
-// `<owner>-<component>-rev-<hash>`.
-//
-// Takes workload.ComponentType so workload/ops/ can call this without
-// importing the CRD API package. Lives in workload/query/ because
-// workload/ops/delete.go reads per-revision Service names when
-// computing drain targets and must not import the omenative
-// coordination package (which would close a dependency cycle). The
-// coordination package retains its own v1beta1-typed copy of the
-// helper for the per-revision Service builders; both copies must
-// produce identical names so dispatch-path lookups line up.
-//
-// This single canonical workload-side helper replaces the inlined
-// per-revision-Service format string that previously lived in
-// workload/ops/update.go's drainServiceForPod — a stale literal there
-// would have silently mismatched the routed Service the coordination
-// layer creates.
+// PerRevisionServiceName returns the per-revision routed Service name
+// for one (owner, component, revisionHash) tuple — format
+// `<owner>-<component>-rev-<hash>`. The coordination package keeps
+// its own v1beta1-typed copy; both must produce identical names so
+// dispatch-path lookups line up.
 func PerRevisionServiceName(ownerName string, component workload.ComponentType, revisionHash string) string {
 	return fmt.Sprintf("%s-%s-rev-%s", ownerName, component, revisionHash)
 }

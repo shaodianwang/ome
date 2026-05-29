@@ -23,18 +23,11 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// Test file is in package ops_test so the tests only see the
-// workload.* API surface — no privileged access to ops/ internals. The
-// imports above are the only types create_test.go reaches for; the
-// only v1beta1 surface used is the fake-client scheme registration
-// plus the in-memory observed state mirror the MutateInstance closure
-// writes through.
+// Test file is in package ops_test so tests only see the workload.*
+// API surface — no privileged access to ops/ internals.
 
 // newFakeClient builds a controller-runtime fake client with the
-// scheme the workload reconciler needs. The fake exposes the
-// InferenceService status subresource so the MutateInstance closure
-// (which the test wires through to a fake-client Status().Update can
-// be observed in tests that read back the ISVC for assertions).
+// scheme the workload reconciler needs.
 func newFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -58,10 +51,9 @@ func newFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 }
 
 // minimalISVC builds an ISVC with the minimum metadata Create() needs.
-// The workload tests still construct an ISVC because the fake-client
-// status-write path the MutateInstance closure delegates to needs a
-// concrete owner object to round-trip — workload code reads the
-// resulting ReconcileInput opaquely.
+// The fake-client status-write path needs a concrete owner object to
+// round-trip; workload code reads the resulting ReconcileInput
+// opaquely.
 func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 	mr := replicas
 	return &v1beta1.InferenceService{
@@ -84,10 +76,9 @@ func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 // pods (matches what production Render emits via ome.io/revision-hash).
 const testRevisionHash = "testrev1"
 
-// testPodLabels reproduces the label set workload/ops.Render stamps on
-// every emitted pod. Duplicated here (rather than re-exported from
-// workload/ops) because workload/ops keeps the helper private; tests
-// in this package fabricate pods directly without going through Render.
+// testPodLabels reproduces the label set workload/ops.Render stamps
+// on every emitted pod. Duplicated here because Render's helper is
+// private to ops/; tests in ops_test fabricate pods directly.
 func testPodLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, incarnation int64, ordinal int32) map[string]string {
 	return map[string]string{
 		constants.InferenceServicePodLabelKey: isvc,
@@ -101,14 +92,9 @@ func testPodLabels(isvc string, component v1beta1.ComponentType, instanceIdx int
 }
 
 // buildTestInput projects the ISVC under test onto a
-// workload.ReconcileInput. Mirrors what
-// omenative/internalsource.BuildReconcileInput does in production —
-// the workload-level tests reproduce the shape inline so they don't
-// take a backward import on the omenative adapter package.
-//
-// MutateInstance round-trips through the fake client's Status().Update
-// so tests can assert on the persisted ISVC.Status.Components[c].OMENative
-// shape.
+// workload.ReconcileInput. MutateInstance round-trips through the
+// fake client's Status().Update so tests can assert on the persisted
+// ISVC.Status.
 func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component v1beta1.ComponentType) workload.ReconcileInput {
 	var instances []workload.InstanceStatus
 	if cs, ok := isvc.Status.Components[component]; ok && cs.OMENative != nil {
@@ -149,10 +135,8 @@ func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component v
 }
 
 // testMutateInstance is the test-side persistence layer for
-// ReconcileInput.MutateInstance. Mirrors omenative/status.MutateInstance
-// at the wire level — Get / mutate / Status().Update — but skips
-// retry.RetryOnConflict (the fake client has no optimistic-concurrency
-// failures to retry).
+// ReconcileInput.MutateInstance. Skips retry.RetryOnConflict (fake
+// client has no optimistic-concurrency failures to retry).
 func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 		fresh := &v1beta1.InferenceService{}
@@ -283,23 +267,18 @@ func buildPlanSinglePodEngine(replicas int32) workload.ComponentPlan {
 	}
 }
 
-// resetExpectations re-seats the workload-level expectations singleton
-// so back-to-back tests don't observe prior ExpectCreates entries.
-// `workload` here is the workload/types subpackage (workload root would
-// close the workload→workload/ops cycle via reconcile.go); reseating
-// types.DefaultExpectations directly is enough because
-// `Deps.ExpectationsCache()` reads it.
+// resetExpectations re-seats the expectations singleton so back-to-
+// back tests don't observe prior ExpectCreates entries.
 func resetExpectations(t *testing.T) {
 	t.Helper()
 	workload.DefaultExpectations = workload.NewExpectations()
 }
 
-// podForInstance fabricates a pod matching what Render() would produce
-// for the given (ISVC, instance) pair, with knobs for runtime-ready /
-// serving state. The `ready` knob synthesizes ContainersReady=True,
-// not PodReady=True, because the controller gates on ContainersReady
-// and PodReady requires every readiness gate (including ome.io/serving)
-// to be True — which is exactly what the controller is about to write.
+// podForInstance fabricates a pod matching what Render() would
+// produce for the given (ISVC, instance) pair. The `ready` knob
+// synthesizes ContainersReady=True, not PodReady=True — PodReady
+// requires every readiness gate (including ome.io/serving), which is
+// exactly what the controller is about to write.
 func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, serving bool) *corev1.Pod {
 	labels := testPodLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1, 0)
 	labels[query.LabelRevisionHash] = testRevisionHash

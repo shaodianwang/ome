@@ -9,11 +9,9 @@ import (
 
 // TestReconcileInput_Compiles is a compile-time pin on the
 // ReconcileInput struct shape and the MutateInstance callback
-// signature. The struct must be value-constructible with no required
-// adapter scaffolding (no constructor, no helper), and the
-// MutateInstance signature must accept a workload-owned InstanceStatus
-// mutator. If a future slice changes either, this test fails to
-// compile and forces a deliberate update.
+// signature. The struct must be value-constructible with no adapter
+// scaffolding, and the MutateInstance signature must accept a
+// workload-owned InstanceStatus mutator.
 func TestReconcileInput_Compiles(t *testing.T) {
 	_ = workload.ReconcileInput{
 		MutateInstance: func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {

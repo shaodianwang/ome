@@ -80,37 +80,15 @@ func IsMultiPodInstance(inst workload.InstancePlan) bool {
 
 // BuildPodGroup produces the desired PodGroup for one multi-pod
 // Instance. Caller MUST check IsMultiPodInstance(inst) first; passing
-// a single-pod Instance returns an error so a stray call site can't
-// silently emit a 1-member PodGroup (which the scheduler-plugins
-// validation rejects with `minMember must be >= 1` only when zero,
-// but a 1-member PodGroup is functionally wrong — it means "schedule
-// this one pod whenever, but block other pods in the group" which has
-// no other members).
+// a single-pod Instance returns an error so a stray call can't
+// silently emit a 1-member PodGroup (functionally wrong: "schedule
+// this one pod whenever, but block other members" with no other
+// members).
 //
-// Properties:
-//   - Name: query.PodGroupName(owner.Name, component, inst.Index) —
-//     `<owner>-<comp>-<idx>`, mirrors the Instance subdomain prefix.
-//   - Namespace: inherits from the parent owner.
-//   - Labels: same Component-scoped trio every OMENative-emitted
-//     resource carries (inferenceservice, component, managed-by).
-//     The instance-index label is included so a single-Component
-//     selector can fan out by Instance for debugging.
-//   - OwnerReference: owner (typically the InferenceService) as
-//     Controller, blockOwnerDeletion=true so the K8s garbage collector
-//     handles cascade-delete when the owner is removed.
-//   - Spec.MinMember: TotalPodsForInstance(inst) — every leader +
-//     worker pod must be schedulable for the gang to land.
-//   - Spec.ScheduleTimeoutSeconds: clamped from the caller's
-//     InstanceReadyTimeout into [minScheduleTimeoutSeconds,
-//     maxScheduleTimeoutSeconds]; see the constant comments above.
-//
-// The owner is taken as the abstract client.Object + GroupVersionKind
-// (rather than a concrete v1beta1.InferenceService) so this leaf
-// package stays callable from the workload reconciler — which lives
-// above the owner-CRD typed boundary and never imports
-// pkg/apis/ome/v1beta1. Adapters supply the concrete object plus the
-// GVK at the dispatch site (omenative passes the ISVC + isvcGVK; the
-// future InferenceReplica adapter will pass its own).
+// Spec.MinMember = TotalPods(inst) — every leader + worker pod must be
+// schedulable for the gang to land. Spec.ScheduleTimeoutSeconds is
+// clamped from InstanceReadyTimeout into [minScheduleTimeoutSeconds,
+// maxScheduleTimeoutSeconds].
 //
 // Pure compute, no I/O.
 func BuildPodGroup(owner client.Object, ownerGVK schema.GroupVersionKind, plan workload.ComponentPlan, inst workload.InstancePlan) (*schedulingv1alpha1.PodGroup, error) {
@@ -171,26 +149,13 @@ func clampScheduleTimeoutSeconds(in int32) int32 {
 }
 
 // EnsurePodGroup creates (or no-op-reconciles) the PodGroup for one
-// multi-pod Instance. Idempotent: drift on MinMember /
-// ScheduleTimeoutSeconds / Labels / OwnerReferences is corrected on
-// every reconcile. No-op for single-pod Instances.
+// multi-pod Instance. Idempotent. No-op for single-pod Instances.
 //
 // The PodGroup MUST exist before any of its Instance's pods are
-// created — otherwise the scheduler-plugins coscheduler sees pods
-// referencing an unknown PodGroup and falls back to scheduling them
-// individually (defeating the gang). Callers wire this in BEFORE the
-// per-Instance Create / Restart op runs.
-//
-// Returns gangAvailable=false (with err=nil) when the cluster lacks
-// the PodGroup CRD — the no-match error from controller-runtime is
-// indistinguishable from "transient apiserver hiccup" at the typed
-// level, so the discovery check is the right gate (done by
-// CRDPresent above the caller).
-//
-// owner + ownerGVK are passed straight through to BuildPodGroup so
-// callers above the owner-CRD typed boundary (the workload gang
-// reconciler) can drive the PodGroup lifecycle without importing
-// pkg/apis/ome/v1beta1.
+// created — otherwise the coscheduler sees pods referencing an
+// unknown PodGroup and falls back to scheduling them individually
+// (defeating the gang). Callers wire this before the per-Instance
+// Create / Restart op.
 func EnsurePodGroup(ctx context.Context, c client.Client, owner client.Object, ownerGVK schema.GroupVersionKind, plan workload.ComponentPlan, inst workload.InstancePlan) error {
 	if c == nil {
 		return fmt.Errorf("EnsurePodGroup: nil client")

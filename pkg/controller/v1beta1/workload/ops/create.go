@@ -20,31 +20,19 @@ import (
 // readiness when an Instance is still coming up.
 const createRequeueInterval = 5 * time.Second
 
-// Event reasons emitted by the Create / Migration ops are declared
-// once in workload/events.go (as workload.EventReason values) so every
-// op file in this package shares the same constants — see that file
-// for the per-reason documentation and the byte-for-byte rationale
-// against the legacy omenative/status copies.
-
-// Create drives Create / Scale-Up toward each desired Instance. Multi-pass:
+// Create drives Create / Scale-Up toward each desired Instance.
+// Multi-pass:
 //
-//  1. Render missing pods with ome.io/serving=False; patch InstanceStatus
-//     to Phase=Creating with the Create operation stamped.
+//  1. Render missing pods with ome.io/serving=False; patch
+//     InstanceStatus to Phase=Creating with the Create operation
+//     stamped.
 //  2. Wait for runtime Ready on every pod, flip ome.io/serving=True,
 //     promote InstanceStatus to Phase=Ready (Operation=nil).
 //
-// Caller restricts to single-pod Instances via workload.BuildPlan;
-// EndpointSlice convergence is owned by drain.go.
-//
-// When target != nil the Ready promote records RunningRevision=target.Name
-// so detectUpdateTrigger's fast-path (s.RunningRevision == target.Name) can
-// short-circuit. Without it, per-pod podMatchesTarget runs and false-positives
-// against the post-Render pod mutations, triggering a spurious recreate.
-//
-// Source-agnostic: callers construct workload.ReconcileInput from their
-// own source-of-truth types. The ISVC-OMENative dispatcher delegates
-// via internalsource.BuildReconcileInput; the IR controller will call
-// the same entry point with its own ReconcileInput.
+// When target != nil the Ready promote records
+// RunningRevision=target.Name so detectUpdateTrigger's fast-path can
+// short-circuit. Without it, per-pod podMatchesTarget false-positives
+// against post-Render pod mutations and triggers a spurious recreate.
 func Create(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
 	if deps.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("Create: nil client")
@@ -157,25 +145,17 @@ type podTarget struct {
 	Ordinal int32
 }
 
-// expectedPodNamesForInstance enumerates every (Runner, ordinal) tuple
-// the Instance plan asks for and returns the targets in stable order.
+// expectedPodNamesForInstance enumerates every (Runner, ordinal)
+// tuple the Instance plan asks for.
 //
-// For single-pod Runners (Size == 1) the ordinal slot is read from the
-// Instance's recorded ActiveOrdinal in status — SurgeThenDrain
-// alternates between slots 0 and 1 across rollouts and the new slot
-// becomes canonical on promote. Without this lookup the next
-// steady-state Create pass after a surge cycle would hard-code
-// ordinal 0, see the canonical pod (now at ordinal 1) as "missing
-// ordinal 0", and create a duplicate pod — leaving the Instance with
-// 2 alive pods and no drain convergence.
+// Single-pod Runners (Size==1) read the ordinal slot from the
+// Instance's recorded ActiveOrdinal — SurgeThenDrain alternates
+// between slots 0 and 1 across rollouts. Without this lookup the
+// post-surge Create pass would hard-code ordinal 0 and create a
+// duplicate pod alongside the (now ordinal-1) canonical pod.
 //
-// Multi-pod Runners (Size > 1) keep enumerating every 0..Size-1
-// ordinal; per-gang-member surge allocation is not yet plumbed, so
-// the ActiveOrdinal bit applies only to the single-pod branch.
-//
-// Instances without a status entry (initial create) default to
-// ordinal 0 — matches findInstanceStatus returning nil and preserves
-// the pre-fix behavior of every Create-from-empty path.
+// Multi-pod Runners (Size>1) keep enumerating every 0..Size-1
+// ordinal; per-gang-member surge allocation isn't yet plumbed.
 func expectedPodNamesForInstance(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan) []podTarget {
 	var targets []podTarget
 	for _, runner := range inst.Runners {

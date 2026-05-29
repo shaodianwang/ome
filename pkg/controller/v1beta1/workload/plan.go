@@ -10,30 +10,19 @@ import (
 )
 
 // BuildPlan computes the desired ComponentPlan from the projected
-// (WorkloadDesiredSpec, WorkloadObservedState) pair.
-//
-// The function is pure: it inspects desired (Replicas, MultiPod,
-// WorkerPodSpec presence, Lifecycle) and observed (InstanceStatuses)
-// and produces the plan the rest of the reconciler will drive toward.
-// No I/O, no controller-runtime calls. Adapters are responsible for
-// projecting the spec/status they own into these two value types.
+// (WorkloadDesiredSpec, WorkloadObservedState) pair. Pure: no I/O,
+// no controller-runtime calls.
 //
 // Runner layout:
-//   - Single-pod Instances (desired.MultiPod=false): one Runner named
-//     "default" of size 1 per Instance. Used by Router and any
-//     Engine/Decoder without Leader+Worker declared.
-//   - Multi-pod Instances (desired.MultiPod=true): one "leader" Runner of
-//     size 1 plus one "worker" Runner of size derived from the
-//     desired.WorkerPodSpec presence. Matches OEP-0007 Story 1.
+//   - Single-pod (desired.MultiPod=false): one "default" Runner of
+//     size 1. Used by Router and Engine/Decoder without Leader+Worker.
+//   - Multi-pod (desired.MultiPod=true): one "leader" Runner of size 1
+//     plus one "worker" Runner of the user-set Worker.Size. Matches
+//     OEP-0007 Story 1.
 //
-// Defaulting: the mutating webhook fills in lifecycle fields for
-// OMENative-annotated Components, so in production the fields are
-// non-nil. For robustness against pre-defaulter objects or test
-// fixtures, BuildPlan also applies the same defaults inline.
-//
-// Component is taken from the caller; it is metadata for downstream
-// consumers and is not part of the planning computation. Typed as
-// v1beta1.ComponentType — see the note on ComponentPlan.Component above.
+// The mutating webhook fills in Lifecycle fields in production;
+// BuildPlan re-applies defaults inline for robustness against
+// pre-defaulter objects and test fixtures.
 func BuildPlan(component v1beta1.ComponentType, desired WorkloadDesiredSpec, observed WorkloadObservedState) (ComponentPlan, error) {
 	replicas := desired.Replicas
 	if replicas <= 0 {
@@ -73,9 +62,8 @@ func BuildPlan(component v1beta1.ComponentType, desired WorkloadDesiredSpec, obs
 	}, nil
 }
 
-// workerSizeFromRunners extracts the "worker" Runner size from the
-// desired Runner set. Returns 0 when no worker Runner is present
-// (single-pod Component).
+// workerSizeFromRunners returns the "worker" Runner size or 0 when no
+// worker Runner is present (single-pod Component).
 func workerSizeFromRunners(runners []Runner) int32 {
 	for _, r := range runners {
 		if r.Name == "worker" {
@@ -85,21 +73,12 @@ func workerSizeFromRunners(runners []Runner) int32 {
 	return 0
 }
 
-// runnersForInstance returns the Runner layout for one Instance based on
-// the Component's multi-pod flag and worker size.
-//
-// Single-pod (multiPod=false): one "default" Runner of size 1.
-// Multi-pod  (multiPod=true):  one "leader" Runner of size 1 plus one
-//
-//	"worker" Runner of size workerSize. The OEP fixes
-//	leader at size=1; the worker size is the user-set
-//	`Worker.Size` from the Component spec.
-//
-// The "worker" runner is emitted even when workerSize=0 so the layout shape
-// is consistent across reconciles (downstream code keys on Runner.Name).
-// Admission rejects `Worker.Size <= 0` at the webhook
-// (ValidateLeaderWorkerPairing), so a real workerSize=0 multi-pod request
-// never reaches this function in production.
+// runnersForInstance returns the Runner layout for one Instance based
+// on the Component's multi-pod flag and worker size. The "worker"
+// runner is emitted even when workerSize=0 so the layout shape is
+// consistent (downstream code keys on Runner.Name). Admission rejects
+// Worker.Size <= 0 at the webhook so workerSize=0 multi-pod requests
+// never reach this function in production.
 func runnersForInstance(multiPod bool, workerSize int32) []RunnerPlan {
 	if !multiPod {
 		return []RunnerPlan{{Name: "default", Size: 1}}
@@ -136,13 +115,10 @@ func updateStrategyWithDefaults(s *v1beta1.UpdateStrategy) v1beta1.UpdateStrateg
 	}
 	out := *s
 	if out.Type == "" {
-		// Default to SurgeThenDrain. It currently delegates to recreate
-		// (no zero-downtime surge yet), but recreates throttle to the
-		// MaxUnavailable budget at the dispatcher gate — in-place at
-		// scale could mass-drain the fleet on a single wake-up. Opt
-		// back into in-place explicitly via
-		// spec.<component>.omeNative.updateStrategy.type if you have a
-		// reason (pod-UID preservation, tight capacity).
+		// SurgeThenDrain default: recreates throttle to MaxUnavailable
+		// at the dispatcher gate, whereas in-place at scale could mass-
+		// drain the fleet on a single wake-up. Opt into in-place
+		// explicitly via spec.<component>.omeNative.updateStrategy.type.
 		out.Type = v1beta1.UpdateStrategySurgeThenDrain
 	}
 	if out.InPlaceUpdateStrategy == nil {
@@ -284,8 +260,7 @@ func migrationSourceIndices(instances []InstanceStatus) map[int32]struct{} {
 	return out
 }
 
-// existingInstanceIndices returns the set of indices the InstanceStatus
-// slice currently records.
+// existingInstanceIndices returns the set of recorded indices.
 func existingInstanceIndices(instances []InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	for _, s := range instances {
@@ -295,27 +270,19 @@ func existingInstanceIndices(instances []InstanceStatus) map[int32]struct{} {
 }
 
 // lowestUnusedIndex returns the smallest non-negative int32 not
-// present in used. The loop is bounded by len(used)+1 — for any set
-// of size N, at least one of {0,1,...,N} must be unused, so we never
-// scan past that. The bound prevents a pathological infinite loop if
-// `used` were ever to contain every int32 value.
+// present in used. Pigeonhole-bounded: for any set of size N at least
+// one of {0,..,N} must be unused.
 func lowestUnusedIndex(used map[int32]struct{}) int32 {
 	for i := int32(0); i <= int32(len(used)); i++ {
 		if _, taken := used[i]; !taken {
 			return i
 		}
 	}
-	// Unreachable given the pigeonhole argument above; the explicit
-	// fallback keeps the function total.
-	return int32(len(used))
+	return int32(len(used)) // unreachable; keep function total.
 }
 
-// incarnationForIndex returns the current Incarnation for the idx
-// in the InstanceStatus slice. If no matching entry exists yet —
-// first reconcile, or after a delete — incarnation starts at 1.
-// Otherwise the existing value is preserved. This function only reads
-// status; the writers are the patchInstanceStatus* helpers that own
-// each lifecycle transition.
+// incarnationForIndex returns the current Incarnation for idx, or 1
+// when no matching entry exists yet (first reconcile or after delete).
 func incarnationForIndex(instances []InstanceStatus, idx int32) int64 {
 	for _, s := range instances {
 		if s.Index == idx && s.Incarnation > 0 {

@@ -1,18 +1,11 @@
 // Package gang owns the per-Instance PodGroup lifecycle for OMENative
-// multi-pod Components. It sits one layer above the
-// `workload/podgroup` primitives (BuildPodGroup / EnsurePodGroup /
-// DeletePodGroup) and orchestrates them from the workload
-// reconciler's input model — every consumer of the package speaks
-// workload.ReconcileInput + workload.Deps + workload.ComponentPlan,
-// never the owner-CRD typed status.
+// multi-pod Components. Sits one layer above the `workload/podgroup`
+// primitives and orchestrates them from the workload reconciler's
+// input model.
 //
-// Why a subpackage and not the workload root: `workload/podgroup`
-// already imports `workload` for the InstancePlan/ComponentPlan
-// types; placing the gang body in `workload/gang.go` would close an
-// import cycle through podgroup. The gang/ subpackage breaks that
-// cycle (workload/gang → workload, workload/gang → workload/podgroup,
-// workload/podgroup → workload — no cycle since nothing in
-// workload root or workload/podgroup back-imports workload/gang).
+// Lives in its own subpackage (rather than workload root) so the
+// import edges are gang → workload + gang → podgroup → workload,
+// with no back-edge — would otherwise close a cycle through podgroup.
 package gang
 
 import (
@@ -29,36 +22,20 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// Condition types, reasons, and event reasons stamped by the gang
-// reconciler are declared once in workload/conditions.go (types and
-// reasons) and workload/events.go (event reasons); call sites in this
-// file reach for workload.ConditionGangSchedulingUnavailable,
-// workload.ReasonPodGroupCRDNotInstalled / workload.ReasonGangSchedulingAvailable,
-// and workload.EventReasonMaybeNoGangScheduler directly. See those
-// files for the per-constant documentation and the byte-for-byte
-// rationale against the legacy omenative/status copies.
-
-// maybeNoGangSchedulerSeen tracks which (owner, Component) pairs
-// have already received the `MaybeNoGangScheduler` Warning event so
-// the reconciler does not re-emit it on every reconcile. Keyed by
-// "<namespace>/<name>/<component>"; value is unused (presence is
-// the signal). Process-scoped — on controller restart the map is
-// empty and the warning fires once more, which is acceptable since
-// operators re-read events on restart anyway.
+// maybeNoGangSchedulerSeen tracks which (owner, Component) pairs have
+// already received the MaybeNoGangScheduler Warning event so the
+// reconciler does not re-emit it on every reconcile. Keyed by
+// "<namespace>/<name>/<component>". Process-scoped — controller
+// restart re-fires the warning, which is fine since operators re-read
+// events on restart.
 //
-// sync.Map (not a plain map+mutex) because reads dominate writes:
-// every reconcile of an owner that has already warned does a
-// lookup-only pass, and a sync.Map's read-mostly fast path avoids
-// contention with concurrent reconciles for different owners.
+// sync.Map because reads dominate writes: an owner that has already
+// warned does a lookup-only pass per reconcile.
 var maybeNoGangSchedulerSeen sync.Map
 
-// extraPodGroupIndices returns InstanceStatus indices that the plan
-// no longer covers — i.e., scale-down targets. The PodGroups for
-// these Instances need GC to match the pod-level scale-down
-// ops.delete pass does. Same set-difference semantic as
-// ops.extraInstanceIndices but operating against workload-owned
-// types so the gang reconciler stays free of the owner-CRD typed
-// status.
+// extraPodGroupIndices returns InstanceStatus indices the plan no
+// longer covers — scale-down targets whose PodGroups need GC to match
+// the pod-level scale-down ops.delete pass.
 func extraPodGroupIndices(observed []workload.InstanceStatus, plan workload.ComponentPlan) []int32 {
 	if len(observed) == 0 {
 		return nil
@@ -163,26 +140,13 @@ func EnsurePodGroups(ctx context.Context, deps workload.Deps, input workload.Rec
 		}
 	}
 
-	// Soft heuristic: if at least one multi-pod Instance is in the
-	// plan AND the rendered pod template uses the default scheduler
-	// (or no scheduler at all), the PodGroup we just created will be
-	// ignored by the stock kube-scheduler and the gang contract
-	// degrades to per-pod scheduling. Emit a one-shot Warning so
-	// operators notice; see workload.EventReasonMaybeNoGangScheduler for why
-	// this is a heuristic rather than a hard check. Wired AFTER the
-	// EnsurePodGroup loop so PodGroup-create failures take precedence
-	// (event would otherwise fire alongside a hard error and add
-	// noise).
+	// Heuristic warning when the rendered pod template uses the
+	// default scheduler — see EventReasonMaybeNoGangScheduler. Wired
+	// AFTER EnsurePodGroup so PodGroup-create failures take precedence.
 	maybeWarnNoGangScheduler(deps.Recorder, input, workload.ComponentTypeFromV1beta1(plan.Component), input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec)
 
-	// Scale-down PodGroup GC. The pod scale-down logic in ops.Delete
-	// drives pods to gone; this loop ensures the matching PodGroup
-	// is removed too. Cascade-delete from the owner handles
-	// whole-owner teardown — this is the partial / per-Instance
-	// case.
-	//
-	// Skipped when the CRD is not installed (no PodGroup was created;
-	// the Delete RPC would error with `no matches for kind`).
+	// Per-Instance PodGroup GC. Whole-owner teardown is handled by
+	// the cascade-delete OwnerReference.
 	for _, idx := range extraPodGroupIndices(input.ObservedState.InstanceStatuses, plan) {
 		if err := podgroup.DeletePodGroup(ctx, deps.Client, input.OwnerObject, plan.Component, idx); err != nil {
 			return fmt.Errorf("EnsurePodGroups: delete extra instance %d: %w", idx, err)
@@ -192,17 +156,9 @@ func EnsurePodGroups(ctx context.Context, deps workload.Deps, input workload.Rec
 }
 
 // patchGangSchedulingCondition writes the GangSchedulingUnavailable
-// Component-level condition through the adapter's
-// WriteAggregateCondition callback. The callback wraps
-// apimeta.SetStatusCondition + the apiserver round-trip under
-// retry.RetryOnConflict so LastTransitionTime only updates on real
-// Status transitions and concurrent reconciles can't lose the write
-// to each other.
-//
-// input.WriteAggregateCondition is required by contract — workload
-// code panics on a nil callback rather than silently dropping the
-// condition write. Adapters that don't need the condition stamped
-// wire an explicit no-op closure (see input.go).
+// Component-level condition through input.WriteAggregateCondition.
+// The closure wraps apimeta.SetStatusCondition + apiserver round-
+// trip under retry.RetryOnConflict.
 func patchGangSchedulingCondition(ctx context.Context, input workload.ReconcileInput, crdPresent, anyMultiPod bool) error {
 	var generation int64
 	if input.OwnerObject != nil {
@@ -213,14 +169,9 @@ func patchGangSchedulingCondition(ctx context.Context, input workload.ReconcileI
 }
 
 // gangSchedulingUnavailableCondition builds the
-// `GangSchedulingUnavailable` Component-level condition with the
-// canonical reason / message pair the OEP specifies. Set True when
-// the Component has at least one multi-pod Instance but the cluster
-// lacks the scheduler-plugins PodGroup CRD; False otherwise.
-//
-// Local to this package — the omenative/status package retains its
-// own copy (with v1beta1-typed types) for the typed-status callers;
-// values are kept in lockstep by convention.
+// GangSchedulingUnavailable condition. True when the Component has
+// at least one multi-pod Instance but the cluster lacks the
+// scheduler-plugins PodGroup CRD; False otherwise.
 func gangSchedulingUnavailableCondition(crdPresent, anyMultiPodInstance bool, generation int64) metav1.Condition {
 	now := metav1.Now()
 	if !anyMultiPodInstance || crdPresent {
@@ -245,41 +196,21 @@ func gangSchedulingUnavailableCondition(crdPresent, anyMultiPodInstance bool, ge
 	}
 }
 
-// maybeWarnNoGangScheduler emits a one-shot Warning event on the
-// owner (input.EventTarget if set, otherwise input.OwnerObject) when
-// a PodGroup was created for the (owner, Component) pair but the pod
-// template's effective `spec.schedulerName` is empty or the upstream
-// default ("default-scheduler"). The stock kube-scheduler does not
-// read scheduler-plugins' PodGroup objects, so in that configuration
-// gang scheduling is silently ineffective: each pod schedules
-// individually, the LLM runtime hangs on the slowest peer pod to
-// land, and the gang contract is broken.
+// maybeWarnNoGangScheduler emits a one-shot Warning when a PodGroup
+// was created but the pod template's effective spec.schedulerName is
+// empty or "default-scheduler". The stock kube-scheduler doesn't
+// read scheduler-plugins PodGroup objects, so the gang contract is
+// silently broken in that configuration.
 //
-// "Effective" means: if the leader (`leaderSpec`) sets a
-// schedulerName, take that; otherwise fall back to the worker
-// (`workerSpec`); otherwise treat it as unset. The two templates
-// share the runtime's `spec.schedulerName` plumbing in nearly every
-// configuration, but defending against drift is cheap.
+// "Effective" schedulerName: leaderSpec wins, then workerSpec, then
+// treated as unset. The warning is a heuristic — we can't detect
+// scheduler-plugins installed AS the default scheduler from inside
+// the controller, so accept the false-positive cost there.
 //
-// We can't reliably detect the case where the operator has installed
-// scheduler-plugins AS the default scheduler (single-scheduler
-// deployment with the Coscheduling plugin enabled) — from inside the
-// controller, the SchedulerName field would still be empty /
-// "default-scheduler". The warning is therefore a heuristic; we
-// accept the false-positive cost in that configuration in exchange
-// for surfacing the (much more common) misconfiguration where the
-// operator forgot to set SchedulerName entirely.
+// Dedup'd per (owner, Component) per process. Restart re-fires once,
+// which is acceptable.
 //
-// Dedup: at most one event per (owner, Component) per controller
-// process. Reconciles are frequent and the warning is informational;
-// re-firing every reconcile would drown out the actionable events
-// (InstanceCreated, OperationDeadlineExceeded). On controller restart
-// the dedup map is empty and the warning re-fires once — acceptable
-// since operators typically re-scan recent events after a restart
-// anyway.
-//
-// nil-safe: nil recorder, nil owner, nil pod template are all
-// no-ops.
+// nil-safe: nil recorder, nil owner, nil pod template are no-ops.
 func maybeWarnNoGangScheduler(rec record.EventRecorder, input workload.ReconcileInput, component workload.ComponentType, leaderSpec, workerSpec *corev1.PodSpec) {
 	target := eventTarget(input)
 	if target == nil {

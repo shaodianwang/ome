@@ -21,43 +21,34 @@ import (
 )
 
 // MigrateRequeueInterval is the wait between Migrate passes while a
-// surge migration is in flight. Exported so the ISVC dispatcher (which
-// still owns the per-Component requeue calculus) can reach the same
-// pacing without redeclaring it.
+// surge migration is in flight. Exported so the dispatcher's pacing
+// stays in lockstep.
 const MigrateRequeueInterval = 5 * time.Second
 
-// Migrate drives one surge migration toward completion. Triggered by an
-// adapter-side annotation (or other source-of-truth carrier) that the
-// caller has already parsed into (uuid, req). Multi-pass and crash-safe
-// via the audit ConfigMap.
+// Migrate drives one surge migration toward completion. Triggered by
+// an adapter-side annotation (or other source-of-truth carrier) the
+// caller parses into (uuid, req). Multi-pass and crash-safe via the
+// audit ConfigMap.
 //
 // Sequence (surge-only):
 //
 //  1. Audit-ledger dedup; reject schema-invalid / capacity-exceeded.
-//  2. Allocate surge index = lowest unused (sparse-safe). Stamp source
+//  2. Allocate surge index = lowest unused. Stamp source
 //     Phase=Migrating, surge Phase=Creating; persist Started entry.
-//  3. Reuse source's RunningRevision as the surge template; create surge
-//     pods with the migration anti-affinity overlay.
-//  4. Wait surge ContainersReady + in-rotation + Available; flip serving.
-//  5. Drain source (serving=False, wait drain.IsPodDrained), then delete.
+//  3. Reuse source's RunningRevision as the surge template; create
+//     surge pods with the migration anti-affinity overlay.
+//  4. Wait surge ContainersReady + in-rotation + Available; flip
+//     serving.
+//  5. Drain source (serving=False, wait drain.IsPodDrained), delete.
 //  6. Promote surge Ready+RunningRevision, drop source InstanceStatus,
-//     persist Completed entry — in that order (crash window if reversed).
+//     persist Completed entry — in that order (crash window if
+//     reversed).
 //
-// Source-agnostic: callers construct workload.ReconcileInput from their
-// own source-of-truth types. The ISVC-OMENative dispatcher delegates
-// via internalsource.BuildReconcileInput; the IR controller will call
-// the same entry point with its own ReconcileInput.
-//
-// SINGLE-POD ONLY: Multi-pod migration is OEP-deferred — surge sizing
-// must mirror the source's full Runner layout (1 leader + N workers),
-// and the surge must satisfy the gang readiness gate before drain
-// proceeds. The single-pod surge path the rest of this function
-// implements would create a single "default" surge pod that can never
-// satisfy a multi-pod gang, leaving the migration stuck until the
-// deadline. We reject up-front with a Failed audit row so the requester
-// observes the rejection within its SLA. When multi-pod migration lands
-// (future OEP-0007 amendment), drop the guard and extend the surge path
-// to emit the full Runner layout.
+// SINGLE-POD ONLY: multi-pod migration is OEP-deferred — surge sizing
+// must mirror the source's full Runner layout and satisfy the gang
+// readiness gate before drain proceeds. Rejected up-front with a
+// Failed audit row so the requester observes the rejection within
+// its SLA.
 func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, requestUUID string, req *audit.MigrationRequest) (bool, error) {
 	if deps.Client == nil {
 		return false, fmt.Errorf("Migrate: nil client")
@@ -74,8 +65,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return true, nil
 	}
 
-	// Multi-pod migration is OEP-deferred (see the SINGLE-POD ONLY
-	// note on Migrate above). Reject up-front with a Failed audit row.
+	// Reject multi-pod up-front per the SINGLE-POD ONLY guard.
 	if isMultiPodInstance(plan, sourceIdx) {
 		return failMigration(ctx, deps, input, ledger, req, requestUUID,
 			"multi-pod Instance migration not yet supported (single-pod surge cannot satisfy a multi-pod gang)")

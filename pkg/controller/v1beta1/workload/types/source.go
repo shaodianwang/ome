@@ -9,14 +9,12 @@ import (
 )
 
 // WorkloadDesiredSpec.Lifecycle and WorkloadAggregateStatus.Traffic
-// reference v1beta1 because the lifecycle subtree (5 nested structs +
-// 4 string enums) and the traffic target struct have no workload
-// mirror yet.
+// reference v1beta1 because those subtrees have no workload mirror
+// yet.
 
 // WorkloadDesiredSpec is the per-reconcile projection of the source
-// spec the workload pipeline drives toward. Adapters compute this once
-// at the top of Reconcile; the reconciler treats every field as
-// read-only.
+// spec the workload pipeline drives toward. Read-only from workload
+// code.
 type WorkloadDesiredSpec struct {
 	// Replicas is the desired Instance count.
 	Replicas int32
@@ -47,11 +45,8 @@ type WorkloadDesiredSpec struct {
 	// (each Instance materializes more than one pod).
 	MultiPod bool
 
-	// Lifecycle holds the OMENative lifecycle policies (RestartPolicy,
-	// UpdateStrategy, ReadyPolicy, InstanceReadyTimeout,
-	// MigrationPolicy). Reuses the existing LifecycleSpec
-	// type — adapters either project ISVC.Spec.<comp>.OMENative or
-	// dereference IR.Spec.Lifecycle.
+	// Lifecycle holds RestartPolicy / UpdateStrategy / ReadyPolicy /
+	// InstanceReadyTimeout / MigrationPolicy.
 	Lifecycle v1beta1.LifecycleSpec
 
 	// Pacing is the projected rollout pacing for this reconcile. Nil
@@ -63,11 +58,9 @@ type WorkloadDesiredSpec struct {
 	// resume on unpause.
 	Paused bool
 
-	// GangSchedulingAvailable is the cluster-discovery boolean threaded
-	// through from the controller manager — true when the
-	// scheduler-plugins PodGroup CRD is installed at controller
-	// startup. The reconciler reads this to decide whether to call
-	// podgroup.EnsurePodGroup for each multi-pod Instance.
+	// GangSchedulingAvailable is true when the scheduler-plugins
+	// PodGroup CRD was discovered at controller startup. Drives
+	// whether podgroup.EnsurePodGroup runs for multi-pod Instances.
 	GangSchedulingAvailable bool
 }
 
@@ -89,12 +82,8 @@ type WorkloadObservedState struct {
 	// UpdateRevision names the ControllerRevision being rolled out.
 	UpdateRevision string
 
-	// InstanceStatuses reports per-Instance state. The reconciler
-	// reads but does not mutate this slice — writes go through
-	// Source.MutateInstance. Workload-owned mirrors (types.go) —
-	// adapters convert from the owner-CRD shape via
-	// `internalsource.InstanceStatusSliceToWorkload` for the ISVC
-	// adapter.
+	// InstanceStatuses reports per-Instance state. Read-only here;
+	// writes go through ReconcileInput.MutateInstance.
 	InstanceStatuses []InstanceStatus
 
 	// Conditions reports component-level conditions.
@@ -131,42 +120,37 @@ type WorkloadPacing struct {
 	// the reconciler default (25%).
 	MaxUnavailable *intstr.IntOrString
 
-	// Decisions is the projected per-gate allow/deny map for THIS
-	// reconcile. ISVC adapter fills it from CheckRatioGate /
-	// CheckSurgeGate / CheckUnavailabilityGate / CheckSequentialGate;
-	// IR adapter leaves it nil (rate-limited via Partition +
-	// MaxUnavailable only; the parent ISVC controller pauses via
-	// spec.paused for harder gates). nil means "allowed".
+	// Decisions is the projected per-gate allow/deny map for this
+	// reconcile. The ISVC adapter fills it from coordination gates;
+	// the IR adapter leaves it nil. nil means allowed.
 	Decisions *PacingDecisions
 }
 
 // PacingDecisions is the workload-facing projection of cross-Component
-// coordination gates. The workload package treats it as plain data;
-// adapters compute it (or leave it nil) outside the workload package.
+// coordination gates. Plain data — adapters compute it outside the
+// workload package.
 type PacingDecisions struct {
-	// UpdateAllowed is false when the workload reconciler MUST NOT
-	// start any fresh Update operations this reconcile.
+	// UpdateAllowed is false when the reconciler MUST NOT start any
+	// fresh Update operations this reconcile.
 	UpdateAllowed bool
 
 	// UpdateDenyReason is the operator-visible reason recorded onto
 	// events / conditions when UpdateAllowed is false.
 	UpdateDenyReason string
 
-	// SurgeBudgetRemaining is the upper bound on in-flight surge
-	// pods the workload reconciler may keep alive concurrently.
-	// The dispatcher still tracks its own in-flight count within a
-	// single reconcile pass; this is a per-reconcile ceiling.
+	// SurgeBudgetRemaining is the upper bound on in-flight surge pods
+	// the reconciler may keep alive concurrently. The dispatcher
+	// tracks its own in-flight count within a pass; this is a
+	// per-reconcile ceiling.
 	SurgeBudgetRemaining int32
 }
 
-// Runner is the workload-package projection of the Runner concept:
-// a named role within an Instance with a per-Instance pod count.
-// Single-pod Instances have one Runner named "default" of Size=1;
-// multi-pod Instances have "leader" (Size=1) + "worker" (Size=N).
+// Runner is a named role within an Instance with a per-Instance pod
+// count. Single-pod has one "default" Runner of Size=1; multi-pod has
+// "leader" (Size=1) + "worker" (Size=N).
 type Runner struct {
 	// Name is "leader" | "worker" | "default".
 	Name string
-
 	// Size is the per-Instance pod count for this Runner.
 	Size int32
 }

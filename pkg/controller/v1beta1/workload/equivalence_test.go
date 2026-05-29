@@ -1,68 +1,13 @@
 package workload_test
 
-// Equivalence diff harness for the workload-extraction refactor
-// (slice 7 of N). Asserts that the K8s state produced by the
+// Equivalence diff harness. Asserts that the K8s state produced by the
 // legacy ISVC-OMENative path (`omenative.ReconcileComponent`) and the
-// workload-package path produce byte-identical pods / CRs / services
-// / per-Component status against the same fixture.
+// workload-package path produce byte-identical pods / CRs / services /
+// per-Component status against the same fixture.
 //
-// What this guards against:
-//
-//   - A future refactor of `omenative.ReconcileComponent` (e.g., the
-//     slice 8+ extraction of supporting-resource scaffolding into
-//     workload/) accidentally projecting a different
-//     workload.ReconcileInput than `internalsource.BuildReconcileInput`
-//     used to project. The harness would diff and fail.
-//
-//   - A future refactor of `workloadops.Create` (or any peer op)
-//     emitting different labels / owner refs / namespaces than the
-//     ISVC-side render path historically did.
-//
-//   - Any drift between the two paths' supporting-resource emissions
-//     (headless Service shape, ControllerRevision hash, etc.). Both
-//     paths share the underlying core/ helpers today; the harness
-//     ensures the SHARED path stays shared.
-//
-// Why it's structured as a back-to-back comparison rather than a
-// single golden snapshot: a golden file would re-encode the current
-// behaviour without distinguishing legitimate evolution (a CRD
-// addition that updates both paths in lock-step) from regressions
-// (only one path changed). Two parallel runs against byte-identical
-// fixtures catch the latter without false-positives on the former.
-//
-// Architecture note for the "new path": slice 5 of the workload
-// extraction was projected to introduce `workload.Reconcile(ctx,
-// deps, input)` — a single entry point the IR adapter could call
-// instead of the omenative dispatch chain. That slice has not landed
-// at the time this harness ships (the workload package still has no
-// top-level Reconcile function; only the per-op leaves are
-// extracted). The "new path" here therefore mimics what
-// `workload.Reconcile` will do once it lands:
-//
-//  1. Build a `workload.ReconcileInput` via
-//     `internalsource.BuildReconcileInput` (the same projection the
-//     legacy ops shims use under the hood).
-//
-//  2. Compute the desired ComponentPlan via `core.BuildPlan` (the ISVC
-//     adapter projection wrapper around `workload.BuildPlan`).
-//
-//  3. Ensure supporting resources (headless Service,
-//     ControllerRevision) via the shared
-//     `workload.BuildHeadlessService` (fed by the ISVC adapter's
-//     `omenative.BuildHeadlessServiceSpec`) and
-//     `core.EnsureControllerRevisionForISVC` helpers — both pure
-//     compute / source-agnostic.
-//
-//  4. Call `workloadops.Create` (and Delete) directly against the
-//     constructed input — bypassing the omenative dispatch shim.
-//
-//  5. Run `omenative.AggregateAndWriteStatus` (still ISVC-typed; the
-//     workload-side equivalent lands in a later slice).
-//
-// When slice 5 lands, swap step (4) to `workload.Reconcile(ctx, deps,
-// input)` and the harness keeps its meaning. Until then this is the
-// closest structural divergence from the legacy path the codebase
-// can express.
+// Structured as a back-to-back comparison rather than a golden
+// snapshot so legitimate evolution that updates both paths in
+// lock-step doesn't surface as a false-positive regression.
 
 import (
 	"context"
@@ -124,12 +69,10 @@ type fixture struct {
 	initialStatus *v1beta1.OMENativeComponentStatus
 }
 
-// clusterState is the diffable snapshot both paths converge to. The
-// fields here are the ones a workload-extraction refactor could
-// realistically drift on; fields the controller-runtime cache stamps
-// on its own (timestamps, UIDs, resourceVersions) are intentionally
-// dropped at the snapshot stage rather than at the comparison stage so
-// the diff stays grep-readable.
+// clusterState is the diffable snapshot both paths converge to.
+// Cluster-stamped fields (timestamps, UIDs, resourceVersions) are
+// dropped at the snapshot stage rather than at comparison so the diff
+// stays grep-readable.
 type clusterState struct {
 	// crNames is the sorted "namespace/name" of every
 	// ControllerRevision in the cluster. Two CRs with the same Data
@@ -327,38 +270,12 @@ func TestEquivalence_FivePassSteadyState(t *testing.T) {
 	assertEquivalent(t, legacy, wrkld)
 }
 
-// SurgeThenDrain equivalence is INTENTIONALLY NOT covered by this
-// harness. Two structural reasons:
-//
-//  1. The legacy path runs the full per-Component dispatcher
-//     (`ReconcileComponentOps`) which routes Update / Restart /
-//     Migrate / Delete in addition to Create. The "new path" this
-//     harness emulates only invokes `workloadops.Create` because
-//     the workload package does not yet expose a top-level
-//     `Reconcile` that dispatches the peer ops (slice 5 of the
-//     extraction). Comparing the two paths under a fixture that
-//     triggers the Update branch (image bump) surfaces a real
-//     architectural divergence — the new path doesn't dispatch
-//     Update at all — which is not a regression to guard against
-//     but a known gap until slice 5 lands.
-//
-//  2. The full SurgeThenDrain rollout depends on real kubelet
-//     behaviour (ContainersReady=True after image roll, drained
-//     EndpointSlice convergence) that the controller-runtime fake
-//     client cannot synthesize. The KIND suite under
-//     tests/integration/singlecluster/controller/coordination_kind/
-//     is the authoritative coverage for cross-Component rollout
-//     dynamics; an envtest-style equivalence test for it would
-//     either be flaky (PodKubeletSimulator races, the reason the
-//     envtest coordination/ suite was retired) or require so much
-//     pod-status simulation that the equivalence assertion would
-//     be drowned in fixture scaffolding.
-//
-// Once slice 5 ships, swap the workload-path stub here to call
-// `workload.Reconcile(ctx, deps, input)` and add a
-// `TestEquivalence_SurgeThenDrain` scenario that compares the
-// in-flight surge state after one post-bump pass (the steady-state
-// convergence stays a KIND-suite concern).
+// SurgeThenDrain equivalence is NOT covered here: the full rollout
+// depends on real kubelet behaviour (ContainersReady=True after image
+// roll, drained EndpointSlice convergence) that the controller-runtime
+// fake client cannot synthesize. The KIND suite under
+// tests/integration/singlecluster/controller/coordination_kind/ is
+// the authoritative coverage for cross-Component rollout dynamics.
 
 // runLegacy drives `omenative.ReconcileComponent` once against a
 // fresh fixture and snapshots the resulting cluster state.
@@ -385,13 +302,11 @@ func runLegacyN(t *testing.T, fix fixture, passes int) clusterState {
 	params.Expectations = workload.NewExpectations()
 
 	for i := 0; i < passes; i++ {
-		_, err := omenative.ReconcileComponent(ctx, params)
-		// Don't t.Fatalf on errors — the spec says we should
-		// compare error parity too, but for the cold-start /
+		// Don't t.Fatalf on errors — for the cold-start /
 		// steady-state scenarios both paths return nil-or-requeue
-		// in practice. A real error would surface as a divergence
-		// at the snapshot stage (no pods created, etc.).
-		_ = err
+		// in practice. A real error surfaces as a divergence at
+		// the snapshot stage (no pods created, etc.).
+		_, _ = omenative.ReconcileComponent(ctx, params)
 	}
 
 	return snapshotClusterState(t, ctx, cli, isvc, fix.component)
@@ -423,34 +338,10 @@ func runWorkloadN(t *testing.T, fix fixture, passes int) clusterState {
 	return snapshotClusterState(t, ctx, cli, isvc, fix.component)
 }
 
-// runWorkloadOnce is the in-test miniature of what `workload.Reconcile`
-// will do once slice 5 lands. It mirrors `omenative.ReconcileComponent`'s
-// pipeline but routes every step through the workload package wherever
-// the workload package owns the helper:
-//
-//  1. Ensure supporting Services (workload.BuildHeadlessService fed
-//     by omenative.BuildHeadlessServiceSpec for the headless Service;
-//     the top-level service.ServiceReconciler for the stable Service —
-//     same path the legacy ReconcileComponent now uses after the
-//     stable-Service unification refactor).
-//
-//  2. Compute the ComponentPlan via `core.BuildPlan` (the ISVC-side
-//     wrapper around `workload.BuildPlan`).
-//
-//  3. Ensure the target ControllerRevision via
-//     `core.EnsureControllerRevisionForISVC` (shared between paths).
-//
-//  4. Build the `workload.ReconcileInput` via
-//     `internalsource.BuildReconcileInput`.
-//
-//  5. Call `workloadops.Create` directly with the constructed
-//     input — bypassing the `omenative/ops` shim. This is the actual
-//     divergent step from the legacy path.
-//
-//  6. Run `omenative.AggregateAndWriteStatus` to flush the per-Component
-//     status (workload-side equivalent lands in a later slice).
-//
-// Returns any pipeline error so the caller can surface it.
+// runWorkloadOnce mirrors `omenative.ReconcileComponent`'s pipeline
+// but calls `workloadops.Create` directly instead of going through the
+// `omenative/ops` dispatch shim. This is the divergent step the
+// harness exists to compare against the legacy path.
 func runWorkloadOnce(ctx context.Context, params core.ReconcileParams) error {
 	// Step 1: supporting Services. The legacy
 	// `ensureHeadlessService` helper is misleadingly named — it

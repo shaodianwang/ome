@@ -1,22 +1,11 @@
-// services.go owns the per-Component supporting-Service renderers and
-// reconcilers — today only the headless Service that gives every
-// workload-managed pod a stable peer-DNS FQDN of the form
+// services.go owns the per-Component headless Service that gives
+// every workload-managed pod a stable peer-DNS FQDN of the form
 // `<pod-name>.<owner>-<component>-headless.<namespace>.svc.<cluster-domain>`.
 //
-// The functions in this file take a typed `types.PerComponentServiceSpec`
-// rather than an owner CRD object so the workload package stays free
-// of the owner-CRD typed import boundary. Adapters (the ISVC OMENative
-// dispatcher today, the InferenceReplica controller tomorrow) populate
-// the spec from their owner shape and call ReconcileHeadlessService.
-//
-// SCOPE: this file is invoked by the adapter caller, NOT by
-// workload.Reconcile. The dispatcher in reconcile.go owns the per-
-// Instance lifecycle (Create / Update / Restart / Migrate / Delete);
-// supporting-resource emissions are a separate top-of-reconcile
-// concern that runs before any per-Instance op. Keeping the Service
-// reconcile in a sibling helper (rather than folding it into
-// workload.Reconcile) preserves that separation and matches the way
-// PodMonitor and PodGroup are wired by the same caller.
+// Functions take `types.PerComponentServiceSpec` rather than an owner
+// CRD object so the workload package stays free of the owner-CRD
+// typed import boundary. Invoked by the adapter caller before
+// workload.Reconcile, alongside PodMonitor and PodGroup wiring.
 package workload
 
 import (

@@ -21,14 +21,7 @@ import (
 )
 
 // Tests for the per-Instance Update state machine and its chooser /
-// trigger / per-revision helpers. Each test in this file maps back to
-// one of the upstream omenative/ops/update_test.go entries (PR #243,
-// #246, #256, #261, Bug #51 et al.) that moved alongside the
-// production code in part 2 slice 4f of N. Test names preserved
-// byte-for-byte so the prior bug-coverage map carries over unchanged.
-// Setup is rewritten to consume the workload.ReconcileInput + Deps
-// boundary the new state machine takes, matching the canonical
-// pattern in surge_test.go.
+// trigger / per-revision helpers.
 
 // TestUpdate_NilClient pins the nil-client guard. Without it the
 // dispatcher would panic in production when the controller-runtime

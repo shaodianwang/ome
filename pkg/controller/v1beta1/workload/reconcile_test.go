@@ -169,9 +169,8 @@ func TestReconcile_ScaleDownExtra_DrivesDelete(t *testing.T) {
 
 // TestReconcile_MigrationInFlight_NotScaleDown asserts that an
 // Instance with Phase=Migrating is NOT scale-down-deleted, even when
-// the plan doesn't cover its index. Surge-side migration would
-// otherwise be ripped out from under Migrate by the dispatcher's
-// first pass (the scale-down bug pre-extraction).
+// the plan doesn't cover its index — otherwise Migrate's surge
+// would be ripped out by the dispatcher's first pass.
 func TestReconcile_MigrationInFlight_NotScaleDown(t *testing.T) {
 	observed := []workload.InstanceStatus{
 		{Index: 0, Phase: workload.InstancePhaseReady},
@@ -213,8 +212,7 @@ func TestReconcile_MigrationOperationOwned_NotScaleDown(t *testing.T) {
 
 // TestReconcile_SkipsMigrateWhenModeNever asserts the dispatcher
 // short-circuits the migration pass when plan.MigrationMode==never,
-// even if a DetectMigrationRequest callback is wired. Mirrors the
-// pre-extraction omenative dispatcher byte-for-byte.
+// even if a DetectMigrationRequest callback is wired.
 func TestReconcile_SkipsMigrateWhenModeNever(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()

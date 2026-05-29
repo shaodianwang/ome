@@ -16,13 +16,7 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// Tests for the per-Instance SurgeThenDrain state machine. Each test in
-// this file maps to one of the named bug-fix tests in PR #243, #246,
-// #256, #261 — the tests moved from
-// pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops/surge_test.go
-// when the per-Instance state machine itself moved to workload/ops in
-// part 2 slice 4f of N. Names are byte-equal to the upstream omenative
-// copies so the prior bug-coverage map carries over unchanged.
+// Tests for the per-Instance SurgeThenDrain state machine.
 
 // surgePodAtOrdinal builds a fixture pod for a SurgeThenDrain test. Same
 // shape as legacyPodAtIncarnation but stamps LabelPodOrdinal explicitly

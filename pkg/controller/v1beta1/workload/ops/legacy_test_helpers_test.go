@@ -22,27 +22,17 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// Test scaffolding for the Surge / Update bug-fix tests that moved from
-// omenative/ops to workload/ops alongside the production state machine
-// (part 2 slice 4f of N). The helpers below mirror their omenative
-// counterparts (test_helpers_test.go, restart_test.go, update_test.go,
-// surge_test.go) at the wire level but speak the workload-owned types
-// the new state machine consumes. The test names are kept identical to
-// the upstream omenative copies so the prior bug-coverage map carries
-// over unchanged.
+// White-box test scaffolding (package ops) for the Surge / Update
+// state-machine tests. Distinct from the create_test.go fixtures
+// (package ops_test) because both packages need similar helpers but
+// can't share them across the package boundary.
 
-// testRevisionHashLegacy is the synthetic revision hash stamped on test
-// pods in the legacy fixtures. The original omenative/ops package
-// stamped a single constant; this package uses two distinct constants
-// to avoid name collision with the workload/ops/create_test.go fixture
-// shape (which is also testRevisionHash). The two values are unrelated;
-// production callers always stamp the real per-revision hash.
+// testRevisionHashLegacy is the synthetic revision hash stamped on
+// test pods.
 const testRevisionHashLegacy = "testrev1"
 
 // legacyMinimalISVC builds an ISVC with the minimum metadata Update /
-// Surge state-machine tests need. Distinct from minimalISVC in
-// create_test.go to keep the helpers package-internal and not collide
-// with the external-package test fixtures.
+// Surge state-machine tests need.
 func legacyMinimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 	mr := replicas
 	return &v1beta1.InferenceService{
@@ -62,9 +52,7 @@ func legacyMinimalISVC(name, ns string, replicas int) *v1beta1.InferenceService 
 }
 
 // legacyTestPodLabels reproduces the label set Render stamps on every
-// emitted pod. Lifted from the omenative test_helpers_test.go
-// byte-for-byte so the moved bug-fix tests continue to fabricate
-// pods that match production's selector.
+// emitted pod.
 func legacyTestPodLabels(isvc string, component v1beta1.ComponentType, instanceIdx int32, runner string, incarnation int64, ordinal int32) map[string]string {
 	return map[string]string{
 		constants.InferenceServicePodLabelKey: isvc,
@@ -78,24 +66,14 @@ func legacyTestPodLabels(isvc string, component v1beta1.ComponentType, instanceI
 }
 
 // legacyResetExpectations re-seats workload.DefaultExpectations so
-// back-to-back tests don't observe prior ExpectCreates entries. Mirrors
-// the omenative resetExpectations helper at the workload layer; the
-// legacy tests called the omenative version, which already reset both
-// caches. The `workload` import alias in this file points at
-// workload/types (the parent workload package would close an
-// import-cycle with workload.Reconcile importing workload/ops);
-// reseating types.DefaultExpectations directly is sufficient because
-// `Deps.ExpectationsCache()` reads the same var.
+// back-to-back tests don't observe prior ExpectCreates entries.
 func legacyResetExpectations(t *testing.T) {
 	t.Helper()
 	workload.DefaultExpectations = workload.NewExpectations()
 }
 
-// legacyNewFakeClient builds a controller-runtime fake client with the
-// schemes the surge / update tests touch (corev1 + v1beta1 +
-// discoveryv1 + appsv1). Status subresource is registered so
-// Status().Update mirrors API-server behavior. Lifted from the
-// omenative test_helpers_test.go.
+// legacyNewFakeClient builds a controller-runtime fake client with
+// the schemes the surge / update tests touch.
 func legacyNewFakeClient(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -119,8 +97,7 @@ func legacyNewFakeClient(t *testing.T, initObjs ...client.Object) client.Client 
 }
 
 // legacyPodForInstance fabricates a pod matching what Render() would
-// produce for the given (ISVC, instance) pair, with knobs for
-// runtime-ready / serving state. Lifted from omenative test_helpers_test.go.
+// produce for the given (ISVC, instance) pair.
 func legacyPodForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, serving bool) *corev1.Pod {
 	labels := legacyTestPodLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1, 0)
 	labels[query.LabelRevisionHash] = testRevisionHashLegacy
@@ -161,17 +138,13 @@ func legacyPodAtIncarnation(isvc *v1beta1.InferenceService, instanceIdx int32, i
 }
 
 // legacyTestInput projects the ISVC + Component onto a
-// workload.ReconcileInput. Mirrors omenative/internalsource.BuildReconcileInput
-// at the test layer; we reproduce the shape inline to avoid a forward
-// import from workload/ops onto the omenative adapter.
-//
-// MutateInstance round-trips through the fake client's Status().Update
-// so tests can assert on the persisted ISVC.Status.Components[c].OMENative
-// shape. The MutateInstance closure also mirrors the just-committed
-// Operation back onto the in-memory ISVC.Status snapshot the test
-// holds a pointer to — matches the production mirror (#246) that lets
-// detectUpdateTrigger / chooseUpdateMode read the post-commit Operation
-// step on the next pass within the same reconcile.
+// workload.ReconcileInput. MutateInstance round-trips through the
+// fake client's Status().Update so tests can assert on the persisted
+// ISVC.Status. The closure also mirrors the just-committed Operation
+// back onto the in-memory ISVC.Status snapshot the test holds a
+// pointer to, so subsequent passes within the same reconcile observe
+// the just-stamped Phase / Operation without re-reading the
+// apiserver.
 func legacyTestInput(isvc *v1beta1.InferenceService, c client.Client, component v1beta1.ComponentType) workload.ReconcileInput {
 	return workload.ReconcileInput{
 		OwnerObject: isvc,
@@ -199,8 +172,7 @@ func legacyTestInput(isvc *v1beta1.InferenceService, c client.Client, component 
 }
 
 // legacyInstanceStatuses pulls + converts the OMENative
-// InstanceStatuses slice into the workload-owned mirror. Mirrors
-// internalsource.InstanceStatusSliceToWorkload at the test layer.
+// InstanceStatuses slice into the workload-owned mirror.
 func legacyInstanceStatuses(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) []workload.InstanceStatus {
 	var out []workload.InstanceStatus
 	if cs, ok := isvc.Status.Components[component]; ok && cs.OMENative != nil {
@@ -220,13 +192,10 @@ func legacyInstanceStatuses(isvc *v1beta1.InferenceService, component v1beta1.Co
 }
 
 // legacyMutateInstance is the test-side persistence layer for
-// ReconcileInput.MutateInstance. Mirrors omenative/status.MutateInstance
-// at the wire level — Get / mutate / Status().Update — but skips
-// retry.RetryOnConflict (the fake client has no optimistic-concurrency
-// failures to retry). Also mirrors the post-commit Operation onto the
-// in-memory ISVC.Status snapshot the test holds a pointer to (#246
-// requirement: subsequent passes within the same reconcile observe the
-// just-stamped Phase / Operation without re-reading the apiserver).
+// ReconcileInput.MutateInstance. Skips retry.RetryOnConflict (fake
+// client has no optimistic-concurrency failures to retry). Mirrors
+// the post-commit Operation onto the in-memory ISVC.Status snapshot
+// the test holds a pointer to.
 func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 		fresh := &v1beta1.InferenceService{}
@@ -325,19 +294,13 @@ func legacyToV1beta1Op(op *workload.InstanceOperation) *v1beta1.InstanceOperatio
 	}
 }
 
-// (Other legacy helpers — legacyEnsureTargetCR, legacySeedRunningRevision,
-// legacyPlanSinglePodEngine — were lifted from the omenative tests but
-// the moved-in-this-slice tests use makeCR / surgePlan / surgePlanForInstance
-// in surge_test.go directly. They land back in this helper file if a
-// future test that lives here ends up needing them.)
-
 // legacyBoolPtr is a tiny pointer helper used by
 // MarkNotReadyDuringLifecycle / similar bool-pointer test fixtures.
 func legacyBoolPtr(v bool) *bool { return &v }
 
-// legacyTargetSpecImage builds the basic single-container PodSpec used
-// as a rollout target throughout the moved Update / SurgeThenDrain
-// tests. Mirrors omenative/ops/test_helpers_test.go.targetSpecImage.
+// legacyTargetSpecImage builds the basic single-container PodSpec
+// used as a rollout target throughout the Update / SurgeThenDrain
+// tests.
 func legacyTargetSpecImage(image string) *corev1.PodSpec {
 	return &corev1.PodSpec{
 		Containers: []corev1.Container{
@@ -346,20 +309,18 @@ func legacyTargetSpecImage(image string) *corev1.PodSpec {
 	}
 }
 
-// legacyRunningPodAtRevision shapes a pod the controller would consider
-// "running at revName" — labeled with the appropriate incarnation, has
-// the given image, runtime-ready + serving. Mirrors
-// omenative/ops/test_helpers_test.go.runningPodAtRevision.
+// legacyRunningPodAtRevision shapes a pod the controller would
+// consider running at revName — labeled with the appropriate
+// incarnation, image, runtime-ready + serving.
 func legacyRunningPodAtRevision(isvc *v1beta1.InferenceService, instIdx int32, incarnation int64, image string) *corev1.Pod {
 	pod := legacyPodAtIncarnation(isvc, instIdx, incarnation, true /* ready */, true /* serving */)
 	pod.Spec.Containers = []corev1.Container{{Name: "main", Image: image}}
 	return pod
 }
 
-// legacyISVCReadyAtIncarnation builds an ISVC whose InstanceStatus for
-// engine index 0 is Phase=Ready at the given Incarnation — the
-// steady-state from which an Update trigger fires. Mirrors
-// omenative/ops/restart_test.go.isvcReadyAtIncarnation.
+// legacyISVCReadyAtIncarnation builds an ISVC whose InstanceStatus
+// for engine index 0 is Phase=Ready at the given Incarnation — the
+// steady-state from which an Update trigger fires.
 func legacyISVCReadyAtIncarnation(name, ns string, incarnation int64) *v1beta1.InferenceService {
 	isvc := legacyMinimalISVC(name, ns, 1)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
@@ -375,10 +336,8 @@ func legacyISVCReadyAtIncarnation(name, ns string, incarnation int64) *v1beta1.I
 }
 
 // legacySliceWithEndpoint builds an EndpointSlice with one endpoint
-// targeting pod with the given Ready condition. Mirrors
-// omenative/ops/test_helpers_test.go.sliceWithEndpoint. Used by drain
-// fixtures across the Update / Recreate flows that gate the drain wait
-// on real apiserver state.
+// targeting pod with the given Ready condition. Used by drain
+// fixtures across the Update / Recreate flows.
 func legacySliceWithEndpoint(namespace, sliceName, serviceName string, pod *corev1.Pod, ready bool) *discoveryv1.EndpointSlice {
 	readyPtr := ready
 	return &discoveryv1.EndpointSlice{
@@ -404,10 +363,8 @@ func legacySliceWithEndpoint(namespace, sliceName, serviceName string, pod *core
 	}
 }
 
-// legacyEngineRevisionKey is the per-Component revision.Key that
-// EnsureControllerRevision needs. Centralized here so the ensureCR /
-// seedRunningRevision helpers below produce the same key the
-// production ISVC adapter (core.isvcRevisionKey) emits.
+// legacyEngineRevisionKey returns the per-Component revision.Key the
+// production ISVC adapter emits.
 func legacyEngineRevisionKey(isvc *v1beta1.InferenceService) revision.Key {
 	return revision.Key{
 		Namespace: isvc.Namespace,
@@ -420,22 +377,18 @@ func legacyEngineRevisionKey(isvc *v1beta1.InferenceService) revision.Key {
 	}
 }
 
-// legacyEnsureTargetCR computes the deterministic CR name for spec and
-// creates it in the fake client so Update has something to dispatch
-// against. Mirrors omenative/ops/update_test.go.ensureTargetCR but goes
-// through workload/revision directly — the omenative wrapper just
-// composes the revision.Key we now build inline.
+// legacyEnsureTargetCR creates the deterministic CR for spec in the
+// fake client so Update has something to dispatch against.
 func legacyEnsureTargetCR(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, spec *corev1.PodSpec) *appsv1.ControllerRevision {
 	t.Helper()
 	return legacyEnsureTargetCRWithMeta(t, c, isvc, spec, nil)
 }
 
 // legacyEnsureTargetCRWithMeta is legacyEnsureTargetCR's PodMeta-aware
-// sibling. Captures user-intent annotations the operator wrote on
-// spec.{engine,decoder,router} via the meta parameter so the in-place
-// annotation-propagation regression tests can verify those values reach
-// the live pod after an in-place rollout. nil meta degrades to the
-// no-meta behavior. Mirrors omenative/ops/update_test.go.ensureTargetCRWithMeta.
+// sibling. Captures user-intent annotations via meta so the in-place
+// annotation-propagation regression tests can verify those values
+// reach the live pod after an in-place rollout. nil meta degrades to
+// the no-meta behavior.
 func legacyEnsureTargetCRWithMeta(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, spec *corev1.PodSpec, meta *metav1.ObjectMeta) *appsv1.ControllerRevision {
 	t.Helper()
 	cr, _, err := revision.EnsureControllerRevision(
@@ -450,21 +403,19 @@ func legacyEnsureTargetCRWithMeta(t *testing.T, c client.Client, isvc *v1beta1.I
 	return cr
 }
 
-// legacySeedRunningRevision creates a ControllerRevision capturing spec
-// as the Instance's recorded running template and writes its name onto
-// InstanceStatus[idx].RunningRevision. The Update state machine's
-// inPlaceEligible reads the recorded baseline (NOT the live pod) when
-// deciding image-only-vs-bigger-diff. Mirrors
-// omenative/ops/update_test.go.seedRunningRevision.
+// legacySeedRunningRevision creates a ControllerRevision capturing
+// spec as the Instance's recorded running template and writes its
+// name onto InstanceStatus[idx].RunningRevision. The Update state
+// machine's inPlaceEligible reads the recorded baseline (NOT the live
+// pod) when deciding image-only-vs-bigger-diff.
 func legacySeedRunningRevision(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, spec *corev1.PodSpec) {
 	t.Helper()
 	legacySeedRunningRevisionWithMeta(t, c, isvc, component, idx, spec, nil)
 }
 
-// legacySeedRunningRevisionWithMeta is legacySeedRunningRevision's
-// PodMeta-aware sibling — captures the previous-revision PodMeta so the
-// in-place annotation diff has a baseline to subtract from. Mirrors
-// omenative/ops/update_test.go.seedRunningRevisionWithMeta.
+// legacySeedRunningRevisionWithMeta captures the previous-revision
+// PodMeta so the in-place annotation diff has a baseline to subtract
+// from.
 func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, spec *corev1.PodSpec, meta *metav1.ObjectMeta) {
 	t.Helper()
 	cr, _, err := revision.EnsureControllerRevision(
@@ -505,11 +456,10 @@ func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1be
 	t.Fatalf("no InstanceStatus for idx=%d to attach RunningRevision", idx)
 }
 
-// legacyComponentPlan builds the single-pod engine ComponentPlan used
-// by the Update / SurgeThenDrain tests. Mirrors what
-// core.BuildPlan(minimalParams(...)) produced in the omenative
-// fixtures; reproduced inline because workload/ops tests can't reach
-// for omenative/core. strategy controls the UpdateStrategy.Type.
+// legacyComponentPlan builds the single-pod engine ComponentPlan
+// used by the Update / SurgeThenDrain tests. Reproduced inline
+// because workload/ops tests can't import omenative/core. strategy
+// controls the UpdateStrategy.Type.
 func legacyComponentPlan(strategy v1beta1.UpdateStrategyType, inPlaceStrategy *v1beta1.InPlaceUpdateStrategy) workload.ComponentPlan {
 	return workload.ComponentPlan{
 		Component: v1beta1.EngineComponent,
@@ -549,18 +499,13 @@ func legacyMultiPodComponentPlan(strategy v1beta1.UpdateStrategyType) workload.C
 	}
 }
 
-// legacyTestDeps builds the standard workload.Deps a Update / Surge
-// test consumes. Recorder is intentionally nil — event helpers are
-// nil-safe and tests don't assert against the event stream (the
-// omenative-side fixtures didn't either).
+// legacyTestDeps builds the standard workload.Deps. Recorder is nil —
+// event helpers are nil-safe and tests don't assert on the event
+// stream.
 func legacyTestDeps(c client.Client) workload.Deps {
 	return workload.Deps{Client: c}
 }
 
-// (legacyEngineRevisionKey / revision import live above.)
-//
-// Suppress the "imported and not used" warning on the revision package
-// during piecemeal builds: the helpers above all reference it, but the
-// linker emits a friendlier diagnostic if at least one var-level
-// reference exists.
+// Keep the revision import live even when partial test builds don't
+// reference any helper that uses it.
 var _ = revision.Key{}

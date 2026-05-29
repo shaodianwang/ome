@@ -21,21 +21,6 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// workload/ops compares against workload.UpdateStrategyType constants
-// (declared in workload/types.go) exclusively — the dispatcher in the
-// omenative shim converts plan.UpdateStrategy.Type from the v1beta1
-// enum via internalsource.UpdateStrategyTypeToWorkload before reaching
-// workload-side code. A typo or future drift between the two enums is
-// therefore a compile-time error instead of a silent dispatch break.
-
-// Event reasons emitted by the Update state machine are declared once
-// in workload/events.go (as workload.EventReason values); call sites
-// in this file reach for workload.EventReasonInPlaceUpdate{Started,
-// Completed,NotPossible}, workload.EventReasonRecreateUpdate{Started,
-// Completed}, and workload.workload.EventReasonFoundOrphan directly. See that
-// file for the per-reason documentation and the byte-for-byte
-// rationale against the legacy omenative/status copies.
-
 // updateDrainKey identifies an in-place or recreate Update writer
 // against a specific Instance materialization. Same key on Add and
 // Remove so an in-place flow ends with the gate flipping back True.
@@ -43,37 +28,24 @@ func updateDrainKey(idx int32, incarnation int64) string {
 	return strconv.Itoa(int(idx)) + "-" + strconv.FormatInt(incarnation, 10)
 }
 
-// NOTE: drainServiceForPod is declared in migrate.go in this package
-// — Update and Migrate share the same per-revision routed Service
-// lookup (read ome.io/revision-hash off the pod, format the per-rev
-// Service name via query.PerRevisionServiceName). Sharing the single
-// helper keeps the doc rationale (don't use the Component's headless
-// Service — its PublishNotReadyAddresses=true setting makes
-// drain.IsPodDrained wait forever) in one place.
+// drainServiceForPod is declared in migrate.go — Update and Migrate
+// share the same per-revision routed Service lookup.
 
 // UpdateRequeueInterval is the wait between passes while an Update is
-// in flight. Exported so the omenative dispatcher (dispatch.go) can
-// reuse the same value when computing its requeue interval — the two
-// must stay in lockstep or the dispatcher's wake-up cadence will
-// diverge from the per-Instance state machine's progress checks.
+// in flight. Exported so the dispatcher's requeue cadence stays in
+// lockstep with the per-Instance state machine.
 const UpdateRequeueInterval = 5 * time.Second
 
-// Update drives one Instance toward the target ControllerRevision. Mode
-// is chosen per Instance:
+// Update drives one Instance toward the target ControllerRevision.
+// Mode is chosen per Instance:
 //
-//   - RecreatePod: always drain + delete + recreate at bumped Incarnation.
+//   - RecreatePod: always drain + delete + recreate at bumped
+//     Incarnation.
 //   - InPlaceIfPossible: image-patch when the diff is container images
 //     only; otherwise fall through to recreate.
 //   - InPlaceOnly: image-patch when eligible; error otherwise.
 //
 // done=true once Phase=Ready with RunningRevision=target.Name.
-//
-// SCOPE NOTE: This function is the source-agnostic body of the per-Instance
-// Update state machine. The ISVC-OMENative dispatcher (the shim in the
-// omenative/ops package) constructs workload.ReconcileInput from
-// (ISVC, Component) via internalsource.BuildReconcileInput and delegates
-// here. The IR controller, when it lands, will call into the same entry
-// point with its own ReconcileInput.
 func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec) (bool, error) {
 	if deps.Client == nil {
 		return false, fmt.Errorf("Update: nil client")
@@ -100,11 +72,10 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 	}
 
 	multiPod := inst.TotalPods() > 1
-	// Cast at the boundary: plan.UpdateStrategy.Type is still v1beta1-typed
-	// because ComponentPlan currently embeds v1beta1.UpdateStrategy
-	// (the InPlace knobs haven't been mirrored yet). The cast funnels every
-	// chooser comparison through workload.UpdateStrategyType — drift between
-	// enums now fails type-checking at this single seam.
+	// Cast at the boundary: plan.UpdateStrategy.Type is still
+	// v1beta1-typed because ComponentPlan embeds v1beta1.UpdateStrategy.
+	// Funnel chooser comparisons through workload.UpdateStrategyType so
+	// enum drift fails type-checking here.
 	strategy := workload.UpdateStrategyType(plan.UpdateStrategy.Type)
 	mode, err := chooseUpdateModeForInstance(strategy, runningSpec, targetSpec, multiPod)
 	if err != nil {
@@ -114,14 +85,11 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 			instanceKey(input.Key.Component, inst.Index), err)
 		return false, fmt.Errorf("choose update mode (instance=%d): %w", inst.Index, err)
 	}
-	// Surfaces the fallback once per dispatch so operators can correlate a
-	// recreate-flavored rollout with the SurgeThenDrain spec they wrote.
-	// Multi-pod SurgeThenDrain needs per-gang-member ordinal allocation
-	// (a separate OEP amendment, listed as Phase 5 / "future" in
-	// the OMENative multi-node plan); until that lands, recreate is the
-	// safe execution. The spec field stays "SurgeThenDrain" — when the
-	// real implementation lands, this fallback goes away with zero
-	// user-facing churn.
+	// Surface the fallback once per dispatch so operators can correlate
+	// a recreate-flavored rollout with the SurgeThenDrain spec they
+	// wrote. Multi-pod SurgeThenDrain needs per-gang-member ordinal
+	// allocation (deferred per OEP-0007); until that lands recreate is
+	// the safe execution.
 	if multiPod && strategy == workload.UpdateStrategySurgeThenDrain && mode == updateModeRecreate {
 		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
 			"OMENative %s: multi-pod SurgeThenDrain falls back to recreate (per-gang-member surge deferred)",
@@ -130,9 +98,7 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 
 	// Status stamping is per-mode: recreate bumps Incarnation atomically
 	// with the Updating transition; in-place must NOT bump (same
-	// materialization); surge advances ActiveOrdinal on promote. A
-	// generic Updating write here would let recreate's bump branch
-	// idempotency-skip on the second pass.
+	// materialization); surge advances ActiveOrdinal on promote.
 	switch mode {
 	case updateModeInPlace:
 		return inPlaceUpdate(ctx, deps, input, plan, inst, target, targetSpec, pods)
@@ -145,9 +111,7 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 }
 
 // filterPodsByInstance drops pods whose ome.io/instance-index label
-// doesn't match idx. Mirrors query.ListPodsForInstance's filter step
-// but without the ISVC carrier — workload code reads the same label
-// through query.InstanceIdxFromLabels.
+// doesn't match idx.
 func filterPodsByInstance(pods []*corev1.Pod, idx int32) []*corev1.Pod {
 	out := make([]*corev1.Pod, 0, len(pods))
 	for _, pod := range pods {
@@ -174,38 +138,20 @@ const (
 // fallback layered on top.
 //
 // Multi-pod adjustments:
-//   - SurgeThenDrain → recreate, because the per-gang-member surge
-//     ordinal scheme is not yet implemented (deferred per OEP-0007 §
-//     "Multi-pod SurgeThenDrain is a separate phase"). The defaulter
-//     still stamps SurgeThenDrain on the user's spec; this is the
-//     execution-side adapter that picks the safe mode at dispatch time.
-//   - In-place modes (InPlaceIfPossible / InPlaceOnly) → recreate when
-//     multi-pod, because inPlaceEligible compares only the leader's
-//     PodSpec. A worker-only image bump would otherwise produce an
-//     in-place rollout that patches the leader (no-op for the worker
-//     image change) and leaves workers on the old image — split-brain.
-//     The revision hash includes WorkerPodSpec (see HashWithWorker), so
-//     the trigger fires; the chooser routes to recreate so every member
-//     of the gang is replaced.
+//   - SurgeThenDrain → recreate: per-gang-member surge ordinal scheme
+//     is not yet implemented (deferred per OEP-0007).
+//   - In-place modes → recreate: inPlaceEligible compares only the
+//     leader's PodSpec, so a worker-only image bump would produce an
+//     in-place rollout that patches only the leader, leaving workers
+//     on the old image (split-brain).
 //
 // RecreatePod is already recreate; multiPod has no additional effect.
-//
-// strategy is the workload-typed enum the dispatcher converts from
-// plan.UpdateStrategy.Type at the v1beta1 boundary via
-// internalsource.UpdateStrategyTypeToWorkload (see Update). The leaf
-// function takes the workload type directly so a stale literal can't
-// silently disagree with the CRD enum.
 func chooseUpdateModeForInstance(strategy workload.UpdateStrategyType, running, target *corev1.PodSpec, multiPod bool) (updateMode, error) {
 	mode, err := chooseUpdateMode(strategy, running, target)
 	if err != nil {
 		// InPlaceOnly + ineligible diff is the only error path. For
-		// multi-pod we fall back to recreate even on this error: the
-		// in-place pipeline cannot safely roll a worker-only change, so
-		// even if the user pinned InPlaceOnly, the realistic execution
-		// is recreate. Without this branch a multi-pod InPlaceOnly diff
-		// that is image-only-on-leader-and-something-else-on-worker would
-		// fail loudly when the more useful behavior is to roll the whole
-		// gang. Single-pod keeps the strict semantic — surface the error.
+		// multi-pod fall back to recreate: in-place cannot safely roll
+		// a worker-only change. Single-pod keeps the strict semantic.
 		if multiPod && strategy == workload.UpdateStrategyInPlaceOnly {
 			return updateModeRecreate, nil
 		}
@@ -218,13 +164,10 @@ func chooseUpdateModeForInstance(strategy workload.UpdateStrategyType, running, 
 }
 
 // chooseUpdateMode resolves strategy + eligibility into a mode. nil
-// running spec is treated as ineligible, forcing recreate from a known
-// baseline. InPlaceOnly + ineligible returns an error.
-//
-// Pod-count-agnostic; callers in production should route through
-// chooseUpdateModeForInstance which layers the multi-pod surge fallback
-// on top. The bare chooser is preserved for tests and direct callers
-// that don't have an Instance in scope.
+// running spec is treated as ineligible, forcing recreate from a
+// known baseline. InPlaceOnly + ineligible returns an error.
+// Pod-count-agnostic; production callers route through
+// chooseUpdateModeForInstance.
 func chooseUpdateMode(strategy workload.UpdateStrategyType, running, target *corev1.PodSpec) (updateMode, error) {
 	eligible := inPlaceEligible(running, target)
 	switch strategy {
@@ -243,10 +186,8 @@ func chooseUpdateMode(strategy workload.UpdateStrategyType, running, target *cor
 		}
 		return updateModeRecreate, nil
 	case "":
-		// updateStrategyWithDefaults should have filled this in
-		// upstream; the empty-string branch matches the SurgeThenDrain
-		// default so a direct caller (tests, fuzz) gets safe behavior
-		// even if it skips the defaulter.
+		// Default matches SurgeThenDrain so direct callers (tests,
+		// fuzz) skipping the defaulter get safe behavior.
 		return updateModeSurge, nil
 	default:
 		return 0, fmt.Errorf("unknown UpdateStrategy.Type %q", strategy)
@@ -278,11 +219,9 @@ func inPlaceEligible(running, target *corev1.PodSpec) bool {
 // exists, no RunningRevision is recorded, or the CR is gone — callers
 // treat that as no baseline and route to recreate.
 //
-// component is unused at this layer (the InstanceStatus lookup keys on
-// idx alone within input.ObservedState, which the caller has already
-// filtered to the right Component via internalsource.extractInstanceStatuses).
-// Accepted as a parameter for symmetry with the omenative-side equivalents
-// and for future evolution toward multi-Component input payloads.
+// component is unused (the InstanceStatus lookup keys on idx alone)
+// but kept for symmetry and future evolution toward multi-Component
+// input payloads.
 func loadRunningRevisionPodSpec(ctx context.Context, reads client.Reader, input workload.ReconcileInput, _ workload.ComponentType, idx int32) (*corev1.PodSpec, error) {
 	payload, err := loadRunningRevisionPayload(ctx, reads, input, idx)
 	if err != nil || payload == nil {
@@ -291,13 +230,9 @@ func loadRunningRevisionPodSpec(ctx context.Context, reads client.Reader, input 
 	return payload.PodSpec, nil
 }
 
-// loadRunningRevisionPayload is loadRunningRevisionPodSpec's superset
-// that returns the full revision.DataPayload (PodSpec + PodMeta +
-// WorkerPodSpec). Used by inPlaceUpdate's annotation-reconciliation
-// pass to compute the diff between the running PodMeta (annotations
-// owned by the previous revision) and the target PodMeta (annotations
-// the user just edited). Returns (nil, nil) on the same not-found /
-// no-status edge cases as loadRunningRevisionPodSpec.
+// loadRunningRevisionPayload returns the full revision.DataPayload
+// (PodSpec + PodMeta + WorkerPodSpec). Used by inPlaceUpdate's
+// annotation-reconciliation pass.
 func loadRunningRevisionPayload(ctx context.Context, reads client.Reader, input workload.ReconcileInput, idx int32) (*revision.DataPayload, error) {
 	s := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
 	if s == nil || s.RunningRevision == "" {
@@ -319,12 +254,8 @@ func loadRunningRevisionPayload(ctx context.Context, reads client.Reader, input 
 }
 
 // loadControllerRevisionPayload unmarshals a CR's raw data into a
-// revision.DataPayload. The CR is the source of truth for the
-// per-revision pod-template metadata; in-place rollouts read PodMeta
-// from here to reconcile the live pod's annotations against the new
-// revision. Returns (nil, nil) when the CR is nil or its data is
-// empty so callers can fall through without erroring on benign
-// edge cases (e.g., a freshly-created CR observed mid-write).
+// revision.DataPayload. Returns (nil, nil) when the CR is nil or its
+// data is empty (benign mid-write edge case).
 func loadControllerRevisionPayload(cr *appsv1.ControllerRevision) (*revision.DataPayload, error) {
 	if cr == nil || len(cr.Data.Raw) == 0 {
 		return nil, nil
@@ -348,28 +279,16 @@ func podSpecWithoutImages(spec *corev1.PodSpec) ([]byte, error) {
 }
 
 // inPlaceUpdate runs the in-place rollout: drain (optional), patch
-// container images, propagate pod-template annotations from the
-// target revision, wait for runtime ready on the target image, flip
-// serving back, promote Ready. Multi-pass; idempotent.
+// container images, reconcile pod-template annotations from the
+// target revision's PodMeta, wait for runtime ready on the target
+// image, flip serving back, promote Ready. Multi-pass; idempotent.
 //
-// Annotation propagation (Bug #51): the previous behavior patched
-// only container images, leaving pod.metadata.annotations stuck at
-// the value the pod was created with. Operators editing
-// spec.{engine,decoder,router}.annotations during an
-// in-place-eligible rollout saw the new annotation surface on the
-// ControllerRevision but never on the live Pod, breaking observability
-// hints (linkerd.io/inject, prometheus.io/* etc.) that users
-// reasonably expect to apply without bouncing pods.
-//
-// Design choice (a): in-place rolls now reconcile pod annotations
-// against the new revision's PodMeta. Add/update keys present in the
-// new spec, delete keys the user removed (scoped to keys the previous
-// revision once authored — third-party annotations stay), leave
-// foreign keys alone. (b) "force recreate on any annotation change"
-// was considered and rejected: annotations are not load-bearing for
-// runtime image semantics and the recreate would defeat the
-// zero-downtime contract operators expect from
-// InPlaceIfPossible / InPlaceOnly.
+// Annotation handling adds / updates keys present in the new spec and
+// deletes keys the previous revision once authored; foreign
+// (third-party) annotations are left alone. Recreate-on-annotation-
+// change was rejected because annotations are not load-bearing for
+// runtime image semantics and would defeat the zero-downtime
+// contract.
 func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, pods []*corev1.Pod) (bool, error) {
 	// In-place keeps the same Incarnation — only the container image rolls.
 	wasNotUpdating := true
@@ -1144,14 +1063,11 @@ func surgeDrainKey(idx int32, newOrdinal int32) string {
 //   - no in-place patching — different pod NAMES throughout.
 //   - target stability across reconciles: once an Operation is recorded
 //     with Step=Surge / SurgeDrain and TargetRevision=X, the in-flight
-//     surge is committed to driving to X. Spec bumps mid-surge (a fresh
-//     `target` parameter pointing at Y) are picked up by the NEXT
-//     reconcile after this surge promotes — detectUpdateTrigger fires
-//     because RunningRevision=X != target.Name=Y. Without this pinning
-//     the surge would silently drift the in-flight pod (still on X) to
-//     "RunningRevision=Y" in status, leaving pods on the stale rev with
-//     status claiming the new rev. See PR #246's MutateInstance mirror
-//     for the parallel fix in the post-promote ord-resurrection space.
+//     surge is committed to driving to X. Spec bumps mid-surge are
+//     picked up by the NEXT reconcile after this surge promotes —
+//     detectUpdateTrigger fires because RunningRevision=X != target=Y.
+//     Without pinning, the surge would silently drift the in-flight
+//     pod (still on X) to "RunningRevision=Y" in status.
 //
 // Single-pod scope (Runner.Size == 1). Multi-pod SurgeThenDrain needs
 // per-gang-member ordinal allocation and is deferred.
@@ -1357,9 +1273,8 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 				return false, fmt.Errorf("mark old not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
-		// Live drain check via per-revision routed Service (PR #230 fix
-		// — see drain.IsPodDrained semantics; headless slice would lie
-		// because of PublishNotReadyAddresses).
+		// Live drain check via per-revision routed Service — the
+		// headless slice would lie because of PublishNotReadyAddresses.
 		for _, pod := range oldPods {
 			serviceName := drainServiceForPod(input, plan, pod)
 			if serviceName == "" {
