@@ -8,11 +8,9 @@
 //
 // The shim's only job is to build the workload.ReconcileInput +
 // workload.Deps pair from the legacy core.ReconcileParams and delegate.
-// Peer ops (restart.go, migrate.go, timeouts.go) still call into
-// v1beta1-typed helpers that previously lived in this file — those are
-// either kept here as thin wrappers (drainServiceForPod,
-// patchInstanceStatusReadyOnRevision) or in legacy_create_helpers.go;
-// they shrink out as each peer migrates in subsequent slices.
+// The remaining v1beta1-typed helpers used by callers still in this
+// package live in legacy_create_helpers.go; they shrink out as each
+// peer migrates in subsequent slices.
 package ops
 
 import (
@@ -21,11 +19,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 )
@@ -121,52 +116,6 @@ func detectUpdateTrigger(ctx context.Context, p core.ReconcileParams, plan core.
 	workloadInst := workloadInstancePlanFromCore(inst)
 	workloadPlan := workloadComponentPlanFromCore(plan)
 	return workloadops.DetectUpdateTrigger(ctx, deps, input, workloadPlan, workloadInst, target, targetSpec)
-}
-
-// drainServiceForPod returns the per-revision *routed* Service name to
-// gate drain against for pod. Kept as a v1beta1-typed wrapper for any
-// remaining v1beta1 caller; main's restart.go / migrate.go have already
-// migrated to workload/ops and call the typed workload helper directly,
-// so this shim is currently call-site-orphaned. Retained until the
-// dispatcher and any straggler v1beta1 path also migrate; remove in a
-// follow-up sweep once the omenative/ops package is empty of state
-// machine code.
-//
-//nolint:unused
-func drainServiceForPod(isvcName string, component v1beta1.ComponentType, pod *corev1.Pod) string {
-	if pod == nil {
-		return ""
-	}
-	hash := pod.Labels["ome.io/revision-hash"]
-	if hash == "" {
-		return ""
-	}
-	return coordination.PerRevisionServiceName(isvcName, component, hash)
-}
-
-// patchInstanceStatusReadyOnRevision idempotently moves to Phase=Ready
-// with RunningRevision=rev; clears Operation + TargetRevision. Kept as
-// a v1beta1-typed wrapper for any remaining v1beta1 caller; main's
-// migrate.go has already migrated to workload/ops and uses the typed
-// workload helper directly, so this shim is currently call-site-
-// orphaned. Retained until the omenative/ops package fully empties out;
-// remove in a follow-up sweep.
-//
-//nolint:unused
-func patchInstanceStatusReadyOnRevision(ctx context.Context, p core.ReconcileParams, component v1beta1.ComponentType, idx int32, rev string) error {
-	return status.MutateInstance(ctx, p.Client, p.ISVC, component, idx, func(s *v1beta1.OMENativeInstanceStatus) bool {
-		if s.Phase == v1beta1.OMENativeInstanceReady &&
-			s.Operation == nil &&
-			s.RunningRevision == rev &&
-			s.TargetRevision == "" {
-			return false
-		}
-		s.Phase = v1beta1.OMENativeInstanceReady
-		s.RunningRevision = rev
-		s.TargetRevision = ""
-		s.Operation = nil
-		return true
-	})
 }
 
 // workloadInstancePlanFromCore projects the legacy core.InstancePlan
