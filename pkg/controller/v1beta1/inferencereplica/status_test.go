@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -13,56 +14,99 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// TestAggregateStatus_ReadyReplicas_CountsReadyInstances pins the
-// Phase-based ReadyReplicas rollup. Three Instances — two Phase=Ready,
-// one Phase=Updating — should produce ReadyReplicas=2 regardless of
-// ReadyPodCount, the field the legacy workload counter reads.
+// TestPopulateInstancePodCounters_StampsLivePodState pins the
+// per-Instance counter writer: handed a (status slice, by-index pod
+// map, available-pod set) tuple, it stamps each Instance's per-pod
+// counters off the live pod state. This is the load-bearing step that
+// lets the downstream workload.CountReadyInstances classifier see the
+// real pod state instead of the legacy Phase-only proxy.
 //
-// Regression guard for the round-2 cluster bug: PR #245 declared the
-// printcolumn / scale-subresource path off .status.readyReplicas, but
-// the IR aggregator computed ReadyReplicas off ReadyPodCount — a field
-// the IR controller never populates today. `kubectl get irep` showed an
-// empty READY column even after Instances flipped Phase=Ready.
-func TestAggregateStatus_ReadyReplicas_CountsReadyInstances(t *testing.T) {
+// Regression guard for the round-2 recreate-path bug: before the fix,
+// the IR aggregator never populated per-Instance ReadyPodCount —
+// downstream rollups read zero on every Instance even when the
+// underlying pods were ContainersReady. This test pins the exact
+// counter-write contract so a future refactor can't silently drop it.
+func TestPopulateInstancePodCounters_StampsLivePodState(t *testing.T) {
 	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 2)
+	pod0 := podForIR(ir, 0, "default", 0, true, true)
+	pod0.Spec.NodeName = "node-a"
+	pod1 := podForIR(ir, 1, "default", 0, false, false)
 	insts := []v1beta1.OMENativeInstanceStatus{
-		// ReadyPodCount=0 on every Instance proves the new rollup ignores
-		// the legacy per-pod counter and reads Phase only.
-		{Index: 0, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1, ReadyPodCount: 0},
-		{Index: 1, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1, ReadyPodCount: 0},
-		{Index: 2, Phase: v1beta1.OMENativeInstanceUpdating, PodCount: 1, ReadyPodCount: 0},
+		// Pretend the legacy Phase signal lags reality: Instance 0
+		// still Phase=Updating from a prior reconcile, but its pod is
+		// already ContainersReady + serving. The fix should report
+		// ReadyPodCount=1 / ServingPodCount=1 / AvailablePodCount=1
+		// off the live pod state regardless of Phase.
+		{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, PodCount: 0, ReadyPodCount: 0},
+		// Pending Instance with a pod that hasn't flipped Ready —
+		// counters should all be zero except PodCount.
+		{Index: 1, Phase: v1beta1.OMENativeInstancePending, PodCount: 0, ReadyPodCount: 0},
 	}
-	g.Expect(countReadyInstancesByPhase(insts)).To(gomega.Equal(int32(2)),
-		"ReadyReplicas should count Instances with Phase=Ready (2), ignoring ReadyPodCount")
+	byIndex := map[int32][]*corev1.Pod{
+		0: {pod0},
+		1: {pod1},
+	}
+	availableByPod := map[string]struct{}{pod0.Name: {}}
+
+	populateInstancePodCounters(insts, byIndex, availableByPod)
+
+	g.Expect(insts[0].PodCount).To(gomega.Equal(int32(1)),
+		"Instance 0 has 1 live pod")
+	g.Expect(insts[0].ReadyPodCount).To(gomega.Equal(int32(1)),
+		"Instance 0's pod is ContainersReady; ReadyPodCount must be 1 even though Phase=Updating")
+	g.Expect(insts[0].ServingPodCount).To(gomega.Equal(int32(1)),
+		"Instance 0's pod has serving=True; ServingPodCount must be 1")
+	g.Expect(insts[0].AvailablePodCount).To(gomega.Equal(int32(1)),
+		"Instance 0's pod is in the available EndpointSlice set")
+	g.Expect(insts[0].NodesOccupied).To(gomega.Equal([]string{"node-a"}),
+		"NodesOccupied must reflect the scheduling node")
+
+	g.Expect(insts[1].PodCount).To(gomega.Equal(int32(1)),
+		"Instance 1 has 1 live pod (not yet Ready)")
+	g.Expect(insts[1].ReadyPodCount).To(gomega.Equal(int32(0)),
+		"Instance 1's pod is not ContainersReady")
+	g.Expect(insts[1].AvailablePodCount).To(gomega.Equal(int32(0)),
+		"Instance 1's pod is not in the available set")
 }
 
-// TestAggregateStatus_ReadyReplicas_ZeroWhenAllPending pins the
-// zero-Ready edge case: every Instance Phase=Pending → ReadyReplicas=0.
-// Catches a future bug where a misplaced default would surface a stale
-// "1" or "match Replicas" answer.
-func TestAggregateStatus_ReadyReplicas_ZeroWhenAllPending(t *testing.T) {
+// TestPopulateInstancePodCounters_EmptyPodSet pins the no-pods edge
+// case: an Instance with zero matching pods (e.g., post-drain pre-
+// recreate, scale-down victim mid-delete) must end up with all-zero
+// counters. Catches a future bug where the loop accidentally retains
+// stale counter values from a prior reconcile.
+func TestPopulateInstancePodCounters_EmptyPodSet(t *testing.T) {
 	g := gomega.NewWithT(t)
 	insts := []v1beta1.OMENativeInstanceStatus{
-		{Index: 0, Phase: v1beta1.OMENativeInstancePending, PodCount: 1},
-		{Index: 1, Phase: v1beta1.OMENativeInstancePending, PodCount: 1},
+		// Stale stamps from a prior reconcile when this Instance had pods.
+		{Index: 0, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, AvailablePodCount: 1,
+			NodesOccupied: []string{"node-x"}},
 	}
-	g.Expect(countReadyInstancesByPhase(insts)).To(gomega.Equal(int32(0)),
-		"ReadyReplicas must be 0 when no Instance has Phase=Ready")
+	populateInstancePodCounters(insts, map[int32][]*corev1.Pod{}, map[string]struct{}{})
+
+	g.Expect(insts[0].PodCount).To(gomega.BeZero())
+	g.Expect(insts[0].ReadyPodCount).To(gomega.BeZero())
+	g.Expect(insts[0].ServingPodCount).To(gomega.BeZero())
+	g.Expect(insts[0].AvailablePodCount).To(gomega.BeZero())
+	g.Expect(insts[0].NodesOccupied).To(gomega.BeNil(),
+		"NodesOccupied must round-trip nil ↔ nil rather than nil ↔ empty-slice")
 }
 
-// TestAggregateStatus_AvailableReplicas_MatchesReadyForSimpleCase pins
-// the AvailableReplicas == ReadyReplicas contract at v1 via the end-to-
-// end reconcile path. No minReadySeconds gating field exists yet on
-// InferenceReplicaSpec / LifecycleSpec; the two counters collapse onto
-// the same value. When a gating field is added, this test will need an
-// explicit divergence case alongside.
+// TestAggregateStatus_AvailableReplicas_MatchesReadyWithEndpointSlices
+// pins the AvailableReplicas counter via the end-to-end Reconcile path.
+// With pods ContainersReady AND published as Ready in the per-Component
+// headless Service's EndpointSlice, AvailableReplicas should collapse
+// onto ReadyReplicas. The aggregator post-fix reads availability off
+// the slice exactly like the omenative direct path
+// (TestAggregateAndWriteStatus_PerInstanceCountersFromObservedPods),
+// so the two adapters produce byte-identical counters.
 //
-// Goes through the real Reconcile so the assertion holds for the full
-// status-write path, not just the helper. Mirrors the existing
-// TestReconcile_StatusAggregator_RollsUpCounters setup (real pods +
-// pre-seeded Instance statuses) so the workload pipeline observes the
-// expected state instead of restarting Instances.
-func TestAggregateStatus_AvailableReplicas_MatchesReadyForSimpleCase(t *testing.T) {
+// Replaces the legacy assertion that AvailableReplicas always mirrors
+// ReadyReplicas. The two CAN diverge — see
+// TestAggregateStatus_AvailableReplicas_ZeroWhenSliceNotReady — so the
+// surface tested here is "with EndpointSlices published Ready, the two
+// match".
+func TestAggregateStatus_AvailableReplicas_MatchesReadyWithEndpointSlices(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 3)
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
@@ -76,7 +120,9 @@ func TestAggregateStatus_AvailableReplicas_MatchesReadyForSimpleCase(t *testing.
 	pod0 := podForIR(ir, 0, "default", 0, true, true)
 	pod1 := podForIR(ir, 1, "default", 0, true, true)
 	pod2 := podForIR(ir, 2, "default", 0, false, false)
-	r, c := newReconciler(t, ir, pod0, pod1, pod2)
+	slice0 := sliceForIRPod(ir, pod0, true)
+	slice1 := sliceForIRPod(ir, pod1, true)
+	r, c := newReconciler(t, ir, pod0, pod1, pod2, slice0, slice1)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
@@ -87,10 +133,49 @@ func TestAggregateStatus_AvailableReplicas_MatchesReadyForSimpleCase(t *testing.
 	g.Expect(c.Get(context.Background(),
 		types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
 		got)).To(gomega.Succeed())
-	g.Expect(got.Status.AvailableReplicas).To(gomega.Equal(got.Status.ReadyReplicas),
-		"AvailableReplicas must equal ReadyReplicas while no minReadySeconds gating exists")
+	g.Expect(got.Status.ReadyReplicas).To(gomega.Equal(int32(2)),
+		"ReadyReplicas should be 2 (two pods ContainersReady)")
 	g.Expect(got.Status.AvailableReplicas).To(gomega.Equal(int32(2)),
-		"AvailableReplicas should be 2 (matches the 2 Ready Instances)")
+		"AvailableReplicas should match ReadyReplicas when EndpointSlices publish both pods Ready")
+}
+
+// TestAggregateStatus_AvailableReplicas_ZeroWhenSliceNotReady pins the
+// EndpointSlice-gated availability semantic: a pod ContainersReady but
+// NOT yet in any EndpointSlice's Ready endpoints reads
+// AvailablePodCount=0 → AvailableReplicas=0, while ReadyReplicas still
+// reports 1. Mirrors the omenative direct path's
+// TestAggregateAndWriteStatus_AvailableRequiresEndpointSliceReady.
+//
+// This is the "newly-Ready pod hasn't been picked up by kube-proxy
+// yet" window — operators get a useful signal that the pod is alive
+// but not in rotation, instead of the previous always-mirrors-ready
+// behavior that hid the kube-proxy lag.
+func TestAggregateStatus_AvailableReplicas_ZeroWhenSliceNotReady(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+			PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, ActiveOrdinal: 0},
+	}
+	pod0 := podForIR(ir, 0, "default", 0, true, true)
+	// EndpointSlice publishes the endpoint as Ready=false (kube-proxy
+	// hasn't picked it up yet).
+	slice0 := sliceForIRPod(ir, pod0, false)
+	r, c := newReconciler(t, ir, pod0, slice0)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+		got)).To(gomega.Succeed())
+	g.Expect(got.Status.ReadyReplicas).To(gomega.Equal(int32(1)),
+		"ReadyReplicas counts the ContainersReady pod regardless of EndpointSlice state")
+	g.Expect(got.Status.AvailableReplicas).To(gomega.Equal(int32(0)),
+		"AvailableReplicas waits for EndpointSlice Ready=true (kube-proxy gate)")
 }
 
 // TestAggregateStatus_ReadyCondition_TrueWhenAllReady_RolloutDone pins
@@ -224,6 +309,113 @@ func TestAggregateStatus_ReadyCondition_ObservedGenerationStamped(t *testing.T) 
 	cond := computeReadyCondition(status)
 	g.Expect(cond.ObservedGeneration).To(gomega.Equal(int64(7)),
 		"Ready condition must stamp ObservedGeneration off status.ObservedGeneration")
+}
+
+// TestAggregateStatus_RecreatePath_ReadyReplicasReflectsLivePods pins
+// the round-2 cluster-test bug: during a recreate or SurgeThenDrain
+// rollout the per-Instance lifecycle Phase can lag the live pod state
+// (Phase=Updating while the new pod has flipped ContainersReady but
+// the workload pipeline hasn't yet stamped Phase=Ready). The IR
+// rollup MUST count the Instance as Ready off the live pod state
+// rather than the lifecycle bookkeeping — otherwise ISVC's
+// engine.omenative.readyReplicas reads 0 even though the pod is
+// already serving, blocking E-1/X-2/G-2/G-4 + the cascaded E-2/E-3/
+// E-4/E-5 tests.
+//
+// Setup mirrors the post-recreate moment: Instance 0 carries
+// Phase=Updating with a deep operation snapshot (drain step
+// committed), but its replacement pod is live and ContainersReady.
+// After Reconcile, IR.Status.ReadyReplicas must be 1.
+func TestAggregateStatus_RecreatePath_ReadyReplicasReflectsLivePods(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	// Pretend a recreate is mid-flight: the controller has stamped
+	// Phase=Updating with an Update operation but the new pod just
+	// flipped ContainersReady. The aggregator must observe the live
+	// pod state and count the Instance Ready regardless of Phase.
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index:           0,
+			Incarnation:     2,
+			Phase:           v1beta1.OMENativeInstanceUpdating,
+			RunningRevision: "rev-a",
+			TargetRevision:  "rev-b",
+		},
+	}
+	// Live pod is ContainersReady + serving (post-recreate, pre-Phase
+	// bump). The aggregator must populate ReadyPodCount=1 from this.
+	pod0 := podForIR(ir, 0, "default", 0, true, true)
+	// EndpointSlice published — kube-proxy has picked the pod up so
+	// AvailableReplicas can also reach 1.
+	slice0 := sliceForIRPod(ir, pod0, true)
+	r, c := newReconciler(t, ir, pod0, slice0)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+		got)).To(gomega.Succeed())
+	g.Expect(got.Status.ReadyReplicas).To(gomega.Equal(int32(1)),
+		"ReadyReplicas must reflect live pod state during recreate (Phase=Updating but pod ContainersReady)")
+	g.Expect(got.Status.AvailableReplicas).To(gomega.Equal(int32(1)),
+		"AvailableReplicas must match ReadyReplicas when EndpointSlice publishes the pod Ready")
+	g.Expect(got.Status.InstanceStatuses[0].ReadyPodCount).To(gomega.Equal(int32(1)),
+		"per-Instance ReadyPodCount must be populated from the live pod (not the stale 0)")
+}
+
+// TestAggregateStatus_RecreatePath_OldPodCountsReadyDuringDrain pins
+// the operationally-critical surge-tolerant counter behavior: during
+// the drain phase of a recreate, the OLD pod is still serving (the
+// drain hasn't yet completed). The IR rollup MUST count it as Ready
+// throughout drain so SurgeThenDrain / RecreatePod observers see a
+// continuous ServingReplicas signal, not a drop-to-zero glitch that
+// would page operators or trip the RatioBalanced gate.
+//
+// Setup: Instance Phase=Updating, drain step in progress. The
+// canonical pod still carries ContainersReady=True. The aggregator
+// must observe the pod state and count it Ready off
+// CountReadyInstances' surge-tolerant classifier.
+func TestAggregateStatus_RecreatePath_OldPodCountsReadyDuringDrain(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index:           0,
+			Incarnation:     1,
+			Phase:           v1beta1.OMENativeInstanceUpdating,
+			RunningRevision: "rev-a",
+			TargetRevision:  "rev-b",
+			// The drain marker is in flight; the pod is still alive
+			// and ContainersReady but the workload pipeline has set
+			// Phase=Updating.
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationUpdate,
+				Step: "Drain",
+			},
+		},
+	}
+	pod0 := podForIR(ir, 0, "default", 0, true, true)
+	slice0 := sliceForIRPod(ir, pod0, true)
+	r, c := newReconciler(t, ir, pod0, slice0)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+		got)).To(gomega.Succeed())
+	// Critical: ReadyReplicas stays 1 throughout drain even though
+	// Phase=Updating. Without the fix this read as 0, breaking
+	// SurgeThenDrain's "serving >= 1" continuity promise.
+	g.Expect(got.Status.ReadyReplicas).To(gomega.Equal(int32(1)),
+		"the still-serving canonical pod must count Ready during drain (Phase=Updating)")
 }
 
 // TestAggregateStatus_ReadyCondition_PersistedToInformerCache pins the

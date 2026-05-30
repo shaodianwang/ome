@@ -481,6 +481,43 @@ func podNames(pods []corev1.Pod) []string {
 	return out
 }
 
+// sliceForIRPod constructs an EndpointSlice carrying one endpoint for
+// pod against the IR's per-Component headless Service. Used by status
+// tests that need AvailableReplicas to mirror ReadyReplicas — the
+// post-fix aggregator reads availability off the EndpointSlice (same
+// as the omenative direct path), so without a slice every pod is
+// invisible to the availability counter regardless of ContainersReady.
+//
+// Returns a slice with Endpoints[0].Conditions.Ready set to ready —
+// the same toggle the omenative sliceWithEndpoint helper exposes.
+// AddressType=IPv4 + a fixed bogus address keep the fake-client
+// validation happy; the controller's availability counter only reads
+// TargetRef.Name + Ready, not the IP.
+func sliceForIRPod(ir *v1beta1.InferenceReplica, pod *corev1.Pod, ready bool) *discoveryv1.EndpointSlice {
+	serviceName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, internalsource.ComponentTypeToWorkload(ir.Spec.Component))
+	return &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name + "-slice",
+			Namespace: ir.Namespace,
+			Labels:    map[string]string{discoveryv1.LabelServiceName: serviceName},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{
+			{
+				Addresses: []string{"10.0.0.1"},
+				Conditions: discoveryv1.EndpointConditions{
+					Ready: ptr.To(ready),
+				},
+				TargetRef: &corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: pod.Namespace,
+					Name:      pod.Name,
+				},
+			},
+		},
+	}
+}
+
 // intToLabel formats a non-negative int64 as the label-safe ASCII
 // string the workload-side pod label helpers produce. Mirrors the
 // helper in omenative/test_helpers_test.go (test packages can't
