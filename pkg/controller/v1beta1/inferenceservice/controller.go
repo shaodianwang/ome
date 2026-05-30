@@ -496,8 +496,17 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// the requeue. This preserves the prior short-circuit semantics
 	// for downstream reconcilers while ensuring coordination's
 	// producer-side status writes (Traffic, RolloutCoordination) land
-	// every pass.
+	// every pass. updateStatus must be called BEFORE the early return
+	// — coordination.Reconcile above just mutated isvc.Status in-memory
+	// (Traffic[], RolloutCoordination, RolloutCoordinationReady); without
+	// flushing it here those writes are dropped on every requeuing pass,
+	// which is the steady state during active rollouts. Review §6.2 in
+	// .claude/specs/2026-05-30-code-quality-review/06-isvc-controller.md.
 	if pendingRequeue.Requeue || pendingRequeue.RequeueAfter > 0 {
+		if err := r.updateStatus(isvc, deploymentMode); err != nil {
+			r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
+			return reconcile.Result{}, err
+		}
 		return pendingRequeue, nil
 	}
 

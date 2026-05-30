@@ -593,6 +593,113 @@ func TestInferenceServiceReconcile(t *testing.T) {
 	}
 }
 
+// TestUpdateStatusFlushesCoordinationWrites is the regression for
+// review §6.2 (.claude/specs/2026-05-30-code-quality-review/06-isvc-controller.md):
+// when a Component asks the reconciler to requeue, the controller now
+// flushes coordination's in-memory status mutations (Status.RolloutCoordination,
+// per-Component Status.Components.<c>.Traffic[]) BEFORE returning the
+// requeue. Before the fix, those writes were dropped on every requeuing
+// pass — the steady state during active rollouts — because updateStatus
+// ran only on the no-requeue tail of Reconcile.
+//
+// This test asserts the contract updateStatus must satisfy for the fix
+// to be effective: an in-memory desiredService with coordination-style
+// Status mutations is persisted to the apiserver in one call. If
+// updateStatus ever stops persisting those fields (e.g., a future
+// refactor that scopes the writes), this test fails immediately.
+func TestUpdateStatusFlushesCoordinationWrites(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	// Seed the apiserver with an ISVC whose Status has no Traffic and
+	// no RolloutCoordination — the pre-coordination baseline at the
+	// top of a Reconcile pass.
+	existing := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-isvc",
+			Namespace: "default",
+		},
+		Spec: v1beta1.InferenceServiceSpec{
+			Model: &v1beta1.ModelRef{
+				Name: "base-model",
+				Kind: stringPtr("BaseModel"),
+			},
+			Engine: &v1beta1.EngineSpec{},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {},
+			},
+		},
+	}
+
+	c := ctrlclientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithStatusSubresource(existing).
+		Build()
+
+	reconciler := &InferenceServiceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Log:      ctrl.Log.WithName("test"),
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	// Simulate what coordination.Reconcile mutates in-memory: per-
+	// Component Traffic[] and Status.RolloutCoordination. This is the
+	// exact in-memory state the controller would hold after the
+	// per-Component loop + coordination layer ran, and before the
+	// requeue short-circuit at controller.go:500.
+	desired := existing.DeepCopy()
+	desired.Status.Components[v1beta1.EngineComponent] = v1beta1.ComponentStatusSpec{
+		Traffic: []v1beta1.ComponentTrafficTarget{
+			{
+				RevisionName:   "test-isvc-engine-rev-abc123",
+				Percent:        100,
+				LatestRevision: true,
+			},
+		},
+	}
+	desired.Status.RolloutCoordination = &v1beta1.RolloutCoordinationStatus{
+		Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+			Name:       "0",
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+			Policy:     v1beta1.CoordinationPolicyIndependent,
+			Phase:      v1beta1.CoordinationPhaseIdle,
+		}},
+	}
+
+	err := reconciler.updateStatus(desired, constants.RawDeployment)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Re-fetch from the fake apiserver and verify both coordination
+	// writes landed. Pre-fix, the controller never called updateStatus
+	// on the requeue short-circuit path, so these fields stayed unset
+	// across every requeueing reconcile — i.e., the entire duration of
+	// an active rollout.
+	flushed := &v1beta1.InferenceService{}
+	g.Expect(c.Get(context.TODO(), types.NamespacedName{
+		Name:      existing.Name,
+		Namespace: existing.Namespace,
+	}, flushed)).NotTo(gomega.HaveOccurred())
+
+	g.Expect(flushed.Status.Components).To(gomega.HaveKey(v1beta1.EngineComponent))
+	g.Expect(flushed.Status.Components[v1beta1.EngineComponent].Traffic).To(gomega.HaveLen(1))
+	g.Expect(flushed.Status.Components[v1beta1.EngineComponent].Traffic[0].RevisionName).
+		To(gomega.Equal("test-isvc-engine-rev-abc123"))
+	g.Expect(flushed.Status.Components[v1beta1.EngineComponent].Traffic[0].Percent).
+		To(gomega.Equal(int32(100)))
+
+	g.Expect(flushed.Status.RolloutCoordination).NotTo(gomega.BeNil())
+	g.Expect(flushed.Status.RolloutCoordination.Groups).To(gomega.HaveLen(1))
+	g.Expect(flushed.Status.RolloutCoordination.Groups[0].Phase).
+		To(gomega.Equal(v1beta1.CoordinationPhaseIdle))
+}
+
 func TestDetermineDeploymentModes(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
