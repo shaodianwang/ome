@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -122,6 +123,38 @@ func withComponent(ir *v1beta1.InferenceReplica, c v1beta1.ComponentType) *v1bet
 func withParent(ir *v1beta1.InferenceReplica, name string) *v1beta1.InferenceReplica {
 	out := ir.DeepCopy()
 	out.Spec.ParentRef.Name = name
+	return out
+}
+
+// withParentUID returns a clone whose parentRef.UID is rewritten — same
+// name, different UID. This is the exact failure mode the immutability
+// gate exists for: a stale ISVC controller cache stamping the wrong UID
+// onto a live IR after the parent was recreated under the same name.
+func withParentUID(ir *v1beta1.InferenceReplica, uid types.UID) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Spec.ParentRef.UID = uid
+	return out
+}
+
+// withPacingPartition returns a clone with spec.pacing.partition set
+// (creating the Pacing block if nil).
+func withPacingPartition(ir *v1beta1.InferenceReplica, partition int32) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	if out.Spec.Pacing == nil {
+		out.Spec.Pacing = &v1beta1.InferenceReplicaPacing{}
+	}
+	out.Spec.Pacing.Partition = &partition
+	return out
+}
+
+// withReplicasAndPacingPartition returns a clone with both spec.replicas
+// and spec.pacing.partition set. Used by the over-Partition table cases.
+func withReplicasAndPacingPartition(ir *v1beta1.InferenceReplica, replicas, partition int32) *v1beta1.InferenceReplica {
+	out := withReplicas(ir, replicas)
+	if out.Spec.Pacing == nil {
+		out.Spec.Pacing = &v1beta1.InferenceReplicaPacing{}
+	}
+	out.Spec.Pacing.Partition = &partition
 	return out
 }
 
@@ -350,6 +383,120 @@ func TestHandle(t *testing.T) {
 			req: func(t *testing.T) admission.Request {
 				return createReq(t, withAutoscaler(baselineIR(wcw),
 					&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone}))
+			},
+			wantAllowed: true,
+		},
+		// Review §6 (fourth bullet): immutability gate runs BEFORE the
+		// controller-write annotation gate. A misbehaving controller
+		// (stale ISVC cache) that stamps the annotation MUST NOT also be
+		// able to flip spec.parentRef.UID to the wrong parent or move
+		// the IR between Component slots. Pre-fix the annotation gate
+		// ran first, so an annotation-true + UID-rewrite payload slipped
+		// through; post-fix the immutability error wins.
+		{
+			name: "update with annotation, same parentRef → allowed (baseline)",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw), baselineIR(wcw))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "update with annotation, different parentRef.UID → denied (regression: was allowed pre-fix)",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw),
+					withParentUID(baselineIR(wcw), types.UID("ffffffff-ffff-ffff-ffff-ffffffffffff")))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"spec.parentRef is immutable"},
+		},
+		{
+			name: "update with annotation, different parentRef.Name → denied (regression: was allowed pre-fix)",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw), withParent(baselineIR(wcw), "different-isvc"))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"spec.parentRef is immutable"},
+		},
+		{
+			name: "update with annotation, different component → denied (regression: was allowed pre-fix)",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw),
+					withComponent(baselineIR(wcw), v1beta1.DecoderComponent))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"spec.component is immutable"},
+		},
+		{
+			name: "update without annotation, same parentRef → denied (annotation gate)",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw), baselineIR(nil))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"controller-only resource"},
+		},
+		{
+			name: "update without annotation, different parentRef.UID → denied (immutability fires first)",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw),
+					withParentUID(baselineIR(nil), types.UID("ffffffff-ffff-ffff-ffff-ffffffffffff")))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"spec.parentRef is immutable"},
+		},
+		// Review §6 (second bullet): Pacing.Partition must be <=
+		// effective Replicas. Over-Partition silently freezes the
+		// whole replica set forever (rollout engine treats Partition
+		// as a per-index threshold).
+		{
+			name: "create with pacing nil → allowed (no partition to validate)",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, baselineIR(wcw))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "create with pacing.partition nil → allowed",
+			req: func(t *testing.T) admission.Request {
+				ir := baselineIR(wcw)
+				ir.Spec.Pacing = &v1beta1.InferenceReplicaPacing{}
+				return createReq(t, ir)
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "create with partition == replicas → allowed (boundary)",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withReplicasAndPacingPartition(baselineIR(wcw), 3, 3))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "create with partition < replicas → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withReplicasAndPacingPartition(baselineIR(wcw), 5, 2))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "create with partition > replicas → denied",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withReplicasAndPacingPartition(baselineIR(wcw), 3, 5))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"spec.pacing.partition", "must be <= spec.replicas"},
+		},
+		{
+			name: "create with partition=2 and replicas nil → denied (defaults to 1)",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withPacingPartition(baselineIR(wcw), 2))
+			},
+			wantAllowed:  false,
+			wantContains: []string{"spec.pacing.partition (2)", "spec.replicas (1)"},
+		},
+		{
+			name: "create with partition=0 (default canary) and replicas=5 → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withReplicasAndPacingPartition(baselineIR(wcw), 5, 0))
 			},
 			wantAllowed: true,
 		},

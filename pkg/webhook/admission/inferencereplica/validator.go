@@ -85,14 +85,16 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	if !hasControllerWriteAnnotation(newObj.Annotations) {
-		log.V(1).Info("Rejecting direct write to InferenceReplica",
-			"op", req.Operation,
-			"namespace", req.Namespace, "name", req.Name,
-			"userInfo", req.UserInfo.Username)
-		return denyDirectWrite(req.Operation, req.Namespace, req.Name)
-	}
-
+	// Immutability check runs unconditionally on every Update, BEFORE
+	// the controller-write annotation gate. The annotation gates WHO
+	// can write (operator vs. controller), but field immutability is a
+	// stronger contract that applies to ALL writers — a misbehaving
+	// controller (e.g., stale ISVC controller cache) that stamps the
+	// controller-write annotation must NOT also be able to change
+	// spec.parentRef.UID to the wrong parent or move the IR between
+	// Component slots. This is exactly the failure mode webhook gates
+	// exist for. See review §6 (fourth bullet) in
+	// .claude/specs/2026-05-30-code-quality-review/08-inferencereplica-controller.md.
 	if req.Operation == admissionv1.Update {
 		oldObj := &v1beta1.InferenceReplica{}
 		if err := v.Decoder.DecodeRaw(req.OldObject, oldObj); err != nil {
@@ -112,6 +114,14 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 		}
 	}
 
+	if !hasControllerWriteAnnotation(newObj.Annotations) {
+		log.V(1).Info("Rejecting direct write to InferenceReplica",
+			"op", req.Operation,
+			"namespace", req.Namespace, "name", req.Name,
+			"userInfo", req.UserInfo.Username)
+		return denyDirectWrite(req.Operation, req.Namespace, req.Name)
+	}
+
 	// OEP-0013: validate the projected Autoscaler block shape. The IR
 	// webhook is strict about all spec writes by default (controller-
 	// write annotation gate above); this is defense-in-depth against a
@@ -121,6 +131,18 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 	// write here means either the controller did it or someone forged
 	// the annotation. Either way the shape must be valid.
 	if err := validateIRAutoscaler(newObj); err != nil {
+		return admission.Denied(fmt.Sprintf(
+			"InferenceReplica %s/%s: %s",
+			req.Namespace, req.Name, err.Error()))
+	}
+
+	// Pacing.Partition must be <= effective Replicas, otherwise an
+	// over-Partition silently holds every Instance back forever (the
+	// rollout engine treats Partition as a per-index threshold and
+	// freezes any Instance with index < Partition). See review §6
+	// (second bullet) in
+	// .claude/specs/2026-05-30-code-quality-review/08-inferencereplica-controller.md.
+	if err := validateIRPacing(newObj); err != nil {
 		return admission.Denied(fmt.Sprintf(
 			"InferenceReplica %s/%s: %s",
 			req.Namespace, req.Name, err.Error()))
@@ -149,4 +171,31 @@ func validateIRAutoscaler(ir *v1beta1.InferenceReplica) error {
 		Autoscaler:  ir.Spec.Autoscaler,
 	}
 	return validation.ValidateComponentAutoscaler(ext)
+}
+
+// validateIRPacing checks that Pacing.Partition <= effective Replicas.
+// An over-Partition (Partition > Replicas) silently holds every
+// Instance back forever — the rollout engine treats Partition as a
+// per-index threshold and freezes any Instance with index < Partition,
+// so Partition >= Replicas freezes the whole replica set. Matches the
+// effective-Replicas default used by convert.desiredFromIR (nil or 0
+// → 1). See review §6 (second bullet) in
+// .claude/specs/2026-05-30-code-quality-review/08-inferencereplica-controller.md.
+func validateIRPacing(ir *v1beta1.InferenceReplica) error {
+	if ir == nil || ir.Spec.Pacing == nil || ir.Spec.Pacing.Partition == nil {
+		return nil
+	}
+	partition := *ir.Spec.Pacing.Partition
+	// Match convert.desiredFromIR's defaulting: nil OR *r == 0 → 1.
+	replicas := int32(1)
+	if ir.Spec.Replicas != nil && *ir.Spec.Replicas > 0 {
+		replicas = *ir.Spec.Replicas
+	}
+	if partition > replicas {
+		return fmt.Errorf(
+			"spec.pacing.partition (%d) must be <= spec.replicas (%d); "+
+				"an over-partition silently holds every Instance back forever",
+			partition, replicas)
+	}
+	return nil
 }
