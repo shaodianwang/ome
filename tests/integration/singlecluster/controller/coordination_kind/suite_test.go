@@ -8,6 +8,7 @@ import (
 	"context"
 	"testing"
 
+	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -40,8 +41,16 @@ func TestCoordinationKindController(t *testing.T) {
 	// without the scheme registered the controller can't even build
 	// the object. Both have to be in place for any OMENative test to
 	// make progress.
+	//
+	// KEDA ScaledObject is now Owns()'d unconditionally by the ISVC
+	// controller (PR #337, OEP-0013 Slice 2, decision Q6 — KEDA is a
+	// hard cluster-side dependency). Without the scheme + CRD pair in
+	// place the controller-runtime cache-sync errors out 2 min into
+	// startup with "kind must be registered to the Scheme" and the
+	// suite never reaches its first spec.
 	scheme := kindutil.BaseScheme()
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
+	utilruntime.Must(kedav1.AddToScheme(scheme))
 
 	state := kindutil.RunKindSuite(t, kindutil.SuiteOpts{
 		ClusterName: "ome-coord-kind",
@@ -78,13 +87,18 @@ func TestCoordinationKindController(t *testing.T) {
 			},
 		},
 		// Default CRDPaths (config/crd/full) + the prometheus-operator
-		// PodMonitor CRD. The PodMonitor is the only optional CRD the
-		// OMENative reconciler hard-requires today; other optional
-		// schemes (LWS, KEDA, Gateway API, Volcano) remain unwired
-		// because the coordination tests don't exercise them.
+		// PodMonitor CRD + the KEDA ScaledObject CRD. KEDA is a hard
+		// cluster-side dependency for the ISVC controller as of #337
+		// (OEP-0013 Slice 2, decision Q6) — Owns(&kedav1.ScaledObject{})
+		// is unconditional, so the CRD must be installed for cache-sync
+		// to succeed even when individual coordination specs don't
+		// exercise the autoscaling path. Other optional schemes (LWS,
+		// Gateway API, Volcano) remain unwired because the coordination
+		// tests don't exercise them.
 		CRDPaths: []string{
 			"config/crd/full",
 			"tests/integration/dep-crds/prometheus-operator",
+			"tests/integration/dep-crds/keda",
 		},
 		Scheme: scheme,
 		Setup:  mgrSetup,
