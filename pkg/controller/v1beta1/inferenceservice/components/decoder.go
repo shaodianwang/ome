@@ -306,16 +306,7 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 
 // updateDecoderStatus updates the status of the decoder
 func (d *Decoder) updateDecoderStatus(isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta) error {
-	return UpdateComponentStatus(&d.BaseComponentFields, isvc, v1beta1.DecoderComponent, objectMeta, d.getPodLabelInfo)
-}
-
-// getPodLabelInfo returns the pod label key and value used to filter the
-// decoder's pods. All surviving deployment modes (raw, multi-node, OMENative)
-// emit pods carrying the raw-deployment app label.
-func (d *Decoder) getPodLabelInfo(rawDeployment bool, objectMeta metav1.ObjectMeta, statusSpec v1beta1.ComponentStatusSpec) (string, string) {
-	_ = rawDeployment
-	_ = statusSpec
-	return constants.RawDeploymentAppLabel, constants.GetRawServiceLabel(objectMeta.Name)
+	return UpdateComponentStatus(&d.BaseComponentFields, isvc, v1beta1.DecoderComponent, objectMeta)
 }
 
 // reconcileObjectMeta creates the object metadata for the decoder component
@@ -385,12 +376,12 @@ func (d *Decoder) processLabels(isvc *v1beta1.InferenceService) (map[string]stri
 	return ProcessBaseLabels(&d.BaseComponentFields, isvc, v1beta1.DecoderComponent, mergedLabels)
 }
 
-// determineDecoderName determines the name of the decoder service
+// determineDecoderName determines the name of the decoder service.
+// The suffix is sourced from GetServiceSuffix so the engine / decoder /
+// router suffix lives in exactly one place (ComponentConfig).
 func (d *Decoder) determineDecoderName(isvc *v1beta1.InferenceService) (string, error) {
-	// For decoder, we'll use a pattern similar to predictor but with "-decoder" suffix
-	defaultDecoderName := isvc.Name + "-decoder"
+	defaultDecoderName := isvc.Name + d.GetServiceSuffix()
 
-	// For decoder, we'll use a pattern similar to predictor but with "-decoder" suffix
 	if d.DeploymentMode != constants.MultiNode {
 		existing := &v1.Service{}
 		if err := d.Client.Get(context.TODO(), types.NamespacedName{Name: defaultDecoderName, Namespace: isvc.Namespace}, existing); err == nil {

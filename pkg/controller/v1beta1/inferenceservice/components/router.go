@@ -281,16 +281,7 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 
 // updateRouterStatus updates the status of the router component
 func (r *Router) updateRouterStatus(isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta) error {
-	return UpdateComponentStatus(&r.BaseComponentFields, isvc, v1beta1.RouterComponent, objectMeta, r.getPodLabelInfo)
-}
-
-// getPodLabelInfo returns the pod label key and value used to filter the
-// router's pods. All surviving deployment modes (raw, multi-node, OMENative)
-// emit pods carrying the raw-deployment app label.
-func (r *Router) getPodLabelInfo(rawDeployment bool, objectMeta metav1.ObjectMeta, statusSpec v1beta1.ComponentStatusSpec) (string, string) {
-	_ = rawDeployment
-	_ = statusSpec
-	return constants.RawDeploymentAppLabel, constants.GetRawServiceLabel(objectMeta.Name)
+	return UpdateComponentStatus(&r.BaseComponentFields, isvc, v1beta1.RouterComponent, objectMeta)
 }
 
 // reconcileObjectMeta creates the object metadata for the router component
@@ -360,15 +351,15 @@ func (r *Router) processLabels(isvc *v1beta1.InferenceService) (map[string]strin
 	return ProcessBaseLabels(&r.BaseComponentFields, isvc, v1beta1.RouterComponent, mergedLabels)
 }
 
-// determineRouterName determines the name of the router service
+// determineRouterName determines the name of the router service.
+// The suffix is sourced from GetServiceSuffix so the engine / decoder /
+// router suffix lives in exactly one place (ComponentConfig).
 func (r *Router) determineRouterName(isvc *v1beta1.InferenceService) (string, error) {
-	// For router, we'll use a pattern similar to predictor but with "-router" suffix
-	defaultRouterName := isvc.Name + "-router"
-	existingName := defaultRouterName
+	defaultRouterName := isvc.Name + r.GetServiceSuffix()
 
 	existing := &v1.Service{}
 	if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: defaultRouterName, Namespace: isvc.Namespace}, existing); err == nil {
-		return existingName, nil
+		return defaultRouterName, nil
 	}
 
 	return defaultRouterName, nil

@@ -542,9 +542,12 @@ func ProcessBaseLabels(b *BaseComponentFields, isvc *v1beta1.InferenceService, c
 	return labels, nil
 }
 
-// UpdateComponentStatus updates component status based on deployment mode
-// This method provides a systematic way to handle status updates across all components
-func UpdateComponentStatus(b *BaseComponentFields, isvc *v1beta1.InferenceService, componentType v1beta1.ComponentType, objectMeta metav1.ObjectMeta, getPodLabelInfo func(bool, metav1.ObjectMeta, v1beta1.ComponentStatusSpec) (string, string)) error {
+// UpdateComponentStatus updates component status based on deployment mode.
+// All surviving deployment modes (RawDeployment, MultiNode, OMENative)
+// emit pods carrying the raw-deployment app label — the engine / decoder
+// / router previously routed the same constant pair through a per-component
+// getPodLabelInfo callback; that indirection was dead and is inlined here.
+func UpdateComponentStatus(b *BaseComponentFields, isvc *v1beta1.InferenceService, componentType v1beta1.ComponentType, objectMeta metav1.ObjectMeta) error {
 	// Always initialize the component ready condition to ensure it's visible from the start
 	// The deployment reconciler will update the condition based on the actual deployment status:
 	// - MultiNode: Updates when LWS becomes available
@@ -564,7 +567,8 @@ func UpdateComponentStatus(b *BaseComponentFields, isvc *v1beta1.InferenceServic
 	// Update model status for all deployment modes based on actual pod information
 	rawDeployment := b.DeploymentMode == constants.RawDeployment
 	statusSpec := isvc.Status.Components[componentType]
-	podLabelKey, podLabelValue := getPodLabelInfo(rawDeployment, objectMeta, statusSpec)
+	podLabelKey := constants.RawDeploymentAppLabel
+	podLabelValue := constants.GetRawServiceLabel(objectMeta.Name)
 
 	pods, err := isvcutils.ListPodsByLabel(b.Client, isvc.ObjectMeta.Namespace, podLabelKey, podLabelValue)
 	if err != nil {

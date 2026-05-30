@@ -346,16 +346,7 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 
 // updateEngineStatus updates the status of the engine
 func (e *Engine) updateEngineStatus(isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta) error {
-	return UpdateComponentStatus(&e.BaseComponentFields, isvc, v1beta1.EngineComponent, objectMeta, e.getPodLabelInfo)
-}
-
-// getPodLabelInfo returns the pod label key and value used to filter the
-// engine's pods. All surviving deployment modes (raw, multi-node, OMENative)
-// emit pods carrying the raw-deployment app label.
-func (e *Engine) getPodLabelInfo(rawDeployment bool, objectMeta metav1.ObjectMeta, statusSpec v1beta1.ComponentStatusSpec) (string, string) {
-	_ = rawDeployment
-	_ = statusSpec
-	return constants.RawDeploymentAppLabel, constants.GetRawServiceLabel(objectMeta.Name)
+	return UpdateComponentStatus(&e.BaseComponentFields, isvc, v1beta1.EngineComponent, objectMeta)
 }
 
 // reconcileObjectMeta creates the object metadata for the engine component
@@ -424,15 +415,15 @@ func (e *Engine) processLabels(isvc *v1beta1.InferenceService) (map[string]strin
 	return ProcessBaseLabels(&e.BaseComponentFields, isvc, v1beta1.EngineComponent, mergedLabels)
 }
 
-// determineEngineName determines the name of the engine service
+// determineEngineName determines the name of the engine service.
+// The suffix is sourced from GetServiceSuffix so the engine / decoder /
+// router suffix lives in exactly one place (ComponentConfig).
 func (e *Engine) determineEngineName(isvc *v1beta1.InferenceService) (string, error) {
-	// For engine, we'll use a pattern similar to predictor but with "-engine" suffix
-	defaultEngineName := isvc.Name + "-engine"
-	existingName := defaultEngineName
+	defaultEngineName := isvc.Name + e.GetServiceSuffix()
 
 	existing := &v1.Service{}
 	if err := e.Client.Get(context.TODO(), types.NamespacedName{Name: defaultEngineName, Namespace: isvc.Namespace}, existing); err == nil {
-		return existingName, nil
+		return defaultEngineName, nil
 	}
 
 	return defaultEngineName, nil

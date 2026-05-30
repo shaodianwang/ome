@@ -347,10 +347,6 @@ func TestUpdateComponentStatusLeanModel(t *testing.T) {
 	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
-	noopPodLabelInfo := func(_ bool, _ metav1.ObjectMeta, _ v1beta1.ComponentStatusSpec) (string, string) {
-		return constants.InferenceServicePodLabelKey, "test-isvc"
-	}
-
 	tests := []struct {
 		name                       string
 		isvc                       *v1beta1.InferenceService
@@ -397,7 +393,7 @@ func TestUpdateComponentStatusLeanModel(t *testing.T) {
 				Log:            logr.Discard(),
 			}
 
-			err := UpdateComponentStatus(b, tt.isvc, v1beta1.EngineComponent, metav1.ObjectMeta{}, noopPodLabelInfo)
+			err := UpdateComponentStatus(b, tt.isvc, v1beta1.EngineComponent, metav1.ObjectMeta{})
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			if tt.wantModelStatusUntouched {
