@@ -26,9 +26,13 @@ type Expectations struct {
 	entries map[expectationKey]*expectationEntry
 }
 
+// expectationKey is the per-Instance cache key. OwnerName mirrors
+// types.Key.OwnerName — the workload-side owner identifier shared by
+// every adapter (ISVC.Name, IR.Name, future owners) rather than the
+// CRD-specific "ISVC" name.
 type expectationKey struct {
 	Namespace string
-	ISVC      string
+	OwnerName string
 	Component ComponentType
 	Instance  int32
 }
@@ -44,20 +48,20 @@ func NewExpectations() *Expectations {
 	return &Expectations{entries: make(map[expectationKey]*expectationEntry)}
 }
 
-// DefaultExpectations is the in-process singleton used by ReconcileComponent.
-// Tests construct their own via NewExpectations.
+// DefaultExpectations is the in-process singleton used by the workload
+// dispatcher. Tests construct their own via NewExpectations.
 var DefaultExpectations = NewExpectations()
 
 // ExpectCreates records that n pod creates are in flight for the given
-// (ISVC, Component, Instance). Satisfied returns false until all of them
-// are observed via ObservedCreate, or the deadline elapses.
-func (e *Expectations) ExpectCreates(namespace, isvc string, component ComponentType, instance int32, n int) {
+// (OwnerName, Component, Instance). Satisfied returns false until all
+// of them are observed via ObservedCreate, or the deadline elapses.
+func (e *Expectations) ExpectCreates(namespace, ownerName string, component ComponentType, instance int32, n int) {
 	if n <= 0 {
 		return
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	k := expectationKey{namespace, isvc, component, instance}
+	k := expectationKey{namespace, ownerName, component, instance}
 	ent, ok := e.entries[k]
 	if !ok {
 		ent = &expectationEntry{}
@@ -68,13 +72,13 @@ func (e *Expectations) ExpectCreates(namespace, isvc string, component Component
 }
 
 // ExpectDeletes records that n pod deletes are in flight.
-func (e *Expectations) ExpectDeletes(namespace, isvc string, component ComponentType, instance int32, n int) {
+func (e *Expectations) ExpectDeletes(namespace, ownerName string, component ComponentType, instance int32, n int) {
 	if n <= 0 {
 		return
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	k := expectationKey{namespace, isvc, component, instance}
+	k := expectationKey{namespace, ownerName, component, instance}
 	ent, ok := e.entries[k]
 	if !ok {
 		ent = &expectationEntry{}
@@ -85,21 +89,22 @@ func (e *Expectations) ExpectDeletes(namespace, isvc string, component Component
 }
 
 // ObservedCreate decrements the create counter, called when a pod
-// belonging to (ISVC, Component, Instance) appears in the watch cache.
-func (e *Expectations) ObservedCreate(namespace, isvc string, component ComponentType, instance int32) {
-	e.observed(namespace, isvc, component, instance, true)
+// belonging to (OwnerName, Component, Instance) appears in the watch
+// cache.
+func (e *Expectations) ObservedCreate(namespace, ownerName string, component ComponentType, instance int32) {
+	e.observed(namespace, ownerName, component, instance, true)
 }
 
 // ObservedDelete decrements the delete counter, called when a pod
-// belonging to (ISVC, Component, Instance) disappears.
-func (e *Expectations) ObservedDelete(namespace, isvc string, component ComponentType, instance int32) {
-	e.observed(namespace, isvc, component, instance, false)
+// belonging to (OwnerName, Component, Instance) disappears.
+func (e *Expectations) ObservedDelete(namespace, ownerName string, component ComponentType, instance int32) {
+	e.observed(namespace, ownerName, component, instance, false)
 }
 
-func (e *Expectations) observed(namespace, isvc string, component ComponentType, instance int32, isAdd bool) {
+func (e *Expectations) observed(namespace, ownerName string, component ComponentType, instance int32, isAdd bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	k := expectationKey{namespace, isvc, component, instance}
+	k := expectationKey{namespace, ownerName, component, instance}
 	ent, ok := e.entries[k]
 	if !ok {
 		return
@@ -118,10 +123,10 @@ func (e *Expectations) observed(namespace, isvc string, component ComponentType,
 // Satisfied returns true when no outstanding creates or deletes are
 // expected for the Instance — either the watch cache has caught up,
 // the entry expired, or no expectations were ever recorded.
-func (e *Expectations) Satisfied(namespace, isvc string, component ComponentType, instance int32) bool {
+func (e *Expectations) Satisfied(namespace, ownerName string, component ComponentType, instance int32) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	k := expectationKey{namespace, isvc, component, instance}
+	k := expectationKey{namespace, ownerName, component, instance}
 	ent, ok := e.entries[k]
 	if !ok {
 		return true
@@ -134,8 +139,8 @@ func (e *Expectations) Satisfied(namespace, isvc string, component ComponentType
 }
 
 // Forget clears the entry, e.g., when the Instance is deleted entirely.
-func (e *Expectations) Forget(namespace, isvc string, component ComponentType, instance int32) {
+func (e *Expectations) Forget(namespace, ownerName string, component ComponentType, instance int32) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	delete(e.entries, expectationKey{namespace, isvc, component, instance})
+	delete(e.entries, expectationKey{namespace, ownerName, component, instance})
 }

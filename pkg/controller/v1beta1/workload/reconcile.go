@@ -35,21 +35,12 @@ import (
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 )
 
-// Per-op requeue intervals when an op returns done=false. Mirror the
-// constants in workload/ops so dispatcher pacing tracks the per-op
-// state machines; the cross-import would close the cycle the
-// types-split avoids, so they're duplicated explicitly. Any change to
-// one MUST be mirrored to the other.
-const (
-	deleteRequeueInterval  = 5 * time.Second
-	restartRequeueInterval = 5 * time.Second
-	migrateRequeueInterval = 5 * time.Second
-	updateRequeueInterval  = 5 * time.Second
-	// ratioGateRequeueInterval is short enough that a peer Component
-	// catching up next reconcile unblocks this one promptly; long
-	// enough not to spam the apiserver.
-	ratioGateRequeueInterval = 3 * time.Second
-)
+// ratioGateRequeueInterval is short enough that a peer Component
+// catching up next reconcile unblocks this one promptly; long
+// enough not to spam the apiserver. Unlike the per-op intervals
+// (workloadops.{Create,Delete,Restart,Migrate,Update}RequeueInterval)
+// this pacing is dispatcher-owned, not op-state-machine-owned.
+const ratioGateRequeueInterval = 3 * time.Second
 
 // Reconcile drives one workload (one Component of one owner) toward its
 // desired state. The caller constructs a fully populated ReconcileInput
@@ -93,7 +84,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		}
 	}
 	if !allDeleted {
-		return ctrl.Result{RequeueAfter: deleteRequeueInterval}, nil
+		return ctrl.Result{RequeueAfter: workloadops.DeleteRequeueInterval}, nil
 	}
 
 	// 2. Per-Instance restart pass.
@@ -117,7 +108,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		}
 	}
 	if anyRestarting {
-		return ctrl.Result{RequeueAfter: restartRequeueInterval}, nil
+		return ctrl.Result{RequeueAfter: workloadops.RestartRequeueInterval}, nil
 	}
 
 	// 3. Per-Component migration pass. Skip when mode is Never or the
@@ -133,7 +124,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: migrate instance %d: %w", sourceIdx, merr)
 			}
 			if !done {
-				return ctrl.Result{RequeueAfter: migrateRequeueInterval}, nil
+				return ctrl.Result{RequeueAfter: workloadops.MigrateRequeueInterval}, nil
 			}
 			// Migrate just removed the source InstanceStatus and promoted
 			// the surge to Ready. plan was computed with the stale
@@ -226,7 +217,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 			}
 		}
 		if anyUpdating {
-			return ctrl.Result{RequeueAfter: updateRequeueInterval}, nil
+			return ctrl.Result{RequeueAfter: workloadops.UpdateRequeueInterval}, nil
 		}
 		if anyGated {
 			return ctrl.Result{RequeueAfter: ratioGateRequeueInterval}, nil

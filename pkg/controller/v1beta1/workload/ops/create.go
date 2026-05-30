@@ -16,9 +16,9 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// createRequeueInterval is how long to wait before re-checking pod
+// CreateRequeueInterval is how long to wait before re-checking pod
 // readiness when an Instance is still coming up.
-const createRequeueInterval = 5 * time.Second
+const CreateRequeueInterval = 5 * time.Second
 
 // Create drives Create / Scale-Up toward each desired Instance.
 // Multi-pass:
@@ -56,7 +56,7 @@ func Create(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 	}
 
 	if !allReady {
-		return ctrl.Result{RequeueAfter: createRequeueInterval}, nil
+		return ctrl.Result{RequeueAfter: CreateRequeueInterval}, nil
 	}
 	return ctrl.Result{}, nil
 }

@@ -15,6 +15,12 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
+// DeleteRequeueInterval is the wait between Delete passes while a
+// scale-down drain / pod-removal is still in flight. Used by the
+// workload dispatcher; Delete itself returns done=false and lets the
+// caller decide when to retry.
+const DeleteRequeueInterval = 5 * time.Second
+
 // deleteDrainKey is the per-Instance key the Delete-drain writer adds to
 // the ome.io/serving message list. Same key for every pod in the Instance;
 // Delete never RemoveNotReadyKeys — pod deletion clears the entry.
