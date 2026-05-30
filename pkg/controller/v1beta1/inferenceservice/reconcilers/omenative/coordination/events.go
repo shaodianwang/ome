@@ -30,11 +30,6 @@ const (
 	// Informational — helps operators audit back-compat assertions.
 	EventReasonMixedPairingObserved = "MixedPairingObserved"
 
-	// EventReasonSequentialComponentCompleted fires when a Sequential
-	// group's currently-active Component reaches Idle; the next
-	// Component in the Order becomes eligible to start.
-	EventReasonSequentialComponentCompleted = "SequentialComponentCompleted"
-
 	// EventReasonSequentialAwaitingNext fires when a Sequential group
 	// enters the soak window between Components, waiting for the
 	// operator to bump the next Component's spec.

@@ -53,10 +53,6 @@ type ComponentObservation struct {
 
 	// FailureMessage is the operator-facing explanation when Failed.
 	FailureMessage string
-
-	// Paused is true when the Component's rollout is held at the
-	// current phase by an annotation or step-boundary pause.
-	Paused bool
 }
 
 // GroupObservation collects per-Component observations plus group-wide
@@ -186,21 +182,6 @@ func blueGreenTransition(obs GroupObservation) GroupTransition {
 		}
 	}
 
-	anyPaused := false
-	for _, c := range obs.Components {
-		if c.Paused {
-			anyPaused = true
-			break
-		}
-	}
-	if anyPaused {
-		return GroupTransition{
-			Phase:          v1beta1.CoordinationPhasePaused,
-			CompositePhase: string(v1beta1.CoordinationPhasePaused),
-			Message:        "one or more Components in the BlueGreen group are paused",
-		}
-	}
-
 	rolling := false
 	for _, c := range obs.Components {
 		if c.RolloutInFlight {
@@ -281,11 +262,6 @@ func blueGreenTransition(obs GroupObservation) GroupTransition {
 // state machines walk in parallel; the group phase is the union (any
 // Component still surging means the group is Surging; otherwise
 // Waiting → Shifting → ScalingDown → Idle).
-//
-// Pause semantics differ from BlueGreen: BlueGreen short-circuits to Paused
-// when ANY Component is paused (gang-stop), but RollingUpdate lets
-// each Component progress independently, so the group is Paused only
-// when EVERY Component is paused.
 func rollingUpdateTransition(obs GroupObservation) GroupTransition {
 	failed := false
 	for _, c := range obs.Components {
@@ -299,21 +275,6 @@ func rollingUpdateTransition(obs GroupObservation) GroupTransition {
 			Phase:          v1beta1.CoordinationPhaseFailed,
 			CompositePhase: string(v1beta1.CoordinationPhaseFailed),
 			Message:        "one or more Components in the RollingUpdate group failed",
-		}
-	}
-
-	allPaused := len(obs.Components) > 0
-	for _, c := range obs.Components {
-		if !c.Paused {
-			allPaused = false
-			break
-		}
-	}
-	if allPaused {
-		return GroupTransition{
-			Phase:          v1beta1.CoordinationPhasePaused,
-			CompositePhase: string(v1beta1.CoordinationPhasePaused),
-			Message:        "all Components in the RollingUpdate group are paused",
 		}
 	}
 
@@ -392,14 +353,9 @@ func rollingUpdateTransition(obs GroupObservation) GroupTransition {
 // explicit Independent groups and as the implicit default when no
 // group is declared (callers that drive an InferenceService without a
 // rolloutCoordination block hit this branch).
-//
-// Pause semantics match RollingUpdate's: Independent allows each
-// Component to progress on its own, so the group is Paused only when
-// EVERY Component is paused (not BlueGreen's "ANY paused").
 func independentTransition(obs GroupObservation) GroupTransition {
 	anyRolling := false
 	failed := false
-	allPaused := len(obs.Components) > 0
 	for _, c := range obs.Components {
 		if c.Failed {
 			failed = true
@@ -407,22 +363,12 @@ func independentTransition(obs GroupObservation) GroupTransition {
 		if c.RolloutInFlight {
 			anyRolling = true
 		}
-		if !c.Paused {
-			allPaused = false
-		}
 	}
 	if failed {
 		return GroupTransition{
 			Phase:          v1beta1.CoordinationPhaseFailed,
 			CompositePhase: string(v1beta1.CoordinationPhaseFailed),
 			Message:        "one or more Components in the Independent group failed",
-		}
-	}
-	if allPaused {
-		return GroupTransition{
-			Phase:          v1beta1.CoordinationPhasePaused,
-			CompositePhase: string(v1beta1.CoordinationPhasePaused),
-			Message:        "all Components in the Independent group are paused",
 		}
 	}
 	if !anyRolling {

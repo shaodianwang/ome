@@ -32,8 +32,8 @@ func BuildGroupStatus(group ResolvedGroup, tr GroupTransition, ratio *RatioState
 		out.Order = append([]v1beta1.ComponentType(nil), group.Order...)
 	}
 	if group.Pacing.MaxSurge != nil {
-		copy := *group.Pacing.MaxSurge
-		out.ObservedSurge = &copy
+		surge := *group.Pacing.MaxSurge
+		out.ObservedSurge = &surge
 	}
 	if ratio != nil && group.Pacing.Type == v1beta1.CoordinationPacingRatioBalanced {
 		out.ObservedRatio = ratioStateToAPI(ratio)

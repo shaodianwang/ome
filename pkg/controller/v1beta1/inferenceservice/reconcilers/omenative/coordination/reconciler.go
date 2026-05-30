@@ -47,6 +47,11 @@ type ReconcileInputs struct {
 //   - decide whether to write status (Status* fields)
 //   - emit metrics for surge skew / failures
 //   - log structured progress lines
+//
+// RatioBalanced skew is published exclusively via the ratio_skew_total
+// Prometheus counter and the RatioSkewRejected event — see the
+// RatioSkewRejected branch in Reconcile — so Result intentionally does
+// not carry a per-reconcile skew count.
 type Result struct {
 	// GroupStatuses are the per-group statuses freshly computed this
 	// reconcile.
@@ -55,10 +60,6 @@ type Result struct {
 	// PerRevisionServicesEnsured counts how many per-revision Services
 	// the reconcile created or updated. Surfaces in logs.
 	PerRevisionServicesEnsured int
-
-	// SkewRejections counts the Components whose surge attempts were
-	// rejected by RatioBalanced pacing this reconcile.
-	SkewRejections int
 }
 
 // Reconcile is the entry point called by the top-level OMENative

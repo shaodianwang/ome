@@ -159,15 +159,17 @@ func TestComputeTransition_BlueGreenFailed(t *testing.T) {
 	}
 }
 
+// TestComputeTransition_BlueGreenPaused asserts BlueGreen honors the
+// ISVC-wide PausedGlobal signal (the only pause path coordination
+// supports today). Per-Component pause was never wired in production;
+// it was removed in favor of PausedGlobal exclusively.
 func TestComputeTransition_BlueGreenPaused(t *testing.T) {
 	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen}
 	obs := idleObs(g)
-	c := obs.Components[v1beta1.EngineComponent]
-	c.Paused = true
-	obs.Components[v1beta1.EngineComponent] = c
+	obs.PausedGlobal = true
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhasePaused {
-		t.Errorf("BlueGreen with paused Component: got %q want Paused", tr.Phase)
+		t.Errorf("BlueGreen with global pause: got %q want Paused", tr.Phase)
 	}
 }
 
