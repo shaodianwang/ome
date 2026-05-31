@@ -156,6 +156,14 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		return reconcile.Result{}, err
 	}
+	// Bind structured logging context for this reconcile pass: every
+	// per-step log line and every downstream callback that pulls from
+	// ctx inherits (namespace, isvc) without re-stamping per-line. The
+	// existing r.Log field is preserved for sites that already key off
+	// the receiver — those use the same backing logger so output stays
+	// consistent.
+	log := r.Log.WithValues("namespace", isvc.Namespace, "isvc", isvc.Name)
+	ctx = ctrl.LoggerInto(ctx, log)
 	// get annotations from isvc
 	annotations := utils.Filter(isvc.Annotations, func(key string) bool {
 		return !utils.Includes(constants.ServiceAnnotationDisallowedList, key)
@@ -168,7 +176,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// For backward compatibility with predictor-based architecture
 	deploymentMode := isvcutils.GetDeploymentMode(annotations, deployConfig)
-	r.Log.Info("Inference service deployment mode ", "namespace", isvc.Namespace, "inference service", isvc.Name, "deployment mode", deploymentMode)
+	log.Info("InferenceService deployment mode resolved", "deploymentMode", deploymentMode)
 
 	// name of our custom finalizer
 	finalizerName := "inferenceservice.finalizers"
@@ -221,8 +229,13 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		isvc.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
 	}
 
-	// Setup reconcilers
-	r.Log.Info("Reconciling inference service", "apiVersion", isvc.APIVersion, "namespace", isvc.Namespace, "isvc", isvc.Name)
+	// Setup reconcilers.
+	// apiVersion field reads from v1beta1.SchemeGroupVersion rather
+	// than isvc.APIVersion because controller-runtime strips TypeMeta
+	// from Get'd objects (well-known scheme-builder behavior). Pre-fix,
+	// the log field was always empty — see review §2 in
+	// .claude/specs/2026-05-30-code-quality-review/06-isvc-controller.md.
+	log.Info("Reconciling inference service", "apiVersion", v1beta1.SchemeGroupVersion.String())
 	isvcConfig, err := controllerconfig.NewInferenceServicesConfig(r.Clientset)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to create InferenceServicesConfig")
@@ -340,7 +353,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		rt = selection.Spec
 		rtName = selection.Name
-		r.Log.Info("Auto-selected runtime", "runtime", rtName, "model", isvc.Spec.Model.Name)
+		log.Info("Auto-selected runtime", "runtime", rtName, "model", isvc.Spec.Model.Name)
 	default:
 		// No model, no runtime — webhook should have caught this; defensive
 		// guard for direct client writes that bypass admission.
@@ -366,18 +379,21 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, err
 	}
 
-	// If both engine and decoder exist, it's PD-disaggregated
+	// If both engine and decoder exist, it's PD-disaggregated. V(1):
+	// steady-state per-reconcile breadcrumb; no operator action.
 	if mergedEngine != nil && mergedDecoder != nil {
-		r.Log.Info("PD-disaggregated deployment detected", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
+		log.V(1).Info("PD-disaggregated deployment detected")
 	}
 
-	// Step 5: Create reconcilers based on merged specs
+	// Step 5: Create reconcilers based on merged specs. The
+	// "Creating <component> reconciler" / "Determined ingress
+	// deployment mode" lines fire every reconcile but observe no
+	// state change — demoted to V(1) per review §2 (hot-path /
+	// steady-state breadcrumbs).
 	if mergedEngine != nil {
 		engineSupportedModelFormats := r.RuntimeSelector.GetSupportedModelFormat(ctx, rt, baseModel, userSpecifiedRuntime)
-		r.Log.Info("Creating engine reconciler",
-			"deploymentMode", engineDeploymentMode,
-			"namespace", isvc.Namespace,
-			"inferenceService", isvc.Name)
+		log.V(1).Info("Creating engine reconciler",
+			"deploymentMode", engineDeploymentMode)
 
 		engineReconciler := componentBuilderFactory.CreateEngineComponent(
 			engineDeploymentMode,
@@ -394,10 +410,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	if mergedDecoder != nil {
 		decoderSupportedModelFormats := r.RuntimeSelector.GetSupportedModelFormat(ctx, rt, baseModel, userSpecifiedRuntime)
-		r.Log.Info("Creating decoder reconciler",
-			"deploymentMode", decoderDeploymentMode,
-			"namespace", isvc.Namespace,
-			"inferenceService", isvc.Name)
+		log.V(1).Info("Creating decoder reconciler",
+			"deploymentMode", decoderDeploymentMode)
 
 		decoderReconciler := componentBuilderFactory.CreateDecoderComponent(
 			decoderDeploymentMode,
@@ -414,10 +428,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// Add Router reconciler if merged router spec exists (using new v2 Router)
 	if mergedRouter != nil {
-		r.Log.Info("Creating router reconciler",
-			"deploymentMode", routerDeploymentMode, // Using the determined router deployment mode
-			"namespace", isvc.Namespace,
-			"inferenceService", isvc.Name)
+		log.V(1).Info("Creating router reconciler",
+			"deploymentMode", routerDeploymentMode)
 
 		routerReconciler := componentBuilderFactory.CreateRouterComponent(
 			routerDeploymentMode, // Using the determined router deployment mode
@@ -441,10 +453,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		ingressDeploymentMode = engineDeploymentMode
 	}
 
-	r.Log.Info("Determined ingress deployment mode",
-		"ingressDeploymentMode", ingressDeploymentMode,
-		"namespace", isvc.Namespace,
-		"inferenceService", isvc.Name)
+	log.V(1).Info("Determined ingress deployment mode",
+		"ingressDeploymentMode", ingressDeploymentMode)
 
 	// Step 6: Run all reconcilers. Capture the max-requeue across
 	// per-Component reconcilers WITHOUT short-circuiting — coordination
@@ -457,10 +467,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	for _, reconciler := range reconcilers {
 		result, err := reconciler.Reconcile(ctx, isvc)
 		if err != nil {
-			r.Log.Error(err, "Failed to reconcile component",
-				"component", fmt.Sprintf("%T", reconciler),
-				"namespace", isvc.Namespace,
-				"inferenceService", isvc.Name)
+			log.Error(err, "Failed to reconcile component",
+				"component", fmt.Sprintf("%T", reconciler))
 			return result, err
 		}
 		if result.Requeue {
@@ -485,8 +493,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		Reader:   r.APIReader,
 		Recorder: r.Recorder,
 	}); err != nil {
-		r.Log.Error(err, "Failed to reconcile cross-Component coordination",
-			"namespace", isvc.Namespace, "inferenceService", isvc.Name)
+		log.Error(err, "Failed to reconcile cross-Component coordination")
 		return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile coordination")
 	}
 
@@ -521,7 +528,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// New architecture: ingress uses the determined ingress deployment mode
 	ingressReconciler := ingress.NewIngressReconciler(r.Client, r.Clientset, r.Scheme, resolvedIngressConfig, isvcConfig)
-	r.Log.Info("Reconciling ingress for inference service", "isvc", isvc.Name)
+	log.V(1).Info("Reconciling ingress for inference service")
 	if err := ingressReconciler.(*ingress.IngressReconciler).ReconcileWithDeploymentMode(ctx, isvc, ingressDeploymentMode); err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile ingress")
 	}
@@ -529,7 +536,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Reconcile external service - creates a service with the inference service name
 	// when ingress is disabled to provide a stable endpoint
 	externalServiceReconciler := external_service.NewExternalServiceReconciler(r.Client, r.Clientset, r.Scheme, resolvedIngressConfig)
-	r.Log.Info("Reconciling external service for inference service", "isvc", isvc.Name)
+	log.V(1).Info("Reconciling external service for inference service")
 	if err := externalServiceReconciler.Reconcile(ctx, isvc); err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile external service")
 	}
@@ -570,33 +577,44 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	// Clean up resources for components that no longer exist.
+	// Clean up resources for components that no longer exist. Cleanup
+	// errors don't fail reconciliation (we still want the rest of the
+	// status flush to land), but we log Error so a chronic permission
+	// failure on cleanup isn't fully invisible to the operator.
 	if err := r.cleanupRemovedComponents(ctx, isvc, mergedEngine, mergedDecoder, mergedRouter); err != nil {
-		r.Log.Error(err, "Failed to cleanup removed components", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
-		// Don't fail reconciliation on cleanup errors
+		log.Error(err, "Failed to cleanup removed components")
 	}
 
-	// Clean up status for components that no longer exist
+	// Clean up status for components that no longer exist. Demoted to
+	// V(1): this block runs every reconcile but in steady state every
+	// declared Component still has a merged spec, so the "Cleaning up"
+	// breadcrumb fires on the hot path without ever doing real work.
+	// The per-Component delete lines stay at Info because they only
+	// fire on a real spec change (Component removed from the ISVC).
 	if isvc.Status.Components != nil {
-		r.Log.Info("Cleaning up component status",
-			"namespace", isvc.Namespace,
-			"inferenceService", isvc.Name,
+		log.V(1).Info("Cleaning up component status",
 			"mergedEngine", mergedEngine != nil,
 			"mergedDecoder", mergedDecoder != nil,
 			"mergedRouter", mergedRouter != nil,
 			"statusComponents", len(isvc.Status.Components))
 
 		if mergedEngine == nil {
-			delete(isvc.Status.Components, v1beta1.EngineComponent)
-			r.Log.Info("Deleted engine from status", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
+			if _, present := isvc.Status.Components[v1beta1.EngineComponent]; present {
+				delete(isvc.Status.Components, v1beta1.EngineComponent)
+				log.Info("Deleted engine from status")
+			}
 		}
 		if mergedDecoder == nil {
-			delete(isvc.Status.Components, v1beta1.DecoderComponent)
-			r.Log.Info("Deleted decoder from status", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
+			if _, present := isvc.Status.Components[v1beta1.DecoderComponent]; present {
+				delete(isvc.Status.Components, v1beta1.DecoderComponent)
+				log.Info("Deleted decoder from status")
+			}
 		}
 		if mergedRouter == nil {
-			delete(isvc.Status.Components, v1beta1.RouterComponent)
-			r.Log.Info("Deleted router from status", "namespace", isvc.Namespace, "inferenceService", isvc.Name)
+			if _, present := isvc.Status.Components[v1beta1.RouterComponent]; present {
+				delete(isvc.Status.Components, v1beta1.RouterComponent)
+				log.Info("Deleted router from status")
+			}
 		}
 	}
 

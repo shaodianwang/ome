@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -91,6 +92,15 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	groups := ResolveGroups(in.ISVC.Spec.RolloutCoordination)
 	result := &Result{}
 
+	// Bind a logger keyed to the ISVC so every downstream V(1)
+	// breadcrumb (per-group transition, per-revision Service GC,
+	// skew rejection) inherits the same anchor and operators can
+	// `grep isvc=foo` across the coordination layer.
+	logger := log.FromContext(ctx).WithValues(
+		"isvc", client.ObjectKeyFromObject(in.ISVC),
+		"groupCount", len(groups))
+	ctx = log.IntoContext(ctx, logger)
+
 	// Per-revision Service / Traffic[] producer: emitted for EVERY
 	// OMENative-mode Component, with or without a rolloutCoordination
 	// group declared. These artifacts are the data-plane for OEP-0011's
@@ -103,8 +113,12 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// opt-in — those only run when groups are declared.
 	componentsTouched := collectOMENativeComponents(in.ISVC)
 	if len(componentsTouched) == 0 {
+		logger.V(1).Info("Reconcile entry; no OMENative Components on ISVC, nothing to coordinate")
 		return result, nil
 	}
+	logger.V(1).Info("Reconcile entry",
+		"componentCount", len(componentsTouched),
+		"components", componentsTouched)
 
 	// Informational hint: ISVC has multiple OMENative Components but
 	// no rolloutCoordination block declared. Default behavior rolls
@@ -173,8 +187,35 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		// Record observability for this group.
 		prevPhase := previousGroupPhase(in.ISVC, g.Name)
 		RecordGroupPhase(in.ISVC.Name, g.Name, string(tr.Phase))
+		// Steady-state breadcrumb (no transition): V(1) so operators
+		// can `grep group=foo` without drowning the log under normal
+		// load. Includes phase + policy + componentCount + rollout
+		// count so post-mortem on a misfire can correlate the inputs
+		// the per-policy transition function saw.
+		rolloutInFlight := 0
+		for _, comp := range obs.Components {
+			if comp.RolloutInFlight {
+				rolloutInFlight++
+			}
+		}
+		logger.V(1).Info("Group transition computed",
+			"group", g.Name,
+			"policy", g.Policy,
+			"phase", tr.Phase,
+			"componentCount", len(g.Components),
+			"rolloutInFlight", rolloutInFlight,
+			"ratioSkewRejected", tr.RatioSkewRejected)
 		if prevPhase != "" && string(prevPhase) != string(tr.Phase) {
 			RecordGroupTransition(in.ISVC.Name, g.Name, string(prevPhase), string(tr.Phase))
+			// Real Phase transition: Info-level so it shows up in
+			// operator-facing dashboards alongside the K8s event the
+			// emitPhaseEvents call below records.
+			logger.Info("Group phase transition",
+				"group", g.Name,
+				"policy", g.Policy,
+				"fromPhase", prevPhase,
+				"toPhase", tr.Phase,
+				"message", tr.Message)
 		}
 		if tr.Phase == v1beta1.CoordinationPhaseFailed {
 			RecordGroupFailure(in.ISVC.Name, g.Name, tr.Message)

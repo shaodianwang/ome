@@ -49,6 +49,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -77,12 +78,26 @@ var disableIRManaged atomic.Int32
 //
 // Idempotent and safe to call concurrently — the underlying atomic
 // store has the right memory ordering.
+//
+// Logs the post-flip value at Info so post-incident triage has a
+// breadcrumb that the manager actually flipped the kill switch (the
+// flag is otherwise invisible from the running controller's state).
+// Suppresses the log on idempotent re-sets so test-suite fixtures that
+// repeatedly assign the same value don't spam.
 func SetGlobalDisableIRManaged(disabled bool) {
+	var prev int32
 	if disabled {
-		disableIRManaged.Store(1)
+		prev = disableIRManaged.Swap(1)
 	} else {
-		disableIRManaged.Store(0)
+		prev = disableIRManaged.Swap(0)
 	}
+	wasDisabled := prev == 1
+	if wasDisabled == disabled {
+		return
+	}
+	log.Log.Info("IR-managed projection kill switch flipped",
+		"disabled", disabled,
+		"previousDisabled", wasDisabled)
 }
 
 // IsManagerDisableFlagSet returns the current value of the
@@ -219,6 +234,11 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 	name := InferenceReplicaName(p.ISVC.Name, p.Component)
 	key := types.NamespacedName{Namespace: p.ISVC.Namespace, Name: name}
 
+	logger := log.FromContext(ctx).WithValues(
+		"isvc", client.ObjectKey{Namespace: p.ISVC.Namespace, Name: p.ISVC.Name},
+		"component", p.Component,
+		"inferencereplica", key)
+
 	var committed *v1beta1.InferenceReplica
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		ir := &v1beta1.InferenceReplica{}
@@ -228,6 +248,14 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 			ir = newInferenceReplica(p, name)
 			if err := p.Client.Create(ctx, ir); err != nil {
 				if apierrors.IsAlreadyExists(err) {
+					// Cache lag: the Get said NotFound but the
+					// apiserver already has the IR (the projector's
+					// own previous Create just landed, or a racing
+					// peer wrote it). Log so repeated firings of this
+					// branch — a real symptom of cache desync — surface
+					// in operator logs at V(1).
+					logger.V(1).Info("InferenceReplica racing-create resolved as Conflict; retrying",
+						"parentUID", p.ISVC.UID)
 					return apierrors.NewConflict(
 						schema.GroupResource{Group: v1beta1.SchemeGroupVersion.Group, Resource: "inferencereplicas"},
 						name,

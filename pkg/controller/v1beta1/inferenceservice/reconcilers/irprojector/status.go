@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -85,9 +86,21 @@ func AggregateIRStatus(ctx context.Context, c client.Client, isvc *v1beta1.Infer
 	}
 
 	managerDisabled := IsManagerDisableFlagSet()
+	logger := log.FromContext(ctx).WithValues(
+		"isvc", client.ObjectKeyFromObject(isvc))
 	for _, comp := range allDeclaredComponents(isvc) {
 		mode := componentModes[comp]
 		if !IsIRManagedComponent(mode, managerDisabled) {
+			// A non-OMENative mode skip is routine. The interesting case
+			// is OMENative + managerDisabled — the kill switch has
+			// deflected this Component back to the omenative direct
+			// path. Surface that at V(1) so operators can grep for
+			// drifted Components when --disable-ir-managed-omenative is
+			// toggled mid-flight.
+			if managerDisabled && mode == constants.OMENative {
+				logger.V(1).Info("Kill switch active; routing Component via omenative direct path instead of IR",
+					"component", comp)
+			}
 			continue
 		}
 		if err := aggregateOneComponent(ctx, c, isvc, comp); err != nil {
@@ -117,7 +130,14 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 			// First-reconcile race: the projector's CreateOrUpdate
 			// landed but the cache hasn't observed it yet, OR the
 			// IR was deleted between writes. Leave the status entry
-			// empty and let the next reconcile pick it up.
+			// empty and let the next reconcile pick it up. Log at
+			// V(1) so a *persistent* NotFound (projector failing to
+			// create) is visible in operator logs — otherwise this
+			// state is invisible from the ISVC status surface.
+			log.FromContext(ctx).V(1).Info("InferenceReplica not found; leaving ISVC status entry empty until next reconcile",
+				"isvc", client.ObjectKeyFromObject(isvc),
+				"inferencereplica", key,
+				"component", component)
 			return nil
 		}
 		return fmt.Errorf("AggregateIRStatus: get IR %s/%s for component=%s: %w",

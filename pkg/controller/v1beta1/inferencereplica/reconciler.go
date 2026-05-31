@@ -112,10 +112,32 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, err
 	}
 
+	// Bind structured logging context for the remainder of this
+	// reconcile so every downstream callback inherits the same
+	// (component, parent, generation) bindings without needing to
+	// re-stamp them per-line.
+	log = log.WithValues(
+		"component", ir.Spec.Component,
+		"parent", ir.Spec.ParentRef.Name,
+		"generation", ir.Generation)
+	ctx = ctrl.LoggerInto(ctx, log)
+	log.V(1).Info("Reconcile entry",
+		"currentRevision", ir.Status.CurrentRevision,
+		"updateRevision", ir.Status.UpdateRevision,
+		"replicas", ir.Status.Replicas,
+		"readyReplicas", ir.Status.ReadyReplicas)
+
+	// Snapshot revision pointers + failure-state BEFORE workload.Reconcile
+	// so the deferred status-write can log on real transitions
+	// (CurrentRevision promotion, first Phase=Failed escalation).
+	priorCurrentRevision := ir.Status.CurrentRevision
+	priorAnyFailed := hasFailedInstance(ir.Status.InstanceStatuses)
+
 	if ir.DeletionTimestamp != nil {
 		// Foreground cascade-delete is owned by the apiserver via
 		// blockOwnerDeletion on each child owner ref. The IR controller
 		// has no finalizer — its work is observation-only at delete time.
+		log.V(1).Info("DeletionTimestamp set; no-op")
 		return ctrl.Result{}, nil
 	}
 
@@ -160,12 +182,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Defer status aggregation so it runs regardless of whether the
 	// workload dispatcher returned a requeue or an error. Status-write
 	// errors don't clobber a real dispatcher error — they only surface
-	// when everything else succeeded.
+	// when everything else succeeded. We log the suppressed error at
+	// V(1) so a dispatcher+status double-failure isn't fully invisible.
 	defer func() {
 		if serr := r.aggregateAndWriteStatus(ctx, ir, plan, target); serr != nil {
 			if err == nil {
 				err = fmt.Errorf("InferenceReplica reconciler: write status: %w", serr)
+				return
 			}
+			log.V(1).Error(serr, "Status write also failed; primary error preserved")
+		}
+		// State-transition logs: only fire when a real transition
+		// crossed in this reconcile (not on steady-state passes). The
+		// in-memory mirror in aggregateAndWriteStatus means ir.Status
+		// now reflects the post-write counters.
+		if priorCurrentRevision != ir.Status.CurrentRevision && ir.Status.CurrentRevision != "" {
+			log.Info("Rollout complete; CurrentRevision promoted",
+				"previousCurrentRevision", priorCurrentRevision,
+				"currentRevision", ir.Status.CurrentRevision)
+		}
+		if !priorAnyFailed && hasFailedInstance(ir.Status.InstanceStatuses) {
+			log.Info("Instance escalation observed; at least one Instance reached Phase=Failed")
 		}
 	}()
 
@@ -183,10 +220,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	//
 	// Service errors don't clobber a real workload.Reconcile error; only
 	// surface them when the dispatcher succeeded. Same pattern the deferred
-	// status-write uses above.
+	// status-write uses above; log the suppressed error at V(1) so the
+	// double-failure case is grep-able.
 	if serr := workload.ReconcileHeadlessService(ctx, r.Client, buildHeadlessServiceSpec(ir)); serr != nil {
 		if err == nil {
 			err = fmt.Errorf("InferenceReplica reconciler: reconcile headless service: %w", serr)
+		} else {
+			log.V(1).Error(serr, "Headless Service reconcile also failed; primary error preserved")
 		}
 	}
 	return result, err

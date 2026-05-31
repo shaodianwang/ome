@@ -89,7 +89,18 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent cl
 		// ISVC when set, else IR). The stuck-pod aggregator is run
 		// elsewhere in this PR but every constructed input must satisfy
 		// the panic-on-nil contract.
+		//
+		// Also mirror the escalation onto the controller log so
+		// log-aggregated views (loki/es/journal) see it without going
+		// through the events stream — the event is user-facing while
+		// the log is operator-facing.
 		WarnInstanceFailed: func(idx int32, podName, reason string) {
+			r.Log.Info("Instance escalated to Phase=Failed",
+				"inferencereplica", client.ObjectKeyFromObject(ir),
+				"component", ir.Spec.Component,
+				"instance", idx,
+				"pod", podName,
+				"reason", reason)
 			if r.Recorder == nil {
 				return
 			}
