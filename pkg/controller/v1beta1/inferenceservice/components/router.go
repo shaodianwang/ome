@@ -244,11 +244,11 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		if irprojector.IsIRManagedComponent(r.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
 			// Resolve the authoritative ComponentAutoscaler from the
 			// ISVC → runtime → default chain (OEP-0013 §"Inheritance
-			// chain"). See engine dispatch for the full design — the
-			// projection is a no-op at runtime until Slice 3 dispatches
-			// HPA / KEDA / external / none from ir.Spec.Autoscaler.
+			// chain"). See engine dispatch for the full design — Slice
+			// 3 dispatches HPA / KEDA / external / none against the
+			// committed IR (always-on per Q7).
 			resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(r.Runtime, isvc, v1beta1.RouterComponent)
-			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
+			ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
 				ISVC:               isvc,
 				Component:          v1beta1.RouterComponent,
 				ComponentExt:       &r.routerSpec.ComponentExtensionSpec,
@@ -257,8 +257,21 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 				MultiPod:           false,
 				ResolvedAutoscaler: resolvedAS,
 				Client:             r.Client,
-			}); err != nil {
+			})
+			if err != nil {
 				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for router")
+			}
+			// OEP-0013 Slice 3: always-on per-IR autoscaler dispatch (Q7).
+			// See engine dispatch for the full owner-ref + scaleTargetRef
+			// rationale.
+			if err := autoscaler.DispatchForIRComponent(ctx, autoscaler.IRDispatchInput{
+				Client:             r.Client,
+				Scheme:             r.Scheme,
+				IR:                 ir,
+				ResolvedAutoscaler: resolvedAS,
+				ComponentExt:       &r.routerSpec.ComponentExtensionSpec,
+			}); err != nil {
+				return ctrl.Result{}, errors.Wrap(err, "failed to dispatch autoscaler for router")
 			}
 			return ctrl.Result{}, nil
 		}

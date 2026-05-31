@@ -43,7 +43,8 @@ type KEDAReconciler struct {
 // targets the caller-supplied Deployment. Preserves the legacy
 // ComponentExtensionSpec behaviour: MinReplicas / MaxReplicas drive the
 // bounds and Autoscaler.Keda.Triggers (when present) drives the trigger list.
-// OEP-0013 Slice 3 introduces a sibling constructor for the IR-managed path.
+// OEP-0013 Slice 3 introduces the sibling NewKEDAReconcilerForTarget
+// constructor for the IR-managed path.
 func NewKEDAReconciler(
 	client client.Client,
 	scheme *runtime.Scheme,
@@ -59,6 +60,43 @@ func NewKEDAReconciler(
 		ScaledObject: scaledObject,
 		componentExt: componentExt,
 	}, nil
+}
+
+// NewKEDAReconcilerForTarget builds a KEDAReconciler whose generated
+// ScaledObject targets the caller-supplied scaleTargetRef (typically an
+// InferenceReplica for the OEP-0013 IR-managed path). kedaSpec carries the
+// resolved KedaAutoscaler block (resolver output from Slice 1); Triggers,
+// Advanced, PollingInterval, CooldownPeriod, IdleReplicaCount, and Fallback
+// are all forwarded verbatim to the ScaledObject spec per OEP-0013 README
+// 678-706.
+//
+// Unlike NewKEDAReconciler, this constructor does NOT consult the legacy
+// ScaleMetric / ScaleTarget / componentExt fields. It is the entry point
+// for OEP-0013's per-IR dispatch (Slice 3) and stays free of legacy
+// concerns so Slice 6's cleanup can drop the legacy constructor wholesale
+// without touching this path.
+//
+// When kedaSpec is nil or kedaSpec.Triggers is empty the generated
+// ScaledObject ends up with no triggers; Reconcile() then skips the apply
+// to avoid creating an invalid (zero-trigger) ScaledObject.
+func NewKEDAReconcilerForTarget(
+	client client.Client,
+	scheme *runtime.Scheme,
+	componentMeta metav1.ObjectMeta,
+	scaleTargetRef kedav1.ScaleTarget,
+	kedaSpec *v1beta1.KedaAutoscaler,
+	minReplicas int32,
+	maxReplicas int32,
+) *KEDAReconciler {
+	return &KEDAReconciler{
+		client:       client,
+		scheme:       scheme,
+		ScaledObject: createScaledObject(componentMeta, scaleTargetRef, kedaSpec, minReplicas, maxReplicas),
+		// componentExt is intentionally nil — the IR-managed path doesn't
+		// consult it. Keep the field on the struct for shape compatibility
+		// with the legacy constructor; the Reconcile() path doesn't read it.
+		componentExt: nil,
+	}
 }
 
 // createScaledObject builds the desired ScaledObject from explicit inputs.
@@ -111,6 +149,13 @@ func createScaledObject(
 			Namespace:   componentMeta.Namespace,
 			Labels:      filteredLabels,
 			Annotations: componentMeta.Annotations,
+			// Forward OwnerReferences so the OEP-0013 IR-managed dispatch
+			// can stamp the SO with the IR's controller-ref for foreground
+			// GC cascade. Raw Deployment legacy callers go through
+			// createScaledObjectFromLegacy → SetControllerReferences and
+			// don't populate componentMeta.OwnerReferences, so this is a
+			// no-op for them.
+			OwnerReferences: componentMeta.OwnerReferences,
 		},
 		Spec: spec,
 	}

@@ -303,12 +303,11 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			// Resolve the authoritative ComponentAutoscaler from the
 			// ISVC → runtime → default chain (OEP-0013 §"Inheritance
 			// chain"). The resolved block is projected onto
-			// ir.Spec.Autoscaler by the projector. Slice 3 reads it
-			// off the IR and dispatches HPA / KEDA / external / none.
-			// Today (Slice 1) the projection is a no-op at runtime;
-			// no scaler is emitted until Slice 3 lands.
+			// ir.Spec.Autoscaler by the projector; Slice 3 then
+			// dispatches HPA / KEDA / external / none against the
+			// committed IR (always-on per Q7).
 			resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(e.Runtime, isvc, v1beta1.EngineComponent)
-			if _, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
+			ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
 				ISVC:               isvc,
 				Component:          v1beta1.EngineComponent,
 				ComponentExt:       &e.engineSpec.ComponentExtensionSpec,
@@ -319,8 +318,24 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 				MultiPod:           multiPod,
 				ResolvedAutoscaler: resolvedAS,
 				Client:             e.Client,
-			}); err != nil {
+			})
+			if err != nil {
 				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for engine")
+			}
+			// OEP-0013 Slice 3: always-on per-IR autoscaler dispatch (Q7).
+			// Owner-ref the HPA / SO to the IR so foreground GC cascades
+			// when the IR is deleted; ScaleTargetRef points at the IR's
+			// /scale subresource. Q5: external + none are status-field
+			// twins — both fall through to the dispatch's "delete both"
+			// branch with no separate code path.
+			if err := autoscaler.DispatchForIRComponent(ctx, autoscaler.IRDispatchInput{
+				Client:             e.Client,
+				Scheme:             e.Scheme,
+				IR:                 ir,
+				ResolvedAutoscaler: resolvedAS,
+				ComponentExt:       &e.engineSpec.ComponentExtensionSpec,
+			}); err != nil {
+				return ctrl.Result{}, errors.Wrap(err, "failed to dispatch autoscaler for engine")
 			}
 			return ctrl.Result{}, nil
 		}

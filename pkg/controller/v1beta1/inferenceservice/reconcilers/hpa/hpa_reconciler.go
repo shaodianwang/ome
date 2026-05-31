@@ -32,8 +32,10 @@ type HPAReconciler struct {
 // NewHPAReconciler builds an HPAReconciler whose generated HPA targets the
 // caller-supplied Deployment. Preserves the legacy ComponentExtensionSpec
 // behaviour: ScaleMetric / ScaleTarget drive the synthesized metric and
-// MinReplicas / MaxReplicas drive the bounds. OEP-0013 Slice 3 will introduce
-// a sibling constructor that targets an InferenceReplica instead.
+// MinReplicas / MaxReplicas drive the bounds. OEP-0013 Slice 3 introduces
+// the sibling NewHPAReconcilerForTarget constructor that targets an
+// InferenceReplica (or any caller-supplied scaleTargetRef) using the
+// resolver's typed HPAAutoscaler block.
 func NewHPAReconciler(client client.Client,
 	scheme *runtime.Scheme,
 	componentMeta metav1.ObjectMeta,
@@ -44,6 +46,38 @@ func NewHPAReconciler(client client.Client,
 		scheme:       scheme,
 		HPA:          createHPAFromLegacyComponentExt(componentMeta, componentExt),
 		componentExt: componentExt,
+	}
+}
+
+// NewHPAReconcilerForTarget builds an HPAReconciler whose generated HPA
+// targets the caller-supplied scaleTargetRef (typically an InferenceReplica
+// for the OEP-0013 IR-managed path). hpaSpec carries the resolved
+// HPAAutoscaler block (resolver output from Slice 1); nil / empty Metrics
+// expands to the OEP-0013 default of a single CPU=80% Resource metric per
+// README 731 + 1148.
+//
+// Unlike NewHPAReconciler, this constructor does NOT consult the legacy
+// ScaleTarget / ScaleMetric / componentExt fields. It is the entry point
+// for OEP-0013's per-IR dispatch (Slice 3) and stays free of legacy
+// concerns so Slice 6's cleanup can drop the legacy constructor wholesale
+// without touching this path.
+func NewHPAReconcilerForTarget(
+	client client.Client,
+	scheme *runtime.Scheme,
+	componentMeta metav1.ObjectMeta,
+	scaleTargetRef autoscalingv2.CrossVersionObjectReference,
+	hpaSpec *v1beta1.HPAAutoscaler,
+	minReplicas int32,
+	maxReplicas int32,
+) *HPAReconciler {
+	return &HPAReconciler{
+		client: client,
+		scheme: scheme,
+		HPA:    createHPA(componentMeta, scaleTargetRef, hpaSpec, minReplicas, maxReplicas),
+		// componentExt is intentionally nil — the IR-managed path doesn't
+		// consult it. Keep the field on the struct for shape compatibility
+		// with the legacy constructor; the Reconcile() path doesn't read it.
+		componentExt: nil,
 	}
 }
 
