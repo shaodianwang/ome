@@ -8647,6 +8647,74 @@ spec:
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       type: object
+                    podGroupDeployment:
+                      properties:
+                        groups:
+                          format: int32
+                          type: integer
+                        multiNode:
+                          properties:
+                            containerName:
+                              type: string
+                            distInitPort:
+                              format: int32
+                              type: integer
+                            enabled:
+                              type: boolean
+                            tensorParallelSize:
+                              format: int32
+                              type: integer
+                          type: object
+                        replicasPerGroup:
+                          format: int32
+                          type: integer
+                        rollout:
+                          properties:
+                            maxSkew:
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            maxUnavailablePercent:
+                              format: int32
+                              maximum: 100
+                              minimum: 1
+                              type: integer
+                          type: object
+                        scheduleTimeoutSeconds:
+                          format: int32
+                          type: integer
+                        schedulerName:
+                          type: string
+                        serviceTargetOrdinal:
+                          format: int32
+                          type: integer
+                        topologyKey:
+                          type: string
+                        updateStrategy:
+                          properties:
+                            rollingUpdate:
+                              properties:
+                                maxSurge:
+                                  format: int32
+                                  type: integer
+                                maxUnavailable:
+                                  format: int32
+                                  type: integer
+                                maxUnavailablePercent:
+                                  format: int32
+                                  type: integer
+                                progressDeadlineSeconds:
+                                  format: int32
+                                  type: integer
+                              type: object
+                            type:
+                              enum:
+                                - RecreatePod
+                                - InPlaceIfPossible
+                                - InPlaceOnly
+                              type: string
+                          type: object
+                      type: object
                     preemptionPolicy:
                       type: string
                     priority:
@@ -22086,6 +22154,74 @@ spec:
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       type: object
+                    podGroupDeployment:
+                      properties:
+                        groups:
+                          format: int32
+                          type: integer
+                        multiNode:
+                          properties:
+                            containerName:
+                              type: string
+                            distInitPort:
+                              format: int32
+                              type: integer
+                            enabled:
+                              type: boolean
+                            tensorParallelSize:
+                              format: int32
+                              type: integer
+                          type: object
+                        replicasPerGroup:
+                          format: int32
+                          type: integer
+                        rollout:
+                          properties:
+                            maxSkew:
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            maxUnavailablePercent:
+                              format: int32
+                              maximum: 100
+                              minimum: 1
+                              type: integer
+                          type: object
+                        scheduleTimeoutSeconds:
+                          format: int32
+                          type: integer
+                        schedulerName:
+                          type: string
+                        serviceTargetOrdinal:
+                          format: int32
+                          type: integer
+                        topologyKey:
+                          type: string
+                        updateStrategy:
+                          properties:
+                            rollingUpdate:
+                              properties:
+                                maxSurge:
+                                  format: int32
+                                  type: integer
+                                maxUnavailable:
+                                  format: int32
+                                  type: integer
+                                maxUnavailablePercent:
+                                  format: int32
+                                  type: integer
+                                progressDeadlineSeconds:
+                                  format: int32
+                                  type: integer
+                              type: object
+                            type:
+                              enum:
+                                - RecreatePod
+                                - InPlaceIfPossible
+                                - InPlaceOnly
+                              type: string
+                          type: object
+                      type: object
                     preemptionPolicy:
                       type: string
                     priority:
@@ -31286,6 +31422,74 @@ spec:
                           - type: string
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                      type: object
+                    podGroupDeployment:
+                      properties:
+                        groups:
+                          format: int32
+                          type: integer
+                        multiNode:
+                          properties:
+                            containerName:
+                              type: string
+                            distInitPort:
+                              format: int32
+                              type: integer
+                            enabled:
+                              type: boolean
+                            tensorParallelSize:
+                              format: int32
+                              type: integer
+                          type: object
+                        replicasPerGroup:
+                          format: int32
+                          type: integer
+                        rollout:
+                          properties:
+                            maxSkew:
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            maxUnavailablePercent:
+                              format: int32
+                              maximum: 100
+                              minimum: 1
+                              type: integer
+                          type: object
+                        scheduleTimeoutSeconds:
+                          format: int32
+                          type: integer
+                        schedulerName:
+                          type: string
+                        serviceTargetOrdinal:
+                          format: int32
+                          type: integer
+                        topologyKey:
+                          type: string
+                        updateStrategy:
+                          properties:
+                            rollingUpdate:
+                              properties:
+                                maxSurge:
+                                  format: int32
+                                  type: integer
+                                maxUnavailable:
+                                  format: int32
+                                  type: integer
+                                maxUnavailablePercent:
+                                  format: int32
+                                  type: integer
+                                progressDeadlineSeconds:
+                                  format: int32
+                                  type: integer
+                              type: object
+                            type:
+                              enum:
+                                - RecreatePod
+                                - InPlaceIfPossible
+                                - InPlaceOnly
+                              type: string
+                          type: object
                       type: object
                     preemptionPolicy:
                       type: string

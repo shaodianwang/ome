@@ -12,93 +12,98 @@ import (
 
 func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
 	return map[string]common.OpenAPIDefinition{
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef":               schema_pkg_apis_ome_v1beta1_BackendPolicyRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                      schema_pkg_apis_ome_v1beta1_BaseModel(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":                  schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":                  schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":               schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":           schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":          schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList":      schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler":            schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentExtensionSpec":         schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec":            schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget":         schema_pkg_apis_ome_v1beta1_ComponentTrafficTarget(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec":             schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CoordinationPacing":             schema_pkg_apis_ome_v1beta1_CoordinationPacing(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec":                    schema_pkg_apis_ome_v1beta1_DecoderSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionComponentSpec":         schema_pkg_apis_ome_v1beta1_DiffusionComponentSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec":          schema_pkg_apis_ome_v1beta1_DiffusionPipelineSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec":           schema_pkg_apis_ome_v1beta1_EndpointOverrideSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec":                     schema_pkg_apis_ome_v1beta1_EngineSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FailureInfo":                    schema_pkg_apis_ome_v1beta1_FailureInfo(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeight":                schema_pkg_apis_ome_v1beta1_FineTunedWeight(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightList":            schema_pkg_apis_ome_v1beta1_FineTunedWeightList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":            schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HPAAutoscaler":                  schema_pkg_apis_ome_v1beta1_HPAAutoscaler(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                     schema_pkg_apis_ome_v1beta1_HashCookie(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                     schema_pkg_apis_ome_v1beta1_HashHeader(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InPlaceUpdateStrategy":          schema_pkg_apis_ome_v1beta1_InPlaceUpdateStrategy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplica":               schema_pkg_apis_ome_v1beta1_InferenceReplica(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaList":           schema_pkg_apis_ome_v1beta1_InferenceReplicaList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing":         schema_pkg_apis_ome_v1beta1_InferenceReplicaPacing(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaSpec":           schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaStatus":         schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceService":               schema_pkg_apis_ome_v1beta1_InferenceService(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceList":           schema_pkg_apis_ome_v1beta1_InferenceServiceList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceSpec":           schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":         schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation":              schema_pkg_apis_ome_v1beta1_InstanceOperation(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaAutoscaler":                 schema_pkg_apis_ome_v1beta1_KedaAutoscaler(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                     schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec":                  schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":                 schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry":          schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationPolicy":                schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus":               schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCopies":                    schema_pkg_apis_ome_v1beta1_ModelCopies(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelExtensionSpec":             schema_pkg_apis_ome_v1beta1_ModelExtensionSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat":                    schema_pkg_apis_ome_v1beta1_ModelFormat(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec":             schema_pkg_apis_ome_v1beta1_ModelFrameworkSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelOverlayRef":                schema_pkg_apis_ome_v1beta1_ModelOverlayRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef":                       schema_pkg_apis_ome_v1beta1_ModelRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRevisionStates":            schema_pkg_apis_ome_v1beta1_ModelRevisionStates(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec":             schema_pkg_apis_ome_v1beta1_ModelSizeRangeSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus":                    schema_pkg_apis_ome_v1beta1_ModelStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatusSpec":                schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay":                 schema_pkg_apis_ome_v1beta1_MountedOverlay(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus":       schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":        schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":                schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                schema_pkg_apis_ome_v1beta1_ParentReference(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                        schema_pkg_apis_ome_v1beta1_PodSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy":             schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate":                  schema_pkg_apis_ome_v1beta1_RollingUpdate(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus": schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationRatio":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationRatio(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec":        schema_pkg_apis_ome_v1beta1_RolloutCoordinationSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus":      schema_pkg_apis_ome_v1beta1_RolloutCoordinationStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause":                   schema_pkg_apis_ome_v1beta1_RolloutPause(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                    schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep":                    schema_pkg_apis_ome_v1beta1_RolloutStep(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                     schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner":                         schema_pkg_apis_ome_v1beta1_Runner(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                     schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy":                  schema_pkg_apis_ome_v1beta1_ScalingPolicy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntime":                 schema_pkg_apis_ome_v1beta1_ServingRuntime(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeList":             schema_pkg_apis_ome_v1beta1_ServingRuntimeList(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimePodSpec":          schema_pkg_apis_ome_v1beta1_ServingRuntimePodSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef":              schema_pkg_apis_ome_v1beta1_ServingRuntimeRef(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeSpec":             schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeStatus":           schema_pkg_apis_ome_v1beta1_ServingRuntimeStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec":                    schema_pkg_apis_ome_v1beta1_StorageSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat":           schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedRuntime":               schema_pkg_apis_ome_v1beta1_SupportedRuntime(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec":                    schema_pkg_apis_ome_v1beta1_TrafficSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus":                  schema_pkg_apis_ome_v1beta1_TrafficStatus(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.UpdateStrategy":                 schema_pkg_apis_ome_v1beta1_UpdateStrategy(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec":                     schema_pkg_apis_ome_v1beta1_WorkerSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef":                        schema_pkg_apis_ome_v1beta1_BackendPolicyRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                               schema_pkg_apis_ome_v1beta1_BaseModel(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":                           schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":                           schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":                        schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":                    schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":                   schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList":               schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler":                     schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentExtensionSpec":                  schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec":                     schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget":                  schema_pkg_apis_ome_v1beta1_ComponentTrafficTarget(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec":                      schema_pkg_apis_ome_v1beta1_ConsistentHashSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CoordinationPacing":                      schema_pkg_apis_ome_v1beta1_CoordinationPacing(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec":                             schema_pkg_apis_ome_v1beta1_DecoderSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionComponentSpec":                  schema_pkg_apis_ome_v1beta1_DiffusionComponentSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec":                   schema_pkg_apis_ome_v1beta1_DiffusionPipelineSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec":                    schema_pkg_apis_ome_v1beta1_EndpointOverrideSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec":                              schema_pkg_apis_ome_v1beta1_EngineSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FailureInfo":                             schema_pkg_apis_ome_v1beta1_FailureInfo(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeight":                         schema_pkg_apis_ome_v1beta1_FineTunedWeight(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightList":                     schema_pkg_apis_ome_v1beta1_FineTunedWeightList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":                     schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HPAAutoscaler":                           schema_pkg_apis_ome_v1beta1_HPAAutoscaler(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                              schema_pkg_apis_ome_v1beta1_HashCookie(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                              schema_pkg_apis_ome_v1beta1_HashHeader(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InPlaceUpdateStrategy":                   schema_pkg_apis_ome_v1beta1_InPlaceUpdateStrategy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplica":                        schema_pkg_apis_ome_v1beta1_InferenceReplica(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaList":                    schema_pkg_apis_ome_v1beta1_InferenceReplicaList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing":                  schema_pkg_apis_ome_v1beta1_InferenceReplicaPacing(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaSpec":                    schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaStatus":                  schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceService":                        schema_pkg_apis_ome_v1beta1_InferenceService(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceList":                    schema_pkg_apis_ome_v1beta1_InferenceServiceList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceSpec":                    schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":                  schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation":                       schema_pkg_apis_ome_v1beta1_InstanceOperation(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaAutoscaler":                          schema_pkg_apis_ome_v1beta1_KedaAutoscaler(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                              schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec":                           schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":                          schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry":                   schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationPolicy":                         schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCacheStatus":                        schema_pkg_apis_ome_v1beta1_ModelCacheStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelCopies":                             schema_pkg_apis_ome_v1beta1_ModelCopies(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelExtensionSpec":                      schema_pkg_apis_ome_v1beta1_ModelExtensionSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat":                             schema_pkg_apis_ome_v1beta1_ModelFormat(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec":                      schema_pkg_apis_ome_v1beta1_ModelFrameworkSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelOverlayRef":                         schema_pkg_apis_ome_v1beta1_ModelOverlayRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef":                                schema_pkg_apis_ome_v1beta1_ModelRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRevisionStates":                     schema_pkg_apis_ome_v1beta1_ModelRevisionStates(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelSizeRangeSpec":                      schema_pkg_apis_ome_v1beta1_ModelSizeRangeSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus":                             schema_pkg_apis_ome_v1beta1_ModelStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatusSpec":                         schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay":                          schema_pkg_apis_ome_v1beta1_MountedOverlay(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus":                schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":                 schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":                         schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                         schema_pkg_apis_ome_v1beta1_ParentReference(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentComponentSpec":         schema_pkg_apis_ome_v1beta1_PodGroupDeploymentComponentSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentMultiNodeSpec":         schema_pkg_apis_ome_v1beta1_PodGroupDeploymentMultiNodeSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentRollingUpdateStrategy": schema_pkg_apis_ome_v1beta1_PodGroupDeploymentRollingUpdateStrategy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentRolloutStrategy":       schema_pkg_apis_ome_v1beta1_PodGroupDeploymentRolloutStrategy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentUpdateStrategy":        schema_pkg_apis_ome_v1beta1_PodGroupDeploymentUpdateStrategy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                                 schema_pkg_apis_ome_v1beta1_PodSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy":                      schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate":                           schema_pkg_apis_ome_v1beta1_RollingUpdate(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup":                schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus":          schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationRatio":                schema_pkg_apis_ome_v1beta1_RolloutCoordinationRatio(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec":                 schema_pkg_apis_ome_v1beta1_RolloutCoordinationSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus":               schema_pkg_apis_ome_v1beta1_RolloutCoordinationStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause":                            schema_pkg_apis_ome_v1beta1_RolloutPause(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                             schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep":                             schema_pkg_apis_ome_v1beta1_RolloutStep(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                              schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner":                                  schema_pkg_apis_ome_v1beta1_Runner(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                              schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy":                           schema_pkg_apis_ome_v1beta1_ScalingPolicy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntime":                          schema_pkg_apis_ome_v1beta1_ServingRuntime(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeList":                      schema_pkg_apis_ome_v1beta1_ServingRuntimeList(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimePodSpec":                   schema_pkg_apis_ome_v1beta1_ServingRuntimePodSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef":                       schema_pkg_apis_ome_v1beta1_ServingRuntimeRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeSpec":                      schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeStatus":                    schema_pkg_apis_ome_v1beta1_ServingRuntimeStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec":                             schema_pkg_apis_ome_v1beta1_StorageSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedModelFormat":                    schema_pkg_apis_ome_v1beta1_SupportedModelFormat(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SupportedRuntime":                        schema_pkg_apis_ome_v1beta1_SupportedRuntime(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec":                             schema_pkg_apis_ome_v1beta1_TrafficSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus":                           schema_pkg_apis_ome_v1beta1_TrafficStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.UpdateStrategy":                          schema_pkg_apis_ome_v1beta1_UpdateStrategy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec":                              schema_pkg_apis_ome_v1beta1_WorkerSpec(ref),
 	}
 }
 
@@ -772,11 +777,17 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
+					"podGroupDeployment": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PodGroupDeployment configures podgroup-operator backed lifecycle for this Component. Applies only when the Component is annotated ome.io/deploymentMode=PodGroupDeploymentRollout.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentComponentSpec"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentComponentSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -1582,6 +1593,12 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
+					"podGroupDeployment": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PodGroupDeployment configures podgroup-operator backed lifecycle for this Component. Applies only when the Component is annotated ome.io/deploymentMode=PodGroupDeploymentRollout.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentComponentSpec"),
+						},
+					},
 					"runner": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Runner container override for customizing the main container This is essentially a container spec that can override the default container Defines the main decoder container configuration, including image, resource requests/limits, environment variables, and command.",
@@ -1604,7 +1621,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentComponentSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -2329,6 +2346,12 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
+					"podGroupDeployment": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PodGroupDeployment configures podgroup-operator backed lifecycle for this Component. Applies only when the Component is annotated ome.io/deploymentMode=PodGroupDeploymentRollout.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentComponentSpec"),
+						},
+					},
 					"runner": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Runner container override for customizing the engine container This is essentially a container spec that can override the default container Defines the main model runner container configuration, including image, resource requests/limits, environment variables, and command.",
@@ -2351,7 +2374,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentComponentSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -5179,6 +5202,208 @@ func schema_pkg_apis_ome_v1beta1_ParentReference(ref common.ReferenceCallback) c
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_PodGroupDeploymentComponentSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PodGroupDeploymentComponentSpec configures how an OME Component is rendered into a podgroup.meta.com PodGroupDeployment child managed by a PodGroupDeploymentRollout.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"groups": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Groups is the number of PodGroupDeployment groups. Defaults to minReplicas when unset, then 1.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"replicasPerGroup": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReplicasPerGroup is the number of pods in each gang-scheduled group. Defaults to 1.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"topologyKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TopologyKey controls the pod affinity topology for pods in one group. Defaults to kubernetes.io/hostname.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"serviceTargetOrdinal": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServiceTargetOrdinal selects which ordinal backs the stable per-group and top-level Services. Defaults to 0.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"scheduleTimeoutSeconds": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ScheduleTimeoutSeconds is propagated to scheduler-plugins PodGroup.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"schedulerName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "SchedulerName sets the scheduler used by generated pods. Defaults to the rendered PodSpec schedulerName, then default-scheduler.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"updateStrategy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdateStrategy controls podgroup-operator per-role pod replacement. Defaults to RecreatePod.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentUpdateStrategy"),
+						},
+					},
+					"multiNode": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MultiNode enables podgroup-operator multinode argument injection.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentMultiNodeSpec"),
+						},
+					},
+					"rollout": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Rollout controls the paired PodGroupDeploymentRollout strategy. It is app-level state; when both engine and decoder set it, engine wins.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentRolloutStrategy"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentMultiNodeSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentRolloutStrategy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentUpdateStrategy"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_PodGroupDeploymentMultiNodeSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PodGroupDeploymentMultiNodeSpec configures multinode groups.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"enabled": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"boolean"},
+							Format: "",
+						},
+					},
+					"containerName": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"tensorParallelSize": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"integer"},
+							Format: "int32",
+						},
+					},
+					"distInitPort": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"integer"},
+							Format: "int32",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_PodGroupDeploymentRollingUpdateStrategy(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PodGroupDeploymentRollingUpdateStrategy mirrors podgroup-operator's rollingUpdate fields.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"maxSurge": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"integer"},
+							Format: "int32",
+						},
+					},
+					"maxUnavailable": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"integer"},
+							Format: "int32",
+						},
+					},
+					"maxUnavailablePercent": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"integer"},
+							Format: "int32",
+						},
+					},
+					"progressDeadlineSeconds": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"integer"},
+							Format: "int32",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_PodGroupDeploymentRolloutStrategy(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PodGroupDeploymentRolloutStrategy configures paired rollout waves.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"maxUnavailablePercent": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"integer"},
+							Format: "int32",
+						},
+					},
+					"maxSkew": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"integer"},
+							Format: "int32",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_PodGroupDeploymentUpdateStrategy(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PodGroupDeploymentUpdateStrategy configures per-role replacement behavior.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Type is the podgroup-operator update strategy.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"rollingUpdate": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RollingUpdate controls per-role rollout budget.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentRollingUpdateStrategy"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentRollingUpdateStrategy"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_PodSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -6744,6 +6969,12 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
+					"podGroupDeployment": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PodGroupDeployment configures podgroup-operator backed lifecycle for this Component. Applies only when the Component is annotated ome.io/deploymentMode=PodGroupDeploymentRollout.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentComponentSpec"),
+						},
+					},
 					"runner": {
 						SchemaProps: spec.SchemaProps{
 							Description: "This is essentially a container spec that can override the default container",
@@ -6770,7 +7001,7 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodGroupDeploymentComponentSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec", "k8s.io/api/apps/v1.DeploymentStrategy", "k8s.io/api/core/v1.Affinity", "k8s.io/api/core/v1.Container", "k8s.io/api/core/v1.EphemeralContainer", "k8s.io/api/core/v1.HostAlias", "k8s.io/api/core/v1.LocalObjectReference", "k8s.io/api/core/v1.PodDNSConfig", "k8s.io/api/core/v1.PodOS", "k8s.io/api/core/v1.PodReadinessGate", "k8s.io/api/core/v1.PodResourceClaim", "k8s.io/api/core/v1.PodSchedulingGate", "k8s.io/api/core/v1.PodSecurityContext", "k8s.io/api/core/v1.Toleration", "k8s.io/api/core/v1.TopologySpreadConstraint", "k8s.io/api/core/v1.Volume", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 

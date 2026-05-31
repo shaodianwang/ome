@@ -455,12 +455,15 @@ const (
 	MultiNode         DeploymentModeType = "MultiNode"
 	VirtualDeployment DeploymentModeType = "VirtualDeployment"
 	OMENative         DeploymentModeType = "OMENative"
+	// PodGroupDeploymentRollout delegates engine/decoder lifecycle to
+	// podgroup.meta.com/v1alpha1 PodGroupDeploymentRollout.
+	PodGroupDeploymentRollout DeploymentModeType = "PodGroupDeploymentRollout"
 )
 
 // IsValid checks if the deployment mode is valid
 func (d DeploymentModeType) IsValid() bool {
 	switch d {
-	case RawDeployment, MultiNode, VirtualDeployment, OMENative:
+	case RawDeployment, MultiNode, VirtualDeployment, OMENative, PodGroupDeploymentRollout:
 		return true
 	default:
 		return false
@@ -495,6 +498,9 @@ const (
 	// `GangSchedulingUnavailable=True` Component Condition) per
 	// OEP-0007 §"Gang Scheduling".
 	PodGroupKind = "PodGroup"
+
+	// PodGroupDeploymentRolloutKind is the podgroup-operator rollout CRD.
+	PodGroupDeploymentRolloutKind = "PodGroupDeploymentRollout"
 )
 
 // Volcano Job Labels

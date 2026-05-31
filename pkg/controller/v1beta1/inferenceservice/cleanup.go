@@ -141,6 +141,7 @@ func (r *InferenceServiceReconciler) getAvailableResourceTypes() ([]schema.Group
 		{gvk: schema.GroupVersionKind{Group: "leaderworkerset.x-k8s.io", Version: "v1", Kind: "LeaderWorkerSet"}},
 		{gvk: schema.GroupVersionKind{Group: "keda.sh", Version: "v1alpha1", Kind: "ScaledObject"}},
 		{gvk: schema.GroupVersionKind{Group: "monitoring.coreos.com", Version: "v1", Kind: "PodMonitor"}},
+		{gvk: schema.GroupVersionKind{Group: "podgroup.meta.com", Version: "v1alpha1", Kind: constants.PodGroupDeploymentRolloutKind}},
 	}
 
 	for _, res := range optionals {

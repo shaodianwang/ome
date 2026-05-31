@@ -26,6 +26,61 @@ OME uses a component-based architecture built on Kubernetes custom resources:
 - **ServingRuntime/ClusterServingRuntime:** Define how models are served with runtime-specific configurations
 - **InferenceService:** Connects models to runtimes for deployment with support for prefill-decode disaggregation and multi-node inference
 
+## PodGroupDeploymentRollout Mode
+
+OME can delegate prefill/decode podgroup lifecycle to the
+`podgroup.meta.com/v1alpha1` `PodGroupDeploymentRollout` controller. This is an
+opt-in deployment mode on `engine` and `decoder`; the top-level
+`InferenceService` shape remains `engine`, `decoder`, and optional `router`.
+
+```yaml
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sglang-pd
+spec:
+  engine:
+    minReplicas: 8
+    annotations:
+      ome.io/deploymentMode: PodGroupDeploymentRollout
+    podGroupDeployment:
+      replicasPerGroup: 2
+      topologyKey: ds.coreweave.com/nvlink.domain
+      scheduleTimeoutSeconds: 60
+      schedulerName: default-scheduler
+      rollout:
+        maxUnavailablePercent: 25
+        maxSkew: 0
+      multiNode:
+        enabled: true
+        tensorParallelSize: 8
+        distInitPort: 30000
+  decoder:
+    minReplicas: 4
+    annotations:
+      ome.io/deploymentMode: PodGroupDeploymentRollout
+    podGroupDeployment:
+      replicasPerGroup: 2
+      topologyKey: ds.coreweave.com/nvlink.domain
+      scheduleTimeoutSeconds: 60
+      schedulerName: default-scheduler
+      multiNode:
+        enabled: true
+        tensorParallelSize: 8
+        distInitPort: 30000
+  router:
+    annotations:
+      ome.io/deploymentMode: RawDeployment
+```
+
+OME renders one `PodGroupDeploymentRollout` named after the
+`InferenceService`. `engine` becomes the PGDR `prefill` member and `decoder`
+becomes the `decode` member. `engine.minReplicas` and `decoder.minReplicas`
+default the member group counts unless `podGroupDeployment.groups` is set
+explicitly. Router remains a normal OME component and should discover PGDR
+rank-0 pods through the podgroup labels, for example
+`app.kubernetes.io/component=prefill,podgroup.meta.com/service-target=true`.
+
 ## Development
 
 See [CLAUDE.md](CLAUDE.md) for build commands, test instructions, and detailed architecture reference.

@@ -141,6 +141,10 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	if err := validation.ValidateEngineDecoderDeploymentMode(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
+	if err := validation.ValidatePodGroupDeploymentRolloutMode(&isvc.Spec); err != nil {
+		return allWarnings, err
+	}
+
 	if err := validation.ValidateScaleToZero(isvc); err != nil {
 		return allWarnings, err
 	}

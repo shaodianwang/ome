@@ -202,6 +202,14 @@ func TestGetDeploymentModeFromAnnotations(t *testing.T) {
 			expectedFound: true,
 		},
 		{
+			name: "valid PodGroupDeploymentRollout mode",
+			annotations: map[string]string{
+				constants.DeploymentMode: string(constants.PodGroupDeploymentRollout),
+			},
+			expectedMode:  constants.PodGroupDeploymentRollout,
+			expectedFound: true,
+		},
+		{
 			name: "invalid deployment mode - returns empty and false",
 			annotations: map[string]string{
 				constants.DeploymentMode: "InvalidMode",

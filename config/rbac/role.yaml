@@ -278,6 +278,24 @@ rules:
   verbs:
   - update
 - apiGroups:
+  - podgroup.meta.com
+  resources:
+  - podgroupdeploymentrollouts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - podgroup.meta.com
+  resources:
+  - podgroupdeploymentrollouts/status
+  verbs:
+  - get
+- apiGroups:
   - policy
   resources:
   - poddisruptionbudgets
