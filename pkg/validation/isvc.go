@@ -520,9 +520,39 @@ var validAutoscalerClasses = map[v1beta1.AutoscalerClass]struct{}{
 	v1beta1.AutoscalerNone:     {},
 }
 
-// ValidateComponentAutoscaler validates the shape of a Component's
-// Autoscaler block per OEP-0013 "Webhook validation" (oeps/0013/README
-// 1103-1142), filtered by the user-locked decisions (5.Decisions in
+// ComponentAutoscalerCheck names one Component's Autoscaler block for
+// the slice-driven ValidateComponentsAutoscalers helper. Name is the
+// field label used to wrap a per-Component error (e.g., "engine",
+// "engineConfig"). Autoscaler may be nil — skipped silently.
+// MinReplicas is the effective per-Component MinReplicas floor used to
+// gate KEDA.IdleReplicaCount; nil disables that check.
+type ComponentAutoscalerCheck struct {
+	Name        string
+	Autoscaler  *v1beta1.ComponentAutoscaler
+	MinReplicas *int
+}
+
+// ValidateComponentsAutoscalers loops the per-Component checks and
+// returns the first failure wrapped with "<Name>: ". Used by every
+// webhook that dispatches the per-Component Autoscaler shape check
+// across engine/decoder/router (or their ServingRuntime field-path
+// twins) so the engine/decoder/router copy-paste lives in exactly one
+// place. See ValidateAutoscaler for the rule set.
+func ValidateComponentsAutoscalers(checks []ComponentAutoscalerCheck) error {
+	for _, c := range checks {
+		if err := ValidateAutoscaler(c.Autoscaler, c.MinReplicas); err != nil {
+			if c.Name == "" {
+				return err
+			}
+			return fmt.Errorf("%s: %w", c.Name, err)
+		}
+	}
+	return nil
+}
+
+// ValidateAutoscaler is the core per-Component Autoscaler shape check
+// per OEP-0013 "Webhook validation" (oeps/0013/README 1103-1142),
+// filtered by the user-locked decisions (5.Decisions in
 // .claude/specs/2026-05-29-oep-0013-wiring-plan/plan.md):
 //
 //   - Q5: `none` and `external` are status-field twins; both are
@@ -544,21 +574,22 @@ var validAutoscalerClasses = map[v1beta1.AutoscalerClass]struct{}{
 //     Resource != nil, etc.). HPA.Metrics empty/nil is allowed — the
 //     controller defaults to CPU=80% per OEP backcompat table 1148.
 //  4. class=keda with both Keda.IdleReplicaCount and the supplied
-//     componentMinReplicas set: IdleReplicaCount must be strictly less
-//     than componentMinReplicas.
+//     minReplicas set: IdleReplicaCount must be strictly less than
+//     minReplicas.
 //
-// Returns nil when componentExt is nil or componentExt.Autoscaler is
-// nil — every Component-level Autoscaler block is optional.
+// Returns nil when autoscaler is nil — every Component-level Autoscaler
+// block is optional.
 //
-// componentMinReplicas is the effective MinReplicas for the Component
-// (typically ComponentExtensionSpec.MinReplicas); pass nil if the
-// caller cannot determine it. The IdleReplicaCount-vs-MinReplica check
-// is skipped when either side is nil.
-func ValidateComponentAutoscaler(componentExt *v1beta1.ComponentExtensionSpec) error {
-	if componentExt == nil || componentExt.Autoscaler == nil {
+// minReplicas is the effective per-Component MinReplicas floor; pass
+// nil if the caller cannot determine it (e.g., the IR webhook may pass
+// the IR's spec.replicas, the ISVC webhook passes
+// ComponentExtensionSpec.MinReplicas). The IdleReplicaCount-vs-MinReplicas
+// check is skipped when either side is nil.
+func ValidateAutoscaler(autoscaler *v1beta1.ComponentAutoscaler, minReplicas *int) error {
+	if autoscaler == nil {
 		return nil
 	}
-	as := componentExt.Autoscaler
+	as := autoscaler
 
 	// Rule 1: class enum (defense-in-depth against the CRD marker).
 	if _, ok := validAutoscalerClasses[as.Class]; !ok {
@@ -587,11 +618,11 @@ func ValidateComponentAutoscaler(componentExt *v1beta1.ComponentExtensionSpec) e
 		}
 	}
 
-	// Rule 4: KEDA IdleReplicaCount < componentMinReplicas.
+	// Rule 4: KEDA IdleReplicaCount < minReplicas.
 	if as.Class == v1beta1.AutoscalerKEDA && as.Keda != nil &&
-		as.Keda.IdleReplicaCount != nil && componentExt.MinReplicas != nil {
+		as.Keda.IdleReplicaCount != nil && minReplicas != nil {
 		idle := int(*as.Keda.IdleReplicaCount)
-		min := *componentExt.MinReplicas
+		min := *minReplicas
 		if idle >= min {
 			return fmt.Errorf(
 				"%s: keda.idleReplicaCount must be < minReplicas (got idleReplicaCount=%d, minReplicas=%d)",
@@ -601,6 +632,20 @@ func ValidateComponentAutoscaler(componentExt *v1beta1.ComponentExtensionSpec) e
 	}
 
 	return nil
+}
+
+// ValidateComponentAutoscaler is a back-compat thin wrapper around
+// ValidateAutoscaler that pulls the Autoscaler block + MinReplicas out
+// of a ComponentExtensionSpec. New callers should prefer
+// ValidateAutoscaler (or ValidateComponentsAutoscalers for the
+// per-Component dispatch) so they don't have to synthesize a parent
+// ComponentExtensionSpec (cf. the IR webhook, which carries Replicas
+// on the IR spec rather than a nested ComponentExtensionSpec).
+func ValidateComponentAutoscaler(componentExt *v1beta1.ComponentExtensionSpec) error {
+	if componentExt == nil {
+		return nil
+	}
+	return ValidateAutoscaler(componentExt.Autoscaler, componentExt.MinReplicas)
 }
 
 // validateHPAMetricSpec checks that a single MetricSpec entry has its

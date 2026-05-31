@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -975,6 +976,199 @@ func TestValidateComponentAutoscaler(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestValidateAutoscaler covers the (autoscaler, minReplicas) core
+// signature added so callers without a parent ComponentExtensionSpec
+// (notably the InferenceReplica webhook) don't have to synthesize one
+// to fit the historical ValidateComponentAutoscaler shape. See review
+// §4 in .claude/specs/2026-05-30-code-quality-review/07-webhooks.md.
+//
+// The behaviour parity with ValidateComponentAutoscaler is covered by
+// TestValidateComponentAutoscaler above — this test asserts the cases
+// that are only reachable through the direct signature.
+func TestValidateAutoscaler(t *testing.T) {
+	validKedaTriggers := []kedav1.ScaleTriggers{{
+		Type:     "prometheus",
+		Metadata: map[string]string{"serverAddress": "x", "query": "y", "threshold": "1"},
+	}}
+
+	tests := []struct {
+		name            string
+		autoscaler      *v1beta1.ComponentAutoscaler
+		minReplicas     *int
+		wantErr         bool
+		wantErrContains string
+	}{
+		{
+			name: "nil autoscaler is a no-op even with non-nil minReplicas",
+			// IR webhook: spec.autoscaler may be nil while spec.replicas is set;
+			// must return nil rather than panic on nil-deref.
+			minReplicas: ptr.To[int](3),
+		},
+		{
+			name: "keda IdleReplicaCount >= minReplicas — REJECT (IR-style call)",
+			// Equivalent to the IR webhook passing spec.replicas as the floor.
+			autoscaler: &v1beta1.ComponentAutoscaler{
+				Class: v1beta1.AutoscalerKEDA,
+				Keda: &v1beta1.KedaAutoscaler{
+					Triggers:         validKedaTriggers,
+					IdleReplicaCount: ptr.To[int32](2),
+				},
+			},
+			minReplicas:     ptr.To[int](2),
+			wantErr:         true,
+			wantErrContains: "keda.idleReplicaCount must be < minReplicas",
+		},
+		{
+			name: "keda IdleReplicaCount with nil minReplicas — skip check",
+			// IR webhook with spec.replicas nil: skip the idle-vs-min check
+			// rather than reject (controller will pick the default later).
+			autoscaler: &v1beta1.ComponentAutoscaler{
+				Class: v1beta1.AutoscalerKEDA,
+				Keda: &v1beta1.KedaAutoscaler{
+					Triggers:         validKedaTriggers,
+					IdleReplicaCount: ptr.To[int32](5),
+				},
+			},
+			minReplicas: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateAutoscaler(tc.autoscaler, tc.minReplicas)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr && tc.wantErrContains != "" {
+				if got := err.Error(); !strings.Contains(got, tc.wantErrContains) {
+					t.Fatalf("error string\n\tgot:  %q\n\twant substring: %q", got, tc.wantErrContains)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateComponentsAutoscalers covers the slice-driven dispatch
+// shared by the ISVC, ServingRuntime, and IR webhooks. Asserts that
+// (a) the first failure short-circuits, (b) the per-Component Name is
+// prepended via %w (so callers can unwrap to ReasonXxx), (c) nil/empty
+// slice + nil Autoscaler entries are no-ops, and (d) an empty Name
+// returns the inner error unwrapped (so the IR site with a single check
+// reads naturally).
+func TestValidateComponentsAutoscalers(t *testing.T) {
+	badKEDA := &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerKEDA}
+	validHPA := &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}
+
+	t.Run("nil slice is a no-op", func(t *testing.T) {
+		if err := ValidateComponentsAutoscalers(nil); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("empty slice is a no-op", func(t *testing.T) {
+		if err := ValidateComponentsAutoscalers([]ComponentAutoscalerCheck{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("all entries with nil Autoscaler — no-op", func(t *testing.T) {
+		err := ValidateComponentsAutoscalers([]ComponentAutoscalerCheck{
+			{Name: "engine"},
+			{Name: "decoder"},
+			{Name: "router"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("all valid — accept", func(t *testing.T) {
+		err := ValidateComponentsAutoscalers([]ComponentAutoscalerCheck{
+			{Name: "engine", Autoscaler: validHPA},
+			{Name: "decoder", Autoscaler: validHPA},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("first failure short-circuits with Name prefix", func(t *testing.T) {
+		// engine is valid, decoder is invalid, router would also be
+		// invalid — assert the error names "decoder" (not "router").
+		err := ValidateComponentsAutoscalers([]ComponentAutoscalerCheck{
+			{Name: "engine", Autoscaler: validHPA},
+			{Name: "decoder", Autoscaler: badKEDA},
+			{Name: "router", Autoscaler: badKEDA},
+		})
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "decoder:") {
+			t.Fatalf("expected 'decoder:' prefix, got %q", err.Error())
+		}
+		if strings.Contains(err.Error(), "router:") {
+			t.Fatalf("expected router not reached, got %q", err.Error())
+		}
+	})
+
+	t.Run("unwrap returns the inner Reason error", func(t *testing.T) {
+		err := ValidateComponentsAutoscalers([]ComponentAutoscalerCheck{
+			{Name: "engine", Autoscaler: badKEDA},
+		})
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		// %w wrapping must preserve the Reason prefix on Unwrap.
+		inner := errors.Unwrap(err)
+		if inner == nil {
+			t.Fatalf("expected unwrappable error, got plain %q", err.Error())
+		}
+		if !strings.Contains(inner.Error(), ReasonKedaTriggersRequired) {
+			t.Fatalf("unwrapped error missing reason: %q", inner.Error())
+		}
+	})
+
+	t.Run("empty Name returns inner error unwrapped", func(t *testing.T) {
+		// Single-Component callers (IR webhook style) pass an empty Name
+		// so the message reads "<reason>: ..." not ": <reason>: ...".
+		err := ValidateComponentsAutoscalers([]ComponentAutoscalerCheck{
+			{Autoscaler: badKEDA},
+		})
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		if strings.HasPrefix(err.Error(), ":") {
+			t.Fatalf("empty Name produced bare-colon prefix: %q", err.Error())
+		}
+	})
+
+	t.Run("MinReplicas is per-entry, not shared", func(t *testing.T) {
+		// engine has minReplicas=2 + idleReplica=2 → REJECT.
+		// decoder has minReplicas=3 + idleReplica=2 → accept (but engine
+		// short-circuits first).
+		bad := &v1beta1.ComponentAutoscaler{
+			Class: v1beta1.AutoscalerKEDA,
+			Keda: &v1beta1.KedaAutoscaler{
+				Triggers: []kedav1.ScaleTriggers{{
+					Type:     "prometheus",
+					Metadata: map[string]string{"serverAddress": "x", "query": "y", "threshold": "1"},
+				}},
+				IdleReplicaCount: ptr.To[int32](2),
+			},
+		}
+		err := ValidateComponentsAutoscalers([]ComponentAutoscalerCheck{
+			{Name: "engine", Autoscaler: bad, MinReplicas: ptr.To[int](2)},
+			{Name: "decoder", Autoscaler: bad, MinReplicas: ptr.To[int](3)},
+		})
+		if err == nil || !strings.Contains(err.Error(), "engine:") {
+			t.Fatalf("expected engine reject, got %v", err)
+		}
+	})
 }
 
 // TestValidateAutoscalerAnnotationConflict covers the OEP-0013 rule

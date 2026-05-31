@@ -203,31 +203,43 @@ func validateServingRuntimePriority(newSpec, existingSpec *v1beta1.ServingRuntim
 	return nil
 }
 
-// validateRuntimeComponentAutoscalers runs ValidateComponentAutoscaler
-// against each Component on a ServingRuntime spec. Mirrors the per-
-// Component dispatch on the ISVC webhook so a runtime-level Autoscaler
-// block carrying a malformed shape is rejected at admission rather
-// than silently inherited into an ISVC at controller time.
+// validateRuntimeComponentAutoscalers runs the shared per-Component
+// Autoscaler shape check against each Component on a ServingRuntime
+// spec. The per-Component dispatch is shared with the InferenceService
+// and InferenceReplica webhooks via
+// validation.ValidateComponentsAutoscalers — see review §4 in
+// .claude/specs/2026-05-30-code-quality-review/07-webhooks.md.
+// Mirrors the per-Component dispatch on the ISVC webhook so a
+// runtime-level Autoscaler block carrying a malformed shape is rejected
+// at admission rather than silently inherited into an ISVC at
+// controller time.
 func validateRuntimeComponentAutoscalers(spec *v1beta1.ServingRuntimeSpec) error {
 	if spec == nil {
 		return nil
 	}
+	var checks []validation.ComponentAutoscalerCheck
 	if spec.EngineConfig != nil {
-		if err := validation.ValidateComponentAutoscaler(&spec.EngineConfig.ComponentExtensionSpec); err != nil {
-			return fmt.Errorf("engineConfig: %w", err)
-		}
+		checks = append(checks, validation.ComponentAutoscalerCheck{
+			Name:        "engineConfig",
+			Autoscaler:  spec.EngineConfig.Autoscaler,
+			MinReplicas: spec.EngineConfig.MinReplicas,
+		})
 	}
 	if spec.DecoderConfig != nil {
-		if err := validation.ValidateComponentAutoscaler(&spec.DecoderConfig.ComponentExtensionSpec); err != nil {
-			return fmt.Errorf("decoderConfig: %w", err)
-		}
+		checks = append(checks, validation.ComponentAutoscalerCheck{
+			Name:        "decoderConfig",
+			Autoscaler:  spec.DecoderConfig.Autoscaler,
+			MinReplicas: spec.DecoderConfig.MinReplicas,
+		})
 	}
 	if spec.RouterConfig != nil {
-		if err := validation.ValidateComponentAutoscaler(&spec.RouterConfig.ComponentExtensionSpec); err != nil {
-			return fmt.Errorf("routerConfig: %w", err)
-		}
+		checks = append(checks, validation.ComponentAutoscalerCheck{
+			Name:        "routerConfig",
+			Autoscaler:  spec.RouterConfig.Autoscaler,
+			MinReplicas: spec.RouterConfig.MinReplicas,
+		})
 	}
-	return nil
+	return validation.ValidateComponentsAutoscalers(checks)
 }
 
 func anyProtocolOverlap(a, b []constants.InferenceServiceProtocol) bool {

@@ -151,14 +151,17 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 	return admission.Allowed("")
 }
 
-// validateIRAutoscaler wraps validation.ValidateComponentAutoscaler
-// against an IR's projected Autoscaler block. The IR spec carries its
-// own Replicas field (not a ComponentExtensionSpec), so we synthesize
-// the bag the shared helper expects: the per-Component MinReplicas
-// floor is derived from ir.spec.replicas (the IR's own MinReplicas
-// equivalent for the KEDA idle-vs-min check).
+// validateIRAutoscaler runs the shared Autoscaler shape check against
+// an IR's projected Autoscaler block. The IR spec carries its own
+// Replicas field (not a ComponentExtensionSpec); we pass it as the
+// effective MinReplicas floor for the KEDA idle-vs-min check. Calls
+// validation.ValidateAutoscaler directly — the
+// (*ComponentAutoscaler, *int) signature accepts this shape without
+// synthesizing a parent ComponentExtensionSpec. Shared with the
+// InferenceService and ServingRuntime webhooks; see review §4 in
+// .claude/specs/2026-05-30-code-quality-review/07-webhooks.md.
 func validateIRAutoscaler(ir *v1beta1.InferenceReplica) error {
-	if ir == nil || ir.Spec.Autoscaler == nil {
+	if ir == nil {
 		return nil
 	}
 	var minPtr *int
@@ -166,11 +169,7 @@ func validateIRAutoscaler(ir *v1beta1.InferenceReplica) error {
 		min := int(*ir.Spec.Replicas)
 		minPtr = &min
 	}
-	ext := &v1beta1.ComponentExtensionSpec{
-		MinReplicas: minPtr,
-		Autoscaler:  ir.Spec.Autoscaler,
-	}
-	return validation.ValidateComponentAutoscaler(ext)
+	return validation.ValidateAutoscaler(ir.Spec.Autoscaler, minPtr)
 }
 
 // validateIRPacing checks that Pacing.Partition <= effective Replicas.

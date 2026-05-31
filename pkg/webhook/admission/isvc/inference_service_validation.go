@@ -106,21 +106,12 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 
 	// OEP-0013 webhook validation: per-Component Autoscaler block shape
 	// (class enum, required fields, IdleReplicaCount vs MinReplicas) +
-	// annotation/block conflict.
-	if isvc.Spec.Engine != nil {
-		if err := validation.ValidateComponentAutoscaler(&isvc.Spec.Engine.ComponentExtensionSpec); err != nil {
-			return allWarnings, fmt.Errorf("engine: %w", err)
-		}
-	}
-	if isvc.Spec.Decoder != nil {
-		if err := validation.ValidateComponentAutoscaler(&isvc.Spec.Decoder.ComponentExtensionSpec); err != nil {
-			return allWarnings, fmt.Errorf("decoder: %w", err)
-		}
-	}
-	if isvc.Spec.Router != nil {
-		if err := validation.ValidateComponentAutoscaler(&isvc.Spec.Router.ComponentExtensionSpec); err != nil {
-			return allWarnings, fmt.Errorf("router: %w", err)
-		}
+	// annotation/block conflict. The per-Component dispatch is shared
+	// with the ServingRuntime and InferenceReplica webhooks via
+	// validation.ValidateComponentsAutoscalers — see review §4 in
+	// .claude/specs/2026-05-30-code-quality-review/07-webhooks.md.
+	if err := validation.ValidateComponentsAutoscalers(isvcAutoscalerChecks(isvc)); err != nil {
+		return allWarnings, err
 	}
 	if err := validation.ValidateAutoscalerAnnotationConflict(isvc); err != nil {
 		return allWarnings, err
@@ -411,6 +402,36 @@ func expectedPinPattern(kind runtimerevision.SourceKind, sourceNS, runtimeName s
 	default:
 		return "<unknown kind>"
 	}
+}
+
+// isvcAutoscalerChecks projects each declared Component (Engine,
+// Decoder, Router) into the per-Component slice consumed by
+// validation.ValidateComponentsAutoscalers. Nil Components are skipped
+// so an absent Component never produces a spurious "<name>:" error.
+func isvcAutoscalerChecks(isvc *v1beta1.InferenceService) []validation.ComponentAutoscalerCheck {
+	var checks []validation.ComponentAutoscalerCheck
+	if isvc.Spec.Engine != nil {
+		checks = append(checks, validation.ComponentAutoscalerCheck{
+			Name:        "engine",
+			Autoscaler:  isvc.Spec.Engine.Autoscaler,
+			MinReplicas: isvc.Spec.Engine.MinReplicas,
+		})
+	}
+	if isvc.Spec.Decoder != nil {
+		checks = append(checks, validation.ComponentAutoscalerCheck{
+			Name:        "decoder",
+			Autoscaler:  isvc.Spec.Decoder.Autoscaler,
+			MinReplicas: isvc.Spec.Decoder.MinReplicas,
+		})
+	}
+	if isvc.Spec.Router != nil {
+		checks = append(checks, validation.ComponentAutoscalerCheck{
+			Name:        "router",
+			Autoscaler:  isvc.Spec.Router.Autoscaler,
+			MinReplicas: isvc.Spec.Router.MinReplicas,
+		})
+	}
+	return checks
 }
 
 // hasFullRunnerConfig reports whether the engine has enough runner
