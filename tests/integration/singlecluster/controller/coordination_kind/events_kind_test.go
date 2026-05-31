@@ -125,9 +125,20 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 	// both be observed (kubelet does eventually roll
 	// Status.ContainerStatuses[*].Image after the in-place patch).
 	ginkgo.It("InPlaceUpdateStarted fires on an image-only rollout", func() {
+		// InPlaceUpdateStarted only fires when chooseUpdateMode picks
+		// the in-place path: that requires UpdateStrategy=InPlaceIfPossible
+		// AND a multi-pod Instance (single-replica + default SurgeThenDrain
+		// routes through the surge path and emits RecreateUpdate* instead).
+		// Mirrors the canonical pattern in behavior_l_inplace_kind_test.go.
 		fix := newCoordFixture(ns.Name, WithISVCName("evt-inplace-isvc"),
 			WithoutDecoder(),
+			WithEngineReplicas(3),
 			WithEngineImage("fake-serving:v1"))
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{
+				Type: v1beta1.UpdateStrategyInPlaceIfPossible,
+			},
+		}
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 
