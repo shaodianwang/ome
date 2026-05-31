@@ -1,4 +1,4 @@
-package omenative
+package status
 
 import (
 	"testing"

@@ -11,7 +11,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
-	"knative.dev/pkg/apis"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -19,6 +18,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	isvcstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
@@ -156,7 +156,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// never flips the top-level condition past InitializeComponent
 		// Condition's False/Initializing — and the outer reconciler's
 		// updateStatus flush stamps Ready=False forever.
-		topCond := TopLevelComponentReadyFromOMENative(v1component, cs.OMENative)
+		topCond := isvcstatus.TopLevelComponentReadyFromOMENative(v1component, cs.OMENative)
 		if topCond != nil {
 			fresh.Status.SetCondition(topCond.Type, topCond)
 		}
@@ -539,52 +539,6 @@ func componentLabelSelectorString(isvc string, component v1beta1.ComponentType) 
 		constants.OMEComponentLabel:           string(component),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
 	}).String()
-}
-
-// TopLevelComponentReadyFromOMENative derives the standard top-level
-// component-ready condition (EngineReady / DecoderReady / RouterReady)
-// from OMENative counters. Returns nil for unknown Component types so
-// callers leave the condition surface untouched.
-//
-// Ready=True iff ReadyReplicas == Replicas > 0 — i.e., every desired
-// Instance has all its pods ContainersReady. Mirrors the contract
-// PropagateRawStatus uses (Deployment.Available) so the ingress
-// reconciler, aggregate Ready rollup, and `kubectl wait
-// --for=condition=Ready` treat OMENative the same as RawDeployment /
-// MultiNode.
-//
-// Exported so the IR-managed status path (irprojector) can derive the
-// same condition off the IR-mirrored OMENativeComponentStatus without
-// duplicating the rule. Single source of truth — any future change to
-// the Ready predicate lives here only.
-func TopLevelComponentReadyFromOMENative(component v1beta1.ComponentType, cs *v1beta1.OMENativeComponentStatus) *apis.Condition {
-	var readyType apis.ConditionType
-	switch component {
-	case v1beta1.EngineComponent:
-		readyType = v1beta1.EngineReady
-	case v1beta1.DecoderComponent:
-		readyType = v1beta1.DecoderReady
-	case v1beta1.RouterComponent:
-		readyType = v1beta1.RouterReady
-	default:
-		return nil
-	}
-	cond := &apis.Condition{Type: readyType}
-	switch {
-	case cs == nil || cs.Replicas == 0:
-		cond.Status = corev1.ConditionFalse
-		cond.Reason = "NoReplicas"
-		cond.Message = "Component has no desired Instances"
-	case cs.ReadyReplicas == cs.Replicas:
-		cond.Status = corev1.ConditionTrue
-		cond.Reason = "Ready"
-		cond.Message = "All Instances are Ready"
-	default:
-		cond.Status = corev1.ConditionFalse
-		cond.Reason = "NotAllReady"
-		cond.Message = fmt.Sprintf("%d/%d Instances ready", cs.ReadyReplicas, cs.Replicas)
-	}
-	return cond
 }
 
 // mirrorComponentRevisionFields copies UpdateRevision + CurrentRevision

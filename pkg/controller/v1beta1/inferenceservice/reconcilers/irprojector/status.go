@@ -12,7 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 )
 
 // AggregateIRStatus reads the live InferenceReplica for each
@@ -133,7 +133,7 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 	// separate reconcile would re-enter AggregateIRStatus). On a peer
 	// status-write conflict we re-Get the ISVC and re-stamp, but the
 	// condition itself is stable for this pass.
-	topCond := omenative.TopLevelComponentReadyFromOMENative(component, desired)
+	topCond := status.TopLevelComponentReadyFromOMENative(component, desired)
 	isvcKey := client.ObjectKeyFromObject(isvc)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceService{}
