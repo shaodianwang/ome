@@ -260,16 +260,21 @@ func SnapshotOriginal(replicas map[v1beta1.ComponentType]int32) map[v1beta1.Comp
 // same stale snapshot answer and the dispatcher fires past the band
 // before status catches up.
 func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
-	if isvc == nil {
-		return true, "nil ISVC"
+	return ResolveGateContext(isvc, component).CheckRatio(inFlightDelta)
+}
+
+// CheckRatio is the GateContext-aware variant of CheckRatioGate. The
+// dispatcher calls ResolveGateContext once per per-Instance tick and
+// threads the resulting context into each gate via CheckRatio /
+// CheckSurge / CheckUnavailability / CheckSequential, paying the
+// resolve prelude exactly once per tick instead of once per gate.
+func (ctx GateContext) CheckRatio(inFlightDelta int32) (allowed bool, reason string) {
+	if ctx.ShortCircuit {
+		return true, ctx.ShortReason
 	}
-	if isvc.Spec.RolloutCoordination == nil || len(isvc.Spec.RolloutCoordination.Groups) == 0 {
-		return true, "no coordination block"
-	}
-	group, ok := MembershipFor(ResolveGroups(isvc.Spec.RolloutCoordination), component)
-	if !ok {
-		return true, "component not in any coord group"
-	}
+	group := ctx.Group
+	isvc := ctx.ISVC
+	component := ctx.Component
 	if group.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
 		return true, "not RatioBalanced pacing"
 	}
@@ -373,18 +378,18 @@ func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentT
 // creating new pods within the surge budget instead of taking old
 // ones offline.
 func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
-	if isvc == nil {
-		return true, "nil ISVC"
-	}
-	if isvc.Spec.RolloutCoordination == nil || len(isvc.Spec.RolloutCoordination.Groups) == 0 {
-		return true, "no coordination block"
-	}
-	group, ok := MembershipFor(ResolveGroups(isvc.Spec.RolloutCoordination), component)
-	if !ok {
-		return true, "component not in any coord group"
-	}
+	return ResolveGateContext(isvc, component).CheckUnavailability(inFlightDelta)
+}
 
-	cs, ok := isvc.Status.Components[component]
+// CheckUnavailability is the GateContext-aware variant of
+// CheckUnavailabilityGate. See GateContext / CheckRatio for the
+// pre-resolve pattern the dispatcher uses to pay the prelude once per
+// per-Instance tick.
+func (ctx GateContext) CheckUnavailability(inFlightDelta int32) (allowed bool, reason string) {
+	if ctx.ShortCircuit {
+		return true, ctx.ShortReason
+	}
+	cs, ok := ctx.ISVC.Status.Components[ctx.Component]
 	if !ok || cs.OMENative == nil {
 		return true, "no observation yet"
 	}
@@ -403,7 +408,7 @@ func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.C
 	if inFlightDelta < 0 {
 		inFlightDelta = 0
 	}
-	budget := MaxUnavailableBudget(group.Pacing, desired)
+	budget := MaxUnavailableBudget(ctx.Group.Pacing, desired)
 	projected := currentUnavailable + inFlightDelta + 1
 	if projected > budget {
 		return false, fmt.Sprintf("unavailable budget %d exhausted (current %d, in-flight %d, would become %d)",
@@ -435,18 +440,17 @@ func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.C
 // the surge step (Surge or SurgeDrain) — those are the Instances that
 // already have an extra pod alive from a prior wake-up.
 func CheckSurgeGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
-	if isvc == nil {
-		return true, "nil ISVC"
-	}
-	if isvc.Spec.RolloutCoordination == nil || len(isvc.Spec.RolloutCoordination.Groups) == 0 {
-		return true, "no coordination block"
-	}
-	group, ok := MembershipFor(ResolveGroups(isvc.Spec.RolloutCoordination), component)
-	if !ok {
-		return true, "component not in any coord group"
-	}
+	return ResolveGateContext(isvc, component).CheckSurge(inFlightDelta)
+}
 
-	cs, ok := isvc.Status.Components[component]
+// CheckSurge is the GateContext-aware variant of CheckSurgeGate. See
+// GateContext / CheckRatio for the pre-resolve pattern the dispatcher
+// uses to pay the prelude once per per-Instance tick.
+func (ctx GateContext) CheckSurge(inFlightDelta int32) (allowed bool, reason string) {
+	if ctx.ShortCircuit {
+		return true, ctx.ShortReason
+	}
+	cs, ok := ctx.ISVC.Status.Components[ctx.Component]
 	if !ok || cs.OMENative == nil {
 		return true, "no observation yet"
 	}
@@ -471,7 +475,7 @@ func CheckSurgeGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentT
 	if inFlightDelta < 0 {
 		inFlightDelta = 0
 	}
-	budget := MaxSurgeBudget(group.Pacing, desired)
+	budget := MaxSurgeBudget(ctx.Group.Pacing, desired)
 	projected := currentInFlight + inFlightDelta + 1
 	if projected > budget {
 		return false, fmt.Sprintf("surge budget %d exhausted (current %d, in-flight %d, would become %d)",

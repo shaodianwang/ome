@@ -53,17 +53,20 @@ const conditionAvailable = "Available"
 // Reads exclusively from isvc.Spec + isvc.Status (no client / cache
 // hits) so it is safe to call from the hot dispatcher loop.
 func CheckSequentialGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) (allowed bool, reason string) {
-	if isvc == nil {
-		return true, "nil ISVC"
-	}
-	if isvc.Spec.RolloutCoordination == nil || len(isvc.Spec.RolloutCoordination.Groups) == 0 {
-		return true, "no coordination block"
-	}
+	return ResolveGateContext(isvc, component).CheckSequential()
+}
 
-	group, ok := MembershipFor(ResolveGroups(isvc.Spec.RolloutCoordination), component)
-	if !ok {
-		return true, "component not in any coord group"
+// CheckSequential is the GateContext-aware variant of
+// CheckSequentialGate. See GateContext / CheckRatio for the pre-resolve
+// pattern the dispatcher uses to pay the prelude once per per-Instance
+// tick.
+func (ctx GateContext) CheckSequential() (allowed bool, reason string) {
+	if ctx.ShortCircuit {
+		return true, ctx.ShortReason
 	}
+	group := ctx.Group
+	isvc := ctx.ISVC
+	component := ctx.Component
 	if group.Policy != v1beta1.CoordinationPolicySequential {
 		return true, "not Sequential pacing"
 	}

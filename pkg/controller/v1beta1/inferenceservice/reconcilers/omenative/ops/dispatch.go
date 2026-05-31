@@ -109,21 +109,27 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	// surge / unavailability based on the strategy, then sequential
 	// (Sequential group ordering). First denial wins; subsequent
 	// gates short-circuit.
+	//
+	// ResolveGateContext is called once per per-Instance tick so the
+	// shared prelude (ResolveGroups + MembershipFor + nil-isvc /
+	// no-coord-block short-circuit checks) runs once instead of four
+	// times — see the coordination.GateContext docs.
 	input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
 		v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
-		if allowed, reason := coordination.CheckRatioGate(p.ISVC, v1component, inFlightUnavail); !allowed {
+		ctx := coordination.ResolveGateContext(p.ISVC, v1component)
+		if allowed, reason := ctx.CheckRatio(inFlightUnavail); !allowed {
 			return false, reason
 		}
 		if strategy == workload.UpdateStrategySurgeThenDrain || strategy == "" {
-			if allowed, reason := coordination.CheckSurgeGate(p.ISVC, v1component, inFlightSurge); !allowed {
+			if allowed, reason := ctx.CheckSurge(inFlightSurge); !allowed {
 				return false, reason
 			}
 		} else {
-			if allowed, reason := coordination.CheckUnavailabilityGate(p.ISVC, v1component, inFlightUnavail); !allowed {
+			if allowed, reason := ctx.CheckUnavailability(inFlightUnavail); !allowed {
 				return false, reason
 			}
 		}
-		if allowed, reason := coordination.CheckSequentialGate(p.ISVC, v1component); !allowed {
+		if allowed, reason := ctx.CheckSequential(); !allowed {
 			return false, reason
 		}
 		return true, ""
