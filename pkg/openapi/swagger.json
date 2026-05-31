@@ -315,11 +315,11 @@
           "default": ""
         },
         "hpa": {
-          "description": "HPA holds HorizontalPodAutoscaler-specific configuration. Optional when Class == \"hpa\"; if absent the controller emits a default CPU=80% HPA.",
+          "description": "HPA holds HorizontalPodAutoscaler-specific configuration. Optional when Class == \"HPA\"; if absent the controller emits a default CPU=80% HPA.",
           "$ref": "#/definitions/v1beta1.HPAAutoscaler"
         },
         "keda": {
-          "description": "Keda holds KEDA-specific configuration. Required when Class == \"keda\".",
+          "description": "Keda holds KEDA-specific configuration. Required when Class == \"KEDA\".",
           "$ref": "#/definitions/v1beta1.KedaAutoscaler"
         }
       }

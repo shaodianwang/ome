@@ -945,7 +945,7 @@ func TestValidateComponentAutoscaler(t *testing.T) {
 				Autoscaler: &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerClass("knative")},
 			},
 			wantErr:         true,
-			wantErrContains: "is not one of hpa|keda|external|none",
+			wantErrContains: "is not one of HPA|KEDA|External|None",
 		},
 		{
 			name: "nil componentExt — no error",

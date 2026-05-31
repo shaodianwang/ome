@@ -2019,7 +2019,7 @@ func TestClusterServingRuntimeValidator_AutoscalerShape(t *testing.T) {
 				Class: v1beta1.AutoscalerClass("knative"),
 			}),
 			wantAllowed: false,
-			wantSubstr:  "is not one of hpa|keda|external|none",
+			wantSubstr:  "is not one of HPA|KEDA|External|None",
 		},
 	}
 

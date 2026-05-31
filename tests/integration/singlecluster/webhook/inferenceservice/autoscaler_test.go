@@ -111,7 +111,7 @@ var _ = ginkgo.Describe("InferenceService webhook Autoscaler validation (OEP-001
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(SatisfyAny(
-			ContainSubstring("is not one of hpa|keda|external|none"),
+			ContainSubstring("is not one of HPA|KEDA|External|None"),
 			ContainSubstring("Unsupported value"),
 		))
 	})

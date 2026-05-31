@@ -499,15 +499,15 @@ spec:
                         class:
                           allOf:
                             - enum:
-                                - hpa
-                                - keda
-                                - external
-                                - none
+                                - HPA
+                                - KEDA
+                                - External
+                                - None
                             - enum:
-                                - hpa
-                                - keda
-                                - external
-                                - none
+                                - HPA
+                                - KEDA
+                                - External
+                                - None
                           type: string
                         hpa:
                           properties:
@@ -6733,9 +6733,9 @@ spec:
                           properties:
                             mode:
                               enum:
-                                - auto
-                                - surge
-                                - never
+                                - Auto
+                                - Surge
+                                - Never
                               type: string
                           type: object
                         readyPolicy:
@@ -13229,15 +13229,15 @@ spec:
                         class:
                           allOf:
                             - enum:
-                                - hpa
-                                - keda
-                                - external
-                                - none
+                                - HPA
+                                - KEDA
+                                - External
+                                - None
                             - enum:
-                                - hpa
-                                - keda
-                                - external
-                                - none
+                                - HPA
+                                - KEDA
+                                - External
+                                - None
                           type: string
                         hpa:
                           properties:
@@ -19463,9 +19463,9 @@ spec:
                           properties:
                             mode:
                               enum:
-                                - auto
-                                - surge
-                                - never
+                                - Auto
+                                - Surge
+                                - Never
                               type: string
                           type: object
                         readyPolicy:
@@ -26060,15 +26060,15 @@ spec:
                         class:
                           allOf:
                             - enum:
-                                - hpa
-                                - keda
-                                - external
-                                - none
+                                - HPA
+                                - KEDA
+                                - External
+                                - None
                             - enum:
-                                - hpa
-                                - keda
-                                - external
-                                - none
+                                - HPA
+                                - KEDA
+                                - External
+                                - None
                           type: string
                         hpa:
                           properties:
@@ -28024,9 +28024,9 @@ spec:
                           properties:
                             mode:
                               enum:
-                                - auto
-                                - surge
-                                - never
+                                - Auto
+                                - Surge
+                                - Never
                               type: string
                           type: object
                         readyPolicy:
@@ -29812,14 +29812,14 @@ spec:
                     mode:
                       allOf:
                         - enum:
-                            - independent
-                            - proportional
-                            - pinned
+                            - Independent
+                            - Proportional
+                            - Pinned
                         - enum:
-                            - independent
-                            - proportional
-                            - pinned
-                      default: independent
+                            - Independent
+                            - Proportional
+                            - Pinned
+                      default: Independent
                       type: string
                     proportional:
                       properties:
@@ -30291,7 +30291,7 @@ spec:
                         type: integer
                       mode:
                         enum:
-                          - surge
+                          - Surge
                         type: string
                       outcomeReason:
                         type: string

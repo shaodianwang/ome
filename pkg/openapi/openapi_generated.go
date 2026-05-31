@@ -642,13 +642,13 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref common.ReferenceCallbac
 					},
 					"keda": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Keda holds KEDA-specific configuration. Required when Class == \"keda\".",
+							Description: "Keda holds KEDA-specific configuration. Required when Class == \"KEDA\".",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaAutoscaler"),
 						},
 					},
 					"hpa": {
 						SchemaProps: spec.SchemaProps{
-							Description: "HPA holds HorizontalPodAutoscaler-specific configuration. Optional when Class == \"hpa\"; if absent the controller emits a default CPU=80% HPA.",
+							Description: "HPA holds HorizontalPodAutoscaler-specific configuration. Optional when Class == \"HPA\"; if absent the controller emits a default CPU=80% HPA.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HPAAutoscaler"),
 						},
 					},

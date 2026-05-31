@@ -594,7 +594,7 @@ func ValidateAutoscaler(autoscaler *v1beta1.ComponentAutoscaler, minReplicas *in
 	// Rule 1: class enum (defense-in-depth against the CRD marker).
 	if _, ok := validAutoscalerClasses[as.Class]; !ok {
 		return fmt.Errorf(
-			"%s: autoscaler.class %q is not one of hpa|keda|external|none",
+			"%s: autoscaler.class %q is not one of HPA|KEDA|External|None",
 			ReasonAutoscalerClassUnknown, as.Class,
 		)
 	}

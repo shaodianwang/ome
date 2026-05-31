@@ -91,12 +91,12 @@ type MigrationMode string
 const (
 	// MigrationModeAuto / MigrationModeSurge — operator may trigger
 	// migration via the per-UUID annotation; controller drives the
-	// surge cycle. surge is a spelling alias for auto.
-	MigrationModeAuto  MigrationMode = "auto"
-	MigrationModeSurge MigrationMode = "surge"
+	// surge cycle. Surge is a spelling alias for Auto.
+	MigrationModeAuto  MigrationMode = "Auto"
+	MigrationModeSurge MigrationMode = "Surge"
 	// MigrationModeNever — controller refuses any migration;
 	// annotations are ignored.
-	MigrationModeNever MigrationMode = "never"
+	MigrationModeNever MigrationMode = "Never"
 )
 
 // InstanceOperationType identifies the kind of an in-flight

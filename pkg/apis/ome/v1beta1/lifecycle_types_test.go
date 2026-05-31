@@ -275,9 +275,9 @@ func TestUpdateStrategyType_Values(t *testing.T) {
 
 func TestMigrationPolicyMode_Values(t *testing.T) {
 	pairs := map[MigrationPolicyMode]string{
-		MigrationPolicyModeAuto:  "auto",
-		MigrationPolicyModeSurge: "surge",
-		MigrationPolicyModeNever: "never",
+		MigrationPolicyModeAuto:  "Auto",
+		MigrationPolicyModeSurge: "Surge",
+		MigrationPolicyModeNever: "Never",
 	}
 	for got, want := range pairs {
 		if string(got) != want {

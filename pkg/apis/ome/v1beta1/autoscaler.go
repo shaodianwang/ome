@@ -9,21 +9,21 @@ import (
 // AutoscalerClass identifies the autoscaler implementation for a Component.
 // Alpha (OEP-0013). The API may change without notice.
 //
-// +kubebuilder:validation:Enum=hpa;keda;external;none
+// +kubebuilder:validation:Enum=HPA;KEDA;External;None
 type AutoscalerClass string
 
 const (
 	// AutoscalerHPA selects the HorizontalPodAutoscaler reconciler.
-	AutoscalerHPA AutoscalerClass = "hpa"
+	AutoscalerHPA AutoscalerClass = "HPA"
 	// AutoscalerKEDA selects the KEDA ScaledObject reconciler.
-	AutoscalerKEDA AutoscalerClass = "keda"
+	AutoscalerKEDA AutoscalerClass = "KEDA"
 	// AutoscalerExternal disables OME's autoscaler so an operator-owned scaler
 	// can drive the Component. status.components.<comp>.scaleTargetRef
 	// publishes the canonical target name for the operator to point at.
-	AutoscalerExternal AutoscalerClass = "external"
+	AutoscalerExternal AutoscalerClass = "External"
 	// AutoscalerNone disables autoscaling entirely. Used by proportional-policy
 	// followers, where the ScalingPolicy coordinator writes replicas directly.
-	AutoscalerNone AutoscalerClass = "none"
+	AutoscalerNone AutoscalerClass = "None"
 )
 
 // ComponentAutoscaler configures the autoscaler for a single Component
@@ -32,15 +32,15 @@ const (
 // for this Component. Alpha (OEP-0013). The API may change without notice.
 type ComponentAutoscaler struct {
 	// Class selects the autoscaler implementation.
-	// +kubebuilder:validation:Enum=hpa;keda;external;none
+	// +kubebuilder:validation:Enum=HPA;KEDA;External;None
 	Class AutoscalerClass `json:"class"`
 
-	// Keda holds KEDA-specific configuration. Required when Class == "keda".
+	// Keda holds KEDA-specific configuration. Required when Class == "KEDA".
 	// +optional
 	Keda *KedaAutoscaler `json:"keda,omitempty"`
 
 	// HPA holds HorizontalPodAutoscaler-specific configuration. Optional when
-	// Class == "hpa"; if absent the controller emits a default CPU=80% HPA.
+	// Class == "HPA"; if absent the controller emits a default CPU=80% HPA.
 	// +optional
 	HPA *HPAAutoscaler `json:"hpa,omitempty"`
 }
@@ -100,26 +100,26 @@ type HPAAutoscaler struct {
 // ScalingMode declares how Components of an InferenceService scale relative
 // to each other. Alpha (OEP-0013). The API may change without notice.
 //
-// +kubebuilder:validation:Enum=independent;proportional;pinned
+// +kubebuilder:validation:Enum=Independent;Proportional;Pinned
 type ScalingMode string
 
 const (
 	// ScalingIndependent — each Component autoscales on its own metrics. Default.
-	ScalingIndependent ScalingMode = "independent"
+	ScalingIndependent ScalingMode = "Independent"
 	// ScalingProportional — anchor Component drives; followers scale by declared
 	// ratio via the ScalingPolicy coordinator.
-	ScalingProportional ScalingMode = "proportional"
+	ScalingProportional ScalingMode = "Proportional"
 	// ScalingPinned — replica counts pinned with no autoscaler. Reserved for a
 	// future release; not implemented.
-	ScalingPinned ScalingMode = "pinned"
+	ScalingPinned ScalingMode = "Pinned"
 )
 
 // ScalingPolicy defines coordination between the Components of an
 // InferenceService. Alpha (OEP-0013). The API may change without notice.
 type ScalingPolicy struct {
 	// Mode selects the coordination strategy.
-	// +kubebuilder:validation:Enum=independent;proportional;pinned
-	// +kubebuilder:default=independent
+	// +kubebuilder:validation:Enum=Independent;Proportional;Pinned
+	// +kubebuilder:default=Independent
 	Mode ScalingMode `json:"mode"`
 
 	// Proportional configuration; required when Mode == "proportional".

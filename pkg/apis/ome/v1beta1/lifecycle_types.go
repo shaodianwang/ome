@@ -244,12 +244,12 @@ const (
 )
 
 // MigrationMode is the migration mechanism selected.
-// +kubebuilder:validation:Enum=surge
+// +kubebuilder:validation:Enum=Surge
 type MigrationMode string
 
 const (
 	// MigrationModeSurge creates a replacement Instance before draining the original.
-	MigrationModeSurge MigrationMode = "surge"
+	MigrationModeSurge MigrationMode = "Surge"
 )
 
 // MigrationPhase is the lifecycle phase of a migration request.
@@ -472,18 +472,18 @@ type MigrationPolicy struct {
 }
 
 // MigrationPolicyMode is the requested migration disposition.
-// In v1, `auto` resolves to `surge` or rejection — there is no rolling
+// In v1, `Auto` resolves to `Surge` or rejection — there is no rolling
 // per-pod migration path.
-// +kubebuilder:validation:Enum=auto;surge;never
+// +kubebuilder:validation:Enum=Auto;Surge;Never
 type MigrationPolicyMode string
 
 const (
 	// MigrationPolicyModeAuto lets OMENative pick the mechanism.
-	// In v1 this resolves to surge when capacity is available, or rejection.
-	MigrationPolicyModeAuto MigrationPolicyMode = "auto"
+	// In v1 this resolves to Surge when capacity is available, or rejection.
+	MigrationPolicyModeAuto MigrationPolicyMode = "Auto"
 	// MigrationPolicyModeSurge forces surge migration.
-	MigrationPolicyModeSurge MigrationPolicyMode = "surge"
+	MigrationPolicyModeSurge MigrationPolicyMode = "Surge"
 	// MigrationPolicyModeNever opts the Component out of migration
 	// entirely. Migration requests are rejected with reason MigrationDisabled.
-	MigrationPolicyModeNever MigrationPolicyMode = "never"
+	MigrationPolicyModeNever MigrationPolicyMode = "Never"
 )

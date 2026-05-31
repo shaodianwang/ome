@@ -368,7 +368,7 @@ func TestHandle(t *testing.T) {
 					&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerClass("knative")}))
 			},
 			wantAllowed:  false,
-			wantContains: []string{"is not one of hpa|keda|external|none"},
+			wantContains: []string{"is not one of HPA|KEDA|External|None"},
 		},
 		{
 			name: "create with valid external class → allowed",

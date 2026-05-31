@@ -35,7 +35,7 @@ var _ = ginkgo.Describe("ClusterServingRuntime webhook Autoscaler validation (OE
 		err := k8sClient.Create(suiteCtx, csr)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		gomega.Expect(err.Error()).To(gomega.SatisfyAny(
-			gomega.ContainSubstring("is not one of hpa|keda|external|none"),
+			gomega.ContainSubstring("is not one of HPA|KEDA|External|None"),
 			gomega.ContainSubstring("Unsupported value"),
 		))
 	})

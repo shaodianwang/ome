@@ -52,15 +52,15 @@ spec:
                     class:
                       allOf:
                         - enum:
-                            - hpa
-                            - keda
-                            - external
-                            - none
+                            - HPA
+                            - KEDA
+                            - External
+                            - None
                         - enum:
-                            - hpa
-                            - keda
-                            - external
-                            - none
+                            - HPA
+                            - KEDA
+                            - External
+                            - None
                       type: string
                     hpa:
                       properties:
@@ -559,9 +559,9 @@ spec:
                       properties:
                         mode:
                           enum:
-                            - auto
-                            - surge
-                            - never
+                            - Auto
+                            - Surge
+                            - Never
                           type: string
                       type: object
                     readyPolicy:
