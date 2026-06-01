@@ -16,11 +16,11 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	isvcstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // AggregateAndWriteStatus computes Component + per-Instance counters from
@@ -39,7 +39,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 	// the v1beta1-typed status / event / map-index sites in this file.
 	// plan.Component itself is the workload-side ComponentType after the
 	// workload boundary purge (slice 7 of N).
-	v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+	v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 
 	pods, err := query.ListOMENativePodsByName(ctx, p.Client, p.ISVC.Namespace, p.ISVC.Name, plan.Component)
 	if err != nil {
@@ -287,7 +287,7 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 	if p.ISVC == nil {
 		return nil
 	}
-	v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+	v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 	cs, ok := p.ISVC.Status.Components[v1component]
 	if !ok || cs.OMENative == nil {
 		return nil
@@ -314,11 +314,11 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 		EventTarget: p.ISVC,
 		MutateInstance: func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 			return status.MutateInstance(ctx, p.Client, p.ISVC, v1component, idx, func(v *v1beta1.OMENativeInstanceStatus) bool {
-				w := internalsource.InstanceStatusToWorkload(*v)
+				w := v1beta1convert.InstanceStatusToWorkload(*v)
 				if !mutate(&w) {
 					return false
 				}
-				*v = internalsource.InstanceStatusFromWorkload(w)
+				*v = v1beta1convert.InstanceStatusFromWorkload(w)
 				return true
 			})
 		},
@@ -333,7 +333,7 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 	}
 
 	return workload.EscalateStuckPodFailures(ctx, input, workload.EscalationParams{
-		Instances:           internalsource.InstanceStatusSliceToWorkload(cs.OMENative.InstanceStatuses),
+		Instances:           v1beta1convert.InstanceStatusSliceToWorkload(cs.OMENative.InstanceStatuses),
 		PodsByIndex:         byIndex,
 		CurrentRevisionHash: query.RevisionHashFromControllerRevisionName(cs.OMENative.CurrentRevision),
 		RevisionHashLabel:   query.LabelRevisionHash,
@@ -367,7 +367,7 @@ func refreshComponentConditionsPostEscalation(ctx context.Context, p ReconcilePa
 	if p.ISVC == nil || p.Client == nil {
 		return nil
 	}
-	v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+	v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 	// Fast-path: compute against the in-memory mirror first. The
 	// escalator's MutateInstance has already mirrored Phase=Failed
 	// back to p.ISVC, so this compute reflects post-escalation state
@@ -509,26 +509,26 @@ func desiredPodCountByInstance(plan ComponentPlan) map[int32]int32 {
 // still produce the correct result, but the full converter keeps the
 // boundary contract uniform.
 func countReadyInstances(insts []v1beta1.OMENativeInstanceStatus, desiredByIdx map[int32]int32) int32 {
-	return workload.CountReadyInstances(internalsource.InstanceStatusSliceToWorkload(insts), desiredByIdx)
+	return workload.CountReadyInstances(v1beta1convert.InstanceStatusSliceToWorkload(insts), desiredByIdx)
 }
 
 func countServingInstances(insts []v1beta1.OMENativeInstanceStatus, desiredByIdx map[int32]int32) int32 {
-	return workload.CountServingInstances(internalsource.InstanceStatusSliceToWorkload(insts), desiredByIdx)
+	return workload.CountServingInstances(v1beta1convert.InstanceStatusSliceToWorkload(insts), desiredByIdx)
 }
 
 func countAvailableInstances(insts []v1beta1.OMENativeInstanceStatus, desiredByIdx map[int32]int32) int32 {
-	return workload.CountAvailableInstances(internalsource.InstanceStatusSliceToWorkload(insts), desiredByIdx)
+	return workload.CountAvailableInstances(v1beta1convert.InstanceStatusSliceToWorkload(insts), desiredByIdx)
 }
 
 func countUpdatedInstances(insts []v1beta1.OMENativeInstanceStatus, targetRevName string, desiredByIdx map[int32]int32) (updated, updatedReady int32) {
-	return workload.CountUpdatedInstances(internalsource.InstanceStatusSliceToWorkload(insts), targetRevName, desiredByIdx)
+	return workload.CountUpdatedInstances(v1beta1convert.InstanceStatusSliceToWorkload(insts), targetRevName, desiredByIdx)
 }
 
 // rolloutComplete is the CurrentRevision promotion gate: every Instance
 // on targetRevName AND Phase=Ready. ISVC-shape wrapper around
 // workload.RolloutComplete.
 func rolloutComplete(insts []v1beta1.OMENativeInstanceStatus, targetRevName string) bool {
-	return workload.RolloutComplete(internalsource.InstanceStatusSliceToWorkload(insts), targetRevName)
+	return workload.RolloutComplete(v1beta1convert.InstanceStatusSliceToWorkload(insts), targetRevName)
 }
 
 // componentLabelSelectorString is the canonical "k=v,k=v" selector

@@ -17,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // ExpireOperationsIfDeadlinePassed walks every InstanceStatus and takes
@@ -39,7 +40,7 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p core.ReconcileParam
 	if p.ISVC == nil {
 		return nil
 	}
-	v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+	v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 	cs, ok := p.ISVC.Status.Components[v1component]
 	if !ok || cs.OMENative == nil {
 		return nil
@@ -190,7 +191,7 @@ func tryAbandonStuckMigration(ctx context.Context, p core.ReconcileParams, compo
 	surgeIdx := *source.Operation.SurgeIndex
 	uuid := source.Operation.RequestUUID
 
-	surgePods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, internalsource.ComponentTypeToWorkload(component), surgeIdx)
+	surgePods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, v1beta1convert.ComponentTypeToWorkload(component), surgeIdx)
 	if err != nil {
 		return false, fmt.Errorf("list surge pods: %w", err)
 	}
@@ -213,7 +214,7 @@ func tryAbandonStuckMigration(ctx context.Context, p core.ReconcileParams, compo
 	// Undo the source-drain key (set during Migrate step 8). If the
 	// drain key was never added (timeout fired before step 8) the
 	// remove is a no-op via podreadiness's idempotency.
-	sourcePods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, internalsource.ComponentTypeToWorkload(component), source.Index)
+	sourcePods, err := query.LiveListPodsForInstance(ctx, p.Reader(), p.ISVC.Namespace, p.ISVC.Name, v1beta1convert.ComponentTypeToWorkload(component), source.Index)
 	if err != nil {
 		return false, fmt.Errorf("list source pods: %w", err)
 	}

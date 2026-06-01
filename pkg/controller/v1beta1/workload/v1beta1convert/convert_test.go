@@ -1,4 +1,4 @@
-package internalsource
+package v1beta1convert
 
 import (
 	"testing"

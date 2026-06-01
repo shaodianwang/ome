@@ -6,10 +6,10 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // RenderWithRevisionForISVC is the (ReconcileParams, plan, inst,
@@ -32,7 +32,7 @@ func RenderWithRevisionForISVC(
 	return ops.RenderWithRevision(
 		p.ISVC,
 		isvcGVK,
-		isvcRenderKey(p.ISVC, internalsource.ComponentTypeFromWorkload(plan.Component)),
+		isvcRenderKey(p.ISVC, v1beta1convert.ComponentTypeFromWorkload(plan.Component)),
 		template,
 		&p.ObjectMeta,
 		plan,

@@ -10,8 +10,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -72,7 +72,7 @@ var _ = ginkgo.Describe("PEER-DNS — per-pod headless DNS plumbing", ginkgo.Ord
 		// + PublishNotReadyAddresses=true. Production code:
 		// reconcilers/omenative/services.go.
 		for _, comp := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent} {
-			svcName := query.HeadlessServiceName("peer-dns", internalsource.ComponentTypeToWorkload(comp))
+			svcName := query.HeadlessServiceName("peer-dns", v1beta1convert.ComponentTypeToWorkload(comp))
 			svc := &corev1.Service{}
 			Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: svcName}, svc)).
 				To(Succeed(), "headless Service %s should exist", svcName)
@@ -89,7 +89,7 @@ var _ = ginkgo.Describe("PEER-DNS — per-pod headless DNS plumbing", ginkgo.Ord
 			"expected 2 engine + 1 decoder pod, got %d", len(pods))
 		for _, p := range pods {
 			comp := v1beta1.ComponentType(p.Labels["component"])
-			wantSubdomain := query.HeadlessServiceName("peer-dns", internalsource.ComponentTypeToWorkload(comp))
+			wantSubdomain := query.HeadlessServiceName("peer-dns", v1beta1convert.ComponentTypeToWorkload(comp))
 			Expect(p.Spec.Subdomain).To(Equal(wantSubdomain),
 				"pod %s must have Subdomain=%s for DNS resolution; got %q",
 				p.Name, wantSubdomain, p.Spec.Subdomain)
@@ -103,7 +103,7 @@ var _ = ginkgo.Describe("PEER-DNS — per-pod headless DNS plumbing", ginkgo.Ord
 		// pod's `hostname` field into the EndpointSlice's
 		// Endpoints[].Hostname; this is what kube-DNS reads when
 		// answering `<pod>.<svc>.<ns>.svc.cluster.local` queries.
-		engSvc := query.HeadlessServiceName("peer-dns", internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent))
+		engSvc := query.HeadlessServiceName("peer-dns", v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent))
 		Eventually(func(g Gomega) {
 			slices := &discoveryv1.EndpointSliceList{}
 			g.Expect(k8sClient.List(suiteCtx, slices,

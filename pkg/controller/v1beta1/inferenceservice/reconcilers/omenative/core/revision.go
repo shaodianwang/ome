@@ -10,9 +10,9 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // isvcGVK is the GroupVersionKind every OMENative-on-ISVC adapter
@@ -101,7 +101,7 @@ func CollectLiveRevisionNamesForISVC(cs *v1beta1.OMENativeComponentStatus) []str
 	if cs == nil {
 		return nil
 	}
-	return revision.CollectLiveRevisionNames(cs.CurrentRevision, cs.UpdateRevision, internalsource.InstanceStatusSliceToWorkload(cs.InstanceStatuses))
+	return revision.CollectLiveRevisionNames(cs.CurrentRevision, cs.UpdateRevision, v1beta1convert.InstanceStatusSliceToWorkload(cs.InstanceStatuses))
 }
 
 // RevisionName composes the legacy CR name `<isvc>-<component>-<hash>`.

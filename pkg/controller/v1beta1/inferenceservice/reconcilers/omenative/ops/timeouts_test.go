@@ -14,6 +14,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 func pastDeadline() metav1.Time { return metav1.NewTime(time.Now().Add(-1 * time.Hour)) }
@@ -43,7 +44,7 @@ func TestOperationDeadlinePassed(t *testing.T) {
 }
 
 func TestExpireOperationsIfDeadlinePassed_NilClient(t *testing.T) {
-	err := ExpireOperationsIfDeadlinePassed(context.Background(), core.ReconcileParams{}, core.ComponentPlan{Component: internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)})
+	err := ExpireOperationsIfDeadlinePassed(context.Background(), core.ReconcileParams{}, core.ComponentPlan{Component: v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)})
 	if err == nil {
 		t.Fatal("expected error for nil client")
 	}

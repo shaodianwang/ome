@@ -1,20 +1,22 @@
-// Package internalsource contains adapter helpers that bridge between
+// Package v1beta1convert contains adapter helpers that bridge between
 // workload-owned types and the v1beta1.OMENative* source-of-truth types
-// the OMENative ISVC dispatch path reads and writes. These converters are
-// the only place in the repo where the workload package's type set
-// crosses the boundary into v1beta1.OMENative* — workload code itself
-// never imports pkg/apis/ome/v1beta1.
+// that controllers (ISVC OMENative dispatch, InferenceReplica) read and
+// write. These converters are the only place in the repo where the
+// workload package's type set crosses the boundary into v1beta1.OMENative*
+// — workload code itself never imports pkg/apis/ome/v1beta1.
 //
 // The converters are field-for-field mirrors. They round-trip cleanly
 // for every value of every enum; round-trip tests live in convert_test.go.
 //
-// Slice ordering: this package lands in part-2 slice 2 of the workload
-// extraction refactor. The converters exist but no caller wires them in
-// yet — slice 3+ flips the Source interface signatures and migrates each
-// op (`omenative/ops/`) over to the workload types one at a time, calling
-// these helpers at the adapter boundary. See
-// `.claude/specs/2026-05-27-workload-extraction/plan.md` §3.X.
-package internalsource
+// The package sits at the workload boundary by design: every caller is
+// an adapter (an ISVC-side or IR-side reconciler) that needs to map
+// CRD-shape values into workload-shape values (or vice versa) at a
+// single seam. Placing the converters under pkg/controller/v1beta1/workload/
+// (rather than under any specific reconciler tree) keeps the dependency
+// direction clean — owner-CRD adapters depend on the converters, the
+// converters depend on workload + v1beta1, and the workload package
+// itself stays free of v1beta1 imports.
+package v1beta1convert
 
 import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"

@@ -8,8 +8,10 @@
 // The workload package owns its own status / operation / component /
 // phase / key types and does NOT depend on the OME CRD API package.
 // Every type here mirrors the corresponding OMENative-on-ISVC status
-// type field-for-field; adapter boundaries (omenative/internalsource,
-// inferencereplica) perform the conversion.
+// type field-for-field; the v1beta1convert helpers next door
+// (`workload/v1beta1convert`) perform the conversion, and adapter
+// packages (omenative/internalsource, inferencereplica) wire those
+// converters into their reconcile loops.
 //
 // External callers reference these types as `workload.X` — the parent
 // `workload` package re-exports them as Go aliases.

@@ -22,6 +22,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // Carrier types defined in core/ are re-exported here so the rest of
@@ -150,7 +151,7 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 	// without reaching the update branch.
 	var target *appsv1.ControllerRevision
 	if p.PodSpec != nil {
-		t, rerr := ensureRevisionWithCollisionRetry(ctx, p, internalsource.ComponentTypeFromWorkload(plan.Component))
+		t, rerr := ensureRevisionWithCollisionRetry(ctx, p, v1beta1convert.ComponentTypeFromWorkload(plan.Component))
 		if rerr != nil {
 			return ctrl.Result{}, fmt.Errorf("OMENative reconciler: ensure revision (component=%s): %w", plan.Component, rerr)
 		}

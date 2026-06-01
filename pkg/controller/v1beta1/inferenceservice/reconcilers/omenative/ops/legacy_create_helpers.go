@@ -19,8 +19,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // patchInstanceStatusReady idempotently moves to Phase=Ready, clears Operation.
@@ -93,7 +93,7 @@ func removeInstanceStatus(ctx context.Context, p core.ReconcileParams, component
 	}
 	if hadEntry {
 		// Forget so a later index reuse doesn't inherit stale counters.
-		p.ExpectationsCache().Forget(p.ISVC.Namespace, p.ISVC.Name, internalsource.ComponentTypeToWorkload(component), idx)
+		p.ExpectationsCache().Forget(p.ISVC.Namespace, p.ISVC.Name, v1beta1convert.ComponentTypeToWorkload(component), idx)
 	}
 	return hadEntry, nil
 }

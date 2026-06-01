@@ -16,9 +16,9 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 func TestManagedByOMENativePredicate(t *testing.T) {
@@ -259,7 +259,7 @@ func TestEndpointSliceToISVC_NonSliceObject(t *testing.T) {
 func newOMENativePod(ns, isvc string, component v1beta1.ComponentType, idx int32, withOwner bool) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodName(isvc, internalsource.ComponentTypeToWorkload(component), idx, "default", 0),
+			Name:      query.PodName(isvc, v1beta1convert.ComponentTypeToWorkload(component), idx, "default", 0),
 			Namespace: ns,
 			Labels: map[string]string{
 				query.LabelManagedBy:                  query.ManagedByOMENative,

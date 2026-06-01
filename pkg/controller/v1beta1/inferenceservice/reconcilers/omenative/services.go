@@ -8,10 +8,10 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // isvcGroupVersionKind identifies the InferenceService owner reference
@@ -48,7 +48,7 @@ func componentSelector(isvc *v1beta1.InferenceService, component v1beta1.Compone
 func BuildHeadlessServiceSpec(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workloadtypes.PerComponentServiceSpec {
 	selector := componentSelector(isvc, component)
 	return workloadtypes.PerComponentServiceSpec{
-		Name:      query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(component)),
+		Name:      query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(component)),
 		Namespace: isvc.Namespace,
 		Selector:  selector,
 		Labels:    selector,

@@ -36,6 +36,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // ReconcileComponentOps drives the per-Component pipeline for one
@@ -95,7 +96,7 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	// workload.MigrationRequestSummary is a type alias for
 	// audit.MigrationRequest so the pointer carries through unchanged.
 	input.DetectMigrationRequest = func(ctx context.Context) (string, *workload.MigrationRequestSummary, int32, bool, error) {
-		return detectMigrationRequest(ctx, p, internalsource.ComponentTypeFromWorkload(plan.Component))
+		return detectMigrationRequest(ctx, p, v1beta1convert.ComponentTypeFromWorkload(plan.Component))
 	}
 
 	// UpdateGate wires the coordination stack — workload code can't
@@ -115,7 +116,7 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	// no-coord-block short-circuit checks) runs once instead of four
 	// times — see the coordination.GateContext docs.
 	input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
-		v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+		v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 		ctx := coordination.ResolveGateContext(p.ISVC, v1component)
 		if allowed, reason := ctx.CheckRatio(inFlightUnavail); !allowed {
 			return false, reason

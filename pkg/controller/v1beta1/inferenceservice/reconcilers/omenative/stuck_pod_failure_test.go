@@ -13,9 +13,9 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // withStuckPodGracePeriod swaps in a short grace window for the duration
@@ -56,7 +56,7 @@ func surgeStuckPodEnv(t *testing.T, podAge time.Duration, reason string) (*v1bet
 	oldPod := podAtIncarnation(isvc, 0, 1, true /* ready */, true /* serving */)
 	oldPod.Labels[query.LabelPodOrdinal] = "0"
 	surgePod := podAtIncarnation(isvc, 0, 1, false /* not ready */, false /* not serving */)
-	surgePod.Name = query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
+	surgePod.Name = query.PodName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
 	surgePod.Labels[query.LabelPodOrdinal] = "1"
 	surgePod.CreationTimestamp = metav1.NewTime(time.Now().Add(-podAge))
 	surgePod.Status.ContainerStatuses = []corev1.ContainerStatus{
@@ -316,7 +316,7 @@ func TestSurgeUpdate_WedgedSurgePod_NoTransientPhase_EscalatesFailed(t *testing.
 	// past the grace window. revision-hash points at the new CR, the
 	// rollout-target the controller stopped tracking in InstanceStatus.
 	surgePod := podAtIncarnation(isvc, 0, 1, false /* not ready */, false /* not serving */)
-	surgePod.Name = query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
+	surgePod.Name = query.PodName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
 	surgePod.Labels[query.LabelPodOrdinal] = "1"
 	surgePod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName("llama-70b-engine-new")
 	surgePod.CreationTimestamp = metav1.NewTime(time.Now().Add(-5 * time.Second))

@@ -14,10 +14,10 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // irGVK is the GroupVersionKind every IR-driven workload reconcile
@@ -137,7 +137,7 @@ func buildHeadlessServiceSpec(ir *v1beta1.InferenceReplica) workloadtypes.PerCom
 		query.LabelManagedBy:                  query.ManagedByOMENative,
 	}
 	return workloadtypes.PerComponentServiceSpec{
-		Name:      query.HeadlessServiceName(ir.Spec.ParentRef.Name, internalsource.ComponentTypeToWorkload(ir.Spec.Component)),
+		Name:      query.HeadlessServiceName(ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)),
 		Namespace: ir.Namespace,
 		Selector:  selector,
 		Labels:    selector,
@@ -173,7 +173,7 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadDesiredSpec {
 		}
 	}
 	if ir.Spec.Lifecycle != nil {
-		desired.Lifecycle = internalsource.LifecycleSpecToWorkload(*ir.Spec.Lifecycle)
+		desired.Lifecycle = v1beta1convert.LifecycleSpecToWorkload(*ir.Spec.Lifecycle)
 	}
 	// Pull the per-role PodSpec + ObjectMeta out of the rendered IR
 	// runners. The IR contract requires at least one Runner; the
@@ -230,7 +230,7 @@ func observedFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadObservedState
 		CollisionCount:     ir.Status.CollisionCount,
 		CurrentRevision:    ir.Status.CurrentRevision,
 		UpdateRevision:     ir.Status.UpdateRevision,
-		InstanceStatuses:   internalsource.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
+		InstanceStatuses:   v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
 	}
 }
 
@@ -247,7 +247,7 @@ func observedFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadObservedState
 func buildKey(ir *v1beta1.InferenceReplica) workload.Key {
 	return workload.Key{
 		Namespace:   ir.Namespace,
-		Component:   internalsource.ComponentTypeToWorkload(ir.Spec.Component),
+		Component:   v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		OwnerName:   ir.Spec.ParentRef.Name,
 		OwnerLabels: ir.Labels,
 		SelectorLabels: map[string]string{
@@ -301,11 +301,11 @@ func buildMutateInstance(c client.Client, ir *v1beta1.InferenceReplica) func(ctx
 			} else {
 				slot = &insts[pos]
 			}
-			w := internalsource.InstanceStatusToWorkload(*slot)
+			w := v1beta1convert.InstanceStatusToWorkload(*slot)
 			if !mutate(&w) {
 				return nil
 			}
-			*slot = internalsource.InstanceStatusFromWorkload(w)
+			*slot = v1beta1convert.InstanceStatusFromWorkload(w)
 			fresh.Status.InstanceStatuses = insts
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
@@ -396,7 +396,7 @@ func buildRemoveInstance(c client.Client, ir *v1beta1.InferenceReplica, exp *wor
 			if cache == nil {
 				cache = workload.DefaultExpectations
 			}
-			cache.Forget(ir.Namespace, ir.Name, internalsource.ComponentTypeToWorkload(ir.Spec.Component), idx)
+			cache.Forget(ir.Namespace, ir.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), idx)
 		}
 		return hadEntry, nil
 	}

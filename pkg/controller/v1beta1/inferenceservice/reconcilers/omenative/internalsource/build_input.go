@@ -17,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // isvcGVK is the GroupVersionKind every OMENative-on-ISVC adapter
@@ -35,8 +36,7 @@ func ISVCGVK() schema.GroupVersionKind { return isvcGVK }
 // BuildInputDeps captures the carrier-free subset of
 // core.ReconcileParams that BuildReconcileInput needs. Kept distinct
 // from core.ReconcileParams so this helper lives in internalsource/
-// without taking on a backward import to core/ (which would close a
-// cycle: core imports internalsource for converters).
+// without taking on a backward import to core/.
 //
 // SCOPE NOTE (slice 4b-4d of N): only the fields the workload Create /
 // Delete / Migrate state machines read (Client, ISVC, Component,
@@ -148,7 +148,7 @@ func BuildReconcileInput(d BuildInputDeps) workload.ReconcileInput {
 			GangSchedulingAvailable: d.GangSchedulingAvailable,
 		},
 		ObservedState: workload.WorkloadObservedState{
-			InstanceStatuses: InstanceStatusSliceToWorkload(extractInstanceStatuses(d.ISVC, d.Component)),
+			InstanceStatuses: v1beta1convert.InstanceStatusSliceToWorkload(extractInstanceStatuses(d.ISVC, d.Component)),
 		},
 		MutateInstance:          buildMutateInstance(d.Client, d.ISVC, d.Component),
 		RemoveInstance:          buildRemoveInstance(d.Client, d.ISVC, d.Component, d.Expectations),
@@ -166,11 +166,11 @@ func BuildReconcileInput(d BuildInputDeps) workload.ReconcileInput {
 func buildMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
 		return status.MutateInstance(ctx, c, isvc, component, idx, func(v *v1beta1.OMENativeInstanceStatus) bool {
-			w := InstanceStatusToWorkload(*v)
+			w := v1beta1convert.InstanceStatusToWorkload(*v)
 			if !mutate(&w) {
 				return false
 			}
-			*v = InstanceStatusFromWorkload(w)
+			*v = v1beta1convert.InstanceStatusFromWorkload(w)
 			return true
 		})
 	}
@@ -243,7 +243,7 @@ func buildRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compon
 			if cache == nil {
 				cache = workload.DefaultExpectations
 			}
-			cache.Forget(isvc.Namespace, isvc.Name, ComponentTypeToWorkload(component), idx)
+			cache.Forget(isvc.Namespace, isvc.Name, v1beta1convert.ComponentTypeToWorkload(component), idx)
 		}
 		return hadEntry, nil
 	}
@@ -327,7 +327,7 @@ func buildKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) w
 	}
 	return workload.Key{
 		Namespace:   namespace,
-		Component:   ComponentTypeToWorkload(component),
+		Component:   v1beta1convert.ComponentTypeToWorkload(component),
 		OwnerName:   ownerName,
 		OwnerLabels: ownerLabels,
 		SelectorLabels: map[string]string{

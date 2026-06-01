@@ -20,10 +20,10 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // ---------------------------------------------------------------------
@@ -32,7 +32,7 @@ import (
 // ---------------------------------------------------------------------
 
 func TestAggregateAndWriteStatus_NilClient(t *testing.T) {
-	err := AggregateAndWriteStatus(context.Background(), ReconcileParams{}, ComponentPlan{Component: internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)}, nil)
+	err := AggregateAndWriteStatus(context.Background(), ReconcileParams{}, ComponentPlan{Component: v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)}, nil)
 	if err == nil {
 		t.Fatal("expected error for nil client")
 	}
@@ -44,7 +44,7 @@ func TestAggregateAndWriteStatus_PerInstanceCountersFromObservedPods(t *testing.
 	// One pod, ContainersReady=True, scheduled, in rotation.
 	pod := podAtIncarnation(isvc, 0, 1, true, true)
 	pod.Spec.NodeName = "node-7"
-	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
+	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	p := minimalParams(t, isvc, c)
 	plan, _ := BuildPlan(p)
@@ -84,7 +84,7 @@ func TestAggregateAndWriteStatus_AvailableRequiresEndpointSliceReady(t *testing.
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	pod := podAtIncarnation(isvc, 0, 1, true, false)
 	pod.Spec.NodeName = "node-7"
-	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, false)
+	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, false)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	p := minimalParams(t, isvc, c)
 	plan, _ := BuildPlan(p)
@@ -116,7 +116,7 @@ func TestAggregateAndWriteStatus_TargetWritesUpdateRevisionAndPromotesOnConverge
 	targetSpec := targetSpecImage("llama:v1")
 	pod := podAtIncarnation(isvc, 0, 1, true, true)
 	pod.Spec.NodeName = "node-7"
-	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
+	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpec)
 	// Mark the Instance Ready and on the target revision.
@@ -152,7 +152,7 @@ func TestAggregateAndWriteStatus_NoPromotionWhileInstanceLagsTarget(t *testing.T
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	targetSpec := targetSpecImage("llama:v2")
 	pod := podAtIncarnation(isvc, 0, 1, true, true)
-	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
+	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpec)
 	// Instance is Ready but RunningRevision is some other CR.
@@ -237,11 +237,11 @@ func TestAggregateAndWriteStatus_SurgeMidFlightHoldsServingReplicas(t *testing.T
 	// Surge pod at ordinal 1 — created, scheduled, but not yet
 	// ContainersReady (kubelet still starting). NOT serving.
 	surgePod := podAtIncarnation(isvc, 0, 1, false /* not ready */, false /* not serving */)
-	surgePod.Name = query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
+	surgePod.Name = query.PodName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
 	surgePod.Spec.NodeName = "node-new"
 	surgePod.Labels[query.LabelPodOrdinal] = "1"
 	slice := sliceWithEndpoint("prod", "engine-1",
-		query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), oldPod, true)
+		query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)), oldPod, true)
 	c := newFakeClientWithDiscovery(t, isvc, oldPod, surgePod, slice)
 	p := minimalParams(t, isvc, c)
 	plan, _ := BuildPlan(p)
@@ -296,7 +296,7 @@ func TestAggregateAndWriteStatus_SurgeWithFewerCanonicalPodsNotServing(t *testin
 	oldPod.Labels[query.LabelPodOrdinal] = "0"
 	// Surge pod at ord=1 — not yet Ready.
 	surgePod := podAtIncarnation(isvc, 0, 1, false, false)
-	surgePod.Name = query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
+	surgePod.Name = query.PodName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
 	surgePod.Labels[query.LabelPodOrdinal] = "1"
 	c := newFakeClientWithDiscovery(t, isvc, oldPod, surgePod)
 	p := minimalParams(t, isvc, c)
@@ -512,7 +512,7 @@ func TestAggregateAndWriteStatus_RetriesOnConflict(t *testing.T) {
 	}
 	p := newStatusRetryTestParams(t, isvc, &calls)
 	plan := ComponentPlan{
-		Component: internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent),
+		Component: v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent),
 		Replicas:  1,
 		Instances: []InstancePlan{{Index: 0, Incarnation: 1}},
 	}
@@ -662,7 +662,7 @@ func TestSurgeUpdate_SingleBump_URMatchesCR_OnlyOneNewCR(t *testing.T) {
 		Containers: []corev1.Container{{Name: "main", Image: "engine:initial"}},
 	}
 	bumpedMeta := metav1.ObjectMeta{
-		Name:      query.StableServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)),
+		Name:      query.StableServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)),
 		Namespace: isvc.Namespace,
 		Annotations: map[string]string{
 			"test.ome.io/rollout-trigger": "bumped",
@@ -709,7 +709,7 @@ func TestSurgeUpdate_SingleBump_URMatchesCR_OnlyOneNewCR(t *testing.T) {
 	}
 
 	// Simulate kubelet: surge pod becomes ContainersReady.
-	surgePodName := query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
+	surgePodName := query.PodName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
 	surgePod := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: surgePodName}, surgePod); err != nil {
 		t.Fatalf("get surge pod: %v", err)
@@ -893,7 +893,7 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 	// engine.go would produce on the next reconcile).
 	isvc.Spec.Engine.Annotations["test.ome.io/rollout-trigger"] = "v2"
 	v2Meta := metav1.ObjectMeta{
-		Name:      query.StableServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)),
+		Name:      query.StableServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)),
 		Namespace: isvc.Namespace,
 		Annotations: map[string]string{
 			"test.ome.io/rollout-trigger": "v2",
@@ -931,7 +931,7 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 	}
 	// Confirm v2 surge pod exists. NOT yet ready — this is the
 	// "in-flight surge" state where the bump-during-bump arrives.
-	v2SurgePodName := query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
+	v2SurgePodName := query.PodName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 1)
 	v2SurgePod := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: v2SurgePodName}, v2SurgePod); err != nil {
 		t.Fatalf("v2 surge pod missing after v2 pass 1: %v", err)
@@ -941,7 +941,7 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 	// This is the X-2 bump-during-bump trigger.
 	isvc.Spec.Engine.Annotations["test.ome.io/rollout-trigger"] = "v3"
 	v3Meta := metav1.ObjectMeta{
-		Name:      query.StableServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)),
+		Name:      query.StableServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)),
 		Namespace: isvc.Namespace,
 		Annotations: map[string]string{
 			"test.ome.io/rollout-trigger": "v3",
@@ -1046,7 +1046,7 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 
 	// Confirm v3 surge pod created at ord=0 (alternate slot since
 	// ActiveOrdinal moved to 1 after v2 promote).
-	v3SurgePodName := query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 0)
+	v3SurgePodName := query.PodName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 0)
 	v3SurgePod := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "sandbox", Name: v3SurgePodName}, v3SurgePod); err != nil {
 		t.Fatalf("v3 surge pod missing after v3 pass 4: %v", err)
@@ -1176,7 +1176,7 @@ func TestAggregateAndWriteStatus_MirrorsCommittedRevisionFieldsOntoInMemoryISVC(
 	targetSpec := targetSpecImage("llama:v1")
 	pod := podAtIncarnation(isvc, 0, 1, true, true)
 	pod.Spec.NodeName = "node-7"
-	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
+	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpec)
 	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].RunningRevision = tcr.Name
@@ -1237,7 +1237,7 @@ func TestAggregateAndWriteStatus_MirrorsURWhenRolloutInProgress(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	targetSpec := targetSpecImage("llama:v2")
 	pod := podAtIncarnation(isvc, 0, 1, true, true)
-	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
+	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpec)
 	// Pre-seed both API and in-memory CR field with an "older revision" —

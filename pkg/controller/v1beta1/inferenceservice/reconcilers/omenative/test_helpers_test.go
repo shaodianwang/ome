@@ -20,8 +20,8 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // Test fixtures shared by reconciler_test.go and status_test.go.
@@ -68,7 +68,7 @@ func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client
 	return ReconcileParams{
 		ISVC: isvc,
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.StableServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)),
+			Name:      query.StableServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)),
 			Namespace: isvc.Namespace,
 		},
 		PodSpec:      &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}},
@@ -163,7 +163,7 @@ func intToLabel(n int64) string {
 func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, serving bool) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), instanceIdx, "default", 0),
+			Name:      query.PodName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), instanceIdx, "default", 0),
 			Namespace: isvc.Namespace,
 			Labels:    helperPodLabels(isvc.Name, v1beta1.EngineComponent, instanceIdx, "default", 1),
 		},

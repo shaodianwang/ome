@@ -19,9 +19,9 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // Shared test fixtures used by every *_test.go in the omenative/ops
@@ -257,7 +257,7 @@ func podForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, ready, se
 	labels[query.LabelRevisionHash] = testRevisionHash
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), instanceIdx, "default", 0),
+			Name:      query.PodName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), instanceIdx, "default", 0),
 			Namespace: isvc.Namespace,
 			Labels:    labels,
 		},

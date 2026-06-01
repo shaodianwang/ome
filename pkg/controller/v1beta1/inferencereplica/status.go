@@ -15,9 +15,9 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // InferenceReplicaConditionReady is the top-level condition type written
@@ -91,7 +91,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	}
 	key := client.ObjectKeyFromObject(ir)
 	desiredByIdx := workload.DesiredPodCountByInstance(plan)
-	component := internalsource.ComponentTypeToWorkload(ir.Spec.Component)
+	component := v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)
 
 	// Live-list pods + EndpointSlices outside the retry closure: both
 	// reads are idempotent (no apiserver-side mutation), so on a status
@@ -132,7 +132,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		// IR aggregator never observed the pod's live state.
 		populateInstancePodCounters(fresh.Status.InstanceStatuses, byIndex, availableByPod)
 
-		insts := internalsource.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
+		insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
 
 		// Component-level counters from per-Instance state (now with
 		// fresh per-pod counters populated above).

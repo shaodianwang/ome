@@ -21,6 +21,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
 
 // migrationRequestJSON builds the canonical Alfred annotation value.
@@ -509,7 +510,7 @@ func TestMigrate_FirstPassAllocatesSurgeAndStampsBothStatuses(t *testing.T) {
 	// Surge pod should exist with the anti-affinity overlay.
 	pods := &corev1.PodList{}
 	_ = c.List(context.Background(), pods, client.InNamespace("prod"))
-	surgePodName := query.PodName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent), *src.Operation.SurgeIndex, "default", 0)
+	surgePodName := query.PodName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), *src.Operation.SurgeIndex, "default", 0)
 	var surgePod *corev1.Pod
 	for i := range pods.Items {
 		if pods.Items[i].Name == surgePodName {
@@ -780,7 +781,7 @@ func ensureDrainedSlice(t *testing.T, c client.Client, isvc *v1beta1.InferenceSe
 	}
 	perRev := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-drained-rev", pod.Name), coordination.PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, hash), pod, false)
 	_ = c.Create(context.Background(), perRev)
-	headless := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-drained-hd", pod.Name), query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, false)
+	headless := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-drained-hd", pod.Name), query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, false)
 	_ = c.Create(context.Background(), headless)
 }
 
@@ -792,7 +793,7 @@ func ensureInRotationSlice(t *testing.T, c client.Client, isvc *v1beta1.Inferenc
 	}
 	perRev := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-rotation-rev", pod.Name), coordination.PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, hash), pod, true)
 	_ = c.Create(context.Background(), perRev)
-	headless := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-rotation-hd", pod.Name), query.HeadlessServiceName(isvc.Name, internalsource.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
+	headless := sliceWithEndpoint(isvc.Namespace, fmt.Sprintf("%s-rotation-hd", pod.Name), query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
 	_ = c.Create(context.Background(), headless)
 }
 
@@ -840,7 +841,7 @@ func refreshInstanceCounters(ctx context.Context, p core.ReconcileParams, plan c
 	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
 		return fmt.Errorf("refreshInstanceCounters: re-read ISVC: %w", err)
 	}
-	v1component := internalsource.ComponentTypeFromWorkload(plan.Component)
+	v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 	cs := fresh.Status.Components[v1component]
 	if cs.OMENative == nil {
 		return nil

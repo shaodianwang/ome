@@ -1,3 +1,11 @@
+// Package internalsource hosts the ISVC-typed adapter helpers the
+// OMENative dispatch path uses to project an InferenceService Component
+// onto the source-agnostic workload.ReconcileInput, plus the ISVC-typed
+// audit-ledger wrappers. Pure v1beta1 <-> workload type converters
+// (formerly hosted here) now live under
+// pkg/controller/v1beta1/workload/v1beta1convert so callers that have
+// no ISVC dependency (e.g. the InferenceReplica controller) can import
+// them without pulling in this directory.
 package internalsource
 
 import (
