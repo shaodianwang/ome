@@ -15,20 +15,42 @@ import (
 	"github.com/ome-projects/ome/pkg/webhook/admission/isvc"
 )
 
-// TestCreateHPA exercises the legacy-shim path: the existing Raw Deployment
-// constructor flows through createHPAFromLegacyComponentExt, which must keep
-// producing the byte-identical pre-refactor HPA. Once Slice 6 deletes the
-// legacy ScaleTarget / ScaleMetric fields these cases collapse into the
-// IRScaleTarget / CustomMetrics tests below.
-func TestCreateHPA(t *testing.T) {
+// TestCreateHPAFromComponentExt exercises the Raw Deployment path: the
+// existing Raw Deployment constructor flows through
+// createHPAFromComponentExt, which reads from the new Autoscaler.HPA
+// block (OEP-0013 Slice 6's canonical location) plus the legacy
+// ome.io/targetUtilizationPercentage annotation override.
+func TestCreateHPAFromComponentExt(t *testing.T) {
 
 	type args struct {
 		objectMeta   metav1.ObjectMeta
 		componentExt *v1beta1.ComponentExtensionSpec
 	}
 
-	cpuResource := v1beta1.MetricCPU
-	memoryResource := v1beta1.MetricMemory
+	cpuMetric := func(util int32) autoscalingv2.MetricSpec {
+		return autoscalingv2.MetricSpec{
+			Type: autoscalingv2.ResourceMetricSourceType,
+			Resource: &autoscalingv2.ResourceMetricSource{
+				Name: v1.ResourceCPU,
+				Target: autoscalingv2.MetricTarget{
+					Type:               autoscalingv2.UtilizationMetricType,
+					AverageUtilization: &util,
+				},
+			},
+		}
+	}
+	memMetric := func(util int32) autoscalingv2.MetricSpec {
+		return autoscalingv2.MetricSpec{
+			Type: autoscalingv2.ResourceMetricSourceType,
+			Resource: &autoscalingv2.ResourceMetricSource{
+				Name: v1.ResourceMemory,
+				Target: autoscalingv2.MetricTarget{
+					Type:               autoscalingv2.UtilizationMetricType,
+					AverageUtilization: &util,
+				},
+			},
+		}
+	}
 
 	testInput := map[string]args{
 		"igdefaulthpa": {
@@ -45,7 +67,7 @@ func TestCreateHPA(t *testing.T) {
 			},
 			componentExt: &v1beta1.ComponentExtensionSpec{},
 		},
-		"igspecifiedhpa": {
+		"igAutoscalerCPU30": {
 			objectMeta: metav1.ObjectMeta{
 				Name:      "basic-ig",
 				Namespace: "basic-ig-namespace",
@@ -60,8 +82,12 @@ func TestCreateHPA(t *testing.T) {
 			componentExt: &v1beta1.ComponentExtensionSpec{
 				MinReplicas: isvc.GetIntReference(2),
 				MaxReplicas: 5,
-				ScaleTarget: isvc.GetIntReference(30),
-				ScaleMetric: &cpuResource,
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerHPA,
+					HPA: &v1beta1.HPAAutoscaler{
+						Metrics: []autoscalingv2.MetricSpec{cpuMetric(30)},
+					},
+				},
 			},
 		},
 		"predictordefaulthpa": {
@@ -69,17 +95,25 @@ func TestCreateHPA(t *testing.T) {
 			componentExt: &v1beta1.ComponentExtensionSpec{
 				MinReplicas: nil,
 				MaxReplicas: 0,
-				ScaleTarget: nil,
-				ScaleMetric: &memoryResource,
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerHPA,
+					HPA: &v1beta1.HPAAutoscaler{
+						Metrics: []autoscalingv2.MetricSpec{memMetric(80)},
+					},
+				},
 			},
 		},
-		"predictorspecifiedhpa": {
+		"predictorAutoscalerCPU50": {
 			objectMeta: metav1.ObjectMeta{},
 			componentExt: &v1beta1.ComponentExtensionSpec{
 				MinReplicas: isvc.GetIntReference(5),
 				MaxReplicas: 10,
-				ScaleTarget: isvc.GetIntReference(50),
-				ScaleMetric: &cpuResource,
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerHPA,
+					HPA: &v1beta1.HPAAutoscaler{
+						Metrics: []autoscalingv2.MetricSpec{cpuMetric(50)},
+					},
+				},
 			},
 		},
 		"invalidinputhpa": {
@@ -87,18 +121,31 @@ func TestCreateHPA(t *testing.T) {
 			componentExt: &v1beta1.ComponentExtensionSpec{
 				MinReplicas: isvc.GetIntReference(0),
 				MaxReplicas: -10,
-				ScaleTarget: nil,
-				ScaleMetric: &memoryResource,
+				Autoscaler: &v1beta1.ComponentAutoscaler{
+					Class: v1beta1.AutoscalerHPA,
+					HPA: &v1beta1.HPAAutoscaler{
+						Metrics: []autoscalingv2.MetricSpec{memMetric(80)},
+					},
+				},
+			},
+		},
+		"annotationOverrideCPU60": {
+			objectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					constants.TargetUtilizationPercentage: "60",
+				},
+			},
+			// No Autoscaler block — annotation drives the metric.
+			componentExt: &v1beta1.ComponentExtensionSpec{
+				MinReplicas: isvc.GetIntReference(1),
+				MaxReplicas: 3,
 			},
 		},
 	}
 
 	defaultminreplicas := int32(1)
-	defaultutilization := int32(80)
 	igminreplicas := int32(2)
-	igutilization := int32(30)
 	predictorminreplicas := int32(5)
-	predictorutilization := int32(50)
 
 	expectedHPASpecs := map[string]*autoscalingv2.HorizontalPodAutoscaler{
 		"igdefaulthpa": {
@@ -111,44 +158,22 @@ func TestCreateHPA(t *testing.T) {
 				},
 				MinReplicas: &defaultminreplicas,
 				MaxReplicas: 1,
-				Metrics: []autoscalingv2.MetricSpec{
-					{
-						Type: autoscalingv2.ResourceMetricSourceType,
-						Resource: &autoscalingv2.ResourceMetricSource{
-							Name: v1.ResourceName("cpu"),
-							Target: autoscalingv2.MetricTarget{
-								Type:               "Utilization",
-								AverageUtilization: &defaultutilization,
-							},
-						},
-					},
-				},
-				Behavior: &autoscalingv2.HorizontalPodAutoscalerBehavior{},
+				Metrics:     []autoscalingv2.MetricSpec{cpuMetric(80)},
+				Behavior:    &autoscalingv2.HorizontalPodAutoscalerBehavior{},
 			},
 		},
-		"igspecifiedhpa": {
-			ObjectMeta: testInput["igspecifiedhpa"].objectMeta,
+		"igAutoscalerCPU30": {
+			ObjectMeta: testInput["igAutoscalerCPU30"].objectMeta,
 			Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 				ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
 					APIVersion: "apps/v1",
 					Kind:       "Deployment",
-					Name:       testInput["igspecifiedhpa"].objectMeta.Name,
+					Name:       testInput["igAutoscalerCPU30"].objectMeta.Name,
 				},
 				MinReplicas: &igminreplicas,
 				MaxReplicas: 5,
-				Metrics: []autoscalingv2.MetricSpec{
-					{
-						Type: autoscalingv2.ResourceMetricSourceType,
-						Resource: &autoscalingv2.ResourceMetricSource{
-							Name: v1.ResourceName("cpu"),
-							Target: autoscalingv2.MetricTarget{
-								Type:               "Utilization",
-								AverageUtilization: &igutilization,
-							},
-						},
-					},
-				},
-				Behavior: &autoscalingv2.HorizontalPodAutoscalerBehavior{},
+				Metrics:     []autoscalingv2.MetricSpec{cpuMetric(30)},
+				Behavior:    &autoscalingv2.HorizontalPodAutoscalerBehavior{},
 			},
 		},
 		"predictordefaulthpa": {
@@ -160,22 +185,11 @@ func TestCreateHPA(t *testing.T) {
 				},
 				MinReplicas: &defaultminreplicas,
 				MaxReplicas: 1,
-				Metrics: []autoscalingv2.MetricSpec{
-					{
-						Type: autoscalingv2.ResourceMetricSourceType,
-						Resource: &autoscalingv2.ResourceMetricSource{
-							Name: v1.ResourceName("memory"),
-							Target: autoscalingv2.MetricTarget{
-								Type:               "Utilization",
-								AverageUtilization: &defaultutilization,
-							},
-						},
-					},
-				},
-				Behavior: &autoscalingv2.HorizontalPodAutoscalerBehavior{},
+				Metrics:     []autoscalingv2.MetricSpec{memMetric(80)},
+				Behavior:    &autoscalingv2.HorizontalPodAutoscalerBehavior{},
 			},
 		},
-		"predictorspecifiedhpa": {
+		"predictorAutoscalerCPU50": {
 			ObjectMeta: metav1.ObjectMeta{},
 			Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 				ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
@@ -184,19 +198,21 @@ func TestCreateHPA(t *testing.T) {
 				},
 				MinReplicas: &predictorminreplicas,
 				MaxReplicas: 10,
-				Metrics: []autoscalingv2.MetricSpec{
-					{
-						Type: autoscalingv2.ResourceMetricSourceType,
-						Resource: &autoscalingv2.ResourceMetricSource{
-							Name: v1.ResourceName("cpu"),
-							Target: autoscalingv2.MetricTarget{
-								Type:               "Utilization",
-								AverageUtilization: &predictorutilization,
-							},
-						},
-					},
+				Metrics:     []autoscalingv2.MetricSpec{cpuMetric(50)},
+				Behavior:    &autoscalingv2.HorizontalPodAutoscalerBehavior{},
+			},
+		},
+		"annotationOverrideCPU60": {
+			ObjectMeta: testInput["annotationOverrideCPU60"].objectMeta,
+			Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+				ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+					APIVersion: "apps/v1",
+					Kind:       "Deployment",
 				},
-				Behavior: &autoscalingv2.HorizontalPodAutoscalerBehavior{},
+				MinReplicas: &defaultminreplicas,
+				MaxReplicas: 3,
+				Metrics:     []autoscalingv2.MetricSpec{cpuMetric(60)},
+				Behavior:    &autoscalingv2.HorizontalPodAutoscalerBehavior{},
 			},
 		},
 	}
@@ -215,12 +231,12 @@ func TestCreateHPA(t *testing.T) {
 			expected: expectedHPASpecs["igdefaulthpa"],
 		},
 		{
-			name: "inference graph specified hpa",
+			name: "inference graph autoscaler-block cpu 30%",
 			args: args{
-				objectMeta:   testInput["igspecifiedhpa"].objectMeta,
-				componentExt: testInput["igspecifiedhpa"].componentExt,
+				objectMeta:   testInput["igAutoscalerCPU30"].objectMeta,
+				componentExt: testInput["igAutoscalerCPU30"].componentExt,
 			},
-			expected: expectedHPASpecs["igspecifiedhpa"],
+			expected: expectedHPASpecs["igAutoscalerCPU30"],
 		},
 		{
 			name: "predictor default hpa",
@@ -231,25 +247,33 @@ func TestCreateHPA(t *testing.T) {
 			expected: expectedHPASpecs["predictordefaulthpa"],
 		},
 		{
-			name: "predictor specified hpa",
+			name: "predictor autoscaler-block cpu 50%",
 			args: args{
-				objectMeta:   testInput["predictorspecifiedhpa"].objectMeta,
-				componentExt: testInput["predictorspecifiedhpa"].componentExt,
+				objectMeta:   testInput["predictorAutoscalerCPU50"].objectMeta,
+				componentExt: testInput["predictorAutoscalerCPU50"].componentExt,
 			},
-			expected: expectedHPASpecs["predictorspecifiedhpa"],
+			expected: expectedHPASpecs["predictorAutoscalerCPU50"],
 		},
 		{
-			name: "invalid input for hpa",
+			name: "invalid bounds collapse to defaults",
 			args: args{
 				objectMeta:   testInput["invalidinputhpa"].objectMeta,
 				componentExt: testInput["invalidinputhpa"].componentExt,
 			},
 			expected: expectedHPASpecs["predictordefaulthpa"],
 		},
+		{
+			name: "annotation overrides default cpu 60%",
+			args: args{
+				objectMeta:   testInput["annotationOverrideCPU60"].objectMeta,
+				componentExt: testInput["annotationOverrideCPU60"].componentExt,
+			},
+			expected: expectedHPASpecs["annotationOverrideCPU60"],
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := createHPAFromLegacyComponentExt(tt.args.objectMeta, tt.args.componentExt)
+			got := createHPAFromComponentExt(tt.args.objectMeta, tt.args.componentExt)
 			if diff := cmp.Diff(tt.expected, got); diff != "" {
 				t.Errorf("Test %q unexpected hpa (-want +got): %v", tt.name, diff)
 			}
@@ -373,25 +397,42 @@ func TestCreateHPA_Behavior(t *testing.T) {
 	}
 }
 
-// TestCreateHPA_LegacyShim_Identical pins the byte-identical contract: the
-// shim must emit the same HPA as the pre-refactor createHPA. The expected
-// object is hand-rolled to encode the legacy generator's exact output for
-// componentExt{MinReplicas:3, MaxReplicas:7, ScaleTarget:55, ScaleMetric:cpu}.
-func TestCreateHPA_LegacyShim_Identical(t *testing.T) {
+// TestCreateHPA_ComponentExtShim_Identical pins the byte-identical
+// contract for the Raw Deployment path: createHPAFromComponentExt must
+// emit the same HPA as createHPA when given an equivalent Autoscaler.HPA
+// block. The OEP-0013 Slice 6 deletion of ScaleTarget / ScaleMetric
+// moved the metric configuration into Autoscaler.HPA.Metrics — operators
+// who used to set ScaleTarget=55 + ScaleMetric=cpu now declare a
+// Resource{cpu, 55%} entry in Autoscaler.HPA.Metrics.
+func TestCreateHPA_ComponentExtShim_Identical(t *testing.T) {
 	componentMeta := metav1.ObjectMeta{
 		Name:      "raw-engine",
 		Namespace: "ns",
 		Labels:    map[string]string{"app": "raw-engine"},
 	}
-	cpuResource := v1beta1.MetricCPU
+	utilization := int32(55)
 	componentExt := &v1beta1.ComponentExtensionSpec{
 		MinReplicas: isvc.GetIntReference(3),
 		MaxReplicas: 7,
-		ScaleTarget: isvc.GetIntReference(55),
-		ScaleMetric: &cpuResource,
+		Autoscaler: &v1beta1.ComponentAutoscaler{
+			Class: v1beta1.AutoscalerHPA,
+			HPA: &v1beta1.HPAAutoscaler{
+				Metrics: []autoscalingv2.MetricSpec{
+					{
+						Type: autoscalingv2.ResourceMetricSourceType,
+						Resource: &autoscalingv2.ResourceMetricSource{
+							Name: v1.ResourceCPU,
+							Target: autoscalingv2.MetricTarget{
+								Type:               autoscalingv2.UtilizationMetricType,
+								AverageUtilization: &utilization,
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 	minReplicas := int32(3)
-	utilization := int32(55)
 	expected := &autoscalingv2.HorizontalPodAutoscaler{
 		ObjectMeta: componentMeta,
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
@@ -408,7 +449,7 @@ func TestCreateHPA_LegacyShim_Identical(t *testing.T) {
 					Resource: &autoscalingv2.ResourceMetricSource{
 						Name: v1.ResourceCPU,
 						Target: autoscalingv2.MetricTarget{
-							Type:               "Utilization",
+							Type:               autoscalingv2.UtilizationMetricType,
 							AverageUtilization: &utilization,
 						},
 					},
@@ -418,10 +459,10 @@ func TestCreateHPA_LegacyShim_Identical(t *testing.T) {
 		},
 	}
 
-	got := createHPAFromLegacyComponentExt(componentMeta, componentExt)
+	got := createHPAFromComponentExt(componentMeta, componentExt)
 
 	if diff := cmp.Diff(expected, got); diff != "" {
-		t.Errorf("Legacy shim is not byte-identical (-want +got): %s", diff)
+		t.Errorf("ComponentExt shim is not byte-identical (-want +got): %s", diff)
 	}
 }
 

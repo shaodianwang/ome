@@ -1373,3 +1373,88 @@ func TestValidateMigrationPolicy_PerComponent(t *testing.T) {
 		t.Errorf("expected decoder-scoped rejection; got %v", err)
 	}
 }
+
+// TestValidateLegacyAutoscalerFieldsRaw exercises the OEP-0013 Slice 6
+// defense-in-depth check that rejects requests carrying the deleted
+// scaleTarget / scaleMetric fields with a friendly migration message.
+// Most paths NEVER trigger in practice (CRD schema pruning drops the
+// unknown fields server-side), so the test is the canonical operator-
+// facing record of what error a stale client would see.
+func TestValidateLegacyAutoscalerFieldsRaw(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		wantField string // "" means no error
+	}{
+		{name: "empty raw", raw: ""},
+		{name: "no spec at all", raw: `{}`},
+		{name: "spec without components", raw: `{"spec":{"model":{"name":"m"}}}`},
+		{
+			name: "engine without legacy fields",
+			raw:  `{"spec":{"engine":{"minReplicas":1,"maxReplicas":5}}}`,
+		},
+		{
+			name: "engine.autoscaler block alone is fine",
+			raw:  `{"spec":{"engine":{"autoscaler":{"class":"HPA"}}}}`,
+		},
+		{
+			name:      "engine.scaleTarget=5 rejected",
+			raw:       `{"spec":{"engine":{"scaleTarget":5}}}`,
+			wantField: "engine.scaleTarget",
+		},
+		{
+			name:      "engine.scaleMetric=cpu rejected",
+			raw:       `{"spec":{"engine":{"scaleMetric":"cpu"}}}`,
+			wantField: "engine.scaleMetric",
+		},
+		{
+			name:      "decoder.scaleTarget rejected",
+			raw:       `{"spec":{"decoder":{"scaleTarget":80}}}`,
+			wantField: "decoder.scaleTarget",
+		},
+		{
+			name:      "router.scaleMetric rejected",
+			raw:       `{"spec":{"router":{"scaleMetric":"memory"}}}`,
+			wantField: "router.scaleMetric",
+		},
+		{
+			name:      "engineConfig.scaleTarget rejected (PD-disaggregated shape)",
+			raw:       `{"spec":{"engineConfig":{"scaleTarget":50}}}`,
+			wantField: "engineConfig.scaleTarget",
+		},
+		{
+			name: "explicit null scaleTarget is OK (operator's explicit unset)",
+			raw:  `{"spec":{"engine":{"scaleTarget":null}}}`,
+		},
+		{
+			name: "malformed JSON is silently passed (primary decoder reports)",
+			raw:  `{"spec":{`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateLegacyAutoscalerFieldsRaw([]byte(tc.raw))
+			if tc.wantField == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error mentioning %q; got nil", tc.wantField)
+			}
+			if !strings.Contains(err.Error(), ReasonLegacyAutoscalerFieldsRejected) {
+				t.Errorf("error %q missing reason constant %q", err, ReasonLegacyAutoscalerFieldsRejected)
+			}
+			if !strings.Contains(err.Error(), tc.wantField) {
+				t.Errorf("error %q missing field name %q", err, tc.wantField)
+			}
+			if !strings.Contains(err.Error(), "spec.") {
+				t.Errorf("error %q missing spec.* prefix for operator legibility", err)
+			}
+			if !strings.Contains(err.Error(), "autoscaler") {
+				t.Errorf("error %q missing migration pointer to autoscaler block", err)
+			}
+		})
+	}
+}

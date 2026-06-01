@@ -354,16 +354,6 @@ func (in *ComponentExtensionSpec) DeepCopyInto(out *ComponentExtensionSpec) {
 		*out = new(int)
 		**out = **in
 	}
-	if in.ScaleTarget != nil {
-		in, out := &in.ScaleTarget, &out.ScaleTarget
-		*out = new(int)
-		**out = **in
-	}
-	if in.ScaleMetric != nil {
-		in, out := &in.ScaleMetric, &out.ScaleMetric
-		*out = new(ScaleMetric)
-		**out = **in
-	}
 	if in.TimeoutSeconds != nil {
 		in, out := &in.TimeoutSeconds, &out.TimeoutSeconds
 		*out = new(int64)

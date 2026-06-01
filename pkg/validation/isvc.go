@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -497,7 +498,7 @@ func ValidateAutoscalerConfig(isvc *v1beta1.InferenceService) ([]string, error) 
 				switch class {
 				case constants.AutoscalerClassHPA:
 					if metric, ok := annotations[constants.AutoscalerMetrics]; ok {
-						return nil, ValidateHPAMetrics(v1beta1.ScaleMetric(metric))
+						return nil, ValidateHPAMetrics(metric)
 					}
 					return nil, nil
 				case constants.AutoscalerClassKEDA:
@@ -531,9 +532,13 @@ func ValidateAutoscalerTargetUtilizationPercentage(isvc *v1beta1.InferenceServic
 	return nil
 }
 
-func ValidateHPAMetrics(metric v1beta1.ScaleMetric) error {
+// ValidateHPAMetrics validates the legacy ome.io/metrics annotation value
+// against the AutoscalerAllowedMetricsList enum. Accepts the raw string
+// from the annotation since OEP-0013 Slice 6 (2026-06-01) deleted the
+// v1beta1.ScaleMetric enum that this used to take.
+func ValidateHPAMetrics(metric string) error {
 	for _, item := range constants.AutoscalerAllowedMetricsList {
-		if item == constants.AutoscalerMetricsType(metric) {
+		if string(item) == metric {
 			return nil
 		}
 	}
@@ -577,6 +582,16 @@ const (
 	// locks legacy fields for deletion in Slice 6; this validation
 	// pre-empts confusion during the transition.
 	ReasonAutoscalerAnnotationConflict = "AutoscalerAnnotationConflict"
+
+	// ReasonLegacyAutoscalerFieldsRejected is the friendly migration
+	// error returned by ValidateLegacyAutoscalerFieldsRaw when a client
+	// submits an ISVC carrying the deleted scaleTarget / scaleMetric
+	// fields. The Go-struct fields and CRD schema entries were both
+	// hard-deleted in OEP-0013 Slice 6 (2026-06-01); a modern kubectl
+	// against an up-to-date CRD will already prune them via structural-
+	// schema enforcement. This reason is defense-in-depth for clients
+	// with a stale local CRD that bypassed pruning.
+	ReasonLegacyAutoscalerFieldsRejected = "LegacyAutoscalerFieldsRejected"
 )
 
 // validAutoscalerClasses mirrors the CRD enum
@@ -806,4 +821,128 @@ func ValidateAutoscalerAnnotationConflict(isvc *v1beta1.InferenceService) error 
 		ReasonAutoscalerAnnotationConflict,
 		constants.AutoscalerClass, conflicting[0],
 	)
+}
+
+// ValidateLegacyAutoscalerFieldsRaw inspects the raw admission-request
+// JSON for the deleted scaleTarget / scaleMetric fields and returns a
+// friendly migration error if either is set on any Component
+// (spec.engine, spec.decoder, spec.router, spec.engineConfig.*, etc).
+//
+// OEP-0013 Slice 6 (2026-06-01) hard-deleted these fields from
+// ComponentExtensionSpec; the generated CRD no longer carries them in
+// the OpenAPI schema. A modern kubectl with --validate=true against an
+// up-to-date CRD will reject the unknown fields server-side before they
+// reach the webhook; the API server's structural-schema pruning will
+// silently drop them when --validate=false. This helper exists as
+// defense-in-depth for the narrow window where:
+//
+//   - An operator's local CRD is stale (cluster updated, kubeconfig
+//     points at older CRD), AND
+//   - The client bypasses --validate, AND
+//   - Field pruning fails for any reason (custom admission, intermediate
+//     proxy, etc).
+//
+// In all three cases the field would silently no-op rather than reject;
+// this helper surfaces the migration message at admission time so the
+// operator gets a clear pointer at the Autoscaler block.
+//
+// rawObj is typically req.AdmissionRequest.Object.Raw from the
+// admission.Request — the raw JSON bytes BEFORE the Go decoder strips
+// unknown fields. Returns nil when rawObj is empty / unparseable (the
+// caller's primary validation will surface the parse failure) and when
+// no legacy fields are populated on any Component.
+func ValidateLegacyAutoscalerFieldsRaw(rawObj []byte) error {
+	if len(rawObj) == 0 {
+		return nil
+	}
+	var envelope struct {
+		Spec struct {
+			Engine        json.RawMessage `json:"engine,omitempty"`
+			Decoder       json.RawMessage `json:"decoder,omitempty"`
+			Router        json.RawMessage `json:"router,omitempty"`
+			EngineConfig  json.RawMessage `json:"engineConfig,omitempty"`
+			DecoderConfig json.RawMessage `json:"decoderConfig,omitempty"`
+			RouterConfig  json.RawMessage `json:"routerConfig,omitempty"`
+		} `json:"spec,omitempty"`
+	}
+	if err := json.Unmarshal(rawObj, &envelope); err != nil {
+		// The primary decoder will surface a JSON parse failure; this
+		// helper is best-effort defense-in-depth and must not mask the
+		// real error.
+		return nil
+	}
+	checks := []struct {
+		name string
+		body json.RawMessage
+	}{
+		{"engine", envelope.Spec.Engine},
+		{"decoder", envelope.Spec.Decoder},
+		{"router", envelope.Spec.Router},
+		{"engineConfig", envelope.Spec.EngineConfig},
+		{"decoderConfig", envelope.Spec.DecoderConfig},
+		{"routerConfig", envelope.Spec.RouterConfig},
+	}
+	for _, c := range checks {
+		if len(c.body) == 0 {
+			continue
+		}
+		if field, ok := legacyAutoscalerFieldOn(c.body); ok {
+			return fmt.Errorf(
+				"%s: spec.%s.%s is no longer supported. "+
+					"Use spec.%s.autoscaler.%s instead "+
+					"(see oeps/0013-autoscaling/README.md for the migration).",
+				ReasonLegacyAutoscalerFieldsRejected,
+				c.name, field,
+				c.name, legacyAutoscalerReplacement(field),
+			)
+		}
+	}
+	return nil
+}
+
+// legacyAutoscalerFieldOn checks a Component's raw JSON for the deleted
+// legacy autoscaling fields. Returns the offending field name + true on
+// the first match, else "" + false. Both fields are pointer types
+// (*int / *ScaleMetric) in the old API surface, so a null value counts
+// as "not set" — we only reject explicit non-null values.
+func legacyAutoscalerFieldOn(componentBody json.RawMessage) (string, bool) {
+	var probe struct {
+		ScaleTarget *json.RawMessage `json:"scaleTarget,omitempty"`
+		ScaleMetric *json.RawMessage `json:"scaleMetric,omitempty"`
+	}
+	if err := json.Unmarshal(componentBody, &probe); err != nil {
+		return "", false
+	}
+	if isNonNullRaw(probe.ScaleTarget) {
+		return "scaleTarget", true
+	}
+	if isNonNullRaw(probe.ScaleMetric) {
+		return "scaleMetric", true
+	}
+	return "", false
+}
+
+// isNonNullRaw returns true when the raw message is set AND not the
+// literal `null`. JSON `null` for a pointer field is the operator's
+// explicit "unset" marker and must not trigger the rejection.
+func isNonNullRaw(raw *json.RawMessage) bool {
+	if raw == nil {
+		return false
+	}
+	trimmed := string(*raw)
+	return trimmed != "" && trimmed != "null"
+}
+
+// legacyAutoscalerReplacement maps a deleted field name to its
+// Autoscaler-block equivalent so the migration error points the
+// operator at the right replacement.
+func legacyAutoscalerReplacement(field string) string {
+	switch field {
+	case "scaleTarget":
+		return "hpa.metrics[0].resource.target.averageUtilization"
+	case "scaleMetric":
+		return "hpa.metrics[0].resource.name"
+	default:
+		return "<see Autoscaler block>"
+	}
 }

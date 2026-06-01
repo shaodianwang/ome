@@ -57,6 +57,9 @@ func (v *InferenceServiceValidator) ValidateCreate(ctx context.Context, obj runt
 		validatorLogger.Error(err, "Unable to convert object to InferenceService")
 		return nil, err
 	}
+	if err := validateLegacyAutoscalerFieldsFromCtx(ctx); err != nil {
+		return nil, err
+	}
 	return v.validateInferenceService(ctx, isvc)
 }
 
@@ -71,10 +74,27 @@ func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldObj, 
 		validatorLogger.Error(err, "Unable to convert prior object to InferenceService")
 		return nil, err
 	}
+	if err := validateLegacyAutoscalerFieldsFromCtx(ctx); err != nil {
+		return nil, err
+	}
 	if err := validation.ValidateCoordinationUpdate(&oldIsvc.Spec, &isvc.Spec); err != nil {
 		return nil, err
 	}
 	return v.validateInferenceService(ctx, isvc)
+}
+
+// validateLegacyAutoscalerFieldsFromCtx pulls the raw admission request
+// out of ctx and runs the OEP-0013 Slice 6 defense-in-depth check for
+// the deleted scaleTarget / scaleMetric fields. Silently no-ops when the
+// request cannot be retrieved (e.g., when the validator is invoked from a
+// unit test that doesn't stamp the ctx), so it never blocks tests that
+// only feed a typed object.
+func validateLegacyAutoscalerFieldsFromCtx(ctx context.Context) error {
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return nil
+	}
+	return validation.ValidateLegacyAutoscalerFieldsRaw(req.AdmissionRequest.Object.Raw)
 }
 
 func (v *InferenceServiceValidator) ValidateDelete(_ context.Context, obj runtime.Object) (admission.Warnings, error) {

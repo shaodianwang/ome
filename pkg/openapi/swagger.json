@@ -303,7 +303,7 @@
       }
     },
     "v1beta1.ComponentAutoscaler": {
-      "description": "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). When set, it takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+      "description": "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields from ComponentExtensionSpec; this is now the only supported way to configure per-Component autoscaling on an ISVC.",
       "type": "object",
       "required": [
         "class"
@@ -381,7 +381,7 @@
           }
         },
         "autoscaler": {
-          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
           "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
         },
         "canaryTrafficPercent": {
@@ -420,15 +420,6 @@
         },
         "minReplicas": {
           "description": "Minimum number of replicas, defaults to 1 but can be set to 0 to enable scale-to-zero.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "scaleMetric": {
-          "description": "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
-          "type": "string"
-        },
-        "scaleTarget": {
-          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
           "type": "integer",
           "format": "int32"
         },
@@ -602,7 +593,7 @@
           "type": "boolean"
         },
         "autoscaler": {
-          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
           "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
         },
         "canaryTrafficPercent": {
@@ -822,15 +813,6 @@
           "description": "RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group, which should be used to run this pod.  If no RuntimeClass resource matches the named class, the pod will not be run. If unset or empty, the \"legacy\" RuntimeClass will be used, which is an implicit class with an empty definition that uses the default runtime handler. More info: https://git.k8s.io/enhancements/keps/sig-node/585-runtime-class",
           "type": "string"
         },
-        "scaleMetric": {
-          "description": "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
-          "type": "string"
-        },
-        "scaleTarget": {
-          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
-          "type": "integer",
-          "format": "int32"
-        },
         "schedulerName": {
           "description": "If specified, the pod will be dispatched by specified scheduler. If not specified, the pod will be dispatched by default scheduler.",
           "type": "string"
@@ -1029,7 +1011,7 @@
           "type": "boolean"
         },
         "autoscaler": {
-          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
           "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
         },
         "canaryTrafficPercent": {
@@ -1248,15 +1230,6 @@
         "runtimeClassName": {
           "description": "RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group, which should be used to run this pod.  If no RuntimeClass resource matches the named class, the pod will not be run. If unset or empty, the \"legacy\" RuntimeClass will be used, which is an implicit class with an empty definition that uses the default runtime handler. More info: https://git.k8s.io/enhancements/keps/sig-node/585-runtime-class",
           "type": "string"
-        },
-        "scaleMetric": {
-          "description": "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
-          "type": "string"
-        },
-        "scaleTarget": {
-          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
-          "type": "integer",
-          "format": "int32"
         },
         "schedulerName": {
           "description": "If specified, the pod will be dispatched by specified scheduler. If not specified, the pod will be dispatched by default scheduler.",
@@ -3566,7 +3539,7 @@
           "type": "boolean"
         },
         "autoscaler": {
-          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+          "description": "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
           "$ref": "#/definitions/v1beta1.ComponentAutoscaler"
         },
         "canaryTrafficPercent": {
@@ -3789,15 +3762,6 @@
         "runtimeClassName": {
           "description": "RuntimeClassName refers to a RuntimeClass object in the node.k8s.io group, which should be used to run this pod.  If no RuntimeClass resource matches the named class, the pod will not be run. If unset or empty, the \"legacy\" RuntimeClass will be used, which is an implicit class with an empty definition that uses the default runtime handler. More info: https://git.k8s.io/enhancements/keps/sig-node/585-runtime-class",
           "type": "string"
-        },
-        "scaleMetric": {
-          "description": "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
-          "type": "string"
-        },
-        "scaleTarget": {
-          "description": "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
-          "type": "integer",
-          "format": "int32"
         },
         "schedulerName": {
           "description": "If specified, the pod will be dispatched by specified scheduler. If not specified, the pod will be dispatched by default scheduler.",

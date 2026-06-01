@@ -49,9 +49,10 @@ type IRDispatchInput struct {
 	ResolvedAutoscaler *v1beta1.ComponentAutoscaler
 
 	// ComponentExt is the per-Component extension spec; min / max
-	// replicas come from here. The dispatch does NOT consult any
-	// other field (no ScaleTarget / ScaleMetric — those are Slice 6
-	// cleanup territory).
+	// replicas come from here. The dispatch does NOT consult any other
+	// field — the legacy ScaleTarget / ScaleMetric were hard-deleted in
+	// Slice 6 (2026-06-01) and the new Autoscaler block is carried on
+	// ResolvedAutoscaler above.
 	ComponentExt *v1beta1.ComponentExtensionSpec
 }
 

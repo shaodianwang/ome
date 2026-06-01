@@ -631,7 +631,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref common.ReferenceCallbac
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). When set, it takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+				Description: "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields from ComponentExtensionSpec; this is now the only supported way to configure per-Component autoscaling on an ISVC.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"class": {
@@ -762,20 +762,6 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 							Format:      "int32",
 						},
 					},
-					"scaleTarget": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"scaleMetric": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
 					"timeoutSeconds": {
 						SchemaProps: spec.SchemaProps{
 							Description: "TimeoutSeconds specifies the number of seconds to wait before timing out a request to the component.",
@@ -848,7 +834,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -1584,20 +1570,6 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 							Format:      "int32",
 						},
 					},
-					"scaleTarget": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"scaleMetric": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
 					"timeoutSeconds": {
 						SchemaProps: spec.SchemaProps{
 							Description: "TimeoutSeconds specifies the number of seconds to wait before timing out a request to the component.",
@@ -1670,7 +1642,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -2331,20 +2303,6 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 							Format:      "int32",
 						},
 					},
-					"scaleTarget": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"scaleMetric": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
 					"timeoutSeconds": {
 						SchemaProps: spec.SchemaProps{
 							Description: "TimeoutSeconds specifies the number of seconds to wait before timing out a request to the component.",
@@ -2417,7 +2375,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -6758,20 +6716,6 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 							Format:      "int32",
 						},
 					},
-					"scaleTarget": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"scaleMetric": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
 					"timeoutSeconds": {
 						SchemaProps: spec.SchemaProps{
 							Description: "TimeoutSeconds specifies the number of seconds to wait before timing out a request to the component.",
@@ -6844,7 +6788,7 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. When set, takes priority over the legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},

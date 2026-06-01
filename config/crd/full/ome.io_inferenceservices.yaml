@@ -7536,14 +7536,6 @@ spec:
                       type: object
                     runtimeClassName:
                       type: string
-                    scaleMetric:
-                      enum:
-                        - cpu
-                        - memory
-                        - tps
-                      type: string
-                    scaleTarget:
-                      type: integer
                     schedulerName:
                       type: string
                     schedulingGates:
@@ -20281,14 +20273,6 @@ spec:
                       type: object
                     runtimeClassName:
                       type: string
-                    scaleMetric:
-                      enum:
-                        - cpu
-                        - memory
-                        - tps
-                      type: string
-                    scaleTarget:
-                      type: integer
                     schedulerName:
                       type: string
                     schedulingGates:
@@ -28857,14 +28841,6 @@ spec:
                       type: object
                     runtimeClassName:
                       type: string
-                    scaleMetric:
-                      enum:
-                        - cpu
-                        - memory
-                        - tps
-                      type: string
-                    scaleTarget:
-                      type: integer
                     schedulerName:
                       type: string
                     schedulingGates:

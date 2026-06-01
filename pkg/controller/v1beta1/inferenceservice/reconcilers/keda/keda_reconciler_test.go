@@ -191,13 +191,13 @@ func TestCreateScaledObject_PollingCooldownFallback(t *testing.T) {
 	}
 }
 
-// TestCreateScaledObject_LegacyShim_Identical pins the byte-identical
-// contract: the shim must emit the same ScaledObject as the pre-refactor
-// createScaledObject for the Raw Deployment dispatch path. The expected
-// object is hand-rolled to encode the legacy generator's exact output for a
-// componentExt that supplies an Autoscaler.Keda block, including the
-// `k8slens-edit-resource-version` label filtering.
-func TestCreateScaledObject_LegacyShim_Identical(t *testing.T) {
+// TestCreateScaledObject_ComponentExtShim_Identical pins the byte-identical
+// contract for the Raw Deployment dispatch path: the shim must emit the
+// same ScaledObject as createScaledObject when given a componentExt with
+// an Autoscaler.Keda block (the OEP-0013 Slice 6 canonical authoring
+// location). Also covers the `k8slens-edit-resource-version` label
+// filtering quirk.
+func TestCreateScaledObject_ComponentExtShim_Identical(t *testing.T) {
 	componentMeta := metav1.ObjectMeta{
 		Name:      "raw-engine",
 		Namespace: "ns",
@@ -253,10 +253,10 @@ func TestCreateScaledObject_LegacyShim_Identical(t *testing.T) {
 		},
 	}
 
-	got := createScaledObjectFromLegacy(componentMeta, componentExt)
+	got := createScaledObjectFromComponentExt(componentMeta, componentExt)
 
 	if diff := cmp.Diff(expected, got); diff != "" {
-		t.Errorf("Legacy shim is not byte-identical (-want +got): %s", diff)
+		t.Errorf("ComponentExt shim is not byte-identical (-want +got): %s", diff)
 	}
 }
 

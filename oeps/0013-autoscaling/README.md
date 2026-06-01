@@ -1309,6 +1309,27 @@ helper.
 - TBD: Proportional scaling coordinator.
 - TBD: Bundled Prometheus Helm template under
   `charts/ome-resources/templates/prometheus*.yaml`.
+- 2026-06-01: **Slice 6 completed — legacy fields hard-deleted.**
+  `ComponentExtensionSpec.ScaleTarget`, `ComponentExtensionSpec.ScaleMetric`,
+  and the `ScaleMetric` enum (`MetricCPU` / `MetricMemory` / `MetricTPS`
+  constants) are removed from `pkg/apis/ome/v1beta1/component.go`. The
+  CRDs lose three `scaleTarget`/`scaleMetric` property pairs per
+  Component (engine / decoder / router) on `inferenceservices`,
+  `clusterservingruntimes`, and `servingruntimes` (72 lines net across
+  the three CRDs). The Raw Deployment HPA generator now reads the
+  Autoscaler.HPA block as the canonical source; the
+  `ome.io/targetUtilizationPercentage` annotation remains as the
+  no-Autoscaler-block CPU-target override. The
+  `validation.ValidateLegacyAutoscalerFieldsRaw` helper is wired into
+  the ISVC webhook as defense-in-depth — clients with a stale local
+  CRD that submit the deleted fields get a friendly
+  `LegacyAutoscalerFieldsRejected` error pointing at the new
+  Autoscaler block (this path will normally never trigger because the
+  API server's structural-schema pruning drops the unknown fields
+  server-side before they reach the webhook). The `ome.io/autoscalerClass`
+  annotation is still consulted by the legacy Raw Deployment
+  dispatch and its removal is deferred to the Stable graduation per
+  the Stable criteria above.
 
 ## Drawbacks
 
@@ -1321,11 +1342,13 @@ helper.
   automatically when OME bumps the KEDA dep; this is mostly upside
   (new triggers work for free) but means OME consumers see KEDA
   type signatures in their CRDs.
-- Two valid spec shapes (legacy `ScaleMetric` / `ScaleTarget` + new
-  `Autoscaler` block) coexist on the HPA path through Alpha.
-  Operators reading the API surface have to learn two patterns
-  until removal. `KedaConfig` no longer has this problem — it is
-  removed in this OEP.
+- ~~Two valid spec shapes (legacy `ScaleMetric` / `ScaleTarget` + new
+  `Autoscaler` block) coexist on the HPA path through Alpha.~~
+  Resolved 2026-06-01: Slice 6 hard-deleted the legacy fields. The
+  per-Component `Autoscaler` block is now the only authoring surface
+  (the `ome.io/autoscalerClass` annotation is still consulted for the
+  Raw Deployment dispatch; its removal is deferred to Stable
+  graduation). `KedaConfig` was already removed in Alpha.
 - Under recommended Option B, the autoscaler block lives in two
   places (ISVC for authoring, IR for runtime). Mitigated by
   `status.specSource` and by the fact that operators never

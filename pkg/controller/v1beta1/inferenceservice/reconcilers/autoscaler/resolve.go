@@ -54,10 +54,11 @@ const (
 //     "only when Component declares a Resource metric" carve-out.
 //     The operator-visible default unconditionally produces an HPA.
 //
-//   - Q2: Legacy ScaleTarget / ScaleMetric / ome.io/autoscalerClass
-//     fields are IGNORED. They will be DELETED in Slice 6 (no
-//     deprecation period). The new Autoscaler block is fully
-//     authoritative. No deprecation log.
+//   - Q2: Legacy ScaleTarget / ScaleMetric fields were hard-deleted in
+//     Slice 6 (2026-06-01); see ComponentExtensionSpec for the migration
+//     note. The new Autoscaler block is fully authoritative. The
+//     ome.io/autoscalerClass annotation is still consulted by the legacy
+//     Raw Deployment dispatch but does not feed this resolver.
 //
 // Returned pointer is always non-nil and always a deep copy of the
 // source (so callers can mutate freely without affecting the input

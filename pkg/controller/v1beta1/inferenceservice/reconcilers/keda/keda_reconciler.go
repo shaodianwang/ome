@@ -40,9 +40,9 @@ type KEDAReconciler struct {
 }
 
 // NewKEDAReconciler creates a new KEDAReconciler whose generated ScaledObject
-// targets the caller-supplied Deployment. Preserves the legacy
-// ComponentExtensionSpec behaviour: MinReplicas / MaxReplicas drive the
-// bounds and Autoscaler.Keda.Triggers (when present) drives the trigger list.
+// targets the caller-supplied Deployment. Reads the per-Component Autoscaler
+// block (Autoscaler.Keda) from componentExt for trigger configuration;
+// MinReplicas / MaxReplicas on the ComponentExtensionSpec drive the bounds.
 // OEP-0013 Slice 3 introduces the sibling NewKEDAReconcilerForTarget
 // constructor for the IR-managed path.
 func NewKEDAReconciler(
@@ -52,7 +52,7 @@ func NewKEDAReconciler(
 	componentExt *v1beta1.ComponentExtensionSpec,
 ) (*KEDAReconciler, error) {
 
-	scaledObject := createScaledObjectFromLegacy(componentMeta, componentExt)
+	scaledObject := createScaledObjectFromComponentExt(componentMeta, componentExt)
 
 	return &KEDAReconciler{
 		client:       client,
@@ -70,11 +70,9 @@ func NewKEDAReconciler(
 // are all forwarded verbatim to the ScaledObject spec per OEP-0013 README
 // 678-706.
 //
-// Unlike NewKEDAReconciler, this constructor does NOT consult the legacy
-// ScaleMetric / ScaleTarget / componentExt fields. It is the entry point
-// for OEP-0013's per-IR dispatch (Slice 3) and stays free of legacy
-// concerns so Slice 6's cleanup can drop the legacy constructor wholesale
-// without touching this path.
+// It is the entry point for OEP-0013's per-IR dispatch (Slice 3) and stays
+// free of any ComponentExtensionSpec concerns so the two callers are
+// completely decoupled.
 //
 // When kedaSpec is nil or kedaSpec.Triggers is empty the generated
 // ScaledObject ends up with no triggers; Reconcile() then skips the apply
@@ -107,12 +105,13 @@ func NewKEDAReconcilerForTarget(
 // introduced by OEP-0013 Slice 3.
 //
 // kedaSpec / minReplicas / maxReplicas come from the resolver (Slice 1) or
-// the legacy shim (createScaledObjectFromLegacy). When kedaSpec is non-nil
-// the Triggers, Advanced, PollingInterval, CooldownPeriod, IdleReplicaCount,
-// and Fallback fields are all forwarded verbatim per OEP-0013 README 678-706.
-// When kedaSpec is nil or kedaSpec.Triggers is empty the generated
-// ScaledObject ends up with no triggers; Reconcile() then skips the apply to
-// avoid creating an invalid (zero-trigger) ScaledObject.
+// the Raw Deployment shim (createScaledObjectFromComponentExt). When
+// kedaSpec is non-nil the Triggers, Advanced, PollingInterval,
+// CooldownPeriod, IdleReplicaCount, and Fallback fields are all forwarded
+// verbatim per OEP-0013 README 678-706. When kedaSpec is nil or
+// kedaSpec.Triggers is empty the generated ScaledObject ends up with no
+// triggers; Reconcile() then skips the apply to avoid creating an invalid
+// (zero-trigger) ScaledObject.
 func createScaledObject(
 	componentMeta metav1.ObjectMeta,
 	scaleTargetRef kedav1.ScaleTarget,
@@ -151,24 +150,23 @@ func createScaledObject(
 			Annotations: componentMeta.Annotations,
 			// Forward OwnerReferences so the OEP-0013 IR-managed dispatch
 			// can stamp the SO with the IR's controller-ref for foreground
-			// GC cascade. Raw Deployment legacy callers go through
-			// createScaledObjectFromLegacy → SetControllerReferences and
-			// don't populate componentMeta.OwnerReferences, so this is a
-			// no-op for them.
+			// GC cascade. Raw Deployment callers go through
+			// createScaledObjectFromComponentExt → SetControllerReferences
+			// and don't populate componentMeta.OwnerReferences, so this is
+			// a no-op for them.
 			OwnerReferences: componentMeta.OwnerReferences,
 		},
 		Spec: spec,
 	}
 }
 
-// createScaledObjectFromLegacy is the byte-identical bridge from the old
-// (componentMeta, componentExt) → ScaledObject generator to the parameterized
-// createScaledObject. Raw Deployment callers reach the KEDA generator through
-// this shim so that the existing OEP-0013 phase 1 stub (which forwards
-// Autoscaler.Keda only) keeps producing byte-identical ScaledObjects. Slice
-// 3 wires the new (resolver-driven) path; Slice 6 deletes any remaining
-// legacy fields and this shim along with them.
-func createScaledObjectFromLegacy(
+// createScaledObjectFromComponentExt is the Raw Deployment bridge from the
+// (componentMeta, componentExt) caller to the parameterized createScaledObject.
+// Reads Autoscaler.Keda when present (OEP-0013 Slice 6's canonical authoring
+// location) and otherwise leaves Triggers empty — the Reconcile() loop's
+// shouldCreateScaledObject gate then skips the apply to avoid emitting an
+// invalid (zero-trigger) ScaledObject.
+func createScaledObjectFromComponentExt(
 	componentMeta metav1.ObjectMeta,
 	componentExt *v1beta1.ComponentExtensionSpec,
 ) *kedav1.ScaledObject {

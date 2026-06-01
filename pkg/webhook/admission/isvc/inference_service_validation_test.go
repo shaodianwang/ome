@@ -443,13 +443,13 @@ func TestInferenceService_TargetUtilizationValidation(t *testing.T) {
 
 // Test missing branches in validateHPAMetrics
 func TestValidateHPAMetrics_AllMetrics(t *testing.T) {
-	validMetrics := []v1beta1.ScaleMetric{
-		v1beta1.ScaleMetric(constants.AutoScalerMetricsCPU),
-		v1beta1.ScaleMetric(constants.AutoScalerMetricsMemory),
+	validMetrics := []string{
+		string(constants.AutoScalerMetricsCPU),
+		string(constants.AutoScalerMetricsMemory),
 	}
 
 	for _, metric := range validMetrics {
-		t.Run(string(metric), func(t *testing.T) {
+		t.Run(metric, func(t *testing.T) {
 			err := validation.ValidateHPAMetrics(metric)
 			assert.NoError(t, err)
 		})

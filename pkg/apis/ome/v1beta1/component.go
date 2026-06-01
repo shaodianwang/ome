@@ -13,13 +13,6 @@ type ComponentExtensionSpec struct {
 	// Maximum number of replicas for autoscaling.
 	// +optional
 	MaxReplicas int `json:"maxReplicas,omitempty"`
-	// ScaleTarget specifies the integer target value of the metric type the Autoscaler watches for.
-	// +optional
-	ScaleTarget *int `json:"scaleTarget,omitempty"`
-	// ScaleMetric defines the scaling metric type watched by autoscaler.
-	// Possible values are cpu, memory, tps.
-	// +optional
-	ScaleMetric *ScaleMetric `json:"scaleMetric,omitempty"`
 	// TimeoutSeconds specifies the number of seconds to wait before timing out a request to the component.
 	// +optional
 	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
@@ -53,20 +46,15 @@ type ComponentExtensionSpec struct {
 	Lifecycle *LifecycleSpec `json:"lifecycle,omitempty"`
 
 	// Autoscaler configures the per-Component autoscaler dispatch and the
-	// underlying KEDA / HPA configuration. When set, takes priority over the
-	// legacy ScaleMetric / ScaleTarget fields and the ome.io/autoscalerClass
-	// annotation for this Component. Alpha (OEP-0013). The API may change
-	// without notice.
+	// underlying KEDA / HPA configuration. Takes priority over the legacy
+	// ome.io/autoscalerClass annotation for this Component. Alpha
+	// (OEP-0013). The API may change without notice.
+	//
+	// OEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget /
+	// ScaleMetric fields and the ScaleMetric enum that used to live on
+	// this struct. Operators on the legacy shape MUST migrate to the
+	// per-Component Autoscaler block (Autoscaler.HPA.Metrics +
+	// MinReplicas / MaxReplicas).
 	// +optional
 	Autoscaler *ComponentAutoscaler `json:"autoscaler,omitempty"`
 }
-
-// ScaleMetric enum
-// +kubebuilder:validation:Enum=cpu;memory;tps
-type ScaleMetric string
-
-const (
-	MetricCPU    ScaleMetric = "cpu"
-	MetricMemory ScaleMetric = "memory"
-	MetricTPS    ScaleMetric = "tps"
-)
