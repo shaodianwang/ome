@@ -122,15 +122,15 @@ func TestReconcileComponent_SequentialGateDenialReturnsRequeue(t *testing.T) {
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
 	engStatus := isvc.Status.Components[v1beta1.EngineComponent]
-	engStatus.OMENative.ObservedGeneration = 1 // stale → generationSkew=true
+	engStatus.Lifecycle.ObservedGeneration = 1 // stale → generationSkew=true
 	// RunningRevision on the existing Instance is the OLD canonical
 	// revision name. detectUpdateTrigger uses it to decide whether the
 	// pod needs to be re-rolled; setting it to a known stale name forces
 	// needs=true.
-	engStatus.OMENative.InstanceStatuses[0].RunningRevision = "v-seq-engine-oldhash"
+	engStatus.Lifecycle.InstanceStatuses[0].RunningRevision = "v-seq-engine-oldhash"
 	isvc.Status.Components[v1beta1.EngineComponent] = engStatus
 	isvc.Status.Components[v1beta1.DecoderComponent] = v1beta1.ComponentStatusSpec{
-		OMENative: &v1beta1.OMENativeComponentStatus{
+		Lifecycle: &v1beta1.LifecycleStatus{
 			ObservedGeneration: 1, // stale → generationSkew=true → decoder.RolloutInFlight=true
 			Replicas:           1,
 		},
@@ -190,8 +190,8 @@ func TestReconcileComponent_RevisionCollisionBumpsAndRetries(t *testing.T) {
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	if cs.OMENative == nil || cs.OMENative.CollisionCount == nil || *cs.OMENative.CollisionCount != 1 {
-		t.Fatalf("CollisionCount: got %+v, want 1", cs.OMENative.CollisionCount)
+	if cs.Lifecycle == nil || cs.Lifecycle.CollisionCount == nil || *cs.Lifecycle.CollisionCount != 1 {
+		t.Fatalf("CollisionCount: got %+v, want 1", cs.Lifecycle.CollisionCount)
 	}
 
 	// A new CR with a salt-shifted hash should now exist alongside the
@@ -201,7 +201,7 @@ func TestReconcileComponent_RevisionCollisionBumpsAndRetries(t *testing.T) {
 	if len(list.Items) != 2 {
 		t.Errorf("CR count after retry: got %d want 2 (conflicting + salt-shifted)", len(list.Items))
 	}
-	saltedHash, _, _ := revision.Hash(targetSpec, nil, cs.OMENative.CollisionCount, isvc.UID)
+	saltedHash, _, _ := revision.Hash(targetSpec, nil, cs.Lifecycle.CollisionCount, isvc.UID)
 	saltedName := core.RevisionName(isvc.Name, v1beta1.EngineComponent, saltedHash)
 	found := false
 	names := make([]string, 0, len(list.Items))

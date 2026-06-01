@@ -146,7 +146,7 @@ func ComputeWeightsFromPods(perRevisionPods map[string]int32, total int32, lates
 // a write).
 //
 // Bug context: when the very first reconcile that observed pods saw an
-// empty OMENativeComponentStatus.UpdateRevision (the IR controller had
+// empty LifecycleStatus.UpdateRevision (the IR controller had
 // not yet committed Status; common on Component bring-up), the writer
 // stamped LatestRevision=false. A subsequent reconcile saw
 // UpdateRevision populated and computed LatestRevision=true, but the

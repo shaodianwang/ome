@@ -66,7 +66,7 @@ type fixture struct {
 	// first reconcile. Used by the in-place-update / surge scenarios
 	// to seed a steady-state InstanceStatus the second iteration
 	// will mutate from.
-	initialStatus *v1beta1.OMENativeComponentStatus
+	initialStatus *v1beta1.LifecycleStatus
 }
 
 // clusterState is the diffable snapshot both paths converge to.
@@ -105,22 +105,22 @@ type clusterState struct {
 	podGroups []string
 
 	// statusInstanceCount is the length of
-	// ISVC.Status.Components[component].OMENative.InstanceStatuses
+	// ISVC.Status.Components[component].Lifecycle.InstanceStatuses
 	// after the run. Both paths must produce the same number of
 	// per-Instance entries.
 	statusInstanceCount int
 
 	// statusCurrentRevision mirrors the post-reconcile
-	// OMENativeComponentStatus.CurrentRevision so the test catches
+	// LifecycleStatus.CurrentRevision so the test catches
 	// any rollout-promote drift.
 	statusCurrentRevision string
 
 	// statusUpdateRevision mirrors the post-reconcile
-	// OMENativeComponentStatus.UpdateRevision.
+	// LifecycleStatus.UpdateRevision.
 	statusUpdateRevision string
 
 	// statusReplicas mirrors the post-reconcile
-	// OMENativeComponentStatus.Replicas counter.
+	// LifecycleStatus.Replicas counter.
 	statusReplicas int32
 }
 
@@ -410,8 +410,8 @@ func runWorkloadOnce(ctx context.Context, params core.ReconcileParams) error {
 	var target *appsv1.ControllerRevision
 	if params.PodSpec != nil {
 		var collisionCount *int32
-		if cs, ok := params.ISVC.Status.Components[params.Component]; ok && cs.OMENative != nil {
-			collisionCount = cs.OMENative.CollisionCount
+		if cs, ok := params.ISVC.Status.Components[params.Component]; ok && cs.Lifecycle != nil {
+			collisionCount = cs.Lifecycle.CollisionCount
 		}
 		t, _, err := core.EnsureControllerRevisionForISVC(ctx, params.Client, params.Reader(), params.ISVC, params.Component, params.PodSpec, &params.ObjectMeta, collisionCount)
 		if err != nil {
@@ -575,7 +575,7 @@ func buildEquivalenceISVC(fix fixture) *v1beta1.InferenceService {
 
 	if fix.initialStatus != nil {
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			fix.component: {OMENative: fix.initialStatus},
+			fix.component: {Lifecycle: fix.initialStatus},
 		}
 	}
 	return isvc
@@ -710,11 +710,11 @@ func snapshotClusterState(t *testing.T, ctx context.Context, cli client.Client, 
 	if err := cli.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
 		t.Fatalf("snapshot: re-read ISVC: %v", err)
 	}
-	if cs, ok := fresh.Status.Components[component]; ok && cs.OMENative != nil {
-		out.statusInstanceCount = len(cs.OMENative.InstanceStatuses)
-		out.statusCurrentRevision = cs.OMENative.CurrentRevision
-		out.statusUpdateRevision = cs.OMENative.UpdateRevision
-		out.statusReplicas = cs.OMENative.Replicas
+	if cs, ok := fresh.Status.Components[component]; ok && cs.Lifecycle != nil {
+		out.statusInstanceCount = len(cs.Lifecycle.InstanceStatuses)
+		out.statusCurrentRevision = cs.Lifecycle.CurrentRevision
+		out.statusUpdateRevision = cs.Lifecycle.UpdateRevision
+		out.statusReplicas = cs.Lifecycle.Replicas
 	}
 
 	return out

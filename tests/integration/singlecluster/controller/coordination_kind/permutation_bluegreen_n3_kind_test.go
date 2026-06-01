@@ -62,8 +62,8 @@ var _ = ginkgo.Describe("permutation — BlueGreen N=3 gang-flip", ginkgo.Ordere
 				v1beta1.RouterComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil(), "Component %s missing OMENative status", comp)
-				g.Expect(cs.OMENative.ServingReplicas).To(BeNumerically(">=", 1),
+				g.Expect(cs.Lifecycle).NotTo(BeNil(), "Component %s missing OMENative status", comp)
+				g.Expect(cs.Lifecycle.ServingReplicas).To(BeNumerically(">=", 1),
 					"Component %s must have at least 1 serving replica before bump", comp)
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -71,9 +71,9 @@ var _ = ginkgo.Describe("permutation — BlueGreen N=3 gang-flip", ginkgo.Ordere
 		// Snapshot all three Component CurrentRevisions.
 		preBump := freshISVC(Default, ns.Name, "perm-bg-n3")
 		v1Revs := map[v1beta1.ComponentType]string{
-			v1beta1.EngineComponent:  preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision,
-			v1beta1.DecoderComponent: preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision,
-			v1beta1.RouterComponent:  preBump.Status.Components[v1beta1.RouterComponent].OMENative.CurrentRevision,
+			v1beta1.EngineComponent:  preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision,
+			v1beta1.DecoderComponent: preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision,
+			v1beta1.RouterComponent:  preBump.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision,
 		}
 		for comp, rev := range v1Revs {
 			Expect(rev).NotTo(BeEmpty(), "v1 revision for %s should not be empty", comp)
@@ -98,10 +98,10 @@ var _ = ginkgo.Describe("permutation — BlueGreen N=3 gang-flip", ginkgo.Ordere
 				v1beta1.RouterComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil())
-				g.Expect(cs.OMENative.CurrentRevision).NotTo(Equal(v1Revs[comp]),
+				g.Expect(cs.Lifecycle).NotTo(BeNil())
+				g.Expect(cs.Lifecycle.CurrentRevision).NotTo(Equal(v1Revs[comp]),
 					"KP-6: Component %s CurrentRevision must advance off v1", comp)
-				g.Expect(cs.OMENative.ServingReplicas).To(BeNumerically(">=", 1),
+				g.Expect(cs.Lifecycle.ServingReplicas).To(BeNumerically(">=", 1),
 					"KP-6: Component %s must remain serving on v2", comp)
 			}
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).

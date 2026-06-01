@@ -57,11 +57,11 @@ var _ = ginkgo.Describe("behavior — PerComponent maxSurge upper bound", ginkgo
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "surge-e1")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		// Sampler: alive(engine) must stay <= 3 throughout.
 		stop := util.StartSampler(suiteCtx, 100*time.Millisecond, func(g Gomega) {
@@ -82,9 +82,9 @@ var _ = ginkgo.Describe("behavior — PerComponent maxSurge upper bound", ginkgo
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "surge-e1")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"E-1: engine CurrentRevision must advance off v1")
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		stop()
 	})

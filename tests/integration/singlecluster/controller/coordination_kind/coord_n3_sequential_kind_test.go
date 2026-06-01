@@ -74,17 +74,17 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 				v1beta1.EngineComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil(), "Component %s missing OMENative status", comp)
-				g.Expect(cs.OMENative.ServingReplicas).To(BeNumerically(">=", 1),
+				g.Expect(cs.Lifecycle).NotTo(BeNil(), "Component %s missing OMENative status", comp)
+				g.Expect(cs.Lifecycle.ServingReplicas).To(BeNumerically(">=", 1),
 					"Component %s must have at least 1 serving replica before bump", comp)
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Capture the pre-bump revisions for each of the three Components.
 		preBump := freshISVC(Default, ns.Name, "seq-n3-kcg1")
-		v1RouterRev := preBump.Status.Components[v1beta1.RouterComponent].OMENative.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1RouterRev := preBump.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision
+		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 		Expect(v1RouterRev).NotTo(BeEmpty())
 		Expect(v1DecoderRev).NotTo(BeEmpty())
 		Expect(v1EngineRev).NotTo(BeEmpty())
@@ -109,9 +109,9 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 			if err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "seq-n3-kcg1"}, c); err != nil {
 				return
 			}
-			r := c.Status.Components[v1beta1.RouterComponent].OMENative
-			d := c.Status.Components[v1beta1.DecoderComponent].OMENative
-			e := c.Status.Components[v1beta1.EngineComponent].OMENative
+			r := c.Status.Components[v1beta1.RouterComponent].Lifecycle
+			d := c.Status.Components[v1beta1.DecoderComponent].Lifecycle
+			e := c.Status.Components[v1beta1.EngineComponent].Lifecycle
 			if r == nil || d == nil || e == nil {
 				return
 			}
@@ -141,11 +141,11 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 		// advanced off v1, group back to Idle.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "seq-n3-kcg1")
-			g.Expect(c.Status.Components[v1beta1.RouterComponent].OMENative.CurrentRevision).NotTo(Equal(v1RouterRev),
+			g.Expect(c.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1RouterRev),
 				"KCG-1: router CurrentRevision must advance off v1")
-			g.Expect(c.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision).NotTo(Equal(v1DecoderRev),
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
 				"KCG-1: decoder CurrentRevision must advance off v1")
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"KCG-1: engine CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),

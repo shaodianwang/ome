@@ -42,12 +42,12 @@ func findInstanceStatusForISVCTest(isvc *v1beta1.InferenceService, component v1b
 		return nil
 	}
 	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return nil
 	}
-	for i := range cs.OMENative.InstanceStatuses {
-		if cs.OMENative.InstanceStatuses[i].Index == idx {
-			return &cs.OMENative.InstanceStatuses[i]
+	for i := range cs.Lifecycle.InstanceStatuses {
+		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
+			return &cs.Lifecycle.InstanceStatuses[i]
 		}
 	}
 	return nil
@@ -219,12 +219,12 @@ func seedRunningRevision(t *testing.T, c client.Client, isvc *v1beta1.InferenceS
 		fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
 	cs := fresh.Status.Components[component]
-	if cs.OMENative == nil {
-		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	if cs.Lifecycle == nil {
+		cs.Lifecycle = &v1beta1.LifecycleStatus{}
 	}
-	for i := range cs.OMENative.InstanceStatuses {
-		if cs.OMENative.InstanceStatuses[i].Index == idx {
-			cs.OMENative.InstanceStatuses[i].RunningRevision = cr.Name
+	for i := range cs.Lifecycle.InstanceStatuses {
+		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
+			cs.Lifecycle.InstanceStatuses[i].RunningRevision = cr.Name
 			fresh.Status.Components[component] = cs
 			if err := c.Status().Update(context.Background(), fresh); err != nil {
 				t.Fatalf("set RunningRevision: %v", err)

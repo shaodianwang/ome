@@ -110,7 +110,7 @@ func detectStuckInstancesForAutoMigration(ctx context.Context, p core.ReconcileP
 	}
 
 	cs, ok := p.ISVC.Status.Components[component]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return nil
 	}
 
@@ -126,8 +126,8 @@ func detectStuckInstancesForAutoMigration(ctx context.Context, p core.ReconcileP
 	}
 
 	mutated := false
-	for i := range cs.OMENative.InstanceStatuses {
-		s := &cs.OMENative.InstanceStatuses[i]
+	for i := range cs.Lifecycle.InstanceStatuses {
+		s := &cs.Lifecycle.InstanceStatuses[i]
 		if !isStuckPhase(s.Phase) {
 			continue
 		}

@@ -63,8 +63,8 @@ var _ = ginkgo.Describe("permutation — Sequential + InPlaceIfPossible", ginkgo
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(2)))
-			g.Expect(decCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Capture v1 pod UIDs.
@@ -85,8 +85,8 @@ var _ = ginkgo.Describe("permutation — Sequential + InPlaceIfPossible", ginkgo
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-seq-inplace")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 
 		// Sample the Sequential handoff window: decoder rolled off v1
 		// while engine still on v1. Same observation pattern as D-2.
@@ -96,8 +96,8 @@ var _ = ginkgo.Describe("permutation — Sequential + InPlaceIfPossible", ginkgo
 			if err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "perm-seq-inplace"}, c); err != nil {
 				return
 			}
-			dec := c.Status.Components[v1beta1.DecoderComponent].OMENative
-			eng := c.Status.Components[v1beta1.EngineComponent].OMENative
+			dec := c.Status.Components[v1beta1.DecoderComponent].Lifecycle
+			eng := c.Status.Components[v1beta1.EngineComponent].Lifecycle
 			if dec == nil || eng == nil {
 				return
 			}
@@ -120,8 +120,8 @@ var _ = ginkgo.Describe("permutation — Sequential + InPlaceIfPossible", ginkgo
 			c := freshISVC(g, ns.Name, "perm-seq-inplace")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev))
-			g.Expect(decCS.OMENative.CurrentRevision).NotTo(Equal(v1DecoderRev))
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev))
+			g.Expect(decCS.Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev))
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

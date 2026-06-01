@@ -61,9 +61,9 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(3)))
-			v1EngineRev = engCS.OMENative.CurrentRevision
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)))
+			v1EngineRev = engCS.Lifecycle.CurrentRevision
 			g.Expect(v1EngineRev).NotTo(BeEmpty())
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -97,8 +97,8 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "cancel-mid-kcg4")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(3)),
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)),
 				"KCG-4: engine must be back to 3 serving replicas after revert")
 			// Either the CurrentRevision is the ORIGINAL v1EngineRev (the
 			// controller adopted the same ControllerRevision back), OR

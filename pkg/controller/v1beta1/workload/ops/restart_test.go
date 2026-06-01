@@ -23,7 +23,7 @@ func isvcReadyAtIncarnation(name, ns string, incarnation int64) *v1beta1.Inferen
 	isvc := minimalISVC(name, ns, 1)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: 0, Incarnation: incarnation, Phase: v1beta1.OMENativeInstanceReady},
 				},
@@ -48,8 +48,8 @@ func podAtIncarnation(isvc *v1beta1.InferenceService, instanceIdx int32, incarna
 // the post-bump value rather than re-stamping 1.
 func buildPlanSinglePodEngineForRestart(isvc *v1beta1.InferenceService) workload.ComponentPlan {
 	plan := buildPlanSinglePodEngine(1)
-	if cs, ok := isvc.Status.Components[v1beta1.EngineComponent]; ok && cs.OMENative != nil {
-		for _, s := range cs.OMENative.InstanceStatuses {
+	if cs, ok := isvc.Status.Components[v1beta1.EngineComponent]; ok && cs.Lifecycle != nil {
+		for _, s := range cs.Lifecycle.InstanceStatuses {
 			if s.Index == 0 && s.Incarnation > 0 {
 				plan.Instances[0].Incarnation = s.Incarnation
 				break
@@ -87,7 +87,7 @@ func TestRestart_FirstPassBumpsIncarnationAndPatchesStatus(t *testing.T) {
 	// Status should now be Phase=Restarting, Incarnation=2.
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceRestarting {
 		t.Errorf("Phase: got %q want Restarting", s.Phase)
 	}
@@ -111,7 +111,7 @@ func TestRestart_DrainOldPod_FlipsServingFalse(t *testing.T) {
 	// EndpointSlice still publishes the pod as Ready.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:       0,
 		Incarnation: 2,
 		Phase:       v1beta1.OMENativeInstanceRestarting,
@@ -143,7 +143,7 @@ func TestRestart_DrainOldPod_FlipsServingFalse(t *testing.T) {
 func TestRestart_DeletesOldPodOnceDrained(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:       0,
 		Incarnation: 2,
 		Phase:       v1beta1.OMENativeInstanceRestarting,
@@ -212,7 +212,7 @@ func TestRestart_CreatesNewPodAtBumpedIncarnation(t *testing.T) {
 	// not yet created). Restart should create the new pod at Inc=2.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     2,
 		Phase:           v1beta1.OMENativeInstanceRestarting,
@@ -250,7 +250,7 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	// Pre-seed RunningRevision so Phase-B recreate has a hash to stamp.
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].RunningRevision = "llama-70b-engine-" + testRevisionHash
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision = "llama-70b-engine-" + testRevisionHash
 	failed := podAtIncarnation(isvc, 0, 1, true, true)
 	failed.Status.Phase = corev1.PodFailed
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, failed, false /* drained */)
@@ -281,7 +281,7 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 			// Verify end state.
 			finalISVC := &v1beta1.InferenceService{}
 			_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), finalISVC)
-			s := finalISVC.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+			s := finalISVC.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 			if s.Phase != v1beta1.OMENativeInstanceReady {
 				t.Errorf("final Phase: got %q want Ready", s.Phase)
 			}

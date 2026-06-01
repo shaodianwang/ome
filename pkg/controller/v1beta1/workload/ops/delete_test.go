@@ -24,7 +24,7 @@ func isvcWithStatus(name, ns string, replicas int, idx int32, phase v1beta1.OMEN
 	isvc := minimalISVC(name, ns, replicas)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: idx, Phase: phase},
 				},
@@ -81,10 +81,10 @@ func testRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 			return false, nil
 		}
 		cs, ok := fresh.Status.Components[v1component]
-		if !ok || cs.OMENative == nil {
+		if !ok || cs.Lifecycle == nil {
 			return false, nil
 		}
-		insts := cs.OMENative.InstanceStatuses
+		insts := cs.Lifecycle.InstanceStatuses
 		pos := -1
 		for i, s := range insts {
 			if s.Index == idx {
@@ -95,7 +95,7 @@ func testRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 		if pos == -1 {
 			return false, nil
 		}
-		cs.OMENative.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
+		cs.Lifecycle.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
 		fresh.Status.Components[v1component] = cs
 		if err := c.Status().Update(ctx, fresh); err != nil {
 			return false, fmt.Errorf("status update: %w", err)
@@ -157,8 +157,8 @@ func TestDelete_PodsGone_RemovesInstanceStatus(t *testing.T) {
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	if cs.OMENative != nil && len(cs.OMENative.InstanceStatuses) != 0 {
-		t.Errorf("InstanceStatuses: got %d want 0", len(cs.OMENative.InstanceStatuses))
+	if cs.Lifecycle != nil && len(cs.Lifecycle.InstanceStatuses) != 0 {
+		t.Errorf("InstanceStatuses: got %d want 0", len(cs.Lifecycle.InstanceStatuses))
 	}
 }
 
@@ -192,7 +192,7 @@ func TestDelete_FlipsServingFalseAndRequeuesWhileDraining(t *testing.T) {
 	// Status should be Deleting with Operation Delete.
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	is := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	is := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if is.Phase != v1beta1.OMENativeInstanceDeleting {
 		t.Errorf("Phase: got %q want Deleting", is.Phase)
 	}
@@ -261,8 +261,8 @@ func TestDelete_ConvergesAcrossPasses(t *testing.T) {
 			fresh := &v1beta1.InferenceService{}
 			_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 			cs := fresh.Status.Components[v1beta1.EngineComponent]
-			if cs.OMENative != nil && len(cs.OMENative.InstanceStatuses) != 0 {
-				t.Errorf("status entries left: %d", len(cs.OMENative.InstanceStatuses))
+			if cs.Lifecycle != nil && len(cs.Lifecycle.InstanceStatuses) != 0 {
+				t.Errorf("status entries left: %d", len(cs.Lifecycle.InstanceStatuses))
 			}
 			// Allow the cache to "observe" the delete: clear the
 			// expectations entry that ExpectDeletes left behind.

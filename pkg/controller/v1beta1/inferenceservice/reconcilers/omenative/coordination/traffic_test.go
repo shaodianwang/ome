@@ -184,7 +184,7 @@ func TestTrafficDiffersMeaningfully_TagDriftIgnored(t *testing.T) {
 // TestTrafficDiffersMeaningfully_LatestRevisionFlip pins the regression
 // from PD-disaggregated A-6 testing: when the engine's traffic[0] was
 // initially written with LatestRevision=false (because the IR Status had
-// not yet populated OMENativeComponentStatus.UpdateRevision on the first
+// not yet populated LifecycleStatus.UpdateRevision on the first
 // reconcile that observed pods), subsequent reconciles computed the
 // correct LatestRevision=true value but the no-op short-circuit treated
 // the flag as cosmetic and suppressed the write — leaving the engine

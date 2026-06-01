@@ -48,8 +48,8 @@ var _ = ginkgo.Describe("TRAFFIC — Status.Components.<c>.Traffic[] producer", 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "traffic1")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(1)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(1)))
 
 			traffic := trafficForComponent(c, v1beta1.EngineComponent)
 			g.Expect(traffic).To(HaveLen(1),
@@ -89,8 +89,8 @@ var _ = ginkgo.Describe("TRAFFIC — Status.Components.<c>.Traffic[] producer", 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "traffic2")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 			traffic := trafficForComponent(c, v1beta1.EngineComponent)
 			g.Expect(traffic).To(HaveLen(1),
 				"pre-bump Traffic[] must have exactly one entry; got %d", len(traffic))
@@ -145,8 +145,8 @@ var _ = ginkgo.Describe("TRAFFIC — Status.Components.<c>.Traffic[] producer", 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "traffic2")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 
 			traffic := trafficForComponent(c, v1beta1.EngineComponent)
 			g.Expect(traffic).To(HaveLen(1),

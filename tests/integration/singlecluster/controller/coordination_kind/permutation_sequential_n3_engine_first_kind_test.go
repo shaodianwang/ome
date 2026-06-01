@@ -68,15 +68,15 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 				v1beta1.RouterComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil(), "Component %s missing status", comp)
-				g.Expect(cs.OMENative.ServingReplicas).To(BeNumerically(">=", 1))
+				g.Expect(cs.Lifecycle).NotTo(BeNil(), "Component %s missing status", comp)
+				g.Expect(cs.Lifecycle.ServingReplicas).To(BeNumerically(">=", 1))
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-seq-n3-ef")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision
-		v1RouterRev := preBump.Status.Components[v1beta1.RouterComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
+		v1RouterRev := preBump.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision
 
 		// Sample handoff windows. Same pattern as KCG-1 but rotated for
 		// the engine-first order:
@@ -90,9 +90,9 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 			if err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "perm-seq-n3-ef"}, c); err != nil {
 				return
 			}
-			e := c.Status.Components[v1beta1.EngineComponent].OMENative
-			d := c.Status.Components[v1beta1.DecoderComponent].OMENative
-			r := c.Status.Components[v1beta1.RouterComponent].OMENative
+			e := c.Status.Components[v1beta1.EngineComponent].Lifecycle
+			d := c.Status.Components[v1beta1.DecoderComponent].Lifecycle
+			r := c.Status.Components[v1beta1.RouterComponent].Lifecycle
 			if e == nil || d == nil || r == nil {
 				return
 			}
@@ -118,9 +118,9 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-seq-n3-ef")
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision).NotTo(Equal(v1EngineRev))
-			g.Expect(c.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision).NotTo(Equal(v1DecoderRev))
-			g.Expect(c.Status.Components[v1beta1.RouterComponent].OMENative.CurrentRevision).NotTo(Equal(v1RouterRev))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev))
+			g.Expect(c.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1RouterRev))
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

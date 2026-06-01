@@ -166,13 +166,13 @@ func observeSequentialComponentsForGate(isvc *v1beta1.InferenceService, componen
 	out := make(map[v1beta1.ComponentType]ComponentObservation, len(components))
 	for _, c := range components {
 		obs := ComponentObservation{Component: c}
-		if cs, ok := isvc.Status.Components[c]; ok && cs.OMENative != nil {
-			currentHash := revisionHashFromName(isvc.Name, c, cs.OMENative.CurrentRevision)
-			targetHash := revisionHashFromName(isvc.Name, c, cs.OMENative.UpdateRevision)
+		if cs, ok := isvc.Status.Components[c]; ok && cs.Lifecycle != nil {
+			currentHash := revisionHashFromName(isvc.Name, c, cs.Lifecycle.CurrentRevision)
+			targetHash := revisionHashFromName(isvc.Name, c, cs.Lifecycle.UpdateRevision)
 			obs.CurrentRevisionHash = currentHash
 			obs.TargetRevisionHash = targetHash
 			revisionSkew := targetHash != "" && targetHash != currentHash
-			generationSkew := cs.OMENative.ObservedGeneration < isvc.Generation
+			generationSkew := cs.Lifecycle.ObservedGeneration < isvc.Generation
 			obs.RolloutInFlight = revisionSkew || generationSkew
 		}
 		out[c] = obs
@@ -232,10 +232,10 @@ func previousCompletedComponentForGate(order []v1beta1.ComponentType, observatio
 // LastTransitionTime on real status transitions (False→True).
 func previousComponentReadyAt(isvc *v1beta1.InferenceService, prev v1beta1.ComponentType) time.Time {
 	cs, ok := isvc.Status.Components[prev]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return time.Time{}
 	}
-	for _, cond := range cs.OMENative.Conditions {
+	for _, cond := range cs.Lifecycle.Conditions {
 		if cond.Type != conditionAvailable {
 			continue
 		}

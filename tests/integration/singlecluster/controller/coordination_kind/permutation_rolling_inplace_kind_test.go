@@ -67,10 +67,10 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceIfPossible", gin
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(2)))
-			g.Expect(decCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Capture v1 pod UIDs.
@@ -92,8 +92,8 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceIfPossible", gin
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-ru-inplace")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 
 		// Sampler: serving budget invariant across the rollout. Both
 		// Components must keep >= 1 of 2 pods serving (MaxUnavailable=1).
@@ -122,12 +122,12 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceIfPossible", gin
 			c := freshISVC(g, ns.Name, "perm-ru-inplace")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"KP-1: engine CurrentRevision must advance off v1")
-			g.Expect(decCS.OMENative.CurrentRevision).NotTo(Equal(v1DecoderRev),
+			g.Expect(decCS.Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
 				"KP-1: decoder CurrentRevision must advance off v1")
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(2)))
-			g.Expect(decCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"KP-1: rollout must return to Idle")

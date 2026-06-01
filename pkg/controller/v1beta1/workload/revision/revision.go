@@ -508,7 +508,7 @@ func nextRevisionNumber(
 // resume path returns nil and the migration bails forever.
 //
 // Takes the slice of InstanceStatuses + the two revision pointers
-// directly so the call works against either an OMENativeComponentStatus
+// directly so the call works against either an LifecycleStatus
 // (ISVC path) or an InferenceReplicaStatus (IR path) without needing a
 // type-specific reader. Either adapter projects its status surface into
 // these primitive args.

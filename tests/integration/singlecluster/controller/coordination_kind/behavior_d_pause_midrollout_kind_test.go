@@ -54,11 +54,11 @@ var _ = ginkgo.Describe("behavior — pause mid-rollout", ginkgo.Ordered, func()
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(4)))
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(4)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "pause-mid-d7")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		// Bump engine to v2.
 		Eventually(func(g Gomega) {
@@ -116,7 +116,7 @@ var _ = ginkgo.Describe("behavior — pause mid-rollout", ginkgo.Ordered, func()
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pause-mid-d7")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"D-7: after unpause, engine CurrentRevision must advance to v2")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),

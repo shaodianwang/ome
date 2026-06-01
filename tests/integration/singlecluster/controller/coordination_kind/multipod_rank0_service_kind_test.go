@@ -83,12 +83,12 @@ var _ = ginkgo.Describe("MPR — multi-pod rank-0 Service selector", ginkgo.Orde
 				"expected 3 engine pods (1 leader + 2 workers); got %d", engPods)
 			c := freshISVC(g, ns.Name, "mpr1")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			// All 3 pods reach Ready (= 1 Instance with 3 pods of
 			// 3 ready). OMENative reports ServingReplicas as the
 			// count of fully-ready INSTANCES, not pods.
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(1)),
-				"expected 1 multi-pod engine Instance ready; got %d", engCS.OMENative.ServingReplicas)
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(1)),
+				"expected 1 multi-pod engine Instance ready; got %d", engCS.Lifecycle.ServingReplicas)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Per-Component STABLE Service: <isvc>-<comp>.

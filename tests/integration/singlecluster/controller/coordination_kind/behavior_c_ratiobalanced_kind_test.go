@@ -60,14 +60,14 @@ var _ = ginkgo.Describe("behavior — BlueGreen + RatioBalanced", ginkgo.Ordered
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(4)))
-			g.Expect(decCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(4)))
+			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "ratio-c")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		// Sampler asserts C-1: live serving ratio in band [1.5, 2.5].
 		// Failure messages name the observed counts so a band violation
@@ -110,8 +110,8 @@ var _ = ginkgo.Describe("behavior — BlueGreen + RatioBalanced", ginkgo.Ordered
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "ratio-c")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))

@@ -273,8 +273,8 @@ func TestMigrate_RefusesWhenSourcePhaseNotReady(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	// Force source into Phase=Creating with an active Create Operation
 	// (typical state during initial bring-up).
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceCreating
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceCreating
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
 		Type: v1beta1.InstanceOperationCreate,
 		Step: "CreatePods",
 	}
@@ -302,7 +302,7 @@ func TestMigrate_RefusesWhenSourcePhaseNotReady(t *testing.T) {
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase == v1beta1.OMENativeInstanceMigrating {
 		t.Errorf("source must NOT be stamped Migrating while another op owns it; got Phase=%q", s.Phase)
 	}
@@ -310,9 +310,9 @@ func TestMigrate_RefusesWhenSourcePhaseNotReady(t *testing.T) {
 		t.Errorf("source Operation must be preserved; got %+v", s.Operation)
 	}
 	// No surge should have been allocated.
-	if len(fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses) != 1 {
+	if len(fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses) != 1 {
 		t.Errorf("no surge InstanceStatus should exist; got %+v",
-			fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses)
+			fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses)
 	}
 }
 
@@ -341,7 +341,7 @@ func TestMigrate_RefusesWhenSourceRunningRevisionEmpty(t *testing.T) {
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase == v1beta1.OMENativeInstanceMigrating {
 		t.Errorf("source must NOT be stamped Migrating without a recorded RunningRevision; got Phase=%q", s.Phase)
 	}
@@ -421,7 +421,7 @@ func TestMigrate_MultiPodRejectedWithAuditEntry(t *testing.T) {
 	// rejection happened up-front, before any status mutation.
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase == v1beta1.OMENativeInstanceMigrating {
 		t.Errorf("source must NOT be stamped Migrating for multi-pod rejection; got %q", s.Phase)
 	}
@@ -445,9 +445,9 @@ func TestMigrate_MultiPodRejectedWithAuditEntry(t *testing.T) {
 	}
 
 	// No surge InstanceStatus should be allocated.
-	if len(fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses) != 1 {
+	if len(fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses) != 1 {
 		t.Errorf("no surge should be allocated; got %+v",
-			fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses)
+			fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses)
 	}
 }
 
@@ -480,8 +480,8 @@ func TestMigrate_FirstPassAllocatesSurgeAndStampsBothStatuses(t *testing.T) {
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 	cs := fresh.Status.Components[v1beta1.EngineComponent]
 	var src, srg *v1beta1.OMENativeInstanceStatus
-	for i := range cs.OMENative.InstanceStatuses {
-		s := &cs.OMENative.InstanceStatuses[i]
+	for i := range cs.Lifecycle.InstanceStatuses {
+		s := &cs.Lifecycle.InstanceStatuses[i]
 		if s.Index == 0 {
 			src = s
 		} else {
@@ -725,7 +725,7 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 			final := &v1beta1.InferenceService{}
 			_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), final)
 			cs := final.Status.Components[v1beta1.EngineComponent]
-			for _, s := range cs.OMENative.InstanceStatuses {
+			for _, s := range cs.Lifecycle.InstanceStatuses {
 				if s.Index == 0 {
 					t.Errorf("source InstanceStatus should have been removed; got %+v", s)
 				}
@@ -843,11 +843,11 @@ func refreshInstanceCounters(ctx context.Context, p core.ReconcileParams, plan c
 	}
 	v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 	cs := fresh.Status.Components[v1component]
-	if cs.OMENative == nil {
+	if cs.Lifecycle == nil {
 		return nil
 	}
-	for i := range cs.OMENative.InstanceStatuses {
-		s := &cs.OMENative.InstanceStatuses[i]
+	for i := range cs.Lifecycle.InstanceStatuses {
+		s := &cs.Lifecycle.InstanceStatuses[i]
 		instPods := byIndex[s.Index]
 		s.PodCount = int32(len(instPods))
 		var ready, avail int32

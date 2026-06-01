@@ -48,13 +48,13 @@ var _ = ginkgo.Describe("behavior — single-replica safe default", ginkgo.Order
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(BeEmpty(),
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(BeEmpty(),
 				"engine must reach CurrentRevision before bump")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "single-i")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		// Bump engine image.
 		Eventually(func(g Gomega) {
@@ -68,8 +68,8 @@ var _ = ginkgo.Describe("behavior — single-replica safe default", ginkgo.Order
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "single-i")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision must advance off v1 — if this hangs at 90s, the default-pacing single-replica deadlock is back")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))

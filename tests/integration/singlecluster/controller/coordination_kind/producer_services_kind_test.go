@@ -51,8 +51,8 @@ var _ = ginkgo.Describe("SVC — per-revision Service emission + drift correctio
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "svc1")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(1)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(1)))
 
 			pods := listOMENativePods(g, ns.Name, "svc1")
 			g.Expect(pods).NotTo(BeEmpty())

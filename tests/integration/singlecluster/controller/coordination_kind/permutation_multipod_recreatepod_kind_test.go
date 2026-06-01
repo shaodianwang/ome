@@ -58,10 +58,10 @@ var _ = ginkgo.Describe("permutation — multi-pod RecreatePod", ginkgo.Ordered,
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-mp-rp")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1),
 				"KP-11: single Instance (MinReplicas=1) under multi-pod")
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).
 				To(Equal(v1beta1.OMENativeInstanceReady),
 					"KP-11: multi-pod Instance must reach Ready")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -74,8 +74,8 @@ var _ = ginkgo.Describe("permutation — multi-pod RecreatePod", ginkgo.Ordered,
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-mp-rp")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
-		v1Incarnation := preBump.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Incarnation
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		v1Incarnation := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Incarnation
 
 		// Bump engine image. Multi-pod recreate must rebuild the gang
 		// (Incarnation bumps).
@@ -88,13 +88,13 @@ var _ = ginkgo.Describe("permutation — multi-pod RecreatePod", ginkgo.Ordered,
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-mp-rp")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(cs.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"KP-11: engine CurrentRevision must advance off v1")
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).
 				To(Equal(v1beta1.OMENativeInstanceReady),
 					"KP-11: multi-pod Instance must return to Ready on v2")
-			g.Expect(cs.OMENative.InstanceStatuses[0].Incarnation).
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Incarnation).
 				To(BeNumerically(">", v1Incarnation),
 					"KP-11: RecreatePod must bump Incarnation (gang rebuilt)")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).

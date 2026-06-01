@@ -58,12 +58,12 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceOnly env-change 
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-ru-iponly")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 		Expect(v1EngineRev).NotTo(BeEmpty())
 
 		// Inject an env-var change — this is exactly the diff
@@ -88,8 +88,8 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceOnly env-change 
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ru-iponly")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.CurrentRevision).To(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.CurrentRevision).To(Equal(v1EngineRev),
 				"KP-2: InPlaceOnly + env-change must NOT advance CurrentRevision off v1")
 		}, 5*time.Second, kindPollInterval).Should(Succeed())
 

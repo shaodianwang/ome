@@ -47,7 +47,7 @@ var (
 
 // AllocateSurgeIndex is the ISVC-adapter-facing wrapper around
 // workload.AllocateSurgeIndex. It centralizes the
-// ISVC.Status.Components[c].OMENative.InstanceStatuses projection so
+// ISVC.Status.Components[c].Lifecycle.InstanceStatuses projection so
 // callers don't repeat the nil-guard dance. Converts at the boundary
 // via v1beta1convert.InstanceStatusSliceToWorkload — slice 3 of the
 // workload-extraction refactor flipped workload.AllocateSurgeIndex to
@@ -66,10 +66,10 @@ func extractInstanceStatuses(isvc *v1beta1.InferenceService, component v1beta1.C
 		return nil
 	}
 	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return nil
 	}
-	return cs.OMENative.InstanceStatuses
+	return cs.Lifecycle.InstanceStatuses
 }
 
 // BuildPlan is the ISVC-adapter-facing wrapper around

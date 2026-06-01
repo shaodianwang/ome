@@ -41,9 +41,9 @@ var _ = ginkgo.Describe("OMENative: rapid spec bumps", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int5")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Bump an env var 5 times with no delay between writes. Each
@@ -81,8 +81,8 @@ var _ = ginkgo.Describe("OMENative: rapid spec bumps", ginkgo.Ordered, func() {
 			}
 			g.Expect(got).To(Equal("v5"), "final spec env INT5_BUMP must be v5; got %q", got)
 			cs := cur.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.UpdateRevision).NotTo(BeEmpty())
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.UpdateRevision).NotTo(BeEmpty())
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// CR count stays under the retention cap. defaultRevisionRetention

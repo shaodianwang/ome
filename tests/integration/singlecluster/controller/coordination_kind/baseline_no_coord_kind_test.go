@@ -42,10 +42,10 @@ var _ = ginkgo.Describe("baseline — PD without rolloutCoordination", ginkgo.Or
 				"status.rolloutCoordination must stay nil when spec omits it")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ReadyReplicas).To(Equal(int32(1)))
-			g.Expect(decCS.OMENative.ReadyReplicas).To(Equal(int32(1)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ReadyReplicas).To(Equal(int32(1)))
+			g.Expect(decCS.Lifecycle.ReadyReplicas).To(Equal(int32(1)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

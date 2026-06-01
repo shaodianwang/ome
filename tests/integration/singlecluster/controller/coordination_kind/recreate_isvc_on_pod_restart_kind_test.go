@@ -72,9 +72,9 @@ var _ = ginkgo.Describe("behavior — RecreateISVCOnPodRestart cross-Component c
 				v1beta1.EngineComponent, v1beta1.DecoderComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil(), "Component %s missing OMENative status", comp)
-				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).
+				g.Expect(cs.Lifecycle).NotTo(BeNil(), "Component %s missing OMENative status", comp)
+				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).
 					To(Equal(v1beta1.OMENativeInstanceReady),
 						"Component %s must reach Ready before kill", comp)
 			}
@@ -113,9 +113,9 @@ var _ = ginkgo.Describe("behavior — RecreateISVCOnPodRestart cross-Component c
 				v1beta1.EngineComponent, v1beta1.DecoderComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil())
-				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).
+				g.Expect(cs.Lifecycle).NotTo(BeNil())
+				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).
 					To(Equal(v1beta1.OMENativeInstanceReady),
 						"Component %s must converge back to Ready after cascade", comp)
 			}

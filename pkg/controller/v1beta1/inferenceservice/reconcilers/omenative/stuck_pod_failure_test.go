@@ -38,7 +38,7 @@ func withStuckPodGracePeriod(t *testing.T, d time.Duration) {
 func surgeStuckPodEnv(t *testing.T, podAge time.Duration, reason string) (*v1beta1.InferenceService, *corev1.Pod, *corev1.Pod) {
 	t.Helper()
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     1,
 		Phase:           v1beta1.OMENativeInstanceUpdating,
@@ -92,7 +92,7 @@ func TestSurgeUpdate_CrashLoopBackOff_MarksInstanceFailed(t *testing.T) {
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceFailed {
 		t.Errorf("Phase: got %q want Failed (surge pod CrashLoopBackOff past grace should fast-fail)", s.Phase)
 	}
@@ -123,7 +123,7 @@ func TestSurgeUpdate_RunContainerError_MarksInstanceFailed(t *testing.T) {
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceFailed {
 		t.Errorf("Phase: got %q want Failed (surge pod RunContainerError past grace should fast-fail)", s.Phase)
 	}
@@ -149,7 +149,7 @@ func TestSurgeUpdate_ImagePullBackOff_MarksInstanceFailed(t *testing.T) {
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceFailed {
 		t.Errorf("Phase: got %q want Failed (surge pod ImagePullBackOff past grace should fast-fail)", s.Phase)
 	}
@@ -182,7 +182,7 @@ func TestSurgeUpdate_ImagePullBackOff_WithinGrace_NoEscalation(t *testing.T) {
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceUpdating {
 		t.Errorf("Phase: got %q want Updating (still inside grace window)", s.Phase)
 	}
@@ -199,7 +199,7 @@ func TestSurgeUpdate_ImagePullBackOff_IdempotentOnAlreadyFailed(t *testing.T) {
 	isvc, oldPod, surgePod := surgeStuckPodEnv(t, 5*time.Second, "ImagePullBackOff")
 	// Pre-stamp Phase=Failed on the InstanceStatus so the second pass
 	// sees the already-failed state on the very first read.
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceFailed
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceFailed
 	c := newFakeClientWithDiscovery(t, isvc, oldPod, surgePod)
 	p := minimalParams(t, isvc, c)
 	plan, _ := BuildPlan(p)
@@ -214,7 +214,7 @@ func TestSurgeUpdate_ImagePullBackOff_IdempotentOnAlreadyFailed(t *testing.T) {
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceFailed {
 		t.Errorf("Phase: got %q want Failed (escalation must persist across passes)", s.Phase)
 	}
@@ -249,7 +249,7 @@ func TestSurgeUpdate_NoOperation_NoEscalation(t *testing.T) {
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceReady {
 		t.Errorf("Phase: got %q want Ready (no in-flight Operation must not escalate)", s.Phase)
 	}
@@ -290,7 +290,7 @@ func TestSurgeUpdate_WedgedSurgePod_NoTransientPhase_EscalatesFailed(t *testing.
 	// v1 pod); the surge pod alongside carries a NEW CR's revision-hash
 	// label (a stuck-bad-image surge attempt that never converged).
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     1,
 		Phase:           v1beta1.OMENativeInstanceReady,
@@ -304,8 +304,8 @@ func TestSurgeUpdate_WedgedSurgePod_NoTransientPhase_EscalatesFailed(t *testing.
 	// Component-level revisions: CurrentRevision is the old serving CR
 	// (matching the InstanceStatus.RunningRevision). UpdateRevision is
 	// the new bad-image CR (the surge pod was created against it).
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision = "llama-70b-engine-old"
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.UpdateRevision = "llama-70b-engine-new"
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision = "llama-70b-engine-old"
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.UpdateRevision = "llama-70b-engine-new"
 
 	// Old (canonical, v1) pod at ordinal 0 — healthy, serving.
 	oldPod := podAtIncarnation(isvc, 0, 1, true /* ready */, true /* serving */)
@@ -337,7 +337,7 @@ func TestSurgeUpdate_WedgedSurgePod_NoTransientPhase_EscalatesFailed(t *testing.
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceFailed {
 		t.Errorf("Phase: got %q want Failed (wedged surge pod with hash != CurrentRevision must escalate even at Phase=Ready)", s.Phase)
 	}
@@ -359,14 +359,14 @@ func TestSurgeUpdate_WedgedSurgePod_HashMatchesCurrent_NoEscalation(t *testing.T
 	withStuckPodGracePeriod(t, 1*time.Second)
 
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     1,
 		Phase:           v1beta1.OMENativeInstanceReady,
 		RunningRevision: "llama-70b-engine-old",
 	}
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision = "llama-70b-engine-old"
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.UpdateRevision = "llama-70b-engine-old"
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision = "llama-70b-engine-old"
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.UpdateRevision = "llama-70b-engine-old"
 
 	// Single canonical pod, stuck (e.g., registry briefly down), revision
 	// hash matches CurrentRevision — no rollout in flight, no
@@ -387,7 +387,7 @@ func TestSurgeUpdate_WedgedSurgePod_HashMatchesCurrent_NoEscalation(t *testing.T
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceReady {
 		t.Errorf("Phase: got %q want Ready (stuck pod whose hash matches CurrentRevision must not escalate)", s.Phase)
 	}
@@ -435,9 +435,9 @@ func TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd(t *testing.T) {
 	}
 	// CurrentRevision != UpdateRevision so coordination sees a rollout
 	// in flight (the SurgeThenDrain failure case operators reported).
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision = "llama-70b-engine-old"
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.UpdateRevision = "llama-70b-engine-new"
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.Replicas = 1
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision = "llama-70b-engine-old"
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.UpdateRevision = "llama-70b-engine-new"
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.Replicas = 1
 	// Pod revision-hash labels so the per-revision observation has data
 	// to feed the group transition.
 	oldPod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName("llama-70b-engine-old")
@@ -461,7 +461,7 @@ func TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
 		t.Fatalf("get fresh isvc after step 1: %v", err)
 	}
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceFailed {
 		t.Fatalf("step 1: Phase: got %q want Failed", s.Phase)
 	}
@@ -469,7 +469,7 @@ func TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd(t *testing.T) {
 	// Verify the Component-level Progressing condition reflects the
 	// failure (the bug #52 follow-up: previously this stayed at
 	// True/RolloutInProgress because CurrentRevision != UpdateRevision).
-	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	cs := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	progressing := apimeta.FindStatusCondition(cs.Conditions, status.ConditionProgressing)
 	if progressing == nil {
 		t.Fatalf("Progressing condition missing on Component status")
@@ -530,7 +530,7 @@ func TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd(t *testing.T) {
 // surface contract this fix depends on.
 func TestSurgeUpdate_FailedInstanceSurfacesAtComponentObservation(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     1,
 		Phase:           v1beta1.OMENativeInstanceFailed,
@@ -541,9 +541,9 @@ func TestSurgeUpdate_FailedInstanceSurfacesAtComponentObservation(t *testing.T) 
 			Step: "Surge",
 		},
 	}
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.Replicas = 1
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision = "llama-70b-engine-old"
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.UpdateRevision = "llama-70b-engine-new"
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.Replicas = 1
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision = "llama-70b-engine-old"
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.UpdateRevision = "llama-70b-engine-new"
 
 	// Build a single-Component BlueGreen group.
 	group := coordination.ResolvedGroup{
@@ -563,7 +563,7 @@ func TestSurgeUpdate_FailedInstanceSurfacesAtComponentObservation(t *testing.T) 
 		// the InstanceStatus directly and confirming the policy machinery
 		// translates a Failed Instance to Failed Component.Failed=true.
 		failedIdx := []int32{}
-		for _, s := range isvc.Status.Components[c].OMENative.InstanceStatuses {
+		for _, s := range isvc.Status.Components[c].Lifecycle.InstanceStatuses {
 			if s.Phase == v1beta1.OMENativeInstanceFailed {
 				failedIdx = append(failedIdx, s.Index)
 			}

@@ -203,7 +203,7 @@ func isvcReadyAtIncarnation(name, ns string, incarnation int64) *v1beta1.Inferen
 	isvc := minimalISVC(name, ns, 1)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: 0, Incarnation: incarnation, Phase: v1beta1.OMENativeInstanceReady},
 				},

@@ -91,13 +91,13 @@ func RetainControllerRevisionsForISVC(
 	return revision.RetainControllerRevisions(ctx, c, reads, isvcRevisionKey(isvc, component), maxNonLive, liveNames...)
 }
 
-// CollectLiveRevisionNamesForISVC projects an OMENativeComponentStatus
+// CollectLiveRevisionNamesForISVC projects an LifecycleStatus
 // to the (current, update, instances) tuple the workload sweeper takes.
 // The InstanceStatuses slice is converted at the adapter boundary —
 // workload.CollectLiveRevisionNames itself reads only the workload-side
 // InstanceStatus type so the revision package stays free of v1beta1
 // imports.
-func CollectLiveRevisionNamesForISVC(cs *v1beta1.OMENativeComponentStatus) []string {
+func CollectLiveRevisionNamesForISVC(cs *v1beta1.LifecycleStatus) []string {
 	if cs == nil {
 		return nil
 	}

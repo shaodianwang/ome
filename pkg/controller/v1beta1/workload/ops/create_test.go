@@ -98,8 +98,8 @@ func testPodLabels(isvc string, component workload.ComponentType, instanceIdx in
 func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component workload.ComponentType) workload.ReconcileInput {
 	v1component := v1beta1.ComponentType(component)
 	var instances []workload.InstanceStatus
-	if cs, ok := isvc.Status.Components[v1component]; ok && cs.OMENative != nil {
-		for _, s := range cs.OMENative.InstanceStatuses {
+	if cs, ok := isvc.Status.Components[v1component]; ok && cs.Lifecycle != nil {
+		for _, s := range cs.Lifecycle.InstanceStatuses {
 			instances = append(instances, workload.InstanceStatus{
 				Index:           s.Index,
 				Incarnation:     s.Incarnation,
@@ -149,11 +149,11 @@ func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 			fresh.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
 		}
 		cs := fresh.Status.Components[v1component]
-		if cs.OMENative == nil {
-			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+		if cs.Lifecycle == nil {
+			cs.Lifecycle = &v1beta1.LifecycleStatus{}
 		}
 		pos := -1
-		for i, s := range cs.OMENative.InstanceStatuses {
+		for i, s := range cs.Lifecycle.InstanceStatuses {
 			if s.Index == idx {
 				pos = i
 				break
@@ -163,7 +163,7 @@ func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 		if pos == -1 {
 			w = workload.InstanceStatus{Index: idx}
 		} else {
-			s := cs.OMENative.InstanceStatuses[pos]
+			s := cs.Lifecycle.InstanceStatuses[pos]
 			w = workload.InstanceStatus{
 				Index:           s.Index,
 				Incarnation:     s.Incarnation,
@@ -187,9 +187,9 @@ func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 			Operation:       toV1beta1Op(w.Operation),
 		}
 		if pos == -1 {
-			cs.OMENative.InstanceStatuses = append(cs.OMENative.InstanceStatuses, updated)
+			cs.Lifecycle.InstanceStatuses = append(cs.Lifecycle.InstanceStatuses, updated)
 		} else {
-			cs.OMENative.InstanceStatuses[pos] = updated
+			cs.Lifecycle.InstanceStatuses[pos] = updated
 		}
 		fresh.Status.Components[v1component] = cs
 		return c.Status().Update(ctx, fresh)
@@ -258,12 +258,12 @@ func findInstanceStatusInISVC(isvc *v1beta1.InferenceService, component v1beta1.
 		return nil
 	}
 	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return nil
 	}
-	for i := range cs.OMENative.InstanceStatuses {
-		if cs.OMENative.InstanceStatuses[i].Index == idx {
-			return &cs.OMENative.InstanceStatuses[i]
+	for i := range cs.Lifecycle.InstanceStatuses {
+		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
+			return &cs.Lifecycle.InstanceStatuses[i]
 		}
 	}
 	return nil
@@ -387,13 +387,13 @@ func TestCreate_EmptyClusterCreatesPodsAndRequeues(t *testing.T) {
 		t.Fatalf("get isvc: %v", err)
 	}
 	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	if cs.OMENative == nil {
+	if cs.Lifecycle == nil {
 		t.Fatal("OMENative status nil")
 	}
-	if len(cs.OMENative.InstanceStatuses) != 2 {
-		t.Fatalf("InstanceStatuses: got %d want 2", len(cs.OMENative.InstanceStatuses))
+	if len(cs.Lifecycle.InstanceStatuses) != 2 {
+		t.Fatalf("InstanceStatuses: got %d want 2", len(cs.Lifecycle.InstanceStatuses))
 	}
-	for _, s := range cs.OMENative.InstanceStatuses {
+	for _, s := range cs.Lifecycle.InstanceStatuses {
 		if s.Phase != v1beta1.OMENativeInstanceCreating {
 			t.Errorf("instance %d Phase: got %q want Creating", s.Index, s.Phase)
 		}
@@ -465,10 +465,10 @@ func TestCreate_AllPodsReady_FlipsServingAndMarksReady(t *testing.T) {
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	if cs.OMENative == nil || len(cs.OMENative.InstanceStatuses) != 1 {
-		t.Fatalf("status missing: %+v", cs.OMENative)
+	if cs.Lifecycle == nil || len(cs.Lifecycle.InstanceStatuses) != 1 {
+		t.Fatalf("status missing: %+v", cs.Lifecycle)
 	}
-	is := cs.OMENative.InstanceStatuses[0]
+	is := cs.Lifecycle.InstanceStatuses[0]
 	if is.Phase != v1beta1.OMENativeInstanceReady {
 		t.Errorf("Phase: got %q want Ready", is.Phase)
 	}
@@ -585,7 +585,7 @@ func TestCreate_PromoteSkipsRunningRevisionForOffTargetPods(t *testing.T) {
 	priorRev := "llama-70b-engine-priorrev"
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
 					Index:           0,
 					Incarnation:     1,

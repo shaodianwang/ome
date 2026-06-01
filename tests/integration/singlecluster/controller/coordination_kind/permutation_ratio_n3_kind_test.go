@@ -67,13 +67,13 @@ var _ = ginkgo.Describe("permutation — RatioBalanced N=3", ginkgo.Ordered, fun
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].OMENative.ServingReplicas).To(Equal(int32(4)))
-			g.Expect(c.Status.Components[v1beta1.DecoderComponent].OMENative.ServingReplicas).To(Equal(int32(2)))
-			g.Expect(c.Status.Components[v1beta1.RouterComponent].OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.ServingReplicas).To(Equal(int32(4)))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.RouterComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-ratio-n3")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		// Sampler asserts BOTH cross-Component ratios stay in-band.
 		var samples atomic.Int64
@@ -113,7 +113,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced N=3", ginkgo.Ordered, fun
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ratio-n3")
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"KP-7: engine CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),

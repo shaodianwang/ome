@@ -62,7 +62,7 @@ var _ = ginkgo.Describe("permutation — pause mid-RatioBalanced rollout", ginkg
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-ratio-pause")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		// Bump engine image — the RatioBalanced gate will start
 		// pacing the engine rollout.
@@ -111,7 +111,7 @@ var _ = ginkgo.Describe("permutation — pause mid-RatioBalanced rollout", ginkg
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ratio-pause")
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"KP-16: after unpause, engine CurrentRevision must advance to v2")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),

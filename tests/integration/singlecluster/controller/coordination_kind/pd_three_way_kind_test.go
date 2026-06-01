@@ -65,9 +65,9 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 				v1beta1.RouterComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil(), "%s must have OMENative status", comp)
-				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1), "%s replicas mismatch", comp)
-				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+				g.Expect(cs.Lifecycle).NotTo(BeNil(), "%s must have OMENative status", comp)
+				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1), "%s replicas mismatch", comp)
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"%s instance must reach Ready", comp)
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -217,12 +217,12 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 				v1beta1.RouterComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil())
-				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				g.Expect(cs.Lifecycle).NotTo(BeNil())
+				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			}
-			initialDecInc = c.Status.Components[v1beta1.DecoderComponent].OMENative.InstanceStatuses[0].Incarnation
-			initialRouterInc = c.Status.Components[v1beta1.RouterComponent].OMENative.InstanceStatuses[0].Incarnation
+			initialDecInc = c.Status.Components[v1beta1.DecoderComponent].Lifecycle.InstanceStatuses[0].Incarnation
+			initialRouterInc = c.Status.Components[v1beta1.RouterComponent].Lifecycle.InstanceStatuses[0].Incarnation
 
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
@@ -241,22 +241,22 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 			c := freshISVC(g, ns.Name, "pdx5-isvc")
 
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(engCS.OMENative.InstanceStatuses[0].Index).NotTo(Equal(int32(0)),
+			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Index).NotTo(Equal(int32(0)),
 				"Engine must have migrated off index 0")
 
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(decCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(decCS.OMENative.InstanceStatuses[0].Index).To(Equal(int32(0)),
+			g.Expect(decCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(decCS.Lifecycle.InstanceStatuses[0].Index).To(Equal(int32(0)),
 				"Decoder must not gain a surge from Engine-only migration")
-			g.Expect(decCS.OMENative.InstanceStatuses[0].Incarnation).To(Equal(initialDecInc),
+			g.Expect(decCS.Lifecycle.InstanceStatuses[0].Incarnation).To(Equal(initialDecInc),
 				"Decoder Incarnation must remain unchanged")
 
 			routerCS := c.Status.Components[v1beta1.RouterComponent]
-			g.Expect(routerCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(routerCS.OMENative.InstanceStatuses[0].Index).To(Equal(int32(0)),
+			g.Expect(routerCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(routerCS.Lifecycle.InstanceStatuses[0].Index).To(Equal(int32(0)),
 				"Router must not gain a surge from Engine-only migration")
-			g.Expect(routerCS.OMENative.InstanceStatuses[0].Incarnation).To(Equal(initialRouterInc),
+			g.Expect(routerCS.Lifecycle.InstanceStatuses[0].Incarnation).To(Equal(initialRouterInc),
 				"Router Incarnation must remain unchanged")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
@@ -275,9 +275,9 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pdx6-isvc")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(engCS.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("no OMENative-shape pod exists for Decoder (Raw dispatcher owns it)")
@@ -289,12 +289,12 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 				"OMENative-shape Decoder pod must NOT exist; Decoder is Raw")
 		}, "3s", kindPollInterval).Should(Succeed())
 
-		ginkgo.By("Engine's OMENative status set; Decoder.OMENative is nil or empty")
+		ginkgo.By("Engine's OMENative status set; Decoder.Lifecycle is nil or empty")
 		c := freshISVC(Default, ns.Name, "pdx6-isvc")
-		Expect(c.Status.Components[v1beta1.EngineComponent].OMENative).NotTo(BeNil())
+		Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 		decCS := c.Status.Components[v1beta1.DecoderComponent]
-		if decCS.OMENative != nil {
-			Expect(decCS.OMENative.InstanceStatuses).To(BeEmpty(),
+		if decCS.Lifecycle != nil {
+			Expect(decCS.Lifecycle.InstanceStatuses).To(BeEmpty(),
 				"Decoder OMENative state must be empty when running under Raw — non-empty means the OMENative dispatcher leaked")
 		}
 	})
@@ -323,12 +323,12 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 				v1beta1.RouterComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil())
-				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				g.Expect(cs.Lifecycle).NotTo(BeNil())
+				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			}
-			initialEngInc = c.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Incarnation
-			initialDecInc = c.Status.Components[v1beta1.DecoderComponent].OMENative.InstanceStatuses[0].Incarnation
+			initialEngInc = c.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Incarnation
+			initialDecInc = c.Status.Components[v1beta1.DecoderComponent].Lifecycle.InstanceStatuses[0].Incarnation
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("force-deleting Router pod to trigger Restart")
@@ -340,9 +340,9 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 		ginkgo.By("Router Incarnation bumps; Engine + Decoder Incarnations remain unchanged")
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pdx7-isvc")
-			routerInc := c.Status.Components[v1beta1.RouterComponent].OMENative.InstanceStatuses[0].Incarnation
-			engInc := c.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Incarnation
-			decInc := c.Status.Components[v1beta1.DecoderComponent].OMENative.InstanceStatuses[0].Incarnation
+			routerInc := c.Status.Components[v1beta1.RouterComponent].Lifecycle.InstanceStatuses[0].Incarnation
+			engInc := c.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Incarnation
+			decInc := c.Status.Components[v1beta1.DecoderComponent].Lifecycle.InstanceStatuses[0].Incarnation
 			g.Expect(routerInc).To(BeNumerically(">", int64(1)),
 				"Router must have bumped Incarnation through Restart")
 			g.Expect(engInc).To(Equal(initialEngInc),

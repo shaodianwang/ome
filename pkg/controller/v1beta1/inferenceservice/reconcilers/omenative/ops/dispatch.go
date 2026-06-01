@@ -5,7 +5,7 @@
 // ISVC-adapter shim that:
 //
 //  1. Runs ExpireOperationsIfDeadlinePassed (v1beta1-typed, reads
-//     ISVC.Status.Components.OMENative.InstanceStatuses.Operation
+//     ISVC.Status.Components.Lifecycle.InstanceStatuses.Operation
 //     directly).
 //
 //  2. Builds workload.Deps + workload.ReconcileInput from the legacy

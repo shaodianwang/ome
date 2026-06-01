@@ -9,7 +9,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// TopLevelComponentReadyFromOMENative derives the standard top-level
+// TopLevelComponentReadyFromLifecycle derives the standard top-level
 // component-ready condition (EngineReady / DecoderReady / RouterReady)
 // from OMENative counters. Returns nil for unknown Component types so
 // callers leave the condition surface untouched.
@@ -25,12 +25,12 @@ import (
 // either reconciler — both the legacy omenative direct path
 // (status_aggregate.go) and the IR-managed projector (irprojector
 // status.go) call this to derive the same condition off the same
-// OMENativeComponentStatus shape. Single source of truth — any future
+// LifecycleStatus shape. Single source of truth — any future
 // change to the Ready predicate lives here only. Keeping it out of
 // the omenative package also avoids a one-way coupling from the
 // IR-managed path (the new path) to the legacy omenative package
 // (which the design intends to delete after the IR cutover).
-func TopLevelComponentReadyFromOMENative(component v1beta1.ComponentType, cs *v1beta1.OMENativeComponentStatus) *apis.Condition {
+func TopLevelComponentReadyFromLifecycle(component v1beta1.ComponentType, cs *v1beta1.LifecycleStatus) *apis.Condition {
 	var readyType apis.ConditionType
 	switch component {
 	case v1beta1.EngineComponent:

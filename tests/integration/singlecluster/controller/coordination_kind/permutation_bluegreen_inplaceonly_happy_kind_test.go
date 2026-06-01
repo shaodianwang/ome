@@ -57,8 +57,8 @@ var _ = ginkgo.Describe("permutation — BlueGreen + InPlaceOnly happy path", gi
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(3)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Capture v1 pod UIDs.
@@ -73,7 +73,7 @@ var _ = ginkgo.Describe("permutation — BlueGreen + InPlaceOnly happy path", gi
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-bg-iponly")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		// Bump image-only — this IS eligible for in-place under
 		// InPlaceOnly so chooseUpdateMode returns updateModeInPlace.
@@ -86,9 +86,9 @@ var _ = ginkgo.Describe("permutation — BlueGreen + InPlaceOnly happy path", gi
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-bg-iponly")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"KP-5: engine CurrentRevision must advance off v1 on image-only InPlaceOnly bump")
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(3)))
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)))
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

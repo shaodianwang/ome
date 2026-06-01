@@ -68,10 +68,10 @@ var _ = ginkgo.Describe("OMENative auto-migration on stuck Instance (KIND)", gin
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "auto-mig-am1")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).NotTo(BeEmpty())
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).NotTo(BeEmpty())
 			// Phase will be Creating; pod will be ImagePullBackOff.
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).
 				To(Equal(v1beta1.OMENativeInstanceCreating))
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -109,13 +109,13 @@ var _ = ginkgo.Describe("OMENative auto-migration on stuck Instance (KIND)", gin
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "auto-mig-am1")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).NotTo(BeEmpty())
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).NotTo(BeEmpty())
 			// Find the original source InstanceStatus — it's the one
 			// stuck at the auto-migration trigger point. Surge indices
 			// are different.
 			foundFailedWithCondition := false
-			for _, s := range cs.OMENative.InstanceStatuses {
+			for _, s := range cs.Lifecycle.InstanceStatuses {
 				if s.Phase != v1beta1.OMENativeInstanceFailed {
 					continue
 				}
@@ -130,7 +130,7 @@ var _ = ginkgo.Describe("OMENative auto-migration on stuck Instance (KIND)", gin
 				}
 			}
 			g.Expect(foundFailedWithCondition).To(BeTrue(),
-				"expected at least one InstanceStatus with Phase=Failed + ProgressDeadlineExceeded condition; got %+v", cs.OMENative.InstanceStatuses)
+				"expected at least one InstanceStatus with Phase=Failed + ProgressDeadlineExceeded condition; got %+v", cs.Lifecycle.InstanceStatuses)
 		}).WithTimeout(8 * time.Minute).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("expecting an AutoMigrationCapReached warning event")

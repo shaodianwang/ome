@@ -36,8 +36,8 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "og-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.ObservedGeneration).To(Equal(c.Generation),
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.ObservedGeneration).To(Equal(c.Generation),
 				"ObservedGeneration should catch up to .metadata.generation")
 			initialGen = c.Generation
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -56,9 +56,9 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 			g.Expect(c.Generation).To(BeNumerically(">", initialGen),
 				"ISVC.metadata.generation must have bumped on spec edit")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.ObservedGeneration).To(Equal(c.Generation),
-				"ObservedGeneration must catch up; stuck at %d (current gen=%d)", cs.OMENative.ObservedGeneration, c.Generation)
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.ObservedGeneration).To(Equal(c.Generation),
+				"ObservedGeneration must catch up; stuck at %d (current gen=%d)", cs.Lifecycle.ObservedGeneration, c.Generation)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
@@ -71,9 +71,9 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "inst-cond-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			s := cs.OMENative.InstanceStatuses[0]
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			s := cs.Lifecycle.InstanceStatuses[0]
 			for _, t := range []string{"AllPodsScheduled", "AllPodsReady", "AllPodsAvailable"} {
 				cond := meta.FindStatusCondition(s.Conditions, t)
 				g.Expect(cond).NotTo(BeNil(), "InstanceStatus[0] missing Condition %q", t)
@@ -93,9 +93,9 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "counter-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(2))
-			for i, s := range cs.OMENative.InstanceStatuses {
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(2))
+			for i, s := range cs.Lifecycle.InstanceStatuses {
 				g.Expect(s.PodCount).To(Equal(int32(1)),
 					"InstanceStatus[%d].PodCount must be 1 (single-pod runner)", i)
 				g.Expect(s.ReadyPodCount).To(Equal(int32(1)),
@@ -103,9 +103,9 @@ var _ = ginkgo.Describe("OMENative status surface", ginkgo.Ordered, func() {
 				g.Expect(s.AvailablePodCount).To(Equal(int32(1)),
 					"InstanceStatus[%d].AvailablePodCount must be 1 at Ready", i)
 			}
-			g.Expect(cs.OMENative.Replicas).To(Equal(int32(2)))
-			g.Expect(cs.OMENative.ReadyReplicas).To(Equal(int32(2)))
-			g.Expect(cs.OMENative.AvailableReplicas).To(Equal(int32(2)))
+			g.Expect(cs.Lifecycle.Replicas).To(Equal(int32(2)))
+			g.Expect(cs.Lifecycle.ReadyReplicas).To(Equal(int32(2)))
+			g.Expect(cs.Lifecycle.AvailableReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

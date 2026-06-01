@@ -8,9 +8,9 @@ import (
 )
 
 // Condition types written by OMENative. Component-level conditions
-// live on `status.components.<comp>.omenative.conditions`;
+// live on `status.components.<comp>.lifecycle.conditions`;
 // Instance-level conditions live on
-// `status.components.<comp>.omenative.instanceStatuses[*].conditions`.
+// `status.components.<comp>.lifecycle.instanceStatuses[*].conditions`.
 // Type names match OEP §3.3.
 const (
 	// Component-level.
@@ -83,7 +83,7 @@ const (
 // The returned slice is the new desired condition set; callers merge
 // it into the existing list via apimeta.SetStatusCondition so
 // LastTransitionTime updates only on real transitions.
-func ComputeComponentConditions(cs *v1beta1.OMENativeComponentStatus, generation int64) []metav1.Condition {
+func ComputeComponentConditions(cs *v1beta1.LifecycleStatus, generation int64) []metav1.Condition {
 	if cs == nil {
 		return nil
 	}
@@ -101,7 +101,7 @@ func ComputeComponentConditions(cs *v1beta1.OMENativeComponentStatus, generation
 // v1 alpha minReadySeconds defaults to 0 so Available collapses onto
 // Ready, but the distinction stays in the API for the rollout-pacing
 // future.
-func availableCondition(cs *v1beta1.OMENativeComponentStatus, generation int64, now metav1.Time) metav1.Condition {
+func availableCondition(cs *v1beta1.LifecycleStatus, generation int64, now metav1.Time) metav1.Condition {
 	switch {
 	case cs.Replicas == 0:
 		return metav1.Condition{
@@ -149,7 +149,7 @@ func availableCondition(cs *v1beta1.OMENativeComponentStatus, generation int64, 
 // per-Instance escalator stamped Phase=Failed, because
 // CurrentRevision (the old rev) never advanced to UpdateRevision (the
 // new bad rev).
-func progressingCondition(cs *v1beta1.OMENativeComponentStatus, generation int64, now metav1.Time) metav1.Condition {
+func progressingCondition(cs *v1beta1.LifecycleStatus, generation int64, now metav1.Time) metav1.Condition {
 	if hasFailedInstance(cs) {
 		return metav1.Condition{
 			Type:               ConditionProgressing,
@@ -180,7 +180,7 @@ func progressingCondition(cs *v1beta1.OMENativeComponentStatus, generation int64
 	}
 }
 
-func isProgressing(cs *v1beta1.OMENativeComponentStatus) bool {
+func isProgressing(cs *v1beta1.LifecycleStatus) bool {
 	if cs.UpdateRevision != "" && cs.CurrentRevision != cs.UpdateRevision {
 		return true
 	}
@@ -202,7 +202,7 @@ func isProgressing(cs *v1beta1.OMENativeComponentStatus) bool {
 // InstanceReadyTimeout slow path both land here). Used by
 // progressingCondition to suppress the misleading
 // "RolloutInProgress" message when the rollout is actually wedged.
-func hasFailedInstance(cs *v1beta1.OMENativeComponentStatus) bool {
+func hasFailedInstance(cs *v1beta1.LifecycleStatus) bool {
 	for _, s := range cs.InstanceStatuses {
 		if s.Phase == v1beta1.OMENativeInstanceFailed {
 			return true
@@ -215,7 +215,7 @@ func hasFailedInstance(cs *v1beta1.OMENativeComponentStatus) bool {
 // the Progressing condition carries when the failed-instance carve-out
 // fires. Stays short — the per-Instance breadcrumb (Operation.Step) +
 // the InstanceFailed event carry the full detail.
-func failedInstancesMessage(cs *v1beta1.OMENativeComponentStatus) string {
+func failedInstancesMessage(cs *v1beta1.LifecycleStatus) string {
 	var indices []int32
 	for _, s := range cs.InstanceStatuses {
 		if s.Phase == v1beta1.OMENativeInstanceFailed {
@@ -231,7 +231,7 @@ func failedInstancesMessage(cs *v1beta1.OMENativeComponentStatus) string {
 	return "Rollout failed: instances " + commaJoinInt32(indices) + " in Phase=Failed"
 }
 
-func progressingMessage(cs *v1beta1.OMENativeComponentStatus) string {
+func progressingMessage(cs *v1beta1.LifecycleStatus) string {
 	if cs.UpdateRevision != "" && cs.CurrentRevision != cs.UpdateRevision {
 		return "Rolling out " + cs.UpdateRevision + " (" +
 			itoa(int(cs.UpdatedReadyReplicas)) + "/" + itoa(int(cs.Replicas)) + " on target)"
@@ -243,7 +243,7 @@ func progressingMessage(cs *v1beta1.OMENativeComponentStatus) string {
 // Operation with Reason=DeadlineExceeded — the breadcrumb timeouts.go
 // stamps when a non-recoverable op step times out. Lifts the
 // breadcrumb into the operator-facing condition surface per OEP §3.3.
-func operationStuckCondition(cs *v1beta1.OMENativeComponentStatus, generation int64, now metav1.Time) metav1.Condition {
+func operationStuckCondition(cs *v1beta1.LifecycleStatus, generation int64, now metav1.Time) metav1.Condition {
 	stuckInstances := stuckOperations(cs)
 	if len(stuckInstances) == 0 {
 		return metav1.Condition{
@@ -264,7 +264,7 @@ func operationStuckCondition(cs *v1beta1.OMENativeComponentStatus, generation in
 	}
 }
 
-func stuckOperations(cs *v1beta1.OMENativeComponentStatus) []int32 {
+func stuckOperations(cs *v1beta1.LifecycleStatus) []int32 {
 	var out []int32
 	for _, s := range cs.InstanceStatuses {
 		if s.Operation == nil {
@@ -374,7 +374,7 @@ func podCountCondition(observed, total int32, verb string) (metav1.ConditionStat
 // ApplyComponentConditions merges the desired condition set onto cs
 // using apimeta.SetStatusCondition so LastTransitionTime only updates
 // on real status changes.
-func ApplyComponentConditions(cs *v1beta1.OMENativeComponentStatus, desired []metav1.Condition) {
+func ApplyComponentConditions(cs *v1beta1.LifecycleStatus, desired []metav1.Condition) {
 	if cs == nil {
 		return
 	}
@@ -430,7 +430,7 @@ func ApplyInstanceConditions(s *v1beta1.OMENativeInstanceStatus, desired []metav
 
 // availabilityMessage builds a human-readable summary like "2/3
 // Instances Available" for the Available condition's message field.
-func availabilityMessage(cs *v1beta1.OMENativeComponentStatus) string {
+func availabilityMessage(cs *v1beta1.LifecycleStatus) string {
 	return itoa(int(cs.AvailableReplicas)) + "/" + itoa(int(cs.Replicas)) + " Instances Available"
 }
 

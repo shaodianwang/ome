@@ -311,12 +311,12 @@ func (ctx GateContext) CheckRatio(inFlightDelta int32) (allowed bool, reason str
 			orig = 1
 		}
 		state.Original[c] = orig
-		if cs, ok := isvc.Status.Components[c]; ok && cs.OMENative != nil {
-			state.Current[c] = cs.OMENative.Replicas
-			state.NewPods[c] = cs.OMENative.UpdatedReplicas
+		if cs, ok := isvc.Status.Components[c]; ok && cs.Lifecycle != nil {
+			state.Current[c] = cs.Lifecycle.Replicas
+			state.NewPods[c] = cs.Lifecycle.UpdatedReplicas
 			// Serving is what the band check projects against — live
 			// traffic capacity, not rollout progress.
-			state.Serving[c] = cs.OMENative.ServingReplicas
+			state.Serving[c] = cs.Lifecycle.ServingReplicas
 		}
 	}
 	// Account for pods this wake-up has already started pulling out of
@@ -390,10 +390,10 @@ func (ctx GateContext) CheckUnavailability(inFlightDelta int32) (allowed bool, r
 		return true, ctx.ShortReason
 	}
 	cs, ok := ctx.ISVC.Status.Components[ctx.Component]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return true, "no observation yet"
 	}
-	desired := cs.OMENative.Replicas
+	desired := cs.Lifecycle.Replicas
 	if desired <= 0 {
 		desired = 1
 	}
@@ -401,7 +401,7 @@ func (ctx GateContext) CheckUnavailability(inFlightDelta int32) (allowed bool, r
 	// (containers-running count) — in-place drain flips serving=False
 	// before kubelet sees a container restart, so ReadyReplicas would
 	// still report all pods Ready while half are actually out of rotation.
-	currentUnavailable := desired - cs.OMENative.ServingReplicas
+	currentUnavailable := desired - cs.Lifecycle.ServingReplicas
 	if currentUnavailable < 0 {
 		currentUnavailable = 0
 	}
@@ -451,15 +451,15 @@ func (ctx GateContext) CheckSurge(inFlightDelta int32) (allowed bool, reason str
 		return true, ctx.ShortReason
 	}
 	cs, ok := ctx.ISVC.Status.Components[ctx.Component]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return true, "no observation yet"
 	}
-	desired := cs.OMENative.Replicas
+	desired := cs.Lifecycle.Replicas
 	if desired <= 0 {
 		desired = 1
 	}
 	var currentInFlight int32
-	for _, s := range cs.OMENative.InstanceStatuses {
+	for _, s := range cs.Lifecycle.InstanceStatuses {
 		if s.Operation == nil {
 			continue
 		}

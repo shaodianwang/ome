@@ -12,19 +12,19 @@ import (
 func TestAvailableCondition(t *testing.T) {
 	cases := []struct {
 		name       string
-		cs         *v1beta1.OMENativeComponentStatus
+		cs         *v1beta1.LifecycleStatus
 		wantStatus metav1.ConditionStatus
 		wantReason string
 	}{
 		{
 			name:       "no replicas yet",
-			cs:         &v1beta1.OMENativeComponentStatus{},
+			cs:         &v1beta1.LifecycleStatus{},
 			wantStatus: metav1.ConditionFalse,
 			wantReason: ReasonNoReplicas,
 		},
 		{
 			name: "all available",
-			cs: &v1beta1.OMENativeComponentStatus{
+			cs: &v1beta1.LifecycleStatus{
 				Replicas:          2,
 				AvailableReplicas: 2,
 			},
@@ -33,7 +33,7 @@ func TestAvailableCondition(t *testing.T) {
 		},
 		{
 			name: "partially available",
-			cs: &v1beta1.OMENativeComponentStatus{
+			cs: &v1beta1.LifecycleStatus{
 				Replicas:          3,
 				AvailableReplicas: 1,
 			},
@@ -64,17 +64,17 @@ func TestAvailableCondition(t *testing.T) {
 func TestProgressingCondition_RolloutAndPhaseTransitions(t *testing.T) {
 	cases := []struct {
 		name       string
-		cs         *v1beta1.OMENativeComponentStatus
+		cs         *v1beta1.LifecycleStatus
 		wantStatus metav1.ConditionStatus
 	}{
 		{
 			name:       "no rollout",
-			cs:         &v1beta1.OMENativeComponentStatus{CurrentRevision: "r1", UpdateRevision: "r1"},
+			cs:         &v1beta1.LifecycleStatus{CurrentRevision: "r1", UpdateRevision: "r1"},
 			wantStatus: metav1.ConditionFalse,
 		},
 		{
 			name: "revision diff",
-			cs: &v1beta1.OMENativeComponentStatus{
+			cs: &v1beta1.LifecycleStatus{
 				CurrentRevision: "r1", UpdateRevision: "r2",
 				Replicas: 2, UpdatedReadyReplicas: 1,
 			},
@@ -82,7 +82,7 @@ func TestProgressingCondition_RolloutAndPhaseTransitions(t *testing.T) {
 		},
 		{
 			name: "transient phase",
-			cs: &v1beta1.OMENativeComponentStatus{
+			cs: &v1beta1.LifecycleStatus{
 				CurrentRevision: "r1", UpdateRevision: "r1",
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: 0, Phase: v1beta1.OMENativeInstanceMigrating},
@@ -100,7 +100,7 @@ func TestProgressingCondition_RolloutAndPhaseTransitions(t *testing.T) {
 		// reality: Progressing=False, Reason=Failed.
 		{
 			name: "rollout failed: revision diff but every Instance is Phase=Failed",
-			cs: &v1beta1.OMENativeComponentStatus{
+			cs: &v1beta1.LifecycleStatus{
 				CurrentRevision: "r1", UpdateRevision: "r2",
 				Replicas: 1, UpdatedReadyReplicas: 0,
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
@@ -111,7 +111,7 @@ func TestProgressingCondition_RolloutAndPhaseTransitions(t *testing.T) {
 		},
 		{
 			name: "mixed: any Failed Instance suppresses Progressing even when peers are mid-update",
-			cs: &v1beta1.OMENativeComponentStatus{
+			cs: &v1beta1.LifecycleStatus{
 				CurrentRevision: "r1", UpdateRevision: "r2",
 				Replicas: 2, UpdatedReadyReplicas: 0,
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
@@ -143,7 +143,7 @@ func TestProgressingCondition_RolloutAndPhaseTransitions(t *testing.T) {
 // Without these the operator sees Status=False but has to dig into
 // the per-Instance breadcrumbs to find out why.
 func TestProgressingCondition_FailedReasonAndMessage(t *testing.T) {
-	cs := &v1beta1.OMENativeComponentStatus{
+	cs := &v1beta1.LifecycleStatus{
 		CurrentRevision: "rev-old", UpdateRevision: "rev-new",
 		Replicas: 2,
 		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
@@ -174,7 +174,7 @@ func TestProgressingCondition_FailedReasonAndMessage(t *testing.T) {
 }
 
 func TestOperationStuckCondition_LiftsDeadlineExceededBreadcrumb(t *testing.T) {
-	cs := &v1beta1.OMENativeComponentStatus{
+	cs := &v1beta1.LifecycleStatus{
 		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 			{Index: 0, Operation: &v1beta1.InstanceOperation{Type: "Update", Reason: ReasonDeadlineExceeded}},
 			{Index: 1, Operation: &v1beta1.InstanceOperation{Type: "Update"}},
@@ -198,7 +198,7 @@ func TestOperationStuckCondition_LiftsDeadlineExceededBreadcrumb(t *testing.T) {
 }
 
 func TestOperationStuckCondition_FalseWhenClean(t *testing.T) {
-	cs := &v1beta1.OMENativeComponentStatus{
+	cs := &v1beta1.LifecycleStatus{
 		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 			{Index: 0, Operation: &v1beta1.InstanceOperation{Type: "Update"}}, // No DeadlineExceeded.
 		},
@@ -304,7 +304,7 @@ func TestComputeInstanceConditions_DefaultsInPlaceFallbackToFalse(t *testing.T) 
 func TestApplyComponentConditions_NoLastTransitionTimeChurn(t *testing.T) {
 	// Second call with the same condition shape must NOT bump
 	// LastTransitionTime. SetStatusCondition handles this.
-	cs := &v1beta1.OMENativeComponentStatus{
+	cs := &v1beta1.LifecycleStatus{
 		Replicas:          1,
 		AvailableReplicas: 1,
 	}
@@ -322,7 +322,7 @@ func TestApplyComponentConditions_NoLastTransitionTimeChurn(t *testing.T) {
 }
 
 func TestApplyComponentConditions_TransitionUpdatesLastTransitionTime(t *testing.T) {
-	cs := &v1beta1.OMENativeComponentStatus{
+	cs := &v1beta1.LifecycleStatus{
 		Replicas:          1,
 		AvailableReplicas: 0,
 	}
@@ -427,7 +427,7 @@ func TestGangSchedulingUnavailableCondition_Matrix(t *testing.T) {
 // LastTransitionTime (only real status transitions do, per
 // apimeta.SetStatusCondition semantics).
 func TestGangSchedulingUnavailableCondition_Idempotent(t *testing.T) {
-	cs := &v1beta1.OMENativeComponentStatus{}
+	cs := &v1beta1.LifecycleStatus{}
 	first := GangSchedulingUnavailableCondition(false, true, 1)
 	ApplyComponentConditions(cs, []metav1.Condition{first})
 	beforeTime := apimeta.FindStatusCondition(cs.Conditions, ConditionGangSchedulingUnavailable).LastTransitionTime

@@ -56,8 +56,8 @@ var _ = ginkgo.Describe("permutation — Sequential + explicit RecreatePod", gin
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-seq-rp")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 
 		// Sample for the decoder-done-while-engine-v1 handoff window.
 		sawDecoderDoneWhileEngineV1 := false
@@ -66,8 +66,8 @@ var _ = ginkgo.Describe("permutation — Sequential + explicit RecreatePod", gin
 			if err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "perm-seq-rp"}, c); err != nil {
 				return
 			}
-			dec := c.Status.Components[v1beta1.DecoderComponent].OMENative
-			eng := c.Status.Components[v1beta1.EngineComponent].OMENative
+			dec := c.Status.Components[v1beta1.DecoderComponent].Lifecycle
+			eng := c.Status.Components[v1beta1.EngineComponent].Lifecycle
 			if dec == nil || eng == nil {
 				return
 			}
@@ -86,8 +86,8 @@ var _ = ginkgo.Describe("permutation — Sequential + explicit RecreatePod", gin
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-seq-rp")
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision).NotTo(Equal(v1EngineRev))
-			g.Expect(c.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision).NotTo(Equal(v1DecoderRev))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev))
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

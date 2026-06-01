@@ -76,14 +76,14 @@ var _ = ginkgo.Describe("behavior — RollingUpdate + RecreatePod", ginkgo.Order
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(4)))
-			g.Expect(decCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(4)))
+			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "recreate-b")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		// Sampler asserts B-1 + B-2 on every 100ms tick.
 		stop := util.StartSampler(suiteCtx, 100*time.Millisecond, func(g Gomega) {
@@ -112,10 +112,10 @@ var _ = ginkgo.Describe("behavior — RollingUpdate + RecreatePod", ginkgo.Order
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "recreate-b")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"B-3: engine CurrentRevision must advance off v1")
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(4)),
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(4)),
 				"B-3: engine returns to full serving on v2")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))

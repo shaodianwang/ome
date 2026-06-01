@@ -30097,7 +30097,7 @@ spec:
                         type: string
                       latestRolledoutRevision:
                         type: string
-                      omenative:
+                      lifecycle:
                         properties:
                           availableReplicas:
                             format: int32

@@ -13,7 +13,7 @@ import (
 
 func int32Ptr(v int32) *int32 { return &v }
 
-func TestOMENativeComponentStatus_JSONRoundTrip(t *testing.T) {
+func TestLifecycleStatus_JSONRoundTrip(t *testing.T) {
 	requestedAt := metav1.NewTime(time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC))
 	startedAt := metav1.NewTime(time.Date(2026, 5, 15, 12, 1, 0, 0, time.UTC))
 	deadline := metav1.NewTime(time.Date(2026, 5, 15, 12, 31, 0, 0, time.UTC))
@@ -21,7 +21,7 @@ func TestOMENativeComponentStatus_JSONRoundTrip(t *testing.T) {
 	original := InferenceServiceStatus{
 		Components: map[ComponentType]ComponentStatusSpec{
 			EngineComponent: {
-				OMENative: &OMENativeComponentStatus{
+				Lifecycle: &LifecycleStatus{
 					ObservedGeneration:   42,
 					CurrentRevision:      "llama-70b-engine-rev-abc123",
 					UpdateRevision:       "llama-70b-engine-rev-def456",

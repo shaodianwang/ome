@@ -185,9 +185,9 @@ func engineIR(namespace, isvcName string) (*v1beta1.InferenceReplica, bool) {
 	return ir, true
 }
 
-// engineOMENative returns the ISVC's engine OMENative component status,
+// engineOMENative returns the ISVC's engine OMENative lifecycle status,
 // or nil when not yet populated.
-func engineOMENative(isvc *v1beta1.InferenceService) *v1beta1.OMENativeComponentStatus {
+func engineOMENative(isvc *v1beta1.InferenceService) *v1beta1.LifecycleStatus {
 	if isvc.Status.Components == nil {
 		return nil
 	}
@@ -195,7 +195,7 @@ func engineOMENative(isvc *v1beta1.InferenceService) *v1beta1.OMENativeComponent
 	if !ok {
 		return nil
 	}
-	return cs.OMENative
+	return cs.Lifecycle
 }
 
 // =========================================================================

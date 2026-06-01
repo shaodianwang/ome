@@ -66,8 +66,8 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "seq-d2")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 
 		// Sequential's observable invariant: there is a window where the
 		// decoder has fully rolled to v2 (its CurrentRevision advanced off
@@ -95,8 +95,8 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 			if err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "seq-d2"}, c); err != nil {
 				return
 			}
-			dec := c.Status.Components[v1beta1.DecoderComponent].OMENative
-			eng := c.Status.Components[v1beta1.EngineComponent].OMENative
+			dec := c.Status.Components[v1beta1.DecoderComponent].Lifecycle
+			eng := c.Status.Components[v1beta1.EngineComponent].Lifecycle
 			if dec == nil || eng == nil {
 				return
 			}
@@ -121,9 +121,9 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 			c := freshISVC(g, ns.Name, "seq-d2")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"D-2: engine CurrentRevision must advance off v1")
-			g.Expect(decCS.OMENative.CurrentRevision).NotTo(Equal(v1DecoderRev),
+			g.Expect(decCS.Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
 				"D-2: decoder CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))

@@ -59,9 +59,9 @@ var _ = ginkgo.Describe("behavior — in-place opt-in respects MaxUnavailable", 
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(BeEmpty())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(3)),
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(BeEmpty())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)),
 				"all 3 engine pods should be serving on v1")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -78,7 +78,7 @@ var _ = ginkgo.Describe("behavior — in-place opt-in respects MaxUnavailable", 
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "inplace-l")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		stop := util.StartSampler(suiteCtx, 100*time.Millisecond, func(g Gomega) {
 			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, "inplace-l")
@@ -101,10 +101,10 @@ var _ = ginkgo.Describe("behavior — in-place opt-in respects MaxUnavailable", 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "inplace-l")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision should advance off v1")
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(3)),
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)),
 				"all 3 engine pods should be back to serving on v2")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 

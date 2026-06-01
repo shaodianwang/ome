@@ -56,13 +56,13 @@ var _ = ginkgo.Describe("permutation — Sequential + scale-up during rollout", 
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].OMENative.ServingReplicas).To(Equal(int32(2)))
-			g.Expect(c.Status.Components[v1beta1.DecoderComponent].OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-seq-scaleup")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 
 		// Combined update: scale engine 2 → 4 + bump both images. The
 		// Sequential gate must roll decoder first, then engine, and the
@@ -83,13 +83,13 @@ var _ = ginkgo.Describe("permutation — Sequential + scale-up during rollout", 
 			c := freshISVC(g, ns.Name, "perm-seq-scaleup")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"KP-9: engine CurrentRevision must advance off v1")
-			g.Expect(decCS.OMENative.CurrentRevision).NotTo(Equal(v1DecoderRev),
+			g.Expect(decCS.Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
 				"KP-9: decoder CurrentRevision must advance off v1")
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(4)),
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(4)),
 				"KP-9: engine must scale to 4 serving replicas on v2")
-			g.Expect(decCS.OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
 					"KP-9: rollout must return to Idle after combined scale + bump")

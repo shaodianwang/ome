@@ -48,7 +48,7 @@ type ComponentExtensionSpec struct {
 	// Lifecycle groups OMENative-specific lifecycle policies for this
 	// Component. Applies only when the Component is annotated
 	// ome.io/deploymentMode=OMENative; ignored otherwise. The status
-	// counterpart is status.components.<component>.omenative.
+	// counterpart is status.components.<component>.lifecycle.
 	// +optional
 	Lifecycle *LifecycleSpec `json:"lifecycle,omitempty"`
 

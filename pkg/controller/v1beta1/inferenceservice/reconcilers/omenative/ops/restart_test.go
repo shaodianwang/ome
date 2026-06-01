@@ -37,7 +37,7 @@ func isvcReadyAtIncarnation(name, ns string, incarnation int64) *v1beta1.Inferen
 	isvc := minimalISVC(name, ns, 1)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: 0, Incarnation: incarnation, Phase: v1beta1.OMENativeInstanceReady},
 				},
@@ -77,7 +77,7 @@ func TestDetectRestartTrigger_PhaseCreating_NoTrigger(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceCreating},
 				},
@@ -105,7 +105,7 @@ func TestDetectRestartTrigger_PhaseMigratingSuppressed(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceMigrating},
 				},
@@ -133,7 +133,7 @@ func TestDetectRestartTrigger_OperationMigrateSuppressed(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{
 						Index: 1, Incarnation: 1,
@@ -210,7 +210,7 @@ func TestDetectRestartTrigger_PhaseRestartingAlwaysTrue(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: 0, Incarnation: 2, Phase: v1beta1.OMENativeInstanceRestarting},
 				},
@@ -256,7 +256,7 @@ func TestReconcileComponentOps_RestartPolicyNone_FallsThroughToCreate(t *testing
 	// Status must NOT have moved to Restarting.
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase == v1beta1.OMENativeInstanceRestarting {
 		t.Errorf("Phase moved to Restarting under None policy: %+v", s)
 	}
@@ -294,7 +294,7 @@ func TestReconcileComponentOps_RestartTriggerDispatches(t *testing.T) {
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceRestarting {
 		t.Errorf("Phase: got %q want Restarting", s.Phase)
 	}

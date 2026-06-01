@@ -79,7 +79,7 @@ func TestAggregateIRStatus_NonOMENativeMode_NoOp(t *testing.T) {
 	// any accidental overwrite.
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 99},
+			Lifecycle: &v1beta1.LifecycleStatus{Replicas: 99},
 		},
 	}
 	c := fake.NewClientBuilder().
@@ -91,8 +91,8 @@ func TestAggregateIRStatus_NonOMENativeMode_NoOp(t *testing.T) {
 	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineDirectModes)).To(gomega.Succeed())
 
 	// The pre-populated sentinel must survive — we didn't touch the status.
-	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].OMENative).NotTo(gomega.BeNil())
-	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].OMENative.Replicas).To(gomega.Equal(int32(99)),
+	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(gomega.BeNil())
+	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.Replicas).To(gomega.Equal(int32(99)),
 		"direct-path status sentinel must NOT be overwritten when the resolved mode is not OMENative")
 }
 
@@ -118,7 +118,7 @@ func TestAggregateIRStatus_OMENative_NoIR_NoErr(t *testing.T) {
 // TestAggregateIRStatus_OMENative_CopiesStatusFromIR pins the happy
 // path: engine resolves to OMENative, IR exists with realistic
 // Status. The aggregator must write a 1:1 copy of IR.Status into
-// ISVC.Status.Components[engine].OMENative.
+// ISVC.Status.Components[engine].Lifecycle.
 func TestAggregateIRStatus_OMENative_CopiesStatusFromIR(t *testing.T) {
 	g := gomega.NewWithT(t)
 	isvc := baselineISVC("llama", "prod")
@@ -138,7 +138,7 @@ func TestAggregateIRStatus_OMENative_CopiesStatusFromIR(t *testing.T) {
 	g.Expect(c.Get(context.Background(),
 		types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, got)).To(gomega.Succeed())
 
-	om := got.Status.Components[v1beta1.EngineComponent].OMENative
+	om := got.Status.Components[v1beta1.EngineComponent].Lifecycle
 	g.Expect(om).NotTo(gomega.BeNil(),
 		"OMENative subtree must be populated for IR-managed Component")
 	g.Expect(om.Replicas).To(gomega.Equal(int32(3)),
@@ -162,8 +162,8 @@ func TestAggregateIRStatus_OMENative_CopiesStatusFromIR(t *testing.T) {
 	// Aggregator must also mirror onto the in-memory ISVC so
 	// downstream code (e.g. the outer updateStatus equality
 	// short-circuit) observes the post-write state.
-	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].OMENative).NotTo(gomega.BeNil())
-	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].OMENative.Replicas).To(gomega.Equal(int32(3)))
+	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(gomega.BeNil())
+	g.Expect(isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.Replicas).To(gomega.Equal(int32(3)))
 }
 
 // TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents pins
@@ -183,7 +183,7 @@ func TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents(t *testing.T
 	// Decoder's resolved mode is intentionally NOT OMENative.
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.DecoderComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 42}, // sentinel from direct path
+			Lifecycle: &v1beta1.LifecycleStatus{Replicas: 42}, // sentinel from direct path
 		},
 	}
 	ir := liveIR("llama", "prod", 2)
@@ -205,13 +205,13 @@ func TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents(t *testing.T
 		types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, got)).To(gomega.Succeed())
 
 	// Engine: mirrored from IR.
-	g.Expect(got.Status.Components[v1beta1.EngineComponent].OMENative).NotTo(gomega.BeNil())
-	g.Expect(got.Status.Components[v1beta1.EngineComponent].OMENative.Replicas).To(gomega.Equal(int32(2)))
+	g.Expect(got.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(gomega.BeNil())
+	g.Expect(got.Status.Components[v1beta1.EngineComponent].Lifecycle.Replicas).To(gomega.Equal(int32(2)))
 
 	// Decoder: untouched — sentinel survives.
-	g.Expect(got.Status.Components[v1beta1.DecoderComponent].OMENative).NotTo(gomega.BeNil(),
+	g.Expect(got.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(gomega.BeNil(),
 		"decoder OMENative subtree must NOT be cleared by the IR-managed engine path")
-	g.Expect(got.Status.Components[v1beta1.DecoderComponent].OMENative.Replicas).To(gomega.Equal(int32(42)),
+	g.Expect(got.Status.Components[v1beta1.DecoderComponent].Lifecycle.Replicas).To(gomega.Equal(int32(42)),
 		"decoder direct-path sentinel must survive the IR-managed engine aggregation")
 }
 
@@ -224,7 +224,7 @@ func TestAggregateIRStatus_KillSwitch_NoOp(t *testing.T) {
 	isvc := baselineISVC("llama", "prod")
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 77},
+			Lifecycle: &v1beta1.LifecycleStatus{Replicas: 77},
 		},
 	}
 	ir := liveIR("llama", "prod", 5)
@@ -244,7 +244,7 @@ func TestAggregateIRStatus_KillSwitch_NoOp(t *testing.T) {
 		types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, got)).To(gomega.Succeed())
 
 	// Sentinel survives even though an IR existed and the engine mode is OMENative.
-	g.Expect(got.Status.Components[v1beta1.EngineComponent].OMENative.Replicas).To(gomega.Equal(int32(77)),
+	g.Expect(got.Status.Components[v1beta1.EngineComponent].Lifecycle.Replicas).To(gomega.Equal(int32(77)),
 		"kill switch must skip aggregation even when an OMENative IR exists")
 }
 
@@ -272,7 +272,7 @@ func TestAggregateIRStatus_NilISVC_Rejected(t *testing.T) {
 
 // TestAggregateIRStatus_OMENative_PreservesNonOMENativeFields pins
 // the field-isolation contract: the aggregator only touches
-// ISVC.Status.Components[<comp>].OMENative — other fields on the
+// ISVC.Status.Components[<comp>].Lifecycle — other fields on the
 // ComponentStatusSpec (URL, RestURL, Address, RolloutPhase) must
 // survive.
 func TestAggregateIRStatus_OMENative_PreservesNonOMENativeFields(t *testing.T) {
@@ -301,8 +301,8 @@ func TestAggregateIRStatus_OMENative_PreservesNonOMENativeFields(t *testing.T) {
 	cs := got.Status.Components[v1beta1.EngineComponent]
 	g.Expect(cs.LatestReadyRevision).To(gomega.Equal("rev-1"),
 		"non-OMENative ComponentStatusSpec fields must survive aggregation")
-	g.Expect(cs.OMENative).NotTo(gomega.BeNil())
-	g.Expect(cs.OMENative.Replicas).To(gomega.Equal(int32(1)))
+	g.Expect(cs.Lifecycle).NotTo(gomega.BeNil())
+	g.Expect(cs.Lifecycle.Replicas).To(gomega.Equal(int32(1)))
 }
 
 // TestAggregateIRStatus_EmitsEngineReadyCondition pins the bug fix: the
@@ -339,7 +339,7 @@ func TestAggregateIRStatus_EmitsEngineReadyCondition(t *testing.T) {
 	// Existing subtree assertion: the OMENative subtree must still be
 	// populated (regression guard against accidentally moving the
 	// subtree write out of the closure).
-	om := got.Status.Components[v1beta1.EngineComponent].OMENative
+	om := got.Status.Components[v1beta1.EngineComponent].Lifecycle
 	g.Expect(om).NotTo(gomega.BeNil(), "OMENative subtree must be populated")
 	g.Expect(om.Replicas).To(gomega.Equal(int32(1)))
 	g.Expect(om.ReadyReplicas).To(gomega.Equal(int32(1)))
@@ -366,7 +366,7 @@ func TestAggregateIRStatus_EmitsEngineReadyCondition(t *testing.T) {
 // TestAggregateIRStatus_EmitsEngineReadyConditionFalse pins the
 // not-yet-ready branch: when the IR reports Replicas=1, ReadyReplicas=0,
 // EngineReady must be emitted with Status=False / Reason=NotAllReady.
-// Mirrors the legacy direct path's TopLevelComponentReadyFromOMENative
+// Mirrors the legacy direct path's TopLevelComponentReadyFromLifecycle
 // derivation for the same input.
 func TestAggregateIRStatus_EmitsEngineReadyConditionFalse(t *testing.T) {
 	g := gomega.NewWithT(t)
@@ -463,15 +463,15 @@ func TestAggregateIRStatus_MultiComponent_EmitsBothConditions(t *testing.T) {
 		types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, got)).To(gomega.Succeed())
 
 	// Engine subtree + condition.
-	g.Expect(got.Status.Components[v1beta1.EngineComponent].OMENative).NotTo(gomega.BeNil())
-	g.Expect(got.Status.Components[v1beta1.EngineComponent].OMENative.Replicas).To(gomega.Equal(int32(1)))
+	g.Expect(got.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(gomega.BeNil())
+	g.Expect(got.Status.Components[v1beta1.EngineComponent].Lifecycle.Replicas).To(gomega.Equal(int32(1)))
 	engineCond := got.Status.GetCondition(v1beta1.EngineReady)
 	g.Expect(engineCond).NotTo(gomega.BeNil(), "EngineReady must be emitted")
 	g.Expect(engineCond.Status).To(gomega.Equal(corev1.ConditionTrue))
 
 	// Decoder subtree + condition.
-	g.Expect(got.Status.Components[v1beta1.DecoderComponent].OMENative).NotTo(gomega.BeNil())
-	g.Expect(got.Status.Components[v1beta1.DecoderComponent].OMENative.Replicas).To(gomega.Equal(int32(2)))
+	g.Expect(got.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(gomega.BeNil())
+	g.Expect(got.Status.Components[v1beta1.DecoderComponent].Lifecycle.Replicas).To(gomega.Equal(int32(2)))
 	decoderCond := got.Status.GetCondition(v1beta1.DecoderReady)
 	g.Expect(decoderCond).NotTo(gomega.BeNil(), "DecoderReady must be emitted")
 	g.Expect(decoderCond.Status).To(gomega.Equal(corev1.ConditionTrue))
@@ -479,7 +479,7 @@ func TestAggregateIRStatus_MultiComponent_EmitsBothConditions(t *testing.T) {
 
 // TestIrStatusToComponentStatus_DeepCopiesInstanceStatuses pins the
 // aliasing guard: the IR.Status.InstanceStatuses slice must not be
-// aliased into the OMENativeComponentStatus — downstream mutations
+// aliased into the LifecycleStatus — downstream mutations
 // would clobber the IR controller's source-of-truth.
 func TestIrStatusToComponentStatus_DeepCopiesInstanceStatuses(t *testing.T) {
 	g := gomega.NewWithT(t)

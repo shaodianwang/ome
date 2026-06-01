@@ -128,10 +128,10 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "mig-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(cs.OMENative.InstanceStatuses[0].RunningRevision).NotTo(BeEmpty())
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].RunningRevision).NotTo(BeEmpty())
 
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
@@ -150,10 +150,10 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "mig-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1),
 				"after migration, exactly one InstanceStatus survives (the surge)")
-			s := cs.OMENative.InstanceStatuses[0]
+			s := cs.Lifecycle.InstanceStatuses[0]
 			g.Expect(s.Index).NotTo(Equal(int32(0)),
 				"surge index must be != source (0); got %d", s.Index)
 			g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
@@ -170,9 +170,9 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "mig-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			surgeIdx := cs.OMENative.InstanceStatuses[0].Index
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			surgeIdx := cs.Lifecycle.InstanceStatuses[0].Index
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name,
@@ -243,9 +243,9 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "mismatch-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "mismatch-isvc-engine-0-default-0",
@@ -279,11 +279,11 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "mismatch-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1),
 				"rejected migration must not create a surge; got %d InstanceStatuses",
-				len(cs.OMENative.InstanceStatuses))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Index).To(Equal(int32(0)),
+				len(cs.Lifecycle.InstanceStatuses))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Index).To(Equal(int32(0)),
 				"only the source InstanceStatus should exist")
 		}, "3s", kindPollInterval).Should(Succeed())
 
@@ -330,10 +330,10 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "affinity-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(cs.OMENative.InstanceStatuses[0].RunningRevision).NotTo(BeEmpty())
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].RunningRevision).NotTo(BeEmpty())
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "affinity-isvc-engine-0-default-0",
@@ -367,9 +367,9 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "affinity-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).NotTo(BeEmpty())
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).NotTo(BeEmpty())
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("sending a migration request whose FromNode matches the pinned host")
@@ -396,10 +396,10 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "affinity-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1),
 				"rejection must not stamp a surge InstanceStatus")
-			src := cs.OMENative.InstanceStatuses[0]
+			src := cs.Lifecycle.InstanceStatuses[0]
 			g.Expect(src.Index).To(Equal(int32(0)))
 			g.Expect(src.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 				"source must remain Phase=Ready (got %q)", src.Phase)
@@ -438,9 +438,9 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "dedup-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "dedup-isvc-engine-0-default-0",
@@ -457,9 +457,9 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "dedup-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			surgeIdx = cs.OMENative.InstanceStatuses[0].Index
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			surgeIdx = cs.Lifecycle.InstanceStatuses[0].Index
 			g.Expect(surgeIdx).NotTo(Equal(int32(0)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -470,11 +470,11 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "dedup-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1),
 				"re-delivered Completed UUID must NOT trigger a second migration; got %d InstanceStatuses",
-				len(cs.OMENative.InstanceStatuses))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Index).To(Equal(surgeIdx),
+				len(cs.Lifecycle.InstanceStatuses))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Index).To(Equal(surgeIdx),
 				"surviving instance index must match the first migration's surge index")
 		}, "3s", kindPollInterval).Should(Succeed())
 	})
@@ -496,12 +496,12 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 			Eventually(func(g Gomega) {
 				c := freshISVC(g, ns.Name, "seq-isvc")
 				cs := c.Status.Components[v1beta1.EngineComponent]
-				g.Expect(cs.OMENative).NotTo(BeNil())
-				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-				srcIdx = cs.OMENative.InstanceStatuses[0].Index
-				g.Expect(cs.OMENative.InstanceStatuses[0].NodesOccupied).NotTo(BeEmpty())
-				node = cs.OMENative.InstanceStatuses[0].NodesOccupied[0]
+				g.Expect(cs.Lifecycle).NotTo(BeNil())
+				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				srcIdx = cs.Lifecycle.InstanceStatuses[0].Index
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].NodesOccupied).NotTo(BeEmpty())
+				node = cs.Lifecycle.InstanceStatuses[0].NodesOccupied[0]
 			}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 			reqUUID := uuid.NewString()
@@ -513,11 +513,11 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 			Eventually(func(g Gomega) {
 				c := freshISVC(g, ns.Name, "seq-isvc")
 				cs := c.Status.Components[v1beta1.EngineComponent]
-				g.Expect(cs.OMENative).NotTo(BeNil())
-				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-				g.Expect(cs.OMENative.InstanceStatuses[0].Index).NotTo(Equal(srcIdx))
-				newIdx = cs.OMENative.InstanceStatuses[0].Index
+				g.Expect(cs.Lifecycle).NotTo(BeNil())
+				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].Index).NotTo(Equal(srcIdx))
+				newIdx = cs.Lifecycle.InstanceStatuses[0].Index
 
 				ledger := loadLedger(g, ns.Name, "seq-isvc")
 				found := false
@@ -555,9 +555,9 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "audit-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "audit-isvc-engine-0-default-0",
@@ -637,10 +637,10 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Consistently(func(g Gomega) {
 			fresh := freshISVC(g, ns.Name, "nomig-isvc")
 			cs := fresh.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1),
 				"Never policy must NOT create a surge")
-			g.Expect(cs.OMENative.InstanceStatuses[0].Index).To(Equal(int32(0)),
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Index).To(Equal(int32(0)),
 				"only the source index should remain")
 
 			ledger := loadLedger(g, ns.Name, "nomig-isvc")
@@ -669,9 +669,9 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "schemaver-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("writing a migration request with schemaVersion=v99 (unsupported)")
@@ -719,7 +719,7 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 
 			c := freshISVC(g, ns.Name, "schemaver-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1),
 				"unsupported schema must NOT create a surge")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})

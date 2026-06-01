@@ -206,7 +206,7 @@ type InferenceReplicaPacing struct {
 
 // InferenceReplicaStatus is the observed state of one
 // InferenceReplica. The InferenceReplica controller is the sole
-// writer. Fields mirror the legacy OMENativeComponentStatus shape so
+// writer. Fields mirror the legacy LifecycleStatus shape so
 // the dual-write window can byte-compare the two.
 type InferenceReplicaStatus struct {
 	// ObservedGeneration is the InferenceReplica.metadata.generation

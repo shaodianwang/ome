@@ -88,15 +88,15 @@ var _ = ginkgo.Describe("behavior — Sequential.Soak wall-clock", ginkgo.Ordere
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(BeEmpty())
-			g.Expect(decCS.OMENative.CurrentRevision).NotTo(BeEmpty())
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(BeEmpty())
+			g.Expect(decCS.Lifecycle.CurrentRevision).NotTo(BeEmpty())
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "soak-g4")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 
 		bumpedAt := time.Now()
 		// Bump BOTH images. Sequential walks decoder first; engine
@@ -116,11 +116,11 @@ var _ = ginkgo.Describe("behavior — Sequential.Soak wall-clock", ginkgo.Ordere
 			c := freshISVC(g, ns.Name, "soak-g4")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"engine CurrentRevision must advance off v1")
-			g.Expect(decCS.OMENative.CurrentRevision).NotTo(Equal(v1DecoderRev),
+			g.Expect(decCS.Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
 				"decoder CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))

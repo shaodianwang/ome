@@ -106,7 +106,7 @@ const (
 // within a coordination group.
 type CoordinationPacing struct {
 	// Type selects the pacing computation.
-	//   - PerComponent: each Component's omenative.updateStrategy
+	//   - PerComponent: each Component's lifecycle.updateStrategy
 	//     rollingUpdate applies independently. Group-wide MaxSurge
 	//     still applies on top. Default.
 	//   - RatioBalanced: pacing surges proportionally across all

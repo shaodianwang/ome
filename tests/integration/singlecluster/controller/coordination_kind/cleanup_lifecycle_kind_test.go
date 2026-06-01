@@ -49,10 +49,10 @@ var _ = ginkgo.Describe("LIFE-DEL — ISVC delete cascades owned children", gink
 			c := freshISVC(g, ns.Name, "life-del")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(1)))
-			g.Expect(decCS.OMENative.ServingReplicas).To(Equal(int32(1)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(1)))
+			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(1)))
 			g.Expect(listOMENativePods(g, ns.Name, "life-del")).NotTo(BeEmpty(),
 				"pods should exist pre-delete")
 			g.Expect(listOMENativeCRs(g, ns.Name)).NotTo(BeEmpty(),

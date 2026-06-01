@@ -132,12 +132,12 @@ func findInstanceStatusForISVC(isvc *v1beta1.InferenceService, component v1beta1
 		return nil
 	}
 	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return nil
 	}
-	for i := range cs.OMENative.InstanceStatuses {
-		if cs.OMENative.InstanceStatuses[i].Index == idx {
-			return &cs.OMENative.InstanceStatuses[i]
+	for i := range cs.Lifecycle.InstanceStatuses {
+		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
+			return &cs.Lifecycle.InstanceStatuses[i]
 		}
 	}
 	return nil

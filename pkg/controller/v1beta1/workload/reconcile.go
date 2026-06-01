@@ -7,7 +7,7 @@
 // What this dispatcher does NOT own (the caller runs these around
 // Reconcile):
 //   - ExpireOperationsIfDeadlinePassed — v1beta1-typed; reads
-//     ISVC.Status.Components.OMENative.InstanceStatuses.Operation
+//     ISVC.Status.Components.Lifecycle.InstanceStatuses.Operation
 //     fields directly.
 //   - PodMonitor — handled by the top-level podmonitor reconciler.
 //   - ensureRevisionWithCollisionRetry — ISVC-shape collision-counter

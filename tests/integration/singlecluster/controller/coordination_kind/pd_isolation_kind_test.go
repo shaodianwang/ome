@@ -160,10 +160,10 @@ var _ = ginkgo.Describe("PD per-Component isolation", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "pd8-iso")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.Replicas).To(Equal(int32(1)))
-			g.Expect(decCS.OMENative.Replicas).To(Equal(int32(1)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.Replicas).To(Equal(int32(1)))
+			g.Expect(decCS.Lifecycle.Replicas).To(Equal(int32(1)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Scale engine up to 2.
@@ -179,10 +179,10 @@ var _ = ginkgo.Describe("PD per-Component isolation", ginkgo.Ordered, func() {
 			c := freshISVC(g, ns.Name, "pd8-iso")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative.Replicas).To(Equal(int32(2)),
-				"PD-8: engine scale-up should reach 2; got %d", engCS.OMENative.Replicas)
-			g.Expect(decCS.OMENative.Replicas).To(Equal(int32(1)),
-				"PD-8: decoder must NOT change on engine scale-up; got %d", decCS.OMENative.Replicas)
+			g.Expect(engCS.Lifecycle.Replicas).To(Equal(int32(2)),
+				"PD-8: engine scale-up should reach 2; got %d", engCS.Lifecycle.Replicas)
+			g.Expect(decCS.Lifecycle.Replicas).To(Equal(int32(1)),
+				"PD-8: decoder must NOT change on engine scale-up; got %d", decCS.Lifecycle.Replicas)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

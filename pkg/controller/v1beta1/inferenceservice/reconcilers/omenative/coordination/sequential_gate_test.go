@@ -94,7 +94,7 @@ func mkSequentialFixture(name string, soak time.Duration) *v1beta1.InferenceServ
 	return isvc
 }
 
-// setComponentRevisions stamps Status.Components[c].OMENative with
+// setComponentRevisions stamps Status.Components[c].Lifecycle with
 // ControllerRevision names that produce the desired RolloutInFlight
 // answer (target!=current ⇒ in flight). Revision-name shape mirrors
 // what coordination.revisionHashFromName parses:
@@ -104,16 +104,16 @@ func setComponentRevisions(isvc *v1beta1.InferenceService, c v1beta1.ComponentTy
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
 	cs := isvc.Status.Components[c]
-	if cs.OMENative == nil {
-		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	if cs.Lifecycle == nil {
+		cs.Lifecycle = &v1beta1.LifecycleStatus{}
 	}
-	cs.OMENative.CurrentRevision = isvc.Name + "-" + string(c) + "-" + currentHash
-	cs.OMENative.UpdateRevision = isvc.Name + "-" + string(c) + "-" + targetHash
+	cs.Lifecycle.CurrentRevision = isvc.Name + "-" + string(c) + "-" + currentHash
+	cs.Lifecycle.UpdateRevision = isvc.Name + "-" + string(c) + "-" + targetHash
 	isvc.Status.Components[c] = cs
 }
 
 // setComponentObservedGeneration stamps
-// Status.Components[c].OMENative.ObservedGeneration with `gen`. The
+// Status.Components[c].Lifecycle.ObservedGeneration with `gen`. The
 // AggregateAndWriteStatus deferred write copies isvc.Generation onto
 // every Component's ObservedGeneration at the end of each reconcile,
 // so simulating a moment-of-bump means setting Status.* to N while
@@ -123,14 +123,14 @@ func setComponentObservedGeneration(isvc *v1beta1.InferenceService, c v1beta1.Co
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
 	cs := isvc.Status.Components[c]
-	if cs.OMENative == nil {
-		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	if cs.Lifecycle == nil {
+		cs.Lifecycle = &v1beta1.LifecycleStatus{}
 	}
-	cs.OMENative.ObservedGeneration = gen
+	cs.Lifecycle.ObservedGeneration = gen
 	isvc.Status.Components[c] = cs
 }
 
-// setComponentAvailableAt stamps Status.Components[c].OMENative with
+// setComponentAvailableAt stamps Status.Components[c].Lifecycle with
 // an Available=True condition whose LastTransitionTime is `at` — the
 // timestamp shape the Sequential soak gate now consumes. Mirrors what
 // the OMENative status reconciler writes via
@@ -140,10 +140,10 @@ func setComponentAvailableAt(isvc *v1beta1.InferenceService, c v1beta1.Component
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
 	cs := isvc.Status.Components[c]
-	if cs.OMENative == nil {
-		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	if cs.Lifecycle == nil {
+		cs.Lifecycle = &v1beta1.LifecycleStatus{}
 	}
-	cs.OMENative.Conditions = append(cs.OMENative.Conditions, metav1.Condition{
+	cs.Lifecycle.Conditions = append(cs.Lifecycle.Conditions, metav1.Condition{
 		Type:               conditionAvailable,
 		Status:             metav1.ConditionTrue,
 		Reason:             "Ready",
@@ -333,7 +333,7 @@ func TestCheckSequentialGate_SoakWithPriorAvailableFalseBypasses(t *testing.T) {
 	setComponentRevisions(isvc, v1beta1.EngineComponent, "rev1", "rev2")
 	// Available=False on decoder.
 	cs := isvc.Status.Components[v1beta1.DecoderComponent]
-	cs.OMENative.Conditions = []metav1.Condition{{
+	cs.Lifecycle.Conditions = []metav1.Condition{{
 		Type:               conditionAvailable,
 		Status:             metav1.ConditionFalse,
 		Reason:             "NotAllAvailable",

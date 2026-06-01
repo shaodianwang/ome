@@ -75,13 +75,13 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 			fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 		}
 		cs := fresh.Status.Components[v1component]
-		if cs.OMENative == nil {
-			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+		if cs.Lifecycle == nil {
+			cs.Lifecycle = &v1beta1.LifecycleStatus{}
 		}
 
 		// Per-Instance counters and Conditions.
-		for i := range cs.OMENative.InstanceStatuses {
-			s := &cs.OMENative.InstanceStatuses[i]
+		for i := range cs.Lifecycle.InstanceStatuses {
+			s := &cs.Lifecycle.InstanceStatuses[i]
 			instPods := byIndex[s.Index]
 			s.PodCount = int32(len(instPods))
 			s.ReadyPodCount = countReadyPods(instPods)
@@ -105,16 +105,16 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// classify an Instance based on whether desiredPodCount-many
 		// pods meet the condition.
 		desiredByIdx := desiredPodCountByInstance(plan)
-		cs.OMENative.Replicas = int32(len(cs.OMENative.InstanceStatuses))
-		cs.OMENative.ReadyReplicas = countReadyInstances(cs.OMENative.InstanceStatuses, desiredByIdx)
-		cs.OMENative.ServingReplicas = countServingInstances(cs.OMENative.InstanceStatuses, desiredByIdx)
-		cs.OMENative.AvailableReplicas = countAvailableInstances(cs.OMENative.InstanceStatuses, desiredByIdx)
+		cs.Lifecycle.Replicas = int32(len(cs.Lifecycle.InstanceStatuses))
+		cs.Lifecycle.ReadyReplicas = countReadyInstances(cs.Lifecycle.InstanceStatuses, desiredByIdx)
+		cs.Lifecycle.ServingReplicas = countServingInstances(cs.Lifecycle.InstanceStatuses, desiredByIdx)
+		cs.Lifecycle.AvailableReplicas = countAvailableInstances(cs.Lifecycle.InstanceStatuses, desiredByIdx)
 		if target != nil {
-			cs.OMENative.UpdatedReplicas, cs.OMENative.UpdatedReadyReplicas =
-				countUpdatedInstances(cs.OMENative.InstanceStatuses, target.Name, desiredByIdx)
-			cs.OMENative.UpdateRevision = target.Name
-			if rolloutComplete(cs.OMENative.InstanceStatuses, target.Name) {
-				cs.OMENative.CurrentRevision = target.Name
+			cs.Lifecycle.UpdatedReplicas, cs.Lifecycle.UpdatedReadyReplicas =
+				countUpdatedInstances(cs.Lifecycle.InstanceStatuses, target.Name, desiredByIdx)
+			cs.Lifecycle.UpdateRevision = target.Name
+			if rolloutComplete(cs.Lifecycle.InstanceStatuses, target.Name) {
+				cs.Lifecycle.CurrentRevision = target.Name
 			}
 		}
 
@@ -137,12 +137,12 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// (verified on KIND). Pinning ObservedGeneration and UpdateRevision
 		// to the SAME observed snapshot keeps the two skew signals
 		// consistent so the idle window cannot occur.
-		cs.OMENative.ObservedGeneration = p.ISVC.Generation
-		cs.OMENative.LabelSelector = componentLabelSelectorString(p.ISVC.Name, v1component)
+		cs.Lifecycle.ObservedGeneration = p.ISVC.Generation
+		cs.Lifecycle.LabelSelector = componentLabelSelectorString(p.ISVC.Name, v1component)
 
 		// Component-level Conditions. Derived after counters so
 		// AvailableReplicas, UpdateRevision, etc. are current.
-		status.ApplyComponentConditions(cs.OMENative, status.ComputeComponentConditions(cs.OMENative, fresh.Generation))
+		status.ApplyComponentConditions(cs.Lifecycle, status.ComputeComponentConditions(cs.Lifecycle, fresh.Generation))
 
 		fresh.Status.Components[v1component] = cs
 
@@ -156,7 +156,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// never flips the top-level condition past InitializeComponent
 		// Condition's False/Initializing — and the outer reconciler's
 		// updateStatus flush stamps Ready=False forever.
-		topCond := isvcstatus.TopLevelComponentReadyFromOMENative(v1component, cs.OMENative)
+		topCond := isvcstatus.TopLevelComponentReadyFromLifecycle(v1component, cs.Lifecycle)
 		if topCond != nil {
 			fresh.Status.SetCondition(topCond.Type, topCond)
 		}
@@ -170,7 +170,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		}
 		// Capture after a successful Update so a retry replays the names
 		// off the post-conflict re-read.
-		liveRevisionNames = core.CollectLiveRevisionNamesForISVC(cs.OMENative)
+		liveRevisionNames = core.CollectLiveRevisionNamesForISVC(cs.Lifecycle)
 
 		// Mirror the top-level component-ready condition onto the
 		// cached ISVC the parent reconciler is holding. The outer
@@ -186,7 +186,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// caller is reading. Same shape as PR #246's MutateInstance
 		// mirror and bumpCollisionCount's CollisionCount mirror in
 		// reconciler.go: any downstream caller that reads
-		// p.ISVC.Status.Components[X].OMENative within the same
+		// p.ISVC.Status.Components[X].Lifecycle within the same
 		// reconcile (coordination's latestRevisionHash, ops/create.go's
 		// revisionHashForInstance, etc.) sees the post-write state, not
 		// the stale snapshot from when the reconcile started.
@@ -196,7 +196,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// downstream hash off the wrong value, surfacing as the A-2
 		// orphan-hash drift symptom (status field references a CR
 		// that no longer matches what the controller just decided).
-		mirrorComponentRevisionFields(p.ISVC, v1component, cs.OMENative)
+		mirrorComponentRevisionFields(p.ISVC, v1component, cs.Lifecycle)
 		return nil
 	})
 	if isvcGone {
@@ -289,7 +289,7 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 	}
 	v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 	cs, ok := p.ISVC.Status.Components[v1component]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return nil
 	}
 	// Override the workload-side grace period with the ISVC-side var
@@ -333,9 +333,9 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 	}
 
 	return workload.EscalateStuckPodFailures(ctx, input, workload.EscalationParams{
-		Instances:           v1beta1convert.InstanceStatusSliceToWorkload(cs.OMENative.InstanceStatuses),
+		Instances:           v1beta1convert.InstanceStatusSliceToWorkload(cs.Lifecycle.InstanceStatuses),
 		PodsByIndex:         byIndex,
-		CurrentRevisionHash: query.RevisionHashFromControllerRevisionName(cs.OMENative.CurrentRevision),
+		CurrentRevisionHash: query.RevisionHashFromControllerRevisionName(cs.Lifecycle.CurrentRevision),
 		RevisionHashLabel:   query.LabelRevisionHash,
 	})
 }
@@ -373,11 +373,11 @@ func refreshComponentConditionsPostEscalation(ctx context.Context, p ReconcilePa
 	// back to p.ISVC, so this compute reflects post-escalation state
 	// without any apiserver call.
 	cached, ok := p.ISVC.Status.Components[v1component]
-	if !ok || cached.OMENative == nil {
+	if !ok || cached.Lifecycle == nil {
 		return nil
 	}
-	desired := status.ComputeComponentConditions(cached.OMENative, p.ISVC.Generation)
-	if conditionSetUnchanged(cached.OMENative.Conditions, desired) {
+	desired := status.ComputeComponentConditions(cached.Lifecycle, p.ISVC.Generation)
+	if conditionSetUnchanged(cached.Lifecycle.Conditions, desired) {
 		// Escalator was a no-op (no pods stuck) OR escalator fired but
 		// nothing meaningful changed on the Component conditions
 		// (e.g., already in Failed state from a prior pass). Either
@@ -398,16 +398,16 @@ func refreshComponentConditionsPostEscalation(ctx context.Context, p ReconcilePa
 			return nil
 		}
 		cs, ok := fresh.Status.Components[v1component]
-		if !ok || cs.OMENative == nil {
+		if !ok || cs.Lifecycle == nil {
 			return nil
 		}
 		// Recompute against fresh state in case a peer reconcile bumped
 		// counters between the cached read and now.
-		fresherDesired := status.ComputeComponentConditions(cs.OMENative, fresh.Generation)
-		if conditionSetUnchanged(cs.OMENative.Conditions, fresherDesired) {
+		fresherDesired := status.ComputeComponentConditions(cs.Lifecycle, fresh.Generation)
+		if conditionSetUnchanged(cs.Lifecycle.Conditions, fresherDesired) {
 			return nil
 		}
-		status.ApplyComponentConditions(cs.OMENative, fresherDesired)
+		status.ApplyComponentConditions(cs.Lifecycle, fresherDesired)
 		fresh.Status.Components[v1component] = cs
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -423,10 +423,10 @@ func refreshComponentConditionsPostEscalation(ctx context.Context, p ReconcilePa
 			p.ISVC.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
 		}
 		mirror := p.ISVC.Status.Components[v1component]
-		if mirror.OMENative == nil {
-			mirror.OMENative = &v1beta1.OMENativeComponentStatus{}
+		if mirror.Lifecycle == nil {
+			mirror.Lifecycle = &v1beta1.LifecycleStatus{}
 		}
-		mirror.OMENative.Conditions = append(mirror.OMENative.Conditions[:0], cs.OMENative.Conditions...)
+		mirror.Lifecycle.Conditions = append(mirror.Lifecycle.Conditions[:0], cs.Lifecycle.Conditions...)
 		p.ISVC.Status.Components[v1component] = mirror
 		return nil
 	})
@@ -542,7 +542,7 @@ func componentLabelSelectorString(isvc string, component v1beta1.ComponentType) 
 }
 
 // mirrorComponentRevisionFields copies UpdateRevision + CurrentRevision
-// from the just-committed OMENativeComponentStatus onto the caller's
+// from the just-committed LifecycleStatus onto the caller's
 // in-memory ISVC snapshot. The dispatcher and the parent reconciler can
 // then observe the post-write revision pointers within the same
 // reconcile pass, instead of the stale pre-reconcile values.
@@ -565,12 +565,12 @@ func componentLabelSelectorString(isvc string, component v1beta1.ComponentType) 
 // the apiserver — the parent reconciler's updateStatus flush then
 // commits the stale in-memory values via desiredService.Status,
 // overwriting the OMENative reconciler's write. The parent's
-// mergeOMENativeComponentStatus restores the OMENative substatus from
+// mergeLifecycleStatus restores the OMENative substatus from
 // the post-conflict re-read, so in practice this race is closed there
 // — but mirroring the values onto p.ISVC also closes the in-reconcile
 // observability gap and matches the precedent set by PR #246 for
 // per-Instance fields.
-func mirrorComponentRevisionFields(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, src *v1beta1.OMENativeComponentStatus) {
+func mirrorComponentRevisionFields(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, src *v1beta1.LifecycleStatus) {
 	if isvc == nil || src == nil {
 		return
 	}
@@ -578,10 +578,10 @@ func mirrorComponentRevisionFields(isvc *v1beta1.InferenceService, component v1b
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
 	cs := isvc.Status.Components[component]
-	if cs.OMENative == nil {
-		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	if cs.Lifecycle == nil {
+		cs.Lifecycle = &v1beta1.LifecycleStatus{}
 	}
-	cs.OMENative.UpdateRevision = src.UpdateRevision
-	cs.OMENative.CurrentRevision = src.CurrentRevision
+	cs.Lifecycle.UpdateRevision = src.UpdateRevision
+	cs.Lifecycle.CurrentRevision = src.CurrentRevision
 	isvc.Status.Components[component] = cs
 }

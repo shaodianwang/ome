@@ -176,7 +176,7 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 // for the Component's current PodSpec, honoring the collision contract
 // from revision.go: if EnsureControllerRevision reports a hash collision
 // (same revision name, different Data), bump
-// OMENativeComponentStatus.CollisionCount, persist the status, and retry
+// LifecycleStatus.CollisionCount, persist the status, and retry
 // the revision creation with the new salt. The retry yields a different
 // hash and lands.
 //
@@ -186,8 +186,8 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 // prevent.
 func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, component v1beta1.ComponentType) (*appsv1.ControllerRevision, error) {
 	var collisionCount *int32
-	if cs, ok := p.ISVC.Status.Components[component]; ok && cs.OMENative != nil {
-		collisionCount = cs.OMENative.CollisionCount
+	if cs, ok := p.ISVC.Status.Components[component]; ok && cs.Lifecycle != nil {
+		collisionCount = cs.Lifecycle.CollisionCount
 	}
 	// Multi-pod Components fold the worker template into the revision
 	// hash so a worker-only image / env bump triggers a new revision
@@ -223,7 +223,7 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	return target, nil
 }
 
-// bumpCollisionCount increments OMENativeComponentStatus.CollisionCount
+// bumpCollisionCount increments LifecycleStatus.CollisionCount
 // (initializing to 1 when nil) and persists the status. Returns the
 // new pointer for the retry caller.
 //
@@ -251,14 +251,14 @@ func bumpCollisionCount(ctx context.Context, p ReconcileParams, component v1beta
 			fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 		}
 		cs := fresh.Status.Components[component]
-		if cs.OMENative == nil {
-			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+		if cs.Lifecycle == nil {
+			cs.Lifecycle = &v1beta1.LifecycleStatus{}
 		}
 		next = int32(1)
-		if cs.OMENative.CollisionCount != nil {
-			next = *cs.OMENative.CollisionCount + 1
+		if cs.Lifecycle.CollisionCount != nil {
+			next = *cs.Lifecycle.CollisionCount + 1
 		}
-		cs.OMENative.CollisionCount = &next
+		cs.Lifecycle.CollisionCount = &next
 		fresh.Status.Components[component] = cs
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -282,10 +282,10 @@ func bumpCollisionCount(ctx context.Context, p ReconcileParams, component v1beta
 		p.ISVC.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
 	mirror := p.ISVC.Status.Components[component]
-	if mirror.OMENative == nil {
-		mirror.OMENative = &v1beta1.OMENativeComponentStatus{}
+	if mirror.Lifecycle == nil {
+		mirror.Lifecycle = &v1beta1.LifecycleStatus{}
 	}
-	mirror.OMENative.CollisionCount = &next
+	mirror.Lifecycle.CollisionCount = &next
 	p.ISVC.Status.Components[component] = mirror
 	return &next, nil
 }

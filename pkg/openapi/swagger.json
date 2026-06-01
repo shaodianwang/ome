@@ -402,7 +402,7 @@
           }
         },
         "lifecycle": {
-          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.omenative.",
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
           "$ref": "#/definitions/v1beta1.LifecycleSpec"
         },
         "maxReplicas": {
@@ -459,9 +459,9 @@
           "description": "LatestRolledoutRevision names the most recent ControllerRevision that fully owns this Component's traffic (i.e., the rollout has completed). Drives the consumer-side HTTPRoute backendRef.",
           "type": "string"
         },
-        "omenative": {
-          "description": "OMENative reports OMENative-managed state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.",
-          "$ref": "#/definitions/v1beta1.OMENativeComponentStatus"
+        "lifecycle": {
+          "description": "Lifecycle reports OMENative-managed lifecycle state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Counterpart of the LifecycleSpec sub-block on ComponentExtensionSpec. Nil otherwise.",
+          "$ref": "#/definitions/v1beta1.LifecycleStatus"
         },
         "previousRolledoutRevision": {
           "description": "PreviousRolledoutRevision names the prior rolled-out ControllerRevision, retained for diagnosis and traffic reverence during partial rollbacks.",
@@ -571,7 +571,7 @@
           "format": "int32"
         },
         "type": {
-          "description": "Type selects the pacing computation.\n  - PerComponent: each Component's omenative.updateStrategy\n    rollingUpdate applies independently. Group-wide MaxSurge\n    still applies on top. Default.\n  - RatioBalanced: pacing surges proportionally across all\n    Components in the group, never letting the cross-Component\n    ratio drift past the original.",
+          "description": "Type selects the pacing computation.\n  - PerComponent: each Component's lifecycle.updateStrategy\n    rollingUpdate applies independently. Group-wide MaxSurge\n    still applies on top. Default.\n  - RatioBalanced: pacing surges proportionally across all\n    Components in the group, never letting the cross-Component\n    ratio drift past the original.",
           "type": "string"
         }
       }
@@ -729,7 +729,7 @@
           "$ref": "#/definitions/v1beta1.LeaderSpec"
         },
         "lifecycle": {
-          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.omenative.",
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
           "$ref": "#/definitions/v1beta1.LifecycleSpec"
         },
         "maxReplicas": {
@@ -1156,7 +1156,7 @@
           "$ref": "#/definitions/v1beta1.LeaderSpec"
         },
         "lifecycle": {
-          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.omenative.",
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
           "$ref": "#/definitions/v1beta1.LifecycleSpec"
         },
         "maxReplicas": {
@@ -1685,7 +1685,7 @@
       }
     },
     "v1beta1.InferenceReplicaStatus": {
-      "description": "InferenceReplicaStatus is the observed state of one InferenceReplica. The InferenceReplica controller is the sole writer. Fields mirror the legacy OMENativeComponentStatus shape so the dual-write window can byte-compare the two.",
+      "description": "InferenceReplicaStatus is the observed state of one InferenceReplica. The InferenceReplica controller is the sole writer. Fields mirror the legacy LifecycleStatus shape so the dual-write window can byte-compare the two.",
       "type": "object",
       "properties": {
         "availableReplicas": {
@@ -2382,6 +2382,88 @@
         }
       }
     },
+    "v1beta1.LifecycleStatus": {
+      "description": "LifecycleStatus reports OMENative-managed lifecycle state for one Component. Nil when the Component does not use OMENative. Counterpart of the LifecycleSpec sub-block on ComponentExtensionSpec.",
+      "type": "object",
+      "properties": {
+        "availableReplicas": {
+          "description": "AvailableReplicas is the number of Instances that have been Ready continuously for at least MinReadySeconds.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "collisionCount": {
+          "description": "CollisionCount is the salt folded into ControllerRevision hash input after a name collision is observed, so retries produce a different revision name. Same pattern as StatefulSet.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "conditions": {
+          "description": "Conditions reports Component-level conditions. Defined types include Available, Progressing, FailedScale, FailedUpdate, GangSchedulingUnavailable, OperationStuck.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1.Condition"
+          },
+          "x-kubernetes-list-map-keys": [
+            "type"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "currentRevision": {
+          "description": "CurrentRevision names the ControllerRevision currently serving traffic.",
+          "type": "string"
+        },
+        "instanceStatuses": {
+          "description": "InstanceStatuses reports per-Instance state.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.OMENativeInstanceStatus"
+          },
+          "x-kubernetes-list-map-keys": [
+            "index"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "labelSelector": {
+          "description": "LabelSelector identifies pods of this Component for HPA-style consumers.",
+          "type": "string"
+        },
+        "observedGeneration": {
+          "description": "ObservedGeneration is the InferenceService.metadata.generation reflected by this block.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "readyReplicas": {
+          "description": "ReadyReplicas is the number of Instances whose every pod is Ready.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "replicas": {
+          "description": "Replicas is the total Instance count (any phase).",
+          "type": "integer",
+          "format": "int32"
+        },
+        "servingReplicas": {
+          "description": "ServingReplicas is the number of Instances whose every pod is BOTH ContainersReady AND has serving=True on the controller-managed readiness gate — i.e., the pod is actually in the load balancer's rotation. This is the count operators care about for traffic availability, and the count MaxUnavailable budgets gate against.\n\nDiverges from ReadyReplicas during in-place updates and any other scenario where the controller flips the serving gate to False while containers remain technically Ready.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "updateRevision": {
+          "description": "UpdateRevision names the ControllerRevision being rolled out.",
+          "type": "string"
+        },
+        "updatedReadyReplicas": {
+          "description": "UpdatedReadyReplicas is the number of Instances on UpdateRevision and fully Ready. UpdatedReadyReplicas / Replicas drives maxUnavailable rollout pacing.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "updatedReplicas": {
+          "description": "UpdatedReplicas is the number of Instances on UpdateRevision.",
+          "type": "integer",
+          "format": "int32"
+        }
+      }
+    },
     "v1beta1.MigrationEvent": {
       "description": "MigrationEvent is one observation logged during a migration.",
       "type": "object",
@@ -2791,88 +2873,6 @@
         "name": {
           "type": "string",
           "default": ""
-        }
-      }
-    },
-    "v1beta1.OMENativeComponentStatus": {
-      "description": "OMENativeComponentStatus reports OMENative-managed state for one Component. Nil when the Component does not use OMENative.",
-      "type": "object",
-      "properties": {
-        "availableReplicas": {
-          "description": "AvailableReplicas is the number of Instances that have been Ready continuously for at least MinReadySeconds.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "collisionCount": {
-          "description": "CollisionCount is the salt folded into ControllerRevision hash input after a name collision is observed, so retries produce a different revision name. Same pattern as StatefulSet.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "conditions": {
-          "description": "Conditions reports Component-level conditions. Defined types include Available, Progressing, FailedScale, FailedUpdate, GangSchedulingUnavailable, OperationStuck.",
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/v1.Condition"
-          },
-          "x-kubernetes-list-map-keys": [
-            "type"
-          ],
-          "x-kubernetes-list-type": "map"
-        },
-        "currentRevision": {
-          "description": "CurrentRevision names the ControllerRevision currently serving traffic.",
-          "type": "string"
-        },
-        "instanceStatuses": {
-          "description": "InstanceStatuses reports per-Instance state.",
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/v1beta1.OMENativeInstanceStatus"
-          },
-          "x-kubernetes-list-map-keys": [
-            "index"
-          ],
-          "x-kubernetes-list-type": "map"
-        },
-        "labelSelector": {
-          "description": "LabelSelector identifies pods of this Component for HPA-style consumers.",
-          "type": "string"
-        },
-        "observedGeneration": {
-          "description": "ObservedGeneration is the InferenceService.metadata.generation reflected by this block.",
-          "type": "integer",
-          "format": "int64"
-        },
-        "readyReplicas": {
-          "description": "ReadyReplicas is the number of Instances whose every pod is Ready.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "replicas": {
-          "description": "Replicas is the total Instance count (any phase).",
-          "type": "integer",
-          "format": "int32"
-        },
-        "servingReplicas": {
-          "description": "ServingReplicas is the number of Instances whose every pod is BOTH ContainersReady AND has serving=True on the controller-managed readiness gate — i.e., the pod is actually in the load balancer's rotation. This is the count operators care about for traffic availability, and the count MaxUnavailable budgets gate against.\n\nDiverges from ReadyReplicas during in-place updates and any other scenario where the controller flips the serving gate to False while containers remain technically Ready.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "updateRevision": {
-          "description": "UpdateRevision names the ControllerRevision being rolled out.",
-          "type": "string"
-        },
-        "updatedReadyReplicas": {
-          "description": "UpdatedReadyReplicas is the number of Instances on UpdateRevision and fully Ready. UpdatedReadyReplicas / Replicas drives maxUnavailable rollout pacing.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "updatedReplicas": {
-          "description": "UpdatedReplicas is the number of Instances on UpdateRevision.",
-          "type": "integer",
-          "format": "int32"
         }
       }
     },
@@ -3697,7 +3697,7 @@
           }
         },
         "lifecycle": {
-          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.omenative.",
+          "description": "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.\u003ccomponent\u003e.lifecycle.",
           "$ref": "#/definitions/v1beta1.LifecycleSpec"
         },
         "maxReplicas": {

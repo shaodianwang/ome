@@ -93,10 +93,12 @@ type ComponentStatusSpec struct {
 	// +optional
 	Address *duckv1.Addressable `json:"address,omitempty"`
 
-	// OMENative reports OMENative-managed state for this Component when the
-	// Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.
+	// Lifecycle reports OMENative-managed lifecycle state for this Component
+	// when the Component is annotated `ome.io/deploymentMode: OMENative`.
+	// Counterpart of the LifecycleSpec sub-block on ComponentExtensionSpec.
+	// Nil otherwise.
 	// +optional
-	OMENative *OMENativeComponentStatus `json:"omenative,omitempty"`
+	Lifecycle *LifecycleStatus `json:"lifecycle,omitempty"`
 
 	// RolloutPhase reflects the current rollout state for this
 	// Component (OEP-0011 Part 2). One of Stable, Canarying,

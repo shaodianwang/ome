@@ -55,7 +55,7 @@ func TestAggregateAndWriteStatus_PerInstanceCountersFromObservedPods(t *testing.
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	cs := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if cs == nil || len(cs.InstanceStatuses) != 1 {
 		t.Fatalf("expected one InstanceStatus, got %+v", cs)
 	}
@@ -94,7 +94,7 @@ func TestAggregateAndWriteStatus_AvailableRequiresEndpointSliceReady(t *testing.
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	cs := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	s := cs.InstanceStatuses[0]
 	if s.ReadyPodCount != 1 {
 		t.Errorf("ReadyPodCount: got %d want 1", s.ReadyPodCount)
@@ -120,7 +120,7 @@ func TestAggregateAndWriteStatus_TargetWritesUpdateRevisionAndPromotesOnConverge
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpec)
 	// Mark the Instance Ready and on the target revision.
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].RunningRevision = tcr.Name
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision = tcr.Name
 	if err := c.Status().Update(context.Background(), isvc); err != nil {
 		t.Fatalf("seed status: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestAggregateAndWriteStatus_TargetWritesUpdateRevisionAndPromotesOnConverge
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	cs := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if cs.UpdateRevision != tcr.Name {
 		t.Errorf("UpdateRevision: got %q want %q", cs.UpdateRevision, tcr.Name)
 	}
@@ -156,7 +156,7 @@ func TestAggregateAndWriteStatus_NoPromotionWhileInstanceLagsTarget(t *testing.T
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpec)
 	// Instance is Ready but RunningRevision is some other CR.
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].RunningRevision = "older-rev"
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision = "older-rev"
 	if err := c.Status().Update(context.Background(), isvc); err != nil {
 		t.Fatalf("seed status: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestAggregateAndWriteStatus_NoPromotionWhileInstanceLagsTarget(t *testing.T
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	cs := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if cs.UpdateRevision != tcr.Name {
 		t.Errorf("UpdateRevision: got %q want %q", cs.UpdateRevision, tcr.Name)
 	}
@@ -185,11 +185,11 @@ func TestAggregateAndWriteStatus_PreservesLifecycleFields(t *testing.T) {
 	// Incarnation) must not be overwritten by status aggregation.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	original := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	original := isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	original.Phase = v1beta1.OMENativeInstanceUpdating
 	original.TargetRevision = "some-target"
 	original.Operation = &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Step: "InPlace"}
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = original
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = original
 	c := newFakeClientWithDiscovery(t, isvc)
 	p := minimalParams(t, isvc, c)
 	plan, _ := BuildPlan(p)
@@ -199,7 +199,7 @@ func TestAggregateAndWriteStatus_PreservesLifecycleFields(t *testing.T) {
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceUpdating {
 		t.Errorf("Phase clobbered: got %q want Updating", s.Phase)
 	}
@@ -251,7 +251,7 @@ func TestAggregateAndWriteStatus_SurgeMidFlightHoldsServingReplicas(t *testing.T
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	cs := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	s := cs.InstanceStatuses[0]
 
 	// Per-pod observed counters reflect the live state — 2 pods total,
@@ -307,7 +307,7 @@ func TestAggregateAndWriteStatus_SurgeWithFewerCanonicalPodsNotServing(t *testin
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	cs := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if cs.ServingReplicas != 0 {
 		t.Errorf("ServingReplicas: got %d want 0 (no pod is serving anymore)", cs.ServingReplicas)
 	}
@@ -450,11 +450,11 @@ func TestMutateInstanceStatus_RetriesOnConflict(t *testing.T) {
 		t.Fatalf("get after retry: %v", err)
 	}
 	cs := got.Status.Components[v1beta1.EngineComponent]
-	if cs.OMENative == nil || len(cs.OMENative.InstanceStatuses) != 1 {
+	if cs.Lifecycle == nil || len(cs.Lifecycle.InstanceStatuses) != 1 {
 		t.Fatalf("InstanceStatus not landed: %+v", cs)
 	}
-	if cs.OMENative.InstanceStatuses[0].Phase != v1beta1.OMENativeInstanceCreating {
-		t.Errorf("wrong Phase: got %s", cs.OMENative.InstanceStatuses[0].Phase)
+	if cs.Lifecycle.InstanceStatuses[0].Phase != v1beta1.OMENativeInstanceCreating {
+		t.Errorf("wrong Phase: got %s", cs.Lifecycle.InstanceStatuses[0].Phase)
 	}
 }
 
@@ -486,14 +486,14 @@ func TestBumpCollisionCount_RetriesOnConflict(t *testing.T) {
 		t.Fatalf("get after retry: %v", err)
 	}
 	cs := served.Status.Components[v1beta1.EngineComponent]
-	if cs.OMENative == nil || cs.OMENative.CollisionCount == nil || *cs.OMENative.CollisionCount != 1 {
+	if cs.Lifecycle == nil || cs.Lifecycle.CollisionCount == nil || *cs.Lifecycle.CollisionCount != 1 {
 		t.Errorf("CollisionCount not persisted: %+v", cs)
 	}
 
 	// Verify the cached ISVC was also mirrored (the function does this
 	// outside the retry, only on successful commit).
-	if p.ISVC.Status.Components[v1beta1.EngineComponent].OMENative == nil ||
-		p.ISVC.Status.Components[v1beta1.EngineComponent].OMENative.CollisionCount == nil {
+	if p.ISVC.Status.Components[v1beta1.EngineComponent].Lifecycle == nil ||
+		p.ISVC.Status.Components[v1beta1.EngineComponent].Lifecycle.CollisionCount == nil {
 		t.Errorf("cached ISVC not mirrored")
 	}
 }
@@ -503,7 +503,7 @@ func TestAggregateAndWriteStatus_RetriesOnConflict(t *testing.T) {
 	isvc := freshISVC("ns", "isvc")
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
 				},
@@ -529,10 +529,10 @@ func TestAggregateAndWriteStatus_RetriesOnConflict(t *testing.T) {
 		t.Fatalf("get after retry: %v", err)
 	}
 	cs := got.Status.Components[v1beta1.EngineComponent]
-	if cs.OMENative.Replicas != 1 {
-		t.Errorf("Replicas not aggregated: got %d", cs.OMENative.Replicas)
+	if cs.Lifecycle.Replicas != 1 {
+		t.Errorf("Replicas not aggregated: got %d", cs.Lifecycle.Replicas)
 	}
-	if cs.OMENative.LabelSelector == "" {
+	if cs.Lifecycle.LabelSelector == "" {
 		t.Errorf("LabelSelector not set")
 	}
 }
@@ -573,7 +573,7 @@ func TestMutateInstanceStatus_NoWriteWhenMutateReturnsFalse(t *testing.T) {
 // create → surge ready → drain old → promote) through ReconcileComponent,
 // then asserts the status invariant.
 //
-// Mechanism: AggregateAndWriteStatus stamps cs.OMENative.UpdateRevision =
+// Mechanism: AggregateAndWriteStatus stamps cs.Lifecycle.UpdateRevision =
 // target.Name on every pass and promotes CurrentRevision = target.Name
 // when rolloutComplete=true. target.Name is the .Name of the
 // ControllerRevision EnsureControllerRevision returned, which is always
@@ -626,7 +626,7 @@ func TestSurgeUpdate_SingleBump_URMatchesCR_OnlyOneNewCR(t *testing.T) {
 	// Update isvc.Status to reflect the steady-state on the initial CR.
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				CurrentRevision: initialCR.Name,
 				UpdateRevision:  initialCR.Name,
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
@@ -775,9 +775,9 @@ func TestSurgeUpdate_SingleBump_URMatchesCR_OnlyOneNewCR(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
 		t.Fatalf("re-read ISVC: %v", err)
 	}
-	cs := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	cs := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if cs == nil {
-		t.Fatalf("OMENativeComponentStatus missing")
+		t.Fatalf("LifecycleStatus missing")
 	}
 	if cs.UpdateRevision != newCR.Name {
 		t.Errorf("UpdateRevision: got %q want %q (new CR)", cs.UpdateRevision, newCR.Name)
@@ -872,7 +872,7 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 	}
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				CurrentRevision: v1CR.Name,
 				UpdateRevision:  v1CR.Name,
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
@@ -1122,9 +1122,9 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), freshFinal); err != nil {
 		t.Fatalf("re-read ISVC final: %v", err)
 	}
-	csFinal := freshFinal.Status.Components[v1beta1.EngineComponent].OMENative
+	csFinal := freshFinal.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if csFinal == nil {
-		t.Fatalf("OMENativeComponentStatus missing on final read")
+		t.Fatalf("LifecycleStatus missing on final read")
 	}
 	if csFinal.CurrentRevision != v3CR.Name {
 		t.Errorf("final CurrentRevision: got %q want %q (rollout should converge to v3)",
@@ -1162,7 +1162,7 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 // entry point owns the same post-commit observability contract.
 //
 // Without the mirror, a downstream caller that reads
-// p.ISVC.Status.Components[X].OMENative within the same reconcile
+// p.ISVC.Status.Components[X].Lifecycle within the same reconcile
 // (coordination's latestRevisionHash, ops/create.go's
 // revisionHashForInstance, etc.) observes the stale pre-write values,
 // which is the operative fault mode for the A-2 SurgeThenDrain
@@ -1179,7 +1179,7 @@ func TestAggregateAndWriteStatus_MirrorsCommittedRevisionFieldsOntoInMemoryISVC(
 	slice := sliceWithEndpoint("prod", "engine-1", query.HeadlessServiceName(isvc.Name, v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent)), pod, true)
 	c := newFakeClientWithDiscovery(t, isvc, pod, slice)
 	tcr := ensureTargetCR(t, c, isvc, v1beta1.EngineComponent, targetSpec)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].RunningRevision = tcr.Name
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision = tcr.Name
 	if err := c.Status().Update(context.Background(), isvc); err != nil {
 		t.Fatalf("seed status: %v", err)
 	}
@@ -1189,9 +1189,9 @@ func TestAggregateAndWriteStatus_MirrorsCommittedRevisionFieldsOntoInMemoryISVC(
 	// Sanity: before AggregateAndWriteStatus, the in-memory ISVC has the
 	// seed values (UR and CR both empty, since isvcReadyAtIncarnation
 	// only seeds Phase=Ready, not the revision fields).
-	preCS := isvc.Status.Components[v1beta1.EngineComponent].OMENative
+	preCS := isvc.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if preCS == nil {
-		t.Fatalf("pre-test: OMENativeComponentStatus missing")
+		t.Fatalf("pre-test: LifecycleStatus missing")
 	}
 
 	if err := AggregateAndWriteStatus(context.Background(), p, plan, tcr); err != nil {
@@ -1203,7 +1203,7 @@ func TestAggregateAndWriteStatus_MirrorsCommittedRevisionFieldsOntoInMemoryISVC(
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
 		t.Fatalf("re-read ISVC: %v", err)
 	}
-	apiCS := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	apiCS := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if apiCS.UpdateRevision != tcr.Name {
 		t.Fatalf("API UpdateRevision: got %q want %q", apiCS.UpdateRevision, tcr.Name)
 	}
@@ -1212,9 +1212,9 @@ func TestAggregateAndWriteStatus_MirrorsCommittedRevisionFieldsOntoInMemoryISVC(
 	}
 
 	// MIRROR: the in-memory ISVC must reflect the just-committed values.
-	mirrorCS := isvc.Status.Components[v1beta1.EngineComponent].OMENative
+	mirrorCS := isvc.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if mirrorCS == nil {
-		t.Fatalf("mirror missed OMENativeComponentStatus")
+		t.Fatalf("mirror missed LifecycleStatus")
 	}
 	if mirrorCS.UpdateRevision != tcr.Name {
 		t.Errorf("in-memory UpdateRevision: got %q want %q (mirror gap — A-2 orphan-hash bug shape)",
@@ -1243,8 +1243,8 @@ func TestAggregateAndWriteStatus_MirrorsURWhenRolloutInProgress(t *testing.T) {
 	// Pre-seed both API and in-memory CR field with an "older revision" —
 	// simulates the prior rolled-out CR's name surviving across reconciles.
 	const olderRev = "llama-70b-engine-older"
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].RunningRevision = olderRev
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision = olderRev
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision = olderRev
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision = olderRev
 	if err := c.Status().Update(context.Background(), isvc); err != nil {
 		t.Fatalf("seed status: %v", err)
 	}
@@ -1260,7 +1260,7 @@ func TestAggregateAndWriteStatus_MirrorsURWhenRolloutInProgress(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
 		t.Fatalf("re-read ISVC: %v", err)
 	}
-	apiCS := fresh.Status.Components[v1beta1.EngineComponent].OMENative
+	apiCS := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if apiCS.UpdateRevision != tcr.Name {
 		t.Errorf("API UpdateRevision: got %q want %q", apiCS.UpdateRevision, tcr.Name)
 	}
@@ -1270,7 +1270,7 @@ func TestAggregateAndWriteStatus_MirrorsURWhenRolloutInProgress(t *testing.T) {
 	}
 
 	// MIRROR: in-memory must match.
-	mirrorCS := isvc.Status.Components[v1beta1.EngineComponent].OMENative
+	mirrorCS := isvc.Status.Components[v1beta1.EngineComponent].Lifecycle
 	if mirrorCS.UpdateRevision != tcr.Name {
 		t.Errorf("in-memory UpdateRevision: got %q want %q", mirrorCS.UpdateRevision, tcr.Name)
 	}

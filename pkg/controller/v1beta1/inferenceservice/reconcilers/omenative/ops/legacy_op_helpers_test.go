@@ -27,7 +27,7 @@ func TestReconcileComponentOps_ScaleDownDrivesDelete(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
 					{Index: 1, Phase: v1beta1.OMENativeInstanceReady},
@@ -57,7 +57,7 @@ func TestReconcileComponentOps_ScaleDownDrivesDelete(t *testing.T) {
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	for _, s := range cs.OMENative.InstanceStatuses {
+	for _, s := range cs.Lifecycle.InstanceStatuses {
 		if s.Index == 1 {
 			t.Errorf("InstanceStatus for index 1 should have been removed, got %+v", s)
 		}

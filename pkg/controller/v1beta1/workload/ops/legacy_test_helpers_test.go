@@ -175,8 +175,8 @@ func legacyTestInput(isvc *v1beta1.InferenceService, c client.Client, component 
 // InstanceStatuses slice into the workload-owned mirror.
 func legacyInstanceStatuses(isvc *v1beta1.InferenceService, component workload.ComponentType) []workload.InstanceStatus {
 	var out []workload.InstanceStatus
-	if cs, ok := isvc.Status.Components[v1beta1.ComponentType(component)]; ok && cs.OMENative != nil {
-		for _, s := range cs.OMENative.InstanceStatuses {
+	if cs, ok := isvc.Status.Components[v1beta1.ComponentType(component)]; ok && cs.Lifecycle != nil {
+		for _, s := range cs.Lifecycle.InstanceStatuses {
 			out = append(out, workload.InstanceStatus{
 				Index:           s.Index,
 				Incarnation:     s.Incarnation,
@@ -207,11 +207,11 @@ func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compo
 			fresh.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
 		}
 		cs := fresh.Status.Components[v1component]
-		if cs.OMENative == nil {
-			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+		if cs.Lifecycle == nil {
+			cs.Lifecycle = &v1beta1.LifecycleStatus{}
 		}
 		pos := -1
-		for i, s := range cs.OMENative.InstanceStatuses {
+		for i, s := range cs.Lifecycle.InstanceStatuses {
 			if s.Index == idx {
 				pos = i
 				break
@@ -221,7 +221,7 @@ func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compo
 		if pos == -1 {
 			w = workload.InstanceStatus{Index: idx}
 		} else {
-			s := cs.OMENative.InstanceStatuses[pos]
+			s := cs.Lifecycle.InstanceStatuses[pos]
 			w = workload.InstanceStatus{
 				Index:           s.Index,
 				Incarnation:     s.Incarnation,
@@ -245,9 +245,9 @@ func legacyMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compo
 			Operation:       legacyToV1beta1Op(w.Operation),
 		}
 		if pos == -1 {
-			cs.OMENative.InstanceStatuses = append(cs.OMENative.InstanceStatuses, updated)
+			cs.Lifecycle.InstanceStatuses = append(cs.Lifecycle.InstanceStatuses, updated)
 		} else {
-			cs.OMENative.InstanceStatuses[pos] = updated
+			cs.Lifecycle.InstanceStatuses[pos] = updated
 		}
 		fresh.Status.Components[v1component] = cs
 		if err := c.Status().Update(ctx, fresh); err != nil {
@@ -326,7 +326,7 @@ func legacyISVCReadyAtIncarnation(name, ns string, incarnation int64) *v1beta1.I
 	isvc := legacyMinimalISVC(name, ns, 1)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{Index: 0, Incarnation: incarnation, Phase: v1beta1.OMENativeInstanceReady},
 				},
@@ -437,12 +437,12 @@ func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1be
 		fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
 	cs := fresh.Status.Components[v1component]
-	if cs.OMENative == nil {
-		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	if cs.Lifecycle == nil {
+		cs.Lifecycle = &v1beta1.LifecycleStatus{}
 	}
-	for i := range cs.OMENative.InstanceStatuses {
-		if cs.OMENative.InstanceStatuses[i].Index == idx {
-			cs.OMENative.InstanceStatuses[i].RunningRevision = cr.Name
+	for i := range cs.Lifecycle.InstanceStatuses {
+		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
+			cs.Lifecycle.InstanceStatuses[i].RunningRevision = cr.Name
 			fresh.Status.Components[v1component] = cs
 			if err := c.Status().Update(context.Background(), fresh); err != nil {
 				t.Fatalf("set RunningRevision: %v", err)

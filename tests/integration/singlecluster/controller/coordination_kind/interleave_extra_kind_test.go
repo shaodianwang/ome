@@ -58,9 +58,9 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int1-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(3))
-			for _, s := range cs.OMENative.InstanceStatuses {
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
+			for _, s := range cs.Lifecycle.InstanceStatuses {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			}
 			pod := &corev1.Pod{}
@@ -79,11 +79,11 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int1-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(3),
-				"expected 3 instances after migration (source replaced by surge); got %d", len(cs.OMENative.InstanceStatuses))
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3),
+				"expected 3 instances after migration (source replaced by surge); got %d", len(cs.Lifecycle.InstanceStatuses))
 
 			indices := map[int32]v1beta1.OMENativeInstancePhase{}
-			for _, s := range cs.OMENative.InstanceStatuses {
+			for _, s := range cs.Lifecycle.InstanceStatuses {
 				indices[s.Index] = s.Phase
 			}
 			g.Expect(indices).NotTo(HaveKey(int32(0)),
@@ -111,9 +111,9 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int2-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(3))
-			for _, s := range cs.OMENative.InstanceStatuses {
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
+			for _, s := range cs.Lifecycle.InstanceStatuses {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			}
 			pod := &corev1.Pod{}
@@ -137,9 +137,9 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int2-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1),
-				"expected 1 InstanceStatus; got %d", len(cs.OMENative.InstanceStatuses))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1),
+				"expected 1 InstanceStatus; got %d", len(cs.Lifecycle.InstanceStatuses))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
@@ -165,9 +165,9 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int3-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(3))
-			for _, s := range cs.OMENative.InstanceStatuses {
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
+			for _, s := range cs.Lifecycle.InstanceStatuses {
 				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 				if s.Index == 2 {
 					idx2Incarnation = s.Incarnation
@@ -192,10 +192,10 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int3-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(3))
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(3))
 
 			byIdx := map[int32]v1beta1.OMENativeInstanceStatus{}
-			for _, s := range cs.OMENative.InstanceStatuses {
+			for _, s := range cs.Lifecycle.InstanceStatuses {
 				byIdx[s.Index] = s
 			}
 			g.Expect(byIdx).NotTo(HaveKey(int32(0)),
@@ -229,9 +229,9 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int4-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "int4-isvc-engine-0-default-0",
@@ -263,9 +263,9 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int4-followup")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
@@ -285,9 +285,9 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int6-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "int6-isvc-engine-0-default-0",
@@ -308,8 +308,8 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "int6-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			for _, s := range cs.OMENative.InstanceStatuses {
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			for _, s := range cs.Lifecycle.InstanceStatuses {
 				if s.Phase != v1beta1.OMENativeInstanceMigrating &&
 					(s.Operation == nil || s.Operation.Type != v1beta1.InstanceOperationMigrate) {
 					continue
@@ -332,8 +332,8 @@ var _ = ginkgo.Describe("OMENative state-machine interleavings (KIND)", ginkgo.O
 			cs := cur.Status.Components[v1beta1.EngineComponent]
 			// Migration completes by surge promotion. Eventually the
 			// rolling v1→v2 update on the surviving instance also lands.
-			g.Expect(cs.OMENative.InstanceStatuses).NotTo(BeEmpty())
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle.InstanceStatuses).NotTo(BeEmpty())
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

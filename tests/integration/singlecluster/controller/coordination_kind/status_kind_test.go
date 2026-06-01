@@ -46,8 +46,8 @@ var _ = ginkgo.Describe("OMENative status surface (extras)", ginkgo.Ordered, fun
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "avail-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			cond := meta.FindStatusCondition(cs.OMENative.Conditions, "Available")
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			cond := meta.FindStatusCondition(cs.Lifecycle.Conditions, "Available")
 			g.Expect(cond).NotTo(BeNil(), "Available condition missing")
 			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue),
 				"Available should be True once all pods are ready; got %+v", cond)
@@ -77,8 +77,8 @@ var _ = ginkgo.Describe("OMENative status surface (extras)", ginkgo.Ordered, fun
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "term-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.AvailableReplicas).To(Equal(int32(1)))
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.AvailableReplicas).To(Equal(int32(1)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("setting a long graceful termination on the pod, then deleting")
@@ -97,10 +97,10 @@ var _ = ginkgo.Describe("OMENative status surface (extras)", ginkgo.Ordered, fun
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "term-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.AvailableReplicas).To(Equal(int32(0)),
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.AvailableReplicas).To(Equal(int32(0)),
 				"terminating pod must be excluded from AvailableReplicas; got %d",
-				cs.OMENative.AvailableReplicas)
+				cs.Lifecycle.AvailableReplicas)
 		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
@@ -119,12 +119,12 @@ var _ = ginkgo.Describe("OMENative status surface (extras)", ginkgo.Ordered, fun
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "rev-promote-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(cs.OMENative.UpdateRevision).NotTo(BeEmpty(),
+			g.Expect(cs.Lifecycle).NotTo(BeNil())
+			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.Lifecycle.UpdateRevision).NotTo(BeEmpty(),
 				"UpdateRevision should be stamped once the target is computed")
-			g.Expect(cs.OMENative.CurrentRevision).To(Equal(cs.OMENative.UpdateRevision),
+			g.Expect(cs.Lifecycle.CurrentRevision).To(Equal(cs.Lifecycle.UpdateRevision),
 				"CurrentRevision should converge to UpdateRevision once rollout completes")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})

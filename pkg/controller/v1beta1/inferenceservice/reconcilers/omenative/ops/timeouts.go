@@ -42,12 +42,12 @@ func ExpireOperationsIfDeadlinePassed(ctx context.Context, p core.ReconcileParam
 	}
 	v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 	cs, ok := p.ISVC.Status.Components[v1component]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return nil
 	}
 
 	now := time.Now()
-	for _, s := range cs.OMENative.InstanceStatuses {
+	for _, s := range cs.Lifecycle.InstanceStatuses {
 		if !operationDeadlinePassed(&s, now) {
 			continue
 		}
@@ -135,12 +135,12 @@ func mirrorInstancePhase(isvc *v1beta1.InferenceService, c v1beta1.ComponentType
 		return
 	}
 	cs, ok := isvc.Status.Components[c]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return
 	}
-	for i := range cs.OMENative.InstanceStatuses {
-		if cs.OMENative.InstanceStatuses[i].Index == idx {
-			cs.OMENative.InstanceStatuses[i].Phase = phase
+	for i := range cs.Lifecycle.InstanceStatuses {
+		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
+			cs.Lifecycle.InstanceStatuses[i].Phase = phase
 			return
 		}
 	}

@@ -49,7 +49,7 @@ var _ = ginkgo.Describe("behavior — Independent coordination", ginkgo.Ordered,
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "indep-d4")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "indep-d4")
@@ -67,8 +67,8 @@ var _ = ginkgo.Describe("behavior — Independent coordination", ginkgo.Ordered,
 				observed[c.Status.RolloutCoordination.Groups[0].Phase] = true
 			}
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"D-4: engine CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))

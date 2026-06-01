@@ -314,13 +314,13 @@ func TestCheckRatioGate_PDScenarioEngineMustWaitForDecoder(t *testing.T) {
 	isvc := mkPDFixture(int32Ptr(5))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        20,
 				UpdatedReplicas: 1,
 			},
 		},
 		v1beta1.DecoderComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        5,
 				UpdatedReplicas: 0,
 			},
@@ -343,13 +343,13 @@ func TestCheckRatioGate_PDScenarioDecoderAllowedToCatchUp(t *testing.T) {
 	isvc := mkPDFixture(int32Ptr(5))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        20,
 				UpdatedReplicas: 1,
 			},
 		},
 		v1beta1.DecoderComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        5,
 				UpdatedReplicas: 0,
 			},
@@ -377,13 +377,13 @@ func TestCheckRatioGate_PDScenarioWiderToleranceAllowsDrain(t *testing.T) {
 	isvc := mkPDFixture(int32Ptr(20))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        20,
 				ServingReplicas: 20,
 			},
 		},
 		v1beta1.DecoderComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        5,
 				ServingReplicas: 5,
 			},
@@ -464,13 +464,13 @@ func TestCheckRatioGate_InFlightProjectionTightensBand(t *testing.T) {
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
+					Lifecycle: &v1beta1.LifecycleStatus{
 						Replicas:        30,
 						ServingReplicas: 30,
 					},
 				},
 				v1beta1.DecoderComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
+					Lifecycle: &v1beta1.LifecycleStatus{
 						Replicas:        10,
 						ServingReplicas: 10,
 					},
@@ -546,13 +546,13 @@ func TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock(t *testing.T) {
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
+					Lifecycle: &v1beta1.LifecycleStatus{
 						Replicas:        4,
 						ServingReplicas: 4,
 					},
 				},
 				v1beta1.DecoderComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
+					Lifecycle: &v1beta1.LifecycleStatus{
 						Replicas:        2,
 						ServingReplicas: 2,
 					},
@@ -609,13 +609,13 @@ func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
+					Lifecycle: &v1beta1.LifecycleStatus{
 						Replicas:        4,
 						ServingReplicas: 4,
 					},
 				},
 				v1beta1.DecoderComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
+					Lifecycle: &v1beta1.LifecycleStatus{
 						Replicas:        2,
 						ServingReplicas: 2,
 					},
@@ -738,7 +738,7 @@ func TestCheckUnavailabilityGate_WithinBudget(t *testing.T) {
 	isvc := mkUnavailFixture(iosInt(1))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        5,
 				ReadyReplicas:   5,
 				ServingReplicas: 5,
@@ -757,7 +757,7 @@ func TestCheckUnavailabilityGate_BudgetExhausted(t *testing.T) {
 	isvc := mkUnavailFixture(iosInt(1))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        5,
 				ReadyReplicas:   4,
 				ServingReplicas: 4,
@@ -777,7 +777,7 @@ func TestCheckUnavailabilityGate_ZeroBudgetDeadlocks(t *testing.T) {
 	isvc := mkUnavailFixture(iosInt(0))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        5,
 				ReadyReplicas:   5,
 				ServingReplicas: 5,
@@ -797,7 +797,7 @@ func TestCheckUnavailabilityGate_PercentBudget(t *testing.T) {
 	isvc := mkUnavailFixture(&pct)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        10,
 				ReadyReplicas:   10,
 				ServingReplicas: 10,
@@ -821,7 +821,7 @@ func TestCheckUnavailabilityGate_InFlightDeltaCharges(t *testing.T) {
 	isvc := mkUnavailFixture(&pct)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        10,
 				ReadyReplicas:   10,
 				ServingReplicas: 10,
@@ -855,7 +855,7 @@ func TestCheckUnavailabilityGate_ServingDivergesFromReady(t *testing.T) {
 	isvc := mkUnavailFixture(iosInt(3))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas:        10,
 				ReadyReplicas:   10, // misleading — kubelet sees containers Ready
 				ServingReplicas: 7,  // truth — 3 pods are out of rotation
@@ -946,7 +946,7 @@ func TestCheckSurgeGate_NoInFlight_WithinBudget(t *testing.T) {
 	// → ALLOWED.
 	isvc := mkSurgeFixture(iosInt(1))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 5}},
+		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 5}},
 	}
 	allowed, reason := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0)
 	if !allowed {
@@ -959,7 +959,7 @@ func TestCheckSurgeGate_OneInFlight_BudgetExhausted(t *testing.T) {
 	// → DENIED.
 	isvc := mkSurgeFixture(iosInt(1))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{
+		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
 			Replicas: 5,
 			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
 				Index:     0,
@@ -980,7 +980,7 @@ func TestCheckSurgeGate_SurgeDrainStepAlsoCounts(t *testing.T) {
 	// pod is alive until old is deleted.
 	isvc := mkSurgeFixture(iosInt(1))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{
+		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
 			Replicas: 5,
 			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
 				Index:     0,
@@ -1001,7 +1001,7 @@ func TestCheckSurgeGate_OtherStepsDoNotCount(t *testing.T) {
 	for _, step := range []string{"Drain", "InPlace"} {
 		isvc := mkSurgeFixture(iosInt(1))
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{
+			v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
 				Replicas: 5,
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
 					Index:     0,
@@ -1022,7 +1022,7 @@ func TestCheckSurgeGate_InFlightDeltaProjection(t *testing.T) {
 	// kicked off 1 surge this wake-up. With MaxSurge=1, projected=2 → DENIED.
 	isvc := mkSurgeFixture(iosInt(1))
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 5}},
+		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 5}},
 	}
 	allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 1)
 	if allowed {
@@ -1036,7 +1036,7 @@ func TestCheckSurgeGate_PercentBudget(t *testing.T) {
 	pct := intstr.FromString("25%")
 	isvc := mkSurgeFixture(&pct)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 8}},
+		v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 8}},
 	}
 	if allowed, _ := CheckSurgeGate(isvc, v1beta1.EngineComponent, 0); !allowed {
 		t.Errorf("25%% of 8 = 2, 0 in-flight, projected=1: allow")

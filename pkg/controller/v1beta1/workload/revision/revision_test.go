@@ -225,7 +225,7 @@ func TestRevisionHash_CanonicalPayloadIncludesPodMetaField(t *testing.T) {
 }
 
 func TestRevisionHash_NilAndZeroPointerEquivalent(t *testing.T) {
-	// CollisionCount in OMENativeComponentStatus is *int32. Callers may
+	// CollisionCount in LifecycleStatus is *int32. Callers may
 	// legitimately pass nil or ptr.To(int32(0)) for "no salt yet"; the
 	// hash must be the same or a defaulter that normalizes the pointer
 	// would invalidate every previously-recorded revision name.

@@ -56,7 +56,7 @@ func TestExpireOperationsIfDeadlinePassed_InPlaceFallsBackToRecreate(t *testing.
 	// routes through recreate.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     1,
 		Phase:           v1beta1.OMENativeInstanceUpdating,
@@ -78,7 +78,7 @@ func TestExpireOperationsIfDeadlinePassed_InPlaceFallsBackToRecreate(t *testing.
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Operation != nil {
 		t.Errorf("Operation must be cleared after in-place fallback; got %+v", s.Operation)
 	}
@@ -104,7 +104,7 @@ func TestExpireOperationsIfDeadlinePassed_RecreateUpdateStampsStuckAndEscalatesP
 	// transition to Phase=Failed instead of sitting at Surging forever.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     2,
 		Phase:           v1beta1.OMENativeInstanceUpdating,
@@ -126,7 +126,7 @@ func TestExpireOperationsIfDeadlinePassed_RecreateUpdateStampsStuckAndEscalatesP
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Operation == nil {
 		t.Fatalf("Operation must be preserved for recreate; got nil")
 	}
@@ -148,7 +148,7 @@ func TestExpireOperationsIfDeadlinePassed_RecreateUpdateStampsStuckAndEscalatesP
 func TestExpireOperationsIfDeadlinePassed_MirrorsPhaseToInMemoryISVC(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     2,
 		Phase:           v1beta1.OMENativeInstanceUpdating,
@@ -171,7 +171,7 @@ func TestExpireOperationsIfDeadlinePassed_MirrorsPhaseToInMemoryISVC(t *testing.
 	// Read from the in-memory ISVC pointer, NOT a fresh client.Get.
 	// The whole point of the mirror is that the rest of the reconcile
 	// pass sees the new Phase without needing a re-read.
-	got := isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Phase
+	got := isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Phase
 	if got != v1beta1.OMENativeInstanceFailed {
 		t.Errorf("in-memory ISVC Phase: must mirror the just-committed Phase=Failed; got %q", got)
 	}
@@ -190,7 +190,7 @@ func TestExpireOperationsIfDeadlinePassed_FutureDeadlineNoOp(t *testing.T) {
 			Deadline: futureDeadline(),
 		},
 	}
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = original
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = original
 	c := newFakeClientWithDiscovery(t, isvc)
 	p := minimalParams(t, isvc, c)
 	plan, _ := core.BuildPlan(p)
@@ -201,7 +201,7 @@ func TestExpireOperationsIfDeadlinePassed_FutureDeadlineNoOp(t *testing.T) {
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Operation == nil || s.Operation.Step != updateStepInPlace {
 		t.Errorf("future Deadline must leave Operation untouched; got %+v", s.Operation)
 	}
@@ -215,7 +215,7 @@ func TestExpireOperationsIfDeadlinePassed_StuckIsIdempotent(t *testing.T) {
 	// (would churn LastTransitionTime on the eventual condition).
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index: 0,
 		Phase: v1beta1.OMENativeInstanceMigrating,
 		Operation: &v1beta1.InstanceOperation{
@@ -246,7 +246,7 @@ func TestExpireOperationsIfDeadlinePassed_PerInstanceIndependent(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 2)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{
 						Index: 0, Phase: v1beta1.OMENativeInstanceUpdating,
@@ -271,7 +271,7 @@ func TestExpireOperationsIfDeadlinePassed_PerInstanceIndependent(t *testing.T) {
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	for _, s := range fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses {
+	for _, s := range fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses {
 		switch s.Index {
 		case 0:
 			if s.Operation != nil {
@@ -326,7 +326,7 @@ func TestExpireOperationsIfDeadlinePassed_MigrateAbandonsStuckSurge(t *testing.T
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	surgeIdx := int32(1)
 	uuid := "req-abandon"
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
 		{
 			Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceMigrating,
 			RunningRevision: "rev-source",
@@ -361,8 +361,8 @@ func TestExpireOperationsIfDeadlinePassed_MigrateAbandonsStuckSurge(t *testing.T
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 	cs := fresh.Status.Components[v1beta1.EngineComponent]
 	var src *v1beta1.OMENativeInstanceStatus
-	for i := range cs.OMENative.InstanceStatuses {
-		s := &cs.OMENative.InstanceStatuses[i]
+	for i := range cs.Lifecycle.InstanceStatuses {
+		s := &cs.Lifecycle.InstanceStatuses[i]
 		if s.Index == 0 {
 			src = s
 		}
@@ -406,7 +406,7 @@ func TestExpireOperationsIfDeadlinePassed_MigrateLeavesReadySurgeStuck(t *testin
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	surgeIdx := int32(1)
 	uuid := "req-stuck"
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
 		{
 			Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceMigrating,
 			Operation: &v1beta1.InstanceOperation{
@@ -437,8 +437,8 @@ func TestExpireOperationsIfDeadlinePassed_MigrateLeavesReadySurgeStuck(t *testin
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 	cs := fresh.Status.Components[v1beta1.EngineComponent]
 	var src *v1beta1.OMENativeInstanceStatus
-	for i := range cs.OMENative.InstanceStatuses {
-		s := &cs.OMENative.InstanceStatuses[i]
+	for i := range cs.Lifecycle.InstanceStatuses {
+		s := &cs.Lifecycle.InstanceStatuses[i]
 		if s.Index == 0 {
 			src = s
 		}
@@ -502,7 +502,7 @@ func TestStampInstanceFailed_EscalatesPhase(t *testing.T) {
 	// Phase=Updating + Operation present -> Phase=Failed.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index: 0,
 		Phase: v1beta1.OMENativeInstanceUpdating,
 		Operation: &v1beta1.InstanceOperation{
@@ -521,7 +521,7 @@ func TestStampInstanceFailed_EscalatesPhase(t *testing.T) {
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceFailed {
 		t.Errorf("Phase: got %q want Failed", s.Phase)
 	}
@@ -534,7 +534,7 @@ func TestStampInstanceFailed_AlreadyFailedIsNoop(t *testing.T) {
 	// Phase already Failed -> mutate returns false, no churn.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index: 0,
 		Phase: v1beta1.OMENativeInstanceFailed,
 		Operation: &v1beta1.InstanceOperation{
@@ -561,7 +561,7 @@ func TestStampInstanceFailed_DoesNotResurrectRemovedInstance(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	// Remove the existing InstanceStatus to simulate post-abandon state.
 	cs := isvc.Status.Components[v1beta1.EngineComponent]
-	cs.OMENative.InstanceStatuses = nil
+	cs.Lifecycle.InstanceStatuses = nil
 	isvc.Status.Components[v1beta1.EngineComponent] = cs
 	c := newFakeClientWithDiscovery(t, isvc)
 	p := minimalParams(t, isvc, c)
@@ -572,7 +572,7 @@ func TestStampInstanceFailed_DoesNotResurrectRemovedInstance(t *testing.T) {
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	for _, s := range fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses {
+	for _, s := range fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses {
 		if s.Index == 99 {
 			t.Errorf("removed instance must not be resurrected; got %+v", s)
 		}
@@ -585,7 +585,7 @@ func TestExpireOperationsIfDeadlinePassed_PhaseEscalationIsIdempotent(t *testing
 	// thrash on the Component-level Failed surface.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     2,
 		Phase:           v1beta1.OMENativeInstanceFailed,
@@ -609,7 +609,7 @@ func TestExpireOperationsIfDeadlinePassed_PhaseEscalationIsIdempotent(t *testing
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceFailed {
 		t.Errorf("Phase: got %q want Failed", s.Phase)
 	}
@@ -635,7 +635,7 @@ func TestExpireOperationsIfDeadlinePassed_PhaseEscalationIsIdempotent(t *testing
 func TestExpireOperationsIfDeadlinePassed_SurgeStepEscalatesPhase(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     1,
 		Phase:           v1beta1.OMENativeInstanceUpdating,
@@ -658,7 +658,7 @@ func TestExpireOperationsIfDeadlinePassed_SurgeStepEscalatesPhase(t *testing.T) 
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Operation == nil {
 		t.Fatalf("Operation must be preserved on surge timeout; got nil")
 	}
@@ -679,7 +679,7 @@ func TestExpireOperationsIfDeadlinePassed_InPlaceFallbackDoesNotEscalate(t *test
 	// continues on the next reconcile.
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Phase:           v1beta1.OMENativeInstanceUpdating,
 		RunningRevision: "old-rev",
@@ -700,7 +700,7 @@ func TestExpireOperationsIfDeadlinePassed_InPlaceFallbackDoesNotEscalate(t *test
 
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0]
+	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceReady {
 		t.Errorf("Phase: got %q want Ready (in-place fallback is recoverable)", s.Phase)
 	}

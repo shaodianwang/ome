@@ -59,8 +59,8 @@ var _ = ginkgo.Describe("permutation — pause mid-Sequential rollout", ginkgo.O
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-seq-pause")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
-		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 
 		// Bump BOTH images — Sequential will roll decoder first.
 		Eventually(func(g Gomega) {
@@ -112,9 +112,9 @@ var _ = ginkgo.Describe("permutation — pause mid-Sequential rollout", ginkgo.O
 
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-seq-pause")
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"KP-15: after unpause, engine CurrentRevision must advance to v2")
-			g.Expect(c.Status.Components[v1beta1.DecoderComponent].OMENative.CurrentRevision).NotTo(Equal(v1DecoderRev),
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
 				"KP-15: after unpause, decoder CurrentRevision must advance to v2")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),

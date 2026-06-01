@@ -164,22 +164,22 @@ func TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents(t *testin
 			},
 		},
 	}
-	// Seed Components[c].OMENative.UpdateRevision so latestRevisionHash
+	// Seed Components[c].Lifecycle.UpdateRevision so latestRevisionHash
 	// recovers the per-Component hash (matches the steady-state shape
 	// AggregateIRStatus writes after the IR controller commits Status).
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				UpdateRevision: isvc.Name + "-engine-engineHash",
 			},
 		},
 		v1beta1.DecoderComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				UpdateRevision: isvc.Name + "-decoder-decoderHash",
 			},
 		},
 		v1beta1.RouterComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				UpdateRevision: isvc.Name + "-router-routerHash",
 			},
 		},
@@ -249,7 +249,7 @@ func TestReconcile_TrafficLatestRevisionFlipPersists(t *testing.T) {
 
 	// Mirror AggregateIRStatus committing the IR-observed
 	// UpdateRevision back onto the in-memory ISVC.
-	cs1.OMENative = &v1beta1.OMENativeComponentStatus{
+	cs1.Lifecycle = &v1beta1.LifecycleStatus{
 		UpdateRevision: isvc.Name + "-engine-engineHash",
 	}
 	isvc.Status.Components[v1beta1.EngineComponent] = cs1
@@ -488,7 +488,7 @@ func withInstanceStatus(c v1beta1.ComponentType, instances []v1beta1.OMENativeIn
 		ObjectMeta: metav1.ObjectMeta{Name: "isvc-test"},
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				c: {OMENative: &v1beta1.OMENativeComponentStatus{
+				c: {Lifecycle: &v1beta1.LifecycleStatus{
 					InstanceStatuses: instances,
 				}},
 			},
@@ -573,12 +573,12 @@ func TestBuildComponentObservation_FailedPropagatesThroughBlueGreen(t *testing.T
 		ObjectMeta: metav1.ObjectMeta{Name: "isvc-test"},
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-				v1beta1.EngineComponent: {OMENative: &v1beta1.OMENativeComponentStatus{
+				v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
 					InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 						{Index: 0, Phase: v1beta1.OMENativeInstanceFailed},
 					},
 				}},
-				v1beta1.DecoderComponent: {OMENative: &v1beta1.OMENativeComponentStatus{
+				v1beta1.DecoderComponent: {Lifecycle: &v1beta1.LifecycleStatus{
 					InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 						{Index: 0, Phase: v1beta1.OMENativeInstanceReady},
 					},
@@ -660,10 +660,10 @@ func TestBuildRatioState_DefersSnapshotWhenStatusEmpty(t *testing.T) {
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 4},
+					Lifecycle: &v1beta1.LifecycleStatus{Replicas: 4},
 				},
 				v1beta1.DecoderComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 2},
+					Lifecycle: &v1beta1.LifecycleStatus{Replicas: 2},
 				},
 			},
 		},
@@ -699,7 +699,7 @@ func TestBuildRatioState_PartiallyPopulatedStatusDefersSnapshot(t *testing.T) {
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 4},
+					Lifecycle: &v1beta1.LifecycleStatus{Replicas: 4},
 				},
 			},
 		},
@@ -732,10 +732,10 @@ func TestBuildRatioState_PreservesAlreadyRecordedAnchor(t *testing.T) {
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 2},
+					Lifecycle: &v1beta1.LifecycleStatus{Replicas: 2},
 				},
 				v1beta1.DecoderComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 1},
+					Lifecycle: &v1beta1.LifecycleStatus{Replicas: 1},
 				},
 			},
 			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{

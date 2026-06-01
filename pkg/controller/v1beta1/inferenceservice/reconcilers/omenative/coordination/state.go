@@ -31,7 +31,7 @@ type ComponentObservation struct {
 	ServingPods int32
 
 	// NewRevisionPods is the live pod count on the target
-	// ControllerRevision (UpdateRevision in OMENativeComponentStatus
+	// ControllerRevision (UpdateRevision in LifecycleStatus
 	// terms). When zero, the Component is not yet surging.
 	NewRevisionPods int32
 

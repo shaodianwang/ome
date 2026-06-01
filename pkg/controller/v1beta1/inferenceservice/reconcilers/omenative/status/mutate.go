@@ -70,12 +70,12 @@ func MutateInstance(ctx context.Context, c client.Client, isvc *v1beta1.Inferenc
 			fresh.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
 		}
 		cs := fresh.Status.Components[component]
-		if cs.OMENative == nil {
-			cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+		if cs.Lifecycle == nil {
+			cs.Lifecycle = &v1beta1.LifecycleStatus{}
 		}
 
 		// Locate or append the InstanceStatus entry.
-		insts := cs.OMENative.InstanceStatuses
+		insts := cs.Lifecycle.InstanceStatuses
 		pos := -1
 		for i, s := range insts {
 			if s.Index == idx {
@@ -93,7 +93,7 @@ func MutateInstance(ctx context.Context, c client.Client, isvc *v1beta1.Inferenc
 		if !mutate(slot) {
 			return nil
 		}
-		cs.OMENative.InstanceStatuses = insts
+		cs.Lifecycle.InstanceStatuses = insts
 		fresh.Status.Components[component] = cs
 
 		if err := c.Status().Update(ctx, fresh); err != nil {
@@ -128,20 +128,20 @@ func mirrorInstanceStatus(isvc *v1beta1.InferenceService, component v1beta1.Comp
 		isvc.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
 	}
 	cs := isvc.Status.Components[component]
-	if cs.OMENative == nil {
-		cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+	if cs.Lifecycle == nil {
+		cs.Lifecycle = &v1beta1.LifecycleStatus{}
 	}
 	pos := -1
-	for i, s := range cs.OMENative.InstanceStatuses {
+	for i, s := range cs.Lifecycle.InstanceStatuses {
 		if s.Index == src.Index {
 			pos = i
 			break
 		}
 	}
 	if pos == -1 {
-		cs.OMENative.InstanceStatuses = append(cs.OMENative.InstanceStatuses, src)
+		cs.Lifecycle.InstanceStatuses = append(cs.Lifecycle.InstanceStatuses, src)
 	} else {
-		cs.OMENative.InstanceStatuses[pos] = src
+		cs.Lifecycle.InstanceStatuses[pos] = src
 	}
 	isvc.Status.Components[component] = cs
 }

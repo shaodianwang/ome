@@ -208,10 +208,10 @@ func buildRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compon
 				return nil
 			}
 			cs, ok := fresh.Status.Components[component]
-			if !ok || cs.OMENative == nil {
+			if !ok || cs.Lifecycle == nil {
 				return nil
 			}
-			insts := cs.OMENative.InstanceStatuses
+			insts := cs.Lifecycle.InstanceStatuses
 			pos := -1
 			for i, s := range insts {
 				if s.Index == idx {
@@ -222,7 +222,7 @@ func buildRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compon
 			if pos == -1 {
 				return nil
 			}
-			cs.OMENative.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
+			cs.Lifecycle.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
 			fresh.Status.Components[component] = cs
 
 			if err := c.Status().Update(ctx, fresh); err != nil {
@@ -285,21 +285,21 @@ func buildWriteAggregateCondition(c client.Client, isvc *v1beta1.InferenceServic
 				fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 			}
 			cs := fresh.Status.Components[component]
-			if cs.OMENative == nil {
-				cs.OMENative = &v1beta1.OMENativeComponentStatus{}
+			if cs.Lifecycle == nil {
+				cs.Lifecycle = &v1beta1.LifecycleStatus{}
 			}
 			// Detect a no-op before issuing the API write — saves a
 			// status patch and the implicit ResourceVersion bump on
 			// every reconcile. Mirrors the same no-op short-circuit
 			// the legacy patchGangSchedulingCondition used.
-			if existing := apimeta.FindStatusCondition(cs.OMENative.Conditions, cond.Type); existing != nil &&
+			if existing := apimeta.FindStatusCondition(cs.Lifecycle.Conditions, cond.Type); existing != nil &&
 				existing.Status == cond.Status &&
 				existing.Reason == cond.Reason &&
 				existing.ObservedGeneration == cond.ObservedGeneration &&
 				existing.Message == cond.Message {
 				return nil
 			}
-			apimeta.SetStatusCondition(&cs.OMENative.Conditions, cond)
+			apimeta.SetStatusCondition(&cs.Lifecycle.Conditions, cond)
 			fresh.Status.Components[component] = cs
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				if apierrors.IsNotFound(err) {
@@ -348,8 +348,8 @@ func extractInstanceStatuses(isvc *v1beta1.InferenceService, component v1beta1.C
 		return nil
 	}
 	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return nil
 	}
-	return cs.OMENative.InstanceStatuses
+	return cs.Lifecycle.InstanceStatuses
 }

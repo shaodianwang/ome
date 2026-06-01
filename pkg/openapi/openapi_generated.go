@@ -53,6 +53,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaAutoscaler":                 schema_pkg_apis_ome_v1beta1_KedaAutoscaler(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                     schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec":                  schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleStatus":                schema_pkg_apis_ome_v1beta1_LifecycleStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":                 schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry":          schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationPolicy":                schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref),
@@ -68,7 +69,6 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus":                    schema_pkg_apis_ome_v1beta1_ModelStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatusSpec":                schema_pkg_apis_ome_v1beta1_ModelStatusSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay":                 schema_pkg_apis_ome_v1beta1_MountedOverlay(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus":       schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":        schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":                schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                schema_pkg_apis_ome_v1beta1_ParentReference(ref),
@@ -842,7 +842,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -885,10 +885,10 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 							Ref:         ref("knative.dev/pkg/apis/duck/v1.Addressable"),
 						},
 					},
-					"omenative": {
+					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "OMENative reports OMENative-managed state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Nil otherwise.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus"),
+							Description: "Lifecycle reports OMENative-managed lifecycle state for this Component when the Component is annotated `ome.io/deploymentMode: OMENative`. Counterpart of the LifecycleSpec sub-block on ComponentExtensionSpec. Nil otherwise.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleStatus"),
 						},
 					},
 					"rolloutPhase": {
@@ -957,7 +957,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscalerStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScaleTargetRef", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscalerStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScaleTargetRef", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
 	}
 }
 
@@ -1063,7 +1063,7 @@ func schema_pkg_apis_ome_v1beta1_CoordinationPacing(ref common.ReferenceCallback
 				Properties: map[string]spec.Schema{
 					"type": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Type selects the pacing computation.\n  - PerComponent: each Component's omenative.updateStrategy\n    rollingUpdate applies independently. Group-wide MaxSurge\n    still applies on top. Default.\n  - RatioBalanced: pacing surges proportionally across all\n    Components in the group, never letting the cross-Component\n    ratio drift past the original.",
+							Description: "Type selects the pacing computation.\n  - PerComponent: each Component's lifecycle.updateStrategy\n    rollingUpdate applies independently. Group-wide MaxSurge\n    still applies on top. Default.\n  - RatioBalanced: pacing surges proportionally across all\n    Components in the group, never letting the cross-Component\n    ratio drift past the original.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -1664,7 +1664,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -2411,7 +2411,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -3023,7 +3023,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref common.ReferenceCall
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "InferenceReplicaStatus is the observed state of one InferenceReplica. The InferenceReplica controller is the sole writer. Fields mirror the legacy OMENativeComponentStatus shape so the dual-write window can byte-compare the two.",
+				Description: "InferenceReplicaStatus is the observed state of one InferenceReplica. The InferenceReplica controller is the sole writer. Fields mirror the legacy LifecycleStatus shape so the dual-write window can byte-compare the two.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"observedGeneration": {
@@ -4226,6 +4226,142 @@ func schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref common.ReferenceCallback) com
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_LifecycleStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "LifecycleStatus reports OMENative-managed lifecycle state for one Component. Nil when the Component does not use OMENative. Counterpart of the LifecycleSpec sub-block on ComponentExtensionSpec.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"observedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedGeneration is the InferenceService.metadata.generation reflected by this block.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"currentRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CurrentRevision names the ControllerRevision currently serving traffic.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"updateRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdateRevision names the ControllerRevision being rolled out.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"collisionCount": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CollisionCount is the salt folded into ControllerRevision hash input after a name collision is observed, so retries produce a different revision name. Same pattern as StatefulSet.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"labelSelector": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LabelSelector identifies pods of this Component for HPA-style consumers.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"replicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Replicas is the total Instance count (any phase).",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"readyReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReadyReplicas is the number of Instances whose every pod is Ready.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"servingReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServingReplicas is the number of Instances whose every pod is BOTH ContainersReady AND has serving=True on the controller-managed readiness gate — i.e., the pod is actually in the load balancer's rotation. This is the count operators care about for traffic availability, and the count MaxUnavailable budgets gate against.\n\nDiverges from ReadyReplicas during in-place updates and any other scenario where the controller flips the serving gate to False while containers remain technically Ready.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"availableReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AvailableReplicas is the number of Instances that have been Ready continuously for at least MinReadySeconds.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"updatedReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdatedReplicas is the number of Instances on UpdateRevision.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"updatedReadyReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "UpdatedReadyReplicas is the number of Instances on UpdateRevision and fully Ready. UpdatedReadyReplicas / Replicas drives maxUnavailable rollout pacing.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions reports Component-level conditions. Defined types include Available, Progressing, FailedScale, FailedUpdate, GangSchedulingUnavailable, OperationStuck.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+					"instanceStatuses": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"index",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "InstanceStatuses reports per-Instance state.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_MigrationEvent(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -4946,142 +5082,6 @@ func schema_pkg_apis_ome_v1beta1_MountedOverlay(ref common.ReferenceCallback) co
 				Required: []string{"name", "envVar", "distribution"},
 			},
 		},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_OMENativeComponentStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "OMENativeComponentStatus reports OMENative-managed state for one Component. Nil when the Component does not use OMENative.",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"observedGeneration": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ObservedGeneration is the InferenceService.metadata.generation reflected by this block.",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"currentRevision": {
-						SchemaProps: spec.SchemaProps{
-							Description: "CurrentRevision names the ControllerRevision currently serving traffic.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"updateRevision": {
-						SchemaProps: spec.SchemaProps{
-							Description: "UpdateRevision names the ControllerRevision being rolled out.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"collisionCount": {
-						SchemaProps: spec.SchemaProps{
-							Description: "CollisionCount is the salt folded into ControllerRevision hash input after a name collision is observed, so retries produce a different revision name. Same pattern as StatefulSet.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"labelSelector": {
-						SchemaProps: spec.SchemaProps{
-							Description: "LabelSelector identifies pods of this Component for HPA-style consumers.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"replicas": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Replicas is the total Instance count (any phase).",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"readyReplicas": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ReadyReplicas is the number of Instances whose every pod is Ready.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"servingReplicas": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ServingReplicas is the number of Instances whose every pod is BOTH ContainersReady AND has serving=True on the controller-managed readiness gate — i.e., the pod is actually in the load balancer's rotation. This is the count operators care about for traffic availability, and the count MaxUnavailable budgets gate against.\n\nDiverges from ReadyReplicas during in-place updates and any other scenario where the controller flips the serving gate to False while containers remain technically Ready.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"availableReplicas": {
-						SchemaProps: spec.SchemaProps{
-							Description: "AvailableReplicas is the number of Instances that have been Ready continuously for at least MinReadySeconds.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"updatedReplicas": {
-						SchemaProps: spec.SchemaProps{
-							Description: "UpdatedReplicas is the number of Instances on UpdateRevision.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"updatedReadyReplicas": {
-						SchemaProps: spec.SchemaProps{
-							Description: "UpdatedReadyReplicas is the number of Instances on UpdateRevision and fully Ready. UpdatedReadyReplicas / Replicas drives maxUnavailable rollout pacing.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"conditions": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-map-keys": []interface{}{
-									"type",
-								},
-								"x-kubernetes-list-type": "map",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "Conditions reports Component-level conditions. Defined types include Available, Progressing, FailedScale, FailedUpdate, GangSchedulingUnavailable, OperationStuck.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
-									},
-								},
-							},
-						},
-					},
-					"instanceStatuses": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-map-keys": []interface{}{
-									"index",
-								},
-								"x-kubernetes-list-type": "map",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "InstanceStatuses reports per-Instance state.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus"),
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 
@@ -6838,7 +6838,7 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.omenative.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component is annotated ome.io/deploymentMode=OMENative; ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},

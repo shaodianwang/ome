@@ -28,7 +28,7 @@ func stuckInstanceFixture(t *testing.T, name, ns string, phase v1beta1.OMENative
 	stuckSince := time.Now().Add(-stuckDuration)
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {
-			OMENative: &v1beta1.OMENativeComponentStatus{
+			Lifecycle: &v1beta1.LifecycleStatus{
 				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 					{
 						Index:       0,
@@ -207,7 +207,7 @@ func TestDetectStuckInstancesForAutoMigration_PhaseReady_NoTrigger(t *testing.T)
 	policy := policyWithDeadline(30, nil)
 	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceReady, time.Hour, true, "node-a", policy)
 	// Phase=Ready has no Operation by convention; strip it to mirror prod state.
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Operation = nil
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Operation = nil
 	c := newFakeClientWithDiscovery(t, isvc, pod)
 	p := minimalParams(t, isvc, c)
 
@@ -242,7 +242,7 @@ func TestDetectStuckInstancesForAutoMigration_NoOperationAnchor_NoTrigger(t *tes
 	policy := policyWithDeadline(30, nil)
 	isvc, pod := stuckInstanceFixture(t, "iv", "ns", v1beta1.OMENativeInstanceUpdating, 2*time.Minute, true, "node-a", policy)
 	// Clear Operation so stuckSinceForInstance returns ok=false.
-	isvc.Status.Components[v1beta1.EngineComponent].OMENative.InstanceStatuses[0].Operation = nil
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Operation = nil
 	c := newFakeClientWithDiscovery(t, isvc, pod)
 	p := minimalParams(t, isvc, c)
 
@@ -323,10 +323,10 @@ func TestDetectStuckInstancesForAutoMigration_RetryCapReached_NoTriggerAndStamps
 		t.Fatalf("re-read: %v", err)
 	}
 	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	if cs.OMENative == nil || len(cs.OMENative.InstanceStatuses) != 1 {
+	if cs.Lifecycle == nil || len(cs.Lifecycle.InstanceStatuses) != 1 {
 		t.Fatalf("missing engine InstanceStatuses on re-read")
 	}
-	fs := cs.OMENative.InstanceStatuses[0]
+	fs := cs.Lifecycle.InstanceStatuses[0]
 	if fs.Phase != v1beta1.OMENativeInstanceFailed {
 		t.Errorf("Phase: got %q want Failed", fs.Phase)
 	}

@@ -369,20 +369,20 @@ func updateTrafficStatus(isvc *v1beta1.InferenceService, components []v1beta1.Co
 
 // latestRevisionHash returns the ControllerRevision hash this
 // Component is converging toward. Read from
-// OMENativeComponentStatus.UpdateRevision; falls back to
+// LifecycleStatus.UpdateRevision; falls back to
 // CurrentRevision.
 func latestRevisionHash(isvc *v1beta1.InferenceService, c v1beta1.ComponentType) string {
 	if isvc == nil {
 		return ""
 	}
 	cs, ok := isvc.Status.Components[c]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return ""
 	}
-	if name := cs.OMENative.UpdateRevision; name != "" {
+	if name := cs.Lifecycle.UpdateRevision; name != "" {
 		return revisionHashFromName(isvc.Name, c, name)
 	}
-	if name := cs.OMENative.CurrentRevision; name != "" {
+	if name := cs.Lifecycle.CurrentRevision; name != "" {
 		return revisionHashFromName(isvc.Name, c, name)
 	}
 	return ""
@@ -403,7 +403,7 @@ func revisionHashFromName(isvc string, c v1beta1.ComponentType, name string) str
 }
 
 // buildGroupObservation builds the GroupObservation the state machine
-// consumes from observed pod counts + OMENativeComponentStatus.
+// consumes from observed pod counts + LifecycleStatus.
 func buildGroupObservation(isvc *v1beta1.InferenceService, g ResolvedGroup, perRevisionPods map[v1beta1.ComponentType]map[string]int32) GroupObservation {
 	obs := GroupObservation{
 		Group:      g,
@@ -425,23 +425,23 @@ func buildGroupObservation(isvc *v1beta1.InferenceService, g ResolvedGroup, perR
 const PausedRolloutAnnotation = "ome.io/rollout-paused"
 
 // buildComponentObservation aggregates one Component's observation from
-// OMENativeComponentStatus and per-revision pod counts.
+// LifecycleStatus and per-revision pod counts.
 func buildComponentObservation(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, perRevisionPods map[string]int32) ComponentObservation {
 	out := ComponentObservation{
 		Component: c,
 	}
 	cs, ok := isvc.Status.Components[c]
-	if !ok || cs.OMENative == nil {
+	if !ok || cs.Lifecycle == nil {
 		return out
 	}
-	out.DesiredReplicas = cs.OMENative.Replicas
+	out.DesiredReplicas = cs.Lifecycle.Replicas
 	out.TotalPods = sumPodCounts(perRevisionPods)
-	out.ReadyPods = cs.OMENative.ReadyReplicas
-	out.ServingPods = cs.OMENative.ServingReplicas
-	out.NewRevisionPods = cs.OMENative.UpdatedReplicas
-	out.NewRevisionReadyPods = cs.OMENative.UpdatedReadyReplicas
-	currentHash := revisionHashFromName(isvc.Name, c, cs.OMENative.CurrentRevision)
-	targetHash := revisionHashFromName(isvc.Name, c, cs.OMENative.UpdateRevision)
+	out.ReadyPods = cs.Lifecycle.ReadyReplicas
+	out.ServingPods = cs.Lifecycle.ServingReplicas
+	out.NewRevisionPods = cs.Lifecycle.UpdatedReplicas
+	out.NewRevisionReadyPods = cs.Lifecycle.UpdatedReadyReplicas
+	currentHash := revisionHashFromName(isvc.Name, c, cs.Lifecycle.CurrentRevision)
+	targetHash := revisionHashFromName(isvc.Name, c, cs.Lifecycle.UpdateRevision)
 	out.CurrentRevisionHash = currentHash
 	out.TargetRevisionHash = targetHash
 	out.RolloutInFlight = targetHash != "" && targetHash != currentHash
@@ -454,7 +454,7 @@ func buildComponentObservation(isvc *v1beta1.InferenceService, c v1beta1.Compone
 	// group's Failed phase — operators see Phase=Failed instead of the
 	// rollout sitting at Surging / Waiting indefinitely after a per-
 	// Instance deadline blew past.
-	failedInstances := collectFailedInstanceIndices(cs.OMENative.InstanceStatuses)
+	failedInstances := collectFailedInstanceIndices(cs.Lifecycle.InstanceStatuses)
 	if len(failedInstances) > 0 {
 		out.Failed = true
 		out.FailureMessage = formatFailedInstancesMessage(c, failedInstances)

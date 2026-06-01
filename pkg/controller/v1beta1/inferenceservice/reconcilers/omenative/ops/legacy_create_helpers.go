@@ -62,10 +62,10 @@ func removeInstanceStatus(ctx context.Context, p core.ReconcileParams, component
 			return nil
 		}
 		cs, ok := fresh.Status.Components[component]
-		if !ok || cs.OMENative == nil {
+		if !ok || cs.Lifecycle == nil {
 			return nil
 		}
-		insts := cs.OMENative.InstanceStatuses
+		insts := cs.Lifecycle.InstanceStatuses
 		pos := -1
 		for i, s := range insts {
 			if s.Index == idx {
@@ -76,7 +76,7 @@ func removeInstanceStatus(ctx context.Context, p core.ReconcileParams, component
 		if pos == -1 {
 			return nil
 		}
-		cs.OMENative.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
+		cs.Lifecycle.InstanceStatuses = append(insts[:pos], insts[pos+1:]...)
 		fresh.Status.Components[component] = cs
 
 		if err := p.Client.Status().Update(ctx, fresh); err != nil {

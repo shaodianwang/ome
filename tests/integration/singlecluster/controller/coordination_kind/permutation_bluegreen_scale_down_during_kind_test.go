@@ -52,11 +52,11 @@ var _ = ginkgo.Describe("permutation — BlueGreen + scale-down during rollout",
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].OMENative.ServingReplicas).To(Equal(int32(4)))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.ServingReplicas).To(Equal(int32(4)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-bg-scaledown")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		// Combined update: scale engine 4 → 2 + bump image. BlueGreen
 		// has to (a) reach v2 on the (smaller) target replica count and
@@ -72,9 +72,9 @@ var _ = ginkgo.Describe("permutation — BlueGreen + scale-down during rollout",
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-bg-scaledown")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"KP-10: engine CurrentRevision must advance off v1")
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(2)),
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)),
 				"KP-10: engine must converge to 2 serving replicas on v2 (not stuck at 4)")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))

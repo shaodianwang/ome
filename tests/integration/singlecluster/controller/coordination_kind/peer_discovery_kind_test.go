@@ -62,10 +62,10 @@ var _ = ginkgo.Describe("PEER-DNS — per-pod headless DNS plumbing", ginkgo.Ord
 			c := freshISVC(g, ns.Name, "peer-dns")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.ServingReplicas).To(Equal(int32(2)))
-			g.Expect(decCS.OMENative.ServingReplicas).To(Equal(int32(1)))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(1)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// (a) headless Service exists per Component with ClusterIP=None

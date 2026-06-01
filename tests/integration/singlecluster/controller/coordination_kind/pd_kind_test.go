@@ -69,14 +69,14 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation (KIND)", ginkgo.O
 			c := freshISVC(g, ns.Name, "pd1-isvc")
 
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil(), "Engine must have OMENative status")
-			g.Expect(engCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(engCS.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil(), "Engine must have OMENative status")
+			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(decCS.OMENative).NotTo(BeNil(), "Decoder must have OMENative status")
-			g.Expect(decCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(decCS.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(decCS.Lifecycle).NotTo(BeNil(), "Decoder must have OMENative status")
+			g.Expect(decCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(decCS.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
@@ -96,12 +96,12 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation (KIND)", ginkgo.O
 			c := freshISVC(g, ns.Name, "pd5-isvc")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(decCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(engCS.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(decCS.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(decCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(decCS.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
@@ -119,15 +119,15 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation (KIND)", ginkgo.O
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pd5-isvc")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(engCS.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(engCS.OMENative.InstanceStatuses[0].Index).NotTo(Equal(int32(0)),
+			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Index).NotTo(Equal(int32(0)),
 				"Engine migration must move off index 0")
 
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(decCS.OMENative.InstanceStatuses).To(HaveLen(1),
+			g.Expect(decCS.Lifecycle.InstanceStatuses).To(HaveLen(1),
 				"Decoder must NOT have a surge instance from an Engine-only request")
-			g.Expect(decCS.OMENative.InstanceStatuses[0].Index).To(Equal(int32(0)),
+			g.Expect(decCS.Lifecycle.InstanceStatuses[0].Index).To(Equal(int32(0)),
 				"Decoder must remain at its original index — engine migration leaked into decoder dispatch")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -175,13 +175,13 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation (KIND)", ginkgo.O
 			c := freshISVC(g, ns.Name, "pd7-isvc")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative).NotTo(BeNil())
-			g.Expect(decCS.OMENative).NotTo(BeNil())
-			g.Expect(engCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(decCS.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(engCS.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(decCS.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			decoderInc = decCS.OMENative.InstanceStatuses[0].Incarnation
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(decCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(decCS.Lifecycle.InstanceStatuses).To(HaveLen(1))
+			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(decCS.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			decoderInc = decCS.Lifecycle.InstanceStatuses[0].Incarnation
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("force-deleting the Engine pod to trigger Restart")
@@ -195,9 +195,9 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation (KIND)", ginkgo.O
 			c := freshISVC(g, ns.Name, "pd7-isvc")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(engCS.OMENative.InstanceStatuses[0].Incarnation).To(BeNumerically(">", int64(1)),
+			g.Expect(engCS.Lifecycle.InstanceStatuses[0].Incarnation).To(BeNumerically(">", int64(1)),
 				"Engine must have bumped Incarnation through Restart")
-			g.Expect(decCS.OMENative.InstanceStatuses[0].Incarnation).To(Equal(decoderInc),
+			g.Expect(decCS.Lifecycle.InstanceStatuses[0].Incarnation).To(Equal(decoderInc),
 				"Decoder Incarnation must remain unchanged — Engine restart leaked into Decoder reconcile")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})

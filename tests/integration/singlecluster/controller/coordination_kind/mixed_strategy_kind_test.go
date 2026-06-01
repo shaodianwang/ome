@@ -79,10 +79,10 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 				v1beta1.EngineComponent, v1beta1.DecoderComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil(), "%s missing OMENative status", comp)
-				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-				g.Expect(cs.OMENative.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(0)),
+				g.Expect(cs.Lifecycle).NotTo(BeNil(), "%s missing OMENative status", comp)
+				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(0)),
 					"%s must start at ordinal 0", comp)
 			}
 
@@ -114,9 +114,9 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 				v1beta1.EngineComponent, v1beta1.DecoderComponent,
 			} {
 				cs := c.Status.Components[comp]
-				g.Expect(cs.OMENative).NotTo(BeNil())
-				g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-				g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+				g.Expect(cs.Lifecycle).NotTo(BeNil())
+				g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
+				g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 					"%s must reconverge to Ready after the bump", comp)
 			}
 
@@ -131,7 +131,7 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 				"KCG-3: engine UID must be preserved (InPlaceIfPossible + image-only diff = in-place patch); "+
 					"got %s expected %s", string(ePod.UID), engineUIDv1)
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(0)),
+			g.Expect(engCS.Lifecycle.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(0)),
 				"KCG-3: engine InPlaceIfPossible must NOT advance ActiveOrdinal")
 
 			// Decoder: default SurgeThenDrain + image diff →
@@ -139,7 +139,7 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 			// new pod at ordinal 1 with a fresh UID. ActiveOrdinal
 			// advances 0 → 1.
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
-			g.Expect(decCS.OMENative.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(1)),
+			g.Expect(decCS.Lifecycle.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(1)),
 				"KCG-3: decoder SurgeThenDrain must advance ActiveOrdinal 0 → 1")
 
 			dPod := &corev1.Pod{}

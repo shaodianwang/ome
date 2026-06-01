@@ -65,8 +65,8 @@ var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", gin
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].OMENative.ServingReplicas).To(Equal(int32(4)))
-			g.Expect(c.Status.Components[v1beta1.DecoderComponent].OMENative.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.ServingReplicas).To(Equal(int32(4)))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Capture v1 pod UIDs.
@@ -85,7 +85,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", gin
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		preBump := freshISVC(Default, ns.Name, "perm-ratio-inplace")
-		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].OMENative.CurrentRevision
+		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
 		// Sampler asserts the band [1.5, 2.5] (orig 2.0 ± 25%).
 		var samples atomic.Int64
@@ -121,7 +121,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", gin
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ratio-inplace")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.OMENative.CurrentRevision).NotTo(Equal(v1EngineRev),
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
 				"KP-4: engine CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))

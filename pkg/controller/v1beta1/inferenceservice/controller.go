@@ -617,7 +617,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// For every Component whose resolved deployment mode is OMENative
 	// (i.e. flows through the IR-managed path), read the live IR.Status
-	// and copy it onto ISVC.Status.Components[<component>].OMENative.
+	// and copy it onto ISVC.Status.Components[<component>].Lifecycle.
 	// The IR controller is the sole writer of IR.Status (no race with
 	// the omenative direct path — the predicate guarantees one writer
 	// per Component). Components on non-OMENative paths are not touched
@@ -721,7 +721,7 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 	// reliably 409s the outer flush and would wedge the reconcile in a
 	// re-loop. On conflict: re-Get the live ISVC, copy desiredService
 	// status onto the fresh ResourceVersion, then re-merge
-	// ComponentStatus.OMENative from latest so any OMENative writes that
+	// ComponentStatus.Lifecycle from latest so any OMENative writes that
 	// landed between our snapshot and the re-Get (Incarnation bumps,
 	// Phase transitions, RunningRevision promotes) are preserved. The
 	// outer reconciler doesn't own that subtree.
@@ -730,9 +730,9 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 		if err := r.Get(context.TODO(), namespacedName, latest); err != nil {
 			return err
 		}
-		preserved := preserveOMENativeComponentStatus(latest.Status.Components)
+		preserved := preserveLifecycleStatus(latest.Status.Components)
 		latest.Status = desiredService.Status
-		mergeOMENativeComponentStatus(&latest.Status, preserved)
+		mergeLifecycleStatus(&latest.Status, preserved)
 		return r.Status().Update(context.TODO(), latest)
 	}); err != nil {
 		// Same race as the top-of-function Get: if the ISVC vanished
@@ -770,27 +770,27 @@ func inferenceServiceStatusEqual(s1, s2 v1beta1.InferenceServiceStatus) bool {
 	return equality.Semantic.DeepEqual(s1, s2)
 }
 
-// preserveOMENativeComponentStatus snapshots the OMENative ComponentStatus
+// preserveLifecycleStatus snapshots the OMENative ComponentStatus
 // subtree per Component, so the caller can re-merge it after overwriting
 // latest.Status with the reconcile-pass desired status. The OMENative
-// reconciler owns Status.Components[*].OMENative; the outer reconciler
+// reconciler owns Status.Components[*].Lifecycle; the outer reconciler
 // only touches URL / RestURL / Address / RolloutPhase / Conditions.
 // Without re-merging, OMENative writes that landed between our snapshot
 // and the conflict re-Get get clobbered.
-func preserveOMENativeComponentStatus(comps map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec) map[v1beta1.ComponentType]*v1beta1.OMENativeComponentStatus {
+func preserveLifecycleStatus(comps map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec) map[v1beta1.ComponentType]*v1beta1.LifecycleStatus {
 	if len(comps) == 0 {
 		return nil
 	}
-	out := make(map[v1beta1.ComponentType]*v1beta1.OMENativeComponentStatus, len(comps))
+	out := make(map[v1beta1.ComponentType]*v1beta1.LifecycleStatus, len(comps))
 	for c, cs := range comps {
-		if cs.OMENative != nil {
-			out[c] = cs.OMENative.DeepCopy()
+		if cs.Lifecycle != nil {
+			out[c] = cs.Lifecycle.DeepCopy()
 		}
 	}
 	return out
 }
 
-func mergeOMENativeComponentStatus(s *v1beta1.InferenceServiceStatus, preserved map[v1beta1.ComponentType]*v1beta1.OMENativeComponentStatus) {
+func mergeLifecycleStatus(s *v1beta1.InferenceServiceStatus, preserved map[v1beta1.ComponentType]*v1beta1.LifecycleStatus) {
 	if len(preserved) == 0 {
 		return
 	}
@@ -799,7 +799,7 @@ func mergeOMENativeComponentStatus(s *v1beta1.InferenceServiceStatus, preserved 
 	}
 	for c, om := range preserved {
 		cs := s.Components[c]
-		cs.OMENative = om
+		cs.Lifecycle = om
 		s.Components[c] = cs
 	}
 }

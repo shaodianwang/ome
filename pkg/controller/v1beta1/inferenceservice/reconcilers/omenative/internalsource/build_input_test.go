@@ -46,7 +46,7 @@ func TestBuildReconcileInput_ProjectsIdentityAndObservedState(t *testing.T) {
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 				v1beta1.EngineComponent: {
-					OMENative: &v1beta1.OMENativeComponentStatus{
+					Lifecycle: &v1beta1.LifecycleStatus{
 						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 							{Index: 0, Incarnation: 7, Phase: v1beta1.OMENativeInstanceReady, ActiveOrdinal: 1},
 							{Index: 2, Incarnation: 1, Phase: v1beta1.OMENativeInstanceCreating},
@@ -118,8 +118,8 @@ func TestBuildReconcileInput_MutateInstance(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if cs, ok := fresh.Status.Components[v1beta1.EngineComponent]; ok && cs.OMENative != nil && len(cs.OMENative.InstanceStatuses) > 0 {
-		t.Errorf("expected no status write on no-op; got InstanceStatuses=%+v", cs.OMENative.InstanceStatuses)
+	if cs, ok := fresh.Status.Components[v1beta1.EngineComponent]; ok && cs.Lifecycle != nil && len(cs.Lifecycle.InstanceStatuses) > 0 {
+		t.Errorf("expected no status write on no-op; got InstanceStatuses=%+v", cs.Lifecycle.InstanceStatuses)
 	}
 
 	// Real mutate: workload-typed callback round-trips through the
@@ -136,10 +136,10 @@ func TestBuildReconcileInput_MutateInstance(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	cs := fresh.Status.Components[v1beta1.EngineComponent]
-	if cs.OMENative == nil || len(cs.OMENative.InstanceStatuses) != 1 {
-		t.Fatalf("status missing: %+v", cs.OMENative)
+	if cs.Lifecycle == nil || len(cs.Lifecycle.InstanceStatuses) != 1 {
+		t.Fatalf("status missing: %+v", cs.Lifecycle)
 	}
-	got := cs.OMENative.InstanceStatuses[0]
+	got := cs.Lifecycle.InstanceStatuses[0]
 	if got.Phase != v1beta1.OMENativeInstanceReady || got.Incarnation != 4 {
 		t.Errorf("InstanceStatus[0]: got %+v", got)
 	}

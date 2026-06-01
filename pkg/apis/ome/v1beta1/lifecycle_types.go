@@ -5,9 +5,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// OMENativeComponentStatus reports OMENative-managed state for one Component.
-// Nil when the Component does not use OMENative.
-type OMENativeComponentStatus struct {
+// LifecycleStatus reports OMENative-managed lifecycle state for one Component.
+// Nil when the Component does not use OMENative. Counterpart of the
+// LifecycleSpec sub-block on ComponentExtensionSpec.
+type LifecycleStatus struct {
 	// ObservedGeneration is the InferenceService.metadata.generation reflected by this block.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
