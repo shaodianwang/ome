@@ -430,6 +430,7 @@ func buildComponentObservation(isvc *v1beta1.InferenceService, c v1beta1.Compone
 	out.DesiredReplicas = cs.OMENative.Replicas
 	out.TotalPods = sumPodCounts(perRevisionPods)
 	out.ReadyPods = cs.OMENative.ReadyReplicas
+	out.ServingPods = cs.OMENative.ServingReplicas
 	out.NewRevisionPods = cs.OMENative.UpdatedReplicas
 	out.NewRevisionReadyPods = cs.OMENative.UpdatedReadyReplicas
 	currentHash := revisionHashFromName(isvc.Name, c, cs.OMENative.CurrentRevision)
@@ -547,6 +548,17 @@ func gcOrphanedPerRevisionServices(ctx context.Context, c client.Client, isvc *v
 //
 // Always populated even for non-RatioBalanced pacing (cheap; BuildGroupStatus
 // suppresses it on the status side based on policy).
+//
+// Snapshot deferral: the first reconcile of a freshly-created ISVC observes
+// every Component with status.OMENative.Replicas == 0 because the OMENative
+// status writer hasn't run yet (Create happens first; the status write lands
+// on a subsequent pass). Snapshotting from that empty status would anchor
+// Original to {Engine: 1, Decoder: 1} via SnapshotOriginal's zero-clamp,
+// which then deadlocks RatioBalanced rollouts the moment real replica counts
+// disagree (e.g., MinReplicas=4:2 produces a live 2:1 ratio that immediately
+// skews against the bogus 1:1 anchor). Defer the snapshot until every
+// Component reports non-zero status.OMENative.Replicas — by then the live
+// counts ARE the desired counts and Original anchors correctly.
 func buildRatioState(isvc *v1beta1.InferenceService, g ResolvedGroup, obs GroupObservation, perRevisionPods map[v1beta1.ComponentType]map[string]int32) *RatioState {
 	state := &RatioState{
 		Current: make(map[v1beta1.ComponentType]int32, len(g.Components)),
@@ -567,14 +579,26 @@ func buildRatioState(isvc *v1beta1.InferenceService, g ResolvedGroup, obs GroupO
 		}
 	}
 	// Original: read from existing Status, snapshot from current
-	// desired replicas if not yet recorded (first observation).
+	// observed replicas if not yet recorded (first observation that
+	// also has all Components populated in status).
 	state.Original = existingOriginalReplicas(isvc, g.Name)
 	if len(state.Original) == 0 {
 		desired := make(map[v1beta1.ComponentType]int32, len(g.Components))
+		allPopulated := true
 		for _, c := range g.Components {
-			desired[c] = obs.Components[c].DesiredReplicas
+			d := obs.Components[c].DesiredReplicas
+			if d <= 0 {
+				// Status hasn't been written for this Component yet. Don't
+				// snapshot — defer to the next reconcile after the status
+				// aggregator writes the real Replicas.
+				allPopulated = false
+				break
+			}
+			desired[c] = d
 		}
-		state.Original = SnapshotOriginal(desired)
+		if allPopulated {
+			state.Original = SnapshotOriginal(desired)
+		}
 	}
 	return state
 }

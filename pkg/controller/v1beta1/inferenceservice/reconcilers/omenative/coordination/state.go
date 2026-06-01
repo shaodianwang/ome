@@ -23,6 +23,13 @@ type ComponentObservation struct {
 	// ReadyPods is the live pod count reporting Ready=True.
 	ReadyPods int32
 
+	// ServingPods is the live pod count actually in load-balancer
+	// rotation (serving=True). Diverges from ReadyPods during in-place
+	// drains where the serving gate is flipped before containers
+	// restart. RatioBalanced math projects against this — operators
+	// care about live traffic capacity, not rollout progress.
+	ServingPods int32
+
 	// NewRevisionPods is the live pod count on the target
 	// ControllerRevision (UpdateRevision in OMENativeComponentStatus
 	// terms). When zero, the Component is not yet surging.
@@ -561,6 +568,17 @@ func computeSurgeBudget(obs GroupObservation) map[v1beta1.ComponentType]int32 {
 // MaxSurge budget — when the ratio band would be exceeded by even one
 // surge, the budget is zeroed and skew=true so the caller can fire
 // RatioSkewRejected metrics/events.
+//
+// Baseline: populates state.Serving from obs.Components.ServingPods so
+// EvaluateSurge projects against live serving capacity, NOT against the
+// zero-initialized NewPods that exist at rollout start. Without Serving
+// populated EvaluateSurge falls back to NewPods=0 and pairwise band
+// checks see a zero-serving peer (mass-drain failure mode), rejecting
+// every surge attempt the moment a Component first touches RatioBalanced.
+// That spurious rejection produces an unbroken stream of RatioSkewRejected
+// events with no progress; the dispatcher's CheckRatioGate may still
+// allow drain because it reads ServingReplicas from status, but this
+// state-machine-side gating fires the noise + zeros SurgeBudget map.
 func computeSurgeBudgetWithRatio(obs GroupObservation) (map[v1beta1.ComponentType]int32, bool) {
 	budget := computeSurgeBudget(obs)
 	if obs.Group.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
@@ -575,10 +593,12 @@ func computeSurgeBudgetWithRatio(obs GroupObservation) (map[v1beta1.ComponentTyp
 		Original: obs.OriginalReplicas,
 		Current:  make(map[v1beta1.ComponentType]int32, len(obs.Components)),
 		NewPods:  make(map[v1beta1.ComponentType]int32, len(obs.Components)),
+		Serving:  make(map[v1beta1.ComponentType]int32, len(obs.Components)),
 	}
 	for c, comp := range obs.Components {
 		state.Current[c] = comp.TotalPods
 		state.NewPods[c] = comp.NewRevisionPods
+		state.Serving[c] = comp.ServingPods
 	}
 	var skew bool
 	for c, proposed := range budget {

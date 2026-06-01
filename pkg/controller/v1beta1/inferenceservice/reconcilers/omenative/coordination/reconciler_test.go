@@ -619,3 +619,144 @@ func TestCollectFailedInstanceIndices_EmptyOnNoFailures(t *testing.T) {
 		t.Errorf("no failures should return nil/empty; got %v", out)
 	}
 }
+
+// TestBuildRatioState_DefersSnapshotWhenStatusEmpty pins the fix for
+// the BlueGreen+RatioBalanced deadlock (`.claude/specs/2026-05-30-kind-test-walk/
+// ratiobalanced-bluegreen-deadlock-no-progress.md`). The first reconcile
+// of a freshly-created ISVC observes every Component with
+// status.OMENative.Replicas == 0 (the OMENative status writer hasn't
+// run yet). Snapshotting from that empty status anchored Original to
+// {Engine: 1, Decoder: 1} via SnapshotOriginal's zero-clamp, deadlocking
+// rollouts whose live ratio disagreed with 1:1.
+//
+// The fix defers the snapshot until every Component has non-zero
+// observed Replicas. This test pins that contract: empty status →
+// empty Original; populated status → {eng: 4, dec: 2} matches the
+// cluster shape.
+func TestBuildRatioState_DefersSnapshotWhenStatusEmpty(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+		Pacing: v1beta1.CoordinationPacing{
+			Type: v1beta1.CoordinationPacingRatioBalanced,
+		},
+	}
+
+	// Status not yet populated — DesiredReplicas==0 for both Components.
+	// buildComponentObservation returns zero-valued observations when
+	// cs.OMENative is missing.
+	isvcEmpty := &v1beta1.InferenceService{}
+	obsEmpty := buildGroupObservation(isvcEmpty, g, map[v1beta1.ComponentType]map[string]int32{})
+	stateEmpty := buildRatioState(isvcEmpty, g, obsEmpty, map[v1beta1.ComponentType]map[string]int32{})
+
+	if len(stateEmpty.Original) != 0 {
+		t.Fatalf("empty status MUST defer snapshot to avoid the SnapshotOriginal zero-clamp anchoring Original to {1, 1}; got Original=%v", stateEmpty.Original)
+	}
+
+	// Once status carries real Replicas counts, the snapshot should
+	// reflect the cluster shape verbatim.
+	isvcPopulated := &v1beta1.InferenceService{
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 4},
+				},
+				v1beta1.DecoderComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 2},
+				},
+			},
+		},
+	}
+	obsPopulated := buildGroupObservation(isvcPopulated, g, map[v1beta1.ComponentType]map[string]int32{})
+	statePopulated := buildRatioState(isvcPopulated, g, obsPopulated, map[v1beta1.ComponentType]map[string]int32{})
+
+	if statePopulated.Original[v1beta1.EngineComponent] != 4 {
+		t.Errorf("Original engine: got %d want 4 (matches status.OMENative.Replicas)", statePopulated.Original[v1beta1.EngineComponent])
+	}
+	if statePopulated.Original[v1beta1.DecoderComponent] != 2 {
+		t.Errorf("Original decoder: got %d want 2 (matches status.OMENative.Replicas)", statePopulated.Original[v1beta1.DecoderComponent])
+	}
+}
+
+// TestBuildRatioState_PartiallyPopulatedStatusDefersSnapshot covers the
+// race where one Component has been reconciled (status.OMENative.Replicas
+// populated) but the other hasn't yet. The snapshot anchor must reflect
+// the WHOLE group's shape, so until every Component reports non-zero
+// Replicas, defer. Otherwise the in-flight Component pegs the ratio
+// against a still-zero peer and immediately rejects every surge.
+func TestBuildRatioState_PartiallyPopulatedStatusDefersSnapshot(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+		Pacing: v1beta1.CoordinationPacing{
+			Type: v1beta1.CoordinationPacingRatioBalanced,
+		},
+	}
+	// Engine populated; decoder not yet.
+	isvc := &v1beta1.InferenceService{
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 4},
+				},
+			},
+		},
+	}
+	obs := buildGroupObservation(isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	state := buildRatioState(isvc, g, obs, map[v1beta1.ComponentType]map[string]int32{})
+	if len(state.Original) != 0 {
+		t.Fatalf("partially populated status MUST defer snapshot; got Original=%v", state.Original)
+	}
+}
+
+// TestBuildRatioState_PreservesAlreadyRecordedAnchor pins the
+// already-recorded path: when ObservedRatio.Original is already
+// persisted from a prior reconcile, buildRatioState reads it as-is
+// (verbatim) and does NOT re-snapshot — the anchor must remain stable
+// across the rollout even if MinReplicas changes mid-flight.
+func TestBuildRatioState_PreservesAlreadyRecordedAnchor(t *testing.T) {
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+		Pacing: v1beta1.CoordinationPacing{
+			Type: v1beta1.CoordinationPacingRatioBalanced,
+		},
+	}
+	// Status: scaled DOWN to 2 engine + 1 decoder mid-rollout.
+	// ObservedRatio.Original captured at rollout start = 4:2 (the
+	// anchor we want to preserve, NOT the current shape).
+	isvc := &v1beta1.InferenceService{
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 2},
+				},
+				v1beta1.DecoderComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{Replicas: 1},
+				},
+			},
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name: "0",
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
+						Original: map[v1beta1.ComponentType]int32{
+							v1beta1.EngineComponent:  4,
+							v1beta1.DecoderComponent: 2,
+						},
+					},
+				}},
+			},
+		},
+	}
+	obs := buildGroupObservation(isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+	state := buildRatioState(isvc, g, obs, map[v1beta1.ComponentType]map[string]int32{})
+	if state.Original[v1beta1.EngineComponent] != 4 {
+		t.Errorf("anchor preservation: engine Original got %d want 4 (the snapshot from rollout start, NOT the current 2)", state.Original[v1beta1.EngineComponent])
+	}
+	if state.Original[v1beta1.DecoderComponent] != 2 {
+		t.Errorf("anchor preservation: decoder Original got %d want 2 (the snapshot from rollout start, NOT the current 1)", state.Original[v1beta1.DecoderComponent])
+	}
+}

@@ -511,6 +511,146 @@ func TestCheckRatioGate_InFlightProjectionTightensBand(t *testing.T) {
 	}
 }
 
+// TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock pins the
+// fix for the C-1 + H-3 KIND deadlock (`.claude/specs/2026-05-30-kind-test-walk/
+// ratiobalanced-bluegreen-deadlock-no-progress.md`).
+//
+// Reproduction shape: 4 engine + 2 decoder, BlueGreen + RatioBalanced
+// (tol 25%, band [1.5, 2.5]). The original ObservedRatio anchor must
+// reflect the 4:2 fleet — NOT the bogus {1, 1} that SnapshotOriginal
+// produced on the very first reconcile (when status.OMENative.Replicas
+// hadn't been written yet, so DesiredReplicas defaulted to 0 → clamped
+// to 1 by SnapshotOriginal). With the bogus 1:1 anchor, every drain
+// projection produced a ratio outside the 0.75-1.25 band derived from
+// 1.0 * (1 ± 25%), even though the LIVE 4:2 = 2.0 ratio sat perfectly
+// inside the intended 2.0 * (1 ± 25%) = [1.5, 2.5] band.
+//
+// This test asserts the gate ALLOWS the first drain when Original
+// matches the cluster's actual 4:2 shape — the property that broke
+// when buildRatioState snapshotted from an empty status.
+func TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock(t *testing.T) {
+	tol := int32(25)
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:           v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerance: &tol,
+					},
+				}},
+			},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{
+						Replicas:        4,
+						ServingReplicas: 4,
+					},
+				},
+				v1beta1.DecoderComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{
+						Replicas:        2,
+						ServingReplicas: 2,
+					},
+				},
+			},
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name:       "0",
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
+						Original: map[v1beta1.ComponentType]int32{
+							v1beta1.EngineComponent:  4,
+							v1beta1.DecoderComponent: 2,
+						},
+					},
+				}},
+			},
+		},
+	}
+
+	// Engine drain (-1): projected serving = {eng: 3, dec: 2}, ratio
+	// 3/2 = 1.5, lower band 2.0 * (1 - 0.25) = 1.5 → boundary, in band
+	// (inclusive) → MUST be allowed. The deadlock manifested as this
+	// gate rejecting EVERY surge because Original was set to {1, 1}
+	// rather than {4, 2}.
+	if allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0); !allowed {
+		t.Fatalf("BlueGreen + RatioBalanced with 4:2 fleet and 25%% tolerance: first engine drain should be allowed (projected 3/2=1.5 sits at band lower edge [1.5, 2.5]); got allowed=false reason=%s", reason)
+	}
+}
+
+// TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock pins
+// the BAD BEHAVIOR side of the same fix: with the broken {1, 1} anchor
+// (what buildRatioState used to produce when status.OMENative.Replicas
+// was 0 at snapshot time), the gate rejects every drain on a fleet
+// whose live ratio differs from 1:1. This test documents the failure
+// mode so a future regression that re-introduces the empty-status
+// snapshot will trip here AND in the C-1 / H-3 KIND specs together.
+func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.T) {
+	tol := int32(25)
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:           v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerance: &tol,
+					},
+				}},
+			},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{
+						Replicas:        4,
+						ServingReplicas: 4,
+					},
+				},
+				v1beta1.DecoderComponent: {
+					OMENative: &v1beta1.OMENativeComponentStatus{
+						Replicas:        2,
+						ServingReplicas: 2,
+					},
+				},
+			},
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name:       "0",
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
+					// Bogus 1:1 anchor — what the old buildRatioState
+					// snapshotted when status.OMENative.Replicas was 0
+					// at first reconcile (SnapshotOriginal clamps zero
+					// to one).
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
+						Original: map[v1beta1.ComponentType]int32{
+							v1beta1.EngineComponent:  1,
+							v1beta1.DecoderComponent: 1,
+						},
+					},
+				}},
+			},
+		},
+	}
+
+	// With anchor {1, 1}, band = 1.0 * (1 ± 0.25) = [0.75, 1.25].
+	// Live ratio 4/2 = 2.0 is OUT of band. Engine drain projects
+	// 3/2 = 1.5 → still out of band → REJECT.
+	// (This is the deadlock the bug report captures: the gate rejects
+	// every drain because the anchor doesn't match the cluster shape.)
+	if allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0); allowed {
+		t.Fatalf("with bogus 1:1 anchor against 4:2 live fleet, gate should reject (projection 3:2=1.5 is outside band [0.75, 1.25] derived from 1.0); got allowed=true reason=%q — if this test PASSES with the bogus anchor it means the band semantics changed and the deadlock can't be reproduced from this anchor any more", reason)
+	}
+}
+
 // mkPDFixture returns a coordinated ISVC with engine+decoder in one
 // RatioBalanced group + an ObservedRatio snapshot of 20:5 (4:1, decoder
 // = 25% of engine). Caller sets Status.Components.

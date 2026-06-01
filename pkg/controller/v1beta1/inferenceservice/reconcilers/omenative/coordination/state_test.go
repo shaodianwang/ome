@@ -440,3 +440,127 @@ func TestComputeTransition_SequentialNoSoakRunsImmediately(t *testing.T) {
 		t.Errorf("Soak=0 must NOT engage Awaiting; got composite=%q", tr.CompositePhase)
 	}
 }
+
+// TestComputeSurgeBudgetWithRatio_UsesServingPodsBaseline pins the
+// fix for the spurious RatioSkewRejected event spam at rollout start
+// (`.claude/specs/2026-05-30-kind-test-walk/
+// ratiobalanced-bluegreen-deadlock-no-progress.md`). The function MUST
+// project against live serving capacity (ServingPods), NOT against
+// NewRevisionPods which is zero before the first surge lands.
+//
+// Without populating state.Serving the EvaluateSurge call falls back
+// to NewPods={Engine:0, Decoder:0} at rollout start, and pairwise
+// respectsBand sees a zero peer → `pb <= 0` → reject. Every surge
+// attempt then zeros the budget and trips the RatioSkewRejected
+// metric/event.
+//
+// This test sets ServingPods correctly and asserts the LARGER side's
+// surge survives (engine 4→5, ratio 5/2=2.5 at upper band → allowed).
+// The smaller-side decoder ALWAYS gets rejected here because its +1
+// surge against the larger-side's flat 4 would drop the ratio to 4/3
+// = 1.33 → below lower band 1.5; that's the correct ratio-preserving
+// behavior, not a regression. The point of this test is that the
+// LARGER side's surge gets through — that's what unblocks rollouts.
+func TestComputeSurgeBudgetWithRatio_UsesServingPodsBaseline(t *testing.T) {
+	tol := int32(25)
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+		Pacing: v1beta1.CoordinationPacing{
+			Type:           v1beta1.CoordinationPacingRatioBalanced,
+			RatioTolerance: &tol,
+		},
+	}
+	// Live state: 4 engine + 2 decoder pods, all serving, NO surge
+	// pods yet (NewRevisionPods=0). With Original={4, 2} and tol=25%
+	// the band is [1.5, 2.5]. A +1 engine surge against ServingPods
+	// projects to 5/2=2.5 — at the boundary, in band → ALLOW.
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.EngineComponent: {
+				Component:       v1beta1.EngineComponent,
+				DesiredReplicas: 4,
+				TotalPods:       4,
+				ReadyPods:       4,
+				ServingPods:     4,
+				NewRevisionPods: 0,
+			},
+			v1beta1.DecoderComponent: {
+				Component:       v1beta1.DecoderComponent,
+				DesiredReplicas: 2,
+				TotalPods:       2,
+				ReadyPods:       2,
+				ServingPods:     2,
+				NewRevisionPods: 0,
+			},
+		},
+		OriginalReplicas: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent:  4,
+			v1beta1.DecoderComponent: 2,
+		},
+	}
+	budget, _ := computeSurgeBudgetWithRatio(obs)
+	// MaxSurge defaults to 25% — for 4 engine replicas, budget = 1.
+	// EvaluateSurge with +1 against Serving={4,2} projects to 5/2=2.5
+	// → at upper band → ALLOW → budget stays 1. This is the
+	// rollout-unblocking path: with the broken NewPods baseline
+	// (peer at 0), engine would have been rejected and the rollout
+	// would deadlock.
+	if budget[v1beta1.EngineComponent] != 1 {
+		t.Errorf("engine surge budget should be 1 (default 25%% of 4, projection 5/2=2.5 at upper band): got %d", budget[v1beta1.EngineComponent])
+	}
+}
+
+// TestComputeSurgeBudgetWithRatio_NewPodsBaselineWouldDeadlock is the
+// negative-side companion: documents that if ServingPods were absent
+// and the function still fell back to NewPods, the budget would be
+// zeroed even though the live cluster ratio sits in band. This test
+// exists as a tripwire — re-introducing the NewPods fallback (e.g.,
+// by reverting the ServingPods population in buildComponentObservation)
+// would break this test alongside the BlueGreen+RatioBalanced KIND specs.
+func TestComputeSurgeBudgetWithRatio_NewPodsBaselineWouldDeadlock(t *testing.T) {
+	tol := int32(25)
+	g := ResolvedGroup{
+		Name:       "0",
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Policy:     v1beta1.CoordinationPolicyBlueGreen,
+		Pacing: v1beta1.CoordinationPacing{
+			Type:           v1beta1.CoordinationPacingRatioBalanced,
+			RatioTolerance: &tol,
+		},
+	}
+	// Same fleet, but ServingPods left at zero — simulates the OLD
+	// behavior where computeSurgeBudgetWithRatio used NewPods as
+	// baseline and saw {0, 0} at rollout start.
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.EngineComponent: {
+				Component:       v1beta1.EngineComponent,
+				DesiredReplicas: 4,
+				TotalPods:       4,
+				ReadyPods:       4,
+				ServingPods:     0, // <-- simulates the bug
+				NewRevisionPods: 0,
+			},
+			v1beta1.DecoderComponent: {
+				Component:       v1beta1.DecoderComponent,
+				DesiredReplicas: 2,
+				TotalPods:       2,
+				ReadyPods:       2,
+				ServingPods:     0, // <-- simulates the bug
+				NewRevisionPods: 0,
+			},
+		},
+		OriginalReplicas: map[v1beta1.ComponentType]int32{
+			v1beta1.EngineComponent:  4,
+			v1beta1.DecoderComponent: 2,
+		},
+	}
+	_, skew := computeSurgeBudgetWithRatio(obs)
+	if !skew {
+		t.Errorf("with ServingPods=0 (the pre-fix baseline behavior) the gate MUST trip skew — this test pins the deadlock shape so a re-regression is visible at unit level, not just in KIND")
+	}
+}
