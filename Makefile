@@ -628,6 +628,10 @@ integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tes
 	@#     — KIND-backed suite (real kubelet via Docker). Run locally
 	@#     with `make test-kind`; not wired into envtest CI because
 	@#     mks-cpu agents don't expose a Docker daemon.
+	@#   - tests/integration/singlecluster/controller/irmanaged_kind
+	@#     — KIND-backed suite (real kubelet via Docker). Run locally
+	@#     with `make test-kind-irmanaged`; not wired into envtest CI
+	@#     because mks-cpu agents don't expose a Docker daemon.
 	@#
 	@# Verbosity policy: -ginkgo.v is OFF by default. With it on, Ginkgo
 	@# flushes the per-spec GinkgoWriter for every passing spec, which
@@ -641,7 +645,7 @@ integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tes
 	@# Timeout: go test defaults to 10m PER PACKAGE. 20m gives headroom
 	@# without masking a genuine deadlock — any real loop bug would
 	@# still hang past 20m.
-	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|/coordination_kind$$') ; \
+	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|/coordination_kind$$|/irmanaged_kind$$') ; \
 	$(TEST_ENV) go test -v -timeout=20m $$PKGS $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@echo "✅ Integration tests passed"
 
