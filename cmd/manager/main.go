@@ -249,8 +249,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	deployConfig, err := controllerconfig.NewDeployConfig(clientSet)
-	if err != nil {
+	// NewDeployConfig is called here only for its startup-time
+	// validation side effect — the ISVC reconciler re-fetches the
+	// config on every reconcile via its Clientset, so the parsed
+	// value is intentionally discarded.
+	if _, err := controllerconfig.NewDeployConfig(clientSet); err != nil {
 		setupLog.Error(err, "Failed to initialize deployment configuration")
 		os.Exit(1)
 	}
@@ -334,7 +337,7 @@ func main() {
 		Recorder:          eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
 		ModelCache:        modelCacheProvider,
 		TrafficReconciler: trafficReconciler,
-	}).SetupWithManager(mgr, deployConfig, ingressConfig); err != nil {
+	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create InferenceService controller")
 		os.Exit(1)
 	}
@@ -398,7 +401,6 @@ func main() {
 		if err = (&v1beta1inferencereplicacontroller.Reconciler{
 			Client:    mgr.GetClient(),
 			Log:       ctrl.Log.WithName("InferenceReplica"),
-			Scheme:    mgr.GetScheme(),
 			APIReader: mgr.GetAPIReader(),
 			Recorder:  eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
 		}).SetupWithManager(mgr); err != nil {

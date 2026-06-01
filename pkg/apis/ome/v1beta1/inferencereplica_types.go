@@ -17,7 +17,6 @@ package v1beta1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -134,17 +133,11 @@ type InferenceReplicaSpec struct {
 
 // ParentReference holds the InferenceService owner reference info.
 // Distinct from the OwnerReference list because the InferenceReplica
-// controller also consumes the parent's UID for label/selector
-// composition without re-reading the metadata field.
+// controller composes the parent's name into per-IR label and Service
+// names without re-reading the metadata field.
 type ParentReference struct {
 	// Name is the name of the parent InferenceService.
 	Name string `json:"name"`
-
-	// UID is the UID of the parent InferenceService. Stamped at
-	// create time so the controller can detect the parent has been
-	// recreated under the same name without consulting the live
-	// ISVC object.
-	UID types.UID `json:"uid"`
 }
 
 // RunnerName is the enum of recognized Runner roles within an

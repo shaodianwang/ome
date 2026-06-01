@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -52,7 +51,6 @@ func baselineIR(annotations map[string]string) *v1beta1.InferenceReplica {
 		Spec: v1beta1.InferenceReplicaSpec{
 			ParentRef: v1beta1.ParentReference{
 				Name: "llama",
-				UID:  "00000000-0000-0000-0000-000000000001",
 			},
 			Component: v1beta1.EngineComponent,
 			Runners: []v1beta1.Runner{
@@ -123,16 +121,6 @@ func withComponent(ir *v1beta1.InferenceReplica, c v1beta1.ComponentType) *v1bet
 func withParent(ir *v1beta1.InferenceReplica, name string) *v1beta1.InferenceReplica {
 	out := ir.DeepCopy()
 	out.Spec.ParentRef.Name = name
-	return out
-}
-
-// withParentUID returns a clone whose parentRef.UID is rewritten — same
-// name, different UID. This is the exact failure mode the immutability
-// gate exists for: a stale ISVC controller cache stamping the wrong UID
-// onto a live IR after the parent was recreated under the same name.
-func withParentUID(ir *v1beta1.InferenceReplica, uid types.UID) *v1beta1.InferenceReplica {
-	out := ir.DeepCopy()
-	out.Spec.ParentRef.UID = uid
 	return out
 }
 
@@ -401,15 +389,6 @@ func TestHandle(t *testing.T) {
 			wantAllowed: true,
 		},
 		{
-			name: "update with annotation, different parentRef.UID → denied (regression: was allowed pre-fix)",
-			req: func(t *testing.T) admission.Request {
-				return updateReq(t, baselineIR(wcw),
-					withParentUID(baselineIR(wcw), types.UID("ffffffff-ffff-ffff-ffff-ffffffffffff")))
-			},
-			wantAllowed:  false,
-			wantContains: []string{"spec.parentRef is immutable"},
-		},
-		{
 			name: "update with annotation, different parentRef.Name → denied (regression: was allowed pre-fix)",
 			req: func(t *testing.T) admission.Request {
 				return updateReq(t, baselineIR(wcw), withParent(baselineIR(wcw), "different-isvc"))
@@ -435,10 +414,10 @@ func TestHandle(t *testing.T) {
 			wantContains: []string{"controller-only resource"},
 		},
 		{
-			name: "update without annotation, different parentRef.UID → denied (immutability fires first)",
+			name: "update without annotation, different parentRef.Name → denied (immutability fires first)",
 			req: func(t *testing.T) admission.Request {
 				return updateReq(t, baselineIR(wcw),
-					withParentUID(baselineIR(nil), types.UID("ffffffff-ffff-ffff-ffff-ffffffffffff")))
+					withParent(baselineIR(nil), "different-isvc"))
 			},
 			wantAllowed:  false,
 			wantContains: []string{"spec.parentRef is immutable"},

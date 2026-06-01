@@ -5245,7 +5245,7 @@ func schema_pkg_apis_ome_v1beta1_ParentReference(ref common.ReferenceCallback) c
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ParentReference holds the InferenceService owner reference info. Distinct from the OwnerReference list because the InferenceReplica controller also consumes the parent's UID for label/selector composition without re-reading the metadata field.",
+				Description: "ParentReference holds the InferenceService owner reference info. Distinct from the OwnerReference list because the InferenceReplica controller composes the parent's name into per-IR label and Service names without re-reading the metadata field.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"name": {
@@ -5256,16 +5256,7 @@ func schema_pkg_apis_ome_v1beta1_ParentReference(ref common.ReferenceCallback) c
 							Format:      "",
 						},
 					},
-					"uid": {
-						SchemaProps: spec.SchemaProps{
-							Description: "UID is the UID of the parent InferenceService. Stamped at create time so the controller can detect the parent has been recreated under the same name without consulting the live ISVC object.",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
 				},
-				Required: []string{"name", "uid"},
 			},
 		},
 	}

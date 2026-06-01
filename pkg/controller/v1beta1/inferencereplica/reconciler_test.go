@@ -65,7 +65,6 @@ func baselineIR(name, namespace string, replicas int32) *v1beta1.InferenceReplic
 		Spec: v1beta1.InferenceReplicaSpec{
 			ParentRef: v1beta1.ParentReference{
 				Name: "llama",
-				UID:  "00000000-0000-0000-0000-000000000001",
 			},
 			Component: v1beta1.EngineComponent,
 			Replicas:  &r,
@@ -97,7 +96,6 @@ func newReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client.Cli
 	return &Reconciler{
 		Client:       c,
 		Log:          logf.Log.WithName("test"),
-		Scheme:       testScheme(t),
 		Expectations: workload.NewExpectations(),
 	}, c
 }

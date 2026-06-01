@@ -388,7 +388,6 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	// the live object.
 	ir.Spec.ParentRef = v1beta1.ParentReference{
 		Name: p.ISVC.Name,
-		UID:  p.ISVC.UID,
 	}
 	ir.Spec.Component = p.Component
 	ir.Spec.Replicas = replicasFromComponentExt(p.ComponentExt)

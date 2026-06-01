@@ -2970,20 +2970,11 @@
       }
     },
     "v1beta1.ParentReference": {
-      "description": "ParentReference holds the InferenceService owner reference info. Distinct from the OwnerReference list because the InferenceReplica controller also consumes the parent's UID for label/selector composition without re-reading the metadata field.",
+      "description": "ParentReference holds the InferenceService owner reference info. Distinct from the OwnerReference list because the InferenceReplica controller composes the parent's name into per-IR label and Service names without re-reading the metadata field.",
       "type": "object",
-      "required": [
-        "name",
-        "uid"
-      ],
       "properties": {
         "name": {
           "description": "Name is the name of the parent InferenceService.",
-          "type": "string",
-          "default": ""
-        },
-        "uid": {
-          "description": "UID is the UID of the parent InferenceService. Stamped at create time so the controller can detect the parent has been recreated under the same name without consulting the live ISVC object.",
           "type": "string",
           "default": ""
         }

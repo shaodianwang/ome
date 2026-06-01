@@ -632,11 +632,8 @@ spec:
                   properties:
                     name:
                       type: string
-                    uid:
-                      type: string
                   required:
                     - name
-                    - uid
                   type: object
                 paused:
                   type: boolean

@@ -166,7 +166,7 @@ func TestIsManagerDisableFlagSet_ReflectsAtomic(t *testing.T) {
 //     webhook accepts the create
 //   - OwnerReferences point at the parent ISVC as controller (cascade
 //     GC on ISVC delete)
-//   - ParentRef.Name + UID match the parent ISVC
+//   - ParentRef.Name matches the parent ISVC
 //   - Component matches the dispatched ComponentType
 //   - Replicas defaults from ComponentExt.MinReplicas (=2 in baseline)
 //   - Runners is single-pod {default, size 1} with the projected
@@ -203,7 +203,6 @@ func TestEnsureInferenceReplica_Create_NewIR(t *testing.T) {
 	g.Expect(*ref.Controller).To(gomega.BeTrue())
 
 	g.Expect(got.Spec.ParentRef.Name).To(gomega.Equal(isvc.Name))
-	g.Expect(got.Spec.ParentRef.UID).To(gomega.Equal(isvc.UID))
 	g.Expect(got.Spec.Component).To(gomega.Equal(v1beta1.EngineComponent))
 
 	g.Expect(got.Spec.Replicas).NotTo(gomega.BeNil())
@@ -414,7 +413,7 @@ func TestEnsureInferenceReplica_AlreadyExists_PropagatedAsUpdate(t *testing.T) {
 			},
 		},
 		Spec: v1beta1.InferenceReplicaSpec{
-			ParentRef: v1beta1.ParentReference{Name: "llama", UID: isvc.UID},
+			ParentRef: v1beta1.ParentReference{Name: "llama"},
 			Component: v1beta1.EngineComponent,
 		},
 	}

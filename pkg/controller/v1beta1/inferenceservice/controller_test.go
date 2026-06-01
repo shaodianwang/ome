@@ -26,7 +26,6 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	omeTesting "github.com/ome-projects/ome/pkg/utils/testing"
 )
@@ -549,7 +548,6 @@ func TestInferenceServiceReconcile(t *testing.T) {
 				Log:             ctrl.Log.WithName("test"),
 				Scheme:          scheme,
 				Recorder:        recorder,
-				StatusManager:   status.NewStatusReconciler(),
 				RuntimeSelector: runtimeselector.New(c),
 			}
 

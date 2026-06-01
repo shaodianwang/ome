@@ -328,7 +328,6 @@ func runIRManagedPath(t *testing.T, fix shadowFixture) shadowSnapshot {
 	r := &v1beta1inferencereplica.Reconciler{
 		Client:       c,
 		Log:          logf.Log.WithName("shadow-ir"),
-		Scheme:       shadowScheme(t),
 		Expectations: workload.NewExpectations(),
 	}
 	irName := irprojector.InferenceReplicaName(fix.name, fix.component)

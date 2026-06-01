@@ -42,7 +42,6 @@ func TestInferenceReplica_JSONRoundTrip(t *testing.T) {
 		Spec: InferenceReplicaSpec{
 			ParentRef: ParentReference{
 				Name: "llama",
-				UID:  "isvc-uid-abc",
 			},
 			Component:       EngineComponent,
 			Replicas:        &replicas,
@@ -183,7 +182,7 @@ func TestInferenceReplicaList_RoundTrip(t *testing.T) {
 			{
 				ObjectMeta: metav1.ObjectMeta{Name: "engine", Namespace: "ns"},
 				Spec: InferenceReplicaSpec{
-					ParentRef: ParentReference{Name: "llama", UID: "u1"},
+					ParentRef: ParentReference{Name: "llama"},
 					Component: EngineComponent,
 					Runners: []Runner{
 						{Name: RunnerNameDefault, Size: 1},
@@ -209,12 +208,12 @@ func TestInferenceReplicaList_RoundTrip(t *testing.T) {
 // ParentReference helper so future renames don't silently break
 // existing InferenceReplica YAML.
 func TestParentReference_JSONShape(t *testing.T) {
-	pr := ParentReference{Name: "llama", UID: "uid-1"}
+	pr := ParentReference{Name: "llama"}
 	data, err := json.Marshal(&pr)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	want := `{"name":"llama","uid":"uid-1"}`
+	want := `{"name":"llama"}`
 	if string(data) != want {
 		t.Errorf("ParentReference JSON shape changed:\n want %s\n got %s", want, string(data))
 	}

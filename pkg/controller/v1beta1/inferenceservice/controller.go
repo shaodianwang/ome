@@ -49,7 +49,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	traffic "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
@@ -126,7 +125,6 @@ type InferenceServiceReconciler struct {
 	Log             logr.Logger
 	Scheme          *runtime.Scheme
 	Recorder        record.EventRecorder
-	StatusManager   *status.StatusReconciler
 	RuntimeSelector runtimeselector.Selector
 	ModelCache      sharded.Provider
 	// TrafficReconciler is the OEP-0011 backend-policy reconciler.
@@ -230,12 +228,11 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// Setup reconcilers.
-	// apiVersion field reads from v1beta1.SchemeGroupVersion rather
-	// than isvc.APIVersion because controller-runtime strips TypeMeta
-	// from Get'd objects (well-known scheme-builder behavior). Pre-fix,
-	// the log field was always empty — see review §2 in
-	// .claude/specs/2026-05-30-code-quality-review/06-isvc-controller.md.
-	log.Info("Reconciling inference service", "apiVersion", v1beta1.SchemeGroupVersion.String())
+	// apiVersion is omitted: controller-runtime strips TypeMeta from
+	// objects fetched via the typed cache, so isvc.APIVersion is always
+	// empty here. Use v1beta1.SchemeGroupVersion.String() if a callable
+	// API version is needed downstream.
+	log.Info("Reconciling inference service")
 	isvcConfig, err := controllerconfig.NewInferenceServicesConfig(r.Clientset)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to create InferenceServicesConfig")
@@ -826,15 +823,12 @@ func (r *InferenceServiceReconciler) ensureIngressDisableAnnotation(isvc *v1beta
 	return nil
 }
 
-func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployConfig *controllerconfig.DeployConfig, ingressConfig *controllerconfig.IngressConfig) error {
+func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.ClientConfig = mgr.GetConfig()
 	r.APIReader = mgr.GetAPIReader()
 	if r.Expectations == nil {
 		r.Expectations = omenative.NewExpectations()
 	}
-
-	// NEW: Initialize StatusReconciler
-	r.StatusManager = status.NewStatusReconciler()
 
 	// Initialize RuntimeSelector
 	runtimeSelectorConfig := runtimeselector.NewConfig(mgr.GetClient())
