@@ -127,9 +127,11 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 	ginkgo.It("InPlaceUpdateStarted fires on an image-only rollout", func() {
 		// InPlaceUpdateStarted only fires when chooseUpdateMode picks
 		// the in-place path: that requires UpdateStrategy=InPlaceIfPossible
-		// AND a multi-pod Instance (single-replica + default SurgeThenDrain
-		// routes through the surge path and emits RecreateUpdate* instead).
-		// Mirrors the canonical pattern in behavior_l_inplace_kind_test.go.
+		// (default SurgeThenDrain routes through the surge path and emits
+		// RecreateUpdate* instead). Mirrors the canonical pattern in
+		// behavior_l_inplace_kind_test.go. The 3-replica fixture exercises
+		// the multi-Instance dispatch loop so the InPlaceUpdateStarted
+		// event fires once per Instance.
 		fix := newCoordFixture(ns.Name, WithISVCName("evt-inplace-isvc"),
 			WithoutDecoder(),
 			WithEngineReplicas(3),
@@ -146,8 +148,12 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 			c := freshISVC(g, ns.Name, "evt-inplace-isvc")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
-			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(3))
+			for i, inst := range cs.OMENative.InstanceStatuses {
+				g.Expect(inst.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+					"Instance %d should be Ready before bumping image (got Phase=%s)",
+					i, inst.Phase)
+			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
