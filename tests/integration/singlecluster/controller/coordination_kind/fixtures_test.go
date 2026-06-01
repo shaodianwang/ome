@@ -30,19 +30,23 @@ type fixtureOptions struct {
 	// engineWorkerSize > 0 promotes the engine to a multi-pod gang
 	// Instance: a Leader + N workers per Instance (total = N+1 pods).
 	// Zero leaves the engine as single-pod (default).
-	engineWorkerSize int
+	engineWorkerSize     int
+	engineUpdateStrategy v1beta1.UpdateStrategyType
 
 	// Decoder knobs (always present by default; opt out with WithoutDecoder).
-	withoutDecoder     bool
-	decoderImage       string
-	decoderMinReplicas int
-	decoderRawMode     bool
+	withoutDecoder        bool
+	decoderImage          string
+	decoderMinReplicas    int
+	decoderRawMode        bool
+	decoderWorkerSize     int
+	decoderUpdateStrategy v1beta1.UpdateStrategyType
 
 	// Router knobs.
-	withRouter        bool
-	routerImage       string
-	routerMinReplicas int
-	routerRawMode     bool
+	withRouter           bool
+	routerImage          string
+	routerMinReplicas    int
+	routerRawMode        bool
+	routerUpdateStrategy v1beta1.UpdateStrategyType
 
 	// Coordination knobs.
 	coordGroups   []v1beta1.RolloutCoordinationGroup
@@ -93,6 +97,13 @@ func WithEngineWorkerSize(n int) FixtureOption {
 	return func(o *fixtureOptions) { o.engineWorkerSize = n }
 }
 
+// WithEngineUpdateStrategy sets Spec.Engine.Lifecycle.UpdateStrategy.Type.
+// Use this to opt the engine into RecreatePod, InPlaceIfPossible, or
+// InPlaceOnly — the default SurgeThenDrain leaves Lifecycle unset.
+func WithEngineUpdateStrategy(t v1beta1.UpdateStrategyType) FixtureOption {
+	return func(o *fixtureOptions) { o.engineUpdateStrategy = t }
+}
+
 // --- Decoder knobs --------------------------------------------------------
 
 // WithoutDecoder drops the decoder Component. Useful for single-Component
@@ -115,6 +126,17 @@ func WithDecoderReplicas(n int) FixtureOption {
 // mixed-mode coordination scenarios that need a non-OMENative peer.
 func WithDecoderRawMode() FixtureOption {
 	return func(o *fixtureOptions) { o.decoderRawMode = true }
+}
+
+// WithDecoderWorkerSize promotes the decoder to multi-pod. Mirrors
+// WithEngineWorkerSize.
+func WithDecoderWorkerSize(n int) FixtureOption {
+	return func(o *fixtureOptions) { o.decoderWorkerSize = n }
+}
+
+// WithDecoderUpdateStrategy sets Spec.Decoder.Lifecycle.UpdateStrategy.Type.
+func WithDecoderUpdateStrategy(t v1beta1.UpdateStrategyType) FixtureOption {
+	return func(o *fixtureOptions) { o.decoderUpdateStrategy = t }
 }
 
 // --- Router knobs ---------------------------------------------------------
@@ -146,6 +168,15 @@ func WithRouterRawMode() FixtureOption {
 	return func(o *fixtureOptions) {
 		o.withRouter = true
 		o.routerRawMode = true
+	}
+}
+
+// WithRouterUpdateStrategy sets Spec.Router.Lifecycle.UpdateStrategy.Type.
+// Implies WithRouter.
+func WithRouterUpdateStrategy(t v1beta1.UpdateStrategyType) FixtureOption {
+	return func(o *fixtureOptions) {
+		o.withRouter = true
+		o.routerUpdateStrategy = t
 	}
 }
 
@@ -317,6 +348,11 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 			}}},
 		}
 	}
+	if o.engineUpdateStrategy != "" {
+		engine.Lifecycle = &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{Type: o.engineUpdateStrategy},
+		}
+	}
 
 	wrapper := v1beta1testing.MakeInferenceService(o.isvcName, namespace).
 		Model(o.cbmName).
@@ -351,6 +387,27 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 				Image: o.decoderImage,
 			}}},
 		}
+		if o.decoderWorkerSize > 0 {
+			size := o.decoderWorkerSize
+			decoder.Leader = &v1beta1.LeaderSpec{
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
+					Name:  "ome-container",
+					Image: o.decoderImage,
+				}}},
+			}
+			decoder.Worker = &v1beta1.WorkerSpec{
+				Size: &size,
+				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
+					Name:  "ome-container",
+					Image: o.decoderImage,
+				}}},
+			}
+		}
+		if o.decoderUpdateStrategy != "" {
+			decoder.Lifecycle = &v1beta1.LifecycleSpec{
+				UpdateStrategy: &v1beta1.UpdateStrategy{Type: o.decoderUpdateStrategy},
+			}
+		}
 		wrapper = wrapper.Decoder(decoder)
 	}
 
@@ -372,6 +429,11 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 				Name:  "ome-container",
 				Image: o.routerImage,
 			}}},
+		}
+		if o.routerUpdateStrategy != "" {
+			router.Lifecycle = &v1beta1.LifecycleSpec{
+				UpdateStrategy: &v1beta1.UpdateStrategy{Type: o.routerUpdateStrategy},
+			}
 		}
 		wrapper = wrapper.Router(router)
 	}
