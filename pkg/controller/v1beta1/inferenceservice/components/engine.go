@@ -177,32 +177,6 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	return deploymentResult, nil
 }
 
-// RenderPodGroupDeploymentTemplate renders the engine pod template used by
-// PodGroupDeploymentRollout without reconciling the normal engine workload.
-func (e *Engine) RenderPodGroupDeploymentTemplate(ctx context.Context, isvc *v1beta1.InferenceService) (*v1.PodTemplateSpec, error) {
-	_ = ctx
-	if e.engineSpec == nil {
-		return nil, errors.New("engine spec is nil")
-	}
-	if isvc.Spec.Model != nil && len(isvc.Spec.Model.FineTunedWeights) > 0 {
-		if err := ReconcileFineTunedWeights(&e.BaseComponentFields, isvc); err != nil {
-			return nil, errors.Wrap(err, "failed to reconcile fine-tuned weights")
-		}
-	}
-	objectMeta, err := e.reconcileObjectMeta(isvc)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to reconcile object metadata")
-	}
-	podSpec, err := e.reconcilePodSpec(isvc, &objectMeta)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to reconcile pod spec")
-	}
-	return &v1.PodTemplateSpec{
-		ObjectMeta: objectMeta,
-		Spec:       *podSpec,
-	}, nil
-}
-
 // reconcileOMENativeSubresources ensures the per-Component stable
 // Service (`<isvc>-<comp>`) and PodMonitor for OMENative-managed
 // engine. Decoder and Router have their own equivalent methods —

@@ -19,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -93,8 +92,6 @@ import (
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets/finalizers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=scheduling.x-k8s.io,resources=podgroups,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=podgroup.meta.com,resources=podgroupdeploymentrollouts,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=podgroup.meta.com,resources=podgroupdeploymentrollouts/status,verbs=get
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=podmonitors,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
@@ -393,8 +390,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// deployment mode" lines fire every reconcile but observe no
 	// state change — demoted to V(1) per review §2 (hot-path /
 	// steady-state breadcrumbs).
-	var pgdrEngineRenderer podGroupDeploymentTemplateRenderer
-	var pgdrDecoderRenderer podGroupDeploymentTemplateRenderer
 	if mergedEngine != nil {
 		engineSupportedModelFormats := r.RuntimeSelector.GetSupportedModelFormat(ctx, rt, baseModel, userSpecifiedRuntime)
 		log.V(1).Info("Creating engine reconciler",
@@ -410,15 +405,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			engineSupportedModelFormats,
 			resolvedOverlays,
 		)
-		if engineDeploymentMode == constants.PodGroupDeploymentRollout {
-			renderer, ok := engineReconciler.(podGroupDeploymentTemplateRenderer)
-			if !ok {
-				return reconcile.Result{}, fmt.Errorf("engine reconciler does not support PodGroupDeploymentRollout rendering")
-			}
-			pgdrEngineRenderer = renderer
-		} else {
-			reconcilers = append(reconcilers, engineReconciler)
-		}
+		reconcilers = append(reconcilers, engineReconciler)
 	}
 
 	if mergedDecoder != nil {
@@ -436,15 +423,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			decoderSupportedModelFormats,
 			resolvedOverlays,
 		)
-		if decoderDeploymentMode == constants.PodGroupDeploymentRollout {
-			renderer, ok := decoderReconciler.(podGroupDeploymentTemplateRenderer)
-			if !ok {
-				return reconcile.Result{}, fmt.Errorf("decoder reconciler does not support PodGroupDeploymentRollout rendering")
-			}
-			pgdrDecoderRenderer = renderer
-		} else {
-			reconcilers = append(reconcilers, decoderReconciler)
-		}
+		reconcilers = append(reconcilers, decoderReconciler)
 	}
 
 	// Add Router reconciler if merged router spec exists (using new v2 Router)
@@ -485,18 +464,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// requeuing reconciler, leaving Status.RolloutCoordination /
 	// per-revision Services / Traffic[] stale until convergence.
 	var pendingRequeue reconcile.Result
-	if engineDeploymentMode == constants.PodGroupDeploymentRollout || decoderDeploymentMode == constants.PodGroupDeploymentRollout {
-		result, err := r.reconcilePodGroupDeploymentRollout(ctx, isvc, mergedEngine, mergedDecoder, pgdrEngineRenderer, pgdrDecoderRenderer)
-		if err != nil {
-			r.Log.Error(err, "Failed to reconcile PodGroupDeploymentRollout",
-				"namespace", isvc.Namespace,
-				"inferenceService", isvc.Name)
-			return result, err
-		}
-		if result.Requeue || result.RequeueAfter > pendingRequeue.RequeueAfter {
-			pendingRequeue = result
-		}
-	}
 	for _, reconciler := range reconcilers {
 		result, err := reconciler.Reconcile(ctx, isvc)
 		if err != nil {
@@ -901,11 +868,6 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 	}
 	r.GangSchedulingAvailable = podGroupFound
 
-	podGroupDeploymentRolloutFound, err := utils.IsCrdAvailable(r.ClientConfig, podGroupDeploymentRolloutGVK.GroupVersion().String(), constants.PodGroupDeploymentRolloutKind)
-	if err != nil {
-		return err
-	}
-
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.InferenceService{}).
 		Owns(&appsv1.Deployment{}).
@@ -971,14 +933,6 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager, deployCo
 		ctrlBuilder = ctrlBuilder.Owns(&schedulingv1alpha1.PodGroup{})
 	} else {
 		r.Log.Info("The InferenceService controller won't watch scheduling.x-k8s.io/v1alpha1/PodGroup resources because the CRD is not available; OMENative multi-pod Instances will degrade to non-gang scheduling.")
-	}
-
-	if podGroupDeploymentRolloutFound {
-		pgdr := &unstructured.Unstructured{}
-		pgdr.SetGroupVersionKind(podGroupDeploymentRolloutGVK)
-		ctrlBuilder = ctrlBuilder.Owns(pgdr)
-	} else {
-		r.Log.Info("The InferenceService controller won't watch podgroup.meta.com/v1alpha1/PodGroupDeploymentRollout resources because the CRD is not available.")
 	}
 
 	// OEP-0011: register an Owns() watch on the backend policy

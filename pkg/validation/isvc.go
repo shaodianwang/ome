@@ -356,82 +356,15 @@ func ValidateEngineDecoderDeploymentMode(spec *v1beta1.InferenceServiceSpec) err
 	}
 	engineMode := spec.Engine.Annotations[constants.DeploymentMode]
 	decoderMode := spec.Decoder.Annotations[constants.DeploymentMode]
-	if engineMode != string(constants.OMENative) && decoderMode != string(constants.OMENative) &&
-		engineMode != string(constants.PodGroupDeploymentRollout) && decoderMode != string(constants.PodGroupDeploymentRollout) {
+	if engineMode != string(constants.OMENative) && decoderMode != string(constants.OMENative) {
 		return nil
 	}
 	if engineMode != decoderMode {
 		return fmt.Errorf(
-			"InvalidDeploymentModeCombination: engine %s=%q does not match decoder %s=%q; when either is OMENative or PodGroupDeploymentRollout, both must use the same value",
+			"InvalidDeploymentModeCombination: engine %s=%q does not match decoder %s=%q; when either is OMENative, both must use the same value",
 			constants.DeploymentMode, engineMode,
 			constants.DeploymentMode, decoderMode,
 		)
-	}
-	return nil
-}
-
-// ValidatePodGroupDeploymentRolloutMode validates the OME integration path
-// where engine+decoder are rendered as one PodGroupDeploymentRollout.
-func ValidatePodGroupDeploymentRolloutMode(spec *v1beta1.InferenceServiceSpec) error {
-	if spec == nil {
-		return nil
-	}
-	engineMode := ""
-	decoderMode := ""
-	routerMode := ""
-	if spec.Engine != nil {
-		engineMode = spec.Engine.Annotations[constants.DeploymentMode]
-	}
-	if spec.Decoder != nil {
-		decoderMode = spec.Decoder.Annotations[constants.DeploymentMode]
-	}
-	if spec.Router != nil {
-		routerMode = spec.Router.Annotations[constants.DeploymentMode]
-	}
-	pgdr := string(constants.PodGroupDeploymentRollout)
-	if engineMode != pgdr && decoderMode != pgdr && routerMode != pgdr {
-		return nil
-	}
-	if routerMode == pgdr {
-		return fmt.Errorf("InvalidDeploymentModeCombination: router does not support %s=%q; use RawDeployment or OMENative for router", constants.DeploymentMode, pgdr)
-	}
-	if spec.Engine == nil || spec.Decoder == nil || engineMode != pgdr || decoderMode != pgdr {
-		return fmt.Errorf("InvalidDeploymentModeCombination: %s=%q requires both engine and decoder to use the same deployment mode", constants.DeploymentMode, pgdr)
-	}
-	if spec.RolloutCoordination != nil && len(spec.RolloutCoordination.Groups) > 0 {
-		return fmt.Errorf("InvalidDeploymentModeCombination: spec.rolloutCoordination is OMENative-only and cannot be used with %s=%q", constants.DeploymentMode, pgdr)
-	}
-	if spec.Engine.Lifecycle != nil || spec.Decoder.Lifecycle != nil {
-		return fmt.Errorf("InvalidDeploymentModeCombination: spec.engine.lifecycle/spec.decoder.lifecycle cannot be used with %s=%q", constants.DeploymentMode, pgdr)
-	}
-	if err := validatePodGroupDeploymentComponent("engine", spec.Engine.PodGroupDeployment); err != nil {
-		return err
-	}
-	return validatePodGroupDeploymentComponent("decoder", spec.Decoder.PodGroupDeployment)
-}
-
-func validatePodGroupDeploymentComponent(path string, spec *v1beta1.PodGroupDeploymentComponentSpec) error {
-	if spec == nil {
-		return nil
-	}
-	if spec.Groups != nil && *spec.Groups < 1 {
-		return fmt.Errorf("InvalidPodGroupDeployment: spec.%s.podGroupDeployment.groups must be >= 1", path)
-	}
-	if spec.ReplicasPerGroup != nil && *spec.ReplicasPerGroup < 1 {
-		return fmt.Errorf("InvalidPodGroupDeployment: spec.%s.podGroupDeployment.replicasPerGroup must be >= 1", path)
-	}
-	if spec.ServiceTargetOrdinal != nil && *spec.ServiceTargetOrdinal < 0 {
-		return fmt.Errorf("InvalidPodGroupDeployment: spec.%s.podGroupDeployment.serviceTargetOrdinal must be >= 0", path)
-	}
-	if spec.ReplicasPerGroup != nil && spec.ServiceTargetOrdinal != nil && *spec.ServiceTargetOrdinal >= *spec.ReplicasPerGroup {
-		return fmt.Errorf("InvalidPodGroupDeployment: spec.%s.podGroupDeployment.serviceTargetOrdinal must be less than replicasPerGroup", path)
-	}
-	if spec.ScheduleTimeoutSeconds != nil && *spec.ScheduleTimeoutSeconds < 0 {
-		return fmt.Errorf("InvalidPodGroupDeployment: spec.%s.podGroupDeployment.scheduleTimeoutSeconds must be >= 0", path)
-	}
-	if spec.Rollout != nil && spec.Rollout.MaxUnavailablePercent != nil &&
-		(*spec.Rollout.MaxUnavailablePercent < 1 || *spec.Rollout.MaxUnavailablePercent > 100) {
-		return fmt.Errorf("InvalidPodGroupDeployment: spec.%s.podGroupDeployment.rollout.maxUnavailablePercent must be between 1 and 100", path)
 	}
 	return nil
 }

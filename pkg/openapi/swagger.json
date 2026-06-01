@@ -379,10 +379,6 @@
           "type": "integer",
           "format": "int32"
         },
-        "podGroupDeployment": {
-          "description": "PodGroupDeployment configures podgroup-operator backed lifecycle for this Component. Applies only when the Component is annotated ome.io/deploymentMode=PodGroupDeploymentRollout.",
-          "$ref": "#/definitions/v1beta1.PodGroupDeploymentComponentSpec"
-        },
         "scaleMetric": {
           "description": "ScaleMetric defines the scaling metric type watched by autoscaler. Possible values are cpu, memory, tps.",
           "type": "string"
@@ -725,10 +721,6 @@
           "additionalProperties": {
             "$ref": "#/definitions/resource.Quantity"
           }
-        },
-        "podGroupDeployment": {
-          "description": "PodGroupDeployment configures podgroup-operator backed lifecycle for this Component. Applies only when the Component is annotated ome.io/deploymentMode=PodGroupDeploymentRollout.",
-          "$ref": "#/definitions/v1beta1.PodGroupDeploymentComponentSpec"
         },
         "preemptionPolicy": {
           "description": "PreemptionPolicy is the Policy for preempting pods with lower priority. One of Never, PreemptLowerPriority. Defaults to PreemptLowerPriority if unset.",
@@ -1156,10 +1148,6 @@
           "additionalProperties": {
             "$ref": "#/definitions/resource.Quantity"
           }
-        },
-        "podGroupDeployment": {
-          "description": "PodGroupDeployment configures podgroup-operator backed lifecycle for this Component. Applies only when the Component is annotated ome.io/deploymentMode=PodGroupDeploymentRollout.",
-          "$ref": "#/definitions/v1beta1.PodGroupDeploymentComponentSpec"
         },
         "preemptionPolicy": {
           "description": "PreemptionPolicy is the Policy for preempting pods with lower priority. One of Never, PreemptLowerPriority. Defaults to PreemptLowerPriority if unset.",
@@ -2949,122 +2937,6 @@
         }
       }
     },
-    "v1beta1.PodGroupDeploymentComponentSpec": {
-      "description": "PodGroupDeploymentComponentSpec configures how an OME Component is rendered into a podgroup.meta.com PodGroupDeployment child managed by a PodGroupDeploymentRollout.",
-      "type": "object",
-      "properties": {
-        "groups": {
-          "description": "Groups is the number of PodGroupDeployment groups. Defaults to minReplicas when unset, then 1.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "multiNode": {
-          "description": "MultiNode enables podgroup-operator multinode argument injection.",
-          "$ref": "#/definitions/v1beta1.PodGroupDeploymentMultiNodeSpec"
-        },
-        "replicasPerGroup": {
-          "description": "ReplicasPerGroup is the number of pods in each gang-scheduled group. Defaults to 1.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "rollout": {
-          "description": "Rollout controls the paired PodGroupDeploymentRollout strategy. It is app-level state; when both engine and decoder set it, engine wins.",
-          "$ref": "#/definitions/v1beta1.PodGroupDeploymentRolloutStrategy"
-        },
-        "scheduleTimeoutSeconds": {
-          "description": "ScheduleTimeoutSeconds is propagated to scheduler-plugins PodGroup.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "schedulerName": {
-          "description": "SchedulerName sets the scheduler used by generated pods. Defaults to the rendered PodSpec schedulerName, then default-scheduler.",
-          "type": "string"
-        },
-        "serviceTargetOrdinal": {
-          "description": "ServiceTargetOrdinal selects which ordinal backs the stable per-group and top-level Services. Defaults to 0.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "topologyKey": {
-          "description": "TopologyKey controls the pod affinity topology for pods in one group. Defaults to kubernetes.io/hostname.",
-          "type": "string"
-        },
-        "updateStrategy": {
-          "description": "UpdateStrategy controls podgroup-operator per-role pod replacement. Defaults to RecreatePod.",
-          "$ref": "#/definitions/v1beta1.PodGroupDeploymentUpdateStrategy"
-        }
-      }
-    },
-    "v1beta1.PodGroupDeploymentMultiNodeSpec": {
-      "description": "PodGroupDeploymentMultiNodeSpec configures multinode groups.",
-      "type": "object",
-      "properties": {
-        "containerName": {
-          "type": "string"
-        },
-        "distInitPort": {
-          "type": "integer",
-          "format": "int32"
-        },
-        "enabled": {
-          "type": "boolean"
-        },
-        "tensorParallelSize": {
-          "type": "integer",
-          "format": "int32"
-        }
-      }
-    },
-    "v1beta1.PodGroupDeploymentRollingUpdateStrategy": {
-      "description": "PodGroupDeploymentRollingUpdateStrategy mirrors podgroup-operator's rollingUpdate fields.",
-      "type": "object",
-      "properties": {
-        "maxSurge": {
-          "type": "integer",
-          "format": "int32"
-        },
-        "maxUnavailable": {
-          "type": "integer",
-          "format": "int32"
-        },
-        "maxUnavailablePercent": {
-          "type": "integer",
-          "format": "int32"
-        },
-        "progressDeadlineSeconds": {
-          "type": "integer",
-          "format": "int32"
-        }
-      }
-    },
-    "v1beta1.PodGroupDeploymentRolloutStrategy": {
-      "description": "PodGroupDeploymentRolloutStrategy configures paired rollout waves.",
-      "type": "object",
-      "properties": {
-        "maxSkew": {
-          "type": "integer",
-          "format": "int32"
-        },
-        "maxUnavailablePercent": {
-          "type": "integer",
-          "format": "int32"
-        }
-      }
-    },
-    "v1beta1.PodGroupDeploymentUpdateStrategy": {
-      "description": "PodGroupDeploymentUpdateStrategy configures per-role replacement behavior.",
-      "type": "object",
-      "properties": {
-        "rollingUpdate": {
-          "description": "RollingUpdate controls per-role rollout budget.",
-          "$ref": "#/definitions/v1beta1.PodGroupDeploymentRollingUpdateStrategy"
-        },
-        "type": {
-          "description": "Type is the podgroup-operator update strategy.",
-          "type": "string"
-        }
-      }
-    },
     "v1beta1.PodSpec": {
       "description": "PodSpec is a description of a pod.",
       "type": "object",
@@ -3813,10 +3685,6 @@
           "additionalProperties": {
             "$ref": "#/definitions/resource.Quantity"
           }
-        },
-        "podGroupDeployment": {
-          "description": "PodGroupDeployment configures podgroup-operator backed lifecycle for this Component. Applies only when the Component is annotated ome.io/deploymentMode=PodGroupDeploymentRollout.",
-          "$ref": "#/definitions/v1beta1.PodGroupDeploymentComponentSpec"
         },
         "preemptionPolicy": {
           "description": "PreemptionPolicy is the Policy for preempting pods with lower priority. One of Never, PreemptLowerPriority. Defaults to PreemptLowerPriority if unset.",

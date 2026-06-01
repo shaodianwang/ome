@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -100,7 +99,6 @@ func defaultEngine(engine *v1beta1.EngineSpec) {
 	}
 	defaultWorkerSize(engine.Leader, engine.Worker)
 	defaultOMENativeComponent(&engine.ComponentExtensionSpec, engineIsMultiPod(engine))
-	defaultPodGroupDeploymentComponent(&engine.ComponentExtensionSpec, engine.MinReplicas)
 }
 
 func defaultDecoder(decoder *v1beta1.DecoderSpec) {
@@ -113,7 +111,6 @@ func defaultDecoder(decoder *v1beta1.DecoderSpec) {
 	}
 	defaultWorkerSize(decoder.Leader, decoder.Worker)
 	defaultOMENativeComponent(&decoder.ComponentExtensionSpec, decoderIsMultiPod(decoder))
-	defaultPodGroupDeploymentComponent(&decoder.ComponentExtensionSpec, decoder.MinReplicas)
 }
 
 // defaultWorkerSize fills Worker.Size=1 when a multi-pod pairing is
@@ -154,47 +151,6 @@ func defaultRouter(router *v1beta1.RouterSpec) {
 	}
 	// Router has no Leader/Worker; always single-pod.
 	defaultOMENativeComponent(&router.ComponentExtensionSpec, false)
-}
-
-func defaultPodGroupDeploymentComponent(ext *v1beta1.ComponentExtensionSpec, minReplicas *int) {
-	if ext == nil || ext.Annotations == nil {
-		return
-	}
-	if ext.Annotations[constants.DeploymentMode] != string(constants.PodGroupDeploymentRollout) {
-		return
-	}
-	if ext.PodGroupDeployment == nil {
-		ext.PodGroupDeployment = &v1beta1.PodGroupDeploymentComponentSpec{}
-	}
-	spec := ext.PodGroupDeployment
-	if spec.Groups == nil {
-		groups := int32(1)
-		if minReplicas != nil {
-			groups = int32(*minReplicas)
-		}
-		spec.Groups = &groups
-	}
-	if spec.ReplicasPerGroup == nil {
-		replicasPerGroup := int32(1)
-		spec.ReplicasPerGroup = &replicasPerGroup
-	}
-	if spec.TopologyKey == "" {
-		spec.TopologyKey = v1.LabelHostname
-	}
-	if spec.ServiceTargetOrdinal == nil {
-		serviceTargetOrdinal := int32(0)
-		spec.ServiceTargetOrdinal = &serviceTargetOrdinal
-	}
-	if spec.ScheduleTimeoutSeconds == nil {
-		scheduleTimeoutSeconds := int32(60)
-		spec.ScheduleTimeoutSeconds = &scheduleTimeoutSeconds
-	}
-	if spec.UpdateStrategy == nil {
-		spec.UpdateStrategy = &v1beta1.PodGroupDeploymentUpdateStrategy{}
-	}
-	if spec.UpdateStrategy.Type == "" {
-		spec.UpdateStrategy.Type = "RecreatePod"
-	}
 }
 
 // engineIsMultiPod reports whether the Engine spawns more than one pod per

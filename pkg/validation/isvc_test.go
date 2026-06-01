@@ -131,13 +131,6 @@ func TestValidateEngineDecoderDeploymentMode(t *testing.T) {
 			},
 		},
 		{
-			name: "both PodGroupDeploymentRollout — match",
-			spec: &v1beta1.InferenceServiceSpec{
-				Engine:  engineWith(withMode(string(constants.PodGroupDeploymentRollout))),
-				Decoder: decoderWith(withMode(string(constants.PodGroupDeploymentRollout))),
-			},
-		},
-		{
 			name: "engine OMENative, decoder unset — mismatch",
 			spec: &v1beta1.InferenceServiceSpec{
 				Engine:  engineWith(withMode(string(constants.OMENative))),
@@ -184,87 +177,6 @@ func TestValidateEngineDecoderDeploymentMode(t *testing.T) {
 				t.Fatalf("expected error, got nil")
 			}
 			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-		})
-	}
-}
-
-func TestValidatePodGroupDeploymentRolloutMode(t *testing.T) {
-	mode := map[string]string{constants.DeploymentMode: string(constants.PodGroupDeploymentRollout)}
-	raw := map[string]string{constants.DeploymentMode: string(constants.RawDeployment)}
-	int32Ptr := func(v int32) *int32 { return &v }
-
-	tests := []struct {
-		name    string
-		spec    *v1beta1.InferenceServiceSpec
-		wantErr bool
-		errSub  string
-	}{
-		{
-			name: "engine and decoder PGDR passes",
-			spec: &v1beta1.InferenceServiceSpec{
-				Engine:  &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: mode}},
-				Decoder: &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: mode}},
-				Router:  &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: raw}},
-			},
-		},
-		{
-			name: "engine only PGDR rejected",
-			spec: &v1beta1.InferenceServiceSpec{
-				Engine: &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: mode}},
-			},
-			wantErr: true,
-			errSub:  "requires both engine and decoder",
-		},
-		{
-			name: "router PGDR rejected",
-			spec: &v1beta1.InferenceServiceSpec{
-				Engine: &v1beta1.EngineSpec{},
-				Router: &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: mode}},
-			},
-			wantErr: true,
-			errSub:  "router does not support",
-		},
-		{
-			name: "rolloutCoordination rejected",
-			spec: &v1beta1.InferenceServiceSpec{
-				Engine:  &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: mode}},
-				Decoder: &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: mode}},
-				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
-					Groups: []v1beta1.RolloutCoordinationGroup{{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}}},
-				},
-			},
-			wantErr: true,
-			errSub:  "rolloutCoordination",
-		},
-		{
-			name: "invalid replicasPerGroup rejected",
-			spec: &v1beta1.InferenceServiceSpec{
-				Engine: &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					Annotations:        mode,
-					PodGroupDeployment: &v1beta1.PodGroupDeploymentComponentSpec{ReplicasPerGroup: int32Ptr(0)},
-				}},
-				Decoder: &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: mode}},
-			},
-			wantErr: true,
-			errSub:  "replicasPerGroup",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidatePodGroupDeploymentRolloutMode(tt.spec)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tt.errSub != "" && !strings.Contains(err.Error(), tt.errSub) {
-					t.Fatalf("expected error containing %q, got %v", tt.errSub, err)
-				}
-				return
-			}
-			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})

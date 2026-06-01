@@ -412,58 +412,6 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 	})
 }
 
-func TestDefaultPodGroupDeploymentComponent(t *testing.T) {
-	mode := map[string]string{constants.DeploymentMode: string(constants.PodGroupDeploymentRollout)}
-	minReplicas := 8
-
-	t.Run("not PGDR - block untouched", func(t *testing.T) {
-		ext := &v1beta1.ComponentExtensionSpec{
-			Annotations: map[string]string{constants.DeploymentMode: string(constants.RawDeployment)},
-		}
-		defaultPodGroupDeploymentComponent(ext, &minReplicas)
-		assert.Nil(t, ext.PodGroupDeployment)
-	})
-
-	t.Run("PGDR defaults from minReplicas", func(t *testing.T) {
-		ext := &v1beta1.ComponentExtensionSpec{Annotations: mode}
-		defaultPodGroupDeploymentComponent(ext, &minReplicas)
-
-		require.NotNil(t, ext.PodGroupDeployment)
-		require.NotNil(t, ext.PodGroupDeployment.Groups)
-		assert.Equal(t, int32(8), *ext.PodGroupDeployment.Groups)
-		require.NotNil(t, ext.PodGroupDeployment.ReplicasPerGroup)
-		assert.Equal(t, int32(1), *ext.PodGroupDeployment.ReplicasPerGroup)
-		assert.Equal(t, "kubernetes.io/hostname", ext.PodGroupDeployment.TopologyKey)
-		require.NotNil(t, ext.PodGroupDeployment.ScheduleTimeoutSeconds)
-		assert.Equal(t, int32(60), *ext.PodGroupDeployment.ScheduleTimeoutSeconds)
-		require.NotNil(t, ext.PodGroupDeployment.UpdateStrategy)
-		assert.Equal(t, "RecreatePod", ext.PodGroupDeployment.UpdateStrategy.Type)
-	})
-
-	t.Run("PGDR preserves explicit values", func(t *testing.T) {
-		groups := int32(4)
-		replicasPerGroup := int32(2)
-		timeout := int32(120)
-		ext := &v1beta1.ComponentExtensionSpec{
-			Annotations: mode,
-			PodGroupDeployment: &v1beta1.PodGroupDeploymentComponentSpec{
-				Groups:                 &groups,
-				ReplicasPerGroup:       &replicasPerGroup,
-				TopologyKey:            "ds.coreweave.com/nvlink.domain",
-				ScheduleTimeoutSeconds: &timeout,
-				UpdateStrategy:         &v1beta1.PodGroupDeploymentUpdateStrategy{Type: "InPlaceIfPossible"},
-			},
-		}
-		defaultPodGroupDeploymentComponent(ext, &minReplicas)
-
-		assert.Equal(t, int32(4), *ext.PodGroupDeployment.Groups)
-		assert.Equal(t, int32(2), *ext.PodGroupDeployment.ReplicasPerGroup)
-		assert.Equal(t, "ds.coreweave.com/nvlink.domain", ext.PodGroupDeployment.TopologyKey)
-		assert.Equal(t, int32(120), *ext.PodGroupDeployment.ScheduleTimeoutSeconds)
-		assert.Equal(t, "InPlaceIfPossible", ext.PodGroupDeployment.UpdateStrategy.Type)
-	})
-}
-
 func TestEngineIsMultiPod(t *testing.T) {
 	tests := []struct {
 		name string
