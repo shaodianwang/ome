@@ -30,11 +30,14 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
 )
@@ -113,40 +116,71 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	// UpdateGate wires the coordination stack — workload code can't
 	// see omenative/coordination (the workload package's audit-grep
 	// boundary), so the gate decisions cross via this callback.
-	// Returns (allowed, denyReason) per the workload contract; the
-	// dispatcher reads only the allowed bit.
-	//
-	// Order mirrors the pre-extraction dispatch.go inline gating
-	// byte-for-byte: ratio first (peer-Component balance), then
-	// surge / unavailability based on the strategy, then sequential
-	// (Sequential group ordering). First denial wins; subsequent
-	// gates short-circuit.
-	//
-	// ResolveGateContext is called once per per-Instance tick so the
-	// shared prelude (ResolveGroups + MembershipFor + nil-isvc /
-	// no-coord-block short-circuit checks) runs once instead of four
-	// times — see the coordination.GateContext docs.
+	// Body lives in evaluateUpdateGate so the gate order + the
+	// OEP-0007.3 Bug 1 in-place RatioGate bypass have a single
+	// testable site.
 	input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
-		ctx := coordination.ResolveGateContext(p.ISVC, v1component)
-		if allowed, reason := ctx.CheckRatio(inFlightUnavail); !allowed {
-			return false, reason
-		}
-		if strategy == workload.UpdateStrategySurgeThenDrain || strategy == "" {
-			if allowed, reason := ctx.CheckSurge(inFlightSurge); !allowed {
-				return false, reason
-			}
-		} else {
-			if allowed, reason := ctx.CheckUnavailability(inFlightUnavail); !allowed {
-				return false, reason
-			}
-		}
-		if allowed, reason := ctx.CheckSequential(); !allowed {
-			return false, reason
-		}
-		return true, ""
+		return evaluateUpdateGate(p.ISVC, v1component, p.Recorder, strategy, inFlightSurge, inFlightUnavail)
 	}
 
 	return workload.Reconcile(ctx, deps, input, workloadPlanFromCore(plan), target)
+}
+
+// evaluateUpdateGate is the body of the UpdateGate closure threaded into
+// the workload dispatcher via ReconcileInput.UpdateGate. Extracted as a
+// named function so the gate ordering (ratio -> surge/unavail -> sequential)
+// and the OEP-0007.3 Bug 1 in-place RatioGate bypass have a single
+// testable site.
+//
+// Returns (allowed, denyReason) per the workload contract; the
+// dispatcher reads only the allowed bit. First denial wins; subsequent
+// gates short-circuit.
+//
+// OEP-0007.3 Bug 1: in-place strategies (InPlaceIfPossible /
+// InPlaceOnly) skip CheckRatio. CheckRatio always projects a -1 drain
+// (capacity loss); for in-place that drain is paired 1:1 with a same-
+// pod return (mark-not-ready -> patch image -> mark-ready), so the net
+// capacity change is ~0. The -1 projection misrepresents that
+// transient as permanent loss and indefinitely over-blocks the smaller
+// Component of a ratio pair (e.g. the decoder in a 4:2 engine:decoder
+// pair with 25% tolerance deadlocks because 4:1 = 4.0 sits above the
+// [1.5, 2.5] band). CheckUnavailability (called below for non-surge
+// strategies, which includes both in-place variants) already governs
+// concurrent disruption via the MaxUnavailable budget, so RatioBalanced
+// safety is preserved without the projection's structural deadlock.
+// Emits the RatioGateBypassed event + ratio_gate_bypassed_total metric
+// so operators see why the gate did not fire.
+//
+// ResolveGateContext is called once per per-Instance tick so the
+// shared prelude (ResolveGroups + MembershipFor + nil-isvc /
+// no-coord-block short-circuit checks) runs once instead of four
+// times -- see the coordination.GateContext docs.
+func evaluateUpdateGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, recorder record.EventRecorder, strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
+	ctx := coordination.ResolveGateContext(isvc, component)
+	inPlace := strategy == workload.UpdateStrategyInPlaceIfPossible || strategy == workload.UpdateStrategyInPlaceOnly
+	if !inPlace {
+		if allowed, reason := ctx.CheckRatio(inFlightUnavail); !allowed {
+			return false, reason
+		}
+	} else {
+		coordination.RecordRatioGateBypassed(string(component), string(strategy))
+		status.RecordNormal(recorder, isvc, coordination.EventReasonRatioGateBypassed,
+			"RatioGateBypassed: Component=%s, Strategy=%s. RatioBalanced is bypassed for in-place strategies because the drain is paired 1:1 with a same-pod return. Per-Component pacing (CoordinationPacing.PerComponent) still governs concurrent disruption.",
+			component, strategy)
+	}
+	if strategy == workload.UpdateStrategySurgeThenDrain || strategy == "" {
+		if allowed, reason := ctx.CheckSurge(inFlightSurge); !allowed {
+			return false, reason
+		}
+	} else {
+		if allowed, reason := ctx.CheckUnavailability(inFlightUnavail); !allowed {
+			return false, reason
+		}
+	}
+	if allowed, reason := ctx.CheckSequential(); !allowed {
+		return false, reason
+	}
+	return true, ""
 }
 
 // workloadPlanFromCore lifts core.ComponentPlan onto workload.ComponentPlan

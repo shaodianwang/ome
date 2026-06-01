@@ -25,6 +25,20 @@ const (
 	// refused a surge to avoid drifting the cross-Component ratio.
 	EventReasonRatioSkewRejected = "RatioSkewRejected"
 
+	// EventReasonRatioGateBypassed fires when the OMENative ops
+	// dispatcher skips CheckRatioGate because the per-Instance update
+	// strategy is in-place (InPlaceIfPossible / InPlaceOnly). The
+	// gate's "-1" projection treats every drain as a permanent
+	// capacity loss, but an in-place drain is paired 1:1 with a
+	// same-pod return (mark-not-ready -> patch image -> mark-ready)
+	// so the net capacity change is ~0 and the gate's projection
+	// over-blocks the smaller Component of a ratio pair indefinitely
+	// (see OEP-0007.3 Bug 1). CheckUnavailabilityGate still governs
+	// concurrent disruption for the in-place case, so RatioBalanced
+	// safety is not lost -- operators just see this event explaining
+	// why the gate did not fire.
+	EventReasonRatioGateBypassed = "RatioGateBypassed"
+
 	// EventReasonMixedPairingObserved fires when a RollingUpdate
 	// group sees distinct (vN, vM) revision pairs in flight.
 	// Informational — helps operators audit back-compat assertions.
