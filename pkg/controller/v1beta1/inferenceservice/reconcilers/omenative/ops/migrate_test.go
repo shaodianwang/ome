@@ -233,7 +233,7 @@ func TestDetectMigrationRequest_RejectsBadSchemaWithFailedLedgerEntry(t *testing
 // --- Migrate state machine ---
 
 func TestMigrate_NilClient(t *testing.T) {
-	_, err := Migrate(context.Background(), core.ReconcileParams{}, core.ComponentPlan{Component: workload.ComponentEngine}, 0, "uuid", &audit.MigrationRequest{})
+	_, _, err := Migrate(context.Background(), core.ReconcileParams{}, core.ComponentPlan{Component: workload.ComponentEngine}, 0, "uuid", &audit.MigrationRequest{})
 	if err == nil {
 		t.Fatal("expected error for nil client")
 	}
@@ -250,12 +250,15 @@ func TestMigrate_AlreadyCompleted_NoOp(t *testing.T) {
 	p := minimalParams(t, isvc, c)
 	plan, _ := core.BuildPlan(p)
 
-	done, err := Migrate(context.Background(), p, plan, 0, "done", &audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: "engine", Instance: 0, FromNode: "n"})
+	done, accepted, err := Migrate(context.Background(), p, plan, 0, "done", &audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: "engine", Instance: 0, FromNode: "n"})
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	if !done {
 		t.Errorf("completed UUID should short-circuit done=true")
+	}
+	if !accepted {
+		t.Errorf("terminal-ledger dedup must return accepted=true so dispatcher doesn't fall through to Update")
 	}
 }
 
@@ -279,12 +282,21 @@ func TestMigrate_RefusesWhenSourcePhaseNotReady(t *testing.T) {
 	plan, _ := core.BuildPlan(p)
 	req := &audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: "engine", Instance: 0, FromNode: "node5"}
 
-	done, err := Migrate(context.Background(), p, plan, 0, "req-mid-create", req)
+	done, accepted, err := Migrate(context.Background(), p, plan, 0, "req-mid-create", req)
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	if done {
 		t.Fatalf("expected done=false: migration must wait for source to reach Ready")
+	}
+	// Load-bearing: accepted=false signals the dispatcher to fall
+	// through to Update/Create so the in-flight op (Create here, or
+	// Update in the affinity-edit reproduction) can converge. Without
+	// this the dispatcher loops indefinitely in the Migrate-defer
+	// branch — see affinity-trigger-not-detected bug report at
+	// .claude/specs/2026-05-30-kind-test-walk/migrate-affinity-isvc-never-detected.md.
+	if accepted {
+		t.Errorf("expected accepted=false: fresh-request defer while source has in-flight non-Migrate Operation must NOT block dispatcher fall-through")
 	}
 
 	fresh := &v1beta1.InferenceService{}
@@ -316,12 +328,15 @@ func TestMigrate_RefusesWhenSourceRunningRevisionEmpty(t *testing.T) {
 	plan, _ := core.BuildPlan(p)
 	req := &audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: "engine", Instance: 0, FromNode: "node5"}
 
-	done, err := Migrate(context.Background(), p, plan, 0, "req-no-rev", req)
+	done, accepted, err := Migrate(context.Background(), p, plan, 0, "req-no-rev", req)
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	if done {
 		t.Fatalf("expected done=false: missing RunningRevision must defer migration")
+	}
+	if accepted {
+		t.Errorf("expected accepted=false: fresh-request defer on missing RunningRevision must NOT block dispatcher fall-through")
 	}
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
@@ -342,12 +357,15 @@ func TestMigrate_MissingSourceMarksFailed(t *testing.T) {
 	plan, _ := core.BuildPlan(p)
 	req := &audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: "engine", Instance: 7, FromNode: "node5"}
 
-	done, err := Migrate(context.Background(), p, plan, 7, "req-missing", req)
+	done, accepted, err := Migrate(context.Background(), p, plan, 7, "req-missing", req)
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	if !done {
 		t.Errorf("missing source should mark Failed and return done=true")
+	}
+	if !accepted {
+		t.Errorf("terminal failure must return accepted=true so dispatcher requeues post-fail (Failed ledger row is the outcome)")
 	}
 	ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
 	if !ledger.HasCompletedOrFailedRequest("req-missing") {
@@ -390,7 +408,7 @@ func TestMigrate_MultiPodRejectedWithAuditEntry(t *testing.T) {
 		FromNode:      "node5",
 	}
 
-	done, err := Migrate(context.Background(), p, plan, 0, "req-multipod", req)
+	done, _, err := Migrate(context.Background(), p, plan, 0, "req-multipod", req)
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
@@ -445,12 +463,15 @@ func TestMigrate_FirstPassAllocatesSurgeAndStampsBothStatuses(t *testing.T) {
 	plan, _ := core.BuildPlan(p)
 	req := &audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: "engine", Instance: 0, FromNode: "node5", HintTargetNodes: []string{"node3"}}
 
-	done, err := Migrate(context.Background(), p, plan, 0, "req-1", req)
+	done, accepted, err := Migrate(context.Background(), p, plan, 0, "req-1", req)
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	if done {
 		t.Fatalf("expected done=false on first pass (surge pod just created)")
+	}
+	if !accepted {
+		t.Errorf("first pass stamps status + ledger Started — must return accepted=true so dispatcher requeues at MigrateRequeueInterval (not fall-through)")
 	}
 
 	// Status: source Migrating + surge Creating.
@@ -544,7 +565,7 @@ func TestMigrate_WaitsForSurgeRotationBeforeDrainingSource(t *testing.T) {
 		if src := findInstanceStatusForISVCTest(fresh, v1beta1.EngineComponent, 0); src != nil && src.Operation != nil && src.Operation.SurgeIndex != nil {
 			core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), *src.Operation.SurgeIndex)
 		}
-		done, err := Migrate(context.Background(), pPass, planPass, 0, "req-no-rotation", req)
+		done, _, err := Migrate(context.Background(), pPass, planPass, 0, "req-no-rotation", req)
 		if err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
 		}
@@ -585,7 +606,7 @@ func TestMigrate_ResumeFromLedgerWhenSourceStatusLost(t *testing.T) {
 	plan, _ := core.BuildPlan(p)
 	req := &audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: "engine", Instance: 0, FromNode: "node5"}
 
-	done, err := Migrate(context.Background(), p, plan, 0, "req-resume", req)
+	done, accepted, err := Migrate(context.Background(), p, plan, 0, "req-resume", req)
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
@@ -593,6 +614,14 @@ func TestMigrate_ResumeFromLedgerWhenSourceStatusLost(t *testing.T) {
 	// bail without error and without re-allocating a new surge index.
 	if done {
 		t.Fatalf("expected done=false: no source revision available, no progress possible")
+	}
+	// Ledger-resume path: even though source status is wiped, the
+	// in-flight ledger entry forces accepted=true so the dispatcher
+	// requeues without falling through. Falling through here would let
+	// the Update / Create pass re-materialize the source the migration
+	// just torn-wrote away.
+	if !accepted {
+		t.Errorf("ledger-resume path must return accepted=true: in-flight migration owns the source slot even after status wipe")
 	}
 	// Ledger entry must still point at surge 2 (not re-allocated).
 	reloaded, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
@@ -621,7 +650,7 @@ func TestMigrate_DedupAfterCompletedLedgerEntry(t *testing.T) {
 	p := minimalParams(t, isvc, c)
 	plan, _ := core.BuildPlan(p)
 
-	done, err := Migrate(context.Background(), p, plan, 0, "req-completed",
+	done, _, err := Migrate(context.Background(), p, plan, 0, "req-completed",
 		&audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: "engine", Instance: 0, FromNode: "node5"})
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
@@ -678,7 +707,7 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 			core.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentType(v1beta1.EngineComponent), *src.Operation.SurgeIndex)
 		}
 
-		done, err := Migrate(context.Background(), pPass, planPass, 0, "req-end-to-end", req)
+		done, _, err := Migrate(context.Background(), pPass, planPass, 0, "req-end-to-end", req)
 		if err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
 		}
@@ -880,7 +909,7 @@ func TestMigrate_RejectsNodeAffinityConflict(t *testing.T) {
 		FromNode:      "node5",
 	}
 
-	done, err := Migrate(context.Background(), p, plan, 0, "req-conflict", req)
+	done, _, err := Migrate(context.Background(), p, plan, 0, "req-conflict", req)
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}

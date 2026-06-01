@@ -49,26 +49,46 @@ const MigrateRequeueInterval = 5 * time.Second
 // readiness gate before drain proceeds. Rejected up-front with a
 // Failed audit row so the requester observes the rejection within
 // its SLA.
-func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, requestUUID string, req *audit.MigrationRequest) (bool, error) {
+//
+// Returns (done, accepted, err):
+//   - done=true: migration finished (success or terminal failure);
+//     caller continues to the next reconcile pass without requeue from
+//     the migration branch.
+//   - done=false, accepted=true: migration is mid-flight (status
+//     stamped, ledger Started, or driving an existing in-flight pair);
+//     caller MUST requeue and SHOULD NOT fall through to Update/Create
+//     (DetectUpdateTrigger suppresses Migrate-owned status anyway).
+//   - done=false, accepted=false: migration deferred without taking
+//     ownership (fresh request, source not yet in a steady Ready state
+//     because of an in-flight Update/Restart/Create). Caller SHOULD
+//     fall through to Update/Create/etc. so the in-flight op converges;
+//     otherwise the dispatcher loops indefinitely in the Migrate-defer
+//     branch and the source never reaches Ready (silent deadlock — see
+//     .claude/specs/2026-05-30-kind-test-walk/migrate-affinity-isvc-never-detected.md).
+func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, requestUUID string, req *audit.MigrationRequest) (done bool, accepted bool, err error) {
 	if deps.Client == nil {
-		return false, fmt.Errorf("Migrate: nil client")
+		return false, false, fmt.Errorf("Migrate: nil client")
 	}
 	if req == nil {
-		return false, fmt.Errorf("Migrate: nil request (instance=%d)", sourceIdx)
+		return false, false, fmt.Errorf("Migrate: nil request (instance=%d)", sourceIdx)
 	}
 
 	ledger, err := audit.LoadLedgerForOwner(ctx, deps.Reader(), input.OwnerObject)
 	if err != nil {
-		return false, fmt.Errorf("Migrate: load audit ledger: %w", err)
+		return false, false, fmt.Errorf("Migrate: load audit ledger: %w", err)
 	}
 	if ledger.HasCompletedOrFailedRequest(requestUUID) {
-		return true, nil
+		// Already terminal — caller can continue. accepted=true so the
+		// caller knows the request was previously taken and is fully
+		// handled (no fall-through needed).
+		return true, true, nil
 	}
 
 	// Reject multi-pod up-front per the SINGLE-POD ONLY guard.
 	if isMultiPodInstance(plan, sourceIdx) {
-		return failMigration(ctx, deps, input, ledger, req, requestUUID,
+		d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID,
 			"multi-pod Instance migration not yet supported (single-pod surge cannot satisfy a multi-pod gang)")
+		return d, true, ferr
 	}
 
 	// Recover surge index from source status (post-stamp) or ledger
@@ -78,19 +98,27 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	var surgeIdx int32
 	switch {
 	case source != nil && source.Operation != nil && source.Operation.Type == workload.InstanceOperationMigrate && source.Operation.SurgeIndex != nil:
+		// In-flight via stamped source status — accepted on a prior pass.
 		surgeIdx = *source.Operation.SurgeIndex
+		accepted = true
 	case inFlight != nil:
+		// In-flight via ledger (post-Started, pre-stamp crash recovery).
 		surgeIdx = inFlight.SurgeInstance
+		accepted = true
 	default:
 		// Fresh request: refuse to stamp Migrating unless source is a
 		// steady Ready with a recorded revision. Without these guards a
 		// mid-Create stamp deadlocks Create and a mid-Update / Restart
 		// stamp silently steamrolls the in-flight op.
 		if source == nil {
-			return failMigration(ctx, deps, input, ledger, req, requestUUID, "source InstanceStatus missing")
+			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, "source InstanceStatus missing")
+			return d, true, ferr
 		}
 		if source.Phase != workload.InstancePhaseReady || source.Operation != nil || source.RunningRevision == "" {
-			return false, nil
+			// Defer without taking ownership — signal to caller that
+			// fall-through is safe so the in-flight op (Update/Restart/
+			// Create) can converge. accepted=false is load-bearing here.
+			return false, false, nil
 		}
 
 		// Validate FromNode against where source pods actually run. The
@@ -99,13 +127,17 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// post-move source — silently no-op'ing the migration.
 		switch mismatch, defer_, err := validateFromNode(ctx, deps, input, plan, sourceIdx, req.FromNode); {
 		case err != nil:
-			return false, fmt.Errorf("Migrate: validate from-node (instance=%d): %w", sourceIdx, err)
+			return false, false, fmt.Errorf("Migrate: validate from-node (instance=%d): %w", sourceIdx, err)
 		case defer_:
-			return false, nil
+			// Transient (unscheduled source pod). Defer without ownership;
+			// caller can fall through. validateFromNode's defer_ path is a
+			// fresh-request guard and must not block other ops.
+			return false, false, nil
 		case mismatch != "":
 			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationFromNodeMismatch,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, mismatch)
-			return failMigration(ctx, deps, input, ledger, req, requestUUID, mismatch)
+			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, mismatch)
+			return d, true, ferr
 		}
 
 		// Cluster-wide capacity / rate-limit gate (in-flight + last-hour
@@ -113,7 +145,8 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if ok, reason := audit.ValidateCapacity(ledger, time.Now()); !ok {
 			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonRateLimited,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
-			return failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
+			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
+			return d, true, ferr
 		}
 
 		// Resolve the source's RunningRevision and check the overlay BEFORE
@@ -121,13 +154,14 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// for ~instanceReadyTimeout until the timeout cleanup fires —
 		// operators see a wedged status and the requester can't observe
 		// the rejection within its SLA. (nil, nil) means the CR was GC'd
-		// or RunningRevision isn't set yet — defer.
+		// or RunningRevision isn't set yet — defer without ownership so
+		// other ops can run.
 		_, surgeRevSpec, err := surgeRevisionAndSpec(ctx, deps, input, sourceIdx)
 		if err != nil {
-			return false, fmt.Errorf("Migrate: resolve surge revision: %w", err)
+			return false, false, fmt.Errorf("Migrate: resolve surge revision: %w", err)
 		}
 		if surgeRevSpec == nil {
-			return false, nil
+			return false, false, nil
 		}
 		if WouldOverlayConflictWithNodeAffinity(surgeRevSpec, &workload.MigrationOverlay{
 			FromNode:        req.FromNode,
@@ -136,48 +170,55 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
 			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationNodeAffinityConflict,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
-			return failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
+			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
+			return d, true, ferr
 		}
 
 		surgeIdx = workload.AllocateSurgeIndex(input.ObservedState.InstanceStatuses)
 		if err := patchInstanceStatusMigrating(ctx, input, sourceIdx, surgeIdx, requestUUID, req, plan.InstanceReadyTimeout); err != nil {
-			return false, fmt.Errorf("Migrate: stamp source status (instance=%d): %w", sourceIdx, err)
+			return false, false, fmt.Errorf("Migrate: stamp source status (instance=%d): %w", sourceIdx, err)
 		}
 		if err := patchInstanceStatusMigrationSurge(ctx, input, surgeIdx, sourceIdx, requestUUID, req, plan.InstanceReadyTimeout); err != nil {
-			return false, fmt.Errorf("Migrate: stamp surge status (instance=%d): %w", surgeIdx, err)
+			return false, false, fmt.Errorf("Migrate: stamp surge status (instance=%d): %w", surgeIdx, err)
 		}
 		ledger.UpsertEntry(audit.NewStartedEntry(req, requestUUID, surgeIdx))
 		if err := audit.PersistLedgerForOwner(ctx, deps.Client, input.OwnerObject, input.OwnerGVK, ledger); err != nil {
-			return false, fmt.Errorf("Migrate: persist Started ledger: %w", err)
+			return false, false, fmt.Errorf("Migrate: persist Started ledger: %w", err)
 		}
 		// Clear the annotation after stamping Started so a re-delivery
 		// within the requester's retry window dedups via the ledger.
 		if err := clearMigrationRequest(ctx, input, requestUUID); err != nil {
-			return false, fmt.Errorf("Migrate: clear request annotation: %w", err)
+			return false, false, fmt.Errorf("Migrate: clear request annotation: %w", err)
 		}
 		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonMigrationRequestAccepted,
 			"OMENative %s migration accepted (uuid=%s, source-node=%s, surge-index=%d)",
 			instanceKey(input.Key.Component, sourceIdx), requestUUID, req.FromNode, surgeIdx)
+		// Stamped + ledger persisted — Migrate has taken ownership.
+		accepted = true
 	}
 
+	// From this point onward Migrate has taken ownership of the request
+	// (accepted=true above via the switch). All remaining returns
+	// propagate accepted=true so the dispatcher knows to requeue rather
+	// than fall through.
 	sourcePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, sourceIdx)
 	if err != nil {
-		return false, fmt.Errorf("Migrate: list source pods: %w", err)
+		return false, accepted, fmt.Errorf("Migrate: list source pods: %w", err)
 	}
 	surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, surgeIdx)
 	if err != nil {
-		return false, fmt.Errorf("Migrate: list surge pods: %w", err)
+		return false, accepted, fmt.Errorf("Migrate: list surge pods: %w", err)
 	}
 
 	// Migration moves placement, not template — surge runs at the source's
 	// RunningRevision.
 	surgeRev, surgeRevSpec, err := surgeRevisionAndSpec(ctx, deps, input, sourceIdx)
 	if err != nil {
-		return false, fmt.Errorf("Migrate: resolve surge revision: %w", err)
+		return false, accepted, fmt.Errorf("Migrate: resolve surge revision: %w", err)
 	}
 	if surgeRev == nil || surgeRevSpec == nil {
 		// Source not yet promoted with a RunningRevision — retry.
-		return false, nil
+		return false, accepted, nil
 	}
 
 	// Migration overlay tells Render to stamp anti-affinity vs FromNode.
@@ -198,7 +239,8 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
 		recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationNodeAffinityConflict,
 			"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
-		return failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
+		d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
+		return d, accepted, ferr
 	}
 
 	desired := expectedPodNamesForInstance(input, plan, surgeInst)
@@ -211,7 +253,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	}
 	if len(missing) > 0 {
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, surgeIdx) {
-			return false, nil
+			return false, accepted, nil
 		}
 		// Render against the surge revision's PodSpec, not input.DesiredSpec.PodSpec.
 		// Use a shallow ReconcileInput copy with the surge revision's PodSpec so
@@ -221,20 +263,20 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		surgeInput := input
 		surgeInput.DesiredSpec.PodSpec = surgeRevSpec
 		if _, cerr := createMissingPods(ctx, deps, surgeInput, plan, surgeInst, surgeIdx, missing, revisionHashFromTarget(surgeRev)); cerr != nil {
-			return false, fmt.Errorf("Migrate: create surge pod set: %w", cerr)
+			return false, accepted, fmt.Errorf("Migrate: create surge pod set: %w", cerr)
 		}
-		return false, nil
+		return false, accepted, nil
 	}
 
 	if !query.AllPodsRuntimeReady(surgePods) {
-		return false, nil
+		return false, accepted, nil
 	}
 	for _, pod := range surgePods {
 		if podreadiness.IsServing(pod) {
 			continue
 		}
 		if err := podreadiness.MarkPodServing(ctx, deps.Client, pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
-			return false, fmt.Errorf("Migrate: serving=True on surge pod %s: %w", pod.Name, err)
+			return false, accepted, fmt.Errorf("Migrate: serving=True on surge pod %s: %w", pod.Name, err)
 		}
 	}
 
@@ -248,10 +290,10 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		}
 		inRotation, rerr := drain.IsPodInRotation(ctx, deps.Reader(), input.Key.Namespace, serviceName, pod)
 		if rerr != nil {
-			return false, fmt.Errorf("Migrate: check rotation on surge pod %s: %w", pod.Name, rerr)
+			return false, accepted, fmt.Errorf("Migrate: check rotation on surge pod %s: %w", pod.Name, rerr)
 		}
 		if !inRotation {
-			return false, nil
+			return false, accepted, nil
 		}
 	}
 
@@ -261,7 +303,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	surgeStatus := findInstanceStatus(input.ObservedState.InstanceStatuses, surgeIdx)
 	if surgeStatus == nil || surgeStatus.PodCount == 0 ||
 		surgeStatus.AvailablePodCount < surgeStatus.PodCount {
-		return false, nil
+		return false, accepted, nil
 	}
 
 	for _, pod := range sourcePods {
@@ -270,7 +312,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		}
 		// Migrate-source-drain key; cleared by pod deletion at the end.
 		if err := podreadiness.MarkPodNotServing(ctx, deps.Client, pod, podreadiness.WriterMigrateSourceDrain, requestUUID); err != nil {
-			return false, fmt.Errorf("Migrate: serving=False on source pod %s: %w", pod.Name, err)
+			return false, accepted, fmt.Errorf("Migrate: serving=False on source pod %s: %w", pod.Name, err)
 		}
 	}
 	for _, pod := range sourcePods {
@@ -280,10 +322,10 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		}
 		drained, derr := drain.IsPodDrained(ctx, deps.Reader(), input.Key.Namespace, serviceName, pod)
 		if derr != nil {
-			return false, fmt.Errorf("Migrate: check drain on source pod %s: %w", pod.Name, derr)
+			return false, accepted, fmt.Errorf("Migrate: check drain on source pod %s: %w", pod.Name, derr)
 		}
 		if !drained {
-			return false, nil
+			return false, accepted, nil
 		}
 	}
 
@@ -291,12 +333,12 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// delete loop and orphan source pods at source-status removal.
 	sourcePods, err = query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, sourceIdx)
 	if err != nil {
-		return false, fmt.Errorf("Migrate: live-list source pods: %w", err)
+		return false, accepted, fmt.Errorf("Migrate: live-list source pods: %w", err)
 	}
 
 	if len(sourcePods) > 0 {
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, sourceIdx) {
-			return false, nil
+			return false, accepted, nil
 		}
 		// EXPECT-ORDER: per-pod ExpectDeletes BEFORE Delete, rollback via
 		// ObservedDelete on error — a failed RPC fires no event to decrement.
@@ -310,10 +352,10 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 				if apierrors.IsNotFound(err) {
 					continue
 				}
-				return false, fmt.Errorf("Migrate: delete source pod %s/%s: %w", pod.Namespace, pod.Name, err)
+				return false, accepted, fmt.Errorf("Migrate: delete source pod %s/%s: %w", pod.Namespace, pod.Name, err)
 			}
 		}
-		return false, nil
+		return false, accepted, nil
 	}
 
 	// Persist Completed AFTER the surge promote + source-status removal
@@ -323,24 +365,24 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// and never finishes cleanup. Both operations below are idempotent so
 	// re-delivery between them is safe.
 	if err := patchInstanceStatusReadyOnRevision(ctx, input, surgeIdx, surgeRev.Name); err != nil {
-		return false, fmt.Errorf("Migrate: promote surge to Ready: %w", err)
+		return false, accepted, fmt.Errorf("Migrate: promote surge to Ready: %w", err)
 	}
 	if _, rerr := input.RemoveInstance(ctx, sourceIdx); rerr != nil {
-		return false, fmt.Errorf("Migrate: remove source InstanceStatus: %w", rerr)
+		return false, accepted, fmt.Errorf("Migrate: remove source InstanceStatus: %w", rerr)
 	}
 	ledger.UpsertEntry(audit.NewTerminalEntry(*ledger.InFlightEntryOrSeed(requestUUID, req, surgeIdx), audit.PhaseCompleted, "migrated"))
 	if err := audit.PersistLedgerForOwner(ctx, deps.Client, input.OwnerObject, input.OwnerGVK, ledger); err != nil {
-		return false, fmt.Errorf("Migrate: persist Completed ledger: %w", err)
+		return false, accepted, fmt.Errorf("Migrate: persist Completed ledger: %w", err)
 	}
 	// Re-clear in case a re-delivery slipped in between the accept-time
 	// clear and now. Idempotent.
 	if err := clearMigrationRequest(ctx, input, requestUUID); err != nil {
-		return false, fmt.Errorf("Migrate: clear request annotation on completion: %w", err)
+		return false, accepted, fmt.Errorf("Migrate: clear request annotation on completion: %w", err)
 	}
 	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonMigrationCompleted,
 		"OMENative migration uuid=%s complete: %s -> instance=%d (revision=%s)",
 		requestUUID, instanceKey(input.Key.Component, sourceIdx), surgeIdx, surgeRev.Name)
-	return true, nil
+	return true, accepted, nil
 }
 
 // validateFromNode live-reads source pods, returning three states:

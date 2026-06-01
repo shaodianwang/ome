@@ -113,26 +113,52 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 
 	// 3. Per-Component migration pass. Skip when mode is Never or the
 	// adapter didn't wire a detector.
+	//
+	// Migrate's third return (accepted) distinguishes two done=false
+	// modes:
+	//   - accepted=true: migration is mid-flight (status stamped, ledger
+	//     Started, or fresh request that just stamped). Requeue at the
+	//     Migrate interval; do NOT fall through (DetectUpdateTrigger
+	//     already suppresses Migrate-owned status, so falling through
+	//     would be a no-op anyway, but the explicit requeue is cleaner).
+	//   - accepted=false: migration deferred without taking ownership
+	//     (fresh request, source not yet steady-Ready because of an
+	//     in-flight Update/Restart/Create). Fall through to Update/Create
+	//     so the in-flight op converges. Without fall-through the
+	//     dispatcher loops indefinitely at the MigrateRequeueInterval and
+	//     the in-flight op never runs — the affinity-trigger-not-detected
+	//     deadlock; see
+	//     .claude/specs/2026-05-30-kind-test-walk/migrate-affinity-isvc-never-detected.md.
 	if plan.MigrationMode != MigrationModeNever && input.DetectMigrationRequest != nil {
 		uuid, req, sourceIdx, found, mderr := input.DetectMigrationRequest(ctx)
 		if mderr != nil {
 			return ctrl.Result{}, fmt.Errorf("workload.Reconcile: detect migration request (component=%s): %w", plan.Component, mderr)
 		}
 		if found {
-			done, merr := workloadops.Migrate(ctx, deps, input, plan, sourceIdx, uuid, req)
+			done, accepted, merr := workloadops.Migrate(ctx, deps, input, plan, sourceIdx, uuid, req)
 			if merr != nil {
 				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: migrate instance %d: %w", sourceIdx, merr)
 			}
-			if !done {
+			if !done && accepted {
+				// Mid-flight: requeue at the per-op interval.
 				return ctrl.Result{RequeueAfter: workloadops.MigrateRequeueInterval}, nil
 			}
-			// Migrate just removed the source InstanceStatus and promoted
-			// the surge to Ready. plan was computed with the stale
-			// pre-migration view (both source and surge present), so the
-			// Update + Create passes below would fall through to recreate
-			// the source-side index. Re-queue so the next reconcile
-			// rebuilds plan from the post-migration status.
-			return ctrl.Result{Requeue: true}, nil
+			if done {
+				// Migrate just removed the source InstanceStatus and
+				// promoted the surge to Ready (or wrote a terminal
+				// Failed). plan was computed with the stale pre-migration
+				// view (both source and surge present, or pre-failure
+				// state), so the Update + Create passes below would fall
+				// through to recreate the source-side index. Re-queue so
+				// the next reconcile rebuilds plan from the post-
+				// migration status.
+				return ctrl.Result{Requeue: true}, nil
+			}
+			// !done && !accepted: fresh-request defer (e.g., source
+			// Phase=Updating from an in-flight spec edit). Fall through
+			// to Update/Create so the in-flight op converges; the next
+			// reconcile re-detects the same annotation against a steady-
+			// Ready source.
 		}
 	}
 

@@ -279,6 +279,102 @@ func TestReconcile_UpdateGateNil_AllowsAll(t *testing.T) {
 	}
 }
 
+// TestReconcile_FreshMigrateOnNonReadySource_FallsThroughToUpdate pins
+// the affinity-trigger-not-detected bugfix: when DetectMigrationRequest
+// returns found=true for a fresh request UUID (no in-flight ledger
+// entry, no stamped Operation) but the source InstanceStatus is NOT in
+// a state where Migrate can accept it (Phase=Updating, Creating,
+// Restarting, or any Operation != Migrate in flight), Migrate defers
+// without taking ownership. The dispatcher MUST then fall through to
+// the Update / Create passes so the in-flight op can converge —
+// otherwise the dispatcher loops indefinitely in the Migrate-defer
+// branch, the in-flight Update never completes, and the source never
+// reaches Ready so the migration can never proceed (silent deadlock).
+//
+// Reproduction shape: user adds NodeAffinity to ISVC.Spec.Engine
+// PodSpec while the source pod is Running on the to-be-pinned node.
+// The controller fires Update (Phase=Updating). A migration request
+// annotation lands before the Update converges. detectMigrationRequest
+// returns found=true; Migrate sees Phase=Updating, returns done=false
+// without stamping. Without this fix the dispatcher requeues at
+// MigrateRequeueInterval indefinitely; Update never runs; the test's
+// Eventually for the audit ledger times out at 300s. See
+// .claude/specs/2026-05-30-kind-test-walk/migrate-affinity-isvc-never-detected.md.
+//
+// Test shape: instrument MutateInstance to count calls. Without the
+// fix: zero mutations (Migrate's defer doesn't mutate; Update never
+// runs). With the fix: Update fires and at minimum touches MutateInstance
+// to stamp Op.Step=Surge.
+func TestReconcile_FreshMigrateOnNonReadySource_FallsThroughToUpdate(t *testing.T) {
+	scheme := makeScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	deps := workload.Deps{Client: c}
+
+	in := minimalInput(t)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		// Phase=Updating: an in-flight Update from a recent spec edit
+		// (e.g., adding NodeAffinity to ISVC PodSpec). Migrate's fresh-
+		// request branch defers because source.Phase != Ready.
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseUpdating, RunningRevision: "prior-rev"},
+	}
+	plan := minimalPlan()
+	plan.UpdateStrategy = workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain}
+	plan.MigrationMode = workload.MigrationModeAuto
+
+	// DetectMigrationRequest returns a fresh annotation-detected request.
+	// Note the dispatcher does NOT pre-check source state — that's
+	// Migrate's job. The point of the test is the post-Migrate fall-
+	// through.
+	in.DetectMigrationRequest = func(_ context.Context) (string, *workload.MigrationRequestSummary, int32, bool, error) {
+		return "fresh-uuid-during-update", &workload.MigrationRequestSummary{
+			SchemaVersion: "v1",
+			Component:     "engine",
+			Instance:      0,
+			FromNode:      "node5",
+		}, 0, true, nil
+	}
+
+	// Count MutateInstance calls to detect Update firing. Migrate's
+	// defer path doesn't mutate; Update's stamp does. Without the
+	// dispatcher fix mutateCount is 0; with it, Update fires and the
+	// count is > 0.
+	mutateCount := 0
+	in.MutateInstance = func(_ context.Context, _ int32, fn func(*workload.InstanceStatus) bool) error {
+		mutateCount++
+		// Apply mutation against the seeded ObservedState so subsequent
+		// reads inside the same reconcile see the result.
+		for i := range in.ObservedState.InstanceStatuses {
+			if in.ObservedState.InstanceStatuses[i].Index == 0 {
+				_ = fn(&in.ObservedState.InstanceStatuses[i])
+				break
+			}
+		}
+		return nil
+	}
+
+	// Provide a non-nil target so the Update loop is considered.
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+
+	_, err := workload.Reconcile(context.Background(), deps, in, plan, target)
+	if err != nil {
+		// Per-op machines (Update's surge body) can error against the
+		// empty fake client (no CRs, no pods to drain). The contract this
+		// test pins is the dispatcher-level fall-through, not the op-body
+		// success. Log and continue to the load-bearing assertion.
+		t.Logf("Reconcile op error (expected against empty fake client): %v", err)
+	}
+
+	// Load-bearing assertion: MutateInstance was called at least once,
+	// which means the dispatcher reached the Update pass after Migrate
+	// deferred. Without the fix the dispatcher returns immediately
+	// after Migrate's silent defer and mutateCount stays 0.
+	if mutateCount == 0 {
+		t.Errorf("expected dispatcher to fall through to Update after Migrate deferred; MutateInstance was never called (silent Migrate-defer deadlock)")
+	}
+}
+
 // TestReconcile_UpdateRan_RequeuesAndSkipsCreate pins the bug #58
 // (X-2 bump-during-bump) fix: when ANY Update.call fires in the per-
 // Instance loop (even one returning done=true), the dispatcher MUST

@@ -40,16 +40,19 @@ import (
 // workloadops.Migrate — the source-agnostic body of the per-Instance
 // Migrate surge state machine.
 //
-// Signature preserved for backwards compatibility with the dispatcher
-// (dispatch.go calls Migrate(ctx, p, plan, sourceIdx, uuid, req)
-// directly). The IR controller will skip this wrapper and build
-// workload.ReconcileInput from its own source types.
+// Returns (done, accepted, err) — see workloadops.Migrate for the
+// contract. The accepted bit signals the dispatcher whether Migrate
+// took ownership; done=false && accepted=false means the dispatcher
+// should fall through to other ops so an in-flight Update/Restart/
+// Create can converge (otherwise the dispatcher loops indefinitely
+// in the Migrate-defer branch — affinity-trigger-not-detected
+// deadlock).
 //
 // Wires deps.RenderHook to core.ISVCRenderHook(p.ISVC) so the surge
 // pod's Render path runs coordination.InjectPeerEnv — matches the
 // legacy core.RenderWithRevisionForISVC behavior used by the in-package
 // migrate body before the extraction.
-func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, sourceIdx int32, requestUUID string, req *audit.MigrationRequest) (bool, error) {
+func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, sourceIdx int32, requestUUID string, req *audit.MigrationRequest) (bool, bool, error) {
 	deps := workload.Deps{
 		Client:       p.Client,
 		APIReader:    p.APIReader,
