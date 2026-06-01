@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/pkg/errors"
-	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -13,7 +12,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -23,11 +21,8 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/rbac"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
-	"github.com/ome-projects/ome/pkg/utils"
 )
 
 var _ Component = &Router{}
@@ -158,81 +153,12 @@ func (r *Router) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	return deploymentResult, nil
 }
 
-// reconcileOMENativeSubresources ensures the per-Component stable
-// Service (`<isvc>-<comp>`) and PodMonitor for OMENative-managed
-// router. Engine and Decoder have their own equivalent methods —
-// repetition is accepted here over a shared helper so the omenative
-// package can stay pure (pods + headless Service ONLY). See
-// Engine.reconcileOMENativeSubresources for the full rationale.
+// reconcileOMENativeSubresources delegates to the shared
+// ReconcileOMENativeSubresources helper in base.go — engine, decoder,
+// and router emit byte-identical Service + PodMonitor pairs; only the
+// component enum and ComponentExtensionSpec pointer differ.
 func (r *Router) reconcileOMENativeSubresources(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec) error {
-	if podSpec == nil {
-		return nil
-	}
-	// Router is always single-pod (no Leader/Worker fields on RouterSpec),
-	// so the stable Service selector intentionally does NOT carry a
-	// `pod-ordinal=0` filter — see Engine.reconcileOMENativeSubresources
-	// for why single-pod SurgeThenDrain alternates between ordinal 0
-	// and 1 and pinning ordinal=0 would zero-endpoint the Service
-	// during surge.
-	selector := map[string]string{
-		constants.InferenceServicePodLabelKey: isvc.Name,
-		constants.OMEComponentLabel:           string(v1beta1.RouterComponent),
-		query.LabelManagedBy:                  query.ManagedByOMENative,
-	}
-	componentMeta := objectMeta.DeepCopy()
-	componentMeta.OwnerReferences = []metav1.OwnerReference{
-		*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
-	}
-
-	// Stable Service via the SAME top-level reconciler RawDeployment and
-	// MultiNode use; only the selector + owner refs are OMENative-shaped.
-	sr := service.NewServiceReconciler(r.Client, r.Scheme, *componentMeta, &r.routerSpec.ComponentExtensionSpec, podSpec, selector)
-	if _, err := sr.Reconcile(); err != nil {
-		return errors.Wrap(err, "stable service")
-	}
-
-	// PodMonitor — build inline (shared podmonitor reconciler hardcodes
-	// the `app=<name>` selector that matches Raw / MultiNode pods but
-	// NOT OMENative pods). Scrape port: prefer "metrics", else first
-	// declared port, else "http".
-	portName := "http"
-	if len(podSpec.Containers) > 0 {
-		ports := podSpec.Containers[0].Ports
-		for _, p := range ports {
-			if p.Name == "metrics" {
-				portName = "metrics"
-				break
-			}
-		}
-		if portName == "http" && len(ports) > 0 && ports[0].Name != "" {
-			portName = ports[0].Name
-		}
-	}
-	target := &monitoringv1.PodMonitor{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      objectMeta.Name,
-			Namespace: objectMeta.Namespace,
-		},
-	}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, target, func() error {
-		target.Spec.NamespaceSelector = monitoringv1.NamespaceSelector{
-			MatchNames: []string{objectMeta.Namespace},
-		}
-		target.Spec.Selector = metav1.LabelSelector{MatchLabels: selector}
-		target.Spec.PodMetricsEndpoints = []monitoringv1.PodMetricsEndpoint{{
-			Port:     &portName,
-			Path:     "/metrics",
-			Interval: "10s",
-		}}
-		target.Labels = selector
-		target.OwnerReferences = []metav1.OwnerReference{
-			*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
-		}
-		return nil
-	}); err != nil {
-		return errors.Wrapf(err, "pod monitor %s/%s", target.Namespace, target.Name)
-	}
-	return nil
+	return ReconcileOMENativeSubresources(ctx, &r.BaseComponentFields, isvc, v1beta1.RouterComponent, &r.routerSpec.ComponentExtensionSpec, objectMeta, podSpec)
 }
 
 // reconcileDeployment manages the deployment logic for different deployment modes
@@ -303,71 +229,22 @@ func (r *Router) updateRouterStatus(isvc *v1beta1.InferenceService, objectMeta m
 	return UpdateComponentStatus(&r.BaseComponentFields, isvc, v1beta1.RouterComponent, objectMeta)
 }
 
-// reconcileObjectMeta creates the object metadata for the router component
+// reconcileObjectMeta creates the object metadata for the router
+// component. Delegates the annotation / label merge to the shared
+// ReconcileComponentObjectMeta helper in base.go.
 func (r *Router) reconcileObjectMeta(ctx context.Context, isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
 	routerName, err := r.determineRouterName(ctx, isvc)
 	if err != nil {
 		return metav1.ObjectMeta{}, err
 	}
 
-	annotations, err := r.processAnnotations(isvc)
-	if err != nil {
-		return metav1.ObjectMeta{
-			Name:      routerName,
-			Namespace: isvc.Namespace,
-		}, err
-	}
-
-	labels, err := r.processLabels(isvc)
-
-	if err != nil {
-		return metav1.ObjectMeta{
-			Name:        routerName,
-			Namespace:   isvc.Namespace,
-			Annotations: annotations,
-		}, err
-	}
-
-	return metav1.ObjectMeta{
-		Name:        routerName,
-		Namespace:   isvc.Namespace,
-		Labels:      labels,
-		Annotations: annotations,
-	}, nil
-}
-
-// processAnnotations processes the annotations for the router
-func (r *Router) processAnnotations(isvc *v1beta1.InferenceService) (map[string]string, error) {
-	annotations := utils.Filter(isvc.Annotations, func(key string) bool {
-		return !utils.Includes(constants.ServiceAnnotationDisallowedList, key)
-	})
-
-	// Merge with router annotations
-	mergedAnnotations := annotations
+	var routerAnnotations, routerLabels map[string]string
 	if r.routerSpec != nil {
-		routerAnnotations := r.routerSpec.Annotations
-		mergedAnnotations = utils.Union(annotations, routerAnnotations)
+		routerAnnotations = r.routerSpec.Annotations
+		routerLabels = r.routerSpec.Labels
 	}
 
-	// Use common function for base annotations processing
-	processedAnnotations, err := ProcessBaseAnnotations(&r.BaseComponentFields, isvc, mergedAnnotations)
-	if err != nil {
-		return nil, err
-	}
-
-	return processedAnnotations, nil
-}
-
-// processLabels processes the labels for the router
-func (r *Router) processLabels(isvc *v1beta1.InferenceService) (map[string]string, error) {
-	mergedLabels := isvc.Labels
-	if r.routerSpec != nil {
-		routerLabels := r.routerSpec.Labels
-		mergedLabels = utils.Union(isvc.Labels, routerLabels)
-	}
-
-	// Use common function for base labels processing
-	return ProcessBaseLabels(&r.BaseComponentFields, isvc, v1beta1.RouterComponent, mergedLabels)
+	return ReconcileComponentObjectMeta(&r.BaseComponentFields, isvc, v1beta1.RouterComponent, routerName, routerAnnotations, routerLabels)
 }
 
 // determineRouterName determines the name of the router service.

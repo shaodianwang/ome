@@ -5,7 +5,6 @@ import (
 	"strconv"
 
 	"github.com/pkg/errors"
-	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,7 +13,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -23,11 +21,8 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
-	"github.com/ome-projects/ome/pkg/utils"
 )
 
 var _ Component = &Decoder{}
@@ -160,90 +155,12 @@ func (d *Decoder) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService)
 	return deploymentResult, nil
 }
 
-// reconcileOMENativeSubresources ensures the per-Component stable
-// Service (`<isvc>-<comp>`) and PodMonitor for OMENative-managed
-// decoder. Engine and Router have their own equivalent methods —
-// repetition is accepted here over a shared helper so the omenative
-// package can stay pure (pods + headless Service ONLY). See
-// Engine.reconcileOMENativeSubresources for the full rationale.
+// reconcileOMENativeSubresources delegates to the shared
+// ReconcileOMENativeSubresources helper in base.go — engine, decoder,
+// and router emit byte-identical Service + PodMonitor pairs; only the
+// component enum and ComponentExtensionSpec pointer differ.
 func (d *Decoder) reconcileOMENativeSubresources(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec) error {
-	if podSpec == nil {
-		return nil
-	}
-	// Base selector — narrows to OMENative-managed pods of this (ISVC,
-	// Component) pair. See Engine.reconcileOMENativeSubresources for
-	// the full rationale on the rank-0 stable Service selector below.
-	baseSelector := map[string]string{
-		constants.InferenceServicePodLabelKey: isvc.Name,
-		constants.OMEComponentLabel:           string(v1beta1.DecoderComponent),
-		query.LabelManagedBy:                  query.ManagedByOMENative,
-	}
-	// Multi-pod decoder Components route customer traffic only to
-	// rank-0 (workers can't serve). Single-pod decoders keep the broad
-	// selector because SurgeThenDrain alternates pod ordinals.
-	stableSelector := baseSelector
-	if isvcutils.IsMultiPodComponent(isvc, v1beta1.DecoderComponent) {
-		stableSelector = make(map[string]string, len(baseSelector)+1)
-		for k, v := range baseSelector {
-			stableSelector[k] = v
-		}
-		stableSelector[query.LabelPodOrdinal] = "0"
-	}
-	componentMeta := objectMeta.DeepCopy()
-	componentMeta.OwnerReferences = []metav1.OwnerReference{
-		*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
-	}
-
-	// Stable Service via the SAME top-level reconciler RawDeployment and
-	// MultiNode use; only the selector + owner refs are OMENative-shaped.
-	sr := service.NewServiceReconciler(d.Client, d.Scheme, *componentMeta, &d.decoderSpec.ComponentExtensionSpec, podSpec, stableSelector)
-	if _, err := sr.Reconcile(); err != nil {
-		return errors.Wrap(err, "stable service")
-	}
-
-	// PodMonitor — build inline (shared podmonitor reconciler hardcodes
-	// the `app=<name>` selector that matches Raw / MultiNode pods but
-	// NOT OMENative pods). Scrape port: prefer "metrics", else first
-	// declared port, else "http". Uses the base selector (no pod-ordinal
-	// filter) so Prometheus scrapes every pod of the gang.
-	portName := "http"
-	if len(podSpec.Containers) > 0 {
-		ports := podSpec.Containers[0].Ports
-		for _, p := range ports {
-			if p.Name == "metrics" {
-				portName = "metrics"
-				break
-			}
-		}
-		if portName == "http" && len(ports) > 0 && ports[0].Name != "" {
-			portName = ports[0].Name
-		}
-	}
-	target := &monitoringv1.PodMonitor{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      objectMeta.Name,
-			Namespace: objectMeta.Namespace,
-		},
-	}
-	if _, err := controllerutil.CreateOrUpdate(ctx, d.Client, target, func() error {
-		target.Spec.NamespaceSelector = monitoringv1.NamespaceSelector{
-			MatchNames: []string{objectMeta.Namespace},
-		}
-		target.Spec.Selector = metav1.LabelSelector{MatchLabels: baseSelector}
-		target.Spec.PodMetricsEndpoints = []monitoringv1.PodMetricsEndpoint{{
-			Port:     &portName,
-			Path:     "/metrics",
-			Interval: "10s",
-		}}
-		target.Labels = baseSelector
-		target.OwnerReferences = []metav1.OwnerReference{
-			*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
-		}
-		return nil
-	}); err != nil {
-		return errors.Wrapf(err, "pod monitor %s/%s", target.Namespace, target.Name)
-	}
-	return nil
+	return ReconcileOMENativeSubresources(ctx, &d.BaseComponentFields, isvc, v1beta1.DecoderComponent, &d.decoderSpec.ComponentExtensionSpec, objectMeta, podSpec)
 }
 
 // getWorkerSize returns the worker size for multi-node deployments
@@ -337,71 +254,24 @@ func (d *Decoder) updateDecoderStatus(isvc *v1beta1.InferenceService, objectMeta
 	return UpdateComponentStatus(&d.BaseComponentFields, isvc, v1beta1.DecoderComponent, objectMeta)
 }
 
-// reconcileObjectMeta creates the object metadata for the decoder component
+// reconcileObjectMeta creates the object metadata for the decoder
+// component. Delegates the annotation / label merge to the shared
+// ReconcileComponentObjectMeta helper in base.go; the per-component
+// name resolution stays here because decoder gates the Service-
+// existence lookup on non-MultiNode mode (engine / router don't).
 func (d *Decoder) reconcileObjectMeta(ctx context.Context, isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
 	decoderName, err := d.determineDecoderName(ctx, isvc)
 	if err != nil {
 		return metav1.ObjectMeta{}, err
 	}
 
-	annotations, err := d.processAnnotations(isvc)
-	if err != nil {
-		return metav1.ObjectMeta{
-			Name:      decoderName,
-			Namespace: isvc.Namespace,
-		}, err
-	}
-
-	labels, err := d.processLabels(isvc)
-
-	if err != nil {
-		return metav1.ObjectMeta{
-			Name:        decoderName,
-			Namespace:   isvc.Namespace,
-			Annotations: annotations,
-		}, err
-	}
-
-	return metav1.ObjectMeta{
-		Name:        decoderName,
-		Namespace:   isvc.Namespace,
-		Labels:      labels,
-		Annotations: annotations,
-	}, nil
-}
-
-// processAnnotations processes the annotations for the decoder
-func (d *Decoder) processAnnotations(isvc *v1beta1.InferenceService) (map[string]string, error) {
-	annotations := utils.Filter(isvc.Annotations, func(key string) bool {
-		return !utils.Includes(constants.ServiceAnnotationDisallowedList, key)
-	})
-
-	// Merge with decoder annotations
-	mergedAnnotations := annotations
+	var decoderAnnotations, decoderLabels map[string]string
 	if d.decoderSpec != nil {
-		decoderAnnotations := d.decoderSpec.Annotations
-		mergedAnnotations = utils.Union(annotations, decoderAnnotations)
+		decoderAnnotations = d.decoderSpec.Annotations
+		decoderLabels = d.decoderSpec.Labels
 	}
 
-	// Use common function for base annotations processing
-	processedAnnotations, err := ProcessBaseAnnotations(&d.BaseComponentFields, isvc, mergedAnnotations)
-	if err != nil {
-		return nil, err
-	}
-
-	return processedAnnotations, nil
-}
-
-// processLabels processes the labels for the decoder
-func (d *Decoder) processLabels(isvc *v1beta1.InferenceService) (map[string]string, error) {
-	mergedLabels := isvc.Labels
-	if d.decoderSpec != nil {
-		decoderLabels := d.decoderSpec.Labels
-		mergedLabels = utils.Union(isvc.Labels, decoderLabels)
-	}
-
-	// Use common function for base labels processing
-	return ProcessBaseLabels(&d.BaseComponentFields, isvc, v1beta1.DecoderComponent, mergedLabels)
+	return ReconcileComponentObjectMeta(&d.BaseComponentFields, isvc, v1beta1.DecoderComponent, decoderName, decoderAnnotations, decoderLabels)
 }
 
 // determineDecoderName determines the name of the decoder service.

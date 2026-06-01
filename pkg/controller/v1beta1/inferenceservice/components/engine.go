@@ -5,7 +5,6 @@ import (
 	"strconv"
 
 	"github.com/pkg/errors"
-	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,7 +13,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -23,11 +21,8 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/common"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
-	"github.com/ome-projects/ome/pkg/utils"
 )
 
 var _ Component = &Engine{}
@@ -177,121 +172,12 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	return deploymentResult, nil
 }
 
-// reconcileOMENativeSubresources ensures the per-Component stable
-// Service (`<isvc>-<comp>`) and PodMonitor for OMENative-managed
-// engine. Decoder and Router have their own equivalent methods —
-// repetition is accepted here over a shared helper so the omenative
-// package can stay pure (pods + headless Service ONLY) without
-// introducing a new abstraction.
-//
-// The selector is the OMENative-specific three-key tuple
-// (InferenceServicePodLabel + OMEComponentLabel + ManagedBy=OMENative)
-// so the stable Service + PodMonitor scope to OMENative-stamped pods
-// only — a same-Component mode switch (engine OMENative → engine
-// RawDeployment) doesn't strand traffic on the wrong pod set during
-// the transition. PodMonitor scrape port matches the Raw fallback
-// rules: prefer a port named "metrics", else the first declared port,
-// else "http".
-//
-// When podSpec is nil (MinReplicas=0 cold-start, no rendered template)
-// both reconcilers no-op: the Service reconciler would emit a portless
-// ClusterIP and the PodMonitor would have no scrape target. Both are
-// restored on the next reconcile pass after scale-up.
+// reconcileOMENativeSubresources delegates to the shared
+// ReconcileOMENativeSubresources helper in base.go — engine, decoder,
+// and router emit byte-identical Service + PodMonitor pairs; only the
+// component enum and ComponentExtensionSpec pointer differ.
 func (e *Engine) reconcileOMENativeSubresources(ctx context.Context, isvc *v1beta1.InferenceService, objectMeta metav1.ObjectMeta, podSpec *v1.PodSpec) error {
-	if podSpec == nil {
-		return nil
-	}
-	// Base selector — narrows to OMENative-managed pods of this (ISVC,
-	// Component) pair. Service + PodMonitor share the same three-key
-	// scope so neither picks up a same-Component mode-switch pod set.
-	baseSelector := map[string]string{
-		constants.InferenceServicePodLabelKey: isvc.Name,
-		constants.OMEComponentLabel:           string(v1beta1.EngineComponent),
-		query.LabelManagedBy:                  query.ManagedByOMENative,
-	}
-	// Stable Service selector — for multi-pod Components, also pin to
-	// `pod-ordinal=0` so customer traffic lands only on the rank-0
-	// (leader) pod. Workers run distributed-init peers and cannot
-	// handle inference requests; without this filter, kube-proxy would
-	// round-robin to all pods of the gang and ~(Size-1)/Size of
-	// requests would 502.
-	//
-	// Single-pod Components keep the broader selector: SurgeThenDrain
-	// alternates the pod-naming ordinal between 0 and 1 across surges
-	// (see query.LabelPodOrdinal docstring), so pinning ordinal=0
-	// would zero-endpoint the Service during the surge phase. Multi-pod
-	// Components use RecreateInstance (not SurgeThenDrain), so the
-	// rank-0 pod ordinal is stable.
-	stableSelector := baseSelector
-	if isvcutils.IsMultiPodComponent(isvc, v1beta1.EngineComponent) {
-		stableSelector = make(map[string]string, len(baseSelector)+1)
-		for k, v := range baseSelector {
-			stableSelector[k] = v
-		}
-		stableSelector[query.LabelPodOrdinal] = "0"
-	}
-	componentMeta := objectMeta.DeepCopy()
-	componentMeta.OwnerReferences = []metav1.OwnerReference{
-		*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
-	}
-
-	// Stable Service via the SAME top-level reconciler RawDeployment and
-	// MultiNode use; only the selector + owner refs are OMENative-shaped.
-	sr := service.NewServiceReconciler(e.Client, e.Scheme, *componentMeta, &e.engineSpec.ComponentExtensionSpec, podSpec, stableSelector)
-	if _, err := sr.Reconcile(); err != nil {
-		return errors.Wrap(err, "stable service")
-	}
-
-	// PodMonitor — build inline (rather than via the shared podmonitor
-	// reconciler) because the shared reconciler hardcodes the
-	// `app=<name>` selector that matches Raw / MultiNode pods but NOT
-	// OMENative pods. CreateOrUpdate is idempotent + drift-correcting on
-	// the three labelSelector / NamespaceSelector / PodMetricsEndpoints
-	// shape fields. Scrape port follows the Raw fallback rules: prefer a
-	// port named "metrics", else the first declared port, else "http".
-	//
-	// PodMonitor intentionally uses the base selector (no pod-ordinal
-	// filter) so Prometheus scrapes EVERY pod of the gang — workers
-	// emit per-rank metrics too, and per-pod scraping is the standard
-	// Prometheus model.
-	portName := "http"
-	if len(podSpec.Containers) > 0 {
-		ports := podSpec.Containers[0].Ports
-		for _, p := range ports {
-			if p.Name == "metrics" {
-				portName = "metrics"
-				break
-			}
-		}
-		if portName == "http" && len(ports) > 0 && ports[0].Name != "" {
-			portName = ports[0].Name
-		}
-	}
-	target := &monitoringv1.PodMonitor{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      objectMeta.Name,
-			Namespace: objectMeta.Namespace,
-		},
-	}
-	if _, err := controllerutil.CreateOrUpdate(ctx, e.Client, target, func() error {
-		target.Spec.NamespaceSelector = monitoringv1.NamespaceSelector{
-			MatchNames: []string{objectMeta.Namespace},
-		}
-		target.Spec.Selector = metav1.LabelSelector{MatchLabels: baseSelector}
-		target.Spec.PodMetricsEndpoints = []monitoringv1.PodMetricsEndpoint{{
-			Port:     &portName,
-			Path:     "/metrics",
-			Interval: "10s",
-		}}
-		target.Labels = baseSelector
-		target.OwnerReferences = []metav1.OwnerReference{
-			*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
-		}
-		return nil
-	}); err != nil {
-		return errors.Wrapf(err, "pod monitor %s/%s", target.Namespace, target.Name)
-	}
-	return nil
+	return ReconcileOMENativeSubresources(ctx, &e.BaseComponentFields, isvc, v1beta1.EngineComponent, &e.engineSpec.ComponentExtensionSpec, objectMeta, podSpec)
 }
 
 // getWorkerSize returns the worker size for multi-node deployments
@@ -393,70 +279,26 @@ func (e *Engine) updateEngineStatus(isvc *v1beta1.InferenceService, objectMeta m
 	return UpdateComponentStatus(&e.BaseComponentFields, isvc, v1beta1.EngineComponent, objectMeta)
 }
 
-// reconcileObjectMeta creates the object metadata for the engine component
+// reconcileObjectMeta creates the object metadata for the engine
+// component. Delegates the annotation / label merge to the shared
+// ReconcileComponentObjectMeta helper in base.go; the per-component
+// name resolution stays here because the fallback rules still differ
+// across components (Decoder gates the Service-existence lookup on
+// non-MultiNode mode; engine / router don't — see section 4 of the
+// components-dispatch review).
 func (e *Engine) reconcileObjectMeta(ctx context.Context, isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
 	engineName, err := e.determineEngineName(ctx, isvc)
 	if err != nil {
 		return metav1.ObjectMeta{}, err
 	}
 
-	annotations, err := e.processAnnotations(isvc)
-	if err != nil {
-		return metav1.ObjectMeta{
-			Name:      engineName,
-			Namespace: isvc.Namespace,
-		}, err
-	}
-
-	labels, err := e.processLabels(isvc)
-	if err != nil {
-		return metav1.ObjectMeta{
-			Name:        engineName,
-			Namespace:   isvc.Namespace,
-			Annotations: annotations,
-		}, err
-	}
-
-	return metav1.ObjectMeta{
-		Name:        engineName,
-		Namespace:   isvc.Namespace,
-		Labels:      labels,
-		Annotations: annotations,
-	}, nil
-}
-
-// processAnnotations processes the annotations for the engine
-func (e *Engine) processAnnotations(isvc *v1beta1.InferenceService) (map[string]string, error) {
-	annotations := utils.Filter(isvc.Annotations, func(key string) bool {
-		return !utils.Includes(constants.ServiceAnnotationDisallowedList, key)
-	})
-
-	// Merge with engine annotations
-	mergedAnnotations := annotations
+	var engineAnnotations, engineLabels map[string]string
 	if e.engineSpec != nil {
-		engineAnnotations := e.engineSpec.Annotations
-		mergedAnnotations = utils.Union(annotations, engineAnnotations)
+		engineAnnotations = e.engineSpec.Annotations
+		engineLabels = e.engineSpec.Labels
 	}
 
-	// Use common function for base annotations processing
-	processedAnnotations, err := ProcessBaseAnnotations(&e.BaseComponentFields, isvc, mergedAnnotations)
-	if err != nil {
-		return nil, err
-	}
-
-	return processedAnnotations, nil
-}
-
-// processLabels processes the labels for the engine
-func (e *Engine) processLabels(isvc *v1beta1.InferenceService) (map[string]string, error) {
-	mergedLabels := isvc.Labels
-	if e.engineSpec != nil {
-		engineLabels := e.engineSpec.Labels
-		mergedLabels = utils.Union(isvc.Labels, engineLabels)
-	}
-
-	// Use common function for base labels processing
-	return ProcessBaseLabels(&e.BaseComponentFields, isvc, v1beta1.EngineComponent, mergedLabels)
+	return ReconcileComponentObjectMeta(&e.BaseComponentFields, isvc, v1beta1.EngineComponent, engineName, engineAnnotations, engineLabels)
 }
 
 // determineEngineName determines the name of the engine service.

@@ -11,12 +11,14 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -25,8 +27,10 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/service"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -670,4 +674,220 @@ func canonicalScaleTargetRef(mode constants.DeploymentModeType, isvcName, compon
 	default:
 		return v1beta1.ScaleTargetRef{}
 	}
+}
+
+// ReconcileOMENativeSubresources ensures the per-Component stable
+// Service (`<isvc>-<comp>`) and PodMonitor for an OMENative-managed
+// Component (engine / decoder / router). Engine, Decoder, and Router
+// share this implementation byte-for-byte — only the component enum,
+// the per-Component ComponentExtensionSpec, and (implicitly via
+// objectMeta.Name) the resource name differ.
+//
+// The base selector is the OMENative-specific three-key tuple
+// (InferenceServicePodLabel + OMEComponentLabel + ManagedBy=OMENative)
+// so the stable Service + PodMonitor scope to OMENative-stamped pods
+// only — a same-Component mode switch (engine OMENative -> engine
+// RawDeployment) doesn't strand traffic on the wrong pod set during
+// the transition. PodMonitor scrape port matches the Raw fallback
+// rules: prefer a port named "metrics", else the first declared port,
+// else "http".
+//
+// Stable Service selector — for multi-pod Components, also pin to
+// `pod-ordinal=0` so customer traffic lands only on the rank-0
+// (leader) pod. Workers run distributed-init peers and cannot
+// handle inference requests; without this filter, kube-proxy would
+// round-robin to all pods of the gang and ~(Size-1)/Size of
+// requests would 502.
+//
+// Single-pod Components keep the broader selector: SurgeThenDrain
+// alternates the pod-naming ordinal between 0 and 1 across surges
+// (see query.LabelPodOrdinal docstring), so pinning ordinal=0
+// would zero-endpoint the Service during the surge phase. Multi-pod
+// Components use RecreateInstance (not SurgeThenDrain), so the
+// rank-0 pod ordinal is stable.
+//
+// PodMonitor intentionally uses the base selector (no pod-ordinal
+// filter) so Prometheus scrapes EVERY pod of the gang — workers
+// emit per-rank metrics too, and per-pod scraping is the standard
+// Prometheus model.
+//
+// When podSpec is nil (MinReplicas=0 cold-start, no rendered template)
+// both reconcilers no-op: the Service reconciler would emit a portless
+// ClusterIP and the PodMonitor would have no scrape target. Both are
+// restored on the next reconcile pass after scale-up.
+//
+// Inlined PodMonitor build (rather than via the shared podmonitor
+// reconciler) because the shared reconciler hardcodes the
+// `app=<name>` selector that matches Raw / MultiNode pods but NOT
+// OMENative pods. CreateOrUpdate is idempotent + drift-correcting on
+// the three labelSelector / NamespaceSelector / PodMetricsEndpoints
+// shape fields.
+func ReconcileOMENativeSubresources(
+	ctx context.Context,
+	b *BaseComponentFields,
+	isvc *v1beta1.InferenceService,
+	componentType v1beta1.ComponentType,
+	componentExt *v1beta1.ComponentExtensionSpec,
+	objectMeta metav1.ObjectMeta,
+	podSpec *corev1.PodSpec,
+) error {
+	if podSpec == nil {
+		return nil
+	}
+	// Base selector — narrows to OMENative-managed pods of this (ISVC,
+	// Component) pair. Used as-is for PodMonitor; augmented with a
+	// `pod-ordinal=0` filter for the stable Service of multi-pod
+	// Components (see function-level docstring for rationale).
+	baseSelector := map[string]string{
+		constants.InferenceServicePodLabelKey: isvc.Name,
+		constants.OMEComponentLabel:           string(componentType),
+		query.LabelManagedBy:                  query.ManagedByOMENative,
+	}
+	stableSelector := baseSelector
+	if isvcutils.IsMultiPodComponent(isvc, componentType) {
+		stableSelector = make(map[string]string, len(baseSelector)+1)
+		for k, v := range baseSelector {
+			stableSelector[k] = v
+		}
+		stableSelector[query.LabelPodOrdinal] = "0"
+	}
+	componentMeta := objectMeta.DeepCopy()
+	componentMeta.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+	}
+
+	// Stable Service via the SAME top-level reconciler RawDeployment and
+	// MultiNode use; only the selector + owner refs are OMENative-shaped.
+	sr := service.NewServiceReconciler(b.Client, b.Scheme, *componentMeta, componentExt, podSpec, stableSelector)
+	if _, err := sr.Reconcile(); err != nil {
+		return errors.Wrap(err, "stable service")
+	}
+
+	// PodMonitor scrape port follows the Raw fallback rules: prefer a
+	// port named "metrics", else the first declared port, else "http".
+	portName := "http"
+	if len(podSpec.Containers) > 0 {
+		ports := podSpec.Containers[0].Ports
+		for _, p := range ports {
+			if p.Name == "metrics" {
+				portName = "metrics"
+				break
+			}
+		}
+		if portName == "http" && len(ports) > 0 && ports[0].Name != "" {
+			portName = ports[0].Name
+		}
+	}
+	target := &monitoringv1.PodMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      objectMeta.Name,
+			Namespace: objectMeta.Namespace,
+		},
+	}
+	if _, err := controllerutil.CreateOrUpdate(ctx, b.Client, target, func() error {
+		target.Spec.NamespaceSelector = monitoringv1.NamespaceSelector{
+			MatchNames: []string{objectMeta.Namespace},
+		}
+		target.Spec.Selector = metav1.LabelSelector{MatchLabels: baseSelector}
+		target.Spec.PodMetricsEndpoints = []monitoringv1.PodMetricsEndpoint{{
+			Port:     &portName,
+			Path:     "/metrics",
+			Interval: "10s",
+		}}
+		target.Labels = baseSelector
+		target.OwnerReferences = []metav1.OwnerReference{
+			*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+		}
+		return nil
+	}); err != nil {
+		return errors.Wrapf(err, "pod monitor %s/%s", target.Namespace, target.Name)
+	}
+	return nil
+}
+
+// ReconcileComponentObjectMeta builds the common ObjectMeta block
+// (Name, Namespace, Annotations, Labels) shared by engine / decoder /
+// router. The per-Component name is resolved upstream because the
+// fallback logic (Service-existence lookup, MultiNode gating) still
+// differs across components (see section 4 of the components-dispatch
+// review). The annotation / label maps are the per-Component merge
+// (ISVC + componentExt.Annotations / componentExt.Labels) already
+// performed by the caller.
+//
+// On annotation-build failure the returned ObjectMeta carries Name +
+// Namespace only; on label-build failure the returned ObjectMeta
+// carries Name + Namespace + Annotations — preserving the partial-
+// metadata error-return shape the individual receivers used to
+// surface.
+func ReconcileComponentObjectMeta(
+	b *BaseComponentFields,
+	isvc *v1beta1.InferenceService,
+	componentType v1beta1.ComponentType,
+	componentName string,
+	componentAnnotations map[string]string,
+	componentLabels map[string]string,
+) (metav1.ObjectMeta, error) {
+	annotations, err := ProcessComponentAnnotations(b, isvc, componentAnnotations)
+	if err != nil {
+		return metav1.ObjectMeta{
+			Name:      componentName,
+			Namespace: isvc.Namespace,
+		}, err
+	}
+
+	labels, err := ProcessComponentLabels(b, isvc, componentType, componentLabels)
+	if err != nil {
+		return metav1.ObjectMeta{
+			Name:        componentName,
+			Namespace:   isvc.Namespace,
+			Annotations: annotations,
+		}, err
+	}
+
+	return metav1.ObjectMeta{
+		Name:        componentName,
+		Namespace:   isvc.Namespace,
+		Labels:      labels,
+		Annotations: annotations,
+	}, nil
+}
+
+// ProcessComponentAnnotations performs the per-Component annotation
+// build: filter the ISVC-level annotations against the disallowed
+// list, union them with the Component-level annotations, then hand
+// off to ProcessBaseAnnotations for the FT / BaseModel / runtime
+// annotations the base layer adds.
+func ProcessComponentAnnotations(
+	b *BaseComponentFields,
+	isvc *v1beta1.InferenceService,
+	componentAnnotations map[string]string,
+) (map[string]string, error) {
+	annotations := utils.Filter(isvc.Annotations, func(key string) bool {
+		return !utils.Includes(constants.ServiceAnnotationDisallowedList, key)
+	})
+
+	mergedAnnotations := annotations
+	if componentAnnotations != nil {
+		mergedAnnotations = utils.Union(annotations, componentAnnotations)
+	}
+
+	return ProcessBaseAnnotations(b, isvc, mergedAnnotations)
+}
+
+// ProcessComponentLabels performs the per-Component label build:
+// union the ISVC-level labels with the Component-level labels, then
+// hand off to ProcessBaseLabels for the FT / BaseModel / runtime
+// labels the base layer adds.
+func ProcessComponentLabels(
+	b *BaseComponentFields,
+	isvc *v1beta1.InferenceService,
+	componentType v1beta1.ComponentType,
+	componentLabels map[string]string,
+) (map[string]string, error) {
+	mergedLabels := isvc.Labels
+	if componentLabels != nil {
+		mergedLabels = utils.Union(isvc.Labels, componentLabels)
+	}
+
+	return ProcessBaseLabels(b, isvc, componentType, mergedLabels)
 }
