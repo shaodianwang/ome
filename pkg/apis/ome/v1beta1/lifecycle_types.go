@@ -149,7 +149,8 @@ type OMENativeInstanceStatus struct {
 	NodesOccupied []string `json:"nodesOccupied,omitempty"`
 
 	// Conditions reports Instance-level conditions. Defined types include
-	// AllPodsScheduled, AllPodsReady, AllPodsAvailable, Drained, Failed.
+	// AllPodsScheduled, AllPodsReady, AllPodsAvailable, Drained, Failed,
+	// ProgressDeadlineExceeded.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -489,6 +490,25 @@ type MigrationPolicy struct {
 	// Mode selects the migration disposition. Defaults to auto.
 	// +optional
 	Mode MigrationPolicyMode `json:"mode,omitempty"`
+
+	// ProgressDeadlineSeconds is the maximum time an Instance may remain
+	// in Phase=Updating or Phase=Creating before the controller
+	// self-triggers a migration to recover from a stuck pod
+	// (e.g. node failure, scheduler wedged, image-pull stuck).
+	// Optional; when unset, auto-migration is disabled and only
+	// explicit migration requests are honored.
+	// Has no effect when Mode is "Never".
+	// +optional
+	// +kubebuilder:validation:Minimum=30
+	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty"`
+
+	// MaxAutoRetries caps how many times the controller will self-trigger
+	// a migration for the same Instance before escalating to
+	// Phase=Failed with a ProgressDeadlineExceeded condition. Defaults to 3.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10
+	MaxAutoRetries *int32 `json:"maxAutoRetries,omitempty"`
 }
 
 // MigrationPolicyMode is the requested migration disposition.

@@ -66,6 +66,17 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: expire timeouts (component=%s): %w", plan.Component, err)
 	}
 
+	// Self-trigger migration for Instances stuck in Phase=Creating /
+	// Updating longer than MigrationPolicy.ProgressDeadlineSeconds.
+	// Writes synthetic ledger entries (Reason=AutoRecover) so the
+	// next-pass detectMigrationRequest picks them up via Source-2
+	// (in-flight ledger) and drives surge-on-different-node recovery.
+	// No-op when ProgressDeadlineSeconds is unset (opt-in).
+	v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
+	if err := detectStuckInstancesForAutoMigration(ctx, p, v1component); err != nil {
+		return ctrl.Result{}, fmt.Errorf("OMENative reconciler: detect stuck instances for auto-migration (component=%s): %w", plan.Component, err)
+	}
+
 	deps := workload.Deps{
 		Client:       p.Client,
 		APIReader:    p.APIReader,
@@ -96,7 +107,7 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	// workload.MigrationRequestSummary is a type alias for
 	// audit.MigrationRequest so the pointer carries through unchanged.
 	input.DetectMigrationRequest = func(ctx context.Context) (string, *workload.MigrationRequestSummary, int32, bool, error) {
-		return detectMigrationRequest(ctx, p, v1beta1convert.ComponentTypeFromWorkload(plan.Component))
+		return detectMigrationRequest(ctx, p, v1component)
 	}
 
 	// UpdateGate wires the coordination stack — workload code can't
@@ -116,7 +127,6 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	// no-coord-block short-circuit checks) runs once instead of four
 	// times — see the coordination.GateContext docs.
 	input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
-		v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 		ctx := coordination.ResolveGateContext(p.ISVC, v1component)
 		if allowed, reason := ctx.CheckRatio(inFlightUnavail); !allowed {
 			return false, reason

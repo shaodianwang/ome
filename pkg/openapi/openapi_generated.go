@@ -4391,6 +4391,20 @@ func schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref common.ReferenceCallback) c
 							Format:      "",
 						},
 					},
+					"progressDeadlineSeconds": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ProgressDeadlineSeconds is the maximum time an Instance may remain in Phase=Updating or Phase=Creating before the controller self-triggers a migration to recover from a stuck pod (e.g. node failure, scheduler wedged, image-pull stuck). Optional; when unset, auto-migration is disabled and only explicit migration requests are honored. Has no effect when Mode is \"Never\".",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"maxAutoRetries": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxAutoRetries caps how many times the controller will self-trigger a migration for the same Instance before escalating to Phase=Failed with a ProgressDeadlineExceeded condition. Defaults to 3.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 				},
 			},
 		},
@@ -5180,7 +5194,7 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Conditions reports Instance-level conditions. Defined types include AllPodsScheduled, AllPodsReady, AllPodsAvailable, Drained, Failed.",
+							Description: "Conditions reports Instance-level conditions. Defined types include AllPodsScheduled, AllPodsReady, AllPodsAvailable, Drained, Failed, ProgressDeadlineExceeded.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{

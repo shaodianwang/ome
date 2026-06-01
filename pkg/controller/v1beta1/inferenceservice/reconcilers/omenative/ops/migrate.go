@@ -154,6 +154,7 @@ func nextInFlightFromLedger(ledger *audit.Ledger, component v1beta1.ComponentTyp
 		Component:     picked.Component,
 		Instance:      picked.SourceInstance,
 		FromNode:      picked.FromNode,
+		Reason:        picked.Reason,
 	}
 	return picked.RequestUUID, req, picked.SourceInstance
 }

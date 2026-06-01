@@ -145,6 +145,14 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
+	// MigrationPolicy bounds: ProgressDeadlineSeconds >= 30,
+	// MaxAutoRetries within [0, 10]. Auto-migration is opt-in (nil
+	// fields pass through) but configured values must stay within
+	// sane bounds so a misconfigured pod can't thrash migrations.
+	if err := validation.ValidateMigrationPolicy(&isvc.Spec); err != nil {
+		return allWarnings, err
+	}
+
 	// OEP-0011 traffic block: typed core, ome.io/* annotations, rollout
 	// plan, per-Component canary range + PD coupling.
 	if err := validation.ValidateTrafficSpec(isvc.Spec.Traffic); err != nil {

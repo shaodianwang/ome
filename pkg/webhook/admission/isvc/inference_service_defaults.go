@@ -257,6 +257,14 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 	if spec.MigrationPolicy.Mode == "" {
 		spec.MigrationPolicy.Mode = v1beta1.MigrationPolicyModeAuto
 	}
+	// Default MaxAutoRetries=3 only when the operator opted into
+	// auto-migration by setting ProgressDeadlineSeconds. Without the
+	// opt-in there is no auto-trigger to bound, so we leave the field
+	// nil to avoid implying that the cap is meaningful.
+	if spec.MigrationPolicy.ProgressDeadlineSeconds != nil && spec.MigrationPolicy.MaxAutoRetries == nil {
+		def := int32(3)
+		spec.MigrationPolicy.MaxAutoRetries = &def
+	}
 }
 
 // defaultRolloutCoordination fills in the documented pacing defaults

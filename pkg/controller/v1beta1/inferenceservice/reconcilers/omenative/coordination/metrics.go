@@ -56,6 +56,14 @@ var (
 		},
 		[]string{"isvc", "group"},
 	)
+
+	autoMigrationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ome_omenative_auto_migrations_total",
+			Help: "Count of auto-triggered migrations the controller initiated to recover an Instance stuck past MigrationPolicy.ProgressDeadlineSeconds, per (isvc, component, reason).",
+		},
+		[]string{"isvc", "component", "reason"},
+	)
 )
 
 func init() {
@@ -66,7 +74,18 @@ func init() {
 		ratioSkewTotal,
 		perRevisionServiceGauge,
 		mixedPairingTotal,
+		autoMigrationsTotal,
 	)
+}
+
+// RecordAutoMigrationTriggered increments the auto-migration counter
+// when the controller writes a synthetic migration ledger entry to
+// recover an Instance stuck past MigrationPolicy.ProgressDeadlineSeconds.
+func RecordAutoMigrationTriggered(isvc, component, reason string) {
+	if isvc == "" || component == "" || reason == "" {
+		return
+	}
+	autoMigrationsTotal.WithLabelValues(isvc, component, reason).Inc()
 }
 
 // RecordGroupPhase increments the phase counter for one reconcile.

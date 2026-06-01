@@ -415,6 +415,75 @@ func ValidateScaleToZero(isvc *v1beta1.InferenceService) error {
 	)
 }
 
+// ValidateMigrationPolicy validates each Component's lifecycle
+// MigrationPolicy block. Rejects auto-migration knobs configured to
+// nonsensical values:
+//
+//   - ProgressDeadlineSeconds < 30s would cause the controller to
+//     thrash migrations against any pod that takes more than a few
+//     seconds to start. 30s is well clear of normal pod start latency
+//     and matches the typical InstanceReadyTimeout floor.
+//   - MaxAutoRetries > 10 — hard upper bound so a misconfigured pod
+//     can't chew through unbounded migration capacity. 10 is generous;
+//     anything that fails 10 surge migrations in a row needs operator
+//     intervention.
+//
+// Nil pointers are allowed (auto-migration is opt-in; nil means
+// "use default" or "disabled" depending on which field).
+func ValidateMigrationPolicy(spec *v1beta1.InferenceServiceSpec) error {
+	if spec == nil {
+		return nil
+	}
+	if spec.Engine != nil {
+		if err := validateMigrationPolicyOnComponent("engine", migrationPolicyFromExt(&spec.Engine.ComponentExtensionSpec)); err != nil {
+			return err
+		}
+	}
+	if spec.Decoder != nil {
+		if err := validateMigrationPolicyOnComponent("decoder", migrationPolicyFromExt(&spec.Decoder.ComponentExtensionSpec)); err != nil {
+			return err
+		}
+	}
+	if spec.Router != nil {
+		if err := validateMigrationPolicyOnComponent("router", migrationPolicyFromExt(&spec.Router.ComponentExtensionSpec)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrationPolicyFromExt(ext *v1beta1.ComponentExtensionSpec) *v1beta1.MigrationPolicy {
+	if ext == nil || ext.Lifecycle == nil {
+		return nil
+	}
+	return ext.Lifecycle.MigrationPolicy
+}
+
+func validateMigrationPolicyOnComponent(component string, p *v1beta1.MigrationPolicy) error {
+	if p == nil {
+		return nil
+	}
+	if p.ProgressDeadlineSeconds != nil && *p.ProgressDeadlineSeconds < 30 {
+		return fmt.Errorf(
+			"%s.lifecycle.migrationPolicy.progressDeadlineSeconds=%d is too small (minimum 30); auto-migration would thrash on normal pod-start latency",
+			component, *p.ProgressDeadlineSeconds,
+		)
+	}
+	if p.MaxAutoRetries != nil && *p.MaxAutoRetries > 10 {
+		return fmt.Errorf(
+			"%s.lifecycle.migrationPolicy.maxAutoRetries=%d exceeds the hard upper bound of 10; specs needing more retries should escalate via operator intervention",
+			component, *p.MaxAutoRetries,
+		)
+	}
+	if p.MaxAutoRetries != nil && *p.MaxAutoRetries < 0 {
+		return fmt.Errorf(
+			"%s.lifecycle.migrationPolicy.maxAutoRetries=%d must be >= 0",
+			component, *p.MaxAutoRetries,
+		)
+	}
+	return nil
+}
+
 // ValidateAutoscalerConfig validates autoscaler-related annotations and spec
 // fields. It returns warnings (non-fatal messages) and an error if validation
 // fails.

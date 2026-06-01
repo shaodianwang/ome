@@ -29,6 +29,7 @@ type auditEntryShape struct {
 	SourceInstance int32  `json:"sourceInstance"`
 	SurgeInstance  int32  `json:"surgeInstance,omitempty"`
 	Phase          string `json:"phase"`
+	Reason         string `json:"reason,omitempty"`
 	FromNode       string `json:"fromNode,omitempty"`
 	StartedAt      string `json:"startedAt"`
 	CompletedAt    string `json:"completedAt,omitempty"`
