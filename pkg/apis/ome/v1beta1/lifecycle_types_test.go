@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func int32Ptr(v int32) *int32 { return &v }
@@ -186,7 +187,8 @@ func TestLifecycleSpec_JSONRoundTrip(t *testing.T) {
 	graceSecs := int32(30)
 	markNotReady := true
 	partition := int32(0)
-	maxUnavail := int32(1)
+	maxUnavail := intstr.FromInt(1)
+	maxSurge := intstr.FromString("25%")
 
 	original := EngineSpec{
 		ComponentExtensionSpec: ComponentExtensionSpec{
@@ -197,6 +199,7 @@ func TestLifecycleSpec_JSONRoundTrip(t *testing.T) {
 					RollingUpdate: &RollingUpdate{
 						Partition:      &partition,
 						MaxUnavailable: &maxUnavail,
+						MaxSurge:       &maxSurge,
 					},
 					InPlaceUpdateStrategy: &InPlaceUpdateStrategy{
 						GracePeriodSeconds:          &graceSecs,
@@ -283,5 +286,129 @@ func TestMigrationPolicyMode_Values(t *testing.T) {
 		if string(got) != want {
 			t.Errorf("got %q want %q", string(got), want)
 		}
+	}
+}
+
+// TestRollingUpdate_MaxUnavailable_AcceptsIntAndPercent exercises the
+// IntOrString-typed MaxUnavailable field over the three shapes the
+// CRD validator permits: nil (default), integer count, and percent
+// string. Mirrors the corresponding MaxSurge case below — both fields
+// share the same encoder so the parity check guards against future
+// refactors that drift one shape out of sync.
+func TestRollingUpdate_MaxUnavailable_AcceptsIntAndPercent(t *testing.T) {
+	intVal := intstr.FromInt(2)
+	pctVal := intstr.FromString("25%")
+	cases := []struct {
+		name string
+		in   *intstr.IntOrString
+		want string // empty when MaxUnavailable is nil (field omitted)
+	}{
+		{"nil-omitted", nil, ""},
+		{"integer-count", &intVal, `"maxUnavailable":2`},
+		{"percent-string", &pctVal, `"maxUnavailable":"25%"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ru := RollingUpdate{MaxUnavailable: tc.in}
+			b, err := json.Marshal(ru)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got := string(b)
+			if tc.want == "" {
+				if strings.Contains(got, "maxUnavailable") {
+					t.Fatalf("expected maxUnavailable omitted, got %s", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("expected %q in %s", tc.want, got)
+			}
+			var decoded RollingUpdate
+			if err := json.Unmarshal(b, &decoded); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if diff := cmp.Diff(ru, decoded); diff != "" {
+				t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestRollingUpdate_MaxSurge_AcceptsIntAndPercent mirrors the
+// MaxUnavailable matrix above. MaxSurge is a new field (Gap 5) so the
+// nil case is the default-empty shape; the integer and percent forms
+// give callers the same flexibility as upstream
+// appsv1.Deployment.Strategy.RollingUpdate.MaxSurge.
+func TestRollingUpdate_MaxSurge_AcceptsIntAndPercent(t *testing.T) {
+	intVal := intstr.FromInt(1)
+	pctVal := intstr.FromString("50%")
+	cases := []struct {
+		name string
+		in   *intstr.IntOrString
+		want string
+	}{
+		{"nil-omitted", nil, ""},
+		{"integer-count", &intVal, `"maxSurge":1`},
+		{"percent-string", &pctVal, `"maxSurge":"50%"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ru := RollingUpdate{MaxSurge: tc.in}
+			b, err := json.Marshal(ru)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got := string(b)
+			if tc.want == "" {
+				if strings.Contains(got, "maxSurge") {
+					t.Fatalf("expected maxSurge omitted, got %s", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("expected %q in %s", tc.want, got)
+			}
+			var decoded RollingUpdate
+			if err := json.Unmarshal(b, &decoded); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if diff := cmp.Diff(ru, decoded); diff != "" {
+				t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestRollingUpdate_DeepCopy_PreservesIntOrString verifies the
+// generated DeepCopy reproduces both MaxUnavailable and MaxSurge as
+// independent IntOrString pointers — mutating the copy must not change
+// the original. This guards the zz_generated.deepcopy.go output after
+// the int32 → IntOrString widening in Gap 4 / Gap 5.
+func TestRollingUpdate_DeepCopy_PreservesIntOrString(t *testing.T) {
+	mu := intstr.FromString("30%")
+	ms := intstr.FromInt(3)
+	original := &RollingUpdate{
+		MaxUnavailable: &mu,
+		MaxSurge:       &ms,
+	}
+	clone := original.DeepCopy()
+	if clone.MaxUnavailable == original.MaxUnavailable {
+		t.Fatalf("DeepCopy MaxUnavailable must allocate a new pointer")
+	}
+	if clone.MaxSurge == original.MaxSurge {
+		t.Fatalf("DeepCopy MaxSurge must allocate a new pointer")
+	}
+	if diff := cmp.Diff(original, clone); diff != "" {
+		t.Fatalf("DeepCopy value mismatch (-want +got):\n%s", diff)
+	}
+	// Mutate clone; original must stay intact.
+	clone.MaxUnavailable.StrVal = "99%"
+	clone.MaxSurge.IntVal = 99
+	if original.MaxUnavailable.StrVal != "30%" {
+		t.Fatalf("DeepCopy aliased MaxUnavailable: original mutated to %q", original.MaxUnavailable.StrVal)
+	}
+	if original.MaxSurge.IntVal != 3 {
+		t.Fatalf("DeepCopy aliased MaxSurge: original mutated to %d", original.MaxSurge.IntVal)
 	}
 }

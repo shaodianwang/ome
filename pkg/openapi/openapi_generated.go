@@ -5808,14 +5808,21 @@ func schema_pkg_apis_ome_v1beta1_RollingUpdate(ref common.ReferenceCallback) com
 					},
 					"maxUnavailable": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MaxUnavailable is the maximum number of Instances allowed to be in a non-Ready state during the rollout.",
-							Type:        []string{"integer"},
-							Format:      "int32",
+							Description: "MaxUnavailable is the maximum number of Instances (or fraction) allowed to be in a non-Ready state during the rollout. Accepts either an absolute integer count (e.g. 2) or a percent string (e.g. \"25%\"). Percent values resolve to ceil(replicas * percent / 100) at reconcile time so the budget scales with the Component's replica count.",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+					"maxSurge": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxSurge is the maximum number of extra Instances (or fraction) the rollout may create above the Component's desired replica count during a rolling update. Accepts either an absolute integer count (e.g. 1) or a percent string (e.g. \"25%\"). Percent values resolve to ceil(replicas * percent / 100) at reconcile time. Mirrors the semantics of upstream appsv1.Deployment.Strategy.RollingUpdate.MaxSurge — extra capacity is created and brought to Ready before old Instances are drained, enabling zero-capacity-dip rollouts.\n\nWhen the Component participates in a RolloutCoordinationGroup with a non-zero CoordinationPacing.MaxSurge, the group-wide ceiling caps the per-Component MaxSurge.",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
 						},
 					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 

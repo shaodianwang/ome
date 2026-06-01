@@ -19,6 +19,7 @@ package types
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // ComponentType identifies router | engine | decoder. String-mirrors
@@ -281,10 +282,17 @@ type RollingUpdate struct {
 	// Partition. 0 (the default) updates all Instances.
 	Partition *int32
 
-	// MaxUnavailable is the maximum number of Instances allowed to be
-	// in a non-Ready state during the rollout. nil falls back to the
-	// reconciler default.
-	MaxUnavailable *int32
+	// MaxUnavailable is the maximum number of Instances (or percent
+	// expression) allowed to be in a non-Ready state during the rollout.
+	// nil falls back to the reconciler default. Mirrors
+	// v1beta1.RollingUpdate.MaxUnavailable.
+	MaxUnavailable *intstr.IntOrString
+
+	// MaxSurge is the maximum number of extra Instances (or percent
+	// expression) the rollout may create above the Component's desired
+	// replica count during a rolling update. nil falls back to the
+	// reconciler default. Mirrors v1beta1.RollingUpdate.MaxSurge.
+	MaxSurge *intstr.IntOrString
 }
 
 // InPlaceUpdateStrategy tunes the per-pod in-place update sequence.

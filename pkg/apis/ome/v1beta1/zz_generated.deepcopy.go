@@ -2051,7 +2051,12 @@ func (in *RollingUpdate) DeepCopyInto(out *RollingUpdate) {
 	}
 	if in.MaxUnavailable != nil {
 		in, out := &in.MaxUnavailable, &out.MaxUnavailable
-		*out = new(int32)
+		*out = new(intstr.IntOrString)
+		**out = **in
+	}
+	if in.MaxSurge != nil {
+		in, out := &in.MaxSurge, &out.MaxSurge
+		*out = new(intstr.IntOrString)
 		**out = **in
 	}
 }

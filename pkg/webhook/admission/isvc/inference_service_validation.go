@@ -174,6 +174,15 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
+	// Per-Component LifecycleSpec.UpdateStrategy.RollingUpdate semantic
+	// validation: percent strings must be "<n>%" with 0 <= n <= 100;
+	// integer values must be >= 0. The CRD XIntOrString marker handles
+	// the structural "must be int or string" check; this validator adds
+	// the range / format check.
+	if err := validation.ValidateLifecycle(&isvc.Spec); err != nil {
+		return allWarnings, err
+	}
+
 	// At least one of spec.model or spec.runtime must be set. When
 	// spec.model is omitted (lean path), spec.runtime must name the
 	// runtime to use — the controller skips model-fetch and runtime

@@ -2,6 +2,7 @@ package v1beta1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // OMENativeComponentStatus reports OMENative-managed state for one Component.
@@ -427,11 +428,30 @@ type RollingUpdate struct {
 	// +kubebuilder:validation:Minimum=0
 	Partition *int32 `json:"partition,omitempty"`
 
-	// MaxUnavailable is the maximum number of Instances allowed to be in a
-	// non-Ready state during the rollout.
+	// MaxUnavailable is the maximum number of Instances (or fraction) allowed
+	// to be in a non-Ready state during the rollout. Accepts either an
+	// absolute integer count (e.g. 2) or a percent string (e.g. "25%").
+	// Percent values resolve to ceil(replicas * percent / 100) at
+	// reconcile time so the budget scales with the Component's replica count.
 	// +optional
-	// +kubebuilder:validation:Minimum=0
-	MaxUnavailable *int32 `json:"maxUnavailable,omitempty"`
+	// +kubebuilder:validation:XIntOrString
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+
+	// MaxSurge is the maximum number of extra Instances (or fraction) the
+	// rollout may create above the Component's desired replica count
+	// during a rolling update. Accepts either an absolute integer count
+	// (e.g. 1) or a percent string (e.g. "25%"). Percent values resolve
+	// to ceil(replicas * percent / 100) at reconcile time. Mirrors the
+	// semantics of upstream appsv1.Deployment.Strategy.RollingUpdate.MaxSurge
+	// — extra capacity is created and brought to Ready before old Instances
+	// are drained, enabling zero-capacity-dip rollouts.
+	//
+	// When the Component participates in a RolloutCoordinationGroup with a
+	// non-zero CoordinationPacing.MaxSurge, the group-wide ceiling caps the
+	// per-Component MaxSurge.
+	// +optional
+	// +kubebuilder:validation:XIntOrString
+	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
 }
 
 // InPlaceUpdateStrategy tunes the per-pod in-place update sequence.

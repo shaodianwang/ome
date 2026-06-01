@@ -414,6 +414,10 @@ func UpdateStrategyToWorkload(v v1beta1.UpdateStrategy) workload.UpdateStrategy 
 			m := *v.RollingUpdate.MaxUnavailable
 			out.RollingUpdate.MaxUnavailable = &m
 		}
+		if v.RollingUpdate.MaxSurge != nil {
+			s := *v.RollingUpdate.MaxSurge
+			out.RollingUpdate.MaxSurge = &s
+		}
 	}
 	return out
 }

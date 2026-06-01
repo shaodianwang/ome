@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
@@ -344,6 +345,86 @@ func TestInstanceStatusRoundtrip_NodesOccupiedDeepCopy(t *testing.T) {
 	mid.NodesOccupied[0] = "mutated"
 	if in.NodesOccupied[0] == "mutated" {
 		t.Fatalf("NodesOccupied was not deep-copied on To conversion")
+	}
+}
+
+// --- UpdateStrategy.RollingUpdate conversion ----------------------------
+
+// TestUpdateStrategyToWorkload_RollingUpdate_IntOrString covers the Gap
+// 4 / Gap 5 widening: both MaxUnavailable and MaxSurge now flow through
+// the converter as *intstr.IntOrString, preserving integer and percent
+// shapes verbatim. The deep-copy guarantee remains — mutating either
+// pointer on the output must not bleed into the input.
+func TestUpdateStrategyToWorkload_RollingUpdate_IntOrString(t *testing.T) {
+	partition := int32(3)
+	mu := intstr.FromString("25%")
+	ms := intstr.FromInt(2)
+	in := v1beta1.UpdateStrategy{
+		Type: v1beta1.UpdateStrategySurgeThenDrain,
+		RollingUpdate: &v1beta1.RollingUpdate{
+			Partition:      &partition,
+			MaxUnavailable: &mu,
+			MaxSurge:       &ms,
+		},
+	}
+	out := UpdateStrategyToWorkload(in)
+	if out.RollingUpdate == nil {
+		t.Fatalf("RollingUpdate must be carried through, got nil")
+	}
+	if out.RollingUpdate.Partition == nil || *out.RollingUpdate.Partition != partition {
+		t.Fatalf("Partition mismatch: got %v want %d", out.RollingUpdate.Partition, partition)
+	}
+	if out.RollingUpdate.MaxUnavailable == nil ||
+		out.RollingUpdate.MaxUnavailable.Type != intstr.String ||
+		out.RollingUpdate.MaxUnavailable.StrVal != "25%" {
+		t.Fatalf("MaxUnavailable percent mismatch: got %+v", out.RollingUpdate.MaxUnavailable)
+	}
+	if out.RollingUpdate.MaxSurge == nil ||
+		out.RollingUpdate.MaxSurge.Type != intstr.Int ||
+		out.RollingUpdate.MaxSurge.IntVal != 2 {
+		t.Fatalf("MaxSurge integer mismatch: got %+v", out.RollingUpdate.MaxSurge)
+	}
+	// Deep-copy guarantee: the converter must allocate fresh pointers
+	// so adapters can mutate output independently of source.
+	if out.RollingUpdate.MaxUnavailable == in.RollingUpdate.MaxUnavailable {
+		t.Fatalf("MaxUnavailable pointer aliased — converter must deep-copy")
+	}
+	if out.RollingUpdate.MaxSurge == in.RollingUpdate.MaxSurge {
+		t.Fatalf("MaxSurge pointer aliased — converter must deep-copy")
+	}
+}
+
+// TestUpdateStrategyToWorkload_RollingUpdate_NilFields verifies the
+// converter omits MaxUnavailable / MaxSurge when the source has them
+// unset. The workload layer relies on nil = "use default" to fall back
+// to the reconciler's documented defaults.
+func TestUpdateStrategyToWorkload_RollingUpdate_NilFields(t *testing.T) {
+	partition := int32(0)
+	in := v1beta1.UpdateStrategy{
+		RollingUpdate: &v1beta1.RollingUpdate{
+			Partition: &partition,
+		},
+	}
+	out := UpdateStrategyToWorkload(in)
+	if out.RollingUpdate == nil {
+		t.Fatalf("RollingUpdate must be carried through, got nil")
+	}
+	if out.RollingUpdate.MaxUnavailable != nil {
+		t.Fatalf("MaxUnavailable should remain nil; got %+v", out.RollingUpdate.MaxUnavailable)
+	}
+	if out.RollingUpdate.MaxSurge != nil {
+		t.Fatalf("MaxSurge should remain nil; got %+v", out.RollingUpdate.MaxSurge)
+	}
+}
+
+// TestUpdateStrategyToWorkload_RollingUpdate_AbsentDoesNotPopulate
+// confirms a nil source RollingUpdate stays nil on the output — the
+// converter never invents a default RollingUpdate struct.
+func TestUpdateStrategyToWorkload_RollingUpdate_AbsentDoesNotPopulate(t *testing.T) {
+	in := v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategyRecreatePod}
+	out := UpdateStrategyToWorkload(in)
+	if out.RollingUpdate != nil {
+		t.Fatalf("expected RollingUpdate to remain nil; got %+v", out.RollingUpdate)
 	}
 }
 

@@ -588,10 +588,16 @@ spec:
                           type: object
                         rollingUpdate:
                           properties:
+                            maxSurge:
+                              anyOf:
+                                - type: integer
+                                - type: string
+                              x-kubernetes-int-or-string: true
                             maxUnavailable:
-                              format: int32
-                              minimum: 0
-                              type: integer
+                              anyOf:
+                                - type: integer
+                                - type: string
+                              x-kubernetes-int-or-string: true
                             partition:
                               format: int32
                               minimum: 0
