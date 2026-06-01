@@ -130,3 +130,104 @@ func TestDetermineDeploymentModes_NilEngineRejected(t *testing.T) {
 	_, _, _, err := DetermineDeploymentModes(nil, nil, nil, nil)
 	assert.Error(t, err)
 }
+
+func TestIsMultiPodComponent(t *testing.T) {
+	ptrInt := func(i int) *int { return &i }
+	tests := []struct {
+		name      string
+		isvc      *v1beta1.InferenceService
+		component v1beta1.ComponentType
+		want      bool
+	}{
+		{
+			name:      "nil ISVC → false",
+			isvc:      nil,
+			component: v1beta1.EngineComponent,
+			want:      false,
+		},
+		{
+			name: "Engine without Worker → single-pod",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{}},
+			},
+			component: v1beta1.EngineComponent,
+			want:      false,
+		},
+		{
+			name: "Engine.Worker present but Size nil → single-pod (defaulter not yet run)",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{
+					Worker: &v1beta1.WorkerSpec{},
+				}},
+			},
+			component: v1beta1.EngineComponent,
+			want:      false,
+		},
+		{
+			name: "Engine.Worker.Size = 0 → single-pod (validator should reject before reconcile)",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{
+					Worker: &v1beta1.WorkerSpec{Size: ptrInt(0)},
+				}},
+			},
+			component: v1beta1.EngineComponent,
+			want:      false,
+		},
+		{
+			name: "Engine.Worker.Size = 1 → multi-pod (Leader + 1 worker = 2 pods)",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{
+					Worker: &v1beta1.WorkerSpec{Size: ptrInt(1)},
+				}},
+			},
+			component: v1beta1.EngineComponent,
+			want:      true,
+		},
+		{
+			name: "Engine.Worker.Size = 2 → multi-pod (3 pods)",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{
+					Worker: &v1beta1.WorkerSpec{Size: ptrInt(2)},
+				}},
+			},
+			component: v1beta1.EngineComponent,
+			want:      true,
+		},
+		{
+			name: "Decoder.Worker.Size = 3 → multi-pod decoder",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{Decoder: &v1beta1.DecoderSpec{
+					Worker: &v1beta1.WorkerSpec{Size: ptrInt(3)},
+				}},
+			},
+			component: v1beta1.DecoderComponent,
+			want:      true,
+		},
+		{
+			name: "Router is always single-pod regardless of Engine.Worker.Size",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{Worker: &v1beta1.WorkerSpec{Size: ptrInt(4)}},
+					Router: &v1beta1.RouterSpec{},
+				},
+			},
+			component: v1beta1.RouterComponent,
+			want:      false,
+		},
+		{
+			name: "Decoder absent → false (component asked is Decoder)",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{
+					Worker: &v1beta1.WorkerSpec{Size: ptrInt(2)},
+				}},
+			},
+			component: v1beta1.DecoderComponent,
+			want:      false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsMultiPodComponent(tt.isvc, tt.component))
+		})
+	}
+}

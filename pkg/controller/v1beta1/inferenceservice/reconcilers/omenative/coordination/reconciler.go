@@ -14,6 +14,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -143,11 +144,17 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// is declared so the HTTPRoute weighted-backendRef consumer has
 	// the per-revision backends to point at.
 	for _, c := range componentsTouched {
+		// Compute the multi-pod predicate once per Component — the
+		// answer is identical across every revisionHash on that
+		// Component (Worker.Size is a per-Component spec field, not
+		// per-revision). Multi-pod Components route traffic only to
+		// rank-0; the routing Service selector picks that up.
+		multiPod := isvcutils.IsMultiPodComponent(in.ISVC, c)
 		for hash := range perRevisionPods[c] {
 			if hash == "" {
 				continue
 			}
-			if _, err := EnsurePerRevisionServices(ctx, in.Client, in.ISVC, c, hash); err != nil {
+			if _, err := EnsurePerRevisionServices(ctx, in.Client, in.ISVC, c, hash, multiPod); err != nil {
 				return nil, fmt.Errorf("ensure per-revision service for %s/%s: %w", c, hash, err)
 			}
 			result.PerRevisionServicesEnsured++

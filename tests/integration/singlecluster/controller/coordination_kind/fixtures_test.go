@@ -27,6 +27,10 @@ type fixtureOptions struct {
 	engineImage       string
 	engineMinReplicas int
 	engineAnnots      map[string]string
+	// engineWorkerSize > 0 promotes the engine to a multi-pod gang
+	// Instance: a Leader + N workers per Instance (total = N+1 pods).
+	// Zero leaves the engine as single-pod (default).
+	engineWorkerSize int
 
 	// Decoder knobs (always present by default; opt out with WithoutDecoder).
 	withoutDecoder     bool
@@ -78,6 +82,15 @@ func WithEngineAnnotation(k, v string) FixtureOption {
 		}
 		o.engineAnnots[k] = v
 	}
+}
+
+// WithEngineWorkerSize promotes the engine to multi-pod by declaring
+// a Leader + Worker pair with Worker.Size=n. Each Instance materializes
+// n+1 pods (1 leader at ordinal=0, n workers at ordinals 1..n). Used
+// by tests that exercise multi-pod behaviour like rank-0 Service
+// selector tightening.
+func WithEngineWorkerSize(n int) FixtureOption {
+	return func(o *fixtureOptions) { o.engineWorkerSize = n }
 }
 
 // --- Decoder knobs --------------------------------------------------------
@@ -283,6 +296,26 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	if o.engineMinReplicas != 1 {
 		mr := o.engineMinReplicas
 		engine.ComponentExtensionSpec.MinReplicas = &mr
+	}
+	if o.engineWorkerSize > 0 {
+		// Multi-pod gang. Leader + N workers per Instance — the
+		// admission defaulter wires both halves of the pairing and
+		// the OMENative reconciler stamps `ome.io/pod-ordinal` on
+		// every pod (leader=0, workers=1..Size).
+		size := o.engineWorkerSize
+		engine.Leader = &v1beta1.LeaderSpec{
+			PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
+				Name:  "ome-container",
+				Image: o.engineImage,
+			}}},
+		}
+		engine.Worker = &v1beta1.WorkerSpec{
+			Size: &size,
+			PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{
+				Name:  "ome-container",
+				Image: o.engineImage,
+			}}},
+		}
 	}
 
 	wrapper := v1beta1testing.MakeInferenceService(o.isvcName, namespace).

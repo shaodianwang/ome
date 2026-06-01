@@ -21,15 +21,24 @@ import (
 // dispatches into ops/).
 var isvcGroupVersionKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
-// componentSelector builds the pod-label selector that scopes every
-// per-Component Service (headless + stable) to the OMENative-managed
-// pods of one (ISVC, component) pair. The `LabelManagedBy=OMENative`
-// discriminator narrows the selector to OMENative-stamped pods so a
-// later RawDeployment / MultiNode reconciler for the same (ISVC,
-// component) cannot accidentally route to (or be routed by) OMENative
-// pods during a mode-switch transition. Pods stamped by Raw / MultiNode
-// never carry this label (see pkg/controller/v1beta1/inferenceservice/
-// components/base.go ProcessBaseLabels).
+// componentSelector builds the pod-label selector that scopes the
+// per-Component HEADLESS Service to the OMENative-managed pods of one
+// (ISVC, component) pair. The `LabelManagedBy=OMENative` discriminator
+// narrows the selector to OMENative-stamped pods so a later
+// RawDeployment / MultiNode reconciler for the same (ISVC, component)
+// cannot accidentally route to (or be routed by) OMENative pods during
+// a mode-switch transition. Pods stamped by Raw / MultiNode never carry
+// this label (see pkg/controller/v1beta1/inferenceservice/components/
+// base.go ProcessBaseLabels).
+//
+// The headless Service selector intentionally selects ALL pods of the
+// Component including workers, regardless of multi-pod-ness — peer
+// discovery for distributed init (NCCL all-gather, vLLM ray-init, etc.)
+// requires every pod to be addressable via the per-Component DNS name.
+// The per-Component STABLE Service (built in components/{engine,
+// decoder}.go's reconcileOMENativeSubresources) adds a
+// `pod-ordinal=0` filter for multi-pod Components so customer traffic
+// lands only on the leader pod.
 func componentSelector(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) map[string]string {
 	return map[string]string{
 		constants.InferenceServicePodLabelKey: isvc.Name,

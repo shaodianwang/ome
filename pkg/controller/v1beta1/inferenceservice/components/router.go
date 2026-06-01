@@ -168,6 +168,12 @@ func (r *Router) reconcileOMENativeSubresources(ctx context.Context, isvc *v1bet
 	if podSpec == nil {
 		return nil
 	}
+	// Router is always single-pod (no Leader/Worker fields on RouterSpec),
+	// so the stable Service selector intentionally does NOT carry a
+	// `pod-ordinal=0` filter — see Engine.reconcileOMENativeSubresources
+	// for why single-pod SurgeThenDrain alternates between ordinal 0
+	// and 1 and pinning ordinal=0 would zero-endpoint the Service
+	// during surge.
 	selector := map[string]string{
 		constants.InferenceServicePodLabelKey: isvc.Name,
 		constants.OMEComponentLabel:           string(v1beta1.RouterComponent),

@@ -170,10 +170,24 @@ func (d *Decoder) reconcileOMENativeSubresources(ctx context.Context, isvc *v1be
 	if podSpec == nil {
 		return nil
 	}
-	selector := map[string]string{
+	// Base selector — narrows to OMENative-managed pods of this (ISVC,
+	// Component) pair. See Engine.reconcileOMENativeSubresources for
+	// the full rationale on the rank-0 stable Service selector below.
+	baseSelector := map[string]string{
 		constants.InferenceServicePodLabelKey: isvc.Name,
 		constants.OMEComponentLabel:           string(v1beta1.DecoderComponent),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
+	}
+	// Multi-pod decoder Components route customer traffic only to
+	// rank-0 (workers can't serve). Single-pod decoders keep the broad
+	// selector because SurgeThenDrain alternates pod ordinals.
+	stableSelector := baseSelector
+	if isvcutils.IsMultiPodComponent(isvc, v1beta1.DecoderComponent) {
+		stableSelector = make(map[string]string, len(baseSelector)+1)
+		for k, v := range baseSelector {
+			stableSelector[k] = v
+		}
+		stableSelector[query.LabelPodOrdinal] = "0"
 	}
 	componentMeta := objectMeta.DeepCopy()
 	componentMeta.OwnerReferences = []metav1.OwnerReference{
@@ -182,7 +196,7 @@ func (d *Decoder) reconcileOMENativeSubresources(ctx context.Context, isvc *v1be
 
 	// Stable Service via the SAME top-level reconciler RawDeployment and
 	// MultiNode use; only the selector + owner refs are OMENative-shaped.
-	sr := service.NewServiceReconciler(d.Client, d.Scheme, *componentMeta, &d.decoderSpec.ComponentExtensionSpec, podSpec, selector)
+	sr := service.NewServiceReconciler(d.Client, d.Scheme, *componentMeta, &d.decoderSpec.ComponentExtensionSpec, podSpec, stableSelector)
 	if _, err := sr.Reconcile(); err != nil {
 		return errors.Wrap(err, "stable service")
 	}
@@ -190,7 +204,8 @@ func (d *Decoder) reconcileOMENativeSubresources(ctx context.Context, isvc *v1be
 	// PodMonitor — build inline (shared podmonitor reconciler hardcodes
 	// the `app=<name>` selector that matches Raw / MultiNode pods but
 	// NOT OMENative pods). Scrape port: prefer "metrics", else first
-	// declared port, else "http".
+	// declared port, else "http". Uses the base selector (no pod-ordinal
+	// filter) so Prometheus scrapes every pod of the gang.
 	portName := "http"
 	if len(podSpec.Containers) > 0 {
 		ports := podSpec.Containers[0].Ports
@@ -214,13 +229,13 @@ func (d *Decoder) reconcileOMENativeSubresources(ctx context.Context, isvc *v1be
 		target.Spec.NamespaceSelector = monitoringv1.NamespaceSelector{
 			MatchNames: []string{objectMeta.Namespace},
 		}
-		target.Spec.Selector = metav1.LabelSelector{MatchLabels: selector}
+		target.Spec.Selector = metav1.LabelSelector{MatchLabels: baseSelector}
 		target.Spec.PodMetricsEndpoints = []monitoringv1.PodMetricsEndpoint{{
 			Port:     &portName,
 			Path:     "/metrics",
 			Interval: "10s",
 		}}
-		target.Labels = selector
+		target.Labels = baseSelector
 		target.OwnerReferences = []metav1.OwnerReference{
 			*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
 		}

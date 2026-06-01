@@ -201,10 +201,34 @@ func (e *Engine) reconcileOMENativeSubresources(ctx context.Context, isvc *v1bet
 	if podSpec == nil {
 		return nil
 	}
-	selector := map[string]string{
+	// Base selector — narrows to OMENative-managed pods of this (ISVC,
+	// Component) pair. Service + PodMonitor share the same three-key
+	// scope so neither picks up a same-Component mode-switch pod set.
+	baseSelector := map[string]string{
 		constants.InferenceServicePodLabelKey: isvc.Name,
 		constants.OMEComponentLabel:           string(v1beta1.EngineComponent),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
+	}
+	// Stable Service selector — for multi-pod Components, also pin to
+	// `pod-ordinal=0` so customer traffic lands only on the rank-0
+	// (leader) pod. Workers run distributed-init peers and cannot
+	// handle inference requests; without this filter, kube-proxy would
+	// round-robin to all pods of the gang and ~(Size-1)/Size of
+	// requests would 502.
+	//
+	// Single-pod Components keep the broader selector: SurgeThenDrain
+	// alternates the pod-naming ordinal between 0 and 1 across surges
+	// (see query.LabelPodOrdinal docstring), so pinning ordinal=0
+	// would zero-endpoint the Service during the surge phase. Multi-pod
+	// Components use RecreateInstance (not SurgeThenDrain), so the
+	// rank-0 pod ordinal is stable.
+	stableSelector := baseSelector
+	if isvcutils.IsMultiPodComponent(isvc, v1beta1.EngineComponent) {
+		stableSelector = make(map[string]string, len(baseSelector)+1)
+		for k, v := range baseSelector {
+			stableSelector[k] = v
+		}
+		stableSelector[query.LabelPodOrdinal] = "0"
 	}
 	componentMeta := objectMeta.DeepCopy()
 	componentMeta.OwnerReferences = []metav1.OwnerReference{
@@ -213,7 +237,7 @@ func (e *Engine) reconcileOMENativeSubresources(ctx context.Context, isvc *v1bet
 
 	// Stable Service via the SAME top-level reconciler RawDeployment and
 	// MultiNode use; only the selector + owner refs are OMENative-shaped.
-	sr := service.NewServiceReconciler(e.Client, e.Scheme, *componentMeta, &e.engineSpec.ComponentExtensionSpec, podSpec, selector)
+	sr := service.NewServiceReconciler(e.Client, e.Scheme, *componentMeta, &e.engineSpec.ComponentExtensionSpec, podSpec, stableSelector)
 	if _, err := sr.Reconcile(); err != nil {
 		return errors.Wrap(err, "stable service")
 	}
@@ -225,6 +249,11 @@ func (e *Engine) reconcileOMENativeSubresources(ctx context.Context, isvc *v1bet
 	// the three labelSelector / NamespaceSelector / PodMetricsEndpoints
 	// shape fields. Scrape port follows the Raw fallback rules: prefer a
 	// port named "metrics", else the first declared port, else "http".
+	//
+	// PodMonitor intentionally uses the base selector (no pod-ordinal
+	// filter) so Prometheus scrapes EVERY pod of the gang — workers
+	// emit per-rank metrics too, and per-pod scraping is the standard
+	// Prometheus model.
 	portName := "http"
 	if len(podSpec.Containers) > 0 {
 		ports := podSpec.Containers[0].Ports
@@ -248,13 +277,13 @@ func (e *Engine) reconcileOMENativeSubresources(ctx context.Context, isvc *v1bet
 		target.Spec.NamespaceSelector = monitoringv1.NamespaceSelector{
 			MatchNames: []string{objectMeta.Namespace},
 		}
-		target.Spec.Selector = metav1.LabelSelector{MatchLabels: selector}
+		target.Spec.Selector = metav1.LabelSelector{MatchLabels: baseSelector}
 		target.Spec.PodMetricsEndpoints = []monitoringv1.PodMetricsEndpoint{{
 			Port:     &portName,
 			Path:     "/metrics",
 			Interval: "10s",
 		}}
-		target.Labels = selector
+		target.Labels = baseSelector
 		target.OwnerReferences = []metav1.OwnerReference{
 			*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
 		}

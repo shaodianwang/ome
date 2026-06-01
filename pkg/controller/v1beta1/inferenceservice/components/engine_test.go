@@ -27,6 +27,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // Helper functions for creating pointers
@@ -1058,5 +1059,239 @@ func TestEngineDetermineEngineName_CtxCancellation(t *testing.T) {
 		g.Expect(name).To(gomega.Equal("test-isvc-engine"))
 	case <-time.After(2 * time.Second):
 		t.Fatal("determineEngineName did not return promptly under canceled ctx")
+	}
+}
+
+// TestEngineReconcileOMENativeSubresources_Rank0Selector pins that the
+// per-Component stable Service selector ADDS `ome.io/pod-ordinal=0`
+// when the Engine is multi-pod (Worker.Size > 0), but leaves the
+// selector broad for single-pod Engines (so SurgeThenDrain's ordinal
+// alternation doesn't zero-endpoint the Service during surge).
+//
+// Also pins that the PodMonitor selector NEVER carries the rank-0
+// filter — Prometheus scrapes every pod of the gang, not just the
+// leader. Workers emit per-rank metrics too.
+func TestEngineReconcileOMENativeSubresources_Rank0Selector(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(monitoringv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	tests := []struct {
+		name                  string
+		workerSize            *int
+		wantStableSelectorHas string
+	}{
+		{
+			name:                  "single-pod (no Worker) → no pod-ordinal filter",
+			workerSize:            nil,
+			wantStableSelectorHas: "",
+		},
+		{
+			name:                  "multi-pod (Worker.Size=2) → pod-ordinal=0 added",
+			workerSize:            intPtr(2),
+			wantStableSelectorHas: "0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engineSpec := &v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{
+					Containers: []v1.Container{
+						{Name: "engine", Image: "engine:v1"},
+					},
+				},
+			}
+			if tt.workerSize != nil {
+				engineSpec.Leader = &v1beta1.LeaderSpec{
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "engine", Image: "engine:v1"}},
+					},
+				}
+				engineSpec.Worker = &v1beta1.WorkerSpec{
+					Size: tt.workerSize,
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "engine", Image: "engine:v1"}},
+					},
+				}
+			}
+
+			isvc := &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-isvc", Namespace: "default",
+					UID: types.UID("test-isvc-uid"),
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: engineSpec,
+				},
+			}
+			objectMeta := metav1.ObjectMeta{
+				Name:      "test-isvc-engine",
+				Namespace: "default",
+			}
+			podSpec := &v1.PodSpec{
+				Containers: []v1.Container{{Name: "engine", Image: "engine:v1",
+					Ports: []v1.ContainerPort{{Name: "http", ContainerPort: 8080}}}},
+			}
+
+			c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
+			clientset := fake.NewClientset()
+			engine := NewEngine(
+				c, clientset,
+				nil, nil, nil,
+				scheme,
+				&controllerconfig.InferenceServicesConfig{},
+				constants.OMENative,
+				nil, nil,
+				engineSpec,
+				nil, "", nil, nil,
+			).(*Engine)
+
+			err := engine.reconcileOMENativeSubresources(context.Background(), isvc, objectMeta, podSpec)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			// Read back the stable Service and verify its selector.
+			svc := &v1.Service{}
+			g.Expect(c.Get(context.Background(),
+				client.ObjectKey{Namespace: "default", Name: "test-isvc-engine"},
+				svc)).To(gomega.Succeed())
+			// Three base keys always present.
+			g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+				constants.InferenceServicePodLabelKey, "test-isvc"))
+			g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+				constants.OMEComponentLabel, string(v1beta1.EngineComponent)))
+			g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+				query.LabelManagedBy, query.ManagedByOMENative))
+			// Rank-0 filter present only when multi-pod.
+			if tt.wantStableSelectorHas == "" {
+				g.Expect(svc.Spec.Selector).NotTo(gomega.HaveKey(query.LabelPodOrdinal),
+					"single-pod Service selector must NOT carry %s", query.LabelPodOrdinal)
+			} else {
+				g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+					query.LabelPodOrdinal, tt.wantStableSelectorHas),
+					"multi-pod Service selector must carry %s=%s",
+					query.LabelPodOrdinal, tt.wantStableSelectorHas)
+			}
+
+			// PodMonitor selector NEVER carries the rank-0 filter —
+			// Prometheus scrapes per pod, not per load-balancer endpoint.
+			pm := &monitoringv1.PodMonitor{}
+			g.Expect(c.Get(context.Background(),
+				client.ObjectKey{Namespace: "default", Name: "test-isvc-engine"},
+				pm)).To(gomega.Succeed())
+			g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey(query.LabelPodOrdinal),
+				"PodMonitor selector must NEVER carry %s (workers emit metrics too)",
+				query.LabelPodOrdinal)
+		})
+	}
+}
+
+// TestDecoderReconcileOMENativeSubresources_Rank0Selector mirrors the
+// engine test for the Decoder. The two helpers are intentionally
+// duplicated across components/engine.go and components/decoder.go;
+// this test pins the multi-pod selector tightening on the decoder
+// side independently.
+func TestDecoderReconcileOMENativeSubresources_Rank0Selector(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(monitoringv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	tests := []struct {
+		name                  string
+		workerSize            *int
+		wantStableSelectorHas string
+	}{
+		{
+			name:                  "single-pod decoder → no pod-ordinal filter",
+			workerSize:            nil,
+			wantStableSelectorHas: "",
+		},
+		{
+			name:                  "multi-pod decoder (Worker.Size=3) → pod-ordinal=0 added",
+			workerSize:            intPtr(3),
+			wantStableSelectorHas: "0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decoderSpec := &v1beta1.DecoderSpec{
+				PodSpec: v1beta1.PodSpec{
+					Containers: []v1.Container{{Name: "decoder", Image: "decoder:v1"}},
+				},
+			}
+			if tt.workerSize != nil {
+				decoderSpec.Leader = &v1beta1.LeaderSpec{
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "decoder", Image: "decoder:v1"}},
+					},
+				}
+				decoderSpec.Worker = &v1beta1.WorkerSpec{
+					Size: tt.workerSize,
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "decoder", Image: "decoder:v1"}},
+					},
+				}
+			}
+
+			isvc := &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-isvc", Namespace: "default",
+					UID: types.UID("test-isvc-uid"),
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Decoder: decoderSpec,
+				},
+			}
+			objectMeta := metav1.ObjectMeta{
+				Name:      "test-isvc-decoder",
+				Namespace: "default",
+			}
+			podSpec := &v1.PodSpec{
+				Containers: []v1.Container{{Name: "decoder", Image: "decoder:v1",
+					Ports: []v1.ContainerPort{{Name: "http", ContainerPort: 8080}}}},
+			}
+
+			c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
+			clientset := fake.NewClientset()
+			decoder := NewDecoder(
+				c, clientset,
+				nil, nil, nil,
+				scheme,
+				&controllerconfig.InferenceServicesConfig{},
+				constants.OMENative,
+				nil, nil,
+				decoderSpec,
+				nil, "", nil, nil,
+			).(*Decoder)
+
+			err := decoder.reconcileOMENativeSubresources(context.Background(), isvc, objectMeta, podSpec)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			svc := &v1.Service{}
+			g.Expect(c.Get(context.Background(),
+				client.ObjectKey{Namespace: "default", Name: "test-isvc-decoder"},
+				svc)).To(gomega.Succeed())
+			g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+				constants.OMEComponentLabel, string(v1beta1.DecoderComponent)))
+			if tt.wantStableSelectorHas == "" {
+				g.Expect(svc.Spec.Selector).NotTo(gomega.HaveKey(query.LabelPodOrdinal))
+			} else {
+				g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+					query.LabelPodOrdinal, tt.wantStableSelectorHas))
+			}
+
+			pm := &monitoringv1.PodMonitor{}
+			g.Expect(c.Get(context.Background(),
+				client.ObjectKey{Namespace: "default", Name: "test-isvc-decoder"},
+				pm)).To(gomega.Succeed())
+			g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey(query.LabelPodOrdinal))
+		})
 	}
 }

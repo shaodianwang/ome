@@ -71,19 +71,40 @@ func PerRevisionServiceNames(isvcName string, component v1beta1.ComponentType, r
 
 // BuildPerRevisionRoutingService produces the ClusterIP per-revision
 // Service for one (component, revisionHash). Pure compute; idempotent.
-func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string) (*corev1.Service, error) {
+//
+// `multiPod` toggles the rank-0 filter on the routing selector:
+//   - false (single-pod) → broad selector. SurgeThenDrain alternates
+//     the pod-naming ordinal between 0 and 1; pinning ordinal=0 would
+//     zero-endpoint the Service during surge.
+//   - true (multi-pod) → adds `ome.io/pod-ordinal=0` so only the
+//     leader (rank-0) pod handles customer traffic. Workers run
+//     distributed-init peers and cannot serve.
+//
+// The routing Service's label map intentionally does NOT include the
+// `pod-ordinal=0` key — Labels describe the Service itself for
+// catalog/UI purposes; the Selector is the filter that gates pod
+// membership.
+func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, multiPod bool) (*corev1.Service, error) {
 	if isvc == nil {
 		return nil, fmt.Errorf("nil InferenceService")
 	}
 	if revisionHash == "" {
 		return nil, fmt.Errorf("empty revisionHash")
 	}
-	selector := perRevisionServiceSelector(isvc.Name, component, revisionHash)
+	labels := perRevisionServiceSelector(isvc.Name, component, revisionHash)
+	selector := labels
+	if multiPod {
+		selector = make(map[string]string, len(labels)+1)
+		for k, v := range labels {
+			selector[k] = v
+		}
+		selector[query.LabelPodOrdinal] = "0"
+	}
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      PerRevisionServiceName(isvc.Name, component, revisionHash),
 			Namespace: isvc.Namespace,
-			Labels:    selector,
+			Labels:    labels,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(isvc, isvcGroupVersionKind),
 			},
@@ -113,6 +134,13 @@ func perRevisionRoutingPorts() []corev1.ServicePort {
 // BuildPerRevisionHeadlessService produces the headless per-revision
 // Service. Like the routing variant but with ClusterIP=None and
 // PublishNotReadyAddresses=true so peer DNS resolves during gang init.
+//
+// Headless Service intentionally selects ALL pods of the revision —
+// including workers — regardless of multi-pod-ness. Peer discovery
+// for distributed init (NCCL all-gather, vLLM ray-init, etc.)
+// requires every pod to be addressable via per-pod DNS. Only the
+// per-revision ROUTING Service (BuildPerRevisionRoutingService) adds
+// the rank-0 filter for multi-pod Components.
 func BuildPerRevisionHeadlessService(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string) (*corev1.Service, error) {
 	if isvc == nil {
 		return nil, fmt.Errorf("nil InferenceService")
@@ -158,13 +186,20 @@ func perRevisionServiceSelector(isvcName string, component v1beta1.ComponentType
 // drift-correcting on the selector / labels / owner reference. Returns
 // the names so the coordination layer can record them on
 // Status.Components.<c>.Traffic[].
-func EnsurePerRevisionServices(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string) (PerRevisionService, error) {
+//
+// `multiPod` tightens the routing Service selector to rank-0 only;
+// the headless Service is unaffected (workers must stay discoverable
+// for peer DNS).
+func EnsurePerRevisionServices(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, revisionHash string, multiPod bool) (PerRevisionService, error) {
 	out := PerRevisionServiceNames(isvc.Name, component, revisionHash)
 	if c == nil {
 		return out, fmt.Errorf("EnsurePerRevisionServices: nil client")
 	}
 
-	if err := ensureService(ctx, c, isvc, BuildPerRevisionRoutingService, component, revisionHash, out.RoutingName, false); err != nil {
+	routingBuild := func(i *v1beta1.InferenceService, comp v1beta1.ComponentType, hash string) (*corev1.Service, error) {
+		return BuildPerRevisionRoutingService(i, comp, hash, multiPod)
+	}
+	if err := ensureService(ctx, c, isvc, routingBuild, component, revisionHash, out.RoutingName, false); err != nil {
 		return out, err
 	}
 	if err := ensureService(ctx, c, isvc, BuildPerRevisionHeadlessService, component, revisionHash, out.HeadlessName, true); err != nil {
