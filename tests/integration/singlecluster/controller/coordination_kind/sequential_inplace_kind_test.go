@@ -12,7 +12,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-3 — Sequential coord with InPlace on both Components.
+// Sequential coord with InPlace on both Components.
 //
 // The Sequential coordination gate still serializes the rollout
 // (decoder finishes before engine starts) even when individual
@@ -37,7 +37,7 @@ var _ = ginkgo.Describe("permutation — Sequential + InPlaceIfPossible", ginkgo
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-3 Sequential + InPlace serializes Components AND preserves pod UIDs", func() {
+	ginkgo.It("Sequential + InPlace serializes Components AND preserves pod UIDs", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-seq-inplace"),
 			WithEngineReplicas(2),
@@ -89,7 +89,8 @@ var _ = ginkgo.Describe("permutation — Sequential + InPlaceIfPossible", ginkgo
 		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 
 		// Sample the Sequential handoff window: decoder rolled off v1
-		// while engine still on v1. Same observation pattern as D-2.
+		// while engine still on v1. Same observation pattern as the N=2
+		// Sequential spec (sequential_kind).
 		sawDecoderDoneWhileEngineV1 := false
 		stop := util.StartSampler(suiteCtx, kindPollInterval, func(_ Gomega) {
 			c := &v1beta1.InferenceService{}
@@ -128,7 +129,7 @@ var _ = ginkgo.Describe("permutation — Sequential + InPlaceIfPossible", ginkgo
 		stop()
 
 		Expect(sawDecoderDoneWhileEngineV1).To(BeTrue(),
-			"KP-3: never observed decoder rolled-off-v1 while engine still on v1 — Sequential ordering not enforced under in-place")
+			"never observed decoder rolled-off-v1 while engine still on v1 — Sequential ordering not enforced under in-place")
 
 		// Pod UID preservation across the in-place rollout (all 4 pods).
 		snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, "perm-seq-inplace")
@@ -137,9 +138,9 @@ var _ = ginkgo.Describe("permutation — Sequential + InPlaceIfPossible", ginkgo
 			for _, p := range snap.ByComponent[comp] {
 				origUID, ok := v1UIDs[p.Name]
 				Expect(ok).To(BeTrue(),
-					"KP-3: post-bump %s pod %s should have been present at v1", comp, p.Name)
+					"post-bump %s pod %s should have been present at v1", comp, p.Name)
 				Expect(p.UID).To(Equal(origUID),
-					"KP-3: in-place must preserve %s pod UID for %s (got %s, want %s)",
+					"in-place must preserve %s pod UID for %s (got %s, want %s)",
 					comp, p.Name, p.UID, origUID)
 			}
 		}

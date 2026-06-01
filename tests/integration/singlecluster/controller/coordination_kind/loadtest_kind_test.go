@@ -35,7 +35,7 @@ var _ = ginkgo.Describe("behavior — load test (15 prefill + 5 decode, tol 20%)
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("H-1 + H-2 + H-3 RatioBalanced at scale: no mass drain, ratio in band, no deadlock", func() {
+	ginkgo.It("RatioBalanced at scale: no mass drain, ratio in band, no deadlock", func() {
 		tol := int32(20)
 		maxUnavail := intstr.FromInt(3)
 		fix := newCoordFixture(ns.Name, WithISVCName("load-h"),
@@ -72,7 +72,7 @@ var _ = ginkgo.Describe("behavior — load test (15 prefill + 5 decode, tol 20%)
 		preBump := freshISVC(Default, ns.Name, "load-h")
 		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 
-		// Sampler: H-1 floor on each side + H-2 ratio in band.
+		// Sampler: serving floor on each side + ratio in band.
 		// Failure messages name the observed counts so a band violation
 		// is debuggable from the test log.
 		stop := util.StartSampler(suiteCtx, 100*time.Millisecond, func(g Gomega) {
@@ -81,17 +81,17 @@ var _ = ginkgo.Describe("behavior — load test (15 prefill + 5 decode, tol 20%)
 			eng := snap.Serving(v1beta1.EngineComponent)
 			dec := snap.Serving(v1beta1.DecoderComponent)
 			g.Expect(eng).To(BeNumerically(">=", 12),
-				"H-1: engine serving must stay >= 12 (within 20%% of 15); got %d", eng)
+				"engine serving must stay >= 12 (within 20%% of 15); got %d", eng)
 			g.Expect(dec).To(BeNumerically(">=", 4),
-				"H-1: decoder serving must stay >= 4 (within 20%% of 5); got %d", dec)
+				"decoder serving must stay >= 4 (within 20%% of 5); got %d", dec)
 			if dec == 0 {
 				return
 			}
 			ratio := float64(eng) / float64(dec)
 			g.Expect(ratio).To(BeNumerically(">=", 2.4),
-				"H-2: live ratio must stay >= 2.4 (orig 3.0 - 20%%); got %.3f (eng=%d dec=%d)", ratio, eng, dec)
+				"live ratio must stay >= 2.4 (orig 3.0 - 20%%); got %.3f (eng=%d dec=%d)", ratio, eng, dec)
 			g.Expect(ratio).To(BeNumerically("<=", 3.6),
-				"H-2: live ratio must stay <= 3.6 (orig 3.0 + 20%%); got %.3f (eng=%d dec=%d)", ratio, eng, dec)
+				"live ratio must stay <= 3.6 (orig 3.0 + 20%%); got %.3f (eng=%d dec=%d)", ratio, eng, dec)
 		})
 		defer stop()
 
@@ -101,16 +101,16 @@ var _ = ginkgo.Describe("behavior — load test (15 prefill + 5 decode, tol 20%)
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// H-3: rollout converges. 15 sequential-ish recreates on a
+		// rollout converges. 15 sequential-ish recreates on a
 		// single-node cluster — budget generously.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "load-h")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"H-3: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(15)),
-				"H-3: engine returns to full 15 serving after rollout")
+				"engine returns to full 15 serving after rollout")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

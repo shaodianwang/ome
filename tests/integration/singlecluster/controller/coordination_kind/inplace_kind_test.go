@@ -17,9 +17,9 @@ import (
 //
 // The in-place patch path keeps the same Pod object (image-only patch
 // via strategic-merge); the assertions here under real kubelet exercise:
-//   - L-1: at-least-2-of-3 serving during the rollout (MaxUnavailable=1)
-//   - L-2: no surge (alive count <= replicas)
-//   - L-3: pod UID is preserved across the bump (proves in-place, not
+//   - at-least-2-of-3 serving during the rollout (MaxUnavailable=1)
+//   - no surge (alive count <= replicas)
+//   - pod UID is preserved across the bump (proves in-place, not
 //     recreate; recreate would mint a new UID)
 var _ = ginkgo.Describe("behavior — in-place opt-in respects MaxUnavailable", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
@@ -32,7 +32,7 @@ var _ = ginkgo.Describe("behavior — in-place opt-in respects MaxUnavailable", 
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("L-1 + L-2 + L-3 in-place bump preserves serving budget, alive cap, and pod UIDs", func() {
+	ginkgo.It("in-place bump preserves serving budget, alive cap, and pod UIDs", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("inplace-l"),
 			WithoutDecoder(),
@@ -65,7 +65,7 @@ var _ = ginkgo.Describe("behavior — in-place opt-in respects MaxUnavailable", 
 				"all 3 engine pods should be serving on v1")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Capture engine pod UIDs at v1 for the L-3 identity assertion.
+		// Capture engine pod UIDs at v1 for the pod-identity assertion.
 		v1UIDs := map[string]corev1apis.UID{}
 		Eventually(func(g Gomega) {
 			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, "inplace-l")
@@ -86,9 +86,9 @@ var _ = ginkgo.Describe("behavior — in-place opt-in respects MaxUnavailable", 
 			eng := snap.Serving(v1beta1.EngineComponent)
 			alive := snap.Alive(v1beta1.EngineComponent)
 			g.Expect(eng).To(BeNumerically(">=", 2),
-				"L-1: in-place with MaxUnavailable=1 must keep >=2 of 3 engine pods serving (observed serving=%d alive=%d)", eng, alive)
+				"in-place with MaxUnavailable=1 must keep >=2 of 3 engine pods serving (observed serving=%d alive=%d)", eng, alive)
 			g.Expect(alive).To(BeNumerically("<=", 3),
-				"L-2: in-place must not create extra pods (observed alive=%d)", alive)
+				"in-place must not create extra pods (observed alive=%d)", alive)
 		})
 		defer stop()
 
@@ -110,7 +110,7 @@ var _ = ginkgo.Describe("behavior — in-place opt-in respects MaxUnavailable", 
 
 		stop()
 
-		// L-3: pod UIDs preserved. In-place patches the same pod object;
+		// pod UIDs preserved. In-place patches the same pod object;
 		// the UID must match the v1 capture. Recreate would mint a new UID.
 		snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, "inplace-l")
 		Expect(err).NotTo(HaveOccurred())
@@ -118,12 +118,12 @@ var _ = ginkgo.Describe("behavior — in-place opt-in respects MaxUnavailable", 
 		for _, p := range snap.ByComponent[v1beta1.EngineComponent] {
 			origUID, ok := v1UIDs[p.Name]
 			Expect(ok).To(BeTrue(),
-				"L-3: post-bump engine pod %s should have been present at v1 (same name)", p.Name)
+				"post-bump engine pod %s should have been present at v1 (same name)", p.Name)
 			Expect(p.UID).To(Equal(origUID),
-				"L-3: in-place must preserve pod UID for %s (got %s, want %s)", p.Name, p.UID, origUID)
+				"in-place must preserve pod UID for %s (got %s, want %s)", p.Name, p.UID, origUID)
 		}
 	})
 
-	// PIt: covered by the convergence wait in L-1+L-2+L-3.
-	ginkgo.PIt("L-4 rollout converges", func() {})
+	// PIt: covered by the convergence wait inside the in-place bump spec above.
+	ginkgo.PIt("rollout converges", func() {})
 })

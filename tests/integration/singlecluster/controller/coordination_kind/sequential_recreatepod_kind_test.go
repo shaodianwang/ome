@@ -11,10 +11,10 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-13 — Sequential coord with EXPLICIT RecreatePod (not the
+// Sequential coord with EXPLICIT RecreatePod (not the
 // SurgeThenDrain default).
 //
-// D-2 covers Sequential with default-strategy (which under
+// sequential_kind covers Sequential with default-strategy (which under
 // single-pod is effectively recreate via the surge fallback in
 // chooseUpdateModeForInstance). This spec pins the explicit
 // RecreatePod selection: the strategy field is set to RecreatePod
@@ -31,7 +31,7 @@ var _ = ginkgo.Describe("permutation — Sequential + explicit RecreatePod", gin
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-13 Sequential + RecreatePod serializes Components and converges", func() {
+	ginkgo.It("Sequential + RecreatePod serializes Components and converges", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-seq-rp"),
 			WithEngineUpdateStrategy(v1beta1.UpdateStrategyRecreatePod),
@@ -94,6 +94,6 @@ var _ = ginkgo.Describe("permutation — Sequential + explicit RecreatePod", gin
 		stop()
 
 		Expect(sawDecoderDoneWhileEngineV1).To(BeTrue(),
-			"KP-13: never observed decoder rolled-off-v1 while engine still on v1 — Sequential not enforced under explicit RecreatePod")
+			"never observed decoder rolled-off-v1 while engine still on v1 — Sequential not enforced under explicit RecreatePod")
 	})
 })

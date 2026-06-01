@@ -13,7 +13,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-7 — RatioBalanced across 3 Components.
+// RatioBalanced across 3 Components.
 //
 // C-1 covers RatioBalanced N=2 (engine 4 : decoder 2). This spec
 // extends it to N=3 — engine + decoder + router — and asserts the
@@ -38,7 +38,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced N=3", ginkgo.Ordered, fun
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-7 RatioBalanced N=3 keeps engine/decoder and engine/router ratios in band", func() {
+	ginkgo.It("RatioBalanced N=3 keeps engine/decoder and engine/router ratios in band", func() {
 		tol := int32(25)
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-ratio-n3"),
@@ -89,16 +89,16 @@ var _ = ginkgo.Describe("permutation — RatioBalanced N=3", ginkgo.Ordered, fun
 			if dec > 0 {
 				r := float64(eng) / float64(dec)
 				g.Expect(r).To(BeNumerically(">=", 1.5),
-					"KP-7: engine/decoder ratio %.2f (eng=%d dec=%d) below band lower 1.5", r, eng, dec)
+					"engine/decoder ratio %.2f (eng=%d dec=%d) below band lower 1.5", r, eng, dec)
 				g.Expect(r).To(BeNumerically("<=", 2.5),
-					"KP-7: engine/decoder ratio %.2f above band upper 2.5", r)
+					"engine/decoder ratio %.2f above band upper 2.5", r)
 			}
 			if rtr > 0 {
 				r := float64(eng) / float64(rtr)
 				g.Expect(r).To(BeNumerically(">=", 1.5),
-					"KP-7: engine/router ratio %.2f (eng=%d rtr=%d) below band lower 1.5", r, eng, rtr)
+					"engine/router ratio %.2f (eng=%d rtr=%d) below band lower 1.5", r, eng, rtr)
 				g.Expect(r).To(BeNumerically("<=", 2.5),
-					"KP-7: engine/router ratio %.2f above band upper 2.5", r)
+					"engine/router ratio %.2f above band upper 2.5", r)
 			}
 		})
 		defer stop()
@@ -114,14 +114,14 @@ var _ = ginkgo.Describe("permutation — RatioBalanced N=3", ginkgo.Ordered, fun
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "perm-ratio-n3")
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"KP-7: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
-					"KP-7: RatioBalanced N=3 rollout must return to Idle")
+					"RatioBalanced N=3 rollout must return to Idle")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		stop()
 		Expect(samples.Load()).To(BeNumerically(">=", 3),
-			"KP-7: sampler observed only %d samples during the rollout; ratio bands were not meaningfully checked",
+			"sampler observed only %d samples during the rollout; ratio bands were not meaningfully checked",
 			samples.Load())
 	})
 })

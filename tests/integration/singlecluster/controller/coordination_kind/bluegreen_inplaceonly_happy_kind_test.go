@@ -11,7 +11,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-5 — BlueGreen + InPlaceOnly happy path.
+// BlueGreen + InPlaceOnly happy path.
 //
 // The interesting case: BlueGreen normally surges a v2 set and flips
 // traffic atomically. With InPlaceOnly + image-only diff the per-pod
@@ -34,7 +34,7 @@ var _ = ginkgo.Describe("permutation — BlueGreen + InPlaceOnly happy path", gi
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-5 BlueGreen + InPlaceOnly image-only diff stays in place and converges", func() {
+	ginkgo.It("BlueGreen + InPlaceOnly image-only diff stays in place and converges", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-bg-iponly"),
 			WithoutDecoder(),
@@ -87,7 +87,7 @@ var _ = ginkgo.Describe("permutation — BlueGreen + InPlaceOnly happy path", gi
 			c := freshISVC(g, ns.Name, "perm-bg-iponly")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"KP-5: engine CurrentRevision must advance off v1 on image-only InPlaceOnly bump")
+				"engine CurrentRevision must advance off v1 on image-only InPlaceOnly bump")
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)))
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
@@ -102,9 +102,9 @@ var _ = ginkgo.Describe("permutation — BlueGreen + InPlaceOnly happy path", gi
 		for _, p := range snap.ByComponent[v1beta1.EngineComponent] {
 			origUID, ok := v1UIDs[p.Name]
 			Expect(ok).To(BeTrue(),
-				"KP-5: post-bump engine pod %s should have been present at v1", p.Name)
+				"post-bump engine pod %s should have been present at v1", p.Name)
 			Expect(p.UID).To(Equal(origUID),
-				"KP-5: InPlaceOnly + eligible diff must preserve pod UID for %s (got %s, want %s)",
+				"InPlaceOnly + eligible diff must preserve pod UID for %s (got %s, want %s)",
 				p.Name, p.UID, origUID)
 		}
 	})

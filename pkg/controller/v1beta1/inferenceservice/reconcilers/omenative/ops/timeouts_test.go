@@ -630,8 +630,8 @@ func TestExpireOperationsIfDeadlinePassed_PhaseEscalationIsIdempotent(t *testing
 // every OTHER wedge mode (drain races, runtime hangs, slow registries
 // where the pull succeeds but the container never reports Ready) where
 // no kubelet signal is available to fast-fail on. Locks in the
-// behavior the X-1 reproduction needs as a backstop independent of pod
-// state.
+// behavior the bad-image (bad_image_kind) reproduction needs as a
+// backstop independent of pod state.
 func TestExpireOperationsIfDeadlinePassed_SurgeStepEscalatesPhase(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)

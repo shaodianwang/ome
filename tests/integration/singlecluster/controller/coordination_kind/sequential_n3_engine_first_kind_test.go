@@ -11,15 +11,15 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-8 — Sequential coordination N=3 with engine-first order.
+// Sequential coordination N=3 with engine-first order.
 //
-// KCG-1 (existing) covers Order=[router, decoder, engine] (the
+// n3_sequential_kind covers Order=[router, decoder, engine] (the
 // production-default decoder-first chain). This spec exercises the
 // other direction: Order=[engine, decoder, router]. The Sequential
 // state machine must not be biased to a specific Component — any
 // permutation declared by the operator should serialize correctly.
 //
-// Asserts the two handoff windows analogous to KCG-1:
+// Asserts the two handoff windows analogous to the router-first spec:
 //   - engine done while decoder + router still v1.
 //   - decoder done while router still v1.
 var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", ginkgo.Ordered, func() {
@@ -33,7 +33,7 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-8 Sequential N=3 with Order=[engine, decoder, router] chains in declared direction", func() {
+	ginkgo.It("Sequential N=3 with Order=[engine, decoder, router] chains in declared direction", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-seq-n3-ef"),
 			WithRouter(),
@@ -78,8 +78,9 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 		v1RouterRev := preBump.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision
 
-		// Sample handoff windows. Same pattern as KCG-1 but rotated for
-		// the engine-first order:
+		// Sample handoff windows. Same pattern as the router-first N=3
+		// spec (n3_sequential_kind) but rotated for the engine-first
+		// order:
 		//   (a) engine done while decoder + router still v1.
 		//   (b) decoder done while router still v1.
 		sawEngineDoneWhileOthersV1 := false
@@ -127,10 +128,10 @@ var _ = ginkgo.Describe("permutation — Sequential N=3 (engine-first order)", g
 		stop()
 
 		Expect(sawEngineDoneWhileOthersV1).To(BeTrue(),
-			"KP-8: never observed engine rolled-off-v1 while decoder+router still v1 — handoff 1 (engine → decoder) not enforced. lastE=%s lastD=%s lastR=%s",
+			"never observed engine rolled-off-v1 while decoder+router still v1 — handoff 1 (engine → decoder) not enforced. lastE=%s lastD=%s lastR=%s",
 			lastE, lastD, lastR)
 		Expect(sawDecoderDoneWhileRouterV1).To(BeTrue(),
-			"KP-8: never observed decoder rolled-off-v1 while router still v1 — handoff 2 (decoder → router) not enforced. lastD=%s lastR=%s",
+			"never observed decoder rolled-off-v1 while router still v1 — handoff 2 (decoder → router) not enforced. lastD=%s lastR=%s",
 			lastD, lastR)
 	})
 })

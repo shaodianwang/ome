@@ -10,7 +10,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// D-4 — Independent coordination policy.
+// Independent coordination policy.
 //
 // Independent skips the gang gates entirely: each Component reconciles
 // on its own. Phase only ever walks Idle / Shifting / Failed —
@@ -27,7 +27,7 @@ var _ = ginkgo.Describe("behavior — Independent coordination", ginkgo.Ordered,
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("D-4 Independent steady-state Idle; bump only walks Idle/Shifting", func() {
+	ginkgo.It("Independent steady-state Idle; bump only walks Idle/Shifting", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("indep-d4"),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
@@ -69,16 +69,16 @@ var _ = ginkgo.Describe("behavior — Independent coordination", ginkgo.Ordered,
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"D-4: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		Expect(observed[v1beta1.CoordinationPhaseSurging]).To(BeFalse(),
-			"D-4: Independent must NOT report Phase=Surging (that's a BlueGreen/RollingUpdate gang state)")
+			"Independent must NOT report Phase=Surging (that's a BlueGreen/RollingUpdate gang state)")
 		Expect(observed[v1beta1.CoordinationPhaseWaiting]).To(BeFalse(),
-			"D-4: Independent must NOT report Phase=Waiting")
+			"Independent must NOT report Phase=Waiting")
 		Expect(observed[v1beta1.CoordinationPhaseScalingDown]).To(BeFalse(),
-			"D-4: Independent must NOT report Phase=ScalingDown")
+			"Independent must NOT report Phase=ScalingDown")
 	})
 })

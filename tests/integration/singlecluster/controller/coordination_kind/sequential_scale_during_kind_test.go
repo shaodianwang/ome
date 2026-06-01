@@ -10,7 +10,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-9 — scale-up engine MinReplicas from 2 → 4 during an in-flight
+// scale-up engine MinReplicas from 2 → 4 during an in-flight
 // Sequential rollout.
 //
 // The operator combines a "scale up + bump image" workflow in a
@@ -34,7 +34,7 @@ var _ = ginkgo.Describe("permutation — Sequential + scale-up during rollout", 
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-9 Sequential converges when engine scales 2 → 4 mid-rollout", func() {
+	ginkgo.It("Sequential converges when engine scales 2 → 4 mid-rollout", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-seq-scaleup"),
 			WithEngineReplicas(2),
@@ -84,15 +84,15 @@ var _ = ginkgo.Describe("permutation — Sequential + scale-up during rollout", 
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"KP-9: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(decCS.Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
-				"KP-9: decoder CurrentRevision must advance off v1")
+				"decoder CurrentRevision must advance off v1")
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(4)),
-				"KP-9: engine must scale to 4 serving replicas on v2")
+				"engine must scale to 4 serving replicas on v2")
 			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
-					"KP-9: rollout must return to Idle after combined scale + bump")
+					"rollout must return to Idle after combined scale + bump")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

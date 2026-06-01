@@ -35,7 +35,7 @@ var _ = ginkgo.Describe("PD per-Component isolation", ginkgo.Ordered, func() {
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("PD-2 each Component owns a distinct ControllerRevision", func() {
+	ginkgo.It("each Component owns a distinct ControllerRevision", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pd2-iso"),
 			WithEngineImage("fake-serving:v1"))
 		applyFixture(Default, fix)
@@ -63,7 +63,7 @@ var _ = ginkgo.Describe("PD per-Component isolation", ginkgo.Ordered, func() {
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("PD-3 each Component owns a distinct headless Service", func() {
+	ginkgo.It("each Component owns a distinct headless Service", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pd3-iso"),
 			WithEngineImage("fake-serving:v1"))
 		applyFixture(Default, fix)
@@ -86,7 +86,7 @@ var _ = ginkgo.Describe("PD per-Component isolation", ginkgo.Ordered, func() {
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("PD-4 engine image bump produces a new Engine CR; decoder CR set untouched", func() {
+	ginkgo.It("engine image bump produces a new Engine CR; decoder CR set untouched", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pd4-iso"),
 			WithEngineImage("fake-serving:v1"))
 		applyFixture(Default, fix)
@@ -140,15 +140,15 @@ var _ = ginkgo.Describe("PD per-Component isolation", ginkgo.Ordered, func() {
 				}
 			}
 			g.Expect(engineCount).To(BeNumerically(">=", 2),
-				"PD-4: engine bump should produce at least 2 engine CRs (v1 + v2); got %d", engineCount)
+				"engine bump should produce at least 2 engine CRs (v1 + v2); got %d", engineCount)
 			g.Expect(decoderCount).To(Equal(1),
-				"PD-4: decoder must NOT churn on engine bump; got %d decoder CRs (%v)", decoderCount, decoderNames)
+				"decoder must NOT churn on engine bump; got %d decoder CRs (%v)", decoderCount, decoderNames)
 			g.Expect(decoderNames[0]).To(Equal(initialDecoderCR),
-				"PD-4: decoder CR name must be unchanged after engine bump")
+				"decoder CR name must be unchanged after engine bump")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("PD-8 engine scale-up does not change decoder replica count", func() {
+	ginkgo.It("engine scale-up does not change decoder replica count", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pd8-iso"),
 			WithEngineReplicas(1),
 			WithEngineImage("fake-serving:v1"))
@@ -180,9 +180,9 @@ var _ = ginkgo.Describe("PD per-Component isolation", ginkgo.Ordered, func() {
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
 			g.Expect(engCS.Lifecycle.Replicas).To(Equal(int32(2)),
-				"PD-8: engine scale-up should reach 2; got %d", engCS.Lifecycle.Replicas)
+				"engine scale-up should reach 2; got %d", engCS.Lifecycle.Replicas)
 			g.Expect(decCS.Lifecycle.Replicas).To(Equal(int32(1)),
-				"PD-8: decoder must NOT change on engine scale-up; got %d", decCS.Lifecycle.Replicas)
+				"decoder must NOT change on engine scale-up; got %d", decCS.Lifecycle.Replicas)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

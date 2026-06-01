@@ -22,11 +22,12 @@ import (
 //     gangs fall back to recreate
 //
 // Coverage already in sibling KIND specs:
-//   - InPlaceIfPossible + image-only → behavior_l_inplace_kind L-1/2/3
+//   - InPlaceIfPossible + image-only → inplace_kind
 //     (asserts UID preserved + serving budget + no surge)
-//   - RecreatePod + image diff → behavior_b_recreatepod_kind B-1/2/3 +
-//     recreate_pod_kind RP-1/2/3 (assert UID rotates + no surge)
-//   - MinReplicas=2 in-place patch — covered indirectly by behavior_l
+//   - RecreatePod + image diff → rolling_recreatepod_kind (the B-* set,
+//     RollingUpdate variant) + recreate_pod_kind (BlueGreen variant —
+//     both assert UID rotates + no surge)
+//   - MinReplicas=2 in-place patch — covered indirectly by inplace_kind
 //     (3 engine replicas demonstrates the per-Instance dispatch loop)
 //
 // Ported below: the explicit InPlaceOnly + InPlaceUpdateNotPossible

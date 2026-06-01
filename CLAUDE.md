@@ -88,7 +88,7 @@ KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)" \
 ```sh
 make test-kind                                       # full suite (~30-60 min)
 GINKGO_FOCUS='PD per-Component' make test-kind       # narrow to specific specs (~5-10 min)
-GINKGO_FOCUS='RP-' make test-kind                    # by spec ID prefix
+GINKGO_FOCUS='RecreatePod' make test-kind            # narrow by It-string fragment
 make test-kind-clean                                 # delete leftover KIND clusters
 ```
 
@@ -103,7 +103,7 @@ Direct `go test` (when you need extra flags):
 ```sh
 KIND_KEEP_CLUSTER=true \
   go test ./tests/integration/singlecluster/controller/coordination_kind/... \
-  -v -timeout 30m -ginkgo.v -ginkgo.focus 'D-5'
+  -v -timeout 30m -ginkgo.v -ginkgo.focus 'rollout converges'
 ```
 
 KIND specs use generous timeouts (`kindShortTimeout=30s`, `kindMediumTimeout=2m`, `kindLongTimeout=5m`) and a 100ms poll interval — tuned for real kubelet latency, not envtest microseconds.

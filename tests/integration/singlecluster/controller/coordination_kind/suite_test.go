@@ -54,7 +54,7 @@ func TestCoordinationKindController(t *testing.T) {
 
 	state := kindutil.RunKindSuite(t, kindutil.SuiteOpts{
 		ClusterName: "ome-coord-kind",
-		// 2 workers. Migration tests (PD-5, PDA-1, PDX-5, INT-*) move a pod
+		// 2 workers. Migration tests (PD/PDA/PDX migrate + INT-*) move a pod
 		// OFF its source node: the surge pod gets a required NodeAffinity
 		// excluding the source node, so it needs another SCHEDULABLE node
 		// to land on. The kind control-plane node carries the default

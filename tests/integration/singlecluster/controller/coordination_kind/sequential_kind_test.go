@@ -11,7 +11,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// D-2 — Sequential coordination policy.
+// Sequential coordination policy.
 //
 // Bumps BOTH images simultaneously. Sequential must roll them in
 // declared Order (decoder first, then engine here). Real kubelet's
@@ -34,7 +34,7 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 	// product bug: Sequential ordering is not reliably enforced. ~1 in 3
 	// runs the engine rolls CONCURRENTLY with the decoder (no intermediate
 	// window; both CurrentRevisions advance together). This is the SAME
-	// root cause as G-4's soak bypass (behavior_g_sequential_soak): the
+	// root cause as the Sequential.Soak bypass (sequential_soak_kind): the
 	// Sequential gate (CheckSequentialGate / state.go) derives "which
 	// Component is in flight" from LAGGING status, so after the decoder
 	// converges there is a window where the engine is not yet observed
@@ -42,8 +42,9 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 	// early. The original spec passed vacuously (its CompositePhase signal
 	// never surfaced decoder.*/engine.* — it stays "Idle"), hiding this.
 	// Un-park once the Sequential-gate reliability fix lands (shared with
-	// G-4). DO NOT revert to a CompositePhase-based or guarded assertion.
-	ginkgo.It("D-2 Sequential rolls components in declared order (decoder → engine)", func() {
+	// sequential_soak_kind). DO NOT revert to a CompositePhase-based or
+	// guarded assertion.
+	ginkgo.It("Sequential rolls components in declared order (decoder → engine)", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("seq-d2"),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
@@ -122,9 +123,9 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"D-2: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(decCS.Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
-				"D-2: decoder CurrentRevision must advance off v1")
+				"decoder CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -137,7 +138,7 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 		// together. A missed observation is now a real failure, not the
 		// silent skip the original guarded assertion allowed.
 		Expect(sawDecoderDoneWhileEngineV1).To(BeTrue(),
-			"D-2: never observed decoder rolled-off-v1 while engine still on v1 — "+
+			"never observed decoder rolled-off-v1 while engine still on v1 — "+
 				"Sequential ordering not enforced (Components rolled concurrently). "+
 				"lastDecoderRev=%s lastEngineRev=%s", lastDecRev, lastEngRev)
 	})

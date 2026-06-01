@@ -33,10 +33,10 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// PDX-1 — All three Components (Router + Engine + Decoder) reach
+	// All three Components (Router + Engine + Decoder) reach
 	// Ready under OMENative. The single most-critical OEP-0007.1
 	// topology gate.
-	ginkgo.It("PDX-1: Router + Engine + Decoder all OMENative converge to Ready", func() {
+	ginkgo.It("Router + Engine + Decoder all OMENative converge to Ready", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pdx1-isvc"),
 			WithRouter(),
 			WithEngineImage("fake-serving:v1"))
@@ -73,11 +73,11 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// PDX-2 — Each of the three Components has its own headless
+	// Each of the three Components has its own headless
 	// Service with a tight selector. Overlap would cross-route peer
 	// DNS (e.g., Engine resolving "router" via the router-headless DNS
 	// picks up decoder pods).
-	ginkgo.It("PDX-2: each of Engine/Decoder/Router has its own headless Service with a tight selector", func() {
+	ginkgo.It("each of Engine/Decoder/Router has its own headless Service with a tight selector", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pdx2-isvc"),
 			WithRouter(),
 			WithEngineImage("fake-serving:v1"))
@@ -99,11 +99,11 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// PDX-3 — Each Component owns a distinct ControllerRevision (3
+	// Each Component owns a distinct ControllerRevision (3
 	// streams of 1). CR retention, detectUpdateTrigger, and
 	// EnsureControllerRevision ALL key off (isvc, component) — collisions
 	// would mix histories or trigger phantom rollouts.
-	ginkgo.It("PDX-3: each Component owns a distinct ControllerRevision (3 streams of 1)", func() {
+	ginkgo.It("each Component owns a distinct ControllerRevision (3 streams of 1)", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pdx3-isvc"),
 			WithRouter(),
 			WithEngineImage("fake-serving:v1"))
@@ -131,10 +131,11 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// PDX-4 — Bumping the Router image must only churn Router's CR
+	// Bumping the Router image must only churn Router's CR
 	// stream; Engine and Decoder stay frozen. Closes the third-component
-	// side of per-Component update isolation (PD-4 covers Engine↔Decoder).
-	ginkgo.It("PDX-4: Router image bump produces a new Router CR; Engine + Decoder CR sets untouched", func() {
+	// side of per-Component update isolation (pd_isolation_kind covers the
+	// Engine↔Decoder pair).
+	ginkgo.It("Router image bump produces a new Router CR; Engine + Decoder CR sets untouched", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pdx4-isvc"),
 			WithRouter(),
 			WithEngineImage("fake-serving:v1"))
@@ -197,10 +198,10 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// PDX-5 — Per-Component migration with all three components running
+	// Per-Component migration with all three components running
 	// OMENative. Engine-targeted migration must not perturb Decoder or
 	// Router.
-	ginkgo.It("PDX-5: Engine migration in a three-way deployment leaves Decoder + Router untouched", func() {
+	ginkgo.It("Engine migration in a three-way deployment leaves Decoder + Router untouched", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pdx5-isvc"),
 			WithRouter(),
 			WithEngineImage("fake-serving:v1"))
@@ -261,10 +262,10 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// PDX-6 — Mixed mode: Engine OMENative + Decoder RawDeployment.
+	// Mixed mode: Engine OMENative + Decoder RawDeployment.
 	// The OMENative dispatcher must NOT touch the Decoder, and the
 	// Raw dispatcher must NOT touch the Engine.
-	ginkgo.It("PDX-6: mixed mode (Engine OMENative + Decoder Raw) dispatches each to its own reconciler", func() {
+	ginkgo.It("mixed mode (Engine OMENative + Decoder Raw) dispatches each to its own reconciler", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pdx6-isvc"),
 			WithDecoderRawMode(),
 			WithEngineImage("fake-serving:v1"))
@@ -299,10 +300,10 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 		}
 	})
 
-	// PDX-7 — Per-Component restart in a three-way deployment. Failing
+	// Per-Component restart in a three-way deployment. Failing
 	// the Router pod must walk Router through Restart without
 	// perturbing Engine or Decoder.
-	ginkgo.It("PDX-7: failing the Router pod restarts Router without touching Engine + Decoder", func() {
+	ginkgo.It("failing the Router pod restarts Router without touching Engine + Decoder", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pdx7-isvc"),
 			WithRouter(),
 			WithEngineImage("fake-serving:v1"))

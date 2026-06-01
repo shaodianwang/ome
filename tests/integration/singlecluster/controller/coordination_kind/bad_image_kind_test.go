@@ -13,7 +13,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// X-1 — bad-image failure → Phase=Failed, v1 capacity preserved.
+// bad-image failure → Phase=Failed, v1 capacity preserved.
 //
 // Operators rely on the "no auto-rollback" principle: a failed
 // rollout freezes; v1 keeps serving; the operator decides what to do
@@ -36,7 +36,7 @@ var _ = ginkgo.Describe("behavior — bad-image failure", ginkgo.Ordered, func()
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("X-1 bad-image bump times out → Failed phase; v1 capacity preserved", func() {
+	ginkgo.It("bad-image bump times out → Failed phase; v1 capacity preserved", func() {
 		// 2-replica engine + 1-replica decoder, BlueGreen,
 		// MaxUnavailable=1. With MaxUnavailable=1 the rollout takes
 		// one v1 pod offline per cycle; if the v2 image never reaches
@@ -80,7 +80,7 @@ var _ = ginkgo.Describe("behavior — bad-image failure", ginkgo.Ordered, func()
 			g.Expect(err).NotTo(HaveOccurred())
 			eng := snap.Serving(v1beta1.EngineComponent)
 			g.Expect(eng).To(BeNumerically(">=", 1),
-				"X-1: at least 1 v1 engine pod must keep serving while v2 fails; observed serving=%d", eng)
+				"at least 1 v1 engine pod must keep serving while v2 fails; observed serving=%d", eng)
 		})
 		defer stop()
 
@@ -100,7 +100,7 @@ var _ = ginkgo.Describe("behavior — bad-image failure", ginkgo.Ordered, func()
 			c := freshISVC(g, ns.Name, "badimg-x1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseFailed),
-					"X-1: coordination layer must mark group Failed after the per-Instance timeout")
+					"coordination layer must mark group Failed after the per-Instance timeout")
 		}).WithTimeout(3 * time.Minute).WithPolling(kindPollInterval).Should(Succeed())
 		stop()
 	})

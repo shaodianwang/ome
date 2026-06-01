@@ -27,7 +27,7 @@ var _ = ginkgo.Describe("behavior — pause / resume", ginkgo.Ordered, func() {
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("G-1 + G-2 paused annotation freezes group phase; unset resumes", func() {
+	ginkgo.It("paused annotation freezes group phase; unset resumes", func() {
 		// Config: 2 prefill + 1 decode, BlueGreen.
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("pause-g"),
@@ -61,7 +61,7 @@ var _ = ginkgo.Describe("behavior — pause / resume", ginkgo.Ordered, func() {
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// G-1: group phase reaches Paused.
+		// group phase reaches Paused.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "pause-g")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
@@ -77,7 +77,7 @@ var _ = ginkgo.Describe("behavior — pause / resume", ginkgo.Ordered, func() {
 					"paused annotation must hold the group at Paused")
 		}, 2*time.Second, 200*time.Millisecond).Should(Succeed())
 
-		// G-2: remove pause annotation, group resumes to Idle.
+		// remove pause annotation, group resumes to Idle.
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "pause-g")
 			delete(cur.Annotations, "ome.io/rollout-paused")

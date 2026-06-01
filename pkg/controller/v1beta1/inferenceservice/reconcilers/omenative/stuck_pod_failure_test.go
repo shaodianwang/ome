@@ -133,8 +133,8 @@ func TestSurgeUpdate_RunContainerError_MarksInstanceFailed(t *testing.T) {
 // fix verification: a SurgeThenDrain surge pod stuck in
 // ImagePullBackOff past StuckPodFailureGracePeriod escalates the
 // Instance to Phase=Failed without waiting for the (default 30 min)
-// InstanceReadyTimeout deadline. Closes the X-1 reproduction reported
-// against the dev cluster.
+// InstanceReadyTimeout deadline. Closes the bad-image reproduction
+// (bad_image_kind spec) reported against the dev cluster.
 func TestSurgeUpdate_ImagePullBackOff_MarksInstanceFailed(t *testing.T) {
 	resetExpectations(t)
 	withStuckPodGracePeriod(t, 1*time.Second)
@@ -256,7 +256,8 @@ func TestSurgeUpdate_NoOperation_NoEscalation(t *testing.T) {
 }
 
 // TestSurgeUpdate_WedgedSurgePod_NoTransientPhase_EscalatesFailed pins
-// the X-1 follow-up scenario (task #52): the surge pod is stuck in
+// the bad-image (bad_image_kind) follow-up scenario (task #52): the
+// surge pod is stuck in
 // ImagePullBackOff but the InstanceStatus has somehow drifted out of
 // the {Creating, Updating, Restarting, Migrating} transient set —
 // Phase=Ready with Operation=nil — even though a pod whose
@@ -285,7 +286,8 @@ func TestSurgeUpdate_WedgedSurgePod_NoTransientPhase_EscalatesFailed(t *testing.
 	withStuckPodGracePeriod(t, 1*time.Second)
 
 	// Build a Phase=Ready, Operation=nil InstanceStatus — the post-#257
-	// X-1 cluster shape after the per-Instance state machine has been
+	// bad-image cluster shape after the per-Instance state machine has
+	// been
 	// reset somehow. RunningRevision points at the OLD CR (the canonical
 	// v1 pod); the surge pod alongside carries a NEW CR's revision-hash
 	// label (a stuck-bad-image surge attempt that never converged).
@@ -521,9 +523,9 @@ func TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd(t *testing.T) {
 // the end-to-end loop: a Phase=Failed InstanceStatus must lift into
 // ComponentObservation.Failed via the coordination layer's
 // buildComponentObservation, which the per-policy state machine reads
-// to flip the group's phase to Failed. Without this rollup, the X-1
-// fix would surface Instance.Failed but the group would still sit at
-// Surging / Waiting.
+// to flip the group's phase to Failed. Without this rollup, the
+// bad-image (bad_image_kind) fix would surface Instance.Failed but the
+// group would still sit at Surging / Waiting.
 //
 // Equivalent to PR #236's reconciler_test rollup tests; pinned here so
 // a refactor of buildComponentObservation can't silently break the

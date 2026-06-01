@@ -38,7 +38,7 @@ var _ = ginkgo.Describe("OMENative auto-migration on stuck Instance (KIND)", gin
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("AM-1 stuck Instance triggers auto-migration; retry cap escalates to Phase=Failed", func() {
+	ginkgo.It("stuck Instance triggers auto-migration; retry cap escalates to Phase=Failed", func() {
 		// Build the fixture with a bad image so the first pod NEVER
 		// becomes Ready. Configure ProgressDeadlineSeconds=30 and
 		// MaxAutoRetries=2 so the test fits the suite budget.

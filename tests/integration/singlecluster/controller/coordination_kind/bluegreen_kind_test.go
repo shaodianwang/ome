@@ -12,9 +12,10 @@ import (
 
 // Behavior test D — BlueGreen convergence.
 //
-// D-1/D-2/D-3/D-4 stay PIt because they require real surge or
-// controller-owned Service selector flips (HTTPRoute weighted cutover
-// territory).
+// "full surge observed", "v1 drain ordering", "traffic stays on v1
+// until all v2 serving", and "atomic flip is single-tick observable"
+// stay PIt because they require real surge or controller-owned Service
+// selector flips (HTTPRoute weighted cutover territory).
 var _ = ginkgo.Describe("behavior — BlueGreen", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -27,15 +28,15 @@ var _ = ginkgo.Describe("behavior — BlueGreen", ginkgo.Ordered, func() {
 	})
 
 	// PIt: requires real SurgeThenDrain (current code path delegates to recreate).
-	ginkgo.PIt("D-1 full surge observed", func() {})
+	ginkgo.PIt("full surge observed", func() {})
 	// PIt: requires real SurgeThenDrain so v1 + v2 can coexist.
-	ginkgo.PIt("D-2 v1 drain ordering", func() {})
+	ginkgo.PIt("v1 drain ordering", func() {})
 	// PIt: HTTPRoute weighted cutover owns traffic flips, not a controller-owned Service selector flip.
-	ginkgo.PIt("D-3 traffic stays on v1 until all v2 serving", func() {})
-	// PIt: same HTTPRoute cutover ownership as D-3.
-	ginkgo.PIt("D-4 atomic flip is single-tick observable", func() {})
+	ginkgo.PIt("traffic stays on v1 until all v2 serving", func() {})
+	// PIt: same HTTPRoute cutover ownership as the "traffic stays on v1" spec.
+	ginkgo.PIt("atomic flip is single-tick observable", func() {})
 
-	ginkgo.It("D-5 rollout converges to all pods on v2", func() {
+	ginkgo.It("rollout converges to all pods on v2", func() {
 		// Config: 4 prefill + 2 decode, BlueGreen group.
 		// Action: bump engine image v1 -> v2.
 		// Invariant: engine CurrentRevision advances off v1, both
@@ -83,16 +84,17 @@ var _ = ginkgo.Describe("behavior — BlueGreen", ginkgo.Ordered, func() {
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"D-5: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(4)))
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// PIt: covered by behavior_x_bad_image X-1 which uses a real bad image tag.
+	// PIt: covered by bad_image_kind which uses a real bad image tag.
 	ginkgo.PIt("F-1 group marked Failed when a v2 pod can't reach Ready", func() {})
-	// PIt: HTTPRoute weighted cutover ownership, same as D-3/D-4.
+	// PIt: HTTPRoute weighted cutover ownership, same as the "traffic stays
+	// on v1" / "atomic flip" PIt specs above.
 	ginkgo.PIt("F-2 no traffic flip on failure", func() {})
 	// PIt: depends on F-1 unlock.
 	ginkgo.PIt("F-3 v1 capacity preserved during failure", func() {})

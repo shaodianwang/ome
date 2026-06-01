@@ -10,14 +10,14 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-17 — Revert mid-rollout under RollingUpdate coord (the
+// Revert mid-rollout under RollingUpdate coord (the
 // operator panic-button workflow under RollingUpdate).
 //
-// KCG-4 covers the same cancel-via-revert workflow under BlueGreen.
-// KP-17 covers it under RollingUpdate (parallel per-Component
-// rollouts, no atomic gang flip). The contract: after a v1 → v2
-// rollout is mid-flight, reverting the image back to v1 must drive
-// the cluster state machine BACK to v1 with no v2 stragglers.
+// cancel_midrollout_kind covers the same cancel-via-revert workflow
+// under BlueGreen. This spec covers it under RollingUpdate (parallel
+// per-Component rollouts, no atomic gang flip). The contract: after a
+// v1 → v2 rollout is mid-flight, reverting the image back to v1 must
+// drive the cluster state machine BACK to v1 with no v2 stragglers.
 //
 // Setup: engine MinReplicas=3 + MaxUnavailable=1 under RollingUpdate
 // — multiple recreate cycles per Component give the revert plenty of
@@ -33,7 +33,7 @@ var _ = ginkgo.Describe("permutation — RollingUpdate cancel via revert", ginkg
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-17 RollingUpdate v1 → v2 → v1 revert converges back to v1 with no v2 stragglers", func() {
+	ginkgo.It("RollingUpdate v1 → v2 → v1 revert converges back to v1 with no v2 stragglers", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-ru-revert"),
 			WithEngineReplicas(3),
@@ -73,7 +73,7 @@ var _ = ginkgo.Describe("permutation — RollingUpdate cancel via revert", ginkg
 			c := freshISVC(g, ns.Name, "perm-ru-revert")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				NotTo(Equal(v1beta1.CoordinationPhaseIdle),
-					"KP-17: rollout must enter non-Idle before revert is applied")
+					"rollout must enter non-Idle before revert is applied")
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("reverting engine image back to v1 mid-rollout")
@@ -89,10 +89,10 @@ var _ = ginkgo.Describe("permutation — RollingUpdate cancel via revert", ginkg
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)),
-				"KP-17: engine must be back to 3 serving replicas after revert")
+				"engine must be back to 3 serving replicas after revert")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
-					"KP-17: rollout must return to Idle after revert converges")
+					"rollout must return to Idle after revert converges")
 
 			pods := listOMENativePods(g, ns.Name, "perm-ru-revert")
 			engCount, v1Count := 0, 0
@@ -111,9 +111,9 @@ var _ = ginkgo.Describe("permutation — RollingUpdate cancel via revert", ginkg
 				}
 			}
 			g.Expect(engCount).To(Equal(3),
-				"KP-17: expected 3 alive engine pods, got %d", engCount)
+				"expected 3 alive engine pods, got %d", engCount)
 			g.Expect(v1Count).To(Equal(3),
-				"KP-17: every alive engine pod must be on fake-serving:v1 after revert (got %d/%d v1 pods); a non-v1 pod = v2 straggler", v1Count, engCount)
+				"every alive engine pod must be on fake-serving:v1 after revert (got %d/%d v1 pods); a non-v1 pod = v2 straggler", v1Count, engCount)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Final no-flap check: 2s of stable Idle.
@@ -121,7 +121,7 @@ var _ = ginkgo.Describe("permutation — RollingUpdate cancel via revert", ginkg
 			c := freshISVC(g, ns.Name, "perm-ru-revert")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
-					"KP-17: post-revert state must be stable at Idle")
+					"post-revert state must be stable at Idle")
 		}, kindShortTimeout, kindPollInterval).Should(Succeed())
 	})
 })

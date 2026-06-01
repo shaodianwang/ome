@@ -9,7 +9,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-14 — Multi-pod (Worker.Size=2) + SurgeThenDrain falls back to
+// Multi-pod (Worker.Size=2) + SurgeThenDrain falls back to
 // RecreatePod (per docs).
 //
 // pkg/.../workload/ops/update.go around line 90 records:
@@ -39,7 +39,7 @@ var _ = ginkgo.Describe("permutation — multi-pod SurgeThenDrain falls back to 
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-14 multi-pod default SurgeThenDrain bumps Incarnation (recreate fallback) without surging pods", func() {
+	ginkgo.It("multi-pod default SurgeThenDrain bumps Incarnation (recreate fallback) without surging pods", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-mp-sfb"),
 			WithoutDecoder(),
 			WithEngineWorkerSize(2),
@@ -73,13 +73,13 @@ var _ = ginkgo.Describe("permutation — multi-pod SurgeThenDrain falls back to 
 			c := freshISVC(g, ns.Name, "perm-mp-sfb")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"KP-14: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
 			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).
 				To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(cs.Lifecycle.InstanceStatuses[0].Incarnation).
 				To(BeNumerically(">", v1Incarnation),
-					"KP-14: multi-pod SurgeThenDrain must fall back to recreate (Incarnation must bump)")
+					"multi-pod SurgeThenDrain must fall back to recreate (Incarnation must bump)")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Pod count stays at 3 — no surge to 4. The fallback is recreate,
@@ -93,6 +93,6 @@ var _ = ginkgo.Describe("permutation — multi-pod SurgeThenDrain falls back to 
 			}
 		}
 		Expect(alive).To(Equal(3),
-			"KP-14: multi-pod SurgeThenDrain fallback to recreate must NOT surge — alive engine pods %d should be 3", alive)
+			"multi-pod SurgeThenDrain fallback to recreate must NOT surge — alive engine pods %d should be 3", alive)
 	})
 })

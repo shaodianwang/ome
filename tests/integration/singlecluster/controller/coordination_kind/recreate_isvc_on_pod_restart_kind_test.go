@@ -11,7 +11,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KCG-2 — RecreateISVCOnPodRestart cascades a pod failure across every
+// RecreateISVCOnPodRestart cascades a pod failure across every
 // OMENative-managed Component in the ISVC.
 //
 // Gap-list item #2. `events RestartTriggered fires when a pod is deleted
@@ -48,7 +48,7 @@ var _ = ginkgo.Describe("behavior — RecreateISVCOnPodRestart cross-Component c
 	// implements the cascade (or the enum value is removed). See
 	// .claude/specs/2026-05-30-kind-test-walk/
 	//   recreate-isvc-on-pod-restart-no-cross-component-cascade.md
-	ginkgo.PIt("KCG-2 RecreateISVCOnPodRestart on engine cascades to decoder pod (both UIDs rotate)", func() {
+	ginkgo.PIt("RecreateISVCOnPodRestart on engine cascades to decoder pod (both UIDs rotate)", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("recreate-isvc-kcg2"),
 			WithEngineImage("fake-serving:v1"))
 		// Both Components opt into the cascade policy. The policy lives
@@ -125,14 +125,14 @@ var _ = ginkgo.Describe("behavior — RecreateISVCOnPodRestart cross-Component c
 				Namespace: ns.Name, Name: "recreate-isvc-kcg2-engine-0-default-0",
 			}, ePod)).To(Succeed())
 			g.Expect(string(ePod.UID)).NotTo(Equal(engineUIDv1),
-				"KCG-2: engine pod UID must rotate (the killed-and-recreated path)")
+				"engine pod UID must rotate (the killed-and-recreated path)")
 
 			dPod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "recreate-isvc-kcg2-decoder-0-default-0",
 			}, dPod)).To(Succeed())
 			g.Expect(string(dPod.UID)).NotTo(Equal(decoderUIDv1),
-				"KCG-2: decoder pod UID must ALSO rotate under RecreateISVCOnPodRestart "+
+				"decoder pod UID must ALSO rotate under RecreateISVCOnPodRestart "+
 					"(cross-Component cascade is the distinguishing contract vs. RecreateInstanceOnPodRestart). "+
 					"old=%s new=%s", decoderUIDv1, string(dPod.UID))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

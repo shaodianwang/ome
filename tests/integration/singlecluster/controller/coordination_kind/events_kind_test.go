@@ -129,7 +129,7 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 		// the in-place path: that requires UpdateStrategy=InPlaceIfPossible
 		// (default SurgeThenDrain routes through the surge path and emits
 		// RecreateUpdate* instead). Mirrors the canonical pattern in
-		// behavior_l_inplace_kind_test.go. The 3-replica fixture exercises
+		// inplace_kind_test.go. The 3-replica fixture exercises
 		// the multi-Instance dispatch loop so the InPlaceUpdateStarted
 		// event fires once per Instance.
 		fix := newCoordFixture(ns.Name, WithISVCName("evt-inplace-isvc"),

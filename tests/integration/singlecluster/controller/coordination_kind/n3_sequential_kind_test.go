@@ -11,19 +11,19 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KCG-1 — Sequential coordination policy spanning N=3 Components.
+// Sequential coordination policy spanning N=3 Components.
 //
-// Gap-list item #7. The existing D-2 spec asserts Sequential N=2
-// (decoder → engine). The Sequential state machine has to chain a
+// Gap-list item #7. The existing N=2 Sequential spec (sequential_kind)
+// asserts decoder → engine. The Sequential state machine has to chain a
 // second handoff when N=3: after Component A finishes, Component B
 // rolls; after B finishes, Component C rolls. The PD three-way suite
-// (PDX-*) covers 3-Component PD topologies but uses NO coordination
-// group, so it doesn't exercise the chained-handoff path.
+// (pd_three_way_kind) covers 3-Component PD topologies but uses NO
+// coordination group, so it doesn't exercise the chained-handoff path.
 //
 // This spec asserts the chained-handoff invariant against the
-// authoritative per-Component CurrentRevision (same shape as D-2's
+// authoritative per-Component CurrentRevision (same shape as the N=2
 // post-fix assertion — CompositePhase intentionally NOT consulted
-// because it's the same product surface that flakes in D-2).
+// because it's the same product surface that flakes in the N=2 spec).
 var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -35,7 +35,7 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KCG-1 Sequential N=3 chains handoffs router → decoder → engine across all three", func() {
+	ginkgo.It("Sequential N=3 chains handoffs router → decoder → engine across all three", func() {
 		// Order matters: router rolls first, then decoder, then engine.
 		// Sequential's per-Component pacing is MaxUnavailable=1 so each
 		// recreate takes one pod offline at a time.
@@ -142,14 +142,14 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "seq-n3-kcg1")
 			g.Expect(c.Status.Components[v1beta1.RouterComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1RouterRev),
-				"KCG-1: router CurrentRevision must advance off v1")
+				"router CurrentRevision must advance off v1")
 			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
-				"KCG-1: decoder CurrentRevision must advance off v1")
+				"decoder CurrentRevision must advance off v1")
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"KCG-1: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
-					"KCG-1: chained Sequential rollout must finish and return to Idle")
+					"chained Sequential rollout must finish and return to Idle")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		stop()
 
@@ -158,12 +158,12 @@ var _ = ginkgo.Describe("behavior — Sequential coordination (N=3)", ginkgo.Ord
 		// decoder rolled in parallel, or decoder + engine rolled in
 		// parallel).
 		Expect(sawRouterDoneWhileOthersV1).To(BeTrue(),
-			"KCG-1: never observed router rolled-off-v1 while decoder+engine still on v1 — "+
+			"never observed router rolled-off-v1 while decoder+engine still on v1 — "+
 				"Sequential ordering not enforced at handoff 1 (router → decoder). "+
 				"lastRouterRev=%s lastDecoderRev=%s lastEngineRev=%s",
 			lastRouterRev, lastDecoderRev, lastEngineRev)
 		Expect(sawDecoderDoneWhileEngineV1).To(BeTrue(),
-			"KCG-1: never observed decoder rolled-off-v1 while engine still on v1 — "+
+			"never observed decoder rolled-off-v1 while engine still on v1 — "+
 				"Sequential ordering not enforced at handoff 2 (decoder → engine). "+
 				"lastDecoderRev=%s lastEngineRev=%s",
 			lastDecoderRev, lastEngineRev)

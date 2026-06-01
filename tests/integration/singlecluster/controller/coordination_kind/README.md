@@ -28,37 +28,37 @@ vs. recreate updates.
 
 | Contract | Spec |
 |---|---|
-| BlueGreen converge | behavior_d_bluegreen D-5 |
-| RollingUpdate + RecreatePod | behavior_b_recreatepod B-1/2/3 |
-| BlueGreen + RecreatePod | recreate_pod RP-1/2/3 |
-| BlueGreen + RatioBalanced small | behavior_c_ratiobalanced C-1/4 |
-| BlueGreen + RatioBalanced load | behavior_h_loadtest H-1/2/3 |
-| Pause/resume Idle | behavior_g_pause G-1/2 |
-| Pause/resume mid-rollout | behavior_d_pause_midrollout D-7 |
-| Single-replica safe default | behavior_i_single_replica I-1 |
-| In-place opt-in | behavior_l_inplace L-1/2/3 |
-| Sequential | behavior_d_sequential D-2 |
-| Independent | behavior_d_independent D-4 |
-| PerComponent maxSurge | behavior_e_percomponent_surge E-1 |
-| Sequential.Soak wall-clock | behavior_g_sequential_soak G-4 |
-| PD-disaggregated isolation | pd_isolation + pd PD-1/5/7 |
-| PD three-way (Engine+Decoder+Router) | pd_three_way PDX-1..7 |
-| PD concurrent ops | pd_concurrent PDA-1/2 |
-| Annotation-driven migration | migrate (8 specs) |
-| ObservedGeneration + per-Instance counters | status_surface + status |
-| Event recorder firing | events (7 specs) |
-| Pod-state watch filters (label, cross-ISVC) | watches |
-| Scale up/down + pod lifecycle | lifecycle |
-| In-place update edge cases | update |
-| State-machine interleavings | interleave INT-5 + interleave_extra INT-1..4/6 |
-| Runtime+model resolution (CBM/CSR stall, missing CSR) | runtime_resolution RT-4/5 |
-| Partial failure recovery | partial_failure PF-1/2/3 |
-| Bad-image failure → Failed | behavior_x_bad_image X-1 |
-| ISVC delete cascade (pods/Services/CRs) | cleanup_lifecycle LIFE-DEL |
-| Per-pod headless DNS + EndpointSlice hostname | peer_discovery PEER-DNS |
-| Per-revision Service emission + drift correction | producer_services SVC-1/2 |
-| Status.Components.Traffic[] steady + mid-bump | producer_traffic TRAFFIC-1/2 |
-| No RolloutCoordinationReady stamped without coord block | regression REG-1+10 |
+| BlueGreen converge | bluegreen_kind |
+| RollingUpdate + RecreatePod | rolling_recreatepod_kind (B-1/2/3) |
+| BlueGreen + RecreatePod | recreate_pod_kind |
+| BlueGreen + RatioBalanced small | ratiobalanced_kind (C-1/4) |
+| BlueGreen + RatioBalanced load | loadtest_kind |
+| Pause/resume Idle | pause_kind |
+| Pause/resume mid-rollout | pause_midrollout_kind |
+| Single-replica safe default | single_replica_kind |
+| In-place opt-in | inplace_kind |
+| Sequential | sequential_kind |
+| Independent | independent_kind |
+| PerComponent maxSurge | percomponent_surge_kind (E-1) |
+| Sequential.Soak wall-clock | sequential_soak_kind |
+| PD-disaggregated isolation | pd_isolation_kind + pd_kind |
+| PD three-way (Engine+Decoder+Router) | pd_three_way_kind |
+| PD concurrent ops | pd_concurrent_kind (PDA-1/2) |
+| Annotation-driven migration | migrate_kind (8 specs) |
+| ObservedGeneration + per-Instance counters | status_surface_kind + status_kind |
+| Event recorder firing | events_kind (7 specs) |
+| Pod-state watch filters (label, cross-ISVC) | watches_kind |
+| Scale up/down + pod lifecycle | lifecycle_kind |
+| In-place update edge cases | update_kind |
+| State-machine interleavings | interleave_kind (INT-5) + interleave_extra_kind (INT-1..4/6) |
+| Runtime+model resolution (CBM/CSR stall, missing CSR) | runtime_resolution_kind (RT-4/5) |
+| Partial failure recovery | partial_failure_kind (PF-1/2/3) |
+| Bad-image failure → Failed | bad_image_kind |
+| ISVC delete cascade (pods/Services/CRs) | cleanup_lifecycle_kind (LIFE-DEL) |
+| Per-pod headless DNS + EndpointSlice hostname | peer_discovery_kind (PEER-DNS) |
+| Per-revision Service emission + drift correction | producer_services_kind (SVC-1/2) |
+| Status.Components.Traffic[] steady + mid-bump | producer_traffic_kind (TRAFFIC-1/2) |
+| No RolloutCoordinationReady stamped without coord block | regression_kind (REG-1+10) |
 
 ## Running locally
 
@@ -105,4 +105,4 @@ KIND_KEEP_CLUSTER=true \
 3. If the test images need to differ (in-place tests need distinct
    digests, not aliases), use `kindutil.ImageBuildSpec.BuildArgs`
    threaded through `suite_test.go` to give each tag a real content
-   diff (see L-* for the pattern).
+   diff (see `inplace_kind_test.go` for the pattern).

@@ -14,7 +14,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-4 — BlueGreen + RatioBalanced pacing + InPlaceIfPossible.
+// BlueGreen + RatioBalanced pacing + InPlaceIfPossible.
 //
 // RatioBalanced gates surge based on the live engine:decoder ratio.
 // In-place patches don't add or remove pods (UIDs preserved), so the
@@ -39,7 +39,7 @@ var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", gin
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-4 RatioBalanced + InPlace holds ratio steady and preserves pod UIDs", func() {
+	ginkgo.It("RatioBalanced + InPlace holds ratio steady and preserves pod UIDs", func() {
 		tol := int32(25)
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-ratio-inplace"),
@@ -102,10 +102,10 @@ var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", gin
 			}
 			ratio := float64(eng) / float64(dec)
 			g.Expect(ratio).To(BeNumerically(">=", 1.5),
-				"KP-4: ratio %.2f (eng=%d dec=%d) below band lower 1.5 — RatioBalanced over-blocked an in-place rollout",
+				"ratio %.2f (eng=%d dec=%d) below band lower 1.5 — RatioBalanced over-blocked an in-place rollout",
 				ratio, eng, dec)
 			g.Expect(ratio).To(BeNumerically("<=", 2.5),
-				"KP-4: ratio %.2f (eng=%d dec=%d) above band upper 2.5",
+				"ratio %.2f (eng=%d dec=%d) above band upper 2.5",
 				ratio, eng, dec)
 		})
 		defer stop()
@@ -122,13 +122,13 @@ var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", gin
 			c := freshISVC(g, ns.Name, "perm-ratio-inplace")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"KP-4: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		stop()
 		Expect(samples.Load()).To(BeNumerically(">=", 3),
-			"KP-4: sampler observed only %d samples during the rollout; ratio band was not meaningfully checked",
+			"sampler observed only %d samples during the rollout; ratio band was not meaningfully checked",
 			samples.Load())
 
 		// Pod UID preservation (in-place must keep all 6 pods).
@@ -138,9 +138,9 @@ var _ = ginkgo.Describe("permutation — RatioBalanced + InPlaceIfPossible", gin
 			for _, p := range snap.ByComponent[comp] {
 				origUID, ok := v1UIDs[p.Name]
 				Expect(ok).To(BeTrue(),
-					"KP-4: post-bump %s pod %s should have been present at v1", comp, p.Name)
+					"post-bump %s pod %s should have been present at v1", comp, p.Name)
 				Expect(p.UID).To(Equal(origUID),
-					"KP-4: in-place must preserve %s pod UID for %s (got %s, want %s)",
+					"in-place must preserve %s pod UID for %s (got %s, want %s)",
 					comp, p.Name, p.UID, origUID)
 			}
 		}

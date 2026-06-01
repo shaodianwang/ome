@@ -10,11 +10,12 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-10 — scale-down engine MinReplicas from 4 → 2 during a BlueGreen
+// scale-down engine MinReplicas from 4 → 2 during a BlueGreen
 // rollout.
 //
-// Symmetric to KP-9 (scale-up under Sequential) but exercises the
-// scale-down code path under BlueGreen pacing. The operator pushes a
+// Symmetric to the scale-up-under-Sequential spec
+// (sequential_scale_during_kind) but exercises the scale-down code path
+// under BlueGreen pacing. The operator pushes a
 // single spec change that both (a) drops engine MinReplicas and (b)
 // bumps the image. The reconciler must converge to 2 engine pods on
 // v2 — not leave orphan v1 pods around from the pre-scale-down
@@ -31,7 +32,7 @@ var _ = ginkgo.Describe("permutation — BlueGreen + scale-down during rollout",
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-10 BlueGreen converges to 2 engine pods on v2 after a combined scale-down + bump", func() {
+	ginkgo.It("BlueGreen converges to 2 engine pods on v2 after a combined scale-down + bump", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-bg-scaledown"),
 			WithEngineReplicas(4),
@@ -73,9 +74,9 @@ var _ = ginkgo.Describe("permutation — BlueGreen + scale-down during rollout",
 			c := freshISVC(g, ns.Name, "perm-bg-scaledown")
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"KP-10: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)),
-				"KP-10: engine must converge to 2 serving replicas on v2 (not stuck at 4)")
+				"engine must converge to 2 serving replicas on v2 (not stuck at 4)")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -91,6 +92,6 @@ var _ = ginkgo.Describe("permutation — BlueGreen + scale-down during rollout",
 			alive++
 		}
 		Expect(alive).To(Equal(2),
-			"KP-10: expected exactly 2 alive engine pods post-converge, got %d (excess pods = v1 stragglers)", alive)
+			"expected exactly 2 alive engine pods post-converge, got %d (excess pods = v1 stragglers)", alive)
 	})
 })

@@ -10,11 +10,12 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-6 — BlueGreen across 3 Components.
+// BlueGreen across 3 Components.
 //
-// KCG-1 covers Sequential N=3; D-5 covers BlueGreen N=2. This spec
-// pins BlueGreen at N=3, where the gang-flip semantic crosses all
-// three Components (engine + decoder + router) in lockstep.
+// n3_sequential_kind covers Sequential N=3; bluegreen_kind covers
+// BlueGreen N=2. This spec pins BlueGreen at N=3, where the gang-flip
+// semantic crosses all three Components (engine + decoder + router) in
+// lockstep.
 //
 // Asserts:
 //   - All three Components advance off v1 once the bump is applied.
@@ -31,7 +32,7 @@ var _ = ginkgo.Describe("permutation — BlueGreen N=3 gang-flip", ginkgo.Ordere
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-6 BlueGreen N=3 rolls all three Components and returns to Idle", func() {
+	ginkgo.It("BlueGreen N=3 rolls all three Components and returns to Idle", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-bg-n3"),
 			WithRouter(),
@@ -100,13 +101,13 @@ var _ = ginkgo.Describe("permutation — BlueGreen N=3 gang-flip", ginkgo.Ordere
 				cs := c.Status.Components[comp]
 				g.Expect(cs.Lifecycle).NotTo(BeNil())
 				g.Expect(cs.Lifecycle.CurrentRevision).NotTo(Equal(v1Revs[comp]),
-					"KP-6: Component %s CurrentRevision must advance off v1", comp)
+					"Component %s CurrentRevision must advance off v1", comp)
 				g.Expect(cs.Lifecycle.ServingReplicas).To(BeNumerically(">=", 1),
-					"KP-6: Component %s must remain serving on v2", comp)
+					"Component %s must remain serving on v2", comp)
 			}
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
-					"KP-6: BlueGreen N=3 rollout must return to Idle")
+					"BlueGreen N=3 rollout must return to Idle")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

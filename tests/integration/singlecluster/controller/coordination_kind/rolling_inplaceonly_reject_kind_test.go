@@ -11,7 +11,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-2 — RollingUpdate + InPlaceOnly + env-only change.
+// RollingUpdate + InPlaceOnly + env-only change.
 //
 // chooseUpdateMode rejects InPlaceOnly when the diff exceeds image-only
 // (an env-var change requires recreate to take effect). The runtime
@@ -21,7 +21,7 @@ import (
 // At the coordination layer the rollout SHOULD stay non-Failed at
 // group level — the per-Instance reject is not the same kind of
 // permanent failure as a pod that can't reach Ready (compare F-* /
-// behavior_x_bad_image which DO drive the group to Failed). This spec
+// bad_image_kind which DO drive the group to Failed). This spec
 // pins both halves of that contract:
 //
 //   - InPlaceUpdateNotPossible event is recorded.
@@ -38,7 +38,7 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceOnly env-change 
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-2 InPlaceOnly + env-change emits InPlaceUpdateNotPossible event and holds CurrentRevision", func() {
+	ginkgo.It("InPlaceOnly + env-change emits InPlaceUpdateNotPossible event and holds CurrentRevision", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-ru-iponly"),
 			WithoutDecoder(),
 			WithEngineReplicas(2),
@@ -90,7 +90,7 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceOnly env-change 
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.CurrentRevision).To(Equal(v1EngineRev),
-				"KP-2: InPlaceOnly + env-change must NOT advance CurrentRevision off v1")
+				"InPlaceOnly + env-change must NOT advance CurrentRevision off v1")
 		}, 5*time.Second, kindPollInterval).Should(Succeed())
 
 		// Group phase MUST NOT be Failed — this is a per-Instance
@@ -99,7 +99,7 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceOnly env-change 
 			c := freshISVC(g, ns.Name, "perm-ru-iponly")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				NotTo(Equal(v1beta1.CoordinationPhaseFailed),
-					"KP-2: per-Instance InPlaceOnly reject must NOT drive group to Failed")
+					"per-Instance InPlaceOnly reject must NOT drive group to Failed")
 		}, 5*time.Second, kindPollInterval).Should(Succeed())
 	})
 })

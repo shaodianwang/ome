@@ -13,7 +13,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-1 — RollingUpdate coordination + InPlaceIfPossible per-Component.
+// RollingUpdate coordination + InPlaceIfPossible per-Component.
 //
 // Covers a permutation the existing matrix didn't: the RollingUpdate
 // coordination policy paired with InPlaceIfPossible update strategy on
@@ -40,7 +40,7 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceIfPossible", gin
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-1 RollingUpdate + InPlace per-Component patches both Components in place", func() {
+	ginkgo.It("RollingUpdate + InPlace per-Component patches both Components in place", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-ru-inplace"),
 			WithEngineReplicas(2),
@@ -103,9 +103,9 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceIfPossible", gin
 				return
 			}
 			g.Expect(snap.Serving(v1beta1.EngineComponent)).To(BeNumerically(">=", 1),
-				"KP-1: engine MaxUnavailable=1 — at least 1 of 2 pods must stay serving")
+				"engine MaxUnavailable=1 — at least 1 of 2 pods must stay serving")
 			g.Expect(snap.Serving(v1beta1.DecoderComponent)).To(BeNumerically(">=", 1),
-				"KP-1: decoder MaxUnavailable=1 — at least 1 of 2 pods must stay serving")
+				"decoder MaxUnavailable=1 — at least 1 of 2 pods must stay serving")
 		})
 		defer stop()
 
@@ -123,14 +123,14 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceIfPossible", gin
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"KP-1: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(decCS.Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
-				"KP-1: decoder CurrentRevision must advance off v1")
+				"decoder CurrentRevision must advance off v1")
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 			g.Expect(decCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
-					"KP-1: rollout must return to Idle")
+					"rollout must return to Idle")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		stop()
 
@@ -143,17 +143,17 @@ var _ = ginkgo.Describe("permutation — RollingUpdate + InPlaceIfPossible", gin
 		for _, p := range snap.ByComponent[v1beta1.EngineComponent] {
 			origUID, ok := engineV1UIDs[p.Name]
 			Expect(ok).To(BeTrue(),
-				"KP-1: post-bump engine pod %s should have been present at v1 (same name)", p.Name)
+				"post-bump engine pod %s should have been present at v1 (same name)", p.Name)
 			Expect(p.UID).To(Equal(origUID),
-				"KP-1: in-place must preserve engine pod UID for %s (got %s, want %s) — recreate would mint a new UID",
+				"in-place must preserve engine pod UID for %s (got %s, want %s) — recreate would mint a new UID",
 				p.Name, p.UID, origUID)
 		}
 		for _, p := range snap.ByComponent[v1beta1.DecoderComponent] {
 			origUID, ok := decoderV1UIDs[p.Name]
 			Expect(ok).To(BeTrue(),
-				"KP-1: post-bump decoder pod %s should have been present at v1 (same name)", p.Name)
+				"post-bump decoder pod %s should have been present at v1 (same name)", p.Name)
 			Expect(p.UID).To(Equal(origUID),
-				"KP-1: in-place must preserve decoder pod UID for %s (got %s, want %s)",
+				"in-place must preserve decoder pod UID for %s (got %s, want %s)",
 				p.Name, p.UID, origUID)
 		}
 	})

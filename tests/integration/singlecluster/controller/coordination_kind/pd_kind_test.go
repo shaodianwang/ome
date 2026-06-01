@@ -15,18 +15,19 @@ import (
 // OMENative PD-disaggregated foundation specs ported from envtest
 // pd_test.go. Each spec asserts a slice of the per-Component isolation
 // contract — none rely on OEP-0007.1 coordination policies (those are
-// covered in behavior_d_*, behavior_e_*, etc.).
+// covered in the sibling bluegreen / sequential / independent / pause
+// / inplace specs in this package).
 //
 // Already covered by pd_isolation_kind_test.go (dropped here):
-//   - PD-2: each Component owns a distinct ControllerRevision
-//   - PD-3: each Component owns a distinct headless Service
-//   - PD-4: Engine image bump leaves Decoder CR set untouched
-//   - PD-8: Engine MinReplicas scale doesn't change Decoder
+//   - each Component owns a distinct ControllerRevision
+//   - each Component owns a distinct headless Service
+//   - Engine image bump leaves Decoder CR set untouched
+//   - Engine MinReplicas scale doesn't change Decoder
 //
 // Already covered by cleanup_lifecycle_kind_test.go LIFE-DEL (KIND
 // runs real kube-controller-manager so cascade actually fires, not
 // just the OwnerRef shape check the envtest spec did):
-//   - PD-6: deleting the ISVC cascades to both Components' children
+//   - deleting the ISVC cascades to both Components' children
 var _ = ginkgo.Describe("OMENative PD-disaggregated foundation (KIND)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 
@@ -40,11 +41,11 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation (KIND)", ginkgo.O
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// PD-1 — Both Engine and Decoder reach Ready independently when
+	// Both Engine and Decoder reach Ready independently when
 	// each carries the OMENative annotation. Without the
 	// DetermineDeploymentModes fix the Decoder would be silently
 	// routed to RawDeployment.
-	ginkgo.It("PD-1: Engine + Decoder ISVC converges with both InstanceStatuses Ready", func() {
+	ginkgo.It("Engine + Decoder ISVC converges with both InstanceStatuses Ready", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pd1-isvc"),
 			WithEngineImage("fake-serving:v1"))
 		applyFixture(Default, fix)
@@ -80,12 +81,12 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation (KIND)", ginkgo.O
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// PD-5 — Component-scoped migration only walks the named
+	// Component-scoped migration only walks the named
 	// Component. Engine-targeted request must not perturb Decoder.
 	// Without the component-filter in pendingMigrationRequest, the
 	// Decoder reconcile would pick up the Engine request and surge
 	// against the wrong pod.
-	ginkgo.It("PD-5: a Component-scoped migration request only walks the named Component", func() {
+	ginkgo.It("a Component-scoped migration request only walks the named Component", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pd5-isvc"),
 			WithEngineImage("fake-serving:v1"))
 		applyFixture(Default, fix)
@@ -153,13 +154,13 @@ var _ = ginkgo.Describe("OMENative PD-disaggregated foundation (KIND)", ginkgo.O
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	// PD-7 — Restart on one Component must NOT bump the other's
+	// Restart on one Component must NOT bump the other's
 	// Incarnation. Fail an Engine pod; the Engine instance restarts and
 	// the Engine Incarnation bumps. Decoder Incarnation stays put.
 	// Without per-Component expectations key, a stale ObservedDelete
 	// against the wrong (namespace, isvc, component, instance) could
 	// stall Decoder progress.
-	ginkgo.It("PD-7: failing an Engine pod restarts Engine without touching Decoder Incarnation", func() {
+	ginkgo.It("failing an Engine pod restarts Engine without touching Decoder Incarnation", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("pd7-isvc"),
 			WithEngineImage("fake-serving:v1"))
 		// Restart on pod-delete (real kubelet flavor).

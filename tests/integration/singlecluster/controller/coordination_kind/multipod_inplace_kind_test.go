@@ -9,7 +9,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KP-12 — Multi-pod (Worker.Size=2) Instance with InPlaceIfPossible.
+// Multi-pod (Worker.Size=2) Instance with InPlaceIfPossible.
 //
 // Per the production note in pkg/.../workload/ops/update.go around
 // chooseUpdateModeForInstance, multi-pod with in-place modes falls
@@ -34,7 +34,7 @@ var _ = ginkgo.Describe("permutation — multi-pod InPlaceIfPossible falls back 
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KP-12 multi-pod + InPlaceIfPossible image bump produces recreate (UIDs not preserved)", func() {
+	ginkgo.It("multi-pod + InPlaceIfPossible image bump produces recreate (UIDs not preserved)", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-mp-ip"),
 			WithoutDecoder(),
 			WithEngineWorkerSize(2),
@@ -80,19 +80,19 @@ var _ = ginkgo.Describe("permutation — multi-pod InPlaceIfPossible falls back 
 			c := freshISVC(g, ns.Name, "perm-mp-ip")
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"KP-12: engine CurrentRevision must advance off v1")
+				"engine CurrentRevision must advance off v1")
 			g.Expect(cs.Lifecycle.InstanceStatuses).To(HaveLen(1))
 			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).
 				To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(cs.Lifecycle.InstanceStatuses[0].Incarnation).
 				To(BeNumerically(">", v1Incarnation),
-					"KP-12: multi-pod InPlaceIfPossible must route to recreate (Incarnation must bump); in-place would keep the same Incarnation")
+					"multi-pod InPlaceIfPossible must route to recreate (Incarnation must bump); in-place would keep the same Incarnation")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Pod count stays at 3 across the rollout end-state.
 		snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, "perm-mp-ip")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(snap.Alive(v1beta1.EngineComponent)).To(Equal(3),
-			"KP-12: multi-pod end-state must still have 3 pods (leader + 2 workers)")
+			"multi-pod end-state must still have 3 pods (leader + 2 workers)")
 	})
 })

@@ -26,7 +26,7 @@ var _ = ginkgo.Describe("behavior — single-replica safe default", ginkgo.Order
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("I-1 default config does not deadlock at 1 replica", func() {
+	ginkgo.It("default config does not deadlock at 1 replica", func() {
 		// Config: 1 prefill + 1 decoder, BlueGreen with DEFAULT pacing
 		// (no explicit Pacing block — exercises the default
 		// maxSurge=25%, maxUnavailable=25%). At single-replica both
@@ -77,5 +77,5 @@ var _ = ginkgo.Describe("behavior — single-replica safe default", ginkgo.Order
 	})
 
 	// PIt: requires full SurgeThenDrain; currently delegates to recreate which has a brief gap per pod.
-	ginkgo.PIt("I-2 serving stays >= 1 throughout", func() {})
+	ginkgo.PIt("serving stays >= 1 throughout", func() {})
 })

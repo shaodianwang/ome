@@ -79,8 +79,8 @@ func SampleDuringRollout(ctx context.Context, done <-chan struct{}, interval tim
 // implementation timed out after 2*interval and returned to the caller,
 // leaving a live goroutine that would observe namespace-teardown state and
 // queue a gomega.Fail against whichever spec was active next — see the
-// 2026-05-30 sampler-goroutine-leak bug report attributing an RP-1
-// serving-floor failure to a later InPlaceOnly spec.
+// 2026-05-30 sampler-goroutine-leak bug report attributing a
+// recreate_pod_kind serving-floor failure to a later InPlaceOnly spec.
 //
 // Risk: a sampleFn that blocks forever (e.g., an apiserver call with no
 // timeout) will now hang Stop forever. Mitigation: pass a ctx that the

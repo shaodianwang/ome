@@ -12,34 +12,37 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// D-7 — pause/resume MID-ROLLOUT (not Idle-pause).
+// Pause mid-Sequential rollout, then resume.
 //
-// G (the Idle-pause spec) verifies the annotation drives a converged
-// group to Paused. D-7 verifies the same annotation freezes a group
-// that's IN the middle of a rollout — the case operators actually
-// care about ("hit pause if a bad bump is in progress"). Real
-// kubelet's seconds-long rollout window makes this case observable.
-var _ = ginkgo.Describe("behavior — pause mid-rollout", ginkgo.Ordered, func() {
+// pause_midrollout_kind covers pause mid-BlueGreen. This spec pins the
+// same pause-then-resume contract for the Sequential coord policy: the
+// pause annotation must freeze a Sequential rollout that is between
+// Component handoffs, and removing it must let the chain finish.
+//
+// Setup: decoder + engine, each with 2 replicas, Sequential
+// Order=[decoder, engine]. Pause is applied AFTER the rollout has
+// entered a non-Idle phase. Then unpause and assert convergence to
+// v2 on both Components.
+var _ = ginkgo.Describe("permutation — pause mid-Sequential rollout", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
 		var err error
-		ns, err = util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "pause-mid-d7-")
+		ns, err = util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "perm-seq-pause-")
 		Expect(err).NotTo(HaveOccurred())
 	})
 	ginkgo.AfterEach(func() {
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("D-7 pause annotation freezes a mid-rollout group; unset resumes", func() {
-		// Config: 4 engine + 1 decoder, BlueGreen, MaxUnavailable=1.
-		// 4 engine recreates @ ~3s each = ~12s window — plenty of time
-		// to land the pause annotation in the middle.
+	ginkgo.It("pause annotation freezes a Sequential rollout; unset resumes the chain", func() {
 		maxUnavail := intstr.FromInt(1)
-		fix := newCoordFixture(ns.Name, WithISVCName("pause-mid-d7"),
-			WithEngineReplicas(4),
+		fix := newCoordFixture(ns.Name, WithISVCName("perm-seq-pause"),
+			WithEngineReplicas(2),
+			WithDecoderReplicas(2),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
-				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyBlueGreen,
+				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+				Policy:     v1beta1.CoordinationPolicySequential,
+				Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 				Pacing: &v1beta1.CoordinationPacing{
 					MaxUnavailable: &maxUnavail,
 				},
@@ -49,38 +52,34 @@ var _ = ginkgo.Describe("behavior — pause mid-rollout", ginkgo.Ordered, func()
 		deferFixtureCleanup(fix)
 
 		Eventually(func(g Gomega) {
-			c := freshISVC(g, ns.Name, "pause-mid-d7")
+			c := freshISVC(g, ns.Name, "perm-seq-pause")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle))
-			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(4)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		preBump := freshISVC(Default, ns.Name, "pause-mid-d7")
+		preBump := freshISVC(Default, ns.Name, "perm-seq-pause")
 		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
+		v1DecoderRev := preBump.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision
 
-		// Bump engine to v2.
+		// Bump BOTH images — Sequential will roll decoder first.
 		Eventually(func(g Gomega) {
-			cur := freshISVC(g, ns.Name, "pause-mid-d7")
+			cur := freshISVC(g, ns.Name, "perm-seq-pause")
 			cur.Spec.Engine.PodSpec.Containers[0].Image = "fake-serving:v2"
+			cur.Spec.Decoder.PodSpec.Containers[0].Image = "fake-serving:v2"
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Wait for the rollout to enter a non-Idle phase (Surging
-		// during BlueGreen). This is the "mid-rollout" gate — without
-		// it the test races the rollout completion and pauses too
-		// late.
+		// Wait for the rollout to enter a non-Idle phase, then pause.
 		Eventually(func(g Gomega) {
-			c := freshISVC(g, ns.Name, "pause-mid-d7")
+			c := freshISVC(g, ns.Name, "perm-seq-pause")
 			phase := c.Status.RolloutCoordination.Groups[0].Phase
 			g.Expect(phase).NotTo(Equal(v1beta1.CoordinationPhaseIdle),
-				"D-7: rollout should have entered a non-Idle phase before pause is applied")
+				"rollout must enter non-Idle before pause is applied")
 		}).WithTimeout(kindMediumTimeout).WithPolling(50 * time.Millisecond).Should(Succeed())
 
-		// Land the pause annotation mid-rollout.
 		Eventually(func(g Gomega) {
-			cur := freshISVC(g, ns.Name, "pause-mid-d7")
+			cur := freshISVC(g, ns.Name, "perm-seq-pause")
 			if cur.Annotations == nil {
 				cur.Annotations = map[string]string{}
 			}
@@ -90,37 +89,36 @@ var _ = ginkgo.Describe("behavior — pause mid-rollout", ginkgo.Ordered, func()
 
 		// Phase reaches Paused.
 		Eventually(func(g Gomega) {
-			c := freshISVC(g, ns.Name, "pause-mid-d7")
+			c := freshISVC(g, ns.Name, "perm-seq-pause")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhasePaused),
-					"D-7: pause annotation must drive group to Paused even mid-rollout")
+					"pause must drive Sequential group to Paused mid-rollout")
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Hold Paused for 2s. The intent is "freeze further rollout
-		// activity" — Phase must not flip out of Paused while the
-		// annotation is set.
+		// Hold Paused for 2s.
 		Consistently(func(g Gomega) {
-			c := freshISVC(g, ns.Name, "pause-mid-d7")
+			c := freshISVC(g, ns.Name, "perm-seq-pause")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhasePaused),
-					"D-7: paused phase must hold while annotation is set")
+					"paused phase must hold while annotation is set")
 		}, 2*time.Second, 200*time.Millisecond).Should(Succeed())
 
-		// Unpause. Rollout resumes and converges.
+		// Unpause. Sequential chain resumes and finishes.
 		Eventually(func(g Gomega) {
-			cur := freshISVC(g, ns.Name, "pause-mid-d7")
+			cur := freshISVC(g, ns.Name, "perm-seq-pause")
 			delete(cur.Annotations, "ome.io/rollout-paused")
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
-			c := freshISVC(g, ns.Name, "pause-mid-d7")
-			engCS := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
-				"D-7: after unpause, engine CurrentRevision must advance to v2")
+			c := freshISVC(g, ns.Name, "perm-seq-pause")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1EngineRev),
+				"after unpause, engine CurrentRevision must advance to v2")
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.CurrentRevision).NotTo(Equal(v1DecoderRev),
+				"after unpause, decoder CurrentRevision must advance to v2")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
-					"D-7: rollout must finish and return to Idle after unpause")
+					"Sequential rollout must return to Idle after unpause")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

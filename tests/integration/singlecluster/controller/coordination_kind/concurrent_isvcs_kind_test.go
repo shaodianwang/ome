@@ -10,7 +10,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KCG-5 — three independent ISVCs in the same namespace all reach Ready,
+// three independent ISVCs in the same namespace all reach Ready,
 // and their per-revision Service selectors don't cross-match across
 // ISVCs.
 //
@@ -35,7 +35,7 @@ var _ = ginkgo.Describe("behavior — concurrent ISVCs in same namespace", ginkg
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KCG-5 three ISVCs same NS reach Ready; per-revision Services are isolated by ome.io/inferenceservice", func() {
+	ginkgo.It("three ISVCs same NS reach Ready; per-revision Services are isolated by ome.io/inferenceservice", func() {
 		// Each ISVC gets its own (CBM, CSR, ISVC) triplet so the
 		// per-ISVC reconciler streams are fully independent. The
 		// fixture's default behaviour (CBM/CSR named after the ISVC) is
@@ -73,20 +73,20 @@ var _ = ginkgo.Describe("behavior — concurrent ISVCs in same namespace", ginkg
 		// matches exactly ONE of our three ISVC names.
 		svcs := listPerRevisionServices(Default, ns.Name)
 		Expect(len(svcs)).To(BeNumerically(">=", len(names)),
-			"KCG-5: expected at least one per-revision Service per ISVC; got %d Services for %d ISVCs",
+			"expected at least one per-revision Service per ISVC; got %d Services for %d ISVCs",
 			len(svcs), len(names))
 
 		perISVCSvcCount := map[string]int{}
 		for _, svc := range svcs {
 			isvcLabel, hasISVC := svc.Spec.Selector[constants.InferenceServicePodLabelKey]
 			Expect(hasISVC).To(BeTrue(),
-				"KCG-5: per-revision Service %s missing %s selector key — would cross-match ISVCs",
+				"per-revision Service %s missing %s selector key — would cross-match ISVCs",
 				svc.Name, constants.InferenceServicePodLabelKey)
 			perISVCSvcCount[isvcLabel]++
 		}
 		for _, n := range names {
 			Expect(perISVCSvcCount[n]).To(BeNumerically(">=", 1),
-				"KCG-5: ISVC %s must own at least one per-revision Service; perISVCSvcCount=%v",
+				"ISVC %s must own at least one per-revision Service; perISVCSvcCount=%v",
 				n, perISVCSvcCount)
 		}
 
@@ -100,10 +100,10 @@ var _ = ginkgo.Describe("behavior — concurrent ISVCs in same namespace", ginkg
 		for _, n := range names {
 			pods := listOMENativePods(Default, ns.Name, n)
 			Expect(pods).NotTo(BeEmpty(),
-				"KCG-5: ISVC %s must have at least one OMENative-managed pod", n)
+				"ISVC %s must have at least one OMENative-managed pod", n)
 			for _, pod := range pods {
 				Expect(pod.Labels[constants.InferenceServicePodLabelKey]).To(Equal(n),
-					"KCG-5: pod %s/%s carries %s=%q, expected %q",
+					"pod %s/%s carries %s=%q, expected %q",
 					pod.Namespace, pod.Name,
 					constants.InferenceServicePodLabelKey,
 					pod.Labels[constants.InferenceServicePodLabelKey], n)

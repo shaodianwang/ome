@@ -12,7 +12,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// G-4 — Sequential.Soak as a real wall-clock gate.
+// Sequential.Soak as a real wall-clock gate.
 //
 // When Sequential is paired with Soak, the controller must hold the
 // next Component at Sequential.Awaiting for the full configured
@@ -62,7 +62,7 @@ var _ = ginkgo.Describe("behavior — Sequential.Soak wall-clock", ginkgo.Ordere
 	// not re-derived), gate both surfaces against it, and rewrite this
 	// spec to assert on the engine pod's creationTimestamp >= decoder
 	// ready time + soak (a deterministic signal immune to rollout speed).
-	ginkgo.It("G-4 Sequential.Soak holds the next Component for the configured duration", func() {
+	ginkgo.It("Sequential.Soak holds the next Component for the configured duration", func() {
 		const soakDuration = 15 * time.Second
 		fix := newCoordFixture(ns.Name, WithISVCName("soak-g4"),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
@@ -127,7 +127,7 @@ var _ = ginkgo.Describe("behavior — Sequential.Soak wall-clock", ginkgo.Ordere
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		elapsed := time.Since(bumpedAt)
 
-		// G-4: total elapsed from bump → engine done must be at least
+		// total elapsed from bump → engine done must be at least
 		// soak duration. Anything less means the soak gate was bypassed
 		// (engine started before the soak window elapsed). Allow 1s
 		// slack for kindPollInterval observation cadence. Per-Component
@@ -135,6 +135,6 @@ var _ = ginkgo.Describe("behavior — Sequential.Soak wall-clock", ginkgo.Ordere
 		// components rolling sequentially the non-soak portion is ~6s,
 		// so a 15s soak dominates the wall-clock budget.
 		Expect(elapsed).To(BeNumerically(">=", soakDuration-time.Second),
-			"G-4: rollout converged in %s; expected >= %s (soak budget). Sequential gate may be bypassed.", elapsed, soakDuration)
+			"rollout converged in %s; expected >= %s (soak budget). Sequential gate may be bypassed.", elapsed, soakDuration)
 	})
 })

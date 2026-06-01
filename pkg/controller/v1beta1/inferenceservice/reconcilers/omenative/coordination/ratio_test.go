@@ -512,8 +512,8 @@ func TestCheckRatioGate_InFlightProjectionTightensBand(t *testing.T) {
 }
 
 // TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock pins the
-// fix for the C-1 + H-3 KIND deadlock (`.claude/specs/2026-05-30-kind-test-walk/
-// ratiobalanced-bluegreen-deadlock-no-progress.md`).
+// fix for the ratiobalanced_kind + loadtest_kind KIND deadlock
+// (`.claude/specs/2026-05-30-kind-test-walk/ratiobalanced-bluegreen-deadlock-no-progress.md`).
 //
 // Reproduction shape: 4 engine + 2 decoder, BlueGreen + RatioBalanced
 // (tol 25%, band [1.5, 2.5]). The original ObservedRatio anchor must
@@ -590,7 +590,8 @@ func TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock(t *testing.T) {
 // was 0 at snapshot time), the gate rejects every drain on a fleet
 // whose live ratio differs from 1:1. This test documents the failure
 // mode so a future regression that re-introduces the empty-status
-// snapshot will trip here AND in the C-1 / H-3 KIND specs together.
+// snapshot will trip here AND in the ratiobalanced_kind / loadtest_kind
+// KIND specs together.
 func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.T) {
 	tol := int32(25)
 	isvc := &v1beta1.InferenceService{

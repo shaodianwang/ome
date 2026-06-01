@@ -11,7 +11,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KCG-3 — mixed update strategies in a single coordination group:
+// mixed update strategies in a single coordination group:
 // engine InPlaceIfPossible + decoder SurgeThenDrain (default).
 //
 // Gap-list item #4. Every existing spec sets a single update strategy
@@ -36,7 +36,7 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KCG-3 engine InPlaceIfPossible preserves UID, decoder default SurgeThenDrain rotates UID", func() {
+	ginkgo.It("engine InPlaceIfPossible preserves UID, decoder default SurgeThenDrain rotates UID", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("mixed-strat-kcg3"),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
@@ -128,11 +128,11 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 				Namespace: ns.Name, Name: "mixed-strat-kcg3-engine-0-default-0",
 			}, ePod)).To(Succeed())
 			g.Expect(string(ePod.UID)).To(Equal(engineUIDv1),
-				"KCG-3: engine UID must be preserved (InPlaceIfPossible + image-only diff = in-place patch); "+
+				"engine UID must be preserved (InPlaceIfPossible + image-only diff = in-place patch); "+
 					"got %s expected %s", string(ePod.UID), engineUIDv1)
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(0)),
-				"KCG-3: engine InPlaceIfPossible must NOT advance ActiveOrdinal")
+				"engine InPlaceIfPossible must NOT advance ActiveOrdinal")
 
 			// Decoder: default SurgeThenDrain + image diff →
 			// surge-to-ordinal-1 path → old pod at ordinal 0 gone,
@@ -140,14 +140,14 @@ var _ = ginkgo.Describe("behavior — mixed update strategies in one group", gin
 			// advances 0 → 1.
 			decCS := c.Status.Components[v1beta1.DecoderComponent]
 			g.Expect(decCS.Lifecycle.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(1)),
-				"KCG-3: decoder SurgeThenDrain must advance ActiveOrdinal 0 → 1")
+				"decoder SurgeThenDrain must advance ActiveOrdinal 0 → 1")
 
 			dPod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: "mixed-strat-kcg3-decoder-0-default-1",
 			}, dPod)).To(Succeed())
 			g.Expect(string(dPod.UID)).NotTo(Equal(decoderUIDv1),
-				"KCG-3: decoder UID at ordinal 1 must differ from the original (surge produces fresh pod)")
+				"decoder UID at ordinal 1 must differ from the original (surge produces fresh pod)")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

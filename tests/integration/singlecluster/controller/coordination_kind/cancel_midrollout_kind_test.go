@@ -10,7 +10,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// KCG-4 — cancel a rollout mid-flight by reverting the trigger (the
+// cancel a rollout mid-flight by reverting the trigger (the
 // operator panic-button workflow).
 //
 // Gap-list item #6. No existing KIND spec exercises the
@@ -36,7 +36,7 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("KCG-4 v1 → v2 → v1 revert mid-rollout converges back to v1; no v2 stragglers", func() {
+	ginkgo.It("v1 → v2 → v1 revert mid-rollout converges back to v1; no v2 stragglers", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("cancel-mid-kcg4"),
 			WithEngineReplicas(3),
@@ -83,7 +83,7 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 			c := freshISVC(g, ns.Name, "cancel-mid-kcg4")
 			phase := c.Status.RolloutCoordination.Groups[0].Phase
 			g.Expect(phase).NotTo(Equal(v1beta1.CoordinationPhaseIdle),
-				"KCG-4: rollout should have entered a non-Idle phase before revert is applied")
+				"rollout should have entered a non-Idle phase before revert is applied")
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("reverting engine image back to v1 mid-rollout (the cancel)")
@@ -99,7 +99,7 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(3)),
-				"KCG-4: engine must be back to 3 serving replicas after revert")
+				"engine must be back to 3 serving replicas after revert")
 			// Either the CurrentRevision is the ORIGINAL v1EngineRev (the
 			// controller adopted the same ControllerRevision back), OR
 			// it's a new revision name that matches the v1 podSpec. The
@@ -107,7 +107,7 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 			// implicitly wanted): NO pod is running on a v2 image.
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
-					"KCG-4: rollout must return to Idle after revert converges")
+					"rollout must return to Idle after revert converges")
 
 			// Per-pod image check: every alive engine pod must be on v1.
 			// This is the no-v2-straggler invariant; it's what
@@ -136,9 +136,9 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 				}
 			}
 			g.Expect(engCount).To(Equal(3),
-				"KCG-4: expected 3 alive engine pods, got %d", engCount)
+				"expected 3 alive engine pods, got %d", engCount)
 			g.Expect(v1Count).To(Equal(3),
-				"KCG-4: every alive engine pod must be on fake-serving:v1 after revert; "+
+				"every alive engine pod must be on fake-serving:v1 after revert; "+
 					"got %d/%d v1 pods (a non-v1 pod = v2 straggler = revert lost data)", v1Count, engCount)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -148,7 +148,7 @@ var _ = ginkgo.Describe("behavior — cancel mid-rollout via revert", ginkgo.Ord
 			c := freshISVC(g, ns.Name, "cancel-mid-kcg4")
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
 				To(Equal(v1beta1.CoordinationPhaseIdle),
-					"KCG-4: post-revert state must be stable at Idle, no phantom rollouts")
+					"post-revert state must be stable at Idle, no phantom rollouts")
 		}, kindShortTimeout, kindPollInterval).Should(Succeed())
 
 		// Capture a meaningful debug breadcrumb if the spec ever fails.

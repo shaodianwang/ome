@@ -563,7 +563,7 @@ func TestBuildComponentObservation_MultipleFailedInstancesListedInMessage(t *tes
 func TestBuildComponentObservation_FailedPropagatesThroughBlueGreen(t *testing.T) {
 	// End-to-end: a Failed Instance flows through buildComponentObservation
 	// into the BlueGreen state machine, which returns Phase=Failed for
-	// the group. This is the bug the X-1 KIND regression pins.
+	// the group. This is the bug the bad_image_kind KIND regression pins.
 	g := ResolvedGroup{
 		Name:       "0",
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
