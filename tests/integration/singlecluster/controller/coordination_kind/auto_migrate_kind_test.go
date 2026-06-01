@@ -17,16 +17,22 @@ import (
 // Phase=Creating / Updating longer than
 // MigrationPolicy.ProgressDeadlineSeconds, the controller self-triggers
 // a migration to recover. After MaxAutoRetries failed attempts the
-// Instance escalates to Phase=Failed with the
-// ProgressDeadlineExceeded condition.
+// Instance retry cap is reached and the ProgressDeadlineExceeded
+// condition is stamped; the Instance eventually reaches Phase=Failed.
 //
-// The fixture uses a non-existent image so the surge pod can never
-// become Ready — exercising the retry budget rapidly. With a 30s
-// progress deadline + MaxAutoRetries=2, we expect: first auto-trigger
-// at T+30s; second auto-trigger after the first surge fails timeout;
-// retry cap reached → Phase=Failed + condition. Total wall-clock
-// budget around 4-5 minutes (each surge takes ~InstanceReadyTimeout
-// to fail).
+// The fixture uses a non-existent image so the pod never becomes
+// Ready. ProgressDeadlineSeconds=30s is the webhook-enforced minimum
+// (ValidateMigrationPolicy in pkg/webhook/admission/isvc). With
+// MaxAutoRetries=2, AutoMigrationTriggered fires at T+30s, and the
+// detector watches subsequent passes for cap exhaustion.
+//
+// Deliberately do NOT set InstanceReadyTimeout on the fixture: the
+// timeouts escalator would otherwise fire Phase=Failed independently
+// of auto-migration, and isStuckPhase() returns false for Failed —
+// auto-migration would never trigger and ProgressDeadlineExceeded
+// would never be stamped. Controller behaviour is correct as
+// designed: once Failed, an operator investigates; we do NOT
+// auto-spin migrations.
 var _ = ginkgo.Describe("OMENative auto-migration on stuck Instance (KIND)", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -40,21 +46,16 @@ var _ = ginkgo.Describe("OMENative auto-migration on stuck Instance (KIND)", gin
 
 	ginkgo.It("stuck Instance triggers auto-migration; retry cap escalates to Phase=Failed", func() {
 		// Build the fixture with a bad image so the first pod NEVER
-		// becomes Ready. Configure ProgressDeadlineSeconds=30 and
-		// MaxAutoRetries=2 so the test fits the suite budget.
+		// becomes Ready. ProgressDeadlineSeconds=30s is the
+		// webhook-enforced minimum; MaxAutoRetries=2 keeps the budget
+		// short enough to fit in the suite wall-clock.
 		deadline := int32(30)
 		maxRetries := int32(2)
-		// Use a short InstanceReadyTimeout so the failed surge times
-		// out quickly enough to chew through MaxAutoRetries within the
-		// test wall-clock budget. 45s is comfortable above the 30s
-		// progress deadline.
-		shortReadyTimeout := metav1.Duration{Duration: 45 * time.Second}
 
 		fix := newCoordFixture(ns.Name, WithISVCName("auto-mig-am1"),
 			WithoutDecoder(),
 			WithEngineImage("ghcr.io/ome-projects/this-image-does-not-exist:v0"))
 		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
-			InstanceReadyTimeout: &shortReadyTimeout,
 			MigrationPolicy: &v1beta1.MigrationPolicy{
 				Mode:                    v1beta1.MigrationPolicyModeAuto,
 				ProgressDeadlineSeconds: &deadline,
@@ -103,8 +104,8 @@ var _ = ginkgo.Describe("OMENative auto-migration on stuck Instance (KIND)", gin
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("waiting for the retry cap to be reached and Phase=Failed + ProgressDeadlineExceeded condition stamped")
-		// Worst-case budget: 2 retries × (InstanceReadyTimeout 45s +
-		// surge create + drain + ledger write headroom) ≈ 4-5 minutes.
+		// Worst-case budget: 2 retries × ProgressDeadlineSeconds=30s +
+		// surge create + drain + ledger write headroom ≈ 3-5 minutes.
 		// 8 minutes is a comfortable ceiling.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "auto-mig-am1")

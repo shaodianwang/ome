@@ -65,10 +65,14 @@ var _ = ginkgo.Describe("permutation — multi-pod InPlaceIfPossible falls back 
 		v1EngineRev := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision
 		v1Incarnation := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Incarnation
 
-		// Bump engine image.
+		// Bump engine image. Multi-pod reads Leader.PodSpec +
+		// Worker.PodSpec (engine.go:339-348) — bump BOTH so the gang
+		// rollout actually fires. Bumping only Spec.Engine.PodSpec leaves
+		// the rendered hash unchanged for multi-pod gangs.
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "perm-mp-ip")
-			cur.Spec.Engine.PodSpec.Containers[0].Image = "fake-serving:v2"
+			cur.Spec.Engine.Leader.PodSpec.Containers[0].Image = "fake-serving:v2"
+			cur.Spec.Engine.Worker.PodSpec.Containers[0].Image = "fake-serving:v2"
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 

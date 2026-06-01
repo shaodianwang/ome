@@ -4,7 +4,6 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -18,7 +17,12 @@ import (
 //   - Bump the leader's image to v2.
 //   - Bump the workers' images to v2.
 //   - Keep the same Instance count (MinReplicas=1).
-//   - Group converges back to Idle.
+//   - Instance returns to Ready and Incarnation bumps.
+//
+// No coordination group is wired — this spec exercises the per-Component
+// RecreatePod path, not coord policy. RollingUpdate requires ≥ 2
+// Components (ValidateGroupShape, groups.go:227), and the gang-recreate
+// behavior here is independent of coord policy.
 //
 // The unit test
 // pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/reconciler_test.go
@@ -36,18 +40,10 @@ var _ = ginkgo.Describe("permutation — multi-pod RecreatePod", ginkgo.Ordered,
 	})
 
 	ginkgo.It("multi-pod engine (leader + 2 workers) recreates on image bump", func() {
-		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("perm-mp-rp"),
 			WithoutDecoder(),
 			WithEngineWorkerSize(2),
 			WithEngineUpdateStrategy(v1beta1.UpdateStrategyRecreatePod),
-			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{
-				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-				Policy:     v1beta1.CoordinationPolicyRollingUpdate,
-				Pacing: &v1beta1.CoordinationPacing{
-					MaxUnavailable: &maxUnavail,
-				},
-			}),
 			WithEngineImage("fake-serving:v1"))
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
@@ -78,10 +74,14 @@ var _ = ginkgo.Describe("permutation — multi-pod RecreatePod", ginkgo.Ordered,
 		v1Incarnation := preBump.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].Incarnation
 
 		// Bump engine image. Multi-pod recreate must rebuild the gang
-		// (Incarnation bumps).
+		// (Incarnation bumps). Multi-pod reads Leader.PodSpec +
+		// Worker.PodSpec (engine.go:339-348) — bumping only the
+		// top-level Spec.Engine.PodSpec leaves the rendered hash
+		// unchanged and the rollout never triggers. Bump BOTH.
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, "perm-mp-rp")
-			cur.Spec.Engine.PodSpec.Containers[0].Image = "fake-serving:v2"
+			cur.Spec.Engine.Leader.PodSpec.Containers[0].Image = "fake-serving:v2"
+			cur.Spec.Engine.Worker.PodSpec.Containers[0].Image = "fake-serving:v2"
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -97,8 +97,6 @@ var _ = ginkgo.Describe("permutation — multi-pod RecreatePod", ginkgo.Ordered,
 			g.Expect(cs.Lifecycle.InstanceStatuses[0].Incarnation).
 				To(BeNumerically(">", v1Incarnation),
 					"RecreatePod must bump Incarnation (gang rebuilt)")
-			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
-				To(Equal(v1beta1.CoordinationPhaseIdle))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Post-bump: still 3 alive engine pods (the gang was recreated,

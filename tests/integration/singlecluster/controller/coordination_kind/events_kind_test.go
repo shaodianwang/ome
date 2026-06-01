@@ -251,18 +251,32 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 		}, "5s", kindPollInterval).Should(Succeed())
 	})
 
-	// FoundOrphan fires when Restart sees a pod labeled
-	// managed-by=OMENative but missing ome.io/instance-incarnation.
-	// Without this signal the operator has no way to learn that the
-	// controller is refusing to delete the orphan.
-	ginkgo.It("FoundOrphan fires on a label-stripped pod during Restart", func() {
+	// FoundOrphan fires when the orphan-scan inside a recreate-update
+	// (or Restart) sees a pod labeled managed-by=OMENative but missing
+	// ome.io/instance-incarnation. Without this signal the operator has
+	// no way to learn that the controller is refusing to delete the
+	// orphan.
+	//
+	// Strategy: stand the ISVC up with UpdateStrategy=RecreatePod, plant
+	// an orphan-shaped pod at the live Instance's idx, then bump the
+	// image. recreateUpdate (update.go:446) keys on missing
+	// ome.io/instance-incarnation, classifies the orphan as unknown,
+	// emits FoundOrphan (update.go:472) and refuses to proceed.
+	//
+	// Notes on why other paths don't surface the orphan reliably:
+	//   - DetectRestartTrigger keys on live-pod-count drops; the orphan
+	//     inflates the live count and suppresses the trigger.
+	//   - Default SurgeThenDrain uses PodOrdinalFromLabels which treats
+	//     a missing pod-ordinal label as ordinal=0 (legacy pod), so the
+	//     orphan slots into the old/surge bucket instead of stragglers
+	//     and no FoundOrphan fires.
+	//   - The RecreatePod strategy goes through recreateUpdate which
+	//     IS the explicit incarnation-orphan scan.
+	ginkgo.It("FoundOrphan fires on an orphan-shaped pod during a recreate-update", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("evt-orphan-isvc"),
 			WithoutDecoder(),
+			WithEngineUpdateStrategy(v1beta1.UpdateStrategyRecreatePod),
 			WithEngineImage("fake-serving:v1"))
-		restartRecreate := v1beta1.InstanceRestartPolicyRecreateInstance
-		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
-			RestartPolicy: &restartRecreate,
-		}
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 
@@ -275,47 +289,22 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 			g.Expect(cs.Lifecycle.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("stripping ome.io/instance-incarnation from the live pod")
-		Eventually(func(g Gomega) {
-			pod := &corev1.Pod{}
-			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
-				Namespace: ns.Name, Name: "evt-orphan-isvc-engine-0-default-0",
-			}, pod)).To(Succeed())
-			delete(pod.Labels, "ome.io/instance-incarnation")
-			g.Expect(k8sClient.Update(suiteCtx, pod)).To(Succeed())
-		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
-
-		ginkgo.By("force-deleting the now-orphan pod to provoke Restart")
-		// Real kubelet: delete the pod to drive live-pod-count below
-		// desired. The Restart pass scans the live pod set and finds
-		// the orphan (the one we just stripped — but it'll be gone
-		// before Restart runs; what we want is the controller to
-		// observe ANY orphan during its scan over time, including
-		// other orphans from race windows). Stamp the orphan label on
-		// a NEW pod created with the right name shape after a fresh
-		// delete.
+		ginkgo.By("planting a deliberate orphan-shaped pod that the orphan-scan will find")
+		// Same labels as a normal OMENative pod EXCEPT no
+		// instance-incarnation. The controller's orphan scan emits
+		// FoundOrphan and refuses to delete or recreate-update it
+		// (operator must clean up).
 		//
-		// Simpler approach: just delete the live pod. The controller's
-		// Restart pass kicks off, then on the next reconcile a fresh
-		// pod gets created. We've already stripped the incarnation
-		// label from the live pod — but the delete will catch that
-		// pod before Restart's orphan scan runs. To make FoundOrphan
-		// fire reliably we need a pod with managed-by but no
-		// incarnation label present at scan time, so we re-label after
-		// the fresh pod appears.
-		//
-		// Alternative: directly create an orphan-shaped pod alongside
-		// the live one. The controller's Restart pass scans and emits
-		// FoundOrphan on the orphan.
+		// The selector chain is:
+		//   1. ListOMENativePodsByName matches ome.io/managed-by=OMENative,
+		//      ome.io/inferenceservice=<name>, AND component=<comp>
+		//      (note: bare "component" key, NOT "ome.io/component" —
+		//      see constants.OMEComponentLabel).
+		//   2. LiveListPodsForInstance filters that set by
+		//      ome.io/instance-index == <idx>.
+		// All four labels must match for the pod to surface in the
+		// orphan-candidate set.
 		grace := int64(0)
-		_ = k8sClient.Delete(suiteCtx, &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: "evt-orphan-isvc-engine-0-default-0"},
-		}, &client.DeleteOptions{GracePeriodSeconds: &grace})
-
-		// Now create a deliberate orphan-shaped pod that the Restart
-		// scan will find: same labels as a normal OMENative pod EXCEPT
-		// no instance-incarnation. The controller's orphan scan emits
-		// FoundOrphan and refuses to delete it (operator must clean up).
 		orphan := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "orphan-shaped",
@@ -323,7 +312,8 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 				Labels: map[string]string{
 					util.LabelManagedByKey:    util.ManagedByOMENativeValue,
 					"ome.io/inferenceservice": "evt-orphan-isvc",
-					"ome.io/component":        "engine",
+					"component":               "engine",
+					"ome.io/instance-index":   "0",
 				},
 			},
 			Spec: corev1.PodSpec{
@@ -339,6 +329,18 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 		ginkgo.DeferCleanup(func() {
 			_ = k8sClient.Delete(suiteCtx, orphan, &client.DeleteOptions{GracePeriodSeconds: &grace})
 		})
+
+		ginkgo.By("triggering a recreate-update via image bump")
+		// RecreatePod strategy routes any spec change through
+		// recreateUpdate (update.go:446). Image bump is the smallest
+		// diff that triggers a roll. recreateUpdate's orphan check
+		// (update.go:472) fires FoundOrphan on the planted orphan and
+		// refuses to proceed.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, "evt-orphan-isvc")
+			cur.Spec.Engine.PodSpec.Containers[0].Image = "fake-serving:v2"
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			eventHasReasonInvolving(g, ns.Name, "FoundOrphan", "InferenceService", "evt-orphan-isvc")
