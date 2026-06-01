@@ -16,10 +16,13 @@ import (
 //
 // Companion to B (which pins maxSurge=0). Asserts that during the
 // rollout, the alive pod count for engine never exceeds
-// minReplicas + maxSurge. Current updateStrategy implementations
-// don't actually surge (SurgeThenDrain delegates to recreate), so
-// the bound holds trivially today — but the test pins the contract
-// so a future real-surge implementation cannot regress past it.
+// minReplicas + maxSurge. With real SurgeThenDrain (PR #238) the
+// gate's CheckSurgeGate IS exercised here — verified by injecting a
+// deliberate gate bypass which makes both Instances surge in parallel
+// and pushes alive=4 (the round-2 E-1 bug report's symptom). See
+// percomponent_maxsurge_multiinstance_kind_test.go for the BlueGreen
+// + 3-Instance variants that stress the cross-Instance enforcement
+// path on the gate's deny side.
 var _ = ginkgo.Describe("behavior — PerComponent maxSurge upper bound", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
