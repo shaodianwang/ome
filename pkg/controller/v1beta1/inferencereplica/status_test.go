@@ -3,6 +3,7 @@ package inferencereplica
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -12,6 +13,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
 // TestPopulateInstancePodCounters_StampsLivePodState pins the
@@ -461,4 +463,152 @@ func TestAggregateStatus_ReadyCondition_PersistedToInformerCache(t *testing.T) {
 	// the condition is first inserted.
 	g.Expect(cond.LastTransitionTime.IsZero()).To(gomega.BeFalse(),
 		"LastTransitionTime must be set by SetStatusCondition")
+}
+
+// withIRStuckPodGracePeriod swaps in a short grace window for the
+// workload-side stuck-pod escalator so unit tests don't have to wait
+// the production 60s. Restored on cleanup so parallel tests don't see
+// each other's overrides.
+func withIRStuckPodGracePeriod(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := workload.StuckPodFailureGracePeriod
+	workload.StuckPodFailureGracePeriod = d
+	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
+}
+
+// TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed is the
+// bug #52 reproduction on the IR-managed path: a SurgeThenDrain surge
+// pod stuck in ImagePullBackOff past StuckPodFailureGracePeriod must
+// escalate the Instance Phase to Failed, the same way the omenative
+// direct path does via PR #314. Without this fix, the production
+// cluster observes the Instance stuck at Phase=Updating for the full
+// 30-minute InstanceReadyTimeout (and even past it, because the IR
+// controller doesn't wire ExpireOperationsIfDeadlinePassed either),
+// so the parent ISVC's coordination layer never sees Component.Failed
+// and the group sits at Surging indefinitely.
+//
+// Setup mirrors the operator-reported real-cluster shape:
+//   - Instance idx=0 carries Phase=Updating with an in-flight
+//     Operation{Type=Update, Step=Surge} (the surge stamp the workload
+//     pipeline writes when starting SurgeThenDrain).
+//   - Two pods at ordinal 0 / 1 (old serving + surge).
+//   - The surge pod (ordinal 1) is past the grace window with
+//     ImagePullBackOff in its ContainerStatuses.
+//
+// Expected post-Reconcile: Instance Phase flips to Failed via the
+// workload-side EscalateStuckPodFailures escalator wired into the IR's
+// aggregateAndWriteStatus. Without the wire-in the test fails: Phase
+// stays at Updating because the IR aggregator never invokes the
+// stuck-pod check the omenative direct path already runs.
+func TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed(t *testing.T) {
+	g := gomega.NewWithT(t)
+	withIRStuckPodGracePeriod(t, 1*time.Millisecond)
+
+	ir := baselineIR("llama-engine", "prod", 1)
+	// Mid-surge state: Instance Phase=Updating with an in-flight Surge
+	// step. Status pre-seeded so the workload dispatcher's
+	// DetectUpdateTrigger sees the in-progress operation rather than
+	// firing a fresh surge.
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index:           0,
+			Incarnation:     1,
+			Phase:           v1beta1.OMENativeInstanceUpdating,
+			RunningRevision: "rev-a",
+			TargetRevision:  "rev-b",
+			ActiveOrdinal:   0,
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationUpdate,
+				Step: "Surge",
+				// Far-future deadline so the slow-path expiry
+				// (production: 30 min) doesn't race the fast-path
+				// escalator we're verifying.
+				Deadline: metav1.NewTime(time.Now().Add(30 * time.Minute)),
+			},
+		},
+	}
+	// Old (canonical) pod at ordinal 0 — serving v1 traffic.
+	oldPod := podForIR(ir, 0, "default", 0, true /*ready*/, true /*serving*/)
+	// Surge pod at ordinal 1 — image pulled into ImagePullBackOff.
+	// CreationTimestamp set well past the grace window so
+	// PodStuckPullFailure's age check fires.
+	surgePod := podForIR(ir, 0, "default", 1, false /*ready*/, false /*serving*/)
+	surgePod.CreationTimestamp = metav1.NewTime(time.Now().Add(-5 * time.Second))
+	surgePod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: "ome-container",
+			State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"},
+			},
+		},
+	}
+
+	r, c := newReconciler(t, ir, oldPod, surgePod)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+		got)).To(gomega.Succeed())
+
+	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(1))
+	g.Expect(got.Status.InstanceStatuses[0].Phase).
+		To(gomega.Equal(v1beta1.OMENativeInstanceFailed),
+			"IR aggregator must run the workload stuck-pod escalator: surge pod stuck in ImagePullBackOff past grace must flip Instance Phase to Failed (bug #52 IR-path equivalent)")
+	// Operation is preserved as the breadcrumb operators read to find
+	// which step wedged.
+	g.Expect(got.Status.InstanceStatuses[0].Operation).NotTo(gomega.BeNil(),
+		"Operation must be preserved on stuck-pod escalation so operators see what was in flight")
+	g.Expect(got.Status.InstanceStatuses[0].Operation.Step).To(gomega.Equal("Surge"))
+}
+
+// TestAggregateStatus_StuckPodWithinGrace_NoEscalation pins the
+// IR-path debounce: a stuck pod still inside StuckPodFailureGracePeriod
+// must NOT escalate. Without this guard, a brief transient pull failure
+// on a flaky registry would mis-classify a pod that's about to recover.
+// Mirrors the equivalent omenative-direct-path test
+// TestSurgeUpdate_ImagePullBackOff_WithinGrace_NoEscalation.
+func TestAggregateStatus_StuckPodWithinGrace_NoEscalation(t *testing.T) {
+	g := gomega.NewWithT(t)
+	// Generous grace so the 5-second-old pod stays inside the window.
+	withIRStuckPodGracePeriod(t, 60*time.Second)
+
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index:           0,
+			Incarnation:     1,
+			Phase:           v1beta1.OMENativeInstanceUpdating,
+			RunningRevision: "rev-a",
+			TargetRevision:  "rev-b",
+			ActiveOrdinal:   0,
+			Operation: &v1beta1.InstanceOperation{
+				Type:     v1beta1.InstanceOperationUpdate,
+				Step:     "Surge",
+				Deadline: metav1.NewTime(time.Now().Add(30 * time.Minute)),
+			},
+		},
+	}
+	oldPod := podForIR(ir, 0, "default", 0, true, true)
+	surgePod := podForIR(ir, 0, "default", 1, false, false)
+	surgePod.CreationTimestamp = metav1.NewTime(time.Now().Add(-5 * time.Second))
+	surgePod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{Name: "ome-container", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}},
+	}
+	r, c := newReconciler(t, ir, oldPod, surgePod)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+		got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses[0].Phase).
+		To(gomega.Equal(v1beta1.OMENativeInstanceUpdating),
+			"stuck pod still inside grace window must NOT escalate (debounce holds)")
 }

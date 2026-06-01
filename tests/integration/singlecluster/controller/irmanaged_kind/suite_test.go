@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -54,8 +55,20 @@ func TestIRManagedKindController(t *testing.T) {
 	// OMENative reconcile (reconcileOMENativeSubresources runs for BOTH
 	// the IR-managed and the legacy path); without the CRD + scheme the
 	// apiserver rejects the Create and every reconcile errors.
+	//
+	// KEDA ScaledObject is now Owns()'d unconditionally by the ISVC
+	// controller (PR #337, OEP-0013 Slice 2, decision Q6 — KEDA is a
+	// hard cluster-side dependency). Without the scheme + CRD pair in
+	// place the controller-runtime cache-sync errors out with "kind must
+	// be registered to the Scheme" and the suite never reaches its first
+	// spec — matching the coordination_kind suite (PR #349). Without
+	// this, irmanaged_kind specs see the controller wedged on a
+	// per-reconcile error log ("no kind is registered for the type
+	// v1alpha1.ScaledObject in scheme") and the IR aggregator never
+	// reaches steady-state Ready.
 	scheme := kindutil.BaseScheme()
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
+	utilruntime.Must(kedav1.AddToScheme(scheme))
 
 	state := kindutil.RunKindSuite(t, kindutil.SuiteOpts{
 		ClusterName: "ome-irmanaged-kind",
@@ -75,9 +88,19 @@ func TestIRManagedKindController(t *testing.T) {
 				BuildArgs:  map[string]string{"VERSION": "v2"},
 			},
 		},
+		// Default CRDPaths (config/crd/full) + the prometheus-operator
+		// PodMonitor CRD + the KEDA ScaledObject CRD. KEDA is a hard
+		// cluster-side dependency for the ISVC controller as of #337
+		// (OEP-0013 Slice 2, decision Q6) — Owns(&kedav1.ScaledObject{})
+		// is unconditional, so the CRD must be installed for cache-sync
+		// to succeed even when individual IR-managed specs don't
+		// exercise the autoscaling path. Mirrors coordination_kind's
+		// CRDPaths exactly so both suites stay in lockstep on this
+		// shared cluster-side prerequisite.
 		CRDPaths: []string{
 			"config/crd/full",
 			"tests/integration/dep-crds/prometheus-operator",
+			"tests/integration/dep-crds/keda",
 		},
 		Scheme: scheme,
 		Setup:  mgrSetup,

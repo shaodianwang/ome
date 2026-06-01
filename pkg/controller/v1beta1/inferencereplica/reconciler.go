@@ -184,7 +184,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// when everything else succeeded. We log the suppressed error at
 	// V(1) so a dispatcher+status double-failure isn't fully invisible.
 	defer func() {
-		if serr := r.aggregateAndWriteStatus(ctx, ir, plan, target); serr != nil {
+		if serr := r.aggregateAndWriteStatus(ctx, ir, parent, plan, target); serr != nil {
 			if err == nil {
 				err = fmt.Errorf("InferenceReplica reconciler: write status: %w", serr)
 				return

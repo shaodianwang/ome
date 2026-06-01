@@ -86,9 +86,10 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent cl
 		// WarnInstanceFailed bridges the workload-side escalator to the
 		// reconciler's event recorder so the operator sees the
 		// per-Instance Failed escalation against the EventTarget (parent
-		// ISVC when set, else IR). The stuck-pod aggregator is run
-		// elsewhere in this PR but every constructed input must satisfy
-		// the panic-on-nil contract.
+		// ISVC when set, else IR). The stuck-pod aggregator is invoked
+		// from the IR's aggregateAndWriteStatus tail (see
+		// status.go::escalateStuckPodFailures) so the contract surface
+		// here matches the omenative direct path byte-for-byte.
 		//
 		// Also mirror the escalation onto the controller log so
 		// log-aggregated views (loki/es/journal) see it without going

@@ -85,7 +85,7 @@ const (
 // template — webhook-rejected today; defensive nil-guard kept). When
 // target is nil revision pointers are left untouched; counters still
 // run.
-func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.InferenceReplica, plan workload.ComponentPlan, target *appsv1.ControllerRevision) error {
+func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.InferenceReplica, parent client.Object, plan workload.ComponentPlan, target *appsv1.ControllerRevision) error {
 	if r.Client == nil {
 		return fmt.Errorf("aggregateAndWriteStatus: nil client")
 	}
@@ -113,7 +113,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		return fmt.Errorf("aggregateAndWriteStatus: compute availability: %w", err)
 	}
 
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1beta1.InferenceReplica{}
 		if err := r.Client.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -229,6 +229,95 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			ir.Status.Conditions = nil
 		}
 		return nil
+	}); err != nil {
+		return err
+	}
+
+	// Fast-failure escalation: any Instance currently in a transient
+	// phase (Creating / Updating / Restarting / Migrating) whose pods
+	// have been stuck in a non-recoverable kubelet waiting state
+	// (ImagePullBackOff / ErrImagePull / InvalidImageName /
+	// CreateContainerError / CrashLoopBackOff / RunContainerError) past
+	// the stuck-pod grace window gets escalated to Phase=Failed
+	// immediately, without waiting for the (default 30 min)
+	// per-Instance Operation deadline.
+	//
+	// Mirrors omenative/status_aggregate.go::escalateStuckPodFailures
+	// byte-for-byte at the contract level (same workload-side helper,
+	// same EscalationParams shape, same per-Instance Phase=Failed write
+	// via input.MutateInstance). Without this hook the IR-managed path
+	// observes the same bad-image symptom the omenative direct path
+	// fixed in PR #314: the surge pod sits in ImagePullBackOff for
+	// 30+ minutes while the Instance stays at Phase=Updating, and the
+	// parent ISVC's coordination state machine never sees
+	// Component.Failed → group Phase stays at Surging indefinitely.
+	// Bug #52 IR-path equivalent — closes the bad_image_kind
+	// reproduction reported against the dev cluster after IR-managed
+	// became the default OMENative dispatch path.
+	return r.escalateStuckPodFailures(ctx, ir, parent, byIndex)
+}
+
+// escalateStuckPodFailures is the IR-side adapter that bridges the
+// IR aggregator body to the workload-side EscalateStuckPodFailures.
+// Builds a minimal workload.ReconcileInput just for the escalation
+// step (MutateInstance + WarnInstanceFailed) and delegates the policy
+// logic to the workload package.
+//
+// Mirrors omenative/status_aggregate.go::escalateStuckPodFailures:
+// reads `byIndex` (per-Instance live pod buckets the caller already
+// computed for counters) so no re-list happens, and walks the
+// caller's in-memory IR snapshot AFTER the retry loop has committed
+// so the InstanceStatus.Phase observed here is the post-counters
+// version.
+//
+// EventTarget defers to the parent ISVC when available so user-facing
+// events stay coherent under `kubectl describe isvc`, matching the
+// EventTarget rule in buildReconcileInput.
+func (r *Reconciler) escalateStuckPodFailures(ctx context.Context, ir *v1beta1.InferenceReplica, parent client.Object, byIndex map[int32][]*corev1.Pod) error {
+	if ir == nil {
+		return nil
+	}
+	eventTarget := client.Object(ir)
+	if parent != nil {
+		eventTarget = parent
+	}
+	// Minimal ReconcileInput: only MutateInstance + WarnInstanceFailed
+	// are actually called by EscalateStuckPodFailures, but the
+	// panic-on-nil contract requires every required callback to be
+	// non-nil. Reuse the same builders the dispatch-time input uses so
+	// the IR-path stuck-pod escalation observes the same retry +
+	// mirror semantics workload writes get on the dispatch path.
+	input := workload.ReconcileInput{
+		OwnerObject:    ir,
+		OwnerGVK:       irGVK,
+		EventTarget:    eventTarget,
+		MutateInstance: buildMutateInstance(r.Client, ir),
+		// RemoveInstance / WriteAggregateCondition /
+		// ClearMigrationRequest are not exercised by the escalator but
+		// satisfy the panic-on-nil contract.
+		RemoveInstance:          func(_ context.Context, _ int32) (bool, error) { return false, nil },
+		WriteAggregateCondition: func(_ context.Context, _ metav1.Condition) error { return nil },
+		ClearMigrationRequest:   func(_ context.Context, _ string) error { return nil },
+		WarnInstanceFailed: func(idx int32, podName, reason string) {
+			r.Log.Info("Instance escalated to Phase=Failed",
+				"inferencereplica", client.ObjectKeyFromObject(ir),
+				"component", ir.Spec.Component,
+				"instance", idx,
+				"pod", podName,
+				"reason", reason)
+			if r.Recorder == nil {
+				return
+			}
+			r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, "InstanceFailed",
+				"InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)",
+				ir.Namespace, ir.Name, ir.Spec.Component, idx, podName, reason)
+		},
+	}
+	return workload.EscalateStuckPodFailures(ctx, input, workload.EscalationParams{
+		Instances:           v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
+		PodsByIndex:         byIndex,
+		CurrentRevisionHash: query.RevisionHashFromControllerRevisionName(ir.Status.CurrentRevision),
+		RevisionHashLabel:   query.LabelRevisionHash,
 	})
 }
 
