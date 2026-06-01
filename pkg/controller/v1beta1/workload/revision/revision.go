@@ -267,11 +267,11 @@ func Labels(key Key) map[string]string {
 // scopeUID partitions the revision history per parent identity so a
 // deleted-and-recreated parent of the same name does not silently
 // inherit the predecessor's CR. For the ISVC adapter this is the ISVC
-// UID; for the IR adapter this is the ISVC UID stamped onto the IR's
-// Spec.ParentRef.UID so BOTH paths address the same per-ISVC revision
-// space (the IR's own UID is intentionally NOT used — that would diverge
-// the IR-managed path's hash from the direct path's hash and break the
-// shadow-mode equivalence the cutover relies on).
+// UID; for the IR adapter this is the ISVC UID resolved from the IR's
+// controller OwnerReference so BOTH paths address the same per-ISVC
+// revision space (the IR's own UID is intentionally NOT used — that
+// would diverge the IR-managed path's hash from the direct path's hash
+// and break the shadow-mode equivalence the cutover relies on).
 //
 // Single-pod variant — does not hash a worker template. Multi-pod
 // callers use EnsureControllerRevisionWithWorker so worker-only spec

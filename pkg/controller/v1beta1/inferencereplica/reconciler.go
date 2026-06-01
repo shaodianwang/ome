@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
@@ -285,7 +286,22 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 	// (isvc.UID, via core.EnsureControllerRevisionForISVC). Using ir.UID
 	// here would diverge the two paths' CR names — breaking shadow-mode
 	// equivalence and stranding pods across a path cutover.
-	scopeUID := ir.Spec.ParentRef.UID
+	//
+	// Source: the IR's controller OwnerReference. The projector
+	// (pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector)
+	// stamps the parent ISVC as the IR's controller-owner on every
+	// Create/Update, so this is the authoritative parent-UID. Refusing
+	// to proceed on a missing controller-owner is correct: an empty
+	// scopeUID would silently produce a CR hash that doesn't match the
+	// direct OMENative path and break shadow-mode equivalence.
+	var scopeUID types.UID
+	if ctrlRef := metav1.GetControllerOf(ir); ctrlRef != nil {
+		scopeUID = ctrlRef.UID
+	}
+	if scopeUID == "" {
+		return nil, fmt.Errorf("InferenceReplica %s/%s missing controller OwnerReference; cannot derive scopeUID for revision",
+			ir.Namespace, ir.Name)
+	}
 
 	target, collision, err := revision.EnsureControllerRevisionWithWorker(
 		ctx, r.Client, reader,

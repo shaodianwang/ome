@@ -61,6 +61,17 @@ func baselineIR(name, namespace string, replicas int32) *v1beta1.InferenceReplic
 				constants.InferenceReplicaControllerWriteAnnotationKey: constants.InferenceReplicaControllerWriteAnnotationVal,
 			},
 			Generation: 1,
+			// Controller-owner = parent ISVC. The IR reconciler reads
+			// this to derive scopeUID for revision partitioning (parent
+			// ISVC UID). The projector stamps the live ISVC; here we
+			// stamp a synthetic UID matching the well-known parent name.
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1beta1.SchemeGroupVersion.String(),
+				Kind:       "InferenceService",
+				Name:       "llama",
+				UID:        types.UID("llama-isvc-uid"),
+				Controller: ptr.To(true),
+			}},
 		},
 		Spec: v1beta1.InferenceReplicaSpec{
 			ParentRef: v1beta1.ParentReference{
