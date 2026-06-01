@@ -206,6 +206,27 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 			strategy = UpdateStrategySurgeThenDrain
 		}
 		isSurgeStrategy := strategy == UpdateStrategySurgeThenDrain
+		// Per-Component within-Component budget — distinct layer from
+		// the cross-Component coordination-group gate that input.UpdateGate
+		// enforces. Both layers must allow before an Instance starts a
+		// fresh update; first denial stops the start. See
+		// budget.go's package comment for the composition rule:
+		//   effective_cap = min(group_cap, per_component_cap)
+		// nil RollingUpdate or nil MaxSurge / MaxUnavailable returns
+		// BudgetNoLimit → this layer doesn't cap, the group layer is the
+		// only constraint.
+		var rollingUpdate *RollingUpdate
+		if plan.UpdateStrategy.RollingUpdate != nil {
+			rollingUpdate = plan.UpdateStrategy.RollingUpdate
+		}
+		perCompSurgeBudget := PerComponentMaxSurgeBudget(rollingUpdate, plan.Replicas)
+		perCompUnavailBudget := PerComponentMaxUnavailableBudget(rollingUpdate, plan.Replicas)
+		// Snapshot the prior-pass in-flight counts ONCE — same anchor the
+		// per-wake-up counters layer on top of. Without this anchor the
+		// per-Component check would re-count every iteration and double-
+		// charge the budget against the same Instance.
+		priorSurgeInFlight := CurrentSurgeInFlight(input.ObservedState.InstanceStatuses)
+		priorUnavailInFlight := CurrentUnavailableInFlight(input.ObservedState.InstanceStatuses)
 		for _, inst := range plan.Instances {
 			needs, derr := workloadops.DetectUpdateTrigger(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec)
 			if derr != nil {
@@ -216,12 +237,38 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 			}
 			s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
 			startingFresh := s == nil || s.Phase != InstancePhaseUpdating
-			if startingFresh && input.UpdateGate != nil {
-				// Pass in-flight counters so the gate can project
-				// against the post-this-pass shape.
-				if allowed, _ := input.UpdateGate(strategy, inFlightSurge, inFlightUnavail); !allowed {
-					anyGated = true
-					continue
+			if startingFresh {
+				// Per-Component within-Component cap. Independent from
+				// the coordination-group cap below: each is its own
+				// capacity, both must allow. We project (prior + this-
+				// wake-up + 1) against the layer's budget the same way
+				// coordination/ratio.go's CheckSurge / CheckUnavailability
+				// project against the group budget.
+				if isSurgeStrategy {
+					if perCompSurgeBudget != BudgetNoLimit {
+						projected := priorSurgeInFlight + inFlightSurge + 1
+						if projected > perCompSurgeBudget {
+							anyGated = true
+							continue
+						}
+					}
+				} else {
+					if perCompUnavailBudget != BudgetNoLimit {
+						projected := priorUnavailInFlight + inFlightUnavail + 1
+						if projected > perCompUnavailBudget {
+							anyGated = true
+							continue
+						}
+					}
+				}
+				if input.UpdateGate != nil {
+					// Pass in-flight counters so the gate can project
+					// against the post-this-pass shape. Independent
+					// layer from the per-Component check above.
+					if allowed, _ := input.UpdateGate(strategy, inFlightSurge, inFlightUnavail); !allowed {
+						anyGated = true
+						continue
+					}
 				}
 			}
 			done, uerr := workloadops.Update(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec)

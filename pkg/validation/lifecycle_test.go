@@ -29,8 +29,10 @@ func TestValidateLifecycle_NilAndEmptyAccepted(t *testing.T) {
 }
 
 // TestValidateLifecycle_RollingUpdate_AcceptsAllValidShapes runs the
-// happy-path matrix: nil pointers, integer counts (including 0), and
-// percent strings within 0..100 — all must pass.
+// happy-path matrix: nil pointers, integer counts, percent strings
+// within 0..100, and zero values on EITHER (but not both) of MaxSurge
+// / MaxUnavailable. The MaxSurge=0 AND MaxUnavailable=0 combination is
+// rejected by ValidateLifecycle_RollingUpdate_RejectsBothZero below.
 func TestValidateLifecycle_RollingUpdate_AcceptsAllValidShapes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -38,10 +40,14 @@ func TestValidateLifecycle_RollingUpdate_AcceptsAllValidShapes(t *testing.T) {
 		ms   *intstr.IntOrString
 	}{
 		{"both-nil", nil, nil},
-		{"int-zero-both", intstrPtr(intstr.FromInt(0)), intstrPtr(intstr.FromInt(0))},
+		{"int-zero-mu-only", intstrPtr(intstr.FromInt(0)), nil},
+		{"int-zero-ms-only", nil, intstrPtr(intstr.FromInt(0))},
+		{"int-zero-mu-positive-ms", intstrPtr(intstr.FromInt(0)), intstrPtr(intstr.FromInt(1))},
+		{"int-positive-mu-zero-ms", intstrPtr(intstr.FromInt(2)), intstrPtr(intstr.FromInt(0))},
 		{"int-positive", intstrPtr(intstr.FromInt(2)), intstrPtr(intstr.FromInt(1))},
 		{"percent-mid", intstrPtr(intstr.FromString("25%")), intstrPtr(intstr.FromString("50%"))},
-		{"percent-edge-zero", intstrPtr(intstr.FromString("0%")), intstrPtr(intstr.FromString("0%"))},
+		{"percent-zero-mu-only", intstrPtr(intstr.FromString("0%")), nil},
+		{"percent-zero-mu-positive-ms", intstrPtr(intstr.FromString("0%")), intstrPtr(intstr.FromString("25%"))},
 		{"percent-edge-hundred", intstrPtr(intstr.FromString("100%")), intstrPtr(intstr.FromString("100%"))},
 	}
 	for _, tc := range cases {
@@ -49,6 +55,38 @@ func TestValidateLifecycle_RollingUpdate_AcceptsAllValidShapes(t *testing.T) {
 			spec := lifecycleSpec(tc.mu, tc.ms)
 			if err := ValidateLifecycle(spec); err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateLifecycle_RollingUpdate_RejectsBothZero pins the new rule
+// added when the per-Component layer started actively gating rollouts:
+// MaxSurge=0 AND MaxUnavailable=0 on the same Component is unstartable
+// — no surge headroom, no drain headroom. Mirrors upstream
+// appsv1.Deployment.Strategy.RollingUpdate validation. Both 0% / 0
+// integer combinations and the mixed (0%, 0) combination trip the
+// rejection.
+func TestValidateLifecycle_RollingUpdate_RejectsBothZero(t *testing.T) {
+	cases := []struct {
+		name string
+		mu   *intstr.IntOrString
+		ms   *intstr.IntOrString
+	}{
+		{"int-zero-both", intstrPtr(intstr.FromInt(0)), intstrPtr(intstr.FromInt(0))},
+		{"pct-zero-both", intstrPtr(intstr.FromString("0%")), intstrPtr(intstr.FromString("0%"))},
+		{"int-zero-mu-pct-zero-ms", intstrPtr(intstr.FromInt(0)), intstrPtr(intstr.FromString("0%"))},
+		{"pct-zero-mu-int-zero-ms", intstrPtr(intstr.FromString("0%")), intstrPtr(intstr.FromInt(0))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := lifecycleSpec(tc.mu, tc.ms)
+			err := ValidateLifecycle(spec)
+			if err == nil {
+				t.Fatalf("expected rejection for MaxSurge=0 AND MaxUnavailable=0; got nil")
+			}
+			if !strings.Contains(err.Error(), ReasonRollingUpdateZeroBudget) {
+				t.Fatalf("expected reason %q in error %q", ReasonRollingUpdateZeroBudget, err.Error())
 			}
 		})
 	}
