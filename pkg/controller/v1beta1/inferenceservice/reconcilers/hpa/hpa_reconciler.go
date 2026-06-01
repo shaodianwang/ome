@@ -40,9 +40,7 @@ type HPAReconciler struct {
 //     ome.io/targetUtilizationPercentage annotation overrides the
 //     default CPU target.
 //
-// OEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget /
-// ScaleMetric fields that this constructor used to consult. See
-// NewHPAReconcilerForTarget for the OEP-0013 IR-managed dispatch path.
+// See NewHPAReconcilerForTarget for the IR-managed dispatch path.
 func NewHPAReconciler(client client.Client,
 	scheme *runtime.Scheme,
 	componentMeta metav1.ObjectMeta,
@@ -58,14 +56,13 @@ func NewHPAReconciler(client client.Client,
 
 // NewHPAReconcilerForTarget builds an HPAReconciler whose generated HPA
 // targets the caller-supplied scaleTargetRef (typically an InferenceReplica
-// for the OEP-0013 IR-managed path). hpaSpec carries the resolved
-// HPAAutoscaler block (resolver output from Slice 1); nil / empty Metrics
-// expands to the OEP-0013 default of a single CPU=80% Resource metric per
-// README 731 + 1148.
+// for the IR-managed path). hpaSpec carries the resolved HPAAutoscaler
+// block (resolver output); nil / empty Metrics expands to the OEP-0013
+// default of a single CPU=80% Resource metric per README 731 + 1148.
 //
-// It is the entry point for OEP-0013's per-IR dispatch (Slice 3) and stays
-// free of any ComponentExtensionSpec concerns so the two callers are
-// completely decoupled.
+// It is the entry point for OEP-0013's per-IR dispatch and stays free of
+// any ComponentExtensionSpec concerns so the two callers are completely
+// decoupled.
 func NewHPAReconcilerForTarget(
 	client client.Client,
 	scheme *runtime.Scheme,
@@ -91,12 +88,11 @@ func NewHPAReconcilerForTarget(
 //
 // scaleTargetRef is forwarded verbatim to the HPA spec — callers are expected
 // to supply `{apps/v1, Deployment, <name>}` for Raw Deployment dispatch and
-// `{ome.io/v1beta1, InferenceReplica, <ir-name>}` for the IR-managed path
-// introduced by OEP-0013 Slice 3.
+// `{ome.io/v1beta1, InferenceReplica, <ir-name>}` for the IR-managed path.
 //
-// hpaSpec / minReplicas / maxReplicas come from the resolver (Slice 1) or
-// the Raw Deployment shim (createHPAFromComponentExt). When hpaSpec is nil
-// or hpaSpec.Metrics is empty the generator emits a single CPU=80% Resource
+// hpaSpec / minReplicas / maxReplicas come from the resolver or the Raw
+// Deployment shim (createHPAFromComponentExt). When hpaSpec is nil or
+// hpaSpec.Metrics is empty the generator emits a single CPU=80% Resource
 // metric per the OEP-0013 default contract (README 731, 1148).
 func createHPA(
 	componentMeta metav1.ObjectMeta,
@@ -133,10 +129,10 @@ func createHPA(
 
 // createHPAFromComponentExt is the bridge from the Raw Deployment
 // (componentMeta, componentExt) caller to the parameterized createHPA.
-// Reads Autoscaler.HPA when present (OEP-0013 Slice 6's canonical
-// authoring location) and falls back to the CPU=80% default (overridden
-// by the ome.io/targetUtilizationPercentage annotation if set) for ISVCs
-// that don't declare a per-Component autoscaler block at all.
+// Reads Autoscaler.HPA when present (the canonical authoring location)
+// and falls back to the CPU=80% default (overridden by the
+// ome.io/targetUtilizationPercentage annotation if set) for ISVCs that
+// don't declare a per-Component autoscaler block at all.
 func createHPAFromComponentExt(
 	componentMeta metav1.ObjectMeta,
 	componentExt *v1beta1.ComponentExtensionSpec,
@@ -155,8 +151,8 @@ func createHPAFromComponentExt(
 	} else if utilization, ok := utilizationFromAnnotation(componentMeta); ok {
 		// Preserve the ome.io/targetUtilizationPercentage annotation
 		// override for ISVCs that don't declare an Autoscaler.HPA block.
-		// The annotation is the only knob left for the CPU target after
-		// OEP-0013 Slice 6 dropped ScaleTarget.
+		// The annotation is the only knob left for the CPU target now
+		// that the legacy ScaleTarget field is gone.
 		hpaSpec = &v1beta1.HPAAutoscaler{
 			Metrics: []autoscalingv2.MetricSpec{
 				{
@@ -176,7 +172,7 @@ func createHPAFromComponentExt(
 	return createHPA(componentMeta, scaleTargetRef, hpaSpec, minReplicas, maxReplicas)
 }
 
-// defaultHPAMetrics returns the OEP-0013 default metric list: a single
+// defaultHPAMetrics returns the default metric list: a single
 // Resource{cpu, 80%} entry. Used when the resolver / shim hands back an
 // HPAAutoscaler with no explicit Metrics.
 func defaultHPAMetrics() []autoscalingv2.MetricSpec {

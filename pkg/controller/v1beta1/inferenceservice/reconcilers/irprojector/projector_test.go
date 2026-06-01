@@ -708,8 +708,8 @@ func autoscalerBlockB() *v1beta1.ComponentAutoscaler {
 }
 
 // TestEnsureInferenceReplica_PropagatesResolvedAutoscaler pins the
-// Slice 1 contract: a non-nil p.ResolvedAutoscaler lands on the IR
-// at Create time. Slice 3's autoscaler dispatch reads ir.Spec
+// resolver→projector contract: a non-nil p.ResolvedAutoscaler lands on
+// the IR at Create time. The autoscaler dispatch reads ir.Spec
 // .Autoscaler — if the projector drops it, the entire OEP-0013 chain
 // is dead on arrival.
 //
@@ -731,7 +731,7 @@ func TestEnsureInferenceReplica_PropagatesResolvedAutoscaler(t *testing.T) {
 
 	g.Expect(got.Spec.Autoscaler).NotTo(gomega.BeNil(),
 		"non-nil p.ResolvedAutoscaler must land on ir.Spec.Autoscaler at Create — "+
-			"the autoscaler dispatch (Slice 3) reads this field")
+			"the autoscaler dispatch reads this field")
 	g.Expect(got.Spec.Autoscaler).To(gomega.Equal(autoscalerBlockA()),
 		"projection must be deep-equal — Class + Keda + HPA all preserved verbatim")
 }
@@ -789,8 +789,8 @@ func TestEnsureInferenceReplica_UpdateAutoscalerRepatchesIR(t *testing.T) {
 
 // TestEnsureInferenceReplica_NilResolvedAutoscaler_NoRegression pins
 // the defensive path: a nil ResolvedAutoscaler (e.g., a dispatch site
-// that hasn't been wired through Slice 1 yet) projects to nil ir.Spec
-// .Autoscaler. No spurious empty {Class: ""} block lands.
+// that doesn't run the resolver) projects to nil ir.Spec.Autoscaler.
+// No spurious empty {Class: ""} block lands.
 //
 // Without this guard, the projector would either (a) panic on a nil
 // deref of p.ResolvedAutoscaler.DeepCopy() or (b) leave the IR with

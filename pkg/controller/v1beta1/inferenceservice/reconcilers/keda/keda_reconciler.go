@@ -26,12 +26,12 @@ const defaultMinReplicas int32 = 1
 
 // KEDAReconciler reconciles the ScaledObject resource.
 //
-// OEP-0013 Slice 2 parameterizes the generator: the constructor accepts a
-// caller-supplied ScaleTarget (Raw Deployment passes apps/v1 Deployment;
-// the IR-managed path introduced by Slice 3 will pass an InferenceReplica
-// target) and a typed *KedaAutoscaler block whose Triggers / Advanced /
-// PollingInterval / CooldownPeriod / IdleReplicaCount / Fallback fields are
-// forwarded verbatim to the ScaledObject spec.
+// The generator is parameterized: the constructor accepts a caller-
+// supplied ScaleTarget (Raw Deployment passes apps/v1 Deployment; the
+// IR-managed path passes an InferenceReplica target) and a typed
+// *KedaAutoscaler block whose Triggers / Advanced / PollingInterval /
+// CooldownPeriod / IdleReplicaCount / Fallback fields are forwarded
+// verbatim to the ScaledObject spec.
 type KEDAReconciler struct {
 	client       client.Client
 	scheme       *runtime.Scheme
@@ -43,8 +43,7 @@ type KEDAReconciler struct {
 // targets the caller-supplied Deployment. Reads the per-Component Autoscaler
 // block (Autoscaler.Keda) from componentExt for trigger configuration;
 // MinReplicas / MaxReplicas on the ComponentExtensionSpec drive the bounds.
-// OEP-0013 Slice 3 introduces the sibling NewKEDAReconcilerForTarget
-// constructor for the IR-managed path.
+// See NewKEDAReconcilerForTarget for the IR-managed path.
 func NewKEDAReconciler(
 	client client.Client,
 	scheme *runtime.Scheme,
@@ -64,15 +63,15 @@ func NewKEDAReconciler(
 
 // NewKEDAReconcilerForTarget builds a KEDAReconciler whose generated
 // ScaledObject targets the caller-supplied scaleTargetRef (typically an
-// InferenceReplica for the OEP-0013 IR-managed path). kedaSpec carries the
-// resolved KedaAutoscaler block (resolver output from Slice 1); Triggers,
-// Advanced, PollingInterval, CooldownPeriod, IdleReplicaCount, and Fallback
-// are all forwarded verbatim to the ScaledObject spec per OEP-0013 README
+// InferenceReplica for the IR-managed path). kedaSpec carries the
+// resolved KedaAutoscaler block (resolver output); Triggers, Advanced,
+// PollingInterval, CooldownPeriod, IdleReplicaCount, and Fallback are all
+// forwarded verbatim to the ScaledObject spec per OEP-0013 README
 // 678-706.
 //
-// It is the entry point for OEP-0013's per-IR dispatch (Slice 3) and stays
-// free of any ComponentExtensionSpec concerns so the two callers are
-// completely decoupled.
+// It is the entry point for OEP-0013's per-IR dispatch and stays free of
+// any ComponentExtensionSpec concerns so the two callers are completely
+// decoupled.
 //
 // When kedaSpec is nil or kedaSpec.Triggers is empty the generated
 // ScaledObject ends up with no triggers; Reconcile() then skips the apply
@@ -101,12 +100,11 @@ func NewKEDAReconcilerForTarget(
 //
 // scaleTargetRef is forwarded verbatim to the ScaledObject spec — callers
 // supply `{apps/v1, Deployment, <name>}` for Raw Deployment dispatch and
-// `{ome.io/v1beta1, InferenceReplica, <ir-name>}` for the IR-managed path
-// introduced by OEP-0013 Slice 3.
+// `{ome.io/v1beta1, InferenceReplica, <ir-name>}` for the IR-managed path.
 //
-// kedaSpec / minReplicas / maxReplicas come from the resolver (Slice 1) or
-// the Raw Deployment shim (createScaledObjectFromComponentExt). When
-// kedaSpec is non-nil the Triggers, Advanced, PollingInterval,
+// kedaSpec / minReplicas / maxReplicas come from the resolver or the Raw
+// Deployment shim (createScaledObjectFromComponentExt). When kedaSpec is
+// non-nil the Triggers, Advanced, PollingInterval,
 // CooldownPeriod, IdleReplicaCount, and Fallback fields are all forwarded
 // verbatim per OEP-0013 README 678-706. When kedaSpec is nil or
 // kedaSpec.Triggers is empty the generated ScaledObject ends up with no
@@ -148,8 +146,8 @@ func createScaledObject(
 			Namespace:   componentMeta.Namespace,
 			Labels:      filteredLabels,
 			Annotations: componentMeta.Annotations,
-			// Forward OwnerReferences so the OEP-0013 IR-managed dispatch
-			// can stamp the SO with the IR's controller-ref for foreground
+			// Forward OwnerReferences so the IR-managed dispatch can
+			// stamp the SO with the IR's controller-ref for foreground
 			// GC cascade. Raw Deployment callers go through
 			// createScaledObjectFromComponentExt → SetControllerReferences
 			// and don't populate componentMeta.OwnerReferences, so this is
@@ -162,8 +160,8 @@ func createScaledObject(
 
 // createScaledObjectFromComponentExt is the Raw Deployment bridge from the
 // (componentMeta, componentExt) caller to the parameterized createScaledObject.
-// Reads Autoscaler.Keda when present (OEP-0013 Slice 6's canonical authoring
-// location) and otherwise leaves Triggers empty — the Reconcile() loop's
+// Reads Autoscaler.Keda when present (the canonical authoring location) and
+// otherwise leaves Triggers empty — the Reconcile() loop's
 // shouldCreateScaledObject gate then skips the apply to avoid emitting an
 // invalid (zero-trigger) ScaledObject.
 func createScaledObjectFromComponentExt(

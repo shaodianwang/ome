@@ -35,7 +35,7 @@ func newStatusTestScheme(t *testing.T) *runtime.Scheme {
 }
 
 // TestWriteAutoscalerStatus_ManagedByMatrix pins the three-way mapping
-// Class → ManagedBy specified in the OEP-0013 Slice 4 spec + Q5:
+// Class → ManagedBy specified in OEP-0013 + Q5:
 //
 //   - nil resolved block               → ManagedBy=none
 //   - Class=hpa | keda                 → ManagedBy=ome
@@ -113,7 +113,7 @@ func TestWriteAutoscalerStatus_ManagedByMatrix(t *testing.T) {
 				"SpecSource must echo the input verbatim")
 
 			// No live HPA / SO planted → counters stay zero, conditions nil,
-			// LastScaleTime nil. Mirrors the "Slice 3 not yet wired" state.
+			// LastScaleTime nil. Mirrors the "dispatch not yet wired" state.
 			g.Expect(status.CurrentReplicas).To(gomega.BeZero())
 			g.Expect(status.DesiredReplicas).To(gomega.BeZero())
 			g.Expect(status.LastScaleTime).To(gomega.BeNil())
@@ -225,10 +225,10 @@ func TestWriteAutoscalerStatus_HPAMirror(t *testing.T) {
 }
 
 // TestWriteAutoscalerStatus_HPAMirror_NotFound pins the graceful-degradation
-// requirement: when the live HPA hasn't been created yet (Slice 3 not wired,
-// or the HPA was just submitted and the cache hasn't caught up), the writer
-// returns the static fields populated and counters at zero. NO error, no
-// crash, no stale state.
+// requirement: when the live HPA hasn't been created yet (dispatch not
+// wired, or the HPA was just submitted and the cache hasn't caught up),
+// the writer returns the static fields populated and counters at zero.
+// NO error, no crash, no stale state.
 func TestWriteAutoscalerStatus_HPAMirror_NotFound(t *testing.T) {
 	g := gomega.NewWithT(t)
 	cli := fake.NewClientBuilder().WithScheme(newStatusTestScheme(t)).Build()

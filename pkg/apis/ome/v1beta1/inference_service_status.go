@@ -142,10 +142,10 @@ type ComponentStatusSpec struct {
 	// Class / ManagedBy / SpecSource and (when ManagedBy == "ome") live
 	// CurrentReplicas / DesiredReplicas / LastScaleTime / Conditions
 	// mirrored from the underlying HPA or ScaledObject. Populated by
-	// the ISVC status writer (OEP-0013 Slice 4); nil for Components
-	// that don't go through the new resolver yet (e.g., RawDeployment
-	// Components that haven't migrated). See ComponentAutoscalerStatus
-	// for the full field semantics.
+	// the ISVC status writer; nil for Components that don't go through
+	// the new resolver yet (e.g., RawDeployment Components that haven't
+	// migrated). See ComponentAutoscalerStatus for the full field
+	// semantics.
 	// +optional
 	Autoscaler *ComponentAutoscalerStatus `json:"autoscaler,omitempty"`
 

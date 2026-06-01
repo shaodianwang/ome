@@ -31,11 +31,11 @@ import (
 //   - ControllerRevisions (owned): re-enqueue on revision GC so the
 //     workload-side retention sweep doesn't fight a manual delete.
 //   - HorizontalPodAutoscaler (owned): re-enqueue when the OEP-0013
-//     Slice 3 dispatch-emitted HPA changes — Slice 4's status writer
-//     mirrors HPA.Status.Conditions onto the IR / ISVC status surface.
+//     dispatch-emitted HPA changes — the status writer mirrors
+//     HPA.Status.Conditions onto the IR / ISVC status surface.
 //   - ScaledObject (owned): KEDA scheme is registered unconditionally
 //     per OEP-0013 Q6, so the Owns() is unconditional. Re-enqueue on
-//     ScaledObject status churn for the same Slice 4 status mirror.
+//     ScaledObject status churn for the same status mirror.
 //
 // The parent InferenceService is NOT watched — the IR's owner ref to
 // its parent means the parent's controller already gets re-enqueued

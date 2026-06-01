@@ -85,7 +85,7 @@ func createAutoscaler(client client.Client,
 	switch ac {
 	// HPA and KEDA can not coexist for the same deployment
 	case constants.AutoscalerClassHPA, constants.AutoscalerClassExternal:
-		// OEP-0013 Slice 2 (decision Q6): KEDA scheme is registered
+		// Decision Q6 (OEP-0013): KEDA scheme is registered
 		// unconditionally at manager startup, so the prior
 		// IsGroupRegistered probe is dead code — call the cleanup
 		// directly.
@@ -118,7 +118,7 @@ func deleteExistingScaledObject(client client.Client, componentMeta metav1.Objec
 		if apierr.IsNotFound(err) {
 			return nil
 		}
-		// OEP-0013 Slice 2 (decision Q6): KEDA is a hard dependency, so
+		// Decision Q6 (OEP-0013): KEDA is a hard dependency, so
 		// `IsNotRegisteredError` cannot fire here at steady state. We keep
 		// it as a defensive guard for the narrow window where KEDA was
 		// uninstalled out from under a running manager.

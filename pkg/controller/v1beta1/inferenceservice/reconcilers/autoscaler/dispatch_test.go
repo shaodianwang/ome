@@ -44,9 +44,9 @@ func dispatchOwner(name string) metav1.OwnerReference {
 	}
 }
 
-// dispatchScaleTargetRef builds the autoscalingv2 ref the OEP-0013 IR-
-// managed path supplies on every dispatch. Both HPA + KEDA branches
-// pass this through to their generators verbatim.
+// dispatchScaleTargetRef builds the autoscalingv2 ref the IR-managed
+// path supplies on every dispatch. Both HPA + KEDA branches pass this
+// through to their generators verbatim.
 func dispatchScaleTargetRef(name string) autoscalingv2.CrossVersionObjectReference {
 	return autoscalingv2.CrossVersionObjectReference{
 		APIVersion: v1beta1.SchemeGroupVersion.String(),
@@ -378,8 +378,8 @@ func TestDispatchAutoscaler_ClassSwitch_KEDAToHPA(t *testing.T) {
 
 // TestDispatchAutoscaler_HPA_DefaultMetric verifies that when the
 // resolved Autoscaler has Class=hpa but HPA=nil (the resolver's default
-// branch), the generated HPA carries the OEP-0013 default of a single
-// CPU=80% Resource metric.
+// branch), the generated HPA carries the default of a single CPU=80%
+// Resource metric.
 func TestDispatchAutoscaler_HPA_DefaultMetric(t *testing.T) {
 	const (
 		ns   = "test-ns"

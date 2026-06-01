@@ -6,8 +6,8 @@ import (
 
 // SpecSource identifies the layer that produced the resolved
 // ComponentAutoscaler. Mirrored onto status.components.<comp>.autoscaler
-// .specSource by Slice 4 so operators can see which layer of the
-// inheritance chain won for a given Component.
+// .specSource by the status writer so operators can see which layer of
+// the inheritance chain won for a given Component.
 //
 // Per OEP-0013 §"Inheritance chain", ISVC takes priority over the
 // resolved ServingRuntime; if neither sets a block we fall back to
@@ -45,8 +45,8 @@ const (
 //  2. Else if runtime.<componentConfig>.Autoscaler != nil → return
 //     (deep-copied runtime block, SpecSourceRuntime).
 //  3. Else → return ({Class: hpa, HPA: nil}, SpecSourceDefault).
-//     The HPA generator (Slice 2) materializes this into a single
-//     CPU=80% Resource metric.
+//     The HPA generator materializes this into a single CPU=80% Resource
+//     metric.
 //
 // Decisions (locked 2026-05-29):
 //
@@ -54,9 +54,7 @@ const (
 //     "only when Component declares a Resource metric" carve-out.
 //     The operator-visible default unconditionally produces an HPA.
 //
-//   - Q2: Legacy ScaleTarget / ScaleMetric fields were hard-deleted in
-//     Slice 6 (2026-06-01); see ComponentExtensionSpec for the migration
-//     note. The new Autoscaler block is fully authoritative. The
+//   - Q2: The Autoscaler block is fully authoritative. The
 //     ome.io/autoscalerClass annotation is still consulted by the legacy
 //     Raw Deployment dispatch but does not feed this resolver.
 //
@@ -144,10 +142,10 @@ func runtimeAutoscaler(runtime *v1beta1.ServingRuntimeSpec, component v1beta1.Co
 // caller mutating the returned pointer cannot affect a subsequent
 // resolution.
 //
-// The HPA generator (Slice 2) treats HPA=nil as a sentinel and
-// materializes a single CPU=80% Resource metric. Per OEP-0013
-// §"Backwards compatibility": every Component without an explicit
-// Autoscaler block gets the same baseline HPA.
+// The HPA generator treats HPA=nil as a sentinel and materializes a
+// single CPU=80% Resource metric. Per OEP-0013 §"Backwards
+// compatibility": every Component without an explicit Autoscaler block
+// gets the same baseline HPA.
 func defaultAutoscaler() *v1beta1.ComponentAutoscaler {
 	return &v1beta1.ComponentAutoscaler{
 		Class: v1beta1.AutoscalerHPA,

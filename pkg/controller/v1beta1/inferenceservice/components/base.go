@@ -561,17 +561,15 @@ func UpdateComponentStatus(b *BaseComponentFields, isvc *v1beta1.InferenceServic
 	// - RawDeployment: Updates when Deployment becomes available
 	b.StatusManager.InitializeComponentCondition(&isvc.Status, componentType)
 
-	// OEP-0013 Slice 4: mirror the resolved per-Component autoscaler block
-	// + canonical scale target onto status.components.<c>.{autoscaler,
-	// scaleTargetRef}. Runs before the lean-path return so operators always
-	// see the resolved class / managed-by / scale target — even on
-	// model-less ISVCs that exit early below.
+	// Mirror the resolved per-Component autoscaler block + canonical scale
+	// target onto status.components.<c>.{autoscaler, scaleTargetRef}.
+	// Runs before the lean-path return so operators always see the
+	// resolved class / managed-by / scale target — even on model-less
+	// ISVCs that exit early below.
 	//
-	// Slice 3 (in flight) wires the dispatch that actually creates the
-	// HPA / ScaledObject; until that lands, the live-mirror branches
-	// return NotFound and counters / conditions stay zero. ManagedBy
-	// still correctly reports "ome" for default class=hpa ISVCs (so
-	// operators can see the resolved class), and "none" for the
+	// The live-mirror branches in writeComponentAutoscalerStatus degrade
+	// gracefully on NotFound (Component without a scaler yet), keeping
+	// ManagedBy correct for default class=hpa ISVCs and "none" for the
 	// AutoscalerNone / unknown branches.
 	if err := writeComponentAutoscalerStatus(b, isvc, componentType, objectMeta); err != nil {
 		return errors.Wrapf(err, "failed to write %s autoscaler status", componentType)
@@ -603,22 +601,22 @@ func UpdateComponentStatus(b *BaseComponentFields, isvc *v1beta1.InferenceServic
 }
 
 // writeComponentAutoscalerStatus resolves the per-Component autoscaler from
-// the ISVC -> runtime -> default chain (Slice 1) and stamps the resulting
+// the ISVC -> runtime -> default chain and stamps the resulting
 // ComponentAutoscalerStatus + ScaleTargetRef onto status.components.<c>.
 // Existing fields on the ComponentStatusSpec entry are preserved — only the
 // .autoscaler and .scaleTargetRef sub-fields are overwritten.
 //
-// OEP-0013 Slice 4. See pkg/.../reconcilers/autoscaler/status.go for the
-// underlying mapping + live-mirror semantics.
+// See pkg/.../reconcilers/autoscaler/status.go for the underlying mapping
+// + live-mirror semantics.
 func writeComponentAutoscalerStatus(b *BaseComponentFields, isvc *v1beta1.InferenceService, componentType v1beta1.ComponentType, objectMeta metav1.ObjectMeta) error {
 	resolved, source := autoscaler.ResolveComponentAutoscaler(b.Runtime, isvc, componentType)
 
 	scaleTargetRef := canonicalScaleTargetRef(b.DeploymentMode, isvc.Name, objectMeta.Name, componentType)
 
-	// For OMENative-managed Components the dispatch (Slice 3) names the
-	// HPA / ScaledObject after the InferenceReplica; for RawDeployment it
-	// uses the legacy component metadata Name. The writer matches that
-	// lookup pattern so the live mirror finds the right object.
+	// For OMENative-managed Components the dispatch names the HPA /
+	// ScaledObject after the InferenceReplica; for RawDeployment it uses
+	// the legacy component metadata Name. The writer matches that lookup
+	// pattern so the live mirror finds the right object.
 	objectName := objectMeta.Name
 	if irprojector.IsIRManagedComponent(b.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
 		objectName = irprojector.InferenceReplicaName(isvc.Name, componentType)

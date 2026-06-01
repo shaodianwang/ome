@@ -401,8 +401,8 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	// return value so a downstream caller mutating the IR cannot
 	// corrupt the next reconcile's resolution. nil
 	// ResolvedAutoscaler clears ir.Spec.Autoscaler — defensive
-	// against a dispatch site that hasn't been wired through Slice 1
-	// yet (no spurious empty block lands on the IR).
+	// against a dispatch site that doesn't run the resolver (no
+	// spurious empty block lands on the IR).
 	ir.Spec.Autoscaler = p.ResolvedAutoscaler.DeepCopy()
 }
 

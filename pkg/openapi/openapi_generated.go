@@ -631,7 +631,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref common.ReferenceCallbac
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields from ComponentExtensionSpec; this is now the only supported way to configure per-Component autoscaling on an ISVC.",
+				Description: "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields have been removed from ComponentExtensionSpec.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"class": {
@@ -667,12 +667,12 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscalerStatus(ref common.ReferenceC
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ComponentAutoscalerStatus reports per-Component autoscaler state on the InferenceService. Mirrors the resolved ComponentAutoscaler block plus the live HPA / ScaledObject metrics so an operator can read the authoritative scaler shape, who owns it, and what it's currently doing — all from the parent ISVC without chasing IRs and scalers separately.\n\nPopulated by the ISVC status writer for OMENative-managed Components once Slice 3 wires dispatch. Until Slice 3 lands the status writer degrades gracefully — ManagedBy reports \"none\" for default class=hpa ISVCs (no HPA exists yet to read from) without crashing.\n\nSee OEP-0013 §\"Status surface\" (README lines 992-1007).\n\nAlpha (OEP-0013). The shape may change without notice.",
+				Description: "ComponentAutoscalerStatus reports per-Component autoscaler state on the InferenceService. Mirrors the resolved ComponentAutoscaler block plus the live HPA / ScaledObject metrics so an operator can read the authoritative scaler shape, who owns it, and what it's currently doing — all from the parent ISVC without chasing IRs and scalers separately.\n\nPopulated by the ISVC status writer for OMENative-managed Components. The writer degrades gracefully when a Component has no live scaler — ManagedBy reports \"none\" and counters stay zero without crashing.\n\nSee OEP-0013 §\"Status surface\" (README lines 992-1007).\n\nAlpha (OEP-0013). The shape may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"class": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Class echoes the resolved autoscaler class as picked by ResolveComponentAutoscaler (Slice 1). One of hpa | keda | external | none. Mirrors the input that drove dispatch so the operator can confirm the inheritance chain landed on the expected class.",
+							Description: "Class echoes the resolved autoscaler class as picked by ResolveComponentAutoscaler. One of hpa | keda | external | none. Mirrors the input that drove dispatch so the operator can confirm the inheritance chain landed on the expected class.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -686,7 +686,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscalerStatus(ref common.ReferenceC
 					},
 					"specSource": {
 						SchemaProps: spec.SchemaProps{
-							Description: "SpecSource reports which layer of the ISVC -> runtime -> default inheritance chain produced the resolved Autoscaler block. One of \"isvc\" | \"runtime\" | \"default\". Mirrors autoscaler.SpecSource (Slice 1) so the operator can debug which layer is contributing the live config.",
+							Description: "SpecSource reports which layer of the ISVC -> runtime -> default inheritance chain produced the resolved Autoscaler block. One of \"isvc\" | \"runtime\" | \"default\". Mirrors autoscaler.SpecSource so the operator can debug which layer is contributing the live config.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -834,7 +834,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -929,7 +929,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler reports the per-Component autoscaler state — resolved Class / ManagedBy / SpecSource and (when ManagedBy == \"ome\") live CurrentReplicas / DesiredReplicas / LastScaleTime / Conditions mirrored from the underlying HPA or ScaledObject. Populated by the ISVC status writer (OEP-0013 Slice 4); nil for Components that don't go through the new resolver yet (e.g., RawDeployment Components that haven't migrated). See ComponentAutoscalerStatus for the full field semantics.",
+							Description: "Autoscaler reports the per-Component autoscaler state — resolved Class / ManagedBy / SpecSource and (when ManagedBy == \"ome\") live CurrentReplicas / DesiredReplicas / LastScaleTime / Conditions mirrored from the underlying HPA or ScaledObject. Populated by the ISVC status writer; nil for Components that don't go through the new resolver yet (e.g., RawDeployment Components that haven't migrated). See ComponentAutoscalerStatus for the full field semantics.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscalerStatus"),
 						},
 					},
@@ -1642,7 +1642,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -2375,7 +2375,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -6788,7 +6788,7 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice.\n\nOEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum that used to live on this struct. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},

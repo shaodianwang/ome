@@ -44,15 +44,13 @@ type IRDispatchInput struct {
 	// caller dispatching before the IR is committed).
 	IR *v1beta1.InferenceReplica
 
-	// ResolvedAutoscaler is the resolver output (Slice 1's
+	// ResolvedAutoscaler is the resolver output (the output of
 	// ResolveComponentAutoscaler). nil is treated as Class=none.
 	ResolvedAutoscaler *v1beta1.ComponentAutoscaler
 
 	// ComponentExt is the per-Component extension spec; min / max
 	// replicas come from here. The dispatch does NOT consult any other
-	// field — the legacy ScaleTarget / ScaleMetric were hard-deleted in
-	// Slice 6 (2026-06-01) and the new Autoscaler block is carried on
-	// ResolvedAutoscaler above.
+	// field — the Autoscaler block is carried on ResolvedAutoscaler above.
 	ComponentExt *v1beta1.ComponentExtensionSpec
 }
 

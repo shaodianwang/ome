@@ -502,9 +502,9 @@ func ValidateAutoscalerConfig(isvc *v1beta1.InferenceService) ([]string, error) 
 					}
 					return nil, nil
 				case constants.AutoscalerClassKEDA:
-					// Phase 1 of OEP-0013 removed the legacy KedaConfig
-					// shape; webhook validation for Autoscaler.Keda lands
-					// in a later phase. Accept without validating here.
+					// Per-Component Autoscaler.Keda shape is validated
+					// by ValidateAutoscaler; the annotation path accepts
+					// class=keda without further validation here.
 					return nil, nil
 				case constants.AutoscalerClassExternal:
 					return nil, nil
@@ -534,8 +534,8 @@ func ValidateAutoscalerTargetUtilizationPercentage(isvc *v1beta1.InferenceServic
 
 // ValidateHPAMetrics validates the legacy ome.io/metrics annotation value
 // against the AutoscalerAllowedMetricsList enum. Accepts the raw string
-// from the annotation since OEP-0013 Slice 6 (2026-06-01) deleted the
-// v1beta1.ScaleMetric enum that this used to take.
+// from the annotation — the v1beta1.ScaleMetric enum this used to take is
+// gone.
 func ValidateHPAMetrics(metric string) error {
 	for _, item := range constants.AutoscalerAllowedMetricsList {
 		if string(item) == metric {
@@ -578,19 +578,18 @@ const (
 
 	// ReasonAutoscalerAnnotationConflict rejects an ISVC that carries
 	// both the legacy ome.io/autoscalerClass annotation AND a new
-	// Autoscaler block on any Component. Decision Q2 (OEP-0013 plan)
-	// locks legacy fields for deletion in Slice 6; this validation
-	// pre-empts confusion during the transition.
+	// Autoscaler block on any Component. Per OEP-0013 Decision Q2, the
+	// per-Component Autoscaler block wins; this validation pre-empts
+	// confusion by forcing operators to remove the annotation.
 	ReasonAutoscalerAnnotationConflict = "AutoscalerAnnotationConflict"
 
 	// ReasonLegacyAutoscalerFieldsRejected is the friendly migration
 	// error returned by ValidateLegacyAutoscalerFieldsRaw when a client
 	// submits an ISVC carrying the deleted scaleTarget / scaleMetric
-	// fields. The Go-struct fields and CRD schema entries were both
-	// hard-deleted in OEP-0013 Slice 6 (2026-06-01); a modern kubectl
-	// against an up-to-date CRD will already prune them via structural-
-	// schema enforcement. This reason is defense-in-depth for clients
-	// with a stale local CRD that bypassed pruning.
+	// fields. The Go-struct fields and CRD schema entries are gone; a
+	// modern kubectl against an up-to-date CRD will already prune them
+	// via structural-schema enforcement. This reason is defense-in-depth
+	// for clients with a stale local CRD that bypassed pruning.
 	ReasonLegacyAutoscalerFieldsRejected = "LegacyAutoscalerFieldsRejected"
 )
 
@@ -790,8 +789,8 @@ func validateHPAMetricSpec(idx int, m autoscalingv2.MetricSpec) error {
 // ValidateAutoscalerAnnotationConflict rejects an InferenceService that
 // declares the legacy ome.io/autoscalerClass annotation AND a new
 // Autoscaler block on any Component. Per Decision Q2 (plan §5), the
-// legacy field is being deleted in Slice 6; this validator pre-empts
-// confusion during the transition by forcing the operator to pick one.
+// per-Component Autoscaler block wins; this validator pre-empts confusion
+// by forcing the operator to pick one.
 //
 // Returns nil when the annotation is absent OR when no Component
 // carries an Autoscaler block.
@@ -828,13 +827,13 @@ func ValidateAutoscalerAnnotationConflict(isvc *v1beta1.InferenceService) error 
 // friendly migration error if either is set on any Component
 // (spec.engine, spec.decoder, spec.router, spec.engineConfig.*, etc).
 //
-// OEP-0013 Slice 6 (2026-06-01) hard-deleted these fields from
-// ComponentExtensionSpec; the generated CRD no longer carries them in
-// the OpenAPI schema. A modern kubectl with --validate=true against an
-// up-to-date CRD will reject the unknown fields server-side before they
-// reach the webhook; the API server's structural-schema pruning will
-// silently drop them when --validate=false. This helper exists as
-// defense-in-depth for the narrow window where:
+// These fields have been removed from ComponentExtensionSpec; the
+// generated CRD no longer carries them in the OpenAPI schema. A modern
+// kubectl with --validate=true against an up-to-date CRD will reject the
+// unknown fields server-side before they reach the webhook; the API
+// server's structural-schema pruning will silently drop them when
+// --validate=false. This helper exists as defense-in-depth for the
+// narrow window where:
 //
 //   - An operator's local CRD is stale (cluster updated, kubeconfig
 //     points at older CRD), AND

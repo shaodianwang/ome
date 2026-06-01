@@ -348,11 +348,11 @@ func TestUpdateComponentStatusLeanModel(t *testing.T) {
 	scheme := runtime.NewScheme()
 	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
-	// OEP-0013 Slice 4: UpdateComponentStatus now resolves + writes the
-	// per-Component autoscaler status, which Gets the live HPA / SO. Both
-	// types must be registered in the test scheme so the live-mirror path
-	// returns NotFound cleanly (which the writer treats as "no scaler yet"
-	// — exercises the graceful-degradation branch).
+	// UpdateComponentStatus resolves + writes the per-Component
+	// autoscaler status, which Gets the live HPA / SO. Both types must
+	// be registered in the test scheme so the live-mirror path returns
+	// NotFound cleanly (which the writer treats as "no scaler yet" —
+	// exercises the graceful-degradation branch).
 	g.Expect(autoscalingv2.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(kedav1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
@@ -434,16 +434,16 @@ func TestUpdateComponentStatusLeanModel(t *testing.T) {
 				)
 			}
 
-			// OEP-0013 Slice 4 lock-in: the autoscaler status writer runs
-			// BEFORE the lean-path return, so BOTH cases (model-less and
-			// with-model) must have a populated ComponentAutoscalerStatus.
+			// Lock-in: the autoscaler status writer runs BEFORE the
+			// lean-path return, so BOTH cases (model-less and with-model)
+			// must have a populated ComponentAutoscalerStatus.
 			// DeploymentMode=RawDeployment + no Autoscaler block anywhere →
 			// resolved Class=hpa, SpecSource=default, ManagedBy=ome.
 			engineStatus, ok := tt.isvc.Status.Components[v1beta1.EngineComponent]
 			g.Expect(ok).To(gomega.BeTrue(),
-				"OEP-0013 Slice 4: every UpdateComponentStatus call must produce a Components entry")
+				"every UpdateComponentStatus call must produce a Components entry")
 			g.Expect(engineStatus.Autoscaler).NotTo(gomega.BeNil(),
-				"OEP-0013 Slice 4: ComponentAutoscalerStatus must be populated even on lean ISVCs")
+				"ComponentAutoscalerStatus must be populated even on lean ISVCs")
 			g.Expect(engineStatus.Autoscaler.Class).To(gomega.Equal(v1beta1.AutoscalerHPA))
 			g.Expect(engineStatus.Autoscaler.SpecSource).To(gomega.Equal("default"))
 			g.Expect(engineStatus.Autoscaler.ManagedBy).To(gomega.Equal(v1beta1.AutoscalerManagedByOME))

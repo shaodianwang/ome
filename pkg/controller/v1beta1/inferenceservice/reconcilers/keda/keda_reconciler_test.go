@@ -62,7 +62,7 @@ func TestCalculateMinMaxReplicas(t *testing.T) {
 	}
 }
 
-// TestCreateScaledObject_IRScaleTarget verifies the OEP-0013 Slice 3 wiring:
+// TestCreateScaledObject_IRScaleTarget verifies the IR-managed wiring:
 // when the caller passes an InferenceReplica ScaleTarget and a KedaAutoscaler
 // with a single trigger, the generator emits a ScaledObject targeting the IR
 // with the trigger forwarded verbatim and the default min/max bounds applied.
@@ -194,9 +194,8 @@ func TestCreateScaledObject_PollingCooldownFallback(t *testing.T) {
 // TestCreateScaledObject_ComponentExtShim_Identical pins the byte-identical
 // contract for the Raw Deployment dispatch path: the shim must emit the
 // same ScaledObject as createScaledObject when given a componentExt with
-// an Autoscaler.Keda block (the OEP-0013 Slice 6 canonical authoring
-// location). Also covers the `k8slens-edit-resource-version` label
-// filtering quirk.
+// an Autoscaler.Keda block (the canonical authoring location). Also covers
+// the `k8slens-edit-resource-version` label filtering quirk.
 func TestCreateScaledObject_ComponentExtShim_Identical(t *testing.T) {
 	componentMeta := metav1.ObjectMeta{
 		Name:      "raw-engine",

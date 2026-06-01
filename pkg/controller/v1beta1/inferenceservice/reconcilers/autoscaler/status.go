@@ -19,8 +19,8 @@ import (
 // WriteAutoscalerStatus computes the per-Component ComponentAutoscalerStatus
 // + ScaleTargetRef for the ISVC status writer. Inputs:
 //
-//   - resolvedAutoscaler: the output of autoscaler.ResolveComponentAutoscaler
-//     (Slice 1). nil is treated as Class=none — surfaces ManagedBy=none.
+//   - resolvedAutoscaler: the output of autoscaler.ResolveComponentAutoscaler.
+//     nil is treated as Class=none — surfaces ManagedBy=none.
 //   - specSource: the SpecSource returned alongside resolvedAutoscaler so the
 //     status mirror echoes the inheritance-chain decision back to the operator.
 //   - scaleTargetRef: the canonical scale target for this Component. Always
@@ -45,13 +45,12 @@ import (
 // (= <objectName>) and mirrors Conditions, CurrentReplicas, DesiredReplicas,
 // LastScaleTime verbatim. NotFound is silently tolerated — the scaler may
 // have been created in the same reconcile pass and not yet reported, so
-// counters stay at zero and Conditions stays empty. This mirrors the
-// "degrades gracefully" requirement from the Slice 4 spec: the writer can
-// run before Slice 3 wires dispatch (every Component lands on ManagedBy=none
-// in that case) without crashing.
+// counters stay at zero and Conditions stays empty. The writer also
+// degrades gracefully when no Component has dispatch wired (every
+// Component lands on ManagedBy=none in that case) without crashing.
 //
-// objectName is the (Namespace, Name) the dispatch (Slice 3) uses for the
-// HPA / ScaledObject. For OMENative-managed Components this is the IR name
+// objectName is the (Namespace, Name) the dispatch uses for the HPA /
+// ScaledObject. For OMENative-managed Components this is the IR name
 // (=<isvc>-<component>); for RawDeployment Components it's the legacy
 // component metadata Name. The KEDA generator translates this name through
 // utils.GetScaledObjectName under the hood so the lookup applies the same
@@ -138,7 +137,7 @@ func managedByForClass(class v1beta1.AutoscalerClass) v1beta1.AutoscalerManagedB
 // and stamps its Conditions / CurrentReplicas / DesiredReplicas /
 // LastScaleTime onto status. NotFound is swallowed — the dispatch may have
 // created the HPA in the same reconcile and the cache may not have caught
-// up, or Slice 3 might not be deployed at all. Counters stay zero in those
+// up, or no dispatch has wired this Component. Counters stay zero in those
 // cases and operators can observe "scaler just spun up" by reading status
 // again on the next reconcile pass.
 func mirrorHPAStatus(ctx context.Context, cli client.Client, namespace, name string, status *v1beta1.ComponentAutoscalerStatus) error {
@@ -167,7 +166,7 @@ func mirrorHPAStatus(ctx context.Context, cli client.Client, namespace, name str
 // ScaledObject derives — KEDA writes them onto its own embedded HPA, not
 // the ScaledObject status — so we additionally Get that HPA (named by
 // SO.Status.HpaName, falling back to the SO name) and read counters from
-// there. Both lookups tolerate NotFound (transient or pre-Slice-3 state).
+// there. Both lookups tolerate NotFound (transient or unwired state).
 //
 // NotRegistered errors on the SO Get are swallowed too: if the cluster
 // hasn't installed KEDA but somebody resolved class=keda upstream (Q6:

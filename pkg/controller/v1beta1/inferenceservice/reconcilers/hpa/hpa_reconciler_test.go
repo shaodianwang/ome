@@ -17,8 +17,8 @@ import (
 
 // TestCreateHPAFromComponentExt exercises the Raw Deployment path: the
 // existing Raw Deployment constructor flows through
-// createHPAFromComponentExt, which reads from the new Autoscaler.HPA
-// block (OEP-0013 Slice 6's canonical location) plus the legacy
+// createHPAFromComponentExt, which reads from the Autoscaler.HPA
+// block (the canonical location) plus the legacy
 // ome.io/targetUtilizationPercentage annotation override.
 func TestCreateHPAFromComponentExt(t *testing.T) {
 
@@ -281,7 +281,7 @@ func TestCreateHPAFromComponentExt(t *testing.T) {
 	}
 }
 
-// TestCreateHPA_IRScaleTarget verifies the OEP-0013 Slice 3 wiring: when the
+// TestCreateHPA_IRScaleTarget verifies the IR-managed wiring: when the
 // caller passes an InferenceReplica scaleTargetRef and a nil HPAAutoscaler,
 // the generator emits an HPA targeting the IR with the default CPU=80% metric.
 func TestCreateHPA_IRScaleTarget(t *testing.T) {
@@ -400,10 +400,9 @@ func TestCreateHPA_Behavior(t *testing.T) {
 // TestCreateHPA_ComponentExtShim_Identical pins the byte-identical
 // contract for the Raw Deployment path: createHPAFromComponentExt must
 // emit the same HPA as createHPA when given an equivalent Autoscaler.HPA
-// block. The OEP-0013 Slice 6 deletion of ScaleTarget / ScaleMetric
-// moved the metric configuration into Autoscaler.HPA.Metrics — operators
-// who used to set ScaleTarget=55 + ScaleMetric=cpu now declare a
-// Resource{cpu, 55%} entry in Autoscaler.HPA.Metrics.
+// block. The metric configuration lives entirely in Autoscaler.HPA.Metrics
+// — operators who used to set ScaleTarget=55 + ScaleMetric=cpu now declare
+// a Resource{cpu, 55%} entry in Autoscaler.HPA.Metrics.
 func TestCreateHPA_ComponentExtShim_Identical(t *testing.T) {
 	componentMeta := metav1.ObjectMeta{
 		Name:      "raw-engine",

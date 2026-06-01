@@ -29,11 +29,9 @@ const (
 // ComponentAutoscaler configures the autoscaler for a single Component
 // (engine / decoder / router). Takes priority over the legacy
 // ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013).
-// The API may change without notice.
-//
-// OEP-0013 Slice 6 (2026-06-01) hard-deleted the legacy ScaleTarget /
-// ScaleMetric fields from ComponentExtensionSpec; this is now the only
-// supported way to configure per-Component autoscaling on an ISVC.
+// The API may change without notice. This is the only supported way to
+// configure per-Component autoscaling on an ISVC — the legacy ScaleTarget
+// / ScaleMetric fields have been removed from ComponentExtensionSpec.
 type ComponentAutoscaler struct {
 	// Class selects the autoscaler implementation.
 	// +kubebuilder:validation:Enum=HPA;KEDA;External;None

@@ -1173,9 +1173,10 @@ func TestValidateComponentsAutoscalers(t *testing.T) {
 
 // TestValidateAutoscalerAnnotationConflict covers the OEP-0013 rule
 // that the legacy ome.io/autoscalerClass annotation cannot coexist
-// with a new per-Component Autoscaler block (Decision Q2 — legacy is
-// being deleted in Slice 6; this validator pre-empts the confused
-// "two sources of truth" state during the transition).
+// with a new per-Component Autoscaler block (Decision Q2 — the
+// per-Component Autoscaler block wins; this validator pre-empts the
+// confused "two sources of truth" state by forcing operators to pick
+// one).
 func TestValidateAutoscalerAnnotationConflict(t *testing.T) {
 	hpaBlock := &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}
 
@@ -1374,7 +1375,7 @@ func TestValidateMigrationPolicy_PerComponent(t *testing.T) {
 	}
 }
 
-// TestValidateLegacyAutoscalerFieldsRaw exercises the OEP-0013 Slice 6
+// TestValidateLegacyAutoscalerFieldsRaw exercises the OEP-0013
 // defense-in-depth check that rejects requests carrying the deleted
 // scaleTarget / scaleMetric fields with a friendly migration message.
 // Most paths NEVER trigger in practice (CRD schema pruning drops the

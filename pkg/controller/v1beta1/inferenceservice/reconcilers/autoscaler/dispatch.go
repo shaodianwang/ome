@@ -20,7 +20,7 @@ import (
 
 // DispatchParams is the input bag DispatchAutoscaler reads to emit the
 // per-Component HPA or ScaledObject. The OMENative IR-managed dispatch
-// fills it from the resolved ComponentAutoscaler (Slice 1's
+// fills it from the resolved ComponentAutoscaler (the output of
 // ResolveComponentAutoscaler), the projected IR identity (for owner-ref
 // + scale-target), and the per-Component min/max replicas.
 //
@@ -30,11 +30,10 @@ type DispatchParams struct {
 	// Update / Delete the HPA + ScaledObject.
 	Client client.Client
 
-	// Scheme is the controller-runtime scheme used to stamp the owner
-	// reference + (in future slices) populate GVK on generated objects.
-	// Reserved for parity with the legacy reconciler — DispatchAutoscaler
-	// uses Owner directly for owner-ref stamping rather than going
-	// through controllerutil.SetControllerReference.
+	// Scheme is the controller-runtime scheme threaded for parity with
+	// the legacy reconciler signatures. DispatchAutoscaler uses Owner
+	// directly for owner-ref stamping rather than going through
+	// controllerutil.SetControllerReference.
 	Scheme *runtime.Scheme
 
 	// Owner is the OwnerReference stamped on every emitted HPA /
@@ -60,10 +59,10 @@ type DispatchParams struct {
 	ScaleTargetRef autoscalingv2.CrossVersionObjectReference
 
 	// Autoscaler is the resolved ComponentAutoscaler block — the output
-	// of autoscaler.ResolveComponentAutoscaler (Slice 1). nil is
-	// treated as Class=none (every OME-managed HPA / SO for this
-	// (Namespace, Name) is deleted). Q5: none + external are status-
-	// field twins and share the same reconciliation path.
+	// of autoscaler.ResolveComponentAutoscaler. nil is treated as
+	// Class=none (every OME-managed HPA / SO for this (Namespace, Name)
+	// is deleted). Q5: none + external are status-field twins and share
+	// the same reconciliation path.
 	Autoscaler *v1beta1.ComponentAutoscaler
 
 	// MinReplicas + MaxReplicas drive the corresponding bounds on the
@@ -80,7 +79,7 @@ type DispatchParams struct {
 // reconciler keeps the cost bounded (no-op when nothing diffs).
 //
 // Three-way dispatch on Autoscaler.Class (Q5: none + external are status-
-// field twins, both fall through to the "delete both" branch — Slice 4
+// field twins, both fall through to the "delete both" branch — the
 // status writer distinguishes them via ManagedBy):
 //
 //   - hpa  → ensure the per-IR HPA exists; delete any pre-existing
@@ -138,9 +137,9 @@ func DispatchAutoscaler(ctx context.Context, p DispatchParams) error {
 	default:
 		// Q5 twins: AutoscalerNone, AutoscalerExternal, and nil all
 		// converge here. Delete any OME-managed HPA + SO; the status
-		// writer (Slice 4) is responsible for the surface-level
-		// distinction between "none" (no autoscaler at all) and
-		// "external" (operator-managed autoscaler).
+		// writer is responsible for the surface-level distinction
+		// between "none" (no autoscaler at all) and "external"
+		// (operator-managed autoscaler).
 		if err := deleteHPAIfExists(ctx, p.Client, p.Namespace, p.Name); err != nil {
 			return fmt.Errorf("delete OME-managed HPA on class=%s (ns=%s, name=%s): %w", class, p.Namespace, p.Name, err)
 		}
@@ -153,9 +152,9 @@ func DispatchAutoscaler(ctx context.Context, p DispatchParams) error {
 
 // autoscalerClass extracts the resolved Class, treating nil as none. Q5
 // folds external + none into the same dispatch branch (both => delete
-// both); we keep them as distinct AutoscalerClass values so a Slice 4
-// status writer wired off the same resolved block can still emit the
-// correct ManagedBy.
+// both); we keep them as distinct AutoscalerClass values so the status
+// writer wired off the same resolved block can still emit the correct
+// ManagedBy.
 func autoscalerClass(a *v1beta1.ComponentAutoscaler) v1beta1.AutoscalerClass {
 	if a == nil {
 		return v1beta1.AutoscalerNone
@@ -163,10 +162,9 @@ func autoscalerClass(a *v1beta1.ComponentAutoscaler) v1beta1.AutoscalerClass {
 	return a.Class
 }
 
-// ensureHPA stamps the OEP-0013 owner-ref on the generator output and
-// runs the HPA reconciler. The HPAReconciler.Reconcile() loop is
-// idempotent (Get-then-diff) so re-running on a steady state is a
-// cheap no-op.
+// ensureHPA stamps the IR owner-ref on the generator output and runs
+// the HPA reconciler. The HPAReconciler.Reconcile() loop is idempotent
+// (Get-then-diff) so re-running on a steady state is a cheap no-op.
 func ensureHPA(ctx context.Context, p DispatchParams) error {
 	componentMeta := buildComponentMeta(p)
 
@@ -191,9 +189,9 @@ func ensureHPA(ctx context.Context, p DispatchParams) error {
 	return nil
 }
 
-// ensureScaledObject stamps the OEP-0013 owner-ref on the generator
-// output and runs the KEDA reconciler. The KEDAReconciler.Reconcile()
-// loop is idempotent (Get-then-diff).
+// ensureScaledObject stamps the IR owner-ref on the generator output
+// and runs the KEDA reconciler. The KEDAReconciler.Reconcile() loop is
+// idempotent (Get-then-diff).
 func ensureScaledObject(ctx context.Context, p DispatchParams) error {
 	componentMeta := buildComponentMeta(p)
 

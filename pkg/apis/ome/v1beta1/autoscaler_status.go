@@ -6,8 +6,8 @@ import (
 
 // AutoscalerManagedBy identifies who owns the active autoscaler for a
 // Component. Mirrored onto status.components.<comp>.autoscaler.managedBy
-// by the ISVC status writer (Slice 4) so operators can tell whether OME
-// is reconciling the HPA / ScaledObject themselves or whether an external
+// by the ISVC status writer so operators can tell whether OME is
+// reconciling the HPA / ScaledObject themselves or whether an external
 // operator is driving scale via the published scaleTargetRef.
 //
 // Per Q5 (locked 2026-05-29 in the OEP-0013 wiring plan §"Decisions"),
@@ -45,20 +45,18 @@ const (
 // doing — all from the parent ISVC without chasing IRs and scalers
 // separately.
 //
-// Populated by the ISVC status writer for OMENative-managed Components
-// once Slice 3 wires dispatch. Until Slice 3 lands the status writer
-// degrades gracefully — ManagedBy reports "none" for default class=hpa
-// ISVCs (no HPA exists yet to read from) without crashing.
+// Populated by the ISVC status writer for OMENative-managed Components.
+// The writer degrades gracefully when a Component has no live scaler —
+// ManagedBy reports "none" and counters stay zero without crashing.
 //
 // See OEP-0013 §"Status surface" (README lines 992-1007).
 //
 // Alpha (OEP-0013). The shape may change without notice.
 type ComponentAutoscalerStatus struct {
 	// Class echoes the resolved autoscaler class as picked by
-	// ResolveComponentAutoscaler (Slice 1). One of hpa | keda |
-	// external | none. Mirrors the input that drove dispatch so the
-	// operator can confirm the inheritance chain landed on the
-	// expected class.
+	// ResolveComponentAutoscaler. One of hpa | keda | external | none.
+	// Mirrors the input that drove dispatch so the operator can confirm
+	// the inheritance chain landed on the expected class.
 	// +optional
 	Class AutoscalerClass `json:"class,omitempty"`
 
@@ -77,9 +75,8 @@ type ComponentAutoscalerStatus struct {
 
 	// SpecSource reports which layer of the ISVC -> runtime -> default
 	// inheritance chain produced the resolved Autoscaler block. One of
-	// "isvc" | "runtime" | "default". Mirrors
-	// autoscaler.SpecSource (Slice 1) so the operator can debug which
-	// layer is contributing the live config.
+	// "isvc" | "runtime" | "default". Mirrors autoscaler.SpecSource so
+	// the operator can debug which layer is contributing the live config.
 	// +optional
 	SpecSource string `json:"specSource,omitempty"`
 

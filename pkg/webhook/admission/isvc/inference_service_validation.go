@@ -84,11 +84,11 @@ func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldObj, 
 }
 
 // validateLegacyAutoscalerFieldsFromCtx pulls the raw admission request
-// out of ctx and runs the OEP-0013 Slice 6 defense-in-depth check for
-// the deleted scaleTarget / scaleMetric fields. Silently no-ops when the
-// request cannot be retrieved (e.g., when the validator is invoked from a
-// unit test that doesn't stamp the ctx), so it never blocks tests that
-// only feed a typed object.
+// out of ctx and runs the defense-in-depth check for the deleted
+// scaleTarget / scaleMetric fields. Silently no-ops when the request
+// cannot be retrieved (e.g., when the validator is invoked from a unit
+// test that doesn't stamp the ctx), so it never blocks tests that only
+// feed a typed object.
 func validateLegacyAutoscalerFieldsFromCtx(ctx context.Context) error {
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
@@ -124,8 +124,8 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	}
 	allWarnings = append(allWarnings, autoscalerWarnings...)
 
-	// OEP-0013 webhook validation: per-Component Autoscaler block shape
-	// (class enum, required fields, IdleReplicaCount vs MinReplicas) +
+	// Per-Component Autoscaler block shape validation (OEP-0013):
+	// class enum, required fields, IdleReplicaCount vs MinReplicas, plus
 	// annotation/block conflict. The per-Component dispatch is shared
 	// with the ServingRuntime and InferenceReplica webhooks via
 	// validation.ValidateComponentsAutoscalers — see review §4 in
