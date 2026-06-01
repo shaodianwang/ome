@@ -103,7 +103,7 @@ func (r *Router) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	}
 
 	// Reconcile object metadata
-	objectMeta, err := r.reconcileObjectMeta(isvc)
+	objectMeta, err := r.reconcileObjectMeta(ctx, isvc)
 	if err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "failed to reconcile object metadata")
 	}
@@ -298,8 +298,8 @@ func (r *Router) updateRouterStatus(isvc *v1beta1.InferenceService, objectMeta m
 }
 
 // reconcileObjectMeta creates the object metadata for the router component
-func (r *Router) reconcileObjectMeta(isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
-	routerName, err := r.determineRouterName(isvc)
+func (r *Router) reconcileObjectMeta(ctx context.Context, isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
+	routerName, err := r.determineRouterName(ctx, isvc)
 	if err != nil {
 		return metav1.ObjectMeta{}, err
 	}
@@ -367,11 +367,11 @@ func (r *Router) processLabels(isvc *v1beta1.InferenceService) (map[string]strin
 // determineRouterName determines the name of the router service.
 // The suffix is sourced from GetServiceSuffix so the engine / decoder /
 // router suffix lives in exactly one place (ComponentConfig).
-func (r *Router) determineRouterName(isvc *v1beta1.InferenceService) (string, error) {
+func (r *Router) determineRouterName(ctx context.Context, isvc *v1beta1.InferenceService) (string, error) {
 	defaultRouterName := isvc.Name + r.GetServiceSuffix()
 
 	existing := &v1.Service{}
-	if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: defaultRouterName, Namespace: isvc.Namespace}, existing); err == nil {
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: defaultRouterName, Namespace: isvc.Namespace}, existing); err == nil {
 		return defaultRouterName, nil
 	}
 

@@ -111,7 +111,7 @@ func (d *Decoder) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService)
 	}
 
 	// Reconcile object metadata
-	objectMeta, err := d.reconcileObjectMeta(isvc)
+	objectMeta, err := d.reconcileObjectMeta(ctx, isvc)
 	if err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "failed to reconcile object metadata")
 	}
@@ -323,8 +323,8 @@ func (d *Decoder) updateDecoderStatus(isvc *v1beta1.InferenceService, objectMeta
 }
 
 // reconcileObjectMeta creates the object metadata for the decoder component
-func (d *Decoder) reconcileObjectMeta(isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
-	decoderName, err := d.determineDecoderName(isvc)
+func (d *Decoder) reconcileObjectMeta(ctx context.Context, isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
+	decoderName, err := d.determineDecoderName(ctx, isvc)
 	if err != nil {
 		return metav1.ObjectMeta{}, err
 	}
@@ -392,12 +392,12 @@ func (d *Decoder) processLabels(isvc *v1beta1.InferenceService) (map[string]stri
 // determineDecoderName determines the name of the decoder service.
 // The suffix is sourced from GetServiceSuffix so the engine / decoder /
 // router suffix lives in exactly one place (ComponentConfig).
-func (d *Decoder) determineDecoderName(isvc *v1beta1.InferenceService) (string, error) {
+func (d *Decoder) determineDecoderName(ctx context.Context, isvc *v1beta1.InferenceService) (string, error) {
 	defaultDecoderName := isvc.Name + d.GetServiceSuffix()
 
 	if d.DeploymentMode != constants.MultiNode {
 		existing := &v1.Service{}
-		if err := d.Client.Get(context.TODO(), types.NamespacedName{Name: defaultDecoderName, Namespace: isvc.Namespace}, existing); err == nil {
+		if err := d.Client.Get(ctx, types.NamespacedName{Name: defaultDecoderName, Namespace: isvc.Namespace}, existing); err == nil {
 			return defaultDecoderName, nil
 		}
 	}

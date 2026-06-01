@@ -117,7 +117,7 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	}
 
 	// Reconcile object metadata
-	objectMeta, err := e.reconcileObjectMeta(isvc)
+	objectMeta, err := e.reconcileObjectMeta(ctx, isvc)
 	if err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "failed to reconcile object metadata")
 	}
@@ -365,8 +365,8 @@ func (e *Engine) updateEngineStatus(isvc *v1beta1.InferenceService, objectMeta m
 }
 
 // reconcileObjectMeta creates the object metadata for the engine component
-func (e *Engine) reconcileObjectMeta(isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
-	engineName, err := e.determineEngineName(isvc)
+func (e *Engine) reconcileObjectMeta(ctx context.Context, isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
+	engineName, err := e.determineEngineName(ctx, isvc)
 	if err != nil {
 		return metav1.ObjectMeta{}, err
 	}
@@ -433,38 +433,45 @@ func (e *Engine) processLabels(isvc *v1beta1.InferenceService) (map[string]strin
 // determineEngineName determines the name of the engine service.
 // The suffix is sourced from GetServiceSuffix so the engine / decoder /
 // router suffix lives in exactly one place (ComponentConfig).
-func (e *Engine) determineEngineName(isvc *v1beta1.InferenceService) (string, error) {
+func (e *Engine) determineEngineName(ctx context.Context, isvc *v1beta1.InferenceService) (string, error) {
 	defaultEngineName := isvc.Name + e.GetServiceSuffix()
 
 	existing := &v1.Service{}
-	if err := e.Client.Get(context.TODO(), types.NamespacedName{Name: defaultEngineName, Namespace: isvc.Namespace}, existing); err == nil {
+	if err := e.Client.Get(ctx, types.NamespacedName{Name: defaultEngineName, Namespace: isvc.Namespace}, existing); err == nil {
 		return defaultEngineName, nil
 	}
 
 	return defaultEngineName, nil
 }
 
+// engineUsesLeaderTemplate reports whether the engine should source its
+// primary pod template from the Leader block (multi-pod shape — MultiNode
+// or multi-pod OMENative) rather than the top-level engine spec
+// (single-pod shape). It is a pure structural check on the spec; it
+// deliberately does NOT consult the deployment mode, so dispatch-mode
+// classification and template selection stay decoupled (see review §5).
+func engineUsesLeaderTemplate(spec *v1beta1.EngineSpec) bool {
+	return spec != nil && spec.Leader != nil
+}
+
 // reconcilePodSpec creates the pod spec for the engine component
 func (e *Engine) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *metav1.ObjectMeta) (*v1.PodSpec, error) {
-	// Get the appropriate pod spec and runner based on deployment mode
-	deploymentMode := isvcutils.DetermineEngineDeploymentMode(e.engineSpec)
-
+	// Template selection is keyed on the presence of a Leader block, NOT on
+	// the deployment mode. e.DeploymentMode is set authoritatively at
+	// construction time; calling isvcutils.DetermineEngineDeploymentMode
+	// here would re-infer it from the spec and disagree with the dispatch
+	// for OMENative-mode engines that also set Leader/Worker (the helper
+	// returns MultiNode; the dispatch is OMENative). See review §5.
 	var basePodSpec v1beta1.PodSpec
 	var runnerSpec *v1beta1.RunnerSpec
 
-	switch deploymentMode {
-	case constants.MultiNode:
-		// For multi-node, use leader spec
-		if e.engineSpec.Leader != nil {
-			basePodSpec = e.engineSpec.Leader.PodSpec
-			runnerSpec = e.engineSpec.Leader.Runner
-		} else {
-			// Fallback to engine spec if leader is not defined
-			basePodSpec = e.engineSpec.PodSpec
-			runnerSpec = e.engineSpec.Runner
-		}
-	default:
-		// For raw deployment and serverless, use engine spec
+	if engineUsesLeaderTemplate(e.engineSpec) {
+		basePodSpec = e.engineSpec.Leader.PodSpec
+		runnerSpec = e.engineSpec.Leader.Runner
+	} else {
+		// Fallback to the top-level engine spec — covers single-pod
+		// OMENative, RawDeployment, and the malformed-but-tolerated
+		// MultiNode-without-Leader shape.
 		basePodSpec = e.engineSpec.PodSpec
 		runnerSpec = e.engineSpec.Runner
 	}

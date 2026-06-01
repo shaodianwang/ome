@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/onsi/gomega"
@@ -716,7 +717,7 @@ func TestEngineReconcileObjectMeta(t *testing.T) {
 			}
 
 			// Test reconcileObjectMeta
-			objectMeta, err := engine.reconcileObjectMeta(tt.isvc)
+			objectMeta, err := engine.reconcileObjectMeta(context.TODO(), tt.isvc)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Validate name
@@ -859,5 +860,203 @@ func TestEngineWorkerPodSpec(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestEngineUsesLeaderTemplate pins the structural predicate that drives
+// pod-template selection in reconcilePodSpec. The earlier implementation
+// called isvcutils.DetermineEngineDeploymentMode(spec) and switched on the
+// result — which returned MultiNode for ANY spec with Leader/Worker set,
+// regardless of the authoritative DeploymentMode wired in at construction
+// time. For an OMENative-mode engine with Leader != nil the two disagreed
+// (helper said MultiNode; dispatch said OMENative); the bug was masked
+// only because the MultiNode branch happened to also use Leader.PodSpec.
+// Replacing the helper with engineUsesLeaderTemplate decouples template
+// selection from dispatch-mode classification. See review §5 / bug 1.
+func TestEngineUsesLeaderTemplate(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	tests := []struct {
+		name     string
+		spec     *v1beta1.EngineSpec
+		expected bool
+	}{
+		{
+			name:     "nil spec returns false",
+			spec:     nil,
+			expected: false,
+		},
+		{
+			name:     "empty spec — no leader — false",
+			spec:     &v1beta1.EngineSpec{},
+			expected: false,
+		},
+		{
+			name: "leader set — true (regardless of mode)",
+			spec: &v1beta1.EngineSpec{
+				Leader: &v1beta1.LeaderSpec{
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "leader"}},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "leader + worker set — true",
+			spec: &v1beta1.EngineSpec{
+				Leader: &v1beta1.LeaderSpec{
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "leader"}},
+					},
+				},
+				Worker: &v1beta1.WorkerSpec{
+					Size: intPtr(2),
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "worker only — false (template still from top-level)",
+			spec: &v1beta1.EngineSpec{
+				Worker: &v1beta1.WorkerSpec{
+					Size: intPtr(2),
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g.Expect(engineUsesLeaderTemplate(tt.spec)).To(gomega.Equal(tt.expected))
+		})
+	}
+}
+
+// TestEngineReconcilePodSpec_OMENativeWithLeader pins that the
+// OMENative-mode engine with Leader != nil picks the Leader pod template
+// (not the top-level engine spec template). This is the latent-bug
+// regression test from review §5 / bug 1: the OLD code called
+// isvcutils.DetermineEngineDeploymentMode which would return MultiNode
+// for this shape, and the MultiNode branch happened to use Leader.PodSpec
+// — so today it accidentally works. Pin the behavior so a future refactor
+// of the MultiNode branch to do something MultiNode-specific does NOT
+// silently break the OMENative + Leader path.
+func TestEngineReconcilePodSpec_OMENativeWithLeader(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	engineSpec := &v1beta1.EngineSpec{
+		PodSpec: v1beta1.PodSpec{
+			Containers: []v1.Container{
+				{Name: "fallback-container", Image: "fallback:latest"},
+			},
+		},
+		Leader: &v1beta1.LeaderSpec{
+			PodSpec: v1beta1.PodSpec{
+				Containers: []v1.Container{
+					{Name: "leader-container", Image: "leader:latest"},
+				},
+			},
+		},
+		Worker: &v1beta1.WorkerSpec{
+			Size: intPtr(2),
+			PodSpec: v1beta1.PodSpec{
+				Containers: []v1.Container{
+					{Name: "worker-container", Image: "worker:latest"},
+				},
+			},
+		},
+	}
+
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+	}
+	objectMeta := &metav1.ObjectMeta{Name: "test-isvc-engine", Namespace: "default"}
+
+	clientset := fake.NewClientset()
+	c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// Construct with DeploymentMode=OMENative — distinct from what
+	// DetermineEngineDeploymentMode would return for this spec (MultiNode).
+	engine := NewEngine(
+		c, clientset,
+		nil, nil, nil, // apiReader, expectations, recorder
+		scheme,
+		&controllerconfig.InferenceServicesConfig{},
+		constants.OMENative,
+		nil, nil, // baseModel, baseModelMeta
+		engineSpec,
+		nil, "", nil, nil, // runtime, runtimeName, supportedModelFormat, overlays
+	).(*Engine)
+
+	podSpec, err := engine.reconcilePodSpec(isvc, objectMeta)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(podSpec).NotTo(gomega.BeNil())
+	g.Expect(podSpec.Containers).To(gomega.HaveLen(1))
+	g.Expect(podSpec.Containers[0].Name).To(gomega.Equal("leader-container"),
+		"OMENative engine with Leader must source pod template from Leader.PodSpec, not engineSpec.PodSpec")
+	g.Expect(podSpec.Containers[0].Image).To(gomega.Equal("leader:latest"))
+}
+
+// TestEngineDetermineEngineName_CtxCancellation pins that context
+// cancellation propagates through the name-discovery Get call. The earlier
+// implementation hardcoded context.TODO() inside a controller reconcile
+// flow, which silently ignored the reconcile manager's cancellation
+// signal. See review §5 / bug 3.
+//
+// With a canceled ctx the fake client's Get returns immediately with the
+// ctx error — the determineEngineName helper does NOT propagate that error
+// (it falls back to the default name), but the test pins that the function
+// returns promptly (no hang) AND uses the supplied ctx (the ctx parameter
+// is wired through to the client Get call; a stray context.TODO would
+// shadow it and the cancellation signal would be lost).
+func TestEngineDetermineEngineName_CtxCancellation(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
+	clientset := fake.NewClientset()
+
+	engine := NewEngine(
+		c, clientset,
+		nil, nil, nil,
+		scheme,
+		&controllerconfig.InferenceServicesConfig{},
+		constants.RawDeployment,
+		nil, nil,
+		&v1beta1.EngineSpec{},
+		nil, "", nil, nil,
+	).(*Engine)
+
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel so the Get observes a closed ctx immediately
+
+	done := make(chan struct{})
+	var name string
+	var err error
+	go func() {
+		defer close(done)
+		name, err = engine.determineEngineName(ctx, isvc)
+	}()
+
+	select {
+	case <-done:
+		// Function returned promptly under canceled ctx. The ctx is
+		// wired through to the client.Get call — pinning the signature
+		// shape is the primary regression guard.
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(name).To(gomega.Equal("test-isvc-engine"))
+	case <-time.After(2 * time.Second):
+		t.Fatal("determineEngineName did not return promptly under canceled ctx")
 	}
 }
