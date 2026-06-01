@@ -356,10 +356,6 @@ var conditionSet = apis.NewLivingConditionSet(
 
 var _ apis.ConditionsAccessor = (*InferenceServiceStatus)(nil)
 
-func (ss *InferenceServiceStatus) InitializeConditions() {
-	conditionSet.Manage(ss).InitializeConditions()
-}
-
 // IsReady returns the overall readiness for the inference service.
 func (ss *InferenceServiceStatus) IsReady() bool {
 	return conditionSet.Manage(ss).IsHappy()
@@ -374,12 +370,6 @@ func (ss *InferenceServiceStatus) GetCondition(t apis.ConditionType) *apis.Condi
 func (ss *InferenceServiceStatus) IsConditionReady(t apis.ConditionType) bool {
 	condition := conditionSet.Manage(ss).GetCondition(t)
 	return condition != nil && condition.Status == v1.ConditionTrue
-}
-
-// IsConditionFalse returns if a given condition is False
-func (ss *InferenceServiceStatus) IsConditionFalse(t apis.ConditionType) bool {
-	condition := conditionSet.Manage(ss).GetCondition(t)
-	return condition != nil && condition.Status == v1.ConditionFalse
 }
 
 // IsConditionUnknown returns if a given condition is Unknown
