@@ -97,14 +97,24 @@ type DataPayload struct {
 // rendered Component metadata so template-meta changes trigger a new
 // revision and a rollout. nil hashes the same as empty ObjectMeta —
 // both serialize to the same `podMeta` JSON shape.
-func Hash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCount *int32) (string, []byte, error) {
-	return HashWithWorker(template, nil, templateMeta, collisionCount)
+//
+// ownerUID partitions the hash space per-owner so a deleted-and-recreated
+// owner of the same name (new UID) does NOT compute the same CR name as
+// the deleted predecessor. Without this partition, cascade-GC racing with
+// recreation can leave the new owner pointing at a freshly-created
+// same-name CR (or, if GC is slower, silently flag a foreign-owner
+// collision) — both shapes drop the OMENative-on-ISVC contract that "new
+// owner ⇒ new revision history" on the floor. Empty UID hashes
+// identically to a zero-value UID; callers that legitimately have no
+// owner identity yet (test fixtures predating the fix) can pass "".
+func Hash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCount *int32, ownerUID types.UID) (string, []byte, error) {
+	return HashWithWorker(template, nil, templateMeta, collisionCount, ownerUID)
 }
 
 // HashWithWorker is Hash with an explicit worker PodSpec slot. Use for
 // multi-pod Components (Leader + Worker); pass workerSpec=nil for
 // single-pod / no-worker Components, in which case the canonical bytes
-// and hash are identical to Hash(template, templateMeta, collisionCount).
+// and hash are identical to Hash(template, templateMeta, collisionCount, ownerUID).
 //
 // The worker template participates in the revision hash so a worker-only
 // image / env / resource bump triggers a new revision and a rollout. The
@@ -112,7 +122,11 @@ func Hash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCo
 // hashing it — leaves worker-only spec changes silently un-rolled,
 // which is exactly the split-brain failure OEP-0007 §"Update Strategy"
 // requires the revision pipeline to prevent.
-func HashWithWorker(template, workerSpec *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCount *int32) (string, []byte, error) {
+//
+// ownerUID is folded into the hash so two owners with the same name +
+// spec — produced by delete-and-recreate cycles — emit distinct CR names.
+// See Hash for the rationale.
+func HashWithWorker(template, workerSpec *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCount *int32, ownerUID types.UID) (string, []byte, error) {
 	if template == nil {
 		return "", nil, fmt.Errorf("nil pod template")
 	}
@@ -134,6 +148,13 @@ func HashWithWorker(template, workerSpec *corev1.PodSpec, templateMeta *metav1.O
 	// the trailing bytes of `raw` — raw ending in "1" plus cc=0 must not
 	// hash the same as raw ending in "10" plus a different cc.
 	_, _ = fmt.Fprintf(h, "|cc=%d|", cc)
+	// Delimit the owner UID the same way. An owner with empty UID hashes
+	// identically to one whose UID happens to render as the empty
+	// string — both serialize to "|uid=|" — so test fixtures that don't
+	// carry a UID stay backward-compatible with the legacy hash provided
+	// they consistently pass an empty UID. Real reconciles always supply
+	// the live owner UID via EnsureControllerRevision.
+	_, _ = fmt.Fprintf(h, "|uid=%s|", string(ownerUID))
 	return fmt.Sprintf("%08x", h.Sum32()), raw, nil
 }
 
@@ -243,6 +264,15 @@ func Labels(key Key) map[string]string {
 // for the workload owner; existing CRs keep whatever labels/owners they
 // already have.
 //
+// scopeUID partitions the revision history per parent identity so a
+// deleted-and-recreated parent of the same name does not silently
+// inherit the predecessor's CR. For the ISVC adapter this is the ISVC
+// UID; for the IR adapter this is the ISVC UID stamped onto the IR's
+// Spec.ParentRef.UID so BOTH paths address the same per-ISVC revision
+// space (the IR's own UID is intentionally NOT used — that would diverge
+// the IR-managed path's hash from the direct path's hash and break the
+// shadow-mode equivalence the cutover relies on).
+//
 // Single-pod variant — does not hash a worker template. Multi-pod
 // callers use EnsureControllerRevisionWithWorker so worker-only spec
 // changes trigger a new CR.
@@ -256,8 +286,9 @@ func EnsureControllerRevision(
 	template *corev1.PodSpec,
 	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
+	scopeUID types.UID,
 ) (cr *appsv1.ControllerRevision, collision bool, err error) {
-	return EnsureControllerRevisionWithWorker(ctx, c, reads, owner, ownerGVK, key, template, nil, templateMeta, collisionCount)
+	return EnsureControllerRevisionWithWorker(ctx, c, reads, owner, ownerGVK, key, template, nil, templateMeta, collisionCount, scopeUID)
 }
 
 // EnsureControllerRevisionWithWorker is the multi-pod-aware sibling of
@@ -265,6 +296,8 @@ func EnsureControllerRevision(
 // so a worker-only spec change produces a new CR and triggers a rollout.
 // Pass workerSpec=nil to get behavior identical to
 // EnsureControllerRevision (same name, same Data.Raw).
+//
+// scopeUID semantics — see EnsureControllerRevision.
 func EnsureControllerRevisionWithWorker(
 	ctx context.Context,
 	c client.Client,
@@ -276,6 +309,7 @@ func EnsureControllerRevisionWithWorker(
 	workerSpec *corev1.PodSpec,
 	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
+	scopeUID types.UID,
 ) (cr *appsv1.ControllerRevision, collision bool, err error) {
 	if owner == nil {
 		return nil, false, fmt.Errorf("EnsureControllerRevision: nil owner")
@@ -287,7 +321,7 @@ func EnsureControllerRevisionWithWorker(
 		return nil, false, fmt.Errorf("EnsureControllerRevision: nil reader")
 	}
 
-	hash, raw, err := HashWithWorker(template, workerSpec, templateMeta, collisionCount)
+	hash, raw, err := HashWithWorker(template, workerSpec, templateMeta, collisionCount, scopeUID)
 	if err != nil {
 		return nil, false, err
 	}

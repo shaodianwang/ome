@@ -71,11 +71,11 @@ func TestRevisionHash_LabelChangeProducesDifferentHash(t *testing.T) {
 	metaV1 := &metav1.ObjectMeta{Labels: map[string]string{"tier": "free"}}
 	metaV2 := &metav1.ObjectMeta{Labels: map[string]string{"tier": "premium"}}
 
-	h1, _, err := Hash(ps, metaV1, nil)
+	h1, _, err := Hash(ps, metaV1, nil, "")
 	if err != nil {
 		t.Fatalf("Hash v1: %v", err)
 	}
-	h2, _, err := Hash(ps, metaV2, nil)
+	h2, _, err := Hash(ps, metaV2, nil, "")
 	if err != nil {
 		t.Fatalf("Hash v2: %v", err)
 	}
@@ -91,8 +91,8 @@ func TestRevisionHash_AnnotationChangeProducesDifferentHash(t *testing.T) {
 	metaV1 := &metav1.ObjectMeta{Annotations: map[string]string{"sidecar.istio.io/inject": "false"}}
 	metaV2 := &metav1.ObjectMeta{Annotations: map[string]string{"sidecar.istio.io/inject": "true"}}
 
-	h1, _, _ := Hash(ps, metaV1, nil)
-	h2, _, _ := Hash(ps, metaV2, nil)
+	h1, _, _ := Hash(ps, metaV1, nil, "")
+	h2, _, _ := Hash(ps, metaV2, nil, "")
 	if h1 == h2 {
 		t.Errorf("hash unchanged after annotation edit: %s == %s", h1, h2)
 	}
@@ -104,8 +104,8 @@ func TestRevisionHash_NoMetaAndEmptyMetaProduceSameHash(t *testing.T) {
 	ps := &corev1.PodSpec{
 		Containers: []corev1.Container{{Name: "main", Image: "llama:v1"}},
 	}
-	hNil, _, _ := Hash(ps, nil, nil)
-	hEmpty, _, _ := Hash(ps, &metav1.ObjectMeta{}, nil)
+	hNil, _, _ := Hash(ps, nil, nil, "")
+	hEmpty, _, _ := Hash(ps, &metav1.ObjectMeta{}, nil, "")
 	if hNil != hEmpty {
 		t.Errorf("hash should be stable across nil vs empty meta: %s vs %s", hNil, hEmpty)
 	}

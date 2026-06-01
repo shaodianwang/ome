@@ -41,6 +41,12 @@ func isvcRevisionKey(isvc *v1beta1.InferenceService, component v1beta1.Component
 // workload/revision.EnsureControllerRevision used by the legacy
 // OMENative-on-ISVC dispatch path. Adapter callers skip this wrapper
 // and call workload/revision directly with their own projected Key.
+//
+// scopeUID is fixed to isvc.UID — both the legacy direct path and the
+// IR-managed path partition the revision history by the parent ISVC's
+// UID so delete-and-recreate cycles can't silently inherit the
+// predecessor's CR identity (see revision.EnsureControllerRevision
+// scopeUID rationale).
 func EnsureControllerRevisionForISVC(
 	ctx context.Context,
 	c client.Client,
@@ -51,7 +57,7 @@ func EnsureControllerRevisionForISVC(
 	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
 ) (*appsv1.ControllerRevision, bool, error) {
-	return revision.EnsureControllerRevision(ctx, c, reads, isvc, isvcGVK, isvcRevisionKey(isvc, component), template, templateMeta, collisionCount)
+	return revision.EnsureControllerRevision(ctx, c, reads, isvc, isvcGVK, isvcRevisionKey(isvc, component), template, templateMeta, collisionCount, isvc.UID)
 }
 
 // EnsureControllerRevisionForISVCWithWorker is the multi-pod sibling of
@@ -68,7 +74,7 @@ func EnsureControllerRevisionForISVCWithWorker(
 	templateMeta *metav1.ObjectMeta,
 	collisionCount *int32,
 ) (*appsv1.ControllerRevision, bool, error) {
-	return revision.EnsureControllerRevisionWithWorker(ctx, c, reads, isvc, isvcGVK, isvcRevisionKey(isvc, component), template, workerSpec, templateMeta, collisionCount)
+	return revision.EnsureControllerRevisionWithWorker(ctx, c, reads, isvc, isvcGVK, isvcRevisionKey(isvc, component), template, workerSpec, templateMeta, collisionCount, isvc.UID)
 }
 
 // RetainControllerRevisionsForISVC is the (isvc, component) shape of

@@ -103,11 +103,11 @@ func basicPodSpecForRevision() *corev1.PodSpec {
 
 func TestRevisionHash_DeterministicForSameInput(t *testing.T) {
 	ps := basicPodSpecForRevision()
-	h1, raw1, err := Hash(ps, nil, nil)
+	h1, raw1, err := Hash(ps, nil, nil, "")
 	if err != nil {
 		t.Fatalf("hash 1: %v", err)
 	}
-	h2, raw2, err := Hash(ps, nil, nil)
+	h2, raw2, err := Hash(ps, nil, nil, "")
 	if err != nil {
 		t.Fatalf("hash 2: %v", err)
 	}
@@ -182,12 +182,12 @@ func TestRevisionHash_DeterministicAcrossInvocations(t *testing.T) {
 		},
 	}
 	const iterations = 1000
-	want, _, err := HashWithWorker(ps, nil, meta, nil)
+	want, _, err := HashWithWorker(ps, nil, meta, nil, "")
 	if err != nil {
 		t.Fatalf("baseline hash: %v", err)
 	}
 	for i := 0; i < iterations; i++ {
-		got, _, err := HashWithWorker(ps, nil, meta, nil)
+		got, _, err := HashWithWorker(ps, nil, meta, nil, "")
 		if err != nil {
 			t.Fatalf("iter %d hash: %v", i, err)
 		}
@@ -200,9 +200,9 @@ func TestRevisionHash_DeterministicAcrossInvocations(t *testing.T) {
 
 func TestRevisionHash_CollisionCountChangesHash(t *testing.T) {
 	ps := basicPodSpecForRevision()
-	h0, _, _ := Hash(ps, nil, nil)
-	h1, _, _ := Hash(ps, nil, ptr.To(int32(1)))
-	h2, _, _ := Hash(ps, nil, ptr.To(int32(2)))
+	h0, _, _ := Hash(ps, nil, nil, "")
+	h1, _, _ := Hash(ps, nil, ptr.To(int32(1)), "")
+	h2, _, _ := Hash(ps, nil, ptr.To(int32(2)), "")
 	if h0 == h1 || h0 == h2 || h1 == h2 {
 		t.Errorf("collision-count salt should change the hash: got %q, %q, %q", h0, h1, h2)
 	}
@@ -215,7 +215,7 @@ func TestRevisionHash_CanonicalPayloadIncludesPodMetaField(t *testing.T) {
 	// adding the field. If this test breaks because the JSON no longer
 	// contains "podMeta", the wrapper struct lost forward-compat.
 	ps := basicPodSpecForRevision()
-	_, raw, err := Hash(ps, nil, nil)
+	_, raw, err := Hash(ps, nil, nil, "")
 	if err != nil {
 		t.Fatalf("Hash: %v", err)
 	}
@@ -230,8 +230,8 @@ func TestRevisionHash_NilAndZeroPointerEquivalent(t *testing.T) {
 	// hash must be the same or a defaulter that normalizes the pointer
 	// would invalidate every previously-recorded revision name.
 	ps := basicPodSpecForRevision()
-	hNil, _, _ := Hash(ps, nil, nil)
-	hZero, _, _ := Hash(ps, nil, ptr.To(int32(0)))
+	hNil, _, _ := Hash(ps, nil, nil, "")
+	hZero, _, _ := Hash(ps, nil, ptr.To(int32(0)), "")
 	if hNil != hZero {
 		t.Errorf("nil and *0 must hash identically: got %q vs %q", hNil, hZero)
 	}
@@ -240,8 +240,8 @@ func TestRevisionHash_NilAndZeroPointerEquivalent(t *testing.T) {
 func TestRevisionHash_DifferentTemplateDifferentHash(t *testing.T) {
 	a := basicPodSpecForRevision()
 	b := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "llama:v2"}}}
-	ha, _, _ := Hash(a, nil, nil)
-	hb, _, _ := Hash(b, nil, nil)
+	ha, _, _ := Hash(a, nil, nil, "")
+	hb, _, _ := Hash(b, nil, nil, "")
 	if ha == hb {
 		t.Errorf("different templates produced same hash: %q", ha)
 	}
@@ -258,11 +258,11 @@ func TestRevisionHash_WorkerPodSpecAffectsHash(t *testing.T) {
 	workerA := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama-worker:v1"}}}
 	workerB := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama-worker:v2"}}}
 
-	hA, _, err := HashWithWorker(leader, workerA, nil, nil)
+	hA, _, err := HashWithWorker(leader, workerA, nil, nil, "")
 	if err != nil {
 		t.Fatalf("HashWithWorker A: %v", err)
 	}
-	hB, _, err := HashWithWorker(leader, workerB, nil, nil)
+	hB, _, err := HashWithWorker(leader, workerB, nil, nil, "")
 	if err != nil {
 		t.Fatalf("HashWithWorker B: %v", err)
 	}
@@ -280,8 +280,8 @@ func TestRevisionHash_NilWorkerSpecBackwardCompat(t *testing.T) {
 	leader := basicPodSpecForRevision()
 	meta := &metav1.ObjectMeta{Labels: map[string]string{"k": "v"}}
 
-	hSinglePod, rawSinglePod, _ := Hash(leader, meta, nil)
-	hWithNilWorker, rawWithNilWorker, _ := HashWithWorker(leader, nil, meta, nil)
+	hSinglePod, rawSinglePod, _ := Hash(leader, meta, nil, "")
+	hWithNilWorker, rawWithNilWorker, _ := HashWithWorker(leader, nil, meta, nil, "")
 	if hSinglePod != hWithNilWorker {
 		t.Errorf("Hash and HashWithWorker(nil) must match: %q vs %q", hSinglePod, hWithNilWorker)
 	}
@@ -299,15 +299,15 @@ func TestRevisionHash_WorkerPodSpecPresentChangesShape(t *testing.T) {
 	leader := basicPodSpecForRevision()
 	worker := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama-worker:v1"}}}
 
-	hNoWorker, _, _ := HashWithWorker(leader, nil, nil, nil)
-	hWithWorker, _, _ := HashWithWorker(leader, worker, nil, nil)
+	hNoWorker, _, _ := HashWithWorker(leader, nil, nil, nil, "")
+	hWithWorker, _, _ := HashWithWorker(leader, worker, nil, nil, "")
 	if hNoWorker == hWithWorker {
 		t.Errorf("introducing a worker must change the hash; both got %q", hNoWorker)
 	}
 }
 
 func TestRevisionHash_NilTemplateRejected(t *testing.T) {
-	if _, _, err := Hash(nil, nil, nil); err == nil {
+	if _, _, err := Hash(nil, nil, nil, ""); err == nil {
 		t.Fatal("expected error for nil template")
 	}
 }
@@ -333,8 +333,8 @@ func TestRevisionHash_MigrationAnnotationDoesNotDriftHash(t *testing.T) {
 		},
 	}
 
-	hBase, _, _ := Hash(ps, base, nil)
-	hWith, _, _ := Hash(ps, withMig, nil)
+	hBase, _, _ := Hash(ps, base, nil, "")
+	hWith, _, _ := Hash(ps, withMig, nil, "")
 	if hBase != hWith {
 		t.Errorf("migration request annotation must be filtered from revision hash: base=%s withMig=%s", hBase, hWith)
 	}
@@ -357,8 +357,8 @@ func TestRevisionHash_PausedRolloutAnnotationDoesNotDriftHash(t *testing.T) {
 		},
 	}
 
-	hBase, _, _ := Hash(ps, base, nil)
-	hWith, _, _ := Hash(ps, withPause, nil)
+	hBase, _, _ := Hash(ps, base, nil, "")
+	hWith, _, _ := Hash(ps, withPause, nil, "")
 	if hBase != hWith {
 		t.Errorf("rollout-paused annotation must be filtered from revision hash: base=%s withPause=%s", hBase, hWith)
 	}
@@ -379,8 +379,8 @@ func TestRevisionHash_UserAnnotationStillDriftsHash(t *testing.T) {
 		},
 	}
 
-	hBase, _, _ := Hash(ps, base, nil)
-	hWith, _, _ := Hash(ps, withUserAnnot, nil)
+	hBase, _, _ := Hash(ps, base, nil, "")
+	hWith, _, _ := Hash(ps, withUserAnnot, nil, "")
 	if hBase == hWith {
 		t.Errorf("user annotation must still drift the hash: both=%s", hBase)
 	}
@@ -390,7 +390,7 @@ func TestEnsureControllerRevision_CreatesNew(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClientWithApps(t, isvc)
 
-	cr, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), basicPodSpecForRevision(), nil, nil)
+	cr, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), basicPodSpecForRevision(), nil, nil, isvc.UID)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
@@ -421,11 +421,11 @@ func TestEnsureControllerRevision_ReusesExistingMatchingData(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	c := newFakeClientWithApps(t, isvc)
 
-	first, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), basicPodSpecForRevision(), nil, nil)
+	first, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), basicPodSpecForRevision(), nil, nil, isvc.UID)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	second, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), basicPodSpecForRevision(), nil, nil)
+	second, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), basicPodSpecForRevision(), nil, nil, isvc.UID)
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestEnsureControllerRevision_DetectsCollision(t *testing.T) {
 	// collision (extremely rare but worth handling).
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	want := basicPodSpecForRevision()
-	hash, _, _ := Hash(want, nil, nil)
+	hash, _, _ := Hash(want, nil, nil, isvc.UID)
 	pre := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      Name(testKey(isvc, workload.ComponentEngine), hash),
@@ -465,7 +465,7 @@ func TestEnsureControllerRevision_DetectsCollision(t *testing.T) {
 	}
 	c := newFakeClientWithApps(t, isvc, pre)
 
-	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), want, nil, nil)
+	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), want, nil, nil, isvc.UID)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestEnsureControllerRevision_CollisionCountSaltRetryLands(t *testing.T) {
 	// different name and succeed without collision.
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	want := basicPodSpecForRevision()
-	hash0, _, _ := Hash(want, nil, nil)
+	hash0, _, _ := Hash(want, nil, nil, isvc.UID)
 	pre := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      Name(testKey(isvc, workload.ComponentEngine), hash0),
@@ -492,11 +492,11 @@ func TestEnsureControllerRevision_CollisionCountSaltRetryLands(t *testing.T) {
 	}
 	c := newFakeClientWithApps(t, isvc, pre)
 
-	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), want, nil, nil)
+	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), want, nil, nil, isvc.UID)
 	if err != nil || !collision {
 		t.Fatalf("expected collision on first call: err=%v collision=%v", err, collision)
 	}
-	cr2, collision2, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), want, nil, ptr.To(int32(1)))
+	cr2, collision2, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), want, nil, ptr.To(int32(1)), isvc.UID)
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -515,13 +515,13 @@ func TestEnsureControllerRevision_NilGuards(t *testing.T) {
 	c := newFakeClientWithApps(t)
 	isvc := minimalISVC("x", "y", 1)
 	template := basicPodSpecForRevision()
-	if _, _, err := EnsureControllerRevision(context.Background(), c, c, nil, testISVCGVK, testKey(isvc, workload.ComponentEngine), template, nil, nil); err == nil {
+	if _, _, err := EnsureControllerRevision(context.Background(), c, c, nil, testISVCGVK, testKey(isvc, workload.ComponentEngine), template, nil, nil, isvc.UID); err == nil {
 		t.Fatal("expected error for nil ISVC")
 	}
-	if _, _, err := EnsureControllerRevision(context.Background(), nil, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), template, nil, nil); err == nil {
+	if _, _, err := EnsureControllerRevision(context.Background(), nil, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), template, nil, nil, isvc.UID); err == nil {
 		t.Fatal("expected error for nil client")
 	}
-	if _, _, err := EnsureControllerRevision(context.Background(), c, nil, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), template, nil, nil); err == nil {
+	if _, _, err := EnsureControllerRevision(context.Background(), c, nil, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), template, nil, nil, isvc.UID); err == nil {
 		t.Fatal("expected error for nil reader")
 	}
 }
@@ -548,7 +548,7 @@ func TestEnsureControllerRevision_RacePathCreateAlreadyExists(t *testing.T) {
 	// the initial Get pretend it doesn't exist, so the function falls
 	// through to Create, which the underlying fake will then reject
 	// with AlreadyExists because the object IS actually there.
-	hash, _, _ := Hash(template, nil, nil)
+	hash, _, _ := Hash(template, nil, nil, isvc.UID)
 	conflicting := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      Name(testKey(isvc, workload.ComponentEngine), hash),
@@ -574,7 +574,7 @@ func TestEnsureControllerRevision_RacePathCreateAlreadyExists(t *testing.T) {
 		}).
 		Build()
 
-	cr, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), template, nil, nil)
+	cr, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), template, nil, nil, isvc.UID)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
@@ -592,7 +592,7 @@ func TestRetainControllerRevisions_BelowMaxIsNoOp(t *testing.T) {
 	// Two revisions, both non-live; maxNonLive=10 keeps everything.
 	for i, image := range []string{"a", "b"} {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
-		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), ps, nil, nil); err != nil {
+		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), ps, nil, nil, isvc.UID); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}
 	}
@@ -612,7 +612,7 @@ func TestRetainControllerRevisions_DropsOldestNonLive(t *testing.T) {
 	c := newFakeClientWithApps(t, isvc)
 	for _, image := range []string{"v1", "v2", "v3", "v4", "v5"} {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
-		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), ps, nil, nil); err != nil {
+		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), ps, nil, nil, isvc.UID); err != nil {
 			t.Fatalf("seed %s: %v", image, err)
 		}
 	}
@@ -642,7 +642,7 @@ func TestRetainControllerRevisions_NeverDeletesLiveRevisions(t *testing.T) {
 	names := make(map[string]string, 4) // image -> CR name
 	for _, image := range []string{"v1", "v2", "v3", "v4"} {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
-		cr, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), ps, nil, nil)
+		cr, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), ps, nil, nil, isvc.UID)
 		if err != nil {
 			t.Fatalf("seed %s: %v", image, err)
 		}
@@ -702,7 +702,7 @@ func TestRetainControllerRevisions_ContinuesAfterDeleteError(t *testing.T) {
 
 	for _, image := range []string{"v1", "v2", "v3", "v4"} {
 		ps := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
-		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), ps, nil, nil); err != nil {
+		if _, _, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), ps, nil, nil, isvc.UID); err != nil {
 			t.Fatalf("seed %s: %v", image, err)
 		}
 	}
@@ -756,11 +756,11 @@ func TestRevisionHash_CollisionCountFramingDistinguishesAmbiguousConcat(t *testi
 	spec := basicPodSpecForRevision()
 	cc0 := int32(0)
 	cc10 := int32(10)
-	h0, _, err := Hash(spec, nil, &cc0)
+	h0, _, err := Hash(spec, nil, &cc0, "")
 	if err != nil {
 		t.Fatalf("h0: %v", err)
 	}
-	h10, _, err := Hash(spec, nil, &cc10)
+	h10, _, err := Hash(spec, nil, &cc10, "")
 	if err != nil {
 		t.Fatalf("h10: %v", err)
 	}
@@ -787,8 +787,11 @@ func TestEnsureControllerRevision_RejectsForeignOwnerAsCollision(t *testing.T) {
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	// Same PodSpec the new EnsureControllerRevision call will hash —
 	// so the name matches and Data matches; ONLY the owner UID differs.
+	// Hash is computed with isvc.UID so the pre-seeded CR lands at the
+	// exact name EnsureControllerRevision will look up: the
+	// foreign-owner branch fires on a true name collision.
 	spec := basicPodSpecForRevision()
-	hash, raw, _ := Hash(spec, nil, nil)
+	hash, raw, _ := Hash(spec, nil, nil, isvc.UID)
 	foreignUID := types.UID("ancient-uid")
 	pre := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
@@ -808,7 +811,7 @@ func TestEnsureControllerRevision_RejectsForeignOwnerAsCollision(t *testing.T) {
 	}
 	c := newFakeClientWithApps(t, isvc, pre)
 
-	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), spec, nil, nil)
+	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), spec, nil, nil, isvc.UID)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
@@ -823,7 +826,7 @@ func TestEnsureControllerRevision_AcceptsMatchingOwnerUID(t *testing.T) {
 	// false collision).
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	spec := basicPodSpecForRevision()
-	hash, raw, _ := Hash(spec, nil, nil)
+	hash, raw, _ := Hash(spec, nil, nil, isvc.UID)
 	pre := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      Name(testKey(isvc, workload.ComponentEngine), hash),
@@ -842,12 +845,82 @@ func TestEnsureControllerRevision_AcceptsMatchingOwnerUID(t *testing.T) {
 	}
 	c := newFakeClientWithApps(t, isvc, pre)
 
-	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), spec, nil, nil)
+	_, collision, err := EnsureControllerRevision(context.Background(), c, c, isvc, testISVCGVK, testKey(isvc, workload.ComponentEngine), spec, nil, nil, isvc.UID)
 	if err != nil {
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
 	if collision {
 		t.Errorf("matching owner UID + matching Data must reuse without collision")
+	}
+}
+
+// TestRevisionHash_OwnerUIDPartitionsTheNameSpace pins the
+// delete-and-recreate-same-name fix from
+// .claude/specs/2026-05-30-kind-test-walk/lifecycle-recreate-isvc-foreign-cr-not-detected.md:
+// two ISVCs sharing the same Name / Namespace / PodSpec / PodMeta /
+// CollisionCount — exactly what a delete-and-recreate cycle produces —
+// MUST emit distinct CR hashes when their UIDs differ. Without the UID
+// partition, cascade-GC racing with recreation could leave the new ISVC
+// pointing at a freshly-created CR carrying the predecessor's name, and
+// the foreign-owner collision branch never fires (the CR is GC'd before
+// the recreate's first reconcile).
+func TestRevisionHash_OwnerUIDPartitionsTheNameSpace(t *testing.T) {
+	ps := basicPodSpecForRevision()
+	hOld, _, err := Hash(ps, nil, nil, types.UID("isvc-uid-old"))
+	if err != nil {
+		t.Fatalf("Hash old: %v", err)
+	}
+	hNew, _, err := Hash(ps, nil, nil, types.UID("isvc-uid-new"))
+	if err != nil {
+		t.Fatalf("Hash new: %v", err)
+	}
+	if hOld == hNew {
+		t.Errorf("same spec, distinct owner UIDs MUST emit distinct hashes; got both %q (recreate path would silently inherit predecessor's CR)", hOld)
+	}
+}
+
+// TestEnsureControllerRevision_RecreateProducesDistinctCRName pins the
+// end-to-end shape: two ISVCs with the same Name + Spec but different
+// UIDs (simulating delete-and-recreate after cascade GC) must land at
+// distinct CR names so the new owner gets a fresh ControllerRevision
+// history rather than re-using the predecessor's. This is the unit-test
+// analog of the KIND spec lifecycle_kind_test.go:301
+// "delete + recreate same-name ISVC produces a fresh ControllerRevision"
+// — the unit form runs against the fake client so it doesn't depend on
+// real cascade-GC timing.
+func TestEnsureControllerRevision_RecreateProducesDistinctCRName(t *testing.T) {
+	oldISVC := minimalISVC("recreate-isvc", "prod", 1)
+	oldISVC.UID = types.UID("uid-A")
+	spec := basicPodSpecForRevision()
+	cOld := newFakeClientWithApps(t, oldISVC)
+	crOld, _, err := EnsureControllerRevision(context.Background(), cOld, cOld, oldISVC, testISVCGVK, testKey(oldISVC, workload.ComponentEngine), spec, nil, nil, oldISVC.UID)
+	if err != nil {
+		t.Fatalf("first EnsureControllerRevision: %v", err)
+	}
+	if crOld == nil {
+		t.Fatal("nil CR from first call")
+	}
+
+	// Simulate cascade GC having reaped the old CR (and the old ISVC),
+	// then a fresh ISVC of the same name landing with a new UID.
+	newISVC := minimalISVC("recreate-isvc", "prod", 1)
+	newISVC.UID = types.UID("uid-B")
+	cNew := newFakeClientWithApps(t, newISVC)
+	crNew, collision, err := EnsureControllerRevision(context.Background(), cNew, cNew, newISVC, testISVCGVK, testKey(newISVC, workload.ComponentEngine), spec, nil, nil, newISVC.UID)
+	if err != nil {
+		t.Fatalf("second EnsureControllerRevision: %v", err)
+	}
+	if collision {
+		t.Errorf("recreate path on an empty cluster must NOT report a collision (no foreign CR present); got collision=true")
+	}
+	if crNew == nil {
+		t.Fatal("nil CR from second call")
+	}
+	if crNew.Name == crOld.Name {
+		t.Errorf("recreated ISVC must NOT land at the predecessor's CR name; both got %q", crNew.Name)
+	}
+	if crNew.OwnerReferences[0].UID != newISVC.UID {
+		t.Errorf("new CR owner UID: got %q want %q", crNew.OwnerReferences[0].UID, newISVC.UID)
 	}
 }
 

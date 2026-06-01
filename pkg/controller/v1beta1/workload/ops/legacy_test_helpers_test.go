@@ -396,7 +396,7 @@ func legacyEnsureTargetCRWithMeta(t *testing.T, c client.Client, isvc *v1beta1.I
 		context.Background(), c, c, isvc,
 		v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
 		legacyEngineRevisionKey(isvc),
-		spec, meta, nil,
+		spec, meta, nil, isvc.UID,
 	)
 	if err != nil {
 		t.Fatalf("revision.EnsureControllerRevision: %v", err)
@@ -424,7 +424,7 @@ func legacySeedRunningRevisionWithMeta(t *testing.T, c client.Client, isvc *v1be
 		context.Background(), c, c, isvc,
 		v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
 		legacyEngineRevisionKey(isvc),
-		spec, meta, nil,
+		spec, meta, nil, isvc.UID,
 	)
 	if err != nil {
 		t.Fatalf("legacySeedRunningRevisionWithMeta: %v", err)

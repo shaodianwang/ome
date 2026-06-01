@@ -166,7 +166,7 @@ func TestReconcileComponent_RevisionCollisionBumpsAndRetries(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	targetSpec := targetSpecImage("llama:v2")
-	hash, _, _ := revision.Hash(targetSpec, nil, nil)
+	hash, _, _ := revision.Hash(targetSpec, nil, nil, isvc.UID)
 	conflictingName := core.RevisionName(isvc.Name, v1beta1.EngineComponent, hash)
 	conflicting := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
@@ -201,7 +201,7 @@ func TestReconcileComponent_RevisionCollisionBumpsAndRetries(t *testing.T) {
 	if len(list.Items) != 2 {
 		t.Errorf("CR count after retry: got %d want 2 (conflicting + salt-shifted)", len(list.Items))
 	}
-	saltedHash, _, _ := revision.Hash(targetSpec, nil, cs.OMENative.CollisionCount)
+	saltedHash, _, _ := revision.Hash(targetSpec, nil, cs.OMENative.CollisionCount, isvc.UID)
 	saltedName := core.RevisionName(isvc.Name, v1beta1.EngineComponent, saltedHash)
 	found := false
 	names := make([]string, 0, len(list.Items))

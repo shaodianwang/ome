@@ -3,6 +3,7 @@ package coordination_kind
 import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -294,10 +295,19 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 	})
 
 	// Delete + recreate same-name ISVC: new ISVC has a fresh UID and
-	// must NOT adopt the old CR (foreign UID owner ref). The
-	// EnsureControllerRevision collision-bump path produces a new CR
-	// name. Without the guard, OMENative would silently inherit the
-	// stale template.
+	// must NOT inherit the old CR's identity. Two cases need handling:
+	// (a) cascade-GC has reaped the old CR by the time the new ISVC
+	//     reconciles → name lookup returns NotFound → Create runs. With
+	//     a UID-aware hash, the new CR's name differs from the old.
+	// (b) GC is still in flight when the new ISVC reconciles → name
+	//     lookup finds the old CR with foreign owner UID → existing
+	//     collision branch bumps CollisionCount → retry lands at a
+	//     fresh name.
+	// Both code paths are exercised in production; this spec pins (a),
+	// the dominant outcome under normal cascade-GC timing. The
+	// foreign-owner path is pinned at unit scope in
+	// pkg/controller/v1beta1/workload/revision/revision_test.go:
+	// TestEnsureControllerRevision_RejectsForeignOwnerAsCollision.
 	ginkgo.It("delete + recreate same-name ISVC produces a fresh ControllerRevision (no foreign-owner adoption)", func() {
 		fix1 := newCoordFixture(ns.Name, WithISVCName("recreate-isvc"),
 			WithoutDecoder(),
@@ -339,18 +349,42 @@ var _ = ginkgo.Describe("OMENative basic lifecycle (KIND)", ginkgo.Ordered, func
 		Expect(k8sClient.Create(suiteCtx, fix2.ISVC)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, fix2.ISVC) })
 
+		var newUID string
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "recreate-isvc")
 			g.Expect(string(c.UID)).NotTo(Equal(originalUID),
 				"recreated ISVC must have a new UID")
+			newUID = string(c.UID)
 			cs := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(cs.OMENative).NotTo(BeNil())
 			g.Expect(cs.OMENative.InstanceStatuses).To(HaveLen(1))
 			g.Expect(cs.OMENative.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(cs.OMENative.UpdateRevision).NotTo(BeEmpty())
 			g.Expect(cs.OMENative.UpdateRevision).NotTo(Equal(originalCR),
-				"new ISVC must NOT adopt the old CR (foreign UID); EnsureControllerRevision must bump CollisionCount. Old=%s New=%s",
+				"new ISVC must NOT inherit the old CR name; UID-partitioned revision hash must produce a distinct name. Old=%s New=%s",
 				originalCR, cs.OMENative.UpdateRevision)
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("verify the new CR's controller OwnerReference points at the new ISVC's UID")
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, "recreate-isvc")
+			cs := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(cs.OMENative).NotTo(BeNil())
+			g.Expect(cs.OMENative.UpdateRevision).NotTo(BeEmpty())
+			cr := &appsv1.ControllerRevision{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
+				Namespace: ns.Name, Name: cs.OMENative.UpdateRevision,
+			}, cr)).To(Succeed())
+			var ownerUID string
+			for _, ref := range cr.OwnerReferences {
+				if ref.Controller != nil && *ref.Controller {
+					ownerUID = string(ref.UID)
+					break
+				}
+			}
+			g.Expect(ownerUID).To(Equal(newUID),
+				"new CR controller-owner UID must be the recreated ISVC's UID; got owner=%q, want %q",
+				ownerUID, newUID)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

@@ -282,12 +282,20 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 		reader = r.APIReader
 	}
 
+	// scopeUID = parent ISVC's UID so the IR-managed path partitions the
+	// revision history by the same identity the direct OMENative path uses
+	// (isvc.UID, via core.EnsureControllerRevisionForISVC). Using ir.UID
+	// here would diverge the two paths' CR names — breaking shadow-mode
+	// equivalence and stranding pods across a path cutover.
+	scopeUID := ir.Spec.ParentRef.UID
+
 	target, collision, err := revision.EnsureControllerRevisionWithWorker(
 		ctx, r.Client, reader,
 		ir, irGVK, revKey,
 		input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec,
 		input.DesiredSpec.PodTemplateObjectMeta,
 		ir.Status.CollisionCount,
+		scopeUID,
 	)
 	if err != nil {
 		return nil, err
@@ -312,6 +320,7 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 		input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec,
 		input.DesiredSpec.PodTemplateObjectMeta,
 		bumped,
+		scopeUID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)
