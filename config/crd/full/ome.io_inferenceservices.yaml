@@ -29981,10 +29981,10 @@ spec:
                         properties:
                           class:
                             enum:
-                              - hpa
-                              - keda
-                              - external
-                              - none
+                              - HPA
+                              - KEDA
+                              - External
+                              - None
                             type: string
                           conditions:
                             items:
