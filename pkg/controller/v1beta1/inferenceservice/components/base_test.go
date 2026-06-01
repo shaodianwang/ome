@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	"github.com/onsi/gomega"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -346,6 +348,13 @@ func TestUpdateComponentStatusLeanModel(t *testing.T) {
 	scheme := runtime.NewScheme()
 	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	// OEP-0013 Slice 4: UpdateComponentStatus now resolves + writes the
+	// per-Component autoscaler status, which Gets the live HPA / SO. Both
+	// types must be registered in the test scheme so the live-mirror path
+	// returns NotFound cleanly (which the writer treats as "no scaler yet"
+	// — exercises the graceful-degradation branch).
+	g.Expect(autoscalingv2.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(kedav1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 
 	tests := []struct {
 		name                       string
@@ -424,6 +433,24 @@ func TestUpdateComponentStatusLeanModel(t *testing.T) {
 					gomega.Equal(v1beta1.Pending),
 				)
 			}
+
+			// OEP-0013 Slice 4 lock-in: the autoscaler status writer runs
+			// BEFORE the lean-path return, so BOTH cases (model-less and
+			// with-model) must have a populated ComponentAutoscalerStatus.
+			// DeploymentMode=RawDeployment + no Autoscaler block anywhere →
+			// resolved Class=hpa, SpecSource=default, ManagedBy=ome.
+			engineStatus, ok := tt.isvc.Status.Components[v1beta1.EngineComponent]
+			g.Expect(ok).To(gomega.BeTrue(),
+				"OEP-0013 Slice 4: every UpdateComponentStatus call must produce a Components entry")
+			g.Expect(engineStatus.Autoscaler).NotTo(gomega.BeNil(),
+				"OEP-0013 Slice 4: ComponentAutoscalerStatus must be populated even on lean ISVCs")
+			g.Expect(engineStatus.Autoscaler.Class).To(gomega.Equal(v1beta1.AutoscalerHPA))
+			g.Expect(engineStatus.Autoscaler.SpecSource).To(gomega.Equal("default"))
+			g.Expect(engineStatus.Autoscaler.ManagedBy).To(gomega.Equal(v1beta1.AutoscalerManagedByOME))
+			// RawDeployment scale target is the underlying Deployment.
+			g.Expect(engineStatus.ScaleTargetRef).NotTo(gomega.BeNil())
+			g.Expect(engineStatus.ScaleTargetRef.APIVersion).To(gomega.Equal("apps/v1"))
+			g.Expect(engineStatus.ScaleTargetRef.Kind).To(gomega.Equal("Deployment"))
 		})
 	}
 }

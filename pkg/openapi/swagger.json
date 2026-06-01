@@ -324,6 +324,50 @@
         }
       }
     },
+    "v1beta1.ComponentAutoscalerStatus": {
+      "description": "ComponentAutoscalerStatus reports per-Component autoscaler state on the InferenceService. Mirrors the resolved ComponentAutoscaler block plus the live HPA / ScaledObject metrics so an operator can read the authoritative scaler shape, who owns it, and what it's currently doing — all from the parent ISVC without chasing IRs and scalers separately.\n\nPopulated by the ISVC status writer for OMENative-managed Components once Slice 3 wires dispatch. Until Slice 3 lands the status writer degrades gracefully — ManagedBy reports \"none\" for default class=hpa ISVCs (no HPA exists yet to read from) without crashing.\n\nSee OEP-0013 §\"Status surface\" (README lines 992-1007).\n\nAlpha (OEP-0013). The shape may change without notice.",
+      "type": "object",
+      "properties": {
+        "class": {
+          "description": "Class echoes the resolved autoscaler class as picked by ResolveComponentAutoscaler (Slice 1). One of hpa | keda | external | none. Mirrors the input that drove dispatch so the operator can confirm the inheritance chain landed on the expected class.",
+          "type": "string"
+        },
+        "conditions": {
+          "description": "Conditions mirrors the HPA's or ScaledObject's conditions verbatim (HPA: ScalingActive / AbleToScale / ScalingLimited; ScaledObject: Ready / Active / Fallback / Paused). Empty when ManagedBy != \"ome\" — operator-owned scalers are surfaced via scaleTargetRef instead.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1.Condition"
+          },
+          "x-kubernetes-list-map-keys": [
+            "type"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "currentReplicas": {
+          "description": "CurrentReplicas is mirrored from the HPA / ScaledObject status. Zero when ManagedBy != \"ome\" or when the scaler has not yet reported.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "desiredReplicas": {
+          "description": "DesiredReplicas is mirrored from the HPA / ScaledObject status. Zero when ManagedBy != \"ome\" or when the scaler has not yet reported.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "lastScaleTime": {
+          "description": "LastScaleTime mirrors the HPA / ScaledObject's last scale event. Nil when ManagedBy != \"ome\", when the scaler has not yet reported, or when no scaling has occurred since the scaler was created.",
+          "$ref": "#/definitions/v1.Time"
+        },
+        "managedBy": {
+          "description": "ManagedBy reports who owns the underlying scaler object. Per Q5: distinguished from Class because none and external are dispatch-equivalent (both =\u003e delete any OME-managed HPA / SO); the surface-level distinction lives here.\n  - \"ome\": OME emitted the HPA / ScaledObject; conditions and\n    replica counters below mirror its live status.\n  - \"external\": operator-owned scaler; OME publishes\n    scaleTargetRef and stays out. Conditions empty.\n  - \"none\": no scaler at all. Conditions empty; counters zero.",
+          "type": "string"
+        },
+        "specSource": {
+          "description": "SpecSource reports which layer of the ISVC -\u003e runtime -\u003e default inheritance chain produced the resolved Autoscaler block. One of \"isvc\" | \"runtime\" | \"default\". Mirrors autoscaler.SpecSource (Slice 1) so the operator can debug which layer is contributing the live config.",
+          "type": "string"
+        }
+      }
+    },
     "v1beta1.ComponentExtensionSpec": {
       "description": "ComponentExtensionSpec defines the deployment configuration for a given InferenceService component",
       "type": "object",
@@ -403,6 +447,10 @@
           "description": "Addressable endpoint for the InferenceService",
           "$ref": "#/definitions/knative.Addressable"
         },
+        "autoscaler": {
+          "description": "Autoscaler reports the per-Component autoscaler state — resolved Class / ManagedBy / SpecSource and (when ManagedBy == \"ome\") live CurrentReplicas / DesiredReplicas / LastScaleTime / Conditions mirrored from the underlying HPA or ScaledObject. Populated by the ISVC status writer (OEP-0013 Slice 4); nil for Components that don't go through the new resolver yet (e.g., RawDeployment Components that haven't migrated). See ComponentAutoscalerStatus for the full field semantics.",
+          "$ref": "#/definitions/v1beta1.ComponentAutoscalerStatus"
+        },
         "latestReadyRevision": {
           "description": "LatestReadyRevision names the most recent ControllerRevision whose pods reached Ready. Equal to LatestRolledoutRevision once the rollout completes; set ahead of it during in-flight rollouts.",
           "type": "string"
@@ -426,6 +474,10 @@
         "rolloutPhase": {
           "description": "RolloutPhase reflects the current rollout state for this Component (OEP-0011 Part 2). One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
           "type": "string"
+        },
+        "scaleTargetRef": {
+          "description": "ScaleTargetRef is the canonical scale target for this Component. For OMENative-managed Components this points at the InferenceReplica's /scale subresource; for RawDeployment-managed Components it points at the underlying Deployment. Published so external scalers (when Autoscaler.ManagedBy == \"external\") know the GroupKind they should target. Populated whenever the Component has a defined scale target — independent of whether an OME-managed HPA / SO is active.",
+          "$ref": "#/definitions/v1beta1.ScaleTargetRef"
         },
         "traffic": {
           "description": "Traffic reports per-revision traffic weights for this Component. Each entry corresponds to one revision currently receiving traffic. The OEP-0011 HTTPRoute builder reads this to emit weighted backendRefs.",
@@ -4024,6 +4076,32 @@
         "workingDir": {
           "description": "Container's working directory. If not specified, the container runtime's default will be used, which might be configured in the container image. Cannot be updated.",
           "type": "string"
+        }
+      }
+    },
+    "v1beta1.ScaleTargetRef": {
+      "description": "ScaleTargetRef is a stripped-down reference to the canonical scale target for a Component — the InferenceReplica (for OMENative) or the underlying Deployment (for RawDeployment). Published on status.components.\u003ccomp\u003e.scaleTargetRef so an external scaler knows which object to point at (matches the GroupKind the user would write into kubectl scale --resource-version-target=...).\n\nEmpty when the Component has no active scaler (e.g., legacy RawDeployment Components that have not migrated to the new Autoscaler block).\n\nAlpha (OEP-0013). The shape may change without notice.",
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "kind",
+        "name"
+      ],
+      "properties": {
+        "apiVersion": {
+          "description": "APIVersion of the scale target — e.g. \"ome.io/v1beta1\" for the IR-managed OMENative path; \"apps/v1\" for RawDeployment.",
+          "type": "string",
+          "default": ""
+        },
+        "kind": {
+          "description": "Kind of the scale target — e.g. \"InferenceReplica\" for the IR-managed OMENative path; \"Deployment\" for RawDeployment.",
+          "type": "string",
+          "default": ""
+        },
+        "name": {
+          "description": "Name of the scale target. Namespace is always the same as the owning ISVC.",
+          "type": "string",
+          "default": ""
         }
       }
     },

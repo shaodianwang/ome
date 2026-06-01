@@ -29977,6 +29977,77 @@ spec:
                           url:
                             type: string
                         type: object
+                      autoscaler:
+                        properties:
+                          class:
+                            enum:
+                              - hpa
+                              - keda
+                              - external
+                              - none
+                            type: string
+                          conditions:
+                            items:
+                              properties:
+                                lastTransitionTime:
+                                  format: date-time
+                                  type: string
+                                message:
+                                  maxLength: 32768
+                                  type: string
+                                observedGeneration:
+                                  format: int64
+                                  minimum: 0
+                                  type: integer
+                                reason:
+                                  maxLength: 1024
+                                  minLength: 1
+                                  pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                                  type: string
+                                status:
+                                  enum:
+                                    - "True"
+                                    - "False"
+                                    - Unknown
+                                  type: string
+                                type:
+                                  maxLength: 316
+                                  pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                                  type: string
+                              required:
+                                - lastTransitionTime
+                                - message
+                                - reason
+                                - status
+                                - type
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                              - type
+                            x-kubernetes-list-type: map
+                          currentReplicas:
+                            format: int32
+                            type: integer
+                          desiredReplicas:
+                            format: int32
+                            type: integer
+                          lastScaleTime:
+                            format: date-time
+                            type: string
+                          managedBy:
+                            allOf:
+                              - enum:
+                                  - ome
+                                  - external
+                                  - none
+                              - enum:
+                                  - ome
+                                  - external
+                                  - none
+                            type: string
+                          specSource:
+                            type: string
+                        type: object
                       latestReadyRevision:
                         type: string
                       latestRolledoutRevision:
@@ -30214,6 +30285,19 @@ spec:
                           - RollingBack
                           - Failed
                         type: string
+                      scaleTargetRef:
+                        properties:
+                          apiVersion:
+                            type: string
+                          kind:
+                            type: string
+                          name:
+                            type: string
+                        required:
+                          - apiVersion
+                          - kind
+                          - name
+                        type: object
                       traffic:
                         items:
                           properties:

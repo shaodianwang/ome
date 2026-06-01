@@ -21,6 +21,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":          schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList":      schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler":            schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscalerStatus":      schema_pkg_apis_ome_v1beta1_ComponentAutoscalerStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentExtensionSpec":         schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec":            schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget":         schema_pkg_apis_ome_v1beta1_ComponentTrafficTarget(ref),
@@ -85,6 +86,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                     schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner":                         schema_pkg_apis_ome_v1beta1_Runner(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                     schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScaleTargetRef":                 schema_pkg_apis_ome_v1beta1_ScaleTargetRef(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy":                  schema_pkg_apis_ome_v1beta1_ScalingPolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntime":                 schema_pkg_apis_ome_v1beta1_ServingRuntime(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeList":             schema_pkg_apis_ome_v1beta1_ServingRuntimeList(ref),
@@ -661,6 +663,84 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref common.ReferenceCallbac
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_ComponentAutoscalerStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ComponentAutoscalerStatus reports per-Component autoscaler state on the InferenceService. Mirrors the resolved ComponentAutoscaler block plus the live HPA / ScaledObject metrics so an operator can read the authoritative scaler shape, who owns it, and what it's currently doing — all from the parent ISVC without chasing IRs and scalers separately.\n\nPopulated by the ISVC status writer for OMENative-managed Components once Slice 3 wires dispatch. Until Slice 3 lands the status writer degrades gracefully — ManagedBy reports \"none\" for default class=hpa ISVCs (no HPA exists yet to read from) without crashing.\n\nSee OEP-0013 §\"Status surface\" (README lines 992-1007).\n\nAlpha (OEP-0013). The shape may change without notice.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"class": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Class echoes the resolved autoscaler class as picked by ResolveComponentAutoscaler (Slice 1). One of hpa | keda | external | none. Mirrors the input that drove dispatch so the operator can confirm the inheritance chain landed on the expected class.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"managedBy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ManagedBy reports who owns the underlying scaler object. Per Q5: distinguished from Class because none and external are dispatch-equivalent (both => delete any OME-managed HPA / SO); the surface-level distinction lives here.\n  - \"ome\": OME emitted the HPA / ScaledObject; conditions and\n    replica counters below mirror its live status.\n  - \"external\": operator-owned scaler; OME publishes\n    scaleTargetRef and stays out. Conditions empty.\n  - \"none\": no scaler at all. Conditions empty; counters zero.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"specSource": {
+						SchemaProps: spec.SchemaProps{
+							Description: "SpecSource reports which layer of the ISVC -> runtime -> default inheritance chain produced the resolved Autoscaler block. One of \"isvc\" | \"runtime\" | \"default\". Mirrors autoscaler.SpecSource (Slice 1) so the operator can debug which layer is contributing the live config.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"currentReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CurrentReplicas is mirrored from the HPA / ScaledObject status. Zero when ManagedBy != \"ome\" or when the scaler has not yet reported.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"desiredReplicas": {
+						SchemaProps: spec.SchemaProps{
+							Description: "DesiredReplicas is mirrored from the HPA / ScaledObject status. Zero when ManagedBy != \"ome\" or when the scaler has not yet reported.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"lastScaleTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastScaleTime mirrors the HPA / ScaledObject's last scale event. Nil when ManagedBy != \"ome\", when the scaler has not yet reported, or when no scaling has occurred since the scaler was created.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Conditions mirrors the HPA's or ScaledObject's conditions verbatim (HPA: ScalingActive / AbleToScale / ScalingLimited; ScaledObject: Ready / Active / Fallback / Paused). Empty when ManagedBy != \"ome\" — operator-owned scalers are surfaced via scaleTargetRef instead.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.Condition"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Condition", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -861,11 +941,23 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 							},
 						},
 					},
+					"autoscaler": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Autoscaler reports the per-Component autoscaler state — resolved Class / ManagedBy / SpecSource and (when ManagedBy == \"ome\") live CurrentReplicas / DesiredReplicas / LastScaleTime / Conditions mirrored from the underlying HPA or ScaledObject. Populated by the ISVC status writer (OEP-0013 Slice 4); nil for Components that don't go through the new resolver yet (e.g., RawDeployment Components that haven't migrated). See ComponentAutoscalerStatus for the full field semantics.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscalerStatus"),
+						},
+					},
+					"scaleTargetRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ScaleTargetRef is the canonical scale target for this Component. For OMENative-managed Components this points at the InferenceReplica's /scale subresource; for RawDeployment-managed Components it points at the underlying Deployment. Published so external scalers (when Autoscaler.ManagedBy == \"external\") know the GroupKind they should target. Populated whenever the Component has a defined scale target — independent of whether an OME-managed HPA / SO is active.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScaleTargetRef"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscalerStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentTrafficTarget", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeComponentStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScaleTargetRef", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
 	}
 }
 
@@ -7108,6 +7200,44 @@ func schema_pkg_apis_ome_v1beta1_RunnerSpec(ref common.ReferenceCallback) common
 		},
 		Dependencies: []string{
 			"k8s.io/api/core/v1.ContainerPort", "k8s.io/api/core/v1.ContainerResizePolicy", "k8s.io/api/core/v1.EnvFromSource", "k8s.io/api/core/v1.EnvVar", "k8s.io/api/core/v1.Lifecycle", "k8s.io/api/core/v1.Probe", "k8s.io/api/core/v1.ResourceRequirements", "k8s.io/api/core/v1.SecurityContext", "k8s.io/api/core/v1.VolumeDevice", "k8s.io/api/core/v1.VolumeMount"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_ScaleTargetRef(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ScaleTargetRef is a stripped-down reference to the canonical scale target for a Component — the InferenceReplica (for OMENative) or the underlying Deployment (for RawDeployment). Published on status.components.<comp>.scaleTargetRef so an external scaler knows which object to point at (matches the GroupKind the user would write into kubectl scale --resource-version-target=...).\n\nEmpty when the Component has no active scaler (e.g., legacy RawDeployment Components that have not migrated to the new Autoscaler block).\n\nAlpha (OEP-0013). The shape may change without notice.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion of the scale target — e.g. \"ome.io/v1beta1\" for the IR-managed OMENative path; \"apps/v1\" for RawDeployment.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind of the scale target — e.g. \"InferenceReplica\" for the IR-managed OMENative path; \"Deployment\" for RawDeployment.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name of the scale target. Namespace is always the same as the owning ISVC.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"apiVersion", "kind", "name"},
+			},
+		},
 	}
 }
 

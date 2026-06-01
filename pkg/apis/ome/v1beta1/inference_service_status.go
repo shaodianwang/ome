@@ -135,6 +135,28 @@ type ComponentStatusSpec struct {
 	// +listType=map
 	// +listMapKey=revisionName
 	Traffic []ComponentTrafficTarget `json:"traffic,omitempty"`
+
+	// Autoscaler reports the per-Component autoscaler state — resolved
+	// Class / ManagedBy / SpecSource and (when ManagedBy == "ome") live
+	// CurrentReplicas / DesiredReplicas / LastScaleTime / Conditions
+	// mirrored from the underlying HPA or ScaledObject. Populated by
+	// the ISVC status writer (OEP-0013 Slice 4); nil for Components
+	// that don't go through the new resolver yet (e.g., RawDeployment
+	// Components that haven't migrated). See ComponentAutoscalerStatus
+	// for the full field semantics.
+	// +optional
+	Autoscaler *ComponentAutoscalerStatus `json:"autoscaler,omitempty"`
+
+	// ScaleTargetRef is the canonical scale target for this Component.
+	// For OMENative-managed Components this points at the
+	// InferenceReplica's /scale subresource; for RawDeployment-managed
+	// Components it points at the underlying Deployment. Published so
+	// external scalers (when Autoscaler.ManagedBy == "external") know
+	// the GroupKind they should target. Populated whenever the
+	// Component has a defined scale target — independent of whether an
+	// OME-managed HPA / SO is active.
+	// +optional
+	ScaleTargetRef *ScaleTargetRef `json:"scaleTargetRef,omitempty"`
 }
 
 // ComponentTrafficTarget describes the percentage of traffic routed to
