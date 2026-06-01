@@ -36,7 +36,6 @@ type KEDAReconciler struct {
 	client       client.Client
 	scheme       *runtime.Scheme
 	ScaledObject *kedav1.ScaledObject
-	componentExt *v1beta1.ComponentExtensionSpec
 }
 
 // NewKEDAReconciler creates a new KEDAReconciler whose generated ScaledObject
@@ -49,7 +48,7 @@ func NewKEDAReconciler(
 	scheme *runtime.Scheme,
 	componentMeta metav1.ObjectMeta,
 	componentExt *v1beta1.ComponentExtensionSpec,
-) (*KEDAReconciler, error) {
+) *KEDAReconciler {
 
 	scaledObject := createScaledObjectFromComponentExt(componentMeta, componentExt)
 
@@ -57,8 +56,7 @@ func NewKEDAReconciler(
 		client:       client,
 		scheme:       scheme,
 		ScaledObject: scaledObject,
-		componentExt: componentExt,
-	}, nil
+	}
 }
 
 // NewKEDAReconcilerForTarget builds a KEDAReconciler whose generated
@@ -89,10 +87,6 @@ func NewKEDAReconcilerForTarget(
 		client:       client,
 		scheme:       scheme,
 		ScaledObject: createScaledObject(componentMeta, scaleTargetRef, kedaSpec, minReplicas, maxReplicas),
-		// componentExt is intentionally nil — the IR-managed path doesn't
-		// consult it. Keep the field on the struct for shape compatibility
-		// with the legacy constructor; the Reconcile() path doesn't read it.
-		componentExt: nil,
 	}
 }
 
@@ -254,11 +248,11 @@ func shouldCreateScaledObject(desired *kedav1.ScaledObject) bool {
 }
 
 // Reconcile reconciles the ScaledObject resource
-func (r *KEDAReconciler) Reconcile() (runtime.Object, error) {
+func (r *KEDAReconciler) Reconcile() error {
 	checkResult, existingScaledObject, err := r.checkScaledObjectExist()
 	log.Info("Reconciling ScaledObject", "namespace", r.ScaledObject.Namespace, "name", r.ScaledObject.Name, "checkResult", checkResult.String())
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	var opErr error
@@ -273,15 +267,15 @@ func (r *KEDAReconciler) Reconcile() (runtime.Object, error) {
 	case constants.CheckResultDelete:
 		opErr = r.client.Delete(context.TODO(), r.ScaledObject)
 	default:
-		return existingScaledObject, nil
+		return nil
 	}
 
 	if opErr != nil {
 		log.Error(opErr, "Failed to reconcile ScaledObject", "namespace", r.ScaledObject.Namespace, "name", r.ScaledObject.Name)
-		return nil, opErr
+		return opErr
 	}
 
-	return r.ScaledObject, nil
+	return nil
 }
 
 // SetControllerReferences sets the owner reference for the ScaledObject

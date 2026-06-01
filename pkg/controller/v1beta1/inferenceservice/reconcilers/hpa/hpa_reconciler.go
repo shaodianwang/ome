@@ -23,10 +23,9 @@ var log = logf.Log.WithName("HPAReconciler")
 
 // HPAReconciler reconciles the HorizontalPodAutoscaler resource
 type HPAReconciler struct {
-	client       client.Client
-	scheme       *runtime.Scheme
-	HPA          *autoscalingv2.HorizontalPodAutoscaler
-	componentExt *v1beta1.ComponentExtensionSpec
+	client client.Client
+	scheme *runtime.Scheme
+	HPA    *autoscalingv2.HorizontalPodAutoscaler
 }
 
 // NewHPAReconciler builds an HPAReconciler whose generated HPA targets the
@@ -47,10 +46,9 @@ func NewHPAReconciler(client client.Client,
 	componentExt *v1beta1.ComponentExtensionSpec) *HPAReconciler {
 
 	return &HPAReconciler{
-		client:       client,
-		scheme:       scheme,
-		HPA:          createHPAFromComponentExt(componentMeta, componentExt),
-		componentExt: componentExt,
+		client: client,
+		scheme: scheme,
+		HPA:    createHPAFromComponentExt(componentMeta, componentExt),
 	}
 }
 
@@ -76,11 +74,6 @@ func NewHPAReconcilerForTarget(
 		client: client,
 		scheme: scheme,
 		HPA:    createHPA(componentMeta, scaleTargetRef, hpaSpec, minReplicas, maxReplicas),
-		// componentExt is intentionally nil — the IR-managed path doesn't
-		// consult it. Keep the field on the struct for shape compatibility
-		// with the Raw Deployment constructor; the Reconcile() path doesn't
-		// read it.
-		componentExt: nil,
 	}
 }
 
@@ -265,11 +258,11 @@ func shouldCreateHPA(desired *autoscalingv2.HorizontalPodAutoscaler) bool {
 	return desiredAutoscalerClass == "" || constants.AutoscalerClassType(desiredAutoscalerClass) == constants.AutoscalerClassHPA
 }
 
-func (r *HPAReconciler) Reconcile() (runtime.Object, error) {
-	checkResult, existingHPA, err := r.checkHPAExist()
+func (r *HPAReconciler) Reconcile() error {
+	checkResult, _, err := r.checkHPAExist()
 	log.Info("Reconciling HPA", "namespace", r.HPA.Namespace, "name", r.HPA.Name, "checkResult", checkResult.String())
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	var opErr error
@@ -281,15 +274,15 @@ func (r *HPAReconciler) Reconcile() (runtime.Object, error) {
 	case constants.CheckResultDelete:
 		opErr = r.client.Delete(context.TODO(), r.HPA)
 	default:
-		return existingHPA, nil
+		return nil
 	}
 
 	if opErr != nil {
 		log.Error(opErr, "Failed to reconcile HPA", "namespace", r.HPA.Namespace, "name", r.HPA.Name)
-		return nil, opErr
+		return opErr
 	}
 
-	return r.HPA, nil
+	return nil
 }
 
 func (r *HPAReconciler) SetControllerReferences(owner metav1.Object, scheme *runtime.Scheme) error {

@@ -23,15 +23,15 @@ import (
 
 // Autoscaler Interface implemented by all autoscalers
 type Autoscaler interface {
-	Reconcile() (runtime.Object, error)
+	Reconcile() error
 	SetControllerReferences(owner metav1.Object, scheme *runtime.Scheme) error
 }
 
 // NoOpAutoscaler Autoscaler that does nothing. Can be used to disable creation of autoscaler resources.
 type NoOpAutoscaler struct{}
 
-func (*NoOpAutoscaler) Reconcile() (*autoscalingv2.HorizontalPodAutoscaler, error) {
-	return nil, nil
+func (*NoOpAutoscaler) Reconcile() error {
+	return nil
 }
 
 func (a *NoOpAutoscaler) SetControllerReferences(owner metav1.Object, scheme *runtime.Scheme) error {
@@ -100,7 +100,7 @@ func createAutoscaler(client client.Client,
 		if err != nil {
 			return nil, fmt.Errorf("failed to delete existing HPA: %w", err)
 		}
-		return keda.NewKEDAReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Engine.ComponentExtensionSpec)
+		return keda.NewKEDAReconciler(client, scheme, componentMeta, &inferenceServiceSpec.Engine.ComponentExtensionSpec), nil
 	default:
 		return nil, fmt.Errorf("unknown autoscaler class type: %v", ac)
 	}
@@ -154,8 +154,7 @@ func deleteExistingHPA(client client.Client, componentMeta metav1.ObjectMeta) er
 // Reconcile ...
 func (r *AutoscalerReconciler) Reconcile() error {
 	// reconcile Autoscaler
-	_, err := r.Autoscaler.Reconcile()
-	if err != nil {
+	if err := r.Autoscaler.Reconcile(); err != nil {
 		return err
 	}
 	return nil

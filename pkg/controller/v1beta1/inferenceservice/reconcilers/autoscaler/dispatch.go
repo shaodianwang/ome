@@ -182,7 +182,7 @@ func ensureHPA(ctx context.Context, p DispatchParams) error {
 		p.MinReplicas,
 		p.MaxReplicas,
 	)
-	if _, err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(); err != nil {
 		return fmt.Errorf("HPA reconcile (ns=%s, name=%s): %w", p.Namespace, p.Name, err)
 	}
 	_ = ctx // reconciler currently uses context.TODO internally; threaded here for future ctx-aware refactor
@@ -209,7 +209,7 @@ func ensureScaledObject(ctx context.Context, p DispatchParams) error {
 		p.MinReplicas,
 		p.MaxReplicas,
 	)
-	if _, err := r.Reconcile(); err != nil {
+	if err := r.Reconcile(); err != nil {
 		return fmt.Errorf("ScaledObject reconcile (ns=%s, name=%s): %w", p.Namespace, p.Name, err)
 	}
 	_ = ctx
