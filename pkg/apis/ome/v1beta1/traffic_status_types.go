@@ -1,4 +1,4 @@
-// Package v1beta1 — traffic-management status types for OEP-0011.
+// Package v1beta1 — traffic-management status types.
 package v1beta1
 
 import (

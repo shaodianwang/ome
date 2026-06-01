@@ -1,8 +1,6 @@
 /*
 InferenceReplica is the per-(InferenceService, Component) workload CRD
-that owns the OMENative lifecycle subtree. See
-.claude/specs/2026-05-27-inference-workload-crd/README.md for the
-full design rationale.
+that owns the OMENative lifecycle subtree.
 
 Access model: this is NOT a user-facing API. The InferenceService
 controller is the sole writer of InferenceReplica specs; the
@@ -85,8 +83,7 @@ type InferenceReplicaSpec struct {
 	// Runners is the fully-rendered set of pod templates per Instance.
 	// MUST be non-empty. Single-pod Instances have one Runner with
 	// Name="default" and Size=1; multi-node Instances typically have
-	// Name="leader" (Size=1) plus Name="worker" (Size=N). See
-	// design doc §2.6 for the multi-node layout.
+	// Name="leader" (Size=1) plus Name="worker" (Size=N).
 	//
 	// The InferenceService controller is the sole writer of this
 	// field. The InferenceReplica controller treats each
@@ -117,8 +114,8 @@ type InferenceReplicaSpec struct {
 	// Autoscaler is the live autoscaler configuration that downstream
 	// scalers (HPA / KEDA / external) target. The ISVC controller projects
 	// the per-Component autoscaler defaults from ISVC.spec.<component>.autoscaler
-	// onto the corresponding IR at create time + on subsequent reconciles
-	// (per OEP-0013 Option B). External autoscalers may also write directly
+	// onto the corresponding IR at create time + on subsequent reconciles.
+	// External autoscalers may also write directly
 	// to this field via the /scale subresource without going through the
 	// ISVC controller.
 	// +optional
@@ -141,7 +138,7 @@ type ParentReference struct {
 }
 
 // RunnerName is the enum of recognized Runner roles within an
-// Instance. Matches the OEP-0007 Runner vocabulary so existing
+// Instance. Matches the established Runner vocabulary so existing
 // ome.io/runner label semantics carry through.
 // +kubebuilder:validation:Enum=default;leader;worker
 type RunnerName string
@@ -288,7 +285,7 @@ type InferenceReplicaStatus struct {
 	// Traffic reports per-revision traffic weights for this
 	// InferenceReplica. Each entry corresponds to one revision
 	// currently receiving traffic. The ISVC controller mirrors this
-	// onto ISVC.status.components[c].traffic[] for OEP-0011's
+	// onto ISVC.status.components[c].traffic[] for the
 	// HTTPRoute builder.
 	// +optional
 	// +listType=map

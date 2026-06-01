@@ -40,8 +40,8 @@ type InferenceServiceSpec struct {
 	Router *RouterSpec `json:"router,omitempty"`
 
 	// Traffic configures the load-balancing policy applied to all
-	// HTTPRoutes OME emits for this InferenceService. See OEP-0011
-	// and the TrafficSpec doc for details.
+	// HTTPRoutes OME emits for this InferenceService. See the
+	// TrafficSpec doc for details.
 	// +optional
 	Traffic *TrafficSpec `json:"traffic,omitempty"`
 
@@ -60,7 +60,7 @@ type InferenceServiceSpec struct {
 	// ScalingPolicy coordinates replica counts across Components when more
 	// than one autoscaler would otherwise drift (e.g., engine + decoder in
 	// a PD-disaggregated service that requires 1:1 sharding). When nil,
-	// every Component autoscales independently. Alpha (OEP-0013). The API
+	// every Component autoscales independently. Alpha. The API
 	// may change without notice.
 	// +optional
 	ScalingPolicy *ScalingPolicy `json:"scalingPolicy,omitempty"`
@@ -231,7 +231,6 @@ type ModelRef struct {
 	// exposed via OVERLAY_<UPPERCASED_NAME>_MODEL_PATH. Runner selects
 	// at request time; OME does not detect failures or auto-swap.
 	// Disabled or NotReady overlays are silently omitted.
-	// See OEP-0011.
 	// +optional
 	// +listType=map
 	// +listMapKey=name

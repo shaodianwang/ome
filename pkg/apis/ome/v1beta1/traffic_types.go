@@ -1,4 +1,4 @@
-// Package v1beta1 — traffic management types for OEP-0011.
+// Package v1beta1 — traffic management types.
 //
 // This file defines the typed core of the InferenceService traffic
 // management surface: load-balancer algorithm, consistent-hash key,
@@ -16,13 +16,13 @@ package v1beta1
 // per-Component subdomain.
 //
 // For less-common settings (circuit breaker, retries, sub-second
-// timeouts), see the ome.io/* annotation contract documented in
-// OEP-0011.
+// timeouts), see the ome.io/* annotation contract on the
+// InferenceService metadata.
 //
 // For Component-specific routing (one Component needs a different LB
 // algorithm), hand-author a separate BackendTrafficPolicy targeting
-// only that Component's HTTPRoute — OME defers (see OEP-0011
-// "Coexistence with Hand-Authored Policies").
+// only that Component's HTTPRoute — OME defers to the hand-authored
+// policy.
 type TrafficSpec struct {
 	// Algorithm selects the load-balancing algorithm. Absent = the
 	// Gateway implementation's default (LeastRequest for Envoy Gateway).

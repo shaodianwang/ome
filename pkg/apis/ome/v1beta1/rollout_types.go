@@ -1,4 +1,4 @@
-// Package v1beta1 — rollout strategy types for OEP-0011.
+// Package v1beta1 — rollout strategy types.
 //
 // This file defines the multi-step progressive rollout shape.
 // Single-step rollouts (the today-or-canary case) continue to use the

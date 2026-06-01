@@ -194,7 +194,7 @@ type ServingRuntimeSpec struct {
 
 	// ScalingPolicy default for InferenceServices binding this runtime.
 	// Replaced wholesale by isvc.spec.scalingPolicy when set on the ISVC.
-	// Alpha (OEP-0013). The API may change without notice.
+	// Alpha. The API may change without notice.
 	// +optional
 	ScalingPolicy *ScalingPolicy `json:"scalingPolicy,omitempty"`
 }

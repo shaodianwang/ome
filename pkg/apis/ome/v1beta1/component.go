@@ -48,7 +48,7 @@ type ComponentExtensionSpec struct {
 	// Autoscaler configures the per-Component autoscaler dispatch and the
 	// underlying KEDA / HPA configuration. Takes priority over the legacy
 	// ome.io/autoscalerClass annotation for this Component. Alpha
-	// (OEP-0013). The API may change without notice. This is the only
+	//. The API may change without notice. This is the only
 	// supported way to configure per-Component autoscaling on an ISVC —
 	// the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum
 	// have been removed. Operators on the legacy shape MUST migrate to the

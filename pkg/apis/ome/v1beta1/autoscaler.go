@@ -7,7 +7,7 @@ import (
 )
 
 // AutoscalerClass identifies the autoscaler implementation for a Component.
-// Alpha (OEP-0013). The API may change without notice.
+// Alpha. The API may change without notice.
 //
 // +kubebuilder:validation:Enum=HPA;KEDA;External;None
 type AutoscalerClass string
@@ -28,7 +28,7 @@ const (
 
 // ComponentAutoscaler configures the autoscaler for a single Component
 // (engine / decoder / router). Takes priority over the legacy
-// ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013).
+// ome.io/autoscalerClass annotation for this Component. Alpha.
 // The API may change without notice. This is the only supported way to
 // configure per-Component autoscaling on an ISVC — the legacy ScaleTarget
 // / ScaleMetric fields have been removed from ComponentExtensionSpec.
@@ -48,7 +48,7 @@ type ComponentAutoscaler struct {
 }
 
 // KedaAutoscaler holds KEDA ScaledObject configuration passed through verbatim.
-// Alpha (OEP-0013). The API may change without notice.
+// Alpha. The API may change without notice.
 type KedaAutoscaler struct {
 	// Triggers are passed through verbatim to kedav1.ScaledObjectSpec.Triggers.
 	// The full KEDA trigger surface (prometheus, cron, external, kafka, ...)
@@ -84,7 +84,7 @@ type KedaAutoscaler struct {
 }
 
 // HPAAutoscaler holds HorizontalPodAutoscaler configuration passed through verbatim.
-// Alpha (OEP-0013). The API may change without notice.
+// Alpha. The API may change without notice.
 type HPAAutoscaler struct {
 	// Metrics are passed through verbatim to
 	// autoscalingv2.HorizontalPodAutoscalerSpec.Metrics. Supports Resource,
@@ -100,7 +100,7 @@ type HPAAutoscaler struct {
 }
 
 // ScalingMode declares how Components of an InferenceService scale relative
-// to each other. Alpha (OEP-0013). The API may change without notice.
+// to each other. Alpha. The API may change without notice.
 //
 // +kubebuilder:validation:Enum=Independent;Proportional;Pinned
 type ScalingMode string
@@ -117,7 +117,7 @@ const (
 )
 
 // ScalingPolicy defines coordination between the Components of an
-// InferenceService. Alpha (OEP-0013). The API may change without notice.
+// InferenceService. Alpha. The API may change without notice.
 type ScalingPolicy struct {
 	// Mode selects the coordination strategy.
 	// +kubebuilder:validation:Enum=Independent;Proportional;Pinned
@@ -130,7 +130,7 @@ type ScalingPolicy struct {
 }
 
 // ProportionalPolicy specifies the anchor Component and per-follower replica
-// ratios for ScalingProportional. Alpha (OEP-0013). The API may change without
+// ratios for ScalingProportional. Alpha. The API may change without
 // notice.
 type ProportionalPolicy struct {
 	// Anchor is the Component whose replica count drives followers.

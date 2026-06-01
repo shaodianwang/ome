@@ -631,7 +631,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref common.ReferenceCallbac
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields have been removed from ComponentExtensionSpec.",
+				Description: "ComponentAutoscaler configures the autoscaler for a single Component (engine / decoder / router). Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha. The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields have been removed from ComponentExtensionSpec.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"class": {
@@ -667,7 +667,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscalerStatus(ref common.ReferenceC
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ComponentAutoscalerStatus reports per-Component autoscaler state on the InferenceService. Mirrors the resolved ComponentAutoscaler block plus the live HPA / ScaledObject metrics so an operator can read the authoritative scaler shape, who owns it, and what it's currently doing — all from the parent ISVC without chasing IRs and scalers separately.\n\nPopulated by the ISVC status writer for OMENative-managed Components. The writer degrades gracefully when a Component has no live scaler — ManagedBy reports \"none\" and counters stay zero without crashing.\n\nSee OEP-0013 §\"Status surface\" (README lines 992-1007).\n\nAlpha (OEP-0013). The shape may change without notice.",
+				Description: "ComponentAutoscalerStatus reports per-Component autoscaler state on the InferenceService. Mirrors the resolved ComponentAutoscaler block plus the live HPA / ScaledObject metrics so an operator can read the authoritative scaler shape, who owns it, and what it's currently doing — all from the parent ISVC without chasing IRs and scalers separately.\n\nPopulated by the ISVC status writer for OMENative-managed Components. The writer degrades gracefully when a Component has no live scaler — ManagedBy reports \"none\" and counters stay zero without crashing.\n\nAlpha. The shape may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"class": {
@@ -679,7 +679,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentAutoscalerStatus(ref common.ReferenceC
 					},
 					"managedBy": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ManagedBy reports who owns the underlying scaler object. Per Q5: distinguished from Class because none and external are dispatch-equivalent (both => delete any OME-managed HPA / SO); the surface-level distinction lives here.\n  - \"ome\": OME emitted the HPA / ScaledObject; conditions and\n    replica counters below mirror its live status.\n  - \"external\": operator-owned scaler; OME publishes\n    scaleTargetRef and stays out. Conditions empty.\n  - \"none\": no scaler at all. Conditions empty; counters zero.",
+							Description: "ManagedBy reports who owns the underlying scaler object. Distinguished from Class because none and external are dispatch-equivalent (both => delete any OME-managed HPA / SO); the surface-level distinction lives here.\n  - \"ome\": OME emitted the HPA / ScaledObject; conditions and\n    replica counters below mirror its live status.\n  - \"external\": operator-owned scaler; OME publishes\n    scaleTargetRef and stays out. Conditions empty.\n  - \"none\": no scaler at all. Conditions empty; counters zero.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -834,7 +834,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -879,7 +879,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 					},
 					"rolloutPhase": {
 						SchemaProps: spec.SchemaProps{
-							Description: "RolloutPhase reflects the current rollout state for this Component (OEP-0011 Part 2). One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
+							Description: "RolloutPhase reflects the current rollout state for this Component. One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -915,7 +915,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Traffic reports per-revision traffic weights for this Component. Each entry corresponds to one revision currently receiving traffic. The OEP-0011 HTTPRoute builder reads this to emit weighted backendRefs.",
+							Description: "Traffic reports per-revision traffic weights for this Component. Each entry corresponds to one revision currently receiving traffic. The HTTPRoute builder reads this to emit weighted backendRefs.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -951,7 +951,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentTrafficTarget(ref common.ReferenceCall
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ComponentTrafficTarget describes the percentage of traffic routed to one revision of one Component. RevisionName is the per-revision Service name produced by OMENative's coordination layer (e.g. `llama-engine-rev-abc123`), which the OEP-0011 HTTPRoute builder consumes directly as a backend reference.",
+				Description: "ComponentTrafficTarget describes the percentage of traffic routed to one revision of one Component. RevisionName is the per-revision Service name produced by OMENative's coordination layer (e.g. `llama-engine-rev-abc123`), which the HTTPRoute builder consumes directly as a backend reference.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"revisionName": {
@@ -1642,7 +1642,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -2375,7 +2375,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -2649,7 +2649,7 @@ func schema_pkg_apis_ome_v1beta1_HPAAutoscaler(ref common.ReferenceCallback) com
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "HPAAutoscaler holds HorizontalPodAutoscaler configuration passed through verbatim. Alpha (OEP-0013). The API may change without notice.",
+				Description: "HPAAutoscaler holds HorizontalPodAutoscaler configuration passed through verbatim. Alpha. The API may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"metrics": {
@@ -2931,7 +2931,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Runners is the fully-rendered set of pod templates per Instance. MUST be non-empty. Single-pod Instances have one Runner with Name=\"default\" and Size=1; multi-node Instances typically have Name=\"leader\" (Size=1) plus Name=\"worker\" (Size=N). See design doc §2.6 for the multi-node layout.\n\nThe InferenceService controller is the sole writer of this field. The InferenceReplica controller treats each Runner.Template as opaque input (same contract appsv1.Deployment.spec.template uses).",
+							Description: "Runners is the fully-rendered set of pod templates per Instance. MUST be non-empty. Single-pod Instances have one Runner with Name=\"default\" and Size=1; multi-node Instances typically have Name=\"leader\" (Size=1) plus Name=\"worker\" (Size=N).\n\nThe InferenceService controller is the sole writer of this field. The InferenceReplica controller treats each Runner.Template as opaque input (same contract appsv1.Deployment.spec.template uses).",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -2957,7 +2957,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler is the live autoscaler configuration that downstream scalers (HPA / KEDA / external) target. The ISVC controller projects the per-Component autoscaler defaults from ISVC.spec.<component>.autoscaler onto the corresponding IR at create time + on subsequent reconciles (per OEP-0013 Option B). External autoscalers may also write directly to this field via the /scale subresource without going through the ISVC controller.",
+							Description: "Autoscaler is the live autoscaler configuration that downstream scalers (HPA / KEDA / external) target. The ISVC controller projects the per-Component autoscaler defaults from ISVC.spec.<component>.autoscaler onto the corresponding IR at create time + on subsequent reconciles. External autoscalers may also write directly to this field via the /scale subresource without going through the ISVC controller.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -3115,7 +3115,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref common.ReferenceCall
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Traffic reports per-revision traffic weights for this InferenceReplica. Each entry corresponds to one revision currently receiving traffic. The ISVC controller mirrors this onto ISVC.status.components[c].traffic[] for OEP-0011's HTTPRoute builder.",
+							Description: "Traffic reports per-revision traffic weights for this InferenceReplica. Each entry corresponds to one revision currently receiving traffic. The ISVC controller mirrors this onto ISVC.status.components[c].traffic[] for the HTTPRoute builder.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -3277,7 +3277,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 					},
 					"traffic": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Traffic configures the load-balancing policy applied to all HTTPRoutes OME emits for this InferenceService. See OEP-0011 and the TrafficSpec doc for details.",
+							Description: "Traffic configures the load-balancing policy applied to all HTTPRoutes OME emits for this InferenceService. See the TrafficSpec doc for details.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"),
 						},
 					},
@@ -3289,7 +3289,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 					},
 					"scalingPolicy": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScalingPolicy coordinates replica counts across Components when more than one autoscaler would otherwise drift (e.g., engine + decoder in a PD-disaggregated service that requires 1:1 sharding). When nil, every Component autoscales independently. Alpha (OEP-0013). The API may change without notice.",
+							Description: "ScalingPolicy coordinates replica counts across Components when more than one autoscaler would otherwise drift (e.g., engine + decoder in a PD-disaggregated service that requires 1:1 sharding). When nil, every Component autoscales independently. Alpha. The API may change without notice.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy"),
 						},
 					},
@@ -3428,7 +3428,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 					},
 					"traffic": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Traffic reflects the resolved backend traffic policy (OEP-0011) and the emitted policy resource. Populated only when traffic intent is declared via spec.traffic or any ome.io/* traffic annotation; otherwise nil so older clients see nothing.",
+							Description: "Traffic reflects the resolved backend traffic policy and the emitted policy resource. Populated only when traffic intent is declared via spec.traffic or any ome.io/* traffic annotation; otherwise nil so older clients see nothing.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus"),
 						},
 					},
@@ -3584,7 +3584,7 @@ func schema_pkg_apis_ome_v1beta1_KedaAutoscaler(ref common.ReferenceCallback) co
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "KedaAutoscaler holds KEDA ScaledObject configuration passed through verbatim. Alpha (OEP-0013). The API may change without notice.",
+				Description: "KedaAutoscaler holds KEDA ScaledObject configuration passed through verbatim. Alpha. The API may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"triggers": {
@@ -4778,7 +4778,7 @@ func schema_pkg_apis_ome_v1beta1_ModelRef(ref common.ReferenceCallback) common.O
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Overlays declares additional BaseModels attached to every serving pod alongside the primary. Each overlay is mounted (PVC/PerNode) or env-addressable (Sharded) at /opt/ml/model-overlays/<name> and exposed via OVERLAY_<UPPERCASED_NAME>_MODEL_PATH. Runner selects at request time; OME does not detect failures or auto-swap. Disabled or NotReady overlays are silently omitted. See OEP-0011.",
+							Description: "Overlays declares additional BaseModels attached to every serving pod alongside the primary. Each overlay is mounted (PVC/PerNode) or env-addressable (Sharded) at /opt/ml/model-overlays/<name> and exposed via OVERLAY_<UPPERCASED_NAME>_MODEL_PATH. Runner selects at request time; OME does not detect failures or auto-swap. Disabled or NotReady overlays are silently omitted.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -5721,7 +5721,7 @@ func schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref common.ReferenceCallback
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ProportionalPolicy specifies the anchor Component and per-follower replica ratios for ScalingProportional. Alpha (OEP-0013). The API may change without notice.",
+				Description: "ProportionalPolicy specifies the anchor Component and per-follower replica ratios for ScalingProportional. Alpha. The API may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"anchor": {
@@ -6788,7 +6788,7 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 					},
 					"autoscaler": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha (OEP-0013). The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
+							Description: "Autoscaler configures the per-Component autoscaler dispatch and the underlying KEDA / HPA configuration. Takes priority over the legacy ome.io/autoscalerClass annotation for this Component. Alpha . The API may change without notice. This is the only supported way to configure per-Component autoscaling on an ISVC — the legacy ScaleTarget / ScaleMetric fields and the ScaleMetric enum have been removed. Operators on the legacy shape MUST migrate to the per-Component Autoscaler block (Autoscaler.HPA.Metrics + MinReplicas / MaxReplicas).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler"),
 						},
 					},
@@ -7163,7 +7163,7 @@ func schema_pkg_apis_ome_v1beta1_ScaleTargetRef(ref common.ReferenceCallback) co
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ScaleTargetRef is a stripped-down reference to the canonical scale target for a Component — the InferenceReplica (for OMENative) or the underlying Deployment (for RawDeployment). Published on status.components.<comp>.scaleTargetRef so an external scaler knows which object to point at (matches the GroupKind the user would write into kubectl scale --resource-version-target=...).\n\nEmpty when the Component has no active scaler (e.g., legacy RawDeployment Components that have not migrated to the new Autoscaler block).\n\nAlpha (OEP-0013). The shape may change without notice.",
+				Description: "ScaleTargetRef is a stripped-down reference to the canonical scale target for a Component — the InferenceReplica (for OMENative) or the underlying Deployment (for RawDeployment). Published on status.components.<comp>.scaleTargetRef so an external scaler knows which object to point at (matches the GroupKind the user would write into kubectl scale --resource-version-target=...).\n\nEmpty when the Component has no active scaler (e.g., legacy RawDeployment Components that have not migrated to the new Autoscaler block).\n\nAlpha. The shape may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"apiVersion": {
@@ -7201,7 +7201,7 @@ func schema_pkg_apis_ome_v1beta1_ScalingPolicy(ref common.ReferenceCallback) com
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "ScalingPolicy defines coordination between the Components of an InferenceService. Alpha (OEP-0013). The API may change without notice.",
+				Description: "ScalingPolicy defines coordination between the Components of an InferenceService. Alpha. The API may change without notice.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"mode": {
@@ -7810,7 +7810,7 @@ func schema_pkg_apis_ome_v1beta1_ServingRuntimeSpec(ref common.ReferenceCallback
 					},
 					"scalingPolicy": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ScalingPolicy default for InferenceServices binding this runtime. Replaced wholesale by isvc.spec.scalingPolicy when set on the ISVC. Alpha (OEP-0013). The API may change without notice.",
+							Description: "ScalingPolicy default for InferenceServices binding this runtime. Replaced wholesale by isvc.spec.scalingPolicy when set on the ISVC. Alpha. The API may change without notice.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy"),
 						},
 					},
@@ -8108,7 +8108,7 @@ func schema_pkg_apis_ome_v1beta1_TrafficSpec(ref common.ReferenceCallback) commo
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "TrafficSpec configures the load-balancing policy applied to all HTTPRoutes OME emits for the InferenceService. The translated backend policy resource (e.g. Envoy Gateway BackendTrafficPolicy) targets every OME-managed HTTPRoute via targetRefs, so behavior is consistent whether clients address the top-level URL or a per-Component subdomain.\n\nFor less-common settings (circuit breaker, retries, sub-second timeouts), see the ome.io/* annotation contract documented in OEP-0011.\n\nFor Component-specific routing (one Component needs a different LB algorithm), hand-author a separate BackendTrafficPolicy targeting only that Component's HTTPRoute — OME defers (see OEP-0011 \"Coexistence with Hand-Authored Policies\").",
+				Description: "TrafficSpec configures the load-balancing policy applied to all HTTPRoutes OME emits for the InferenceService. The translated backend policy resource (e.g. Envoy Gateway BackendTrafficPolicy) targets every OME-managed HTTPRoute via targetRefs, so behavior is consistent whether clients address the top-level URL or a per-Component subdomain.\n\nFor less-common settings (circuit breaker, retries, sub-second timeouts), see the ome.io/* annotation contract on the InferenceService metadata.\n\nFor Component-specific routing (one Component needs a different LB algorithm), hand-author a separate BackendTrafficPolicy targeting only that Component's HTTPRoute — OME defers to the hand-authored policy.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"algorithm": {

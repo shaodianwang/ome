@@ -10,7 +10,6 @@ import (
 // reconciling the HPA / ScaledObject themselves or whether an external
 // operator is driving scale via the published scaleTargetRef.
 //
-// Per Q5 (locked 2026-05-29 in the OEP-0013 wiring plan §"Decisions"),
 // none and external are STATUS-FIELD TWINS — they share the same
 // dispatch branch (delete any OME-managed HPA / SO and stay out) and
 // are distinguished ONLY here in the ManagedBy field. The status writer
@@ -49,9 +48,7 @@ const (
 // The writer degrades gracefully when a Component has no live scaler —
 // ManagedBy reports "none" and counters stay zero without crashing.
 //
-// See OEP-0013 §"Status surface" (README lines 992-1007).
-//
-// Alpha (OEP-0013). The shape may change without notice.
+// Alpha. The shape may change without notice.
 type ComponentAutoscalerStatus struct {
 	// Class echoes the resolved autoscaler class as picked by
 	// ResolveComponentAutoscaler. One of hpa | keda | external | none.
@@ -61,7 +58,7 @@ type ComponentAutoscalerStatus struct {
 	Class AutoscalerClass `json:"class,omitempty"`
 
 	// ManagedBy reports who owns the underlying scaler object.
-	// Per Q5: distinguished from Class because none and external are
+	// Distinguished from Class because none and external are
 	// dispatch-equivalent (both => delete any OME-managed HPA / SO);
 	// the surface-level distinction lives here.
 	//   - "ome": OME emitted the HPA / ScaledObject; conditions and
@@ -121,7 +118,7 @@ type ComponentAutoscalerStatus struct {
 // RawDeployment Components that have not migrated to the new Autoscaler
 // block).
 //
-// Alpha (OEP-0013). The shape may change without notice.
+// Alpha. The shape may change without notice.
 type ScaleTargetRef struct {
 	// APIVersion of the scale target — e.g. "ome.io/v1beta1" for the
 	// IR-managed OMENative path; "apps/v1" for RawDeployment.

@@ -43,7 +43,7 @@ type InferenceServiceStatus struct {
 	// +listMapKey=name
 	MountedOverlays []MountedOverlay `json:"mountedOverlays,omitempty"`
 
-	// Traffic reflects the resolved backend traffic policy (OEP-0011)
+	// Traffic reflects the resolved backend traffic policy
 	// and the emitted policy resource. Populated only when traffic
 	// intent is declared via spec.traffic or any ome.io/* traffic
 	// annotation; otherwise nil so older clients see nothing.
@@ -101,7 +101,7 @@ type ComponentStatusSpec struct {
 	Lifecycle *LifecycleStatus `json:"lifecycle,omitempty"`
 
 	// RolloutPhase reflects the current rollout state for this
-	// Component (OEP-0011 Part 2). One of Stable, Canarying,
+	// Component. One of Stable, Canarying,
 	// BlueGreenStandby, Pending, Paused, Promoting, RollingBack,
 	// Failed. Empty when no rollout is in flight on this Component
 	// (also empty for Components on deployment modes that haven't
@@ -131,7 +131,7 @@ type ComponentStatusSpec struct {
 
 	// Traffic reports per-revision traffic weights for this
 	// Component. Each entry corresponds to one revision currently
-	// receiving traffic. The OEP-0011 HTTPRoute builder reads this to
+	// receiving traffic. The HTTPRoute builder reads this to
 	// emit weighted backendRefs.
 	// +optional
 	// +listType=map
@@ -164,7 +164,7 @@ type ComponentStatusSpec struct {
 // ComponentTrafficTarget describes the percentage of traffic routed to
 // one revision of one Component. RevisionName is the per-revision
 // Service name produced by OMENative's coordination layer (e.g.
-// `llama-engine-rev-abc123`), which the OEP-0011 HTTPRoute builder
+// `llama-engine-rev-abc123`), which the HTTPRoute builder
 // consumes directly as a backend reference.
 type ComponentTrafficTarget struct {
 	// RevisionName is the per-revision Service name for this target.
