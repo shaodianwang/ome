@@ -669,6 +669,30 @@ test-kind: xet-build ## 🧪 Run KIND-backed integration tests (real kubelet —
 		-v -timeout 90m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
 	@echo "✅ KIND integration tests passed"
 
+.PHONY: test-kind-irmanaged
+test-kind-irmanaged: xet-build ## 🧪 Run KIND-backed IR-managed OMENative tests (real kubelet — needs docker + kind locally)
+	@echo "🧪 Running KIND IR-managed OMENative tests..."
+	@command -v kind >/dev/null 2>&1 || { \
+		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		exit 1; \
+	}
+	@docker info >/dev/null 2>&1 || { \
+		echo "❌ docker is not reachable. KIND tests need a running Docker daemon."; \
+		exit 1; \
+	}
+	@# Exercises the IR-managed path (the production default since #320),
+	@# which test-kind's coordination_kind suite deliberately disables. Uses
+	@# its OWN cluster (ome-irmanaged-kind) with the inferencereplica
+	@# controller registered + IR-managed enabled. On a resource-constrained
+	@# host (e.g. an 8GB Colima VM) run `make test-kind-clean` first so this
+	@# cluster doesn't contend with the coordination cluster.
+	@LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
+		DYLD_LIBRARY_PATH="$(XET_LIB_PATH):$$DYLD_LIBRARY_PATH" \
+		KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
+		go test ./tests/integration/singlecluster/controller/irmanaged_kind/... \
+		-v -timeout 30m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
+	@echo "✅ KIND IR-managed tests passed"
+
 .PHONY: test-kind-clean
 test-kind-clean: ## 🧹 Delete leftover KIND clusters from prior test-kind runs
 	@kind get clusters 2>/dev/null | while read -r c; do \
