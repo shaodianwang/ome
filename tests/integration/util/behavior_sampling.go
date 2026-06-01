@@ -26,6 +26,14 @@ import (
 //
 // Tick cadence is honored as a ticker, not a sleep loop, so a slow
 // sampleFn doesn't queue ticks.
+//
+// The done/ctx channels are re-checked immediately before invoking sampleFn:
+// if stop() raced a tick that was already ready, this short-circuits the
+// queued sample so it can't fire an assertion against a snapshot taken AFTER
+// the spec has wound down (e.g., during namespace teardown). Without this
+// guard, a sampler whose sampleFn was mid-call when stop() ran would still
+// complete the apiserver round-trip and assert against the post-teardown
+// state — see the 2026-05-30 sampler-goroutine-leak bug report.
 func SampleDuringRollout(ctx context.Context, done <-chan struct{}, interval time.Duration, sampleFn func(g gomega.Gomega)) int {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
@@ -38,6 +46,19 @@ func SampleDuringRollout(ctx context.Context, done <-chan struct{}, interval tim
 		case <-done:
 			return count
 		case <-tick.C:
+			// Re-check stop signals before sampling: stop() may have
+			// closed done while a tick was concurrently ready, and Go's
+			// select is non-deterministic between two ready channels.
+			// Without this guard the sampler would invoke sampleFn after
+			// the spec body returned and the namespace teardown began —
+			// firing a stale assertion against the next spec's runtime.
+			select {
+			case <-ctx.Done():
+				return count
+			case <-done:
+				return count
+			default:
+			}
 			sampleFn(g)
 			count++
 		}
@@ -46,12 +67,24 @@ func SampleDuringRollout(ctx context.Context, done <-chan struct{}, interval tim
 
 // StartSampler spawns a background sampler that runs sampleFn at the given
 // interval. Returns a Stop function the caller MUST defer; Stop closes the
-// done channel and blocks for one tick interval so the in-flight sample can
-// finish. Returns the count of samples observed.
+// done channel and blocks UNCONDITIONALLY until the sampler goroutine
+// exits. Returns the count of samples observed.
 //
 // The sampling goroutine wraps the loop in ginkgo.GinkgoRecover so a
 // gomega failure inside sampleFn fails the surrounding It block instead of
 // crashing the process — callers don't need their own GinkgoRecover.
+//
+// Stop blocks unconditionally (no timeout) so a sampler whose sampleFn is
+// mid-apiserver-call cannot leak past the spec boundary. The previous
+// implementation timed out after 2*interval and returned to the caller,
+// leaving a live goroutine that would observe namespace-teardown state and
+// queue a gomega.Fail against whichever spec was active next — see the
+// 2026-05-30 sampler-goroutine-leak bug report attributing an RP-1
+// serving-floor failure to a later InPlaceOnly spec.
+//
+// Risk: a sampleFn that blocks forever (e.g., an apiserver call with no
+// timeout) will now hang Stop forever. Mitigation: pass a ctx that the
+// suite will cancel during teardown, and let sampleFn honor it.
 //
 // Typical usage:
 //
@@ -66,8 +99,19 @@ func StartSampler(ctx context.Context, interval time.Duration, sampleFn func(g g
 	done := make(chan struct{})
 	doneCount := make(chan int, 1)
 	go func() {
+		// Send count back on EVERY exit path — including the panic
+		// that fires when sampleFn's gomega.Expect calls ginkgo.Fail.
+		// Without a deferred send, a Fail-induced panic unwinds the
+		// goroutine, GinkgoRecover catches it, and doneCount would
+		// never receive — deadlocking the unconditional <-doneCount
+		// in stop(). Defers run LIFO: inner GinkgoRecover catches
+		// the panic first, then the outer deferred send delivers count.
+		var count int
+		defer func() {
+			doneCount <- count
+		}()
 		defer ginkgo.GinkgoRecover()
-		doneCount <- SampleDuringRollout(ctx, done, interval, sampleFn)
+		count = SampleDuringRollout(ctx, done, interval, sampleFn)
 	}()
 	stopped := false
 	return func() int {
@@ -76,12 +120,11 @@ func StartSampler(ctx context.Context, interval time.Duration, sampleFn func(g g
 		}
 		stopped = true
 		close(done)
-		select {
-		case n := <-doneCount:
-			return n
-		case <-time.After(2 * interval):
-			return 0
-		}
+		// Block until the goroutine actually exits. No timeout: a
+		// leaked sampler that fires a gomega.Fail post-stop lands on
+		// the wrong spec (Ginkgo attributes Fail to the currently
+		// active spec), which is exactly the bug this guard prevents.
+		return <-doneCount
 	}
 }
 

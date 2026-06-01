@@ -87,11 +87,10 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 		sawDecoderDoneWhileEngineV1 := false
 		var lastDecRev, lastEngRev string
 		stop := util.StartSampler(suiteCtx, kindPollInterval, func(_ Gomega) {
-			// Tolerant Get: a late sampler tick can race the ISVC deletion
-			// during teardown (StartSampler.stop() has a 2*interval timeout
-			// escape). Skip on any error rather than using freshISVC, which
-			// Expect-Succeeds and would fail the spec's DeferCleanup on a
-			// not-found ISVC.
+			// Tolerant Get: a sampler tick can race the ISVC deletion if
+			// stop() is called concurrently with a Get in flight. Skip on
+			// any error rather than using freshISVC, which Expect-Succeeds
+			// and would fail the spec's DeferCleanup on a not-found ISVC.
 			c := &v1beta1.InferenceService{}
 			if err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "seq-d2"}, c); err != nil {
 				return
