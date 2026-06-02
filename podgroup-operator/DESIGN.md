@@ -21,6 +21,25 @@ layer owns app-level composition: router Deployments, model PVCs, runtime
 selection, and user-facing service status. `podgroup-operator` owns only the
 prefill/decode or unified PodGroup lifecycle.
 
+## Controller Model
+
+The operator runs as a `controller-runtime` manager, following the same
+production controller structure used by OME:
+
+- `PodGroupDeployment` reconciler: watches PGDs and managed Pods, Services, and
+  scheduler-plugins `PodGroup` objects. It renders the group Pods, Services,
+  scheduler PodGroups, group-level restarts, per-group rollout behavior, and
+  PGD status.
+- `PodGroupDeploymentRollout` reconciler: watches PGDRs, generated child PGDs,
+  and managed child Pods, Services, and scheduler-plugins `PodGroup` objects. It
+  creates or updates role PGDs, computes paired rollout waves, writes
+  rollout-gate annotations to child PGDs, and publishes PGDR status.
+
+The normal path is event-driven through controller-runtime watches and a
+rate-limited workqueue. The only periodic path is a low-frequency cleanup task
+that clears stale rollout-gate annotations from PGDs no longer referenced by any
+PGDR.
+
 ## Current API
 
 The operator-owned CRD is:
@@ -89,7 +108,7 @@ Supported fields:
 - `multiNode.containerName`: optional target container. When unset, PGD
   uses the container with `--tp-size`, or the only container.
 - `multiNode.distInitPort`: port used in `--dist-init-addr`. Defaults to
-  `30000`.
+  `20000`.
 - `template`: Pod template used for every managed Pod.
 
 Defaults applied by the controller:
@@ -557,8 +576,40 @@ For PGDR-managed children, the same gate applies to first create. A child PGD
 does not create groups outside the current PGDR window, even when it has no
 active groups yet.
 
+PGDR treats child writes as reconcile boundaries. When it creates, updates, or
+deletes generated child PGDs, it sets PGDR status to `Blocked` with
+`currentPhase: ReconcilingChildren` and waits for the next reconcile before
+using child status for rollout decisions. It also refuses to advance rollout
+planning from stale child status: if a child PGD has `metadata.generation`
+greater than `status.observedGeneration`, PGDR publishes a hold gate for that
+member and reports both values in `status.members`.
+
 If a required role spec is missing or invalid, PGDR is `Blocked`. Stale rollout
 gates are removed from PGDs when no current PGDR references them.
+
+The controller emits Kubernetes Events on PGD and PGDR resources when rollout
+gates change, child PGDs are created/updated/deleted, child reconciliation
+pauses rollout planning, stale gates are cleared, and finalizers complete.
+Events are secondary to status conditions, but they make operator decisions
+visible in `kubectl describe` during live debugging.
+
+### Deletion And Finalizers
+
+PGD uses the finalizer `podgroup.meta.com/podgroupdeployment`. On deletion, it
+deletes all managed Pods, Services, and scheduler `PodGroup` objects selected by
+`app.kubernetes.io/managed-by=podgroup-operator` and
+`app.kubernetes.io/instance=<pgd-name>`. It removes the finalizer only after
+those children are no longer observed.
+
+PGDR uses the finalizer `podgroup.meta.com/podgroupdeploymentrollout`. On
+deletion, it deletes owned child PGDs labeled with
+`podgroup.meta.com/rollout=<pgdr-name>` and removes the finalizer only after
+those child PGDs are gone. Child PGDs then run their own PGD finalizers to clean
+up Pods, Services, and scheduler PodGroups.
+
+Both reconcilers add their finalizer and stop the current reconcile before
+creating or updating children. Child work starts on a later reconcile after the
+cleanup contract is persisted on the parent resource.
 
 ## Group Restart Semantics
 
@@ -588,6 +639,25 @@ Status shape:
 status:
   observedGeneration: 3
   currentRevision: 8a80854d
+  conditions:
+  - type: Ready
+    status: "True"
+    observedGeneration: 3
+    reason: AllGroupsReady
+    message: all desired pods are ready
+    lastTransitionTime: "2026-06-01T20:00:00Z"
+  - type: Progressing
+    status: "False"
+    observedGeneration: 3
+    reason: AllGroupsReady
+    message: all desired pods are ready
+    lastTransitionTime: "2026-06-01T20:00:00Z"
+  - type: RolloutGated
+    status: "False"
+    observedGeneration: 3
+    reason: NoRolloutGate
+    message: no rollout gate is active
+    lastTransitionTime: "2026-06-01T20:00:00Z"
   groups:
   - index: 0
     schedulerPodGroup: gpu-one-0
@@ -627,6 +697,12 @@ status:
     pausedReason: waiting for rollout phase TerminatePrefill
 ```
 
+PGD conditions:
+
+- `Ready`: all desired Pods are Ready.
+- `Progressing`: at least one desired Pod is not Ready.
+- `RolloutGated`: a PGDR rollout gate is active on the PGD.
+
 PGDR exposes printer columns for operational debugging:
 
 ```text
@@ -652,6 +728,39 @@ PGDR member status reports `updatedReadyGroups`. Ready means desired-revision
 groups with the exact expected ordinals and `PodReady=True` on every Pod.
 Ratioed advancement uses contiguous Ready wave windows, not just the total
 Ready count.
+
+PGDR status also includes conditions and per-member generation tracking:
+
+```yaml
+status:
+  phase: Blocked
+  currentPhase: ReconcilingChildren
+  conditions:
+  - type: Ready
+    status: "False"
+    reason: RolloutBlocked
+    message: waiting for child PodGroupDeployment changes to be observed
+  - type: Blocked
+    status: "True"
+    reason: RolloutBlocked
+    message: waiting for child PodGroupDeployment changes to be observed
+  members:
+  - role: decode
+    podGroupDeployment: qwen-engine-decode
+    generation: 5
+    observedGeneration: 4
+    action: hold
+    phase: Blocked
+    blockedReason: waiting for PodGroupDeployment generation 5 to be observed
+```
+
+PGDR conditions:
+
+- `Ready`: rollout is complete.
+- `Progressing`: rollout is actively moving through waves.
+- `Blocked`: rollout is waiting on missing specs, child generation observation,
+  another member, or an unready wave.
+- `Degraded`: a controller error prevents progress.
 
 ## Local Validation
 

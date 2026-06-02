@@ -20,6 +20,22 @@ spec:
       - name: podgroup-operator
         image: podgroup-operator:latest
         imagePullPolicy: Never
+        args:
+        - --metrics-bind-address=:8080
+        - --health-probe-bind-address=:8081
+        ports:
+        - name: metrics
+          containerPort: 8080
+        - name: healthz
+          containerPort: 8081
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: healthz
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: healthz
         resources:
           requests:
             cpu: 100m

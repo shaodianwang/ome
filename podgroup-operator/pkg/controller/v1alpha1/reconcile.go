@@ -11,6 +11,17 @@ import (
 )
 
 func (c *Controller) reconcileOne(ctx context.Context, pgd *PodGroupDeployment) error {
+	if !pgd.DeletionTimestamp.IsZero() {
+		return c.finalizePodGroupDeployment(ctx, pgd)
+	}
+	finalizerAdded, err := c.ensurePodGroupDeploymentFinalizer(ctx, pgd)
+	if err != nil {
+		return err
+	}
+	if finalizerAdded {
+		return nil
+	}
+
 	spec, err := defaultAndValidateSpec(pgd.Spec)
 	if err != nil {
 		return err
@@ -34,6 +45,12 @@ func (c *Controller) reconcileOne(ctx context.Context, pgd *PodGroupDeployment) 
 	if err != nil {
 		return err
 	}
+
+	if isPGDRManaged(pgd) && !rolloutGate.enabled && pgdRequiresRolloutGate(pgd, desiredRevision, activeInstances, podsByInstance) {
+		logPGD(pgd, "holding pgdr-managed podgroupdeployment without rollout gate revision=%s", desiredRevision)
+		return c.reconcilePGDRManagedWithoutGate(ctx, pgd, desiredRevision, activeInstances, podsByInstance)
+	}
+
 	surgeInUse := int32(0)
 	unavailableInUse := int32(0)
 	for group := int32(0); group < spec.Groups; group++ {
@@ -194,6 +211,80 @@ func (c *Controller) reconcileOne(ctx context.Context, pgd *PodGroupDeployment) 
 		return err
 	}
 	if err := c.deleteExtraObjects(ctx, pgd, desiredRevision, activeInstances, podsByInstance); err != nil {
+		return err
+	}
+	return c.updateStatus(ctx, pgd, desiredRevision)
+}
+
+func isPGDRManaged(pgd *PodGroupDeployment) bool {
+	if pgd == nil {
+		return false
+	}
+	return pgd.Labels[labelRollout] != ""
+}
+
+func pgdRequiresRolloutGate(pgd *PodGroupDeployment, desiredRevision string, activeInstances map[int32]string, podsByInstance map[string][]corev1.Pod) bool {
+	for group := int32(0); group < pgd.Spec.Groups; group++ {
+		desiredInstance := revisionedGroupInstance(pgd.Name, group, desiredRevision)
+		activeInstance := activeInstances[group]
+		if activeInstance == "" {
+			if pgd.Status.CurrentRevision == desiredRevision && groupPodsMatchRevision(podsByInstance, group, desiredRevision) {
+				continue
+			}
+			return true
+		}
+		if activeInstance != desiredInstance {
+			return true
+		}
+		activeRevision := instanceRevision(podsByInstance[activeInstance], "")
+		if activeRevision != "" && activeRevision != desiredRevision {
+			return true
+		}
+	}
+	return false
+}
+
+func groupPodsMatchRevision(podsByInstance map[string][]corev1.Pod, group int32, revision string) bool {
+	found := false
+	for _, pods := range podsByInstance {
+		for i := range pods {
+			podGroup, ok := parseInt32Label(pods[i].Labels, labelGroupIndex)
+			if !ok || podGroup != group {
+				continue
+			}
+			found = true
+			if pods[i].Labels[labelRevision] != revision {
+				return false
+			}
+		}
+	}
+	return found
+}
+
+func (c *Controller) reconcilePGDRManagedWithoutGate(ctx context.Context, pgd *PodGroupDeployment, desiredRevision string, activeInstances map[int32]string, podsByInstance map[string][]corev1.Pod) error {
+	for group := int32(0); group < pgd.Spec.Groups; group++ {
+		desiredInstance := revisionedGroupInstance(pgd.Name, group, desiredRevision)
+		activeInstance := activeInstances[group]
+		if activeInstance == "" {
+			continue
+		}
+		activePods := podsByInstance[activeInstance]
+		activeRevision := instanceRevision(activePods, "")
+		replacementPods := podsByInstance[desiredInstance]
+
+		if activeInstance != desiredInstance && len(replacementPods) > 0 {
+			logPGD(pgd, "deleting ungated pgdr-managed replacement group=%d instance=%s revision=%s", group, desiredInstance, desiredRevision)
+			if err := c.deleteGroupInstance(ctx, pgd, desiredInstance); err != nil {
+				return err
+			}
+		}
+		if activeRevision != "" && len(activePods) > 0 {
+			if err := c.upsertGroupMetadata(ctx, pgd, group, activeInstance, activeRevision); err != nil {
+				return err
+			}
+		}
+	}
+	if err := c.upsertTopLevelService(ctx, pgd); err != nil {
 		return err
 	}
 	return c.updateStatus(ctx, pgd, desiredRevision)
@@ -379,7 +470,10 @@ func defaultAndValidateSpec(spec PodGroupDeploymentSpec) (PodGroupDeploymentSpec
 	if spec.UpdateStrategy.RollingUpdate.ProgressDeadlineSeconds < 0 {
 		return spec, fmt.Errorf("spec.updateStrategy.rollingUpdate.progressDeadlineSeconds must be non-negative")
 	}
-	if spec.MultiNode.Enabled && spec.MultiNode.DistInitPort == 0 {
+	if spec.UpdateStrategy.RollingUpdate.ProgressDeadlineSeconds == 0 {
+		spec.UpdateStrategy.RollingUpdate.ProgressDeadlineSeconds = defaultProgressDeadlineSeconds
+	}
+	if spec.MultiNode.DistInitPort == 0 {
 		spec.MultiNode.DistInitPort = defaultMultiNodeDistInitPort
 	}
 	if err := validateMultiNodeSpec(spec); err != nil {

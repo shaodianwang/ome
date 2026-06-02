@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 type rolloutChild struct {
@@ -18,23 +19,37 @@ type rolloutChild struct {
 	spec   PodGroupDeploymentSpec
 }
 
-func (c *Controller) reconcileRolloutChildren(ctx context.Context, pgdr *PodGroupDeploymentRollout) ([]rolloutMember, error) {
+func (c *Controller) reconcileRolloutChildren(ctx context.Context, pgdr *PodGroupDeploymentRollout) ([]rolloutMember, bool, error) {
+	if !pgdr.DeletionTimestamp.IsZero() {
+		return nil, false, nil
+	}
+
 	if !rolloutSpecManagesChildren(pgdr.Spec) {
-		return rolloutMembersForMode(pgdr.Name, pgdr.Spec.Mode)
+		members, err := rolloutMembersForMode(pgdr.Name, pgdr.Spec.Mode)
+		return members, false, err
 	}
 
 	children, err := desiredRolloutChildren(pgdr)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	members := make([]rolloutMember, 0, len(children))
+	desiredNames := make(map[string]struct{}, len(children))
+	changed := false
 	for _, child := range children {
-		if err := c.upsertRolloutChild(ctx, pgdr, child); err != nil {
-			return members, err
+		childChanged, err := c.upsertRolloutChild(ctx, pgdr, child)
+		if err != nil {
+			return members, changed, err
 		}
+		changed = changed || childChanged
 		members = append(members, child.member)
+		desiredNames[child.member.Name] = struct{}{}
 	}
-	return members, nil
+	staleDeleted, err := c.deleteStaleRolloutChildren(ctx, pgdr, desiredNames)
+	if err != nil {
+		return members, changed, err
+	}
+	return members, changed || staleDeleted, nil
 }
 
 func rolloutSpecManagesChildren(spec PodGroupDeploymentRolloutSpec) bool {
@@ -102,7 +117,7 @@ func defaultAndValidateRolloutChildSpec(spec PodGroupDeploymentSpec) (PodGroupDe
 		return out, err
 	}
 	if !hasRoleWindow {
-		out.UpdateStrategy.RollingUpdate.MaxUnavailablePercent = 0
+		out.UpdateStrategy.RollingUpdate.MaxUnavailablePercent = defaultMaxUnavailablePercent
 	}
 	return out, nil
 }
@@ -410,7 +425,7 @@ func mergeVolumes(base, overrides []corev1.Volume) []corev1.Volume {
 	return out
 }
 
-func (c *Controller) upsertRolloutChild(ctx context.Context, pgdr *PodGroupDeploymentRollout, child rolloutChild) error {
+func (c *Controller) upsertRolloutChild(ctx context.Context, pgdr *PodGroupDeploymentRollout, child rolloutChild) (bool, error) {
 	desired := &PodGroupDeployment{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: operatorAPIVersion,
@@ -425,6 +440,7 @@ func (c *Controller) upsertRolloutChild(ctx context.Context, pgdr *PodGroupDeplo
 				labelRollout:     pgdr.Name,
 				labelRolloutRole: child.member.Role,
 			},
+			Annotations:     initialRolloutGateAnnotations(pgdr),
 			OwnerReferences: rolloutOwnerRef(pgdr),
 		},
 		Spec: child.spec,
@@ -432,45 +448,117 @@ func (c *Controller) upsertRolloutChild(ctx context.Context, pgdr *PodGroupDeplo
 	client := c.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace)
 	obj, err := podGroupDeploymentToUnstructured(desired)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	current, err := client.Get(ctx, child.member.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		logPGDR(pgdr, "creating child_podgroupdeployment=%s role=%s groups=%d replicas_per_group=%d", child.member.Name, child.member.Role, child.spec.Groups, child.spec.ReplicasPerGroup)
+		c.recordNormal(pgdr, reasonChildReconciling, "creating child PodGroupDeployment "+child.member.Name)
 		_, err = client.Create(ctx, obj, metav1.CreateOptions{})
-		return err
+		return err == nil, err
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	currentPGD, err := decodePodGroupDeployment(current)
 	if err != nil {
-		return err
+		return false, err
 	}
 	desired.Labels = mergeStringMaps(currentPGD.Labels, desired.Labels)
+	if rolloutChildNeedsInitialGate(currentPGD, desired) {
+		logPGDR(pgdr, "applying initial rollout gate before child spec update podgroupdeployment=%s/%s role=%s", pgdr.Namespace, child.member.Name, child.member.Role)
+		c.recordNormal(currentPGD, reasonRolloutGate, "rollout "+pgdr.Name+" set initial hold gate before child spec update")
+		err := c.patchPodGroupDeploymentMetadata(ctx, pgdr.Namespace, child.member.Name, desired.Labels, mergeStringMaps(currentPGD.Annotations, initialRolloutGateAnnotations(pgdr)), desired.OwnerReferences)
+		return err == nil, err
+	}
 	desired.Annotations = currentPGD.Annotations
 	desired.ResourceVersion = currentPGD.ResourceVersion
 	desired.UID = currentPGD.UID
 	desired.CreationTimestamp = currentPGD.CreationTimestamp
 
 	if rolloutChildMatches(currentPGD, desired) {
-		return nil
+		return false, nil
 	}
 	obj, err = podGroupDeploymentToUnstructured(desired)
 	if err != nil {
-		return err
+		return false, err
 	}
 	logPGDR(pgdr, "updating child_podgroupdeployment=%s role=%s groups=%d replicas_per_group=%d", child.member.Name, child.member.Role, child.spec.Groups, child.spec.ReplicasPerGroup)
+	c.recordNormal(pgdr, reasonChildReconciling, "updating child PodGroupDeployment "+child.member.Name)
 	_, err = client.Update(ctx, obj, metav1.UpdateOptions{})
-	return err
+	return err == nil, err
+}
+
+func rolloutChildNeedsInitialGate(current, desired *PodGroupDeployment) bool {
+	return !podGroupDeploymentSpecsEqual(current.Spec, desired.Spec) &&
+		!rolloutGateFromAnnotations(current.Annotations).enabled
+}
+
+func initialRolloutGateAnnotations(pgdr *PodGroupDeploymentRollout) map[string]string {
+	return map[string]string{
+		annotationRollout:             pgdr.Name,
+		annotationRolloutAllowedStart: "0",
+		annotationRolloutAllowedEnd:   "1",
+		annotationRolloutWave:         "0",
+		annotationRolloutAction:       rolloutActionHold,
+		annotationRolloutPhase:        "Initializing",
+		annotationRolloutPausedReason: "waiting for rollout gate",
+	}
 }
 
 func rolloutChildMatches(current, desired *PodGroupDeployment) bool {
-	return reflect.DeepEqual(current.Spec, desired.Spec) &&
+	return podGroupDeploymentSpecsEqual(current.Spec, desired.Spec) &&
 		stringMapsEqual(current.Labels, desired.Labels) &&
 		reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences)
+}
+
+func podGroupDeploymentSpecsEqual(a, b PodGroupDeploymentSpec) bool {
+	defaultedA, errA := defaultAndValidateSpec(a)
+	defaultedB, errB := defaultAndValidateSpec(b)
+	if errA == nil && errB == nil {
+		return reflect.DeepEqual(defaultedA, defaultedB)
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+func (c *Controller) deleteStaleRolloutChildren(ctx context.Context, pgdr *PodGroupDeploymentRollout, desiredNames map[string]struct{}) (bool, error) {
+	selector := labels.Set{
+		labelManagedBy: managerName,
+		labelRollout:   pgdr.Name,
+	}.String()
+	list, err := c.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return false, err
+	}
+	deleted := false
+	for i := range list.Items {
+		obj := &list.Items[i]
+		if _, ok := desiredNames[obj.GetName()]; ok {
+			continue
+		}
+		if !rolloutChildControlledBy(pgdr, obj.GetOwnerReferences()) {
+			continue
+		}
+		logPGDR(pgdr, "deleting stale child_podgroupdeployment=%s", obj.GetName())
+		c.recordNormal(pgdr, reasonChildReconciling, "deleting stale child PodGroupDeployment "+obj.GetName())
+		if err := c.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).Delete(ctx, obj.GetName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return deleted, err
+		}
+		deleted = true
+	}
+	return deleted, nil
+}
+
+func rolloutChildControlledBy(pgdr *PodGroupDeploymentRollout, owners []metav1.OwnerReference) bool {
+	for _, owner := range owners {
+		if owner.APIVersion != operatorAPIVersion || owner.Kind != operatorRolloutKind || owner.Name != pgdr.Name {
+			continue
+		}
+		return pgdr.UID == "" || owner.UID == "" || owner.UID == pgdr.UID
+	}
+	return false
 }
 
 func podGroupDeploymentToUnstructured(pgd *PodGroupDeployment) (*unstructured.Unstructured, error) {

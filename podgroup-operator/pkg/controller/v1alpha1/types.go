@@ -3,6 +3,12 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+)
+
+var (
+	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
+	AddToScheme   = SchemeBuilder.AddToScheme
 )
 
 type PodGroupDeployment struct {
@@ -10,6 +16,12 @@ type PodGroupDeployment struct {
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 	Spec              PodGroupDeploymentSpec   `json:"spec,omitempty"`
 	Status            PodGroupDeploymentStatus `json:"status,omitempty"`
+}
+
+type PodGroupDeploymentList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []PodGroupDeployment `json:"items"`
 }
 
 type PodGroupDeploymentSpec struct {
@@ -46,11 +58,12 @@ type MultiNodeSpec struct {
 }
 
 type PodGroupDeploymentStatus struct {
-	ObservedGeneration int64         `json:"observedGeneration,omitempty"`
-	CurrentRevision    string        `json:"currentRevision,omitempty"`
-	Groups             []GroupStatus `json:"groups,omitempty"`
-	Total              TotalStatus   `json:"total,omitempty"`
-	RolloutGate        RolloutGate   `json:"rolloutGate,omitempty"`
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	CurrentRevision    string             `json:"currentRevision,omitempty"`
+	Groups             []GroupStatus      `json:"groups,omitempty"`
+	Total              TotalStatus        `json:"total,omitempty"`
+	RolloutGate        RolloutGate        `json:"rolloutGate,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 
 type GroupStatus struct {
@@ -94,6 +107,12 @@ type PodGroupDeploymentRollout struct {
 	Status            PodGroupDeploymentRolloutStatus `json:"status,omitempty"`
 }
 
+type PodGroupDeploymentRolloutList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []PodGroupDeploymentRollout `json:"items"`
+}
+
 type PodGroupDeploymentRolloutSpec struct {
 	Mode     string                  `json:"mode,omitempty"`
 	Strategy RolloutStrategy         `json:"strategy,omitempty"`
@@ -117,11 +136,14 @@ type PodGroupDeploymentRolloutStatus struct {
 	Phase              string                `json:"phase,omitempty"`
 	Reason             string                `json:"reason,omitempty"`
 	Members            []RolloutMemberStatus `json:"members,omitempty"`
+	Conditions         []metav1.Condition    `json:"conditions,omitempty"`
 }
 
 type RolloutMemberStatus struct {
 	Role               string `json:"role,omitempty"`
 	PodGroupDeployment string `json:"podGroupDeployment,omitempty"`
+	Generation         int64  `json:"generation,omitempty"`
+	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
 	Groups             int32  `json:"groups,omitempty"`
 	WaveSize           int32  `json:"waveSize,omitempty"`
 	AllowedStart       int32  `json:"allowedStart,omitempty"`
@@ -130,4 +152,149 @@ type RolloutMemberStatus struct {
 	UpdatedReadyGroups int32  `json:"updatedReadyGroups,omitempty"`
 	Phase              string `json:"phase,omitempty"`
 	BlockedReason      string `json:"blockedReason,omitempty"`
+}
+
+func addKnownTypes(scheme *runtime.Scheme) error {
+	scheme.AddKnownTypes(
+		operatorGroupVersion,
+		&PodGroupDeployment{},
+		&PodGroupDeploymentList{},
+		&PodGroupDeploymentRollout{},
+		&PodGroupDeploymentRolloutList{},
+	)
+	metav1.AddToGroupVersion(scheme, operatorGroupVersion)
+	return nil
+}
+
+func (in *PodGroupDeployment) DeepCopyObject() runtime.Object {
+	if in == nil {
+		return nil
+	}
+	out := in.DeepCopy()
+	return out
+}
+
+func (in *PodGroupDeploymentList) DeepCopyObject() runtime.Object {
+	if in == nil {
+		return nil
+	}
+	out := in.DeepCopy()
+	return out
+}
+
+func (in *PodGroupDeploymentRollout) DeepCopyObject() runtime.Object {
+	if in == nil {
+		return nil
+	}
+	out := in.DeepCopy()
+	return out
+}
+
+func (in *PodGroupDeploymentRolloutList) DeepCopyObject() runtime.Object {
+	if in == nil {
+		return nil
+	}
+	out := in.DeepCopy()
+	return out
+}
+
+func (in *PodGroupDeployment) DeepCopy() *PodGroupDeployment {
+	if in == nil {
+		return nil
+	}
+	out := new(PodGroupDeployment)
+	*out = *in
+	out.ObjectMeta = *in.ObjectMeta.DeepCopy()
+	out.Spec = in.Spec.DeepCopy()
+	out.Status = in.Status.DeepCopy()
+	return out
+}
+
+func (in *PodGroupDeploymentList) DeepCopy() *PodGroupDeploymentList {
+	if in == nil {
+		return nil
+	}
+	out := new(PodGroupDeploymentList)
+	*out = *in
+	out.ListMeta = *in.ListMeta.DeepCopy()
+	if in.Items != nil {
+		out.Items = make([]PodGroupDeployment, len(in.Items))
+		for i := range in.Items {
+			out.Items[i] = *in.Items[i].DeepCopy()
+		}
+	}
+	return out
+}
+
+func (in PodGroupDeploymentSpec) DeepCopy() PodGroupDeploymentSpec {
+	out := in
+	out.Template = *in.Template.DeepCopy()
+	return out
+}
+
+func (in PodGroupDeploymentStatus) DeepCopy() PodGroupDeploymentStatus {
+	out := in
+	if in.Groups != nil {
+		out.Groups = append([]GroupStatus(nil), in.Groups...)
+	}
+	if in.Conditions != nil {
+		out.Conditions = append([]metav1.Condition(nil), in.Conditions...)
+	}
+	return out
+}
+
+func (in *PodGroupDeploymentRollout) DeepCopy() *PodGroupDeploymentRollout {
+	if in == nil {
+		return nil
+	}
+	out := new(PodGroupDeploymentRollout)
+	*out = *in
+	out.ObjectMeta = *in.ObjectMeta.DeepCopy()
+	out.Spec = in.Spec.DeepCopy()
+	out.Status = in.Status.DeepCopy()
+	return out
+}
+
+func (in *PodGroupDeploymentRolloutList) DeepCopy() *PodGroupDeploymentRolloutList {
+	if in == nil {
+		return nil
+	}
+	out := new(PodGroupDeploymentRolloutList)
+	*out = *in
+	out.ListMeta = *in.ListMeta.DeepCopy()
+	if in.Items != nil {
+		out.Items = make([]PodGroupDeploymentRollout, len(in.Items))
+		for i := range in.Items {
+			out.Items[i] = *in.Items[i].DeepCopy()
+		}
+	}
+	return out
+}
+
+func (in PodGroupDeploymentRolloutSpec) DeepCopy() PodGroupDeploymentRolloutSpec {
+	out := in
+	out.Base = deepCopyPodGroupDeploymentSpecPtr(in.Base)
+	out.Prefill = deepCopyPodGroupDeploymentSpecPtr(in.Prefill)
+	out.Decode = deepCopyPodGroupDeploymentSpecPtr(in.Decode)
+	out.Unified = deepCopyPodGroupDeploymentSpecPtr(in.Unified)
+	return out
+}
+
+func (in PodGroupDeploymentRolloutStatus) DeepCopy() PodGroupDeploymentRolloutStatus {
+	out := in
+	if in.Members != nil {
+		out.Members = append([]RolloutMemberStatus(nil), in.Members...)
+	}
+	if in.Conditions != nil {
+		out.Conditions = append([]metav1.Condition(nil), in.Conditions...)
+	}
+	return out
+}
+
+func deepCopyPodGroupDeploymentSpecPtr(in *PodGroupDeploymentSpec) *PodGroupDeploymentSpec {
+	if in == nil {
+		return nil
+	}
+	out := in.DeepCopy()
+	return &out
 }

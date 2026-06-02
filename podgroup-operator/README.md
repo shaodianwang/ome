@@ -18,6 +18,14 @@ The same operator also provides a `PodGroupDeploymentRollout` API that can own
 and generate disaggregated prefill/decode or unified `PodGroupDeployment`
 resources, then coordinate their rollout waves as one deployment operation.
 
+The binary runs as a `controller-runtime` manager with separate event-driven
+reconcilers for `PodGroupDeployment` and `PodGroupDeploymentRollout`. PGD
+reconciles are triggered by PGD changes plus owned Pod, Service, and scheduler
+PodGroup events. PGDR reconciles are triggered by PGDR changes plus generated
+child PGD, Pod, Service, and scheduler PodGroup events. A small background
+cleaner only handles stale rollout-gate annotations left behind by deleted or
+changed PGDRs.
+
 OME `InferenceService`, Helm, or GitOps should compose this with the rest of
 the serving stack. This operator owns the GPU engine PodGroup lifecycle. Router
 Deployments, model PVCs, runtime selection, and user-facing service status stay
@@ -42,11 +50,19 @@ at the inference-service layer.
 - Cross-PGD rollout coordination through `PodGroupDeploymentRollout` for
   disaggregated prefill/decode engines. PGDR can generate the role PGDs from
   embedded `prefill` and `decode` specs.
+- Coordinated unified rollouts through `PodGroupDeploymentRollout` with
+  `mode: unified`.
 - Ratioed initial bringup for PGDR-managed roles, so oversized PD deployments
   stop at the first Pending wave instead of submitting every prefill and decode
   group at once.
 - New-revision reset for blocked PGDR rollouts. A template change is evaluated
   against the new desired revision and starts from wave 0.
+- Status conditions for PGD and PGDR readiness, progress, rollout gates, and
+  blocked/degraded rollout states.
+- Kubernetes Events for rollout gate changes, child PGD reconciliation, stale
+  gate cleanup, and finalizer completion.
+- Finalizer-backed cleanup for managed Pods, Services, scheduler PodGroups, and
+  generated child PGDs.
 - Status columns for `GROUPS`, `GROUP-SIZE`, `RUNNING`, and `REVISION`.
 
 ## Dependency Flow
@@ -80,7 +96,7 @@ spec:
   multiNode:
     enabled: true
     tensorParallelSize: 8
-    distInitPort: 30000
+    distInitPort: 20000
   topologyKey: kubernetes.io/hostname
   serviceTargetOrdinal: 0
   scheduleTimeoutSeconds: 60
@@ -117,7 +133,7 @@ Defaults:
 - `updateStrategy.rollingUpdate.maxUnavailablePercent`: `20` when rollout
   limits are unset
 - `updateStrategy.rollingUpdate.progressDeadlineSeconds`: `3600`
-- `multiNode.distInitPort`: `30000`
+- `multiNode.distInitPort`: `20000`
 
 ## Scheduling Model
 
@@ -183,7 +199,7 @@ spec:
   multiNode:
     enabled: true
     tensorParallelSize: 8 # optional when --tp-size is already in the command
-    distInitPort: 30000
+    distInitPort: 20000
 ```
 
 When enabled and TP size is greater than 4, PGD sets these arguments on the
@@ -317,6 +333,12 @@ PGDR publishes the current phase and action to each PGD. PGDs then execute only
 prefill from outliving old decode, prevents new prefill from starting before new
 decode, and avoids hidden surge capacity while waiting at a barrier.
 
+PGDR applies child changes in observable steps. If PGDR creates, updates, or
+deletes child PGDs, it reports `CurrentPhase=ReconcilingChildren` and waits for
+the next reconcile before making rollout decisions. If a child PGD has
+`metadata.generation` greater than `status.observedGeneration`, PGDR holds that
+member and records the stale generation in `status.members`.
+
 For initial bringup and updates, a wave advances only after the desired groups
 in the prior wave are Ready. Ready means the group has exactly the expected
 ordinals and every Pod has `PodReady=True`; duplicate, missing, terminating, or
@@ -329,6 +351,24 @@ If a new template revision is applied while an older rollout is blocked on
 unready pods, PGDR recomputes progress against the new desired revision. The
 new rollout starts from wave 0 and rolls both prefill and decode from that new
 revision.
+
+Deletion is explicit. PGD keeps a finalizer until its managed Pods, Services,
+and scheduler `PodGroup` objects are gone. PGDR keeps a finalizer until its
+owned child PGDs are gone. This prevents a parent resource from disappearing
+while controller-owned children are still observable.
+Finalizers are inserted before child objects are created or updated, so cleanup
+protection is persisted before the controller starts managing workload
+resources.
+
+The operator also emits Kubernetes Events on PGD and PGDR resources for gate
+changes, child reconciliation pauses, stale gate cleanup, and completed
+finalization. These events are intended for quick debugging alongside status
+conditions:
+
+```bash
+kubectl -n podgroup-demo describe podgroupdeploymentrollout qwen-engine
+kubectl -n podgroup-demo describe podgroupdeployment qwen-engine-prefill
+```
 
 Watch the coordinated rollout with:
 
@@ -403,6 +443,15 @@ Inspect state:
 ```bash
 kubectl -n podgroup-demo get podgroupdeployments,podgroups,pods,svc -o wide
 kubectl -n podgroup-demo get podgroupdeployment
+```
+
+Useful status fields:
+
+```bash
+kubectl -n podgroup-demo get pgd <name> -o jsonpath='{.status.conditions}'
+kubectl -n podgroup-demo get pgdr <name> -o jsonpath='{.status.conditions}'
+kubectl -n podgroup-demo get pgdr <name> -o jsonpath='{.status.members[*].generation}'
+kubectl -n podgroup-demo get pgdr <name> -o jsonpath='{.status.members[*].observedGeneration}'
 ```
 
 ## Examples

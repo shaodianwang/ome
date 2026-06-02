@@ -3,22 +3,31 @@ package v1alpha1
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
 func (c *Controller) updateRolloutStatus(ctx context.Context, pgdr *PodGroupDeploymentRollout, status PodGroupDeploymentRolloutStatus) error {
+	current, err := c.dynamic.Resource(podGroupDeploymentRolloutGVR).Namespace(pgdr.Namespace).Get(ctx, pgdr.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if currentRollout, err := decodePodGroupDeploymentRollout(current); err == nil {
+		status.Conditions = currentRollout.Status.Conditions
+	}
+	setRolloutStatusConditions(&status)
 	obj, err := rolloutStatusToUnstructured(status)
 	if err != nil {
 		return err
 	}
-	current, err := c.dynamic.Resource(podGroupDeploymentRolloutGVR).Namespace(pgdr.Namespace).Get(ctx, pgdr.Name, metav1.GetOptions{})
-	if err != nil {
-		return err
+	if currentStatus, found, _ := unstructured.NestedMap(current.Object, "status"); found && unstructuredMapsEqual(currentStatus, obj) {
+		return nil
 	}
 	_ = unstructured.SetNestedField(current.Object, obj, "status")
 	_, err = c.dynamic.Resource(podGroupDeploymentRolloutGVR).Namespace(pgdr.Namespace).UpdateStatus(ctx, current, metav1.UpdateOptions{})
@@ -111,17 +120,85 @@ func (c *Controller) updateStatus(ctx context.Context, pgd *PodGroupDeployment, 
 		status.Groups = append(status.Groups, gs)
 	}
 
-	obj, err := statusToUnstructured(status)
-	if err != nil {
-		return err
-	}
 	current, err := c.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgd.Namespace).Get(ctx, pgd.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
+	if currentPGD, err := decodePodGroupDeployment(current); err == nil {
+		status.Conditions = currentPGD.Status.Conditions
+	}
+	setPodGroupDeploymentStatusConditions(&status)
+	obj, err := statusToUnstructured(status)
+	if err != nil {
+		return err
+	}
+	if currentStatus, found, _ := unstructured.NestedMap(current.Object, "status"); found && unstructuredMapsEqual(currentStatus, obj) {
+		return nil
+	}
 	_ = unstructured.SetNestedField(current.Object, obj, "status")
 	_, err = c.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgd.Namespace).UpdateStatus(ctx, current, metav1.UpdateOptions{})
 	return err
+}
+
+func setPodGroupDeploymentStatusConditions(status *PodGroupDeploymentStatus) {
+	ready := status.Total.DesiredPods > 0 && status.Total.ReadyPods == status.Total.DesiredPods
+	if ready {
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionReady, metav1.ConditionTrue, reasonAllGroupsReady, "all desired pods are ready")
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionProgressing, metav1.ConditionFalse, reasonAllGroupsReady, "all desired pods are ready")
+	} else {
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionReady, metav1.ConditionFalse, reasonReconciling, "waiting for desired pods to become ready")
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionProgressing, metav1.ConditionTrue, reasonReconciling, "reconciling desired pods")
+	}
+	if status.RolloutGate.Rollout != "" {
+		message := "rollout gate action=" + status.RolloutGate.Action
+		if status.RolloutGate.Phase != "" {
+			message += " phase=" + status.RolloutGate.Phase
+		}
+		if status.RolloutGate.PausedReason != "" {
+			message += ": " + status.RolloutGate.PausedReason
+		}
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionRolloutGated, metav1.ConditionTrue, reasonRolloutGate, message)
+	} else {
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionRolloutGated, metav1.ConditionFalse, reasonNoRolloutGate, "no rollout gate is active")
+	}
+}
+
+func setRolloutStatusConditions(status *PodGroupDeploymentRolloutStatus) {
+	switch status.Phase {
+	case "Complete":
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionReady, metav1.ConditionTrue, reasonRolloutComplete, "rollout is complete")
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionProgressing, metav1.ConditionFalse, reasonRolloutComplete, "rollout is complete")
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionBlocked, metav1.ConditionFalse, reasonRolloutComplete, "rollout is complete")
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionDegraded, metav1.ConditionFalse, reasonRolloutComplete, "rollout is complete")
+	case "Blocked":
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionReady, metav1.ConditionFalse, reasonRolloutBlocked, status.Reason)
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionProgressing, metav1.ConditionFalse, reasonRolloutBlocked, status.Reason)
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionBlocked, metav1.ConditionTrue, reasonRolloutBlocked, status.Reason)
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionDegraded, metav1.ConditionFalse, reasonRolloutBlocked, status.Reason)
+	case "Degraded":
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionReady, metav1.ConditionFalse, reasonRolloutDegraded, status.Reason)
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionProgressing, metav1.ConditionFalse, reasonRolloutDegraded, status.Reason)
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionBlocked, metav1.ConditionFalse, reasonRolloutDegraded, status.Reason)
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionDegraded, metav1.ConditionTrue, reasonRolloutDegraded, status.Reason)
+	default:
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionReady, metav1.ConditionFalse, reasonRolloutProgress, "rollout is progressing")
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionProgressing, metav1.ConditionTrue, reasonRolloutProgress, "rollout is progressing")
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionBlocked, metav1.ConditionFalse, reasonRolloutProgress, "rollout is progressing")
+		setCondition(&status.Conditions, status.ObservedGeneration, conditionDegraded, metav1.ConditionFalse, reasonRolloutProgress, "rollout is progressing")
+	}
+}
+
+func setCondition(conditions *[]metav1.Condition, observedGeneration int64, conditionType string, status metav1.ConditionStatus, reason, message string) {
+	if message == "" {
+		message = reason
+	}
+	apimeta.SetStatusCondition(conditions, metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		ObservedGeneration: observedGeneration,
+		Reason:             reason,
+		Message:            message,
+	})
 }
 
 func (c *Controller) nodeTopologyValues(ctx context.Context, topologyKey string) (map[string]string, error) {
@@ -167,6 +244,21 @@ func rolloutStatusToUnstructured(status PodGroupDeploymentRolloutStatus) (map[st
 	}
 	var out map[string]interface{}
 	return out, json.Unmarshal(raw, &out)
+}
+
+func unstructuredMapsEqual(a, b map[string]interface{}) bool {
+	if reflect.DeepEqual(a, b) {
+		return true
+	}
+	aJSON, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	bJSON, err := json.Marshal(b)
+	if err != nil {
+		return false
+	}
+	return string(aJSON) == string(bJSON)
 }
 
 func dominantTopologyValue(values map[string]int) string {

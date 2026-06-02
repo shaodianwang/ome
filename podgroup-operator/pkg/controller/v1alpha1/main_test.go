@@ -1,14 +1,24 @@
 package v1alpha1
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	kubefake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/record"
 )
 
 func TestDefaultAndValidateSpec(t *testing.T) {
@@ -44,6 +54,12 @@ func TestDefaultAndValidateSpec(t *testing.T) {
 	}
 	if spec.UpdateStrategy.RollingUpdate.MaxUnavailablePercent != 20 {
 		t.Fatalf("maxUnavailablePercent = %d, want 20", spec.UpdateStrategy.RollingUpdate.MaxUnavailablePercent)
+	}
+	if spec.UpdateStrategy.RollingUpdate.ProgressDeadlineSeconds != defaultProgressDeadlineSeconds {
+		t.Fatalf("progressDeadlineSeconds = %d, want %d", spec.UpdateStrategy.RollingUpdate.ProgressDeadlineSeconds, defaultProgressDeadlineSeconds)
+	}
+	if spec.MultiNode.DistInitPort != defaultMultiNodeDistInitPort {
+		t.Fatalf("multiNode.distInitPort = %d, want %d", spec.MultiNode.DistInitPort, defaultMultiNodeDistInitPort)
 	}
 	if got := effectiveProgressDeadline(spec); got != time.Duration(defaultProgressDeadlineSeconds)*time.Second {
 		t.Fatalf("effectiveProgressDeadline = %s, want %ds", got, defaultProgressDeadlineSeconds)
@@ -160,6 +176,22 @@ func TestPodForGroupMarksServiceTargetOrdinal(t *testing.T) {
 	}
 }
 
+func TestPodForGroupCarriesRolloutLabels(t *testing.T) {
+	pgd := testPodGroupDeployment()
+	pgd.Labels = map[string]string{
+		labelRollout:     "inference",
+		labelRolloutRole: "decode",
+	}
+
+	pod := podForGroup(pgd, 1, 0, "inference-aabbccdd-1", "aabbccdd")
+	if got := pod.Labels[labelRollout]; got != "inference" {
+		t.Fatalf("rollout label = %q, want inference", got)
+	}
+	if got := pod.Labels[labelRolloutRole]; got != "decode" {
+		t.Fatalf("rollout role label = %q, want decode", got)
+	}
+}
+
 func TestPodForGroupInjectsMultiNodeArgs(t *testing.T) {
 	pgd := testPodGroupDeployment()
 	pgd.Spec.ReplicasPerGroup = 2
@@ -180,7 +212,7 @@ func TestPodForGroupInjectsMultiNodeArgs(t *testing.T) {
 	if got, ok := flagValue(command, multiNodeArgNodeRank); !ok || got != "1" {
 		t.Fatalf("--node-rank = %q/%v, want 1/true in command %#v", got, ok, command)
 	}
-	wantAddr := "inference-1.demo.svc.cluster.local:30000"
+	wantAddr := "inference-1.demo.svc.cluster.local:20000"
 	if got, ok := flagValue(command, multiNodeArgDistInitAddr); !ok || got != wantAddr {
 		t.Fatalf("--dist-init-addr = %q/%v, want %s/true in command %#v", got, ok, wantAddr, command)
 	}
@@ -614,8 +646,772 @@ func TestDesiredRolloutChildrenDisagg(t *testing.T) {
 	if children[0].spec.SchedulerName != defaultSchedulerName || children[1].spec.SchedulerName != defaultSchedulerName {
 		t.Fatalf("expected child specs to be defaulted")
 	}
-	if children[0].spec.UpdateStrategy.RollingUpdate.MaxUnavailablePercent != 0 || children[1].spec.UpdateStrategy.RollingUpdate.MaxUnavailablePercent != 0 {
-		t.Fatalf("PGDR-managed child specs should not persist PGD rollout percentages: %#v %#v", children[0].spec.UpdateStrategy, children[1].spec.UpdateStrategy)
+	if children[0].spec.UpdateStrategy.RollingUpdate.MaxUnavailablePercent != defaultMaxUnavailablePercent || children[1].spec.UpdateStrategy.RollingUpdate.MaxUnavailablePercent != defaultMaxUnavailablePercent {
+		t.Fatalf("PGDR-managed child specs should render API defaults to avoid update churn: %#v %#v", children[0].spec.UpdateStrategy, children[1].spec.UpdateStrategy)
+	}
+	for _, child := range children {
+		if child.spec.UpdateStrategy.Type != updateStrategyInPlaceIfPossible {
+			t.Fatalf("%s updateStrategy.type = %q, want API default", child.member.Name, child.spec.UpdateStrategy.Type)
+		}
+		if child.spec.UpdateStrategy.RollingUpdate.ProgressDeadlineSeconds != defaultProgressDeadlineSeconds {
+			t.Fatalf("%s progressDeadlineSeconds = %d, want %d", child.member.Name, child.spec.UpdateStrategy.RollingUpdate.ProgressDeadlineSeconds, defaultProgressDeadlineSeconds)
+		}
+		if child.spec.MultiNode.DistInitPort != defaultMultiNodeDistInitPort {
+			t.Fatalf("%s distInitPort = %d, want %d", child.member.Name, child.spec.MultiNode.DistInitPort, defaultMultiNodeDistInitPort)
+		}
+		if child.spec.TopologyKey != defaultTopologyKey || child.spec.SchedulerName != defaultSchedulerName || child.spec.ServiceTargetOrdinal != 0 {
+			t.Fatalf("%s defaults = topology %q scheduler %q service target %d", child.member.Name, child.spec.TopologyKey, child.spec.SchedulerName, child.spec.ServiceTargetOrdinal)
+		}
+	}
+}
+
+func TestPodGroupDeploymentDefaultsMatchCRDDefaults(t *testing.T) {
+	expected := []string{
+		"default: InPlaceIfPossible",
+		fmt.Sprintf("default: %d", defaultMaxUnavailablePercent),
+		fmt.Sprintf("default: %d", defaultProgressDeadlineSeconds),
+		"default: false",
+		fmt.Sprintf("default: %d", defaultMultiNodeDistInitPort),
+		"default: kubernetes.io/hostname",
+		"default: 0",
+		"default: default-scheduler",
+	}
+	for _, path := range []string{
+		"../../../charts/podgroup-operator/templates/crd-podgroupdeployment.yaml",
+		"../../../manifests/crd.yaml",
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(raw)
+		for _, want := range expected {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s missing %q", path, want)
+			}
+		}
+	}
+}
+
+func TestRolloutChildMatchesAPIDefaultedSpec(t *testing.T) {
+	desired := testPodGroupDeploymentWithName("qwen-prefill", 8)
+	defaultPGDSpec(t, desired)
+
+	current := desired.DeepCopy()
+	current.Spec.UpdateStrategy = UpdateStrategy{}
+	current.Spec.MultiNode = MultiNodeSpec{}
+	current.Spec.TopologyKey = ""
+	current.Spec.SchedulerName = ""
+	current.Spec.Template.Spec.RestartPolicy = ""
+	current.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
+
+	if !rolloutChildMatches(current, desired) {
+		t.Fatalf("rolloutChildMatches() = false for semantically equal defaulted specs\ncurrent=%#v\ndesired=%#v", current.Spec, desired.Spec)
+	}
+
+	current.Spec.MultiNode.DistInitPort = 30000
+	if rolloutChildMatches(current, desired) {
+		t.Fatal("rolloutChildMatches() ignored non-default distInitPort drift")
+	}
+}
+
+func TestInitialRolloutGateAnnotationsHoldNewChildren(t *testing.T) {
+	pgdr := &PodGroupDeploymentRollout{ObjectMeta: metav1.ObjectMeta{Name: "qwen"}}
+	annotations := initialRolloutGateAnnotations(pgdr)
+	if annotations[annotationRollout] != "qwen" {
+		t.Fatalf("rollout annotation = %q, want qwen", annotations[annotationRollout])
+	}
+	if annotations[annotationRolloutAction] != rolloutActionHold {
+		t.Fatalf("rollout action = %q, want hold", annotations[annotationRolloutAction])
+	}
+	if annotations[annotationRolloutAllowedStart] != "0" || annotations[annotationRolloutAllowedEnd] != "1" {
+		t.Fatalf("rollout window = [%s,%s), want [0,1)", annotations[annotationRolloutAllowedStart], annotations[annotationRolloutAllowedEnd])
+	}
+}
+
+func TestRolloutChildNeedsInitialGateForUngatedSpecChange(t *testing.T) {
+	current := testPodGroupDeploymentWithName("qwen-prefill", 8)
+	desired := current.DeepCopy()
+	desired.Spec.Template.Annotations = map[string]string{
+		"podgroup.meta.com/rollout-trigger": "next",
+	}
+
+	if !rolloutChildNeedsInitialGate(current, desired) {
+		t.Fatal("expected ungated child spec update to require an initial rollout gate")
+	}
+}
+
+func TestRolloutChildNeedsInitialGatePreservesActiveGate(t *testing.T) {
+	current := testPodGroupDeploymentWithName("qwen-prefill", 8)
+	current.Annotations = map[string]string{
+		annotationRollout:             "qwen",
+		annotationRolloutAllowedStart: "0",
+		annotationRolloutAllowedEnd:   "1",
+		annotationRolloutWave:         "0",
+		annotationRolloutAction:       rolloutActionCreateNew,
+		annotationRolloutPhase:        rolloutPhaseCreatePrefill,
+	}
+	desired := current.DeepCopy()
+	desired.Spec.Template.Annotations = map[string]string{
+		"podgroup.meta.com/rollout-trigger": "next",
+	}
+
+	if rolloutChildNeedsInitialGate(current, desired) {
+		t.Fatal("active rollout gate should be preserved instead of replaced")
+	}
+}
+
+func TestUpsertRolloutChildAppliesInitialGateBeforeSpecUpdate(t *testing.T) {
+	pgdr := &PodGroupDeploymentRollout{
+		ObjectMeta: metav1.ObjectMeta{Name: "qwen", Namespace: "demo", UID: types.UID("rollout-uid")},
+	}
+	current := testPodGroupDeploymentWithName("qwen-prefill", 8)
+	current.Namespace = pgdr.Namespace
+	current.Labels = map[string]string{
+		labelManagedBy:   managerName,
+		labelRollout:     pgdr.Name,
+		labelRolloutRole: "prefill",
+	}
+	current.Spec.Template.Annotations = map[string]string{"version": "old"}
+	current.Status.CurrentRevision = "old"
+	obj, err := podGroupDeploymentToUnstructured(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := newTestControllerWithDynamicObjects(t, obj)
+
+	desiredSpec := current.Spec
+	desiredSpec.Template.Annotations = map[string]string{"version": "new"}
+	child := rolloutChild{
+		member: rolloutMember{Role: "prefill", Name: current.Name},
+		spec:   desiredSpec,
+	}
+	changed, err := controller.upsertRolloutChild(context.Background(), pgdr, child)
+	if err != nil {
+		t.Fatalf("upsertRolloutChild() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected upsertRolloutChild to report metadata change")
+	}
+
+	updatedObj, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).Get(context.Background(), current.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := decodePodGroupDeployment(updatedObj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Spec.Template.Annotations["version"] != "old" {
+		t.Fatalf("spec version = %q, want old until gate is active", updated.Spec.Template.Annotations["version"])
+	}
+	if !rolloutGateFromAnnotations(updated.Annotations).enabled {
+		t.Fatalf("rollout gate was not applied: %#v", updated.Annotations)
+	}
+	if updated.Status.CurrentRevision != "old" {
+		t.Fatalf("status currentRevision = %q, want old", updated.Status.CurrentRevision)
+	}
+}
+
+func TestRolloutStopsAfterApplyingInitialChildGate(t *testing.T) {
+	pgdr := &PodGroupDeploymentRollout{
+		TypeMeta: metav1.TypeMeta{APIVersion: operatorAPIVersion, Kind: operatorRolloutKind},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "qwen",
+			Namespace:  "demo",
+			UID:        types.UID("rollout-uid"),
+			Finalizers: []string{finalizerPodGroupDeploymentRollout},
+		},
+		Spec: PodGroupDeploymentRolloutSpec{
+			Mode: "unified",
+		},
+	}
+	current := testPodGroupDeploymentWithName("qwen-unified", 1)
+	current.Namespace = pgdr.Namespace
+	current.Generation = 4
+	markPGDRManaged(current, pgdr.Name, "unified")
+	current.OwnerReferences = rolloutOwnerRef(pgdr)
+	current.Spec.Template.Annotations = map[string]string{"version": "old"}
+	defaultPGDSpec(t, current)
+	oldRevision, err := deploymentRevision(&current.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.Status.ObservedGeneration = current.Generation
+	current.Status.CurrentRevision = oldRevision
+	current.Status.Groups = []GroupStatus{{Index: 0, Revision: oldRevision, Phase: "Ready"}}
+
+	desiredSpec := current.Spec.DeepCopy()
+	desiredSpec.Template.Annotations = map[string]string{"version": "new"}
+	pgdr.Spec.Unified = &desiredSpec
+	pgdrObj, err := podGroupDeploymentRolloutToUnstructured(pgdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentObj, err := podGroupDeploymentToUnstructured(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := newTestControllerWithDynamicObjectsList(t, []runtime.Object{pgdrObj, currentObj})
+
+	if _, err := controller.reconcileOneRollout(context.Background(), pgdr); err != nil {
+		t.Fatalf("reconcileOneRollout() error = %v", err)
+	}
+
+	updatedObj, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).Get(context.Background(), current.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := decodePodGroupDeployment(updatedObj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Spec.Template.Annotations["version"] != "old" {
+		t.Fatalf("spec version = %q, want old until next reconcile", updated.Spec.Template.Annotations["version"])
+	}
+	gate := rolloutGateFromAnnotations(updated.Annotations)
+	if !gate.enabled || gate.action != rolloutActionHold {
+		t.Fatalf("initial gate = %#v, want hold", gate)
+	}
+	statusObj, err := controller.dynamic.Resource(podGroupDeploymentRolloutGVR).Namespace(pgdr.Namespace).Get(context.Background(), pgdr.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedRollout, err := decodePodGroupDeploymentRollout(statusObj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedRollout.Status.Phase != "Blocked" || updatedRollout.Status.CurrentPhase != "ReconcilingChildren" {
+		t.Fatalf("rollout status = %#v, want blocked reconciling children", updatedRollout.Status)
+	}
+}
+
+func TestRolloutBlocksOnStaleChildGeneration(t *testing.T) {
+	pgdr := &PodGroupDeploymentRollout{
+		TypeMeta: metav1.TypeMeta{APIVersion: operatorAPIVersion, Kind: operatorRolloutKind},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "qwen",
+			Namespace:  "demo",
+			Finalizers: []string{finalizerPodGroupDeploymentRollout},
+		},
+		Spec: PodGroupDeploymentRolloutSpec{Mode: "unified"},
+	}
+	pgd := testPodGroupDeploymentWithName("qwen-unified", 1)
+	pgd.Namespace = pgdr.Namespace
+	pgd.Generation = 5
+	pgd.Status.ObservedGeneration = 4
+	markPGDRManaged(pgd, pgdr.Name, "unified")
+	defaultPGDSpec(t, pgd)
+	desiredRevision, err := deploymentRevision(&pgd.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgd.Status.CurrentRevision = desiredRevision
+	pgd.Status.Groups = []GroupStatus{{Index: 0, Revision: desiredRevision, Phase: "Ready"}}
+	pgdrObj, err := podGroupDeploymentRolloutToUnstructured(pgdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgdObj, err := podGroupDeploymentToUnstructured(pgd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := newTestControllerWithDynamicObjectsList(t, []runtime.Object{pgdrObj, pgdObj})
+
+	if _, err := controller.reconcileOneRollout(context.Background(), pgdr); err != nil {
+		t.Fatalf("reconcileOneRollout() error = %v", err)
+	}
+
+	statusObj, err := controller.dynamic.Resource(podGroupDeploymentRolloutGVR).Namespace(pgdr.Namespace).Get(context.Background(), pgdr.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedRollout, err := decodePodGroupDeploymentRollout(statusObj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedRollout.Status.Phase != "Blocked" {
+		t.Fatalf("rollout phase = %s, want Blocked", updatedRollout.Status.Phase)
+	}
+	if len(updatedRollout.Status.Members) != 1 {
+		t.Fatalf("members = %d, want 1", len(updatedRollout.Status.Members))
+	}
+	member := updatedRollout.Status.Members[0]
+	if member.Generation != 5 || member.ObservedGeneration != 4 || member.Action != rolloutActionHold || member.Phase != "Blocked" {
+		t.Fatalf("member status = %#v, want stale hold", member)
+	}
+	updatedPGDObj, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).Get(context.Background(), pgd.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedPGD, err := decodePodGroupDeployment(updatedPGDObj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := rolloutGateFromAnnotations(updatedPGD.Annotations)
+	if !gate.enabled || gate.action != rolloutActionHold || gate.pausedReason == "" {
+		t.Fatalf("stale generation gate = %#v, want hold with paused reason", gate)
+	}
+}
+
+func TestStandalonePGDWithoutGateCreatesInitialGroup(t *testing.T) {
+	pgd := testPodGroupDeploymentWithName("standalone", 1)
+	pgd.Spec.ReplicasPerGroup = 1
+	controller := newTestController(t, pgd)
+
+	if err := controller.reconcileOne(context.Background(), pgd); err != nil {
+		t.Fatalf("reconcileOne() error = %v", err)
+	}
+
+	pods, err := controller.kube.CoreV1().Pods(pgd.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("pods = %d, want 1", len(pods.Items))
+	}
+}
+
+func TestPGDFirstReconcileAddsFinalizerBeforeChildren(t *testing.T) {
+	pgd := testPodGroupDeploymentWithName("standalone", 1)
+	pgd.Finalizers = nil
+	pgd.Spec.ReplicasPerGroup = 1
+	controller := newTestController(t, pgd)
+
+	if err := controller.reconcileOne(context.Background(), pgd); err != nil {
+		t.Fatalf("reconcileOne() error = %v", err)
+	}
+
+	obj, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgd.Namespace).Get(context.Background(), pgd.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasString(obj.GetFinalizers(), finalizerPodGroupDeployment) {
+		t.Fatalf("finalizers = %#v, want PGD finalizer", obj.GetFinalizers())
+	}
+	pods, err := controller.kube.CoreV1().Pods(pgd.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("pods = %d, want no children until finalizer is persisted", len(pods.Items))
+	}
+}
+
+func TestDeletingPGDSkipsChildReconcile(t *testing.T) {
+	pgd := testPodGroupDeploymentWithName("deleting", 1)
+	pgd.Spec.ReplicasPerGroup = 1
+	now := metav1.Now()
+	pgd.DeletionTimestamp = &now
+	controller := newTestController(t, pgd)
+
+	if err := controller.reconcileOne(context.Background(), pgd); err != nil {
+		t.Fatalf("reconcileOne() error = %v", err)
+	}
+
+	pods, err := controller.kube.CoreV1().Pods(pgd.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("pods = %d, want 0", len(pods.Items))
+	}
+	services, err := controller.kube.CoreV1().Services(pgd.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(services.Items) != 0 {
+		t.Fatalf("services = %d, want 0", len(services.Items))
+	}
+}
+
+func TestPGDFinalizerDeletesChildrenBeforeRemoval(t *testing.T) {
+	pgd := testPodGroupDeploymentWithName("finalizing", 1)
+	pgd.Spec.ReplicasPerGroup = 1
+	defaultPGDSpec(t, pgd)
+	pgd.Finalizers = []string{finalizerPodGroupDeployment}
+	now := metav1.Now()
+	pgd.DeletionTimestamp = &now
+	revision, err := deploymentRevision(&pgd.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := revisionedGroupInstance(pgd.Name, 0, revision)
+	pod := podForGroup(pgd, 0, 0, instance, revision)
+	service := serviceForGroup(pgd, 0, instance)
+	schedulerPG := testSchedulerPodGroup(pgd, 0, instance, revision)
+	controller := newTestControllerWithDynamicObjectsList(t, []runtime.Object{mustPodGroupDeploymentObject(t, pgd), schedulerPG}, pod, service)
+
+	if err := controller.reconcileOne(context.Background(), pgd); err != nil {
+		t.Fatalf("reconcileOne() error = %v", err)
+	}
+
+	if _, err := controller.kube.CoreV1().Pods(pgd.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{}); err == nil {
+		t.Fatalf("pod %s still exists", pod.Name)
+	}
+	if _, err := controller.kube.CoreV1().Services(pgd.Namespace).Get(context.Background(), service.Name, metav1.GetOptions{}); err == nil {
+		t.Fatalf("service %s still exists", service.Name)
+	}
+	if _, err := controller.dynamic.Resource(schedulerPodGroupGVR).Namespace(pgd.Namespace).Get(context.Background(), schedulerPG.GetName(), metav1.GetOptions{}); err == nil {
+		t.Fatalf("scheduler podgroup %s still exists", schedulerPG.GetName())
+	}
+	obj, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgd.Namespace).Get(context.Background(), pgd.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasString(obj.GetFinalizers(), finalizerPodGroupDeployment) {
+		t.Fatalf("finalizer was not removed: %#v", obj.GetFinalizers())
+	}
+}
+
+func TestPGDRManagedPGDWithoutGateDoesNotCreateInitialGroup(t *testing.T) {
+	pgd := testPodGroupDeploymentWithName("managed", 1)
+	pgd.Spec.ReplicasPerGroup = 1
+	markPGDRManaged(pgd, "rollout", "decode")
+	controller := newTestController(t, pgd)
+
+	if err := controller.reconcileOne(context.Background(), pgd); err != nil {
+		t.Fatalf("reconcileOne() error = %v", err)
+	}
+
+	pods, err := controller.kube.CoreV1().Pods(pgd.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("pods = %d, want 0", len(pods.Items))
+	}
+}
+
+func TestPGDRManagedPGDWithoutGateDeletesUngatedReplacement(t *testing.T) {
+	oldPGD := testPodGroupDeploymentWithName("managed", 1)
+	oldPGD.Spec.ReplicasPerGroup = 1
+	markPGDRManaged(oldPGD, "rollout", "prefill")
+	defaultPGDSpec(t, oldPGD)
+	oldRevision, err := deploymentRevision(&oldPGD.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldInstance := revisionedGroupInstance(oldPGD.Name, 0, oldRevision)
+
+	pgd := oldPGD.DeepCopy()
+	pgd.Spec.Template.Annotations = map[string]string{"podgroup.meta.com/rollout-trigger": "next"}
+	defaultPGDSpec(t, pgd)
+	desiredRevision, err := deploymentRevision(&pgd.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desiredInstance := revisionedGroupInstance(pgd.Name, 0, desiredRevision)
+
+	oldPod := podForGroup(pgd, 0, 0, oldInstance, oldRevision)
+	replacementPod := podForGroup(pgd, 0, 0, desiredInstance, desiredRevision)
+	activeService := serviceForGroup(pgd, 0, oldInstance)
+	controller := newTestController(t, pgd, oldPod, replacementPod, activeService)
+
+	if err := controller.reconcileOne(context.Background(), pgd); err != nil {
+		t.Fatalf("reconcileOne() error = %v", err)
+	}
+
+	if _, err := controller.kube.CoreV1().Pods(pgd.Namespace).Get(context.Background(), replacementPod.Name, metav1.GetOptions{}); err == nil {
+		t.Fatalf("ungated replacement pod %s still exists", replacementPod.Name)
+	}
+	if _, err := controller.kube.CoreV1().Pods(pgd.Namespace).Get(context.Background(), oldPod.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("old active pod was not preserved: %v", err)
+	}
+	service, err := controller.kube.CoreV1().Services(pgd.Namespace).Get(context.Background(), activeService.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Spec.Selector[labelGroupInstance] != oldInstance {
+		t.Fatalf("service selector instance = %s, want %s", service.Spec.Selector[labelGroupInstance], oldInstance)
+	}
+}
+
+func TestPGDRManagedPGDWithoutGateSelfHealsCurrentRevisionService(t *testing.T) {
+	pgd := testPodGroupDeploymentWithName("managed", 1)
+	pgd.Spec.ReplicasPerGroup = 1
+	markPGDRManaged(pgd, "rollout", "decode")
+	defaultPGDSpec(t, pgd)
+	desiredRevision, err := deploymentRevision(&pgd.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgd.Status.CurrentRevision = desiredRevision
+	desiredInstance := revisionedGroupInstance(pgd.Name, 0, desiredRevision)
+	pod := podForGroup(pgd, 0, 0, desiredInstance, desiredRevision)
+	controller := newTestController(t, pgd, pod)
+
+	if err := controller.reconcileOne(context.Background(), pgd); err != nil {
+		t.Fatalf("reconcileOne() error = %v", err)
+	}
+
+	service, err := controller.kube.CoreV1().Services(pgd.Namespace).Get(context.Background(), stableGroupInstance(pgd.Name, 0), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Spec.Selector[labelGroupInstance] != desiredInstance {
+		t.Fatalf("service selector instance = %s, want %s", service.Spec.Selector[labelGroupInstance], desiredInstance)
+	}
+	pods, err := controller.kube.CoreV1().Pods(pgd.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("pods = %d, want 1", len(pods.Items))
+	}
+}
+
+func TestPGDRManagedPGDHoldGateDeletesReplacementPods(t *testing.T) {
+	oldPGD := testPodGroupDeploymentWithName("managed", 1)
+	oldPGD.Spec.ReplicasPerGroup = 1
+	markPGDRManaged(oldPGD, "rollout", "decode")
+	defaultPGDSpec(t, oldPGD)
+	oldRevision, err := deploymentRevision(&oldPGD.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldInstance := revisionedGroupInstance(oldPGD.Name, 0, oldRevision)
+
+	pgd := oldPGD.DeepCopy()
+	pgd.Spec.Template.Annotations = map[string]string{"podgroup.meta.com/rollout-trigger": "next"}
+	pgd.Annotations = map[string]string{
+		annotationRollout:             "rollout",
+		annotationRolloutAllowedStart: "0",
+		annotationRolloutAllowedEnd:   "1",
+		annotationRolloutWave:         "0",
+		annotationRolloutAction:       rolloutActionHold,
+		annotationRolloutPhase:        rolloutPhaseCreateDecode,
+	}
+	defaultPGDSpec(t, pgd)
+	desiredRevision, err := deploymentRevision(&pgd.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desiredInstance := revisionedGroupInstance(pgd.Name, 0, desiredRevision)
+
+	oldPod := podForGroup(pgd, 0, 0, oldInstance, oldRevision)
+	replacementPod := podForGroup(pgd, 0, 0, desiredInstance, desiredRevision)
+	activeService := serviceForGroup(pgd, 0, oldInstance)
+	controller := newTestController(t, pgd, oldPod, replacementPod, activeService)
+
+	if err := controller.reconcileOne(context.Background(), pgd); err != nil {
+		t.Fatalf("reconcileOne() error = %v", err)
+	}
+
+	if _, err := controller.kube.CoreV1().Pods(pgd.Namespace).Get(context.Background(), replacementPod.Name, metav1.GetOptions{}); err == nil {
+		t.Fatalf("held replacement pod %s still exists", replacementPod.Name)
+	}
+	if _, err := controller.kube.CoreV1().Pods(pgd.Namespace).Get(context.Background(), oldPod.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("old active pod was not preserved: %v", err)
+	}
+}
+
+func TestPGDRManagedPGDCreateNewGateOnlyCreatesAllowedWindow(t *testing.T) {
+	oldPGD := testPodGroupDeploymentWithName("managed", 2)
+	oldPGD.Spec.ReplicasPerGroup = 1
+	markPGDRManaged(oldPGD, "rollout", "prefill")
+	defaultPGDSpec(t, oldPGD)
+	oldRevision, err := deploymentRevision(&oldPGD.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldInstance0 := revisionedGroupInstance(oldPGD.Name, 0, oldRevision)
+	oldInstance1 := revisionedGroupInstance(oldPGD.Name, 1, oldRevision)
+
+	pgd := oldPGD.DeepCopy()
+	pgd.Spec.Template.Annotations = map[string]string{"podgroup.meta.com/rollout-trigger": "next"}
+	pgd.Annotations = map[string]string{
+		annotationRollout:             "rollout",
+		annotationRolloutAllowedStart: "0",
+		annotationRolloutAllowedEnd:   "1",
+		annotationRolloutWave:         "0",
+		annotationRolloutAction:       rolloutActionCreateNew,
+		annotationRolloutPhase:        rolloutPhaseCreatePrefill,
+	}
+	defaultPGDSpec(t, pgd)
+	desiredRevision, err := deploymentRevision(&pgd.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desiredInstance0 := revisionedGroupInstance(pgd.Name, 0, desiredRevision)
+	desiredInstance1 := revisionedGroupInstance(pgd.Name, 1, desiredRevision)
+
+	activeService0 := serviceForGroup(pgd, 0, oldInstance0)
+	activeService1 := serviceForGroup(pgd, 1, oldInstance1)
+	oldPod1 := podForGroup(pgd, 1, 0, oldInstance1, oldRevision)
+	controller := newTestController(t, pgd, activeService0, activeService1, oldPod1)
+
+	if err := controller.reconcileOne(context.Background(), pgd); err != nil {
+		t.Fatalf("reconcileOne() error = %v", err)
+	}
+
+	if _, err := controller.kube.CoreV1().Pods(pgd.Namespace).Get(context.Background(), podName(desiredInstance0, 0), metav1.GetOptions{}); err != nil {
+		t.Fatalf("allowed window replacement was not created: %v", err)
+	}
+	if _, err := controller.kube.CoreV1().Pods(pgd.Namespace).Get(context.Background(), podName(desiredInstance1, 0), metav1.GetOptions{}); err == nil {
+		t.Fatalf("out-of-window replacement pod %s was created", podName(desiredInstance1, 0))
+	}
+	if _, err := controller.kube.CoreV1().Pods(pgd.Namespace).Get(context.Background(), oldPod1.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("out-of-window old pod was not preserved: %v", err)
+	}
+}
+
+func TestDesiredRolloutChildrenUnified(t *testing.T) {
+	unifiedSpec := testPodGroupDeploymentWithName("unified", 4).Spec
+	pgdr := &PodGroupDeploymentRollout{
+		ObjectMeta: metav1.ObjectMeta{Name: "qwen", Namespace: "demo"},
+		Spec: PodGroupDeploymentRolloutSpec{
+			Mode:    "unified",
+			Unified: &unifiedSpec,
+		},
+	}
+
+	children, err := desiredRolloutChildren(pgdr)
+	if err != nil {
+		t.Fatalf("desiredRolloutChildren() error = %v", err)
+	}
+	if len(children) != 1 {
+		t.Fatalf("children = %d, want 1", len(children))
+	}
+	if children[0].member.Role != "unified" || children[0].member.Name != "qwen-unified" || children[0].spec.Groups != 4 {
+		t.Fatalf("unified child = %#v", children[0])
+	}
+}
+
+func TestReconcileRolloutChildrenDeletesStaleOwnedChildren(t *testing.T) {
+	unifiedSpec := testPodGroupDeploymentWithName("unified", 4).Spec
+	pgdr := &PodGroupDeploymentRollout{
+		ObjectMeta: metav1.ObjectMeta{Name: "qwen", Namespace: "demo", UID: types.UID("rollout-uid")},
+		Spec: PodGroupDeploymentRolloutSpec{
+			Mode:    "unified",
+			Unified: &unifiedSpec,
+		},
+	}
+	stale := testPodGroupDeploymentWithName("qwen-prefill", 2)
+	markPGDRManaged(stale, pgdr.Name, "prefill")
+	stale.OwnerReferences = rolloutOwnerRef(pgdr)
+	staleObj, err := podGroupDeploymentToUnstructured(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := newTestControllerWithDynamicObjects(t, staleObj)
+
+	members, changed, err := controller.reconcileRolloutChildren(context.Background(), pgdr)
+	if err != nil {
+		t.Fatalf("reconcileRolloutChildren() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected reconcileRolloutChildren to report child changes")
+	}
+	if len(members) != 1 || members[0].Name != "qwen-unified" {
+		t.Fatalf("members = %#v, want qwen-unified", members)
+	}
+	if _, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).Get(context.Background(), "qwen-prefill", metav1.GetOptions{}); err == nil {
+		t.Fatal("stale prefill child still exists")
+	}
+	if _, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).Get(context.Background(), "qwen-unified", metav1.GetOptions{}); err != nil {
+		t.Fatalf("desired unified child was not created: %v", err)
+	}
+}
+
+func TestDeletingPGDRSkipsChildReconcile(t *testing.T) {
+	unifiedSpec := testPodGroupDeploymentWithName("unified", 4).Spec
+	now := metav1.Now()
+	pgdr := &PodGroupDeploymentRollout{
+		ObjectMeta: metav1.ObjectMeta{Name: "qwen", Namespace: "demo", DeletionTimestamp: &now},
+		Spec: PodGroupDeploymentRolloutSpec{
+			Mode:    "unified",
+			Unified: &unifiedSpec,
+		},
+	}
+	controller := newTestControllerWithDynamicObjectsList(t, nil)
+
+	members, err := controller.reconcileOneRollout(context.Background(), pgdr)
+	if err != nil {
+		t.Fatalf("reconcileOneRollout() error = %v", err)
+	}
+	if len(members) != 0 {
+		t.Fatalf("members = %d, want 0", len(members))
+	}
+	if _, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).Get(context.Background(), "qwen-unified", metav1.GetOptions{}); err == nil {
+		t.Fatal("deleting rollout created unified child")
+	}
+}
+
+func TestPGDRFirstReconcileAddsFinalizerBeforeChildren(t *testing.T) {
+	unifiedSpec := testPodGroupDeploymentWithName("unified", 4).Spec
+	pgdr := &PodGroupDeploymentRollout{
+		TypeMeta: metav1.TypeMeta{APIVersion: operatorAPIVersion, Kind: operatorRolloutKind},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "qwen",
+			Namespace: "demo",
+			UID:       types.UID("rollout-uid"),
+		},
+		Spec: PodGroupDeploymentRolloutSpec{
+			Mode:    "unified",
+			Unified: &unifiedSpec,
+		},
+	}
+	controller := newTestControllerWithDynamicObjectsList(t, []runtime.Object{mustPodGroupDeploymentRolloutObject(t, pgdr)})
+
+	members, err := controller.reconcileOneRollout(context.Background(), pgdr)
+	if err != nil {
+		t.Fatalf("reconcileOneRollout() error = %v", err)
+	}
+	if len(members) != 0 {
+		t.Fatalf("members = %d, want no children until finalizer is persisted", len(members))
+	}
+	obj, err := controller.dynamic.Resource(podGroupDeploymentRolloutGVR).Namespace(pgdr.Namespace).Get(context.Background(), pgdr.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasString(obj.GetFinalizers(), finalizerPodGroupDeploymentRollout) {
+		t.Fatalf("finalizers = %#v, want PGDR finalizer", obj.GetFinalizers())
+	}
+	children, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children.Items) != 0 {
+		t.Fatalf("children = %d, want none until finalizer is persisted", len(children.Items))
+	}
+}
+
+func TestPGDRFinalizerDeletesOwnedChildrenBeforeRemoval(t *testing.T) {
+	now := metav1.Now()
+	pgdr := &PodGroupDeploymentRollout{
+		TypeMeta: metav1.TypeMeta{APIVersion: operatorAPIVersion, Kind: operatorRolloutKind},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "qwen",
+			Namespace:         "demo",
+			UID:               types.UID("rollout-uid"),
+			Finalizers:        []string{finalizerPodGroupDeploymentRollout},
+			DeletionTimestamp: &now,
+		},
+		Spec: PodGroupDeploymentRolloutSpec{Mode: "unified"},
+	}
+	child := testPodGroupDeploymentWithName("qwen-unified", 1)
+	child.Namespace = pgdr.Namespace
+	markPGDRManaged(child, pgdr.Name, "unified")
+	child.OwnerReferences = rolloutOwnerRef(pgdr)
+	controller := newTestControllerWithDynamicObjectsList(t, []runtime.Object{
+		mustPodGroupDeploymentRolloutObject(t, pgdr),
+		mustPodGroupDeploymentObject(t, child),
+	})
+
+	if _, err := controller.reconcileOneRollout(context.Background(), pgdr); err != nil {
+		t.Fatalf("reconcileOneRollout() error = %v", err)
+	}
+
+	if _, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).Get(context.Background(), child.Name, metav1.GetOptions{}); err == nil {
+		t.Fatalf("child %s still exists", child.Name)
+	}
+	obj, err := controller.dynamic.Resource(podGroupDeploymentRolloutGVR).Namespace(pgdr.Namespace).Get(context.Background(), pgdr.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasString(obj.GetFinalizers(), finalizerPodGroupDeploymentRollout) {
+		t.Fatalf("finalizer was not removed: %#v", obj.GetFinalizers())
 	}
 }
 
@@ -978,6 +1774,103 @@ func TestRolloutGateFromAnnotationsIgnoresInvalidRange(t *testing.T) {
 	}
 }
 
+func TestApplyAndClearRolloutGatePatchAnnotations(t *testing.T) {
+	pgd := testPodGroupDeploymentWithName("qwen-decode", 1)
+	pgd.Annotations = map[string]string{"keep": "true"}
+	controller := newTestController(t, pgd)
+	recorder := record.NewFakeRecorder(2)
+	controller.WithEventRecorder(recorder)
+	pgdr := &PodGroupDeploymentRollout{ObjectMeta: metav1.ObjectMeta{Name: "qwen", Namespace: pgd.Namespace}}
+
+	if err := controller.applyRolloutGate(context.Background(), pgdr, pgd, 0, 1, 0, rolloutActionCreateNew, rolloutPhaseCreateDecode, "waiting"); err != nil {
+		t.Fatalf("applyRolloutGate() error = %v", err)
+	}
+	obj, err := controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgd.Namespace).Get(context.Background(), pgd.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations := obj.GetAnnotations()
+	if annotations["keep"] != "true" {
+		t.Fatalf("kept annotation = %q, want true", annotations["keep"])
+	}
+	if annotations[annotationRollout] != "qwen" || annotations[annotationRolloutAction] != rolloutActionCreateNew {
+		t.Fatalf("rollout annotations after apply = %#v", annotations)
+	}
+
+	updated, err := decodePodGroupDeployment(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.clearRolloutGate(context.Background(), updated); err != nil {
+		t.Fatalf("clearRolloutGate() error = %v", err)
+	}
+	obj, err = controller.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgd.Namespace).Get(context.Background(), pgd.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations = obj.GetAnnotations()
+	if annotations["keep"] != "true" {
+		t.Fatalf("kept annotation after clear = %q, want true", annotations["keep"])
+	}
+	if annotations[annotationRollout] != "" || annotations[annotationRolloutAction] != "" {
+		t.Fatalf("rollout annotations after clear = %#v", annotations)
+	}
+
+	firstEvent := <-recorder.Events
+	if !strings.Contains(firstEvent, reasonRolloutGate) {
+		t.Fatalf("first event = %q, want rollout gate event", firstEvent)
+	}
+	secondEvent := <-recorder.Events
+	if !strings.Contains(secondEvent, reasonNoRolloutGate) {
+		t.Fatalf("second event = %q, want gate cleared event", secondEvent)
+	}
+}
+
+func TestPodGroupDeploymentStatusConditions(t *testing.T) {
+	status := PodGroupDeploymentStatus{
+		ObservedGeneration: 7,
+		Total: TotalStatus{
+			DesiredPods: 4,
+			ReadyPods:   4,
+		},
+	}
+	setPodGroupDeploymentStatusConditions(&status)
+
+	ready := conditionByType(status.Conditions, conditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != reasonAllGroupsReady || ready.ObservedGeneration != 7 {
+		t.Fatalf("Ready condition = %#v", ready)
+	}
+	gated := conditionByType(status.Conditions, conditionRolloutGated)
+	if gated == nil || gated.Status != metav1.ConditionFalse || gated.Reason != reasonNoRolloutGate {
+		t.Fatalf("RolloutGated condition = %#v", gated)
+	}
+
+	transition := ready.LastTransitionTime
+	setPodGroupDeploymentStatusConditions(&status)
+	ready = conditionByType(status.Conditions, conditionReady)
+	if !ready.LastTransitionTime.Equal(&transition) {
+		t.Fatalf("Ready transition time changed without status change: got %s want %s", ready.LastTransitionTime, transition)
+	}
+}
+
+func TestRolloutStatusConditions(t *testing.T) {
+	status := PodGroupDeploymentRolloutStatus{
+		ObservedGeneration: 3,
+		Phase:              "Blocked",
+		Reason:             "decode waiting",
+	}
+	setRolloutStatusConditions(&status)
+
+	blocked := conditionByType(status.Conditions, conditionBlocked)
+	if blocked == nil || blocked.Status != metav1.ConditionTrue || blocked.Reason != reasonRolloutBlocked || blocked.Message != "decode waiting" || blocked.ObservedGeneration != 3 {
+		t.Fatalf("Blocked condition = %#v", blocked)
+	}
+	ready := conditionByType(status.Conditions, conditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse {
+		t.Fatalf("Ready condition = %#v", ready)
+	}
+}
+
 func TestRolloutActionsSummary(t *testing.T) {
 	members := []RolloutMemberStatus{
 		{Role: "prefill", Action: rolloutActionDeleteOld},
@@ -1262,9 +2155,10 @@ func testPodGroupDeployment() *PodGroupDeployment {
 			Kind:       operatorKind,
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "inference",
-			Namespace: "demo",
-			UID:       types.UID("uid-123"),
+			Name:       "inference",
+			Namespace:  "demo",
+			UID:        types.UID("uid-123"),
+			Finalizers: []string{finalizerPodGroupDeployment},
 		},
 		Spec: PodGroupDeploymentSpec{
 			Groups:               3,
@@ -1292,4 +2186,106 @@ func testPodGroupDeployment() *PodGroupDeployment {
 			},
 		},
 	}
+}
+
+func markPGDRManaged(pgd *PodGroupDeployment, rollout, role string) {
+	pgd.Labels = mergeStringMaps(pgd.Labels, map[string]string{
+		labelManagedBy:   managerName,
+		labelRollout:     rollout,
+		labelRolloutRole: role,
+	})
+}
+
+func defaultPGDSpec(t *testing.T, pgd *PodGroupDeployment) {
+	t.Helper()
+	spec, err := defaultAndValidateSpec(pgd.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgd.Spec = spec
+}
+
+func conditionByType(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
+func mustPodGroupDeploymentObject(t *testing.T, pgd *PodGroupDeployment) *unstructured.Unstructured {
+	t.Helper()
+	obj, err := podGroupDeploymentToUnstructured(pgd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return obj
+}
+
+func mustPodGroupDeploymentRolloutObject(t *testing.T, pgdr *PodGroupDeploymentRollout) *unstructured.Unstructured {
+	t.Helper()
+	obj, err := podGroupDeploymentRolloutToUnstructured(pgdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return obj
+}
+
+func testSchedulerPodGroup(pgd *PodGroupDeployment, group int32, groupInstance, revision string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "scheduling.x-k8s.io/v1alpha1",
+			"kind":       "PodGroup",
+			"spec": map[string]interface{}{
+				"minMember": int64(pgd.Spec.ReplicasPerGroup),
+			},
+		},
+	}
+	obj.SetName(groupInstance)
+	obj.SetNamespace(pgd.Namespace)
+	obj.SetLabels(baseLabels(pgd, group, groupInstance, revision))
+	obj.SetOwnerReferences(ownerRef(pgd))
+	return obj
+}
+
+func podGroupDeploymentRolloutToUnstructured(pgdr *PodGroupDeploymentRollout) (*unstructured.Unstructured, error) {
+	raw, err := json.Marshal(pgdr)
+	if err != nil {
+		return nil, err
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	return &unstructured.Unstructured{Object: obj}, nil
+}
+
+func newTestController(t *testing.T, pgd *PodGroupDeployment, kubeObjects ...runtime.Object) *Controller {
+	t.Helper()
+	obj, err := podGroupDeploymentToUnstructured(pgd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newTestControllerWithDynamicObjects(t, obj, kubeObjects...)
+}
+
+func newTestControllerWithDynamicObjects(t *testing.T, dynamicObject runtime.Object, kubeObjects ...runtime.Object) *Controller {
+	t.Helper()
+	return newTestControllerWithDynamicObjectsList(t, []runtime.Object{dynamicObject}, kubeObjects...)
+}
+
+func newTestControllerWithDynamicObjectsList(t *testing.T, dynamicObjects []runtime.Object, kubeObjects ...runtime.Object) *Controller {
+	t.Helper()
+
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			podGroupDeploymentGVR:        "PodGroupDeploymentList",
+			podGroupDeploymentRolloutGVR: "PodGroupDeploymentRolloutList",
+			schedulerPodGroupGVR:         "PodGroupList",
+		},
+		dynamicObjects...,
+	)
+	return New(kubefake.NewSimpleClientset(kubeObjects...), dynamicClient)
 }

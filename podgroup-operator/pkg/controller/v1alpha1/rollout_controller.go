@@ -3,52 +3,53 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func (c *Controller) reconcileRollouts(ctx context.Context) error {
-	list, err := c.dynamic.Resource(podGroupDeploymentRolloutGVR).Namespace("").List(ctx, metav1.ListOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	referenced := map[string]struct{}{}
-	for i := range list.Items {
-		pgdr, err := decodePodGroupDeploymentRollout(&list.Items[i])
-		if err != nil {
-			log.Printf("decode rollout %s/%s failed: %v", list.Items[i].GetNamespace(), list.Items[i].GetName(), err)
-			continue
-		}
-		memberKeys, err := c.reconcileOneRollout(ctx, pgdr)
-		if err != nil {
-			log.Printf("reconcile rollout %s/%s failed: %v", pgdr.Namespace, pgdr.Name, err)
-			continue
-		}
-		for _, key := range memberKeys {
-			referenced[key] = struct{}{}
-		}
-	}
-	return c.clearStaleRolloutGates(ctx, referenced)
-}
-
 func (c *Controller) reconcileOneRollout(ctx context.Context, pgdr *PodGroupDeploymentRollout) ([]string, error) {
+	if !pgdr.DeletionTimestamp.IsZero() {
+		return nil, c.finalizePodGroupDeploymentRollout(ctx, pgdr)
+	}
+	finalizerAdded, err := c.ensurePodGroupDeploymentRolloutFinalizer(ctx, pgdr)
+	if err != nil {
+		return nil, err
+	}
+	if finalizerAdded {
+		return nil, nil
+	}
+
 	status := PodGroupDeploymentRolloutStatus{
 		ObservedGeneration: pgdr.Generation,
 		Mode:               pgdr.Spec.Mode,
 		Phase:              "Progressing",
 	}
-	members, err := c.reconcileRolloutChildren(ctx, pgdr)
+	members, childrenChanged, err := c.reconcileRolloutChildren(ctx, pgdr)
 	if err != nil {
 		status.Phase = "Blocked"
 		status.Reason = err.Error()
+		c.recordWarning(pgdr, reasonRolloutBlocked, status.Reason)
 		return nil, c.updateRolloutStatus(ctx, pgdr, status)
+	}
+	memberKeys := rolloutMemberKeys(pgdr.Namespace, members)
+	if childrenChanged {
+		status.Phase = "Blocked"
+		status.CurrentPhase = "ReconcilingChildren"
+		status.Reason = "waiting for child PodGroupDeployment changes to be observed"
+		c.recordNormal(pgdr, reasonChildReconciling, status.Reason)
+		for _, member := range members {
+			status.Members = append(status.Members, RolloutMemberStatus{
+				Role:               member.Role,
+				PodGroupDeployment: member.Name,
+				Phase:              "Blocked",
+				Action:             rolloutActionHold,
+				BlockedReason:      status.Reason,
+			})
+		}
+		status.Actions = rolloutActionsSummary(status.Members)
+		return memberKeys, c.updateRolloutStatus(ctx, pgdr, status)
 	}
 
 	maxUnavailablePercent := pgdr.Spec.Strategy.MaxUnavailablePercent
@@ -56,10 +57,7 @@ func (c *Controller) reconcileOneRollout(ctx context.Context, pgdr *PodGroupDepl
 		maxUnavailablePercent = defaultMaxUnavailablePercent
 	}
 	progress := make([]rolloutMemberProgress, 0, len(members))
-	memberKeys := make([]string, 0, len(members))
 	for _, member := range members {
-		key := pgdr.Namespace + "/" + member.Name
-		memberKeys = append(memberKeys, key)
 		obj, err := c.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgdr.Namespace).Get(ctx, member.Name, metav1.GetOptions{})
 		mp := rolloutMemberProgress{member: member}
 		if apierrors.IsNotFound(err) {
@@ -95,6 +93,7 @@ func (c *Controller) reconcileOneRollout(ctx context.Context, pgdr *PodGroupDepl
 		mp.desired = desiredRevision
 		mp.waveSize = rolloutWaveSize(pgd.Spec.Groups, maxUnavailablePercent)
 		mp.updatedReady = updatedReadyGroups(pgd.Status.Groups, desiredRevision)
+		mp.stale = pgd.Generation > pgd.Status.ObservedGeneration
 		mp.pods, err = c.podsForDeployment(ctx, pgd)
 		if err != nil {
 			mp.err = err
@@ -113,7 +112,7 @@ func (c *Controller) reconcileOneRollout(ctx context.Context, pgdr *PodGroupDepl
 	planRolloutWaves(progress)
 	globalCompleted := int32(-1)
 	for _, mp := range progress {
-		if mp.pgd == nil || mp.err != nil || mp.missing {
+		if mp.pgd == nil || mp.err != nil || mp.missing || mp.stale {
 			continue
 		}
 		if globalCompleted < 0 || mp.completed < globalCompleted {
@@ -154,12 +153,25 @@ func (c *Controller) reconcileOneRollout(ctx context.Context, pgdr *PodGroupDepl
 		allowedWave := globalCompleted
 		allowedStart, allowedEnd := rolloutMemberWindow(mp, allowedWave)
 
+		memberStatus.Generation = mp.pgd.Generation
+		memberStatus.ObservedGeneration = mp.pgd.Status.ObservedGeneration
 		memberStatus.Groups = mp.pgd.Spec.Groups
 		memberStatus.WaveSize = allowedEnd - allowedStart
 		memberStatus.AllowedStart = allowedStart
 		memberStatus.AllowedEnd = allowedEnd
 		memberStatus.Action = actions[mp.member.Role]
 		memberStatus.UpdatedReadyGroups = mp.updatedReady
+		if mp.stale {
+			memberStatus.Action = rolloutActionHold
+			memberStatus.Phase = "Blocked"
+			memberStatus.BlockedReason = fmt.Sprintf("waiting for PodGroupDeployment generation %d to be observed", mp.pgd.Generation)
+			blockedReasons = append(blockedReasons, fmt.Sprintf("%s stale generation %d observed %d", mp.member.Name, mp.pgd.Generation, mp.pgd.Status.ObservedGeneration))
+			status.Members = append(status.Members, memberStatus)
+			if err := c.applyRolloutGate(ctx, pgdr, mp.pgd, 0, mp.pgd.Spec.Groups, globalCompleted, rolloutActionHold, phase, memberStatus.BlockedReason); err != nil {
+				return memberKeys, err
+			}
+			continue
+		}
 		if mp.updatedReady >= mp.pgd.Spec.Groups {
 			memberStatus.Phase = "Complete"
 		} else if memberStatus.Action == rolloutActionHold && phase != rolloutPhaseComplete {
@@ -195,6 +207,14 @@ func (c *Controller) reconcileOneRollout(ctx context.Context, pgdr *PodGroupDepl
 		status.CurrentPhase = rolloutPhaseComplete
 	}
 	return memberKeys, c.updateRolloutStatus(ctx, pgdr, status)
+}
+
+func rolloutMemberKeys(namespace string, members []rolloutMember) []string {
+	keys := make([]string, 0, len(members))
+	for _, member := range members {
+		keys = append(keys, namespace+"/"+member.Name)
+	}
+	return keys
 }
 
 func rolloutActionsSummary(members []RolloutMemberStatus) string {

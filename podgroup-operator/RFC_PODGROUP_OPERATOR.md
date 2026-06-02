@@ -311,10 +311,27 @@ scheduled again. If a new template revision is applied while a prior rollout is
 stuck, PGDR recomputes progress against the new desired revision and starts the
 new rollout from wave 0.
 
+PGDR also gates on child observation. When it creates, updates, or deletes a
+generated child PGD, it reports `currentPhase: ReconcilingChildren` and waits
+for a later reconcile before using that child status for rollout decisions. If
+a child PGD has `metadata.generation > status.observedGeneration`, PGDR holds
+that member and reports both values in `status.members`. This prevents stale
+child status from advancing a paired rollout after a spec write.
+
 For image and metadata-only template changes, PGD can update groups in place.
 PGDR coordinates that path by updating decode groups before prefill groups.
 Changes to immutable or recreate-required Pod fields use the recreate sequence
 above, or are rejected when the PGD strategy is `InPlaceOnly`.
+
+PGD and PGDR use finalizers for explicit cleanup. PGD removes its managed Pods,
+Services, and scheduler `PodGroup` objects before its finalizer is removed.
+PGDR removes owned child PGDs before its finalizer is removed; the child PGDs
+then clean up their own children.
+
+The controller emits Kubernetes Events for rollout gate changes, child PGD
+reconciliation, stale gate cleanup, blocked rollout errors, and finalizer
+completion. Events are not the source of truth, but they make the same
+coordination decisions visible through `kubectl describe`.
 
 ## Scheduling Semantics
 
@@ -373,7 +390,10 @@ Capabilities that should stay close to RBG:
 - Cross-role rollout must prevent prefill and decode from drifting during
   updates.
 - Status must expose the current coordination decision, not just final
-  readiness counts.
+  readiness counts. This includes conditions and member generation/observed
+  generation when PGDR is waiting for child observation.
+- Events should mirror important rollout and cleanup decisions for live
+  debugging without replacing status.
 
 Intentional divergence:
 

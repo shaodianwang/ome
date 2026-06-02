@@ -2,10 +2,13 @@ package v1alpha1
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"strconv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 type parsedRolloutGate struct {
@@ -85,13 +88,21 @@ func (c *Controller) applyRolloutGate(ctx context.Context, pgdr *PodGroupDeploym
 		return nil
 	}
 	logPGDR(pgdr, "applying rollout gate podgroupdeployment=%s/%s allowed_start=%d allowed_end=%d wave=%d action=%s phase=%s", pgd.Namespace, pgd.Name, start, end, wave, action, phase)
-	obj, err := c.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgd.Namespace).Get(ctx, pgd.Name, metav1.GetOptions{})
-	if err != nil {
-		return err
+	c.recordNormal(pgd, reasonRolloutGate, "rollout "+pgdr.Name+" set gate action="+action+" phase="+phase+" wave="+strconv.Itoa(int(wave)))
+	patch := map[string]interface{}{
+		annotationRollout:             pgdr.Name,
+		annotationRolloutAllowedStart: strconv.Itoa(int(start)),
+		annotationRolloutAllowedEnd:   strconv.Itoa(int(end)),
+		annotationRolloutWave:         strconv.Itoa(int(wave)),
+		annotationRolloutAction:       action,
+		annotationRolloutPhase:        phase,
 	}
-	obj.SetAnnotations(annotations)
-	_, err = c.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgd.Namespace).Update(ctx, obj, metav1.UpdateOptions{})
-	return err
+	if pausedReason != "" {
+		patch[annotationRolloutPausedReason] = pausedReason
+	} else {
+		patch[annotationRolloutPausedReason] = nil
+	}
+	return c.patchPodGroupDeploymentAnnotations(ctx, pgd.Namespace, pgd.Name, patch)
 }
 
 func (c *Controller) clearRolloutGate(ctx context.Context, pgd *PodGroupDeployment) error {
@@ -100,14 +111,16 @@ func (c *Controller) clearRolloutGate(ctx context.Context, pgd *PodGroupDeployme
 		return nil
 	}
 	logPGD(pgd, "clearing rollout gate rollout=%s", annotations[annotationRollout])
-	next := withoutRolloutGateAnnotations(annotations)
-	obj, err := c.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgd.Namespace).Get(ctx, pgd.Name, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	obj.SetAnnotations(next)
-	_, err = c.dynamic.Resource(podGroupDeploymentGVR).Namespace(pgd.Namespace).Update(ctx, obj, metav1.UpdateOptions{})
-	return err
+	c.recordNormal(pgd, reasonNoRolloutGate, "rollout gate cleared")
+	return c.patchPodGroupDeploymentAnnotations(ctx, pgd.Namespace, pgd.Name, map[string]interface{}{
+		annotationRollout:             nil,
+		annotationRolloutAllowedStart: nil,
+		annotationRolloutAllowedEnd:   nil,
+		annotationRolloutWave:         nil,
+		annotationRolloutAction:       nil,
+		annotationRolloutPhase:        nil,
+		annotationRolloutPausedReason: nil,
+	})
 }
 
 func (c *Controller) clearStaleRolloutGates(ctx context.Context, referenced map[string]struct{}) error {
@@ -125,25 +138,59 @@ func (c *Controller) clearStaleRolloutGates(ctx context.Context, referenced map[
 		if _, ok := referenced[key]; ok {
 			continue
 		}
-		next := mergeStringMaps(annotations)
-		next = withoutRolloutGateAnnotations(next)
-		obj.SetAnnotations(next)
 		log.Printf("podgroupdeployment=%s/%s clearing stale rollout gate rollout=%s", obj.GetNamespace(), obj.GetName(), annotations[annotationRollout])
-		if _, err := c.dynamic.Resource(podGroupDeploymentGVR).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
+		c.recordWarning(obj, reasonNoRolloutGate, "stale rollout gate cleared")
+		if err := c.patchPodGroupDeploymentAnnotations(ctx, obj.GetNamespace(), obj.GetName(), map[string]interface{}{
+			annotationRollout:             nil,
+			annotationRolloutAllowedStart: nil,
+			annotationRolloutAllowedEnd:   nil,
+			annotationRolloutWave:         nil,
+			annotationRolloutAction:       nil,
+			annotationRolloutPhase:        nil,
+			annotationRolloutPausedReason: nil,
+		}); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func withoutRolloutGateAnnotations(annotations map[string]string) map[string]string {
-	next := mergeStringMaps(annotations)
-	delete(next, annotationRollout)
-	delete(next, annotationRolloutAllowedStart)
-	delete(next, annotationRolloutAllowedEnd)
-	delete(next, annotationRolloutWave)
-	delete(next, annotationRolloutAction)
-	delete(next, annotationRolloutPhase)
-	delete(next, annotationRolloutPausedReason)
-	return next
+func (c *Controller) patchPodGroupDeploymentAnnotations(ctx context.Context, namespace, name string, annotations map[string]interface{}) error {
+	return c.patchResourceMetadata(ctx, podGroupDeploymentGVR, namespace, name, nil, annotations, nil, nil)
+}
+
+func (c *Controller) patchPodGroupDeploymentMetadata(ctx context.Context, namespace, name string, labels map[string]string, annotations interface{}, ownerReferences []metav1.OwnerReference) error {
+	return c.patchResourceMetadata(ctx, podGroupDeploymentGVR, namespace, name, labels, annotations, ownerReferences, nil)
+}
+
+func (c *Controller) patchPodGroupDeploymentFinalizers(ctx context.Context, namespace, name string, finalizers []string) error {
+	return c.patchResourceMetadata(ctx, podGroupDeploymentGVR, namespace, name, nil, nil, nil, finalizers)
+}
+
+func (c *Controller) patchPodGroupDeploymentRolloutFinalizers(ctx context.Context, namespace, name string, finalizers []string) error {
+	return c.patchResourceMetadata(ctx, podGroupDeploymentRolloutGVR, namespace, name, nil, nil, nil, finalizers)
+}
+
+func (c *Controller) patchResourceMetadata(ctx context.Context, resource schema.GroupVersionResource, namespace, name string, labels map[string]string, annotations interface{}, ownerReferences []metav1.OwnerReference, finalizers []string) error {
+	metadata := map[string]interface{}{}
+	if labels != nil {
+		metadata["labels"] = labels
+	}
+	if annotations != nil {
+		metadata["annotations"] = annotations
+	}
+	if ownerReferences != nil {
+		metadata["ownerReferences"] = ownerReferences
+	}
+	if finalizers != nil {
+		metadata["finalizers"] = finalizers
+	}
+	raw, err := json.Marshal(map[string]interface{}{
+		"metadata": metadata,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = c.dynamic.Resource(resource).Namespace(namespace).Patch(ctx, name, types.MergePatchType, raw, metav1.PatchOptions{})
+	return err
 }

@@ -20,16 +20,14 @@ func (c *Controller) upsertSchedulerPodGroup(ctx context.Context, pgd *PodGroupD
 		Object: map[string]interface{}{
 			"apiVersion": "scheduling.x-k8s.io/v1alpha1",
 			"kind":       "PodGroup",
-			"metadata": map[string]interface{}{
-				"name":      name,
-				"namespace": pgd.Namespace,
-				"labels":    labels,
-			},
 			"spec": map[string]interface{}{
 				"minMember": int64(pgd.Spec.ReplicasPerGroup),
 			},
 		},
 	}
+	obj.SetName(name)
+	obj.SetNamespace(pgd.Namespace)
+	obj.SetLabels(labels)
 	if pgd.Spec.ScheduleTimeoutSeconds > 0 {
 		_ = unstructured.SetNestedField(obj.Object, int64(pgd.Spec.ScheduleTimeoutSeconds), "spec", "scheduleTimeoutSeconds")
 	}

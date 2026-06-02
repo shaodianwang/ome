@@ -37,6 +37,12 @@ func baseLabels(pgd *PodGroupDeployment, group int32, groupInstance, revision st
 		labelInstance:   pgd.Name,
 		labelGroupIndex: strconv.Itoa(int(group)),
 	}
+	if rollout := pgd.Labels[labelRollout]; rollout != "" {
+		labels[labelRollout] = rollout
+	}
+	if role := pgd.Labels[labelRolloutRole]; role != "" {
+		labels[labelRolloutRole] = role
+	}
 	if groupInstance != "" {
 		labels[labelGroupInstance] = groupInstance
 	}

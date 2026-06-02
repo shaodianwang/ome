@@ -28,3 +28,14 @@ helm template podgroup-operator ./charts/podgroup-operator \
   --namespace podgroup-system \
   --set image.tag="${TAG}"
 ```
+
+Useful production settings:
+
+```yaml
+leaderElection:
+  enabled: true
+metrics:
+  bindAddress: ":8080"
+healthProbe:
+  bindAddress: ":8081"
+```

@@ -15,7 +15,7 @@ const (
 	defaultTerminationGracePeriodSeconds = int64(1)
 	defaultMaxUnavailablePercent         = int32(20)
 	defaultProgressDeadlineSeconds       = int32(3600)
-	defaultMultiNodeDistInitPort         = int32(30000)
+	defaultMultiNodeDistInitPort         = int32(20000)
 
 	labelManagedBy     = "app.kubernetes.io/managed-by"
 	labelInstance      = "app.kubernetes.io/instance"
@@ -59,14 +59,40 @@ const (
 	updateStrategyRecreatePod       UpdateStrategyType = "RecreatePod"
 	updateStrategyInPlaceIfPossible UpdateStrategyType = "InPlaceIfPossible"
 	updateStrategyInPlaceOnly       UpdateStrategyType = "InPlaceOnly"
+
+	conditionReady         = "Ready"
+	conditionProgressing   = "Progressing"
+	conditionRolloutGated  = "RolloutGated"
+	conditionBlocked       = "Blocked"
+	conditionDegraded      = "Degraded"
+	reasonAllGroupsReady   = "AllGroupsReady"
+	reasonReconciling      = "Reconciling"
+	reasonRolloutGate      = "RolloutGate"
+	reasonNoRolloutGate    = "NoRolloutGate"
+	reasonRolloutComplete  = "RolloutComplete"
+	reasonRolloutBlocked   = "RolloutBlocked"
+	reasonRolloutDegraded  = "RolloutDegraded"
+	reasonRolloutProgress  = "RolloutProgressing"
+	reasonFinalizing       = "Finalizing"
+	reasonChildReconciling = "ChildReconciling"
+
+	finalizerPodGroupDeployment        = "podgroup.meta.com/podgroupdeployment"
+	finalizerPodGroupDeploymentRollout = "podgroup.meta.com/podgroupdeploymentrollout"
 )
 
 var (
+	operatorGroupVersion = schema.GroupVersion{
+		Group:   "podgroup.meta.com",
+		Version: "v1alpha1",
+	}
+
 	podGroupDeploymentGVR = schema.GroupVersionResource{
 		Group:    "podgroup.meta.com",
 		Version:  "v1alpha1",
 		Resource: "podgroupdeployments",
 	}
+
+	podGroupDeploymentGVK = operatorGroupVersion.WithKind(operatorKind)
 
 	schedulerPodGroupGVR = schema.GroupVersionResource{
 		Group:    "scheduling.x-k8s.io",
@@ -79,4 +105,6 @@ var (
 		Version:  "v1alpha1",
 		Resource: "podgroupdeploymentrollouts",
 	}
+
+	podGroupDeploymentRolloutGVK = operatorGroupVersion.WithKind(operatorRolloutKind)
 )

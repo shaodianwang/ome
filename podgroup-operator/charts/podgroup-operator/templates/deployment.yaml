@@ -43,5 +43,24 @@ spec:
       - name: podgroup-operator
         image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args:
+        - "--metrics-bind-address={{ .Values.metrics.bindAddress }}"
+        - "--health-probe-bind-address={{ .Values.healthProbe.bindAddress }}"
+        {{- if .Values.leaderElection.enabled }}
+        - --leader-elect
+        {{- end }}
+        ports:
+        - name: metrics
+          containerPort: 8080
+        - name: healthz
+          containerPort: 8081
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: healthz
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: healthz
         resources:
           {{- toYaml .Values.resources | nindent 10 }}

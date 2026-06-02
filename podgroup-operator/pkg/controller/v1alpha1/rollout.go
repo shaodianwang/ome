@@ -22,6 +22,7 @@ type rolloutMemberProgress struct {
 	inPlace      bool
 	pods         []corev1.Pod
 	missing      bool
+	stale        bool
 	err          error
 }
 
@@ -107,7 +108,7 @@ func rolloutMemberUsesInPlace(mp rolloutMemberProgress) bool {
 
 func progressByRole(progress []rolloutMemberProgress, role string) *rolloutMemberProgress {
 	for i := range progress {
-		if progress[i].member.Role == role && progress[i].pgd != nil && progress[i].err == nil && !progress[i].missing {
+		if progress[i].member.Role == role && progress[i].pgd != nil && progress[i].err == nil && !progress[i].missing && !progress[i].stale {
 			return &progress[i]
 		}
 	}
@@ -119,7 +120,7 @@ func rolloutProgressComplete(progress []rolloutMemberProgress) bool {
 		return false
 	}
 	for _, mp := range progress {
-		if mp.pgd == nil || mp.err != nil || mp.missing || mp.updatedReady < mp.pgd.Spec.Groups {
+		if mp.pgd == nil || mp.err != nil || mp.missing || mp.stale || mp.updatedReady < mp.pgd.Spec.Groups {
 			return false
 		}
 	}
@@ -130,7 +131,7 @@ func planRolloutWaves(progress []rolloutMemberProgress) {
 	waveCount := int32(0)
 	for i := range progress {
 		mp := &progress[i]
-		if mp.pgd == nil || mp.err != nil || mp.missing {
+		if mp.pgd == nil || mp.err != nil || mp.missing || mp.stale {
 			continue
 		}
 		memberWaveCount := rolloutWaveCount(mp.pgd.Spec.Groups, mp.waveSize)
@@ -143,7 +144,7 @@ func planRolloutWaves(progress []rolloutMemberProgress) {
 	}
 	for i := range progress {
 		mp := &progress[i]
-		if mp.pgd == nil || mp.err != nil || mp.missing {
+		if mp.pgd == nil || mp.err != nil || mp.missing || mp.stale {
 			continue
 		}
 		mp.waveCount = waveCount
