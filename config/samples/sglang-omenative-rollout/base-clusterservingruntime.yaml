@@ -1,0 +1,210 @@
+# Platform base runtime — the hardware/platform layer for sglang
+# prefill+decode (PD) on gb300. Owned by the platform team; scientists don't
+# normally edit this.
+#
+# It carries ONLY the stable bits: GPU/RDMA resources, volumes, probes, ports,
+# IB networking, and infrastructure env (NCCL/CUDA/...). It has NO image and NO
+# sglang flags — those volatile, per-workload bits live in the tenant runtime,
+# which inherits everything here. (The container name IS required on every
+# runtime by the CRD schema, so it is set here and in the tenant runtime.)
+#
+# Engine (prefill) and decoder (decode) share the same hardware, so the shared
+# blocks are written once with YAML anchors (&name) and reused with aliases
+# (*name). kubectl/Argo expand these before the cluster sees them.
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: srt-llama4x-nvfp4-pd-base
+spec:
+  disabled: false
+  protocolVersions:
+    - openAI
+  supportedModelFormats:
+    - modelFormat:
+        name: safetensors
+        version: "1.0.0"
+        operator: GreaterThanOrEqual
+      modelFramework:
+        name: transformers
+        operator: Equal
+      modelArchitecture: Llama4xForCausalLM
+      quantization: nvfp4
+      autoSelect: false
+      priority: 1
+
+  # Engine (prefill) — declares the shared anchors reused by decoder/router.
+  engineConfig:
+    annotations:
+      # IB macvlan interfaces NIXL needs for PD transfer over RoCE.
+      k8s.v1.cni.cncf.io/networks: &macvlanNets '[{"name":"ibs0p0-macvlan","namespace":"cw-multus"},{"name":"ibs0p1-macvlan","namespace":"cw-multus"},{"name":"ibs0p2-macvlan","namespace":"cw-multus"},{"name":"ibs0p3-macvlan","namespace":"cw-multus"},{"name":"ibs1p0-macvlan","namespace":"cw-multus"},{"name":"ibs1p1-macvlan","namespace":"cw-multus"},{"name":"ibs1p2-macvlan","namespace":"cw-multus"},{"name":"ibs1p3-macvlan","namespace":"cw-multus"},{"name":"ibs2p0-macvlan","namespace":"cw-multus"},{"name":"ibs2p1-macvlan","namespace":"cw-multus"},{"name":"ibs2p2-macvlan","namespace":"cw-multus"},{"name":"ibs2p3-macvlan","namespace":"cw-multus"},{"name":"ibs3p0-macvlan","namespace":"cw-multus"},{"name":"ibs3p1-macvlan","namespace":"cw-multus"},{"name":"ibs3p2-macvlan","namespace":"cw-multus"},{"name":"ibs3p3-macvlan","namespace":"cw-multus"}]'
+      fb.metric.schema: &metricSchema "sglang_metrics"
+    nodeSelector: &arm64Node
+      kubernetes.io/arch: arm64
+    tolerations: &gpuTolerations
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+    volumes: &shmVolumes
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 940Gi
+      - name: tmp-storage
+        emptyDir: {}
+    runner:
+      name: ome-container     # required by schema; image + command come from the tenant runtime
+      ports:
+        - containerPort: 30000
+          name: http
+          protocol: TCP
+        - containerPort: 8998
+          name: bootstrap
+          protocol: TCP
+      env: &infraEnv          # infra/hardware env; workload env is added in the tenant runtime
+        - name: SGLANG_HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: TRITON_PTXAS_PATH
+          value: /usr/local/cuda/bin/ptxas
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: NCCL_MNNVL_ENABLE
+          value: "1"
+        - name: NCCL_CUMEM_ENABLE
+          value: "1"
+        - name: NCCL_IB_ADDR_FAMILY
+          value: AF_INET6
+        - name: NCCL_SOCKET_IFNAME
+          value: eth0
+        - name: NCCL_SOCKET_FAMILY
+          value: AF_INET6
+        - name: CUDA_ENABLE_COREDUMP_ON_EXCEPTION
+          value: "1"
+        - name: CUDA_ENABLE_USER_TRIGGERED_COREDUMP
+          value: "1"
+        - name: CUDA_COREDUMP_GENERATION_FLAGS
+          value: skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory,skip_abort
+        - name: CUDA_COREDUMP_FILE
+          value: /opt/crash-dump/%h/core.cuda.%t.%p
+        - name: CUDA_COREDUMP_PIPE
+          value: /tmp/corepipe.cuda.%h.%p
+        - name: SGLANG_HEALTH_CHECK_FAILURE_PYSPY_DUMP
+          value: "1"
+        - name: SGLANG_HEALTH_CHECK_FAILURE_CUDA_COREDUMP
+          value: "1"
+      resources: &gpu4Res
+        requests:
+          nvidia.com/gpu: "4"
+          rdma/ib: "4"
+        limits:
+          nvidia.com/gpu: "4"
+          rdma/ib: "4"
+      volumeMounts: &shmMounts
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /tmp
+          name: tmp-storage
+      securityContext: &privSec
+        privileged: true
+        capabilities:
+          add:
+            - IPC_LOCK
+            - SYS_PTRACE
+      readinessProbe: &gpuReadiness
+        httpGet:
+          path: /health
+          port: 30000
+        initialDelaySeconds: 120
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 5
+      livenessProbe: &gpuLiveness
+        httpGet:
+          path: /health
+          port: 30000
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 5
+      startupProbe: &gpuStartup
+        httpGet:
+          path: /health
+          port: 30000
+        periodSeconds: 30
+        timeoutSeconds: 30
+        failureThreshold: 60   # 30 min budget for first start
+
+  # Decoder (decode) — reuses every shared block via aliases; no bootstrap port.
+  decoderConfig:
+    annotations:
+      k8s.v1.cni.cncf.io/networks: *macvlanNets
+      fb.metric.schema: *metricSchema
+    nodeSelector: *arm64Node
+    tolerations: *gpuTolerations
+    volumes: *shmVolumes
+    runner:
+      name: ome-container
+      ports:
+        - containerPort: 30000
+          name: http
+          protocol: TCP
+      env: *infraEnv
+      resources: *gpu4Res
+      volumeMounts: *shmMounts
+      securityContext: *privSec
+      readinessProbe: *gpuReadiness
+      livenessProbe: *gpuLiveness
+      startupProbe: *gpuStartup
+
+  # Router — its own resources/ports; reuses nodeSelector + metric schema.
+  routerConfig:
+    annotations:
+      ome.io/enable-prometheus-scraping: "true"
+      fb.metric.schema: *metricSchema
+    nodeSelector: *arm64Node
+    runner:
+      name: router            # required by schema; image comes from the tenant runtime
+      ports:
+        - containerPort: 30080
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+      env:                    # downward-API identity the router uses to find backends
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: INFERENCESERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['ome.io/inferenceservice']
+      resources:
+        requests:
+          cpu: "16"
+          memory: "16Gi"
+        limits:
+          cpu: "32"
+          memory: "32Gi"
+      readinessProbe:
+        httpGet:
+          path: /readiness
+          port: 30080
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 5
+      livenessProbe:
+        httpGet:
+          path: /liveness
+          port: 30080
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 5
+      startupProbe:
+        httpGet:
+          path: /readiness
+          port: 30080
+        periodSeconds: 20
+        timeoutSeconds: 10
+        failureThreshold: 30

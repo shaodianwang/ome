@@ -1,0 +1,140 @@
+# Example: reproduce the live `sglang-sandbox-automated` sandbox deployment
+# through the ome-isvc chart, in OMENative mode.
+#
+# The live ISVC runs ome.io/deploymentMode: PDDisaggregated; this chart
+# always emits OMENative (templates/inferenceservice.yaml), so installing
+# these values is the PDDisaggregated -> OMENative upgrade.
+#
+# Resulting resources (release name = `sglang-sb`):
+#   - ClusterServingRuntime/cks-gb300-sglang-pd        (bundled vendor base)
+#   - ClusterServingRuntime/sglang-sb-...-csr          (tenant child, inherits)
+#   - InferenceService/sglang-sb-...                   (OMENative, ns sandbox)
+#
+# Test with:
+#   helm template sglang-sb charts/ome-isvc \
+#     -f charts/ome-isvc/examples/values-sglang-sandbox-automated.yaml
+#
+# !! KNOWN MISMATCH: the bundled cks-gb300-sglang-pd vendor profile declares
+#    modelArchitecture: Llama4ForConditionalGeneration, but the model
+#    (prod-code-0522-testing-nvfp4-ptq) + live runtime are Llama4xForCausalLM.
+#    The chart's child runtime does NOT override supportedModelFormats, so the
+#    child inherits the vendor's architecture. Since the ISVC pins
+#    spec.runtime.name explicitly this renders fine, but to match the model on
+#    a live cluster either (a) add an Llama4xForCausalLM vendor profile, or
+#    (b) use the Path-2 raw runtime in config/samples/sglang-omenative-rollout.
+
+namespace:
+  name: sandbox
+
+# Tenant child runtime + model are cluster-scoped (the live runtime is a
+# ClusterServingRuntime and the model a ClusterBaseModel).
+scope: cluster
+
+vendor: cks-gb300-sglang-pd
+
+deployments:
+  - name: sglang-sandbox-automated
+    servingMode: pd
+
+    prefill:
+      replicas: { min: 2, max: 2 }
+      contextLength: 1048576
+      tensorParallelSize: 4
+      # Typed knobs -> synthesised sglang flags (emitted only when set).
+      dtype: bfloat16
+      quantization: modelopt_fp4
+      kvCacheDtype: bfloat16
+      moeRunnerBackend: flashinfer_trtllm
+      speculative:
+        algorithm: EAGLE3
+        draftModelPath: $(CC_MODEL_PATH)/draft_hf
+        draftModelQuantization: unquant
+      # Image override: bump the vendor's baseline tag to the live one.
+      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-gb300:20260601-ba882a31
+      # Extra flags with no typed-knob equivalent (PD wiring + EP size).
+      args:
+        - --ep-size
+        - "4"
+        - --disaggregation-mode
+        - prefill
+        - --disaggregation-transfer-backend
+        - meta-p2p
+        - --disaggregation-bootstrap-port
+        - "8998"
+      # Model + cluster-cache env the vendor profile does NOT carry.
+      env:
+        - name: CC_MODEL_PATH
+          value: manifold://fair_llms_prod/tree/vllm_test/tier5_integRL_64x168_rev3-bz10zrx3/checkpoint_0000430/nvfp4-moe-fp8kv-gb300_config
+        - name: CLUSTER_CACHE_HEADLESS_SERVICE
+          value: cluster-cache-headless.clustercache.svc.cluster.local:10090
+        - name: CLUSTER_CACHE_VERIFY_TENSOR_HASH_AGAINST
+          value: "@tp4ep4"
+        - name: CLUSTER_CACHE_GPU_DIRECT
+          value: "1"
+        - name: CLUSTER_CACHE_BBOX
+          value: "1"
+        - name: SGLANG_CLUSTER
+          value: cks
+        - name: SGLANG_EXTERNAL_MODEL_PACKAGE
+          value: sglang_meta.srt.models
+        - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+          value: UCX
+
+    decode:
+      replicas: { min: 2, max: 2 }
+      contextLength: 1048576
+      tensorParallelSize: 4
+      dtype: bfloat16
+      quantization: modelopt_fp4
+      kvCacheDtype: bfloat16
+      moeRunnerBackend: flashinfer_trtllm
+      speculative:
+        algorithm: EAGLE3
+        draftModelPath: $(CC_MODEL_PATH)/draft_hf
+        draftModelQuantization: unquant
+      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-gb300:20260601-ba882a31
+      args:
+        - --ep-size
+        - "4"
+        - --disaggregation-mode
+        - decode
+        - --disaggregation-transfer-backend
+        - meta-p2p
+      env:
+        - name: CC_MODEL_PATH
+          value: manifold://fair_llms_prod/tree/vllm_test/tier5_integRL_64x168_rev3-bz10zrx3/checkpoint_0000430/nvfp4-moe-fp8kv-gb300_config
+        - name: CLUSTER_CACHE_HEADLESS_SERVICE
+          value: cluster-cache-headless.clustercache.svc.cluster.local:10090
+        - name: CLUSTER_CACHE_VERIFY_TENSOR_HASH_AGAINST
+          value: "@tp4ep4"
+        - name: CLUSTER_CACHE_GPU_DIRECT
+          value: "1"
+        - name: CLUSTER_CACHE_BBOX
+          value: "1"
+        - name: SGLANG_CLUSTER
+          value: cks
+        - name: SGLANG_EXTERNAL_MODEL_PACKAGE
+          value: sglang_meta.srt.models
+        - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+          value: UCX
+
+    router:
+      enabled: true
+      replicas: { min: 1, max: 1 }
+      timeoutSeconds: 300
+      loadBalancingAlgorithm: round-robin
+
+    coordination:
+      policy: Sequential
+      order: [decode, prefill]
+      pacing:
+        type: PerComponent
+        maxSurge: 0
+        maxUnavailable: 1
+
+    modelRef:
+      name: prod-code-0522-testing-nvfp4-ptq
+      scope: cluster
+
+# Model already exists on the cluster (ClusterBaseModel); don't create one.
+basemodels: []

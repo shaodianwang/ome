@@ -1,0 +1,33 @@
+# ⚠️ TEMPORARY FALLBACK — REMOVE WHEN CLUSTER CACHE (CC) IS STABLE.
+#
+# The model is normally fetched at RUNTIME by cluster cache (CC): the runtime
+# loads `--model-path $(CC_MODEL_PATH)` (a manifold:// path) using the
+# CLUSTER_CACHE_* env in the tenant runtime. That path needs no
+# ClusterBaseModel — which is why `spec.model` on the ISVC is OPTIONAL and
+# researchers don't have to manage a model resource at all.
+#
+# This PVC-backed ClusterBaseModel exists ONLY as today's fallback: it mounts
+# the weights so the runtime's `--fallback-model-path $(MODEL_PATH)` has
+# something to fall back to while CC is still being hardened.
+#
+# CLEANUP once CC is fully stable (see README "Model loading"):
+#   1. delete this file
+#   2. drop `spec.model` from the ISVC
+#   3. drop the `--fallback-model-path` and `--fallback-speculative-draft-model-path`
+#      flags from the tenant runtime
+#
+# storageUri form:  pvc://<pvc-namespace>:<pvc-name>/<subpath>   ("." = root)
+apiVersion: ome.io/v1beta1
+kind: ClusterBaseModel
+metadata:
+  name: prod-code-0522-testing-nvfp4-ptq
+spec:
+  modelFormat:
+    name: safetensors
+    version: "1.0.0"
+  modelFramework:
+    name: transformers
+  modelArchitecture: Llama4xForCausalLM
+  quantization: nvfp4
+  storage:
+    storageUri: pvc://sandbox:tier5-integrl-64x168-rev3-bz10zrx3-checkpoint-430-nvfp4-ptq/.

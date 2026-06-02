@@ -1,0 +1,72 @@
+# The deployment (InferenceService). Links the model + tenant runtime and runs
+# in OMENative mode with a rolling upgrade across prefill + decode.
+#
+# As a scientist you set two things here:
+#   1. replicas per component (engine = prefill, decoder = decode, router)
+#   2. rollout behavior — group `rolloutCoordination` (how components roll
+#      relative to each other) + per-component `lifecycle` (how one component's
+#      pods roll). See README for the full menu (Sequential / BlueGreen /
+#      RollingUpdate / Independent + the lifecycle update strategies).
+#
+# This sample uses RollingUpdate + RatioBalanced — the recommended shape for
+# PD: prefill and decode roll together, in proportion, so the two pools that
+# talk to each other never drift into a lopsided version skew.
+#
+# REQUIRED: ome.io/deploymentMode: OMENative is set on EACH component below —
+# not just at the top. The top-level annotation alone leaves components as
+# plain Deployments (see README "deployment mode is per-component").
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sglang-llama4x-nvfp4
+  namespace: sandbox
+  annotations:
+    ome.io/deploymentMode: OMENative   # drives overall mode (ingress); NOT propagated to components
+spec:
+  # OPTIONAL — the model is normally cluster-cache-fetched at runtime, so this
+  # block can be omitted entirely. It is here only for the PVC fallback; remove
+  # it together with the model file when CC is stable (see README).
+  model:
+    name: prod-code-0522-testing-nvfp4-ptq
+    kind: ClusterBaseModel
+  runtime:
+    name: srt-llama4x-nvfp4-pd
+  engine:                      # prefill
+    annotations:
+      ome.io/deploymentMode: OMENative   # REQUIRED per component
+    minReplicas: 2
+    maxReplicas: 2
+    priorityClassName: staging
+    lifecycle:
+      updateStrategy:
+        type: SurgeThenDrain   # roll each pod with no traffic gap (needs +1 GPU slot)
+        rollingUpdate:
+          maxSurge: 1
+          maxUnavailable: 0
+  decoder:                     # decode
+    annotations:
+      ome.io/deploymentMode: OMENative
+    minReplicas: 2
+    maxReplicas: 2
+    priorityClassName: staging
+    lifecycle:
+      updateStrategy:
+        type: SurgeThenDrain
+        rollingUpdate:
+          maxSurge: 1
+          maxUnavailable: 0
+  router:
+    annotations:
+      ome.io/deploymentMode: OMENative
+    minReplicas: 1
+    maxReplicas: 1
+    priorityClassName: staging
+  rolloutCoordination:
+    groups:
+      - components: [engine, decoder]
+        policy: RollingUpdate          # parallel roll, mixed revisions tolerated
+        pacing:
+          type: RatioBalanced          # surge prefill : decode in lockstep
+          maxSurge: 1                  # +1 pod of headroom across the group
+          maxUnavailable: 0            # never drop below serving capacity
+          ratioTolerance: 5            # keep prefill:decode within 5% of start
