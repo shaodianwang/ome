@@ -14,6 +14,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -57,19 +58,38 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // — EventTarget falls back to the IR itself so events still land
 // somewhere observable.
 //
-// DetectMigrationRequest / UpdateGate are left nil: the IR controller
-// doesn't yet handle ISVC-orchestrated migrations or cross-Component
-// coordination gates (both stay on the ISVC controller per the design
-// doc §3.3). The workload dispatcher treats nil callbacks as "no
-// migration in flight" and "always allowed" respectively.
-func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent client.Object) workload.ReconcileInput {
+// DetectMigrationRequest is left nil: the IR controller doesn't yet
+// handle ISVC-orchestrated migrations (that stays on the ISVC controller
+// per the design doc §3.3); the workload dispatcher treats a nil
+// DetectMigrationRequest as "no migration in flight".
+//
+// UpdateGate IS wired (when the parent ISVC is resolvable) onto the
+// shared coordination.EvaluateUpdateGate decision site — the identical
+// gate stack the ISVC-direct path runs. Without it, the IR-managed path
+// (the production default) silently skipped ALL cross-Component
+// coordination: Sequential ordering, RatioBalanced, and the group-wide
+// surge / unavailability budgets were never enforced (both Components of
+// a Sequential group recreated concurrently; a group MaxSurge never
+// capped a Component whose per-Component budget was larger). The gate
+// reads only the parent ISVC's Spec + Status, so the resolved parent is
+// all it needs. When parent is nil (no resolvable parent / fetch failed)
+// the gate stays nil and the dispatcher falls back to "always allowed" —
+// coordination is meaningless without the parent's RolloutCoordination
+// block, so there is nothing to enforce anyway.
+//
+// Taking the typed *InferenceService (not client.Object) is deliberate:
+// a nil parent passed as client.Object becomes a non-nil interface
+// wrapping a nil pointer, so the `parent != nil` guards below (event
+// target + gate wiring) would both misfire. The typed parameter makes
+// the nil check correct.
+func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService) workload.ReconcileInput {
 	desired := desiredFromIR(ir)
 	observed := observedFromIR(ir)
 	eventTarget := client.Object(ir)
 	if parent != nil {
 		eventTarget = parent
 	}
-	return workload.ReconcileInput{
+	input := workload.ReconcileInput{
 		OwnerObject:             ir,
 		OwnerGVK:                irGVK,
 		EventTarget:             eventTarget,
@@ -110,6 +130,20 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent cl
 				ir.Namespace, ir.Name, ir.Spec.Component, idx, podName, reason)
 		},
 	}
+
+	// Wire the coordination UpdateGate onto the shared decision site so the
+	// IR-managed path enforces Sequential / RatioBalanced / surge /
+	// unavailability exactly like the ISVC-direct path. The gate reads the
+	// parent ISVC's RolloutCoordination block + per-Component status, so it
+	// only runs when the parent is resolvable; a nil parent means there is
+	// no coordination block to enforce and the dispatcher's nil-gate
+	// fallback ("always allowed") is correct.
+	if parent != nil {
+		input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
+			return coordination.EvaluateUpdateGate(parent, ir.Spec.Component, r.Recorder, strategy, inFlightSurge, inFlightUnavail)
+		}
+	}
+	return input
 }
 
 // buildHeadlessServiceSpec adapts an InferenceReplica into the typed
