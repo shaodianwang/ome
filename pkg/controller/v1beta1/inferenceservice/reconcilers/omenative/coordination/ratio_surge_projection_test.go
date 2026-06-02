@@ -88,3 +88,85 @@ func TestEvaluateUpdateGate_RatioBalancedSurgeNotDeadlocked(t *testing.T) {
 	// (RecreatePod on a symmetric pair is now also cleared by the Part-2
 	// tiebreaker — see TestEvaluateUpdateGate_RecreatePodSymmetricCleared.)
 }
+
+// TestEvaluateSurge_SurgeTiebreaker pins the bounded surge-side tiebreaker
+// (the dual of #404's drain tiebreaker). When the band is narrower than one
+// whole pod, a surge-first roll deadlocks because the discrete (N+1):N step
+// exceeds the band. A surge only ADDS capacity (never starves a peer), so ONE
+// rounding-error pod (overshoot within 2x band, from a balanced full-original
+// baseline) is allowed through; larger overshoots stay an honest deadlock the
+// operator resolves by widening tolerance. The real-cluster playground caught
+// the cleared shapes as p54 (N=3) and p52/p56 (asymmetric small side); p55
+// (N=1) and p53 (tol=10) are the intentionally-NOT-cleared honest deadlocks.
+func TestEvaluateSurge_SurgeTiebreaker(t *testing.T) {
+	eng, dec := v1beta1.EngineComponent, v1beta1.DecoderComponent
+	cases := []struct {
+		name        string
+		tol         int32
+		original    map[v1beta1.ComponentType]int32
+		serving     map[v1beta1.ComponentType]int32
+		comp        v1beta1.ComponentType
+		wantAllowed bool
+	}{
+		// Cleared — rounding-error overshoot within 2x band:
+		{ // p54: 3:3 -> 4:3 = 1.333 <= 2x band 1.5
+			name: "N=3 symmetric (ratio_n3)", tol: 25, comp: eng, wantAllowed: true,
+			original: map[v1beta1.ComponentType]int32{eng: 3, dec: 3},
+			serving:  map[v1beta1.ComponentType]int32{eng: 3, dec: 3},
+		},
+		{ // p52: decoder 2->3, 4:3 = 1.333 within orig-2.0 2x band [1.0,3.0]
+			name: "asymmetric 4:2, small decoder surges", tol: 25, comp: dec, wantAllowed: true,
+			original: map[v1beta1.ComponentType]int32{eng: 4, dec: 2},
+			serving:  map[v1beta1.ComponentType]int32{eng: 4, dec: 2},
+		},
+		{ // p56: decoder 2->3, 8:3 = 2.667 within orig-4.0 2x band [2.0,6.0]
+			name: "asymmetric 8:2, small decoder surges", tol: 25, comp: dec, wantAllowed: true,
+			original: map[v1beta1.ComponentType]int32{eng: 8, dec: 2},
+			serving:  map[v1beta1.ComponentType]int32{eng: 8, dec: 2},
+		},
+		// Honest deadlock — overshoot exceeds 2x band, stays denied:
+		{ // p55: 1:1 -> 2:1 = 2.0 > 2x band 1.5
+			name: "N=1 (2:1 exceeds 2x band)", tol: 25, comp: eng, wantAllowed: false,
+			original: map[v1beta1.ComponentType]int32{eng: 1, dec: 1},
+			serving:  map[v1beta1.ComponentType]int32{eng: 1, dec: 1},
+		},
+		{ // p53: 4:4 tol=10 -> 5:4 = 1.25 > 2x band 1.2
+			name: "tight tol=10 at N=4 (5:4 exceeds 2x band)", tol: 10, comp: eng, wantAllowed: false,
+			original: map[v1beta1.ComponentType]int32{eng: 4, dec: 4},
+			serving:  map[v1beta1.ComponentType]int32{eng: 4, dec: 4},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pacing := v1beta1.CoordinationPacing{
+				Type:           v1beta1.CoordinationPacingRatioBalanced,
+				RatioTolerance: int32Ptr(tc.tol),
+			}
+			d := EvaluateSurge(pacing, RatioState{Original: tc.original, Serving: tc.serving}, tc.comp, +1)
+			got := d.AllowedSurgeDelta != 0
+			if got != tc.wantAllowed {
+				t.Errorf("surge allowed=%v want %v (delta=%d, reason=%q)", got, tc.wantAllowed, d.AllowedSurgeDelta, d.Reason)
+			}
+		})
+	}
+}
+
+// TestEvaluateSurge_DrainStaysStrictAfterSurgeTiebreaker guards that the
+// surge tiebreaker did NOT loosen the DRAIN direction: a -1 drain that
+// exceeds 2x band on a small asymmetric side stays denied — a drain is the
+// real capacity-shortfall risk the band exists for. (4:2, decoder drains to
+// 1 → 4:1 = 4.0 > 2x-band ceiling 3.0.)
+func TestEvaluateSurge_DrainStaysStrictAfterSurgeTiebreaker(t *testing.T) {
+	eng, dec := v1beta1.EngineComponent, v1beta1.DecoderComponent
+	pacing := v1beta1.CoordinationPacing{
+		Type:           v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerance: int32Ptr(25),
+	}
+	d := EvaluateSurge(pacing, RatioState{
+		Original: map[v1beta1.ComponentType]int32{eng: 4, dec: 2},
+		Serving:  map[v1beta1.ComponentType]int32{eng: 4, dec: 2},
+	}, dec, -1)
+	if d.AllowedSurgeDelta != 0 {
+		t.Errorf("a drain exceeding 2x band (4:1 from orig 2:1) must stay DENIED; the surge tiebreaker must not loosen drains; got allowed (reason=%q)", d.Reason)
+	}
+}

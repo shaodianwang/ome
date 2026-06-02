@@ -168,6 +168,34 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 			}
 		}
 	}
+	// Surge-side discrete-granularity tiebreaker — the dual of the drain
+	// tiebreaker above. When the band is narrower than one whole pod at the
+	// current operating point, NO single +1 surge satisfies the strict band
+	// and a surge-first roll deadlocks (e.g. symmetric 3:3 at tol 25%: surging
+	// either side to 4 is 4:3 = 1.333 > 1.25, so BOTH deny and neither goes
+	// first). A surge only ADDS a pod to `component` — it raises component's
+	// serving, never lowers a peer's — so letting ONE rounding-error pod
+	// through is safe: it can't starve a peer, and MaxSurge (CheckSurge) bounds
+	// the magnitude. Same guard shape as the drain tiebreaker:
+	//   (a) the surging Component is at full original serving (a genuine
+	//       start-of-roll deadlock, not a mid-roll skew — mirrors the drain
+	//       baseline>=original guard; rejects the already-skewed / mid-roll
+	//       and zero-serving cases the strict band must keep gating); AND
+	//   (b) the pair is currently balanced (baseline in band); AND
+	//   (c) the overshoot is rounding-error-sized (within 2x band).
+	// Large overshoots stay an honest deadlock the operator resolves by
+	// widening tolerance — N=1 (surge 1->2 = 2:1) and a tolerance so tight the
+	// single-pod step exceeds 2x band (tol 10% at N=4: 5:4 = 1.25 > 1.2) are
+	// intentionally NOT cleared.
+	projected := projectedServing(baseline, component, 1)
+	if baseline[component] >= state.Original[component] &&
+		respectsBand(state.Original, baseline, band) &&
+		respectsBand(state.Original, projected, band*2) {
+		return RatioDecision{
+			AllowedSurgeDelta: 1,
+			Reason:            "surge allowed by discrete-granularity tiebreaker (1 pod, rounding-error overshoot)",
+		}
+	}
 	return RatioDecision{
 		AllowedSurgeDelta: 0,
 		SkewRejected:      true,

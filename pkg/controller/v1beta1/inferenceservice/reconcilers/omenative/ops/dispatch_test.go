@@ -96,9 +96,13 @@ func TestEvaluateUpdateGate_PreflightAssertsRatioDeniesDecoder(t *testing.T) {
 }
 
 // TestEvaluateUpdateGate_BypassForInPlaceTable is the canonical in-place
-// bypass fix coverage:
-//   - For RecreatePod / SurgeThenDrain, the smaller Component (decoder)
-//     stays denied by CheckRatio — the bypass MUST NOT apply.
+// bypass fix coverage. The fixture is an asymmetric 4:2 (engine:decoder)
+// RatioBalanced pair — the decoder is the small, hard-to-pace side:
+//   - RecreatePod: the decoder DRAIN (4:1) exceeds 2x band, so CheckRatio
+//     keeps denying it — the in-place bypass MUST NOT apply.
+//   - SurgeThenDrain: the decoder SURGE (4:3) is a rounding-error overshoot,
+//     so the ratio gate's own surge tiebreaker allows it — allowed, but with
+//     NO bypass event (it went THROUGH the gate, it was not bypassed).
 //   - For InPlaceIfPossible / InPlaceOnly, the gate flips to allowed and
 //     the dispatcher emits the RatioGateBypassed event so operators see why
 //     pacing did not block. (The ratio_gate_bypassed_total metric is
@@ -118,9 +122,14 @@ func TestEvaluateUpdateGate_BypassForInPlaceTable(t *testing.T) {
 			wantBypassEvt: false,
 		},
 		{
-			name:          "SurgeThenDrain: ratio gate still denies decoder (no bypass)",
+			// Asymmetric 4:2: the decoder SURGE (2->3 = 4:3 = 1.333) is a
+			// rounding-error overshoot within 2x band, so the ratio gate's own
+			// surge tiebreaker allows it — allowed, but NOT via the in-place
+			// bypass (no bypass event). This was a real-cluster deadlock (p52)
+			// before the surge tiebreaker.
+			name:          "SurgeThenDrain: surge tiebreaker allows decoder (no bypass)",
 			strategy:      workload.UpdateStrategySurgeThenDrain,
-			wantAllowed:   false,
+			wantAllowed:   true,
 			wantBypassEvt: false,
 		},
 		{
