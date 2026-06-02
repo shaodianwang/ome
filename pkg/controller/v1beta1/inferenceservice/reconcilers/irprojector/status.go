@@ -20,11 +20,10 @@ import (
 // IR-managed Component on the given ISVC and writes IR.Status into
 // ISVC.Status.Components[<component>].Lifecycle via Status().Update.
 //
-// The downstream status contract (kubectl, dashboards, OEP-0007
-// status field shapes) stays identical regardless of which path
-// writes it — the IR controller computes the same per-Component
-// aggregate counters the omenative direct path does; the projector
-// just relays them.
+// The downstream status contract (kubectl, dashboards, status field
+// shapes) stays identical regardless of which path writes it — the IR
+// controller computes the same per-Component aggregate counters the
+// omenative direct path does; the projector just relays them.
 //
 // Called from the ISVC controller's reconcile loop AFTER the
 // per-Component dispatcher (irprojector.EnsureInferenceReplica for
@@ -175,9 +174,9 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 		// RouterReady ever flips True, so the aggregate Ready rollup and
 		// `kubectl wait --for=condition=Ready` see Status=Unknown
 		// indefinitely. Mirrors the legacy direct path's behavior
-		// (omenative/status_aggregate.go:140-143) — this was a PR #310
-		// Piece 2 oversight: the unit tests asserted on the subtree but
-		// not on the top-level condition rollup.
+		// (omenative/status_aggregate.go:140-143) — this was an oversight:
+		// the unit tests asserted on the subtree but not on the top-level
+		// condition rollup.
 		if topCond != nil {
 			fresh.Status.SetCondition(topCond.Type, topCond)
 		}

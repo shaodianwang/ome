@@ -12,15 +12,14 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
-// mkBug1Fixture builds the canonical OEP-0007.3 Bug 1 deadlock fixture:
-// engine=4, decoder=2 (orig 2.0), RatioBalanced tolerance=25% so the band
-// is [1.5, 2.5]. The pre-bump state is 4 engine + 2 decoder all serving.
+// mkBug1Fixture builds the canonical in-place deadlock fixture: engine=4,
+// decoder=2 (orig 2.0), RatioBalanced tolerance=25% so the band is [1.5,
+// 2.5]. The pre-bump state is 4 engine + 2 decoder all serving.
 //
 // CheckRatio for the *decoder* projects a -1 drain to 4:1 = 4.0 which sits
-// above the upper band 2.5 -> REJECTED. The decoder can never drain, so
-// any non-bypassing UpdateGate deadlocks on the smaller Component. This
-// is the exact pathology evaluateUpdateGate's in-place bypass exists to
-// fix.
+// above the upper band 2.5 -> REJECTED. The decoder can never drain, so any
+// non-bypassing UpdateGate deadlocks on the smaller Component. This is the
+// exact pathology evaluateUpdateGate's in-place bypass exists to fix.
 func mkBug1Fixture() *v1beta1.InferenceService {
 	tol := int32(25)
 	return &v1beta1.InferenceService{
@@ -83,11 +82,11 @@ func drainEvents(rec *record.FakeRecorder) []string {
 }
 
 // TestEvaluateUpdateGate_PreflightAssertsRatioDeniesDecoder pins the
-// pre-condition the OEP-0007.3 Bug 1 fix relies on: in the canonical
-// 4:2 RatioBalanced fixture, an unmodified CheckRatio call REJECTS the
-// decoder because a -1 drain projects 4:1 = 4.0 outside [1.5, 2.5].
-// Without this, the table test below would be vacuous (we'd be checking
-// a bypass for a gate that wouldn't have denied anyway).
+// pre-condition the in-place bypass fix relies on: in the canonical 4:2
+// RatioBalanced fixture, an unmodified CheckRatio call REJECTS the decoder
+// because a -1 drain projects 4:1 = 4.0 outside [1.5, 2.5]. Without this,
+// the table test below would be vacuous (we'd be checking a bypass for a
+// gate that wouldn't have denied anyway).
 func TestEvaluateUpdateGate_PreflightAssertsRatioDeniesDecoder(t *testing.T) {
 	isvc := mkBug1Fixture()
 	allowed, reason := coordination.CheckRatioGate(isvc, v1beta1.DecoderComponent, 0)
@@ -96,13 +95,13 @@ func TestEvaluateUpdateGate_PreflightAssertsRatioDeniesDecoder(t *testing.T) {
 	}
 }
 
-// TestEvaluateUpdateGate_BypassForInPlaceTable is the canonical OEP-0007.3
-// Bug 1 fix coverage:
+// TestEvaluateUpdateGate_BypassForInPlaceTable is the canonical in-place
+// bypass fix coverage:
 //   - For RecreatePod / SurgeThenDrain, the smaller Component (decoder)
 //     stays denied by CheckRatio — the bypass MUST NOT apply.
 //   - For InPlaceIfPossible / InPlaceOnly, the gate flips to allowed and
-//     the dispatcher emits the RatioGateBypassed event so operators see
-//     why pacing did not block. (The ratio_gate_bypassed_total metric is
+//     the dispatcher emits the RatioGateBypassed event so operators see why
+//     pacing did not block. (The ratio_gate_bypassed_total metric is
 //     incremented in the same code path; tested implicitly via the
 //     event-emission assert + the dispatch.go single-call structure.)
 func TestEvaluateUpdateGate_BypassForInPlaceTable(t *testing.T) {

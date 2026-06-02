@@ -9,12 +9,11 @@ import (
 // .specSource by the status writer so operators can see which layer of
 // the inheritance chain won for a given Component.
 //
-// Per OEP-0013 §"Inheritance chain", ISVC takes priority over the
-// resolved ServingRuntime; if neither sets a block we fall back to
-// the universal hpa-with-CPU=80% default (filled in by the HPA
-// generator downstream when HPA is nil).
+// ISVC takes priority over the resolved ServingRuntime; if neither sets
+// a block we fall back to the universal hpa-with-CPU=80% default (filled
+// in by the HPA generator downstream when HPA is nil).
 //
-// Alpha (OEP-0013). The constants may change without notice.
+// Alpha API. The constants may change without notice.
 type SpecSource string
 
 const (
@@ -30,15 +29,14 @@ const (
 	// ServingRuntime declared a Component-level Autoscaler block.
 	// ResolveComponentAutoscaler returns the universal default —
 	// {Class: hpa, HPA: nil} — which the HPA generator downstream
-	// expands to a single CPU=80% Resource metric. Per OEP-0013
-	// §"Backwards compatibility": "default ALWAYS produces an HPA".
+	// expands to a single CPU=80% Resource metric. The default ALWAYS
+	// produces an HPA.
 	SpecSourceDefault SpecSource = "default"
 )
 
 // ResolveComponentAutoscaler picks the authoritative ComponentAutoscaler
 // for a single Component, considering the ISVC and the resolved
-// ServingRuntime. The decision tree mirrors OEP-0013 §"Inheritance
-// chain" + §"Generated autoscaler resources":
+// ServingRuntime. The decision tree:
 //
 //  1. If isvc.Spec.<component>.Autoscaler != nil → return
 //     (deep-copied isvc block, SpecSourceISVC).
@@ -48,15 +46,12 @@ const (
 //     The HPA generator materializes this into a single CPU=80% Resource
 //     metric.
 //
-// Decisions (locked 2026-05-29):
-//
-//   - Q1: The default is ALWAYS Class=hpa with CPU=80%. There is no
-//     "only when Component declares a Resource metric" carve-out.
-//     The operator-visible default unconditionally produces an HPA.
-//
-//   - Q2: The Autoscaler block is fully authoritative. The
-//     ome.io/autoscalerClass annotation is still consulted by the legacy
-//     Raw Deployment dispatch but does not feed this resolver.
+// NOTE: The default is ALWAYS Class=hpa with CPU=80%. There is no "only
+// when Component declares a Resource metric" carve-out. The operator-
+// visible default unconditionally produces an HPA. The Autoscaler block
+// is fully authoritative. The ome.io/autoscalerClass annotation is still
+// consulted by the legacy Raw Deployment dispatch but does not feed this
+// resolver.
 //
 // Returned pointer is always non-nil and always a deep copy of the
 // source (so callers can mutate freely without affecting the input
@@ -66,7 +61,7 @@ const (
 // runtime may be nil — when it is, only the ISVC + default branches
 // run. Unknown component values fall through to the default branch.
 //
-// Alpha (OEP-0013). The signature may change without notice.
+// Alpha API. The signature may change without notice.
 func ResolveComponentAutoscaler(
 	runtime *v1beta1.ServingRuntimeSpec,
 	isvc *v1beta1.InferenceService,
@@ -143,9 +138,8 @@ func runtimeAutoscaler(runtime *v1beta1.ServingRuntimeSpec, component v1beta1.Co
 // resolution.
 //
 // The HPA generator treats HPA=nil as a sentinel and materializes a
-// single CPU=80% Resource metric. Per OEP-0013 §"Backwards
-// compatibility": every Component without an explicit Autoscaler block
-// gets the same baseline HPA.
+// single CPU=80% Resource metric. Every Component without an explicit
+// Autoscaler block gets the same baseline HPA.
 func defaultAutoscaler() *v1beta1.ComponentAutoscaler {
 	return &v1beta1.ComponentAutoscaler{
 		Class: v1beta1.AutoscalerHPA,

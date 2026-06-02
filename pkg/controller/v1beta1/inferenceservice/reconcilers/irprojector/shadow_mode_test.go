@@ -1,10 +1,10 @@
 package irprojector_test
 
-// Shadow-mode diff harness for the ISVC -> IR-managed cutover (IR PR 3
-// Piece 4). For a representative ISVC fixture, runs BOTH paths against
-// independent fake clients and asserts they emit byte-equal sets of
-// pods + ControllerRevisions + headless Service (modulo owner ref +
-// volatile fields).
+// Shadow-mode diff harness for the ISVC -> IR-managed cutover. For a
+// representative ISVC fixture, runs BOTH paths against independent fake
+// clients and asserts they emit byte-equal sets of pods +
+// ControllerRevisions + headless Service (modulo owner ref + volatile
+// fields).
 //
 // What this guards against:
 //
@@ -435,12 +435,12 @@ func assertShadowEquivalent(t *testing.T, direct, irManaged shadowSnapshot) {
 	//
 	// (1) "ir-headless-service-not-yet-emitted": IR controller's
 	//     reconciler.go does NOT call workload.ReconcileHeadlessService
-	//     yet — see the TODO(IR PR 2.1) marker at the
-	//     workload.Reconcile call site. The headless Service is
-	//     therefore present in the direct path but absent in the
-	//     IR-managed path. When PR 2.1 lands, the IR controller
-	//     will emit the Service, both Service sets will contain it,
-	//     and the loop below can flip to a strict-equality assertion.
+	//     yet — see the TODO marker at the workload.Reconcile call site.
+	//     The headless Service is therefore present in the direct path
+	//     but absent in the IR-managed path. When the wire-in lands, the
+	//     IR controller will emit the Service, both Service sets will
+	//     contain it, and the loop below can flip to a strict-equality
+	//     assertion.
 	if !containsServiceName(irManaged.services, irManaged.headlessServiceName) {
 		_, expected := knownExpectedShadowDiffs["ir-headless-service-not-yet-emitted"]
 		if !expected {
@@ -452,14 +452,14 @@ func assertShadowEquivalent(t *testing.T, direct, irManaged shadowSnapshot) {
 
 // knownExpectedShadowDiffs records the intentional differences
 // between the omenative direct path and the IR-managed path at the
-// time this harness was authored (IR PR 3). Each entry MUST be
-// removed when the corresponding wire-in lands — the entries are
-// designed to be self-deleting reminders, not permanent excuses.
+// time this harness was authored. Each entry MUST be removed when the
+// corresponding wire-in lands — the entries are designed to be
+// self-deleting reminders, not permanent excuses.
 //
 // Keep the map sorted alphabetically by key so future additions are
 // easy to spot in code review.
 var knownExpectedShadowDiffs = map[string]string{
-	"ir-headless-service-not-yet-emitted": "IR controller TODO(IR PR 2.1) — workload.ReconcileHeadlessService not wired at the workload.Reconcile call site yet; the direct path emits the per-Component headless Service unconditionally. When PR 2.1 lands, both paths emit the Service.",
+	"ir-headless-service-not-yet-emitted": "IR controller TODO — workload.ReconcileHeadlessService not wired at the workload.Reconcile call site yet; the direct path emits the per-Component headless Service unconditionally. When the wire-in lands, both paths emit the Service.",
 }
 
 // buildShadowISVC composes the fixture both paths emit objects

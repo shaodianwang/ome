@@ -252,7 +252,7 @@ func TestRevisionHash_DifferentTemplateDifferentHash(t *testing.T) {
 // worker-only image / env / spec bump triggers a rollout. Without this
 // the controller would silently keep workers on the old image while the
 // leader picked up the new one — exactly the kind of split-brain failure
-// OEP-0007 §"Update Strategy" requires the revision pipeline to prevent.
+// the revision pipeline must prevent.
 func TestRevisionHash_WorkerPodSpecAffectsHash(t *testing.T) {
 	leader := basicPodSpecForRevision()
 	workerA := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama-worker:v1"}}}
@@ -855,14 +855,13 @@ func TestEnsureControllerRevision_AcceptsMatchingOwnerUID(t *testing.T) {
 }
 
 // TestRevisionHash_OwnerUIDPartitionsTheNameSpace pins the
-// delete-and-recreate-same-name fix from
-// .claude/specs/2026-05-30-kind-test-walk/lifecycle-recreate-isvc-foreign-cr-not-detected.md:
-// two ISVCs sharing the same Name / Namespace / PodSpec / PodMeta /
-// CollisionCount — exactly what a delete-and-recreate cycle produces —
-// MUST emit distinct CR hashes when their UIDs differ. Without the UID
-// partition, cascade-GC racing with recreation could leave the new ISVC
-// pointing at a freshly-created CR carrying the predecessor's name, and
-// the foreign-owner collision branch never fires (the CR is GC'd before
+// delete-and-recreate-same-name fix: two ISVCs sharing the same Name /
+// Namespace / PodSpec / PodMeta / CollisionCount — exactly what a
+// delete-and-recreate cycle produces — MUST emit distinct CR hashes when
+// their UIDs differ. Without the UID partition, cascade-GC racing with
+// recreation could leave the new ISVC pointing at a freshly-created CR
+// carrying the predecessor's name, and the foreign-owner collision branch
+// never fires (the CR is GC'd before
 // the recreate's first reconcile).
 func TestRevisionHash_OwnerUIDPartitionsTheNameSpace(t *testing.T) {
 	ps := basicPodSpecForRevision()

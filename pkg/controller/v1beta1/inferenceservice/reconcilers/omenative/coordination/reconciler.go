@@ -20,7 +20,7 @@ import (
 
 // ReconcileInputs is the input bag the top-level OMENative dispatcher
 // passes into the coordination layer once per ISVC reconcile (after
-// every Component's Loop A has run).
+// every Component's per-Component reconciler has run).
 type ReconcileInputs struct {
 	// ISVC is the parent InferenceService. The coordination layer
 	// reads ISVC.Spec.RolloutCoordination and writes
@@ -66,7 +66,7 @@ type Result struct {
 
 // Reconcile is the entry point called by the top-level OMENative
 // reconciler once per ISVC reconcile, after every Component's
-// Loop A has run. It:
+// per-Component reconciler has run. It:
 //
 //  1. resolves the spec.rolloutCoordination.groups[] declaration
 //  2. observes each Component's current per-revision pod state
@@ -104,7 +104,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 
 	// Per-revision Service / Traffic[] producer: emitted for EVERY
 	// OMENative-mode Component, with or without a rolloutCoordination
-	// group declared. These artifacts are the data-plane for OEP-0011's
+	// group declared. These artifacts are the data-plane for the
 	// HTTPRoute weighted-backendRef consumer; an opt-in gate would
 	// break the traffic layer for ISVCs that haven't (yet) declared a
 	// coord group but still want per-revision routing.

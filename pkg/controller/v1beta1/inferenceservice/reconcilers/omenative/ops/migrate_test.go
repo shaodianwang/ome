@@ -290,12 +290,11 @@ func TestMigrate_RefusesWhenSourcePhaseNotReady(t *testing.T) {
 	if done {
 		t.Fatalf("expected done=false: migration must wait for source to reach Ready")
 	}
-	// Load-bearing: accepted=false signals the dispatcher to fall
-	// through to Update/Create so the in-flight op (Create here, or
-	// Update in the affinity-edit reproduction) can converge. Without
-	// this the dispatcher loops indefinitely in the Migrate-defer
-	// branch — see affinity-trigger-not-detected bug report at
-	// .claude/specs/2026-05-30-kind-test-walk/migrate-affinity-isvc-never-detected.md.
+	// Load-bearing: accepted=false signals the dispatcher to fall through
+	// to Update/Create so the in-flight op (Create here, or Update in the
+	// affinity-edit reproduction) can converge. Without this the dispatcher
+	// loops indefinitely in the Migrate-defer branch — the affinity-trigger-
+	// not-detected bug showed this symptom.
 	if accepted {
 		t.Errorf("expected accepted=false: fresh-request defer while source has in-flight non-Migrate Operation must NOT block dispatcher fall-through")
 	}
@@ -376,7 +375,7 @@ func TestMigrate_MissingSourceMarksFailed(t *testing.T) {
 
 // TestMigrate_MultiPodRejectedWithAuditEntry pins that Migrate refuses a
 // multi-pod Instance migration with a Failed audit row. Multi-pod migration
-// requires per-Runner surge ordinal allocation that the OEP defers; without
+// requires per-Runner surge ordinal allocation that is deferred; without
 // this guard a multi-pod ISVC's migration would silently create a single-pod
 // surge that can never satisfy the gang readiness gate, leaving the
 // migration wedged until the deadline.
@@ -744,7 +743,7 @@ func TestMigrate_ConvergesAcrossPasses(t *testing.T) {
 }
 
 // (TestApplyMigrationOverlay_* moved to workload/ops/render_test.go
-// in commit 5; the overlay function lives in workload/ops/render.go now.)
+// during the workload extraction; the overlay function lives in workload/ops/render.go now.)
 
 // --- test-only helpers ---
 
@@ -951,7 +950,7 @@ func TestMigrate_RejectsNodeAffinityConflict(t *testing.T) {
 //
 // Moved to pkg/controller/v1beta1/workload/ops/migrate_test.go (internal
 // package test) when the per-Instance Migrate state machine extracted to
-// workload/ops in part 2 slice 4d of N. The function is no longer
+// workload/ops in the workload-extraction refactor. The function is no longer
 // reachable from the omenative/ops package after the move; the
 // internal-package tests preserve identical names + assertions.
 

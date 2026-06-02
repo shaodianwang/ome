@@ -66,8 +66,8 @@ type Translator interface {
 	// set is valid — it means the translator implements no
 	// annotation extensions (legitimate for a stub).
 	//
-	// The result is the documented support matrix per OEP-0011
-	// §Field Coverage Matrix, expressed as runtime data.
+	// The result is the support matrix of which policy fields each
+	// gateway backend honors, expressed as runtime data.
 	SupportedAnnotations() sets.Set[string]
 
 	// SupportedPassthroughPrefixes returns the ome.io/* annotation

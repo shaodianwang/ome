@@ -1,13 +1,13 @@
 package ops
 
-// Helpers carved out of create.go (part 2 slice 4b of N) and delete.go
-// (part 2 slice 4c of N) when those per-Instance state machines moved
-// to pkg/controller/v1beta1/workload/ops. The helpers below remain in
-// this package because the peer ops still here (timeouts.go) call them
-// directly and read the v1beta1.OMENativeInstanceStatus shape.
+// Helpers carved out of create.go and delete.go when those per-Instance
+// state machines moved to pkg/controller/v1beta1/workload/ops. The
+// helpers below remain in this package because the peer ops still here
+// (timeouts.go) call them directly and read the
+// v1beta1.OMENativeInstanceStatus shape.
 //
 // Each helper shrinks out as the matching caller migrates to
-// workload/ops in a follow-up slice.
+// workload/ops in future refactors.
 
 import (
 	"context"

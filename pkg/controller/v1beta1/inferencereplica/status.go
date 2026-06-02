@@ -247,11 +247,10 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	// same EscalationParams shape, same per-Instance Phase=Failed write
 	// via input.MutateInstance). Without this hook the IR-managed path
 	// observes the same bad-image symptom the omenative direct path
-	// fixed in PR #314: the surge pod sits in ImagePullBackOff for
-	// 30+ minutes while the Instance stays at Phase=Updating, and the
-	// parent ISVC's coordination state machine never sees
-	// Component.Failed → group Phase stays at Surging indefinitely.
-	// Bug #52 IR-path equivalent — closes the bad_image_kind
+	// fixed: the surge pod sits in ImagePullBackOff for 30+ minutes
+	// while the Instance stays at Phase=Updating, and the parent ISVC's
+	// coordination state machine never sees Component.Failed → group
+	// Phase stays at Surging indefinitely. Closes the bad_image_kind
 	// reproduction reported against the dev cluster after IR-managed
 	// became the default OMENative dispatch path.
 	return r.escalateStuckPodFailures(ctx, ir, parent, byIndex)

@@ -28,8 +28,7 @@ import (
 //
 // One Service per (workload-key, component). The ISVC adapter
 // constructs one spec per ReconcileComponent pass; the future IR
-// adapter (OEP-0013) will construct one spec per InferenceReplica
-// reconcile.
+// adapter will construct one spec per InferenceReplica reconcile.
 type PerComponentServiceSpec struct {
 	// Name is the Service object name. The workload renderer stamps it
 	// verbatim but does NOT compute it — adapters pass the canonical

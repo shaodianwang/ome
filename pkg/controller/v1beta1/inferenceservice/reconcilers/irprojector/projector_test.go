@@ -452,8 +452,8 @@ func TestEnsureInferenceReplica_AlreadyExists_PropagatedAsUpdate(t *testing.T) {
 // site forgets to merge them into p.ObjectMeta, the projector still
 // emits them.
 //
-// Same bug class as task #51 (legacy direct-omenative path); this is
-// the IR-managed analog.
+// Same bug class as the legacy direct-omenative path; this is the
+// IR-managed analog.
 func TestEnsureInferenceReplica_PropagatesComponentAnnotations(t *testing.T) {
 	g := gomega.NewWithT(t)
 	isvc := baselineISVC("llama", "prod")
@@ -710,7 +710,7 @@ func autoscalerBlockB() *v1beta1.ComponentAutoscaler {
 // TestEnsureInferenceReplica_PropagatesResolvedAutoscaler pins the
 // resolver→projector contract: a non-nil p.ResolvedAutoscaler lands on
 // the IR at Create time. The autoscaler dispatch reads ir.Spec
-// .Autoscaler — if the projector drops it, the entire OEP-0013 chain
+// .Autoscaler — if the projector drops it, the entire autoscaler chain
 // is dead on arrival.
 //
 // The block is deep-equal-asserted so a half-applied projection (e.g.,
@@ -740,8 +740,7 @@ func TestEnsureInferenceReplica_PropagatesResolvedAutoscaler(t *testing.T) {
 // whole-block replace semantics: a second projection with a different
 // ResolvedAutoscaler swaps the IR's autoscaler wholesale, not merges.
 // Operator-side changes to isvc.spec.<comp>.autoscaler always win over
-// any drifted ir.spec.autoscaler — see OEP-0013 §"Generated autoscaler
-// resources" + §"Inheritance chain".
+// any drifted ir.spec.autoscaler.
 //
 // Failure shape this catches: a projector that only merges sub-fields
 // (e.g., keeps Class from A while overwriting Keda with B's HPA) would

@@ -116,8 +116,7 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 	// see omenative/coordination (the workload package's audit-grep
 	// boundary), so the gate decisions cross via this callback.
 	// Body lives in evaluateUpdateGate so the gate order + the
-	// OEP-0007.3 Bug 1 in-place RatioGate bypass have a single
-	// testable site.
+	// in-place RatioGate bypass have a single testable site.
 	input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
 		return evaluateUpdateGate(p.ISVC, v1component, p.Recorder, strategy, inFlightSurge, inFlightUnavail)
 	}
@@ -127,10 +126,10 @@ func ReconcileComponentOps(ctx context.Context, p core.ReconcileParams, plan cor
 
 // evaluateUpdateGate is the ISVC-direct path's adapter onto the shared
 // coordination.EvaluateUpdateGate decision site. The gate body — order
-// (ratio -> surge/unavail -> sequential), the OEP-0007.3 Bug 1 in-place
-// RatioGate bypass, and the per-tick ResolveGateContext prelude — lives
-// in the coordination package so the IR-managed path (inferencereplica),
-// which is the production default, drives the byte-identical logic. See
+// (ratio -> surge/unavail -> sequential), the in-place RatioGate bypass,
+// and the per-tick ResolveGateContext prelude — lives in the coordination
+// package so the IR-managed path (inferencereplica), which is the
+// production default, drives the byte-identical logic. See
 // coordination.EvaluateUpdateGate.
 //
 // Kept as a named wrapper so the existing dispatch_test.go gate-order /

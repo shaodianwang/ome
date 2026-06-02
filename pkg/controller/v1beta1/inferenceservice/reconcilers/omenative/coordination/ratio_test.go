@@ -512,8 +512,7 @@ func TestCheckRatioGate_InFlightProjectionTightensBand(t *testing.T) {
 }
 
 // TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock pins the
-// fix for the ratiobalanced_kind + loadtest_kind KIND deadlock
-// (`.claude/specs/2026-05-30-kind-test-walk/ratiobalanced-bluegreen-deadlock-no-progress.md`).
+// fix for the BlueGreen + RatioBalanced deadlock observed in KIND tests.
 //
 // Reproduction shape: 4 engine + 2 decoder, BlueGreen + RatioBalanced
 // (tol 25%, band [1.5, 2.5]). The original ObservedRatio anchor must

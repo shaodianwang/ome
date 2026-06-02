@@ -86,7 +86,7 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 	// Surface the fallback once per dispatch so operators can correlate
 	// a recreate-flavored rollout with the SurgeThenDrain spec they
 	// wrote. Multi-pod SurgeThenDrain needs per-gang-member ordinal
-	// allocation (deferred per OEP-0007); until that lands recreate is
+	// allocation (not yet implemented); until that lands recreate is
 	// the safe execution.
 	if multiPod && strategy == workload.UpdateStrategySurgeThenDrain && mode == updateModeRecreate {
 		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
@@ -137,7 +137,7 @@ const (
 //
 // Multi-pod adjustments:
 //   - SurgeThenDrain → recreate: per-gang-member surge ordinal scheme
-//     is not yet implemented (deferred per OEP-0007).
+//     is not yet implemented.
 //   - In-place modes → recreate: inPlaceEligible compares only the
 //     leader's PodSpec, so a worker-only image bump would produce an
 //     in-place rollout that patches only the leader, leaving workers
@@ -1130,8 +1130,8 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// otherwise the ordinal partition above treats it as a valid
 	// surge and Phase 3 promotes RunningRevision to the in-flight
 	// target while the actual pod is on the prior rev. See
-	// reclassifyByRevisionHash's header for the X-2 (task #54)
-	// recovery path this guards.
+	// reclassifyByRevisionHash's header for the X-2 recovery path this
+	// guards.
 	surgePods, oldPods = reclassifyByRevisionHash(surgePods, oldPods, surgeTargetHash, runningRevHash)
 
 	// Phase 1 entry: stamp Phase=Updating + Op.Step=Surge if not
@@ -1160,12 +1160,12 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	//
 	// Skip the create when the surge ordinal slot is already occupied
 	// by a pod the reclassify just moved into the drain set. That's
-	// the recovery path (task #54) where a stale-rev pod lives at the
-	// surge slot — the Create would AlreadyExists against it, leaving
-	// the stale pod in place forever. Falling through to Phase 2
-	// drains both the alternate-slot canonical and the stale pod;
-	// the NEXT reconcile pass enters Phase 1 with an empty surge slot
-	// and creates the correct-rev pod.
+	// the recovery path where a stale-rev pod lives at the surge slot
+	// — the Create would AlreadyExists against it, leaving the stale
+	// pod in place forever. Falling through to Phase 2 drains both the
+	// alternate-slot canonical and the stale pod; the NEXT reconcile
+	// pass enters Phase 1 with an empty surge slot and creates the
+	// correct-rev pod.
 	staleAtSurgeSlot := false
 	for _, pod := range oldPods {
 		if ord, ok := query.PodOrdinalFromLabels(pod); ok && ord == newOrdinal {
@@ -1371,9 +1371,8 @@ func partitionPodsBySurgeOrdinal(pods []*corev1.Pod, oldOrdinal, newOrdinal int3
 // recheck the ordinal partition would treat the stale pod as the
 // "valid surge" — Phase 3 would promote RunningRevision to the
 // pinned target while the actual pod is on a prior rev — exactly the
-// X-2 "v2 straggler labeled post-promote as v3" symptom captured on
-// cluster msl-cw-use2-dev-2 after the post-#256 deploy (OEP-0007.2
-// task #54).
+// X-2 "v2 straggler labeled post-promote as v3" symptom captured in
+// production after a prior deploy.
 //
 // The recheck is narrow: a pod is reclassified into the drain set
 // ONLY when its revision-hash label matches the just-promoted

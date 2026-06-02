@@ -36,19 +36,19 @@ import (
 // rolls mis-models the surge as a capacity loss and deadlocks symmetric
 // RatioBalanced groups.
 //
-// OEP-0007.3 Bug 1: in-place strategies (InPlaceIfPossible / InPlaceOnly)
-// skip CheckRatio entirely. For in-place the drain is paired 1:1 with a
-// same-pod return (mark-not-ready -> patch -> mark-ready), so the net
-// capacity change is ~0; running the gate would project a -1 loss that
-// misrepresents that transient as permanent and indefinitely over-blocks
-// the smaller Component of a ratio pair
-// (e.g. the decoder in a 4:2 engine:decoder pair with 25% tolerance
-// deadlocks because 4:1 = 4.0 sits above the [1.5, 2.5] band).
-// CheckUnavailability (called below for non-surge strategies, which
-// includes both in-place variants) already governs concurrent disruption
-// via the MaxUnavailable budget, so RatioBalanced safety is preserved
-// without the structural deadlock. The RatioGateBypassed event + metric
-// fire so operators see why the gate did not run.
+// In-place strategies (InPlaceIfPossible / InPlaceOnly) skip CheckRatio
+// entirely. For in-place the drain is paired 1:1 with a same-pod return
+// (mark-not-ready -> patch -> mark-ready), so the net capacity change is
+// ~0; running the gate would project a -1 loss that misrepresents that
+// transient as permanent and indefinitely over-blocks the smaller
+// Component of a ratio pair (e.g. the decoder in a 4:2 engine:decoder
+// pair with 25% tolerance deadlocks because 4:1 = 4.0 sits above the
+// [1.5, 2.5] band). CheckUnavailability (called below for non-surge
+// strategies, which includes both in-place variants) already governs
+// concurrent disruption via the MaxUnavailable budget, so RatioBalanced
+// safety is preserved without the structural deadlock. The
+// RatioGateBypassed event + metric fire so operators see why the gate
+// did not run.
 //
 // Reads exclusively from isvc.Spec + isvc.Status (no client / cache hits),
 // so it is safe to call from the hot dispatcher loop on either path.

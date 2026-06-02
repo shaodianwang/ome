@@ -17,7 +17,7 @@ import (
 // HISTORY: this file originally held the full `TestRestart_*` end-to-end
 // coverage; those tests moved alongside the per-Instance Restart state
 // machine to pkg/controller/v1beta1/workload/ops/restart_test.go in
-// slice 4e of the workload-extraction refactor. The remaining tests
+// the workload-extraction refactor. The remaining tests
 // here cover the v1beta1-typed pieces still living in omenative/ops:
 // detectRestartTrigger (called by dispatch.go), the dispatcher's
 // RestartPolicy=None fall-through and trigger dispatch (driven through

@@ -97,7 +97,7 @@ func TestBuildReconcileInput_ProjectsIdentityAndObservedState(t *testing.T) {
 }
 
 // TestBuildReconcileInput_MutateInstance covers the closure's persist
-// path (commit lands on the apiserver) and the no-op short-circuit
+// path (write lands on the apiserver) and the no-op short-circuit
 // (returning false skips the round-trip and leaves status untouched).
 func TestBuildReconcileInput_MutateInstance(t *testing.T) {
 	isvc := &v1beta1.InferenceService{

@@ -33,9 +33,9 @@ func TestHTTPRouteBuilder_Build(t *testing.T) {
 
 	route, ok := httpRoute.(*gatewayapiv1.HTTPRoute)
 	assert.True(t, ok)
-	// OEP-0011 C1: engine HTTPRoute is named "<isvc>-engine", distinct
-	// from the top-level "<isvc>" route, and backs the
-	// "<isvc>-engine" Service (matching engine.go's defaultEngineName).
+	// engine HTTPRoute is named "<isvc>-engine", distinct from the
+	// top-level "<isvc>" route, and backs the "<isvc>-engine" Service
+	// (matching engine.go's defaultEngineName).
 	assert.Equal(t, "test-isvc-engine", route.Name)
 	assert.Equal(t, "default", route.Namespace)
 }
@@ -54,7 +54,7 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_EngineComponent(t *testing.T) {
 		{
 			name: "engine component ready",
 			isvc: createTestInferenceServiceHTTPRoute("test-isvc", "default"),
-			// OEP-0011 C1: engine HTTPRoute is "<isvc>-engine", not "<isvc>".
+			// engine HTTPRoute is "<isvc>-engine", not "<isvc>".
 			expectedName:    "test-isvc-engine",
 			expectedError:   false,
 			expectedRules:   1,
@@ -325,7 +325,7 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_TopLevelComponent(t *testing.T) {
 	}
 }
 
-// ----- OEP-0011 C2: weighted backendRefs from status.traffic[] -----
+// ----- Weighted backendRefs from status.traffic[] -----
 
 // TestHTTPRouteBuilder_WeightedBackends_FromStatusTraffic verifies the
 // HTTPRoute builder reads status.components[<c>].traffic[] and emits
@@ -351,9 +351,9 @@ func TestHTTPRouteBuilder_TopLevelRoutesToRouterEvenWhenNotReady(t *testing.T) {
 }
 
 // TestHTTPRouteBuilder_EngineAndTopLevel_DistinctNames is the
-// OEP-0011 C1 regression: when both engine and top-level routes are
+// naming regression: when both engine and top-level routes are
 // reconciled for the same ISVC, they must have distinct names so the
-// top-level reconcile doesn't overwrite the engine route. Pre-OEP-0011
+// top-level reconcile doesn't overwrite the engine route. Previously
 // both routes were named "<isvc>" (PredictorServiceName == isvc.Name)
 // and the top-level always won, leaving the engine externally
 // unaddressable.
@@ -380,11 +380,11 @@ func TestHTTPRouteBuilder_EngineAndTopLevel_DistinctNames(t *testing.T) {
 	assert.Equal(t, "test-isvc", topLevelRoute.Name)
 }
 
-// TestHTTPRouteBuilder_EngineBackendUsesEngineService is the OEP-0011
-// C1 fix for the silent pre-existing bug: engine HTTPRoute used to
-// reference "<isvc>" as backend Service (PredictorServiceName) but
-// the actual engine Service is named "<isvc>-engine" (defaultEngineName
-// in engine.go). The route was pointing at a non-existent backend.
+// TestHTTPRouteBuilder_EngineBackendUsesEngineService fixes the silent
+// pre-existing bug: engine HTTPRoute used to reference "<isvc>" as
+// backend Service (PredictorServiceName) but the actual engine Service
+// is named "<isvc>-engine" (defaultEngineName in engine.go). The route
+// was pointing at a non-existent backend.
 func TestHTTPRouteBuilder_EngineBackendUsesEngineService(t *testing.T) {
 	builder := createHTTPRouteBuilder()
 	isvc := createTestInferenceServiceHTTPRoute("test-isvc", "default")

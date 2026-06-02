@@ -1,13 +1,12 @@
-// Package envoygateway translates OEP-0011 traffic intent into an
-// Envoy Gateway BackendTrafficPolicy
-// (gateway.envoyproxy.io/v1alpha1).
+// Package envoygateway translates traffic intent into an Envoy Gateway
+// BackendTrafficPolicy (gateway.envoyproxy.io/v1alpha1).
 //
 // The translator emits an unstructured.Unstructured object so OME does
 // not vendor the Envoy Gateway Go module — a dep that would force
 // large transitive upgrades (notably KEDA). The string paths the
-// translator writes into are pinned by OEP-0011 §Annotation Extension
-// and §Field Coverage Matrix; gateway-controller schema errors surface
-// as GatewayRejected on the InferenceService status.
+// translator writes into map to the BackendTrafficPolicy CRD schema;
+// gateway-controller schema errors surface as GatewayRejected on the
+// InferenceService status.
 //
 // Pass-through (`ome.io/btp.<path>=<value>`) is applied last so an
 // operator can override any structured field — this is the documented
@@ -36,8 +35,8 @@ import (
 const Name = "envoy-gateway"
 
 // Envoy Gateway BackendTrafficPolicy coordinates. These are pinned by
-// the OEP-0011 design and the Envoy Gateway public API; any change
-// (e.g. a v1beta1 graduation) is a deliberate upgrade.
+// the Envoy Gateway public API; any change (e.g. a v1beta1 graduation)
+// is a deliberate upgrade.
 const (
 	groupEnvoyGateway = "gateway.envoyproxy.io"
 	versionV1Alpha1   = "v1alpha1"

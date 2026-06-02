@@ -38,11 +38,10 @@ func ISVCGVK() schema.GroupVersionKind { return isvcGVK }
 // from core.ReconcileParams so this helper lives in internalsource/
 // without taking on a backward import to core/.
 //
-// SCOPE NOTE (slice 4b-4d of N): only the fields the workload Create /
-// Delete / Migrate state machines read (Client, ISVC, Component,
-// PodSpec, WorkerPodSpec, ObjectMeta, ClearAnnotation) are populated.
-// As peer ops migrate to workload/ops in later slices the bag grows to
-// cover Lifecycle/Pacing/GangSchedulingAvailable.
+// As the workload-extraction refactor progressed, this struct grew to
+// include the fields the workload Create / Delete / Migrate state
+// machines read: Client, ISVC, Component, PodSpec, WorkerPodSpec,
+// ObjectMeta, Lifecycle/Pacing/GangSchedulingAvailable.
 type BuildInputDeps struct {
 	// ISVC is the parent InferenceService being reconciled. Used as
 	// both the workload OwnerObject and the EventTarget.
@@ -180,11 +179,10 @@ func buildMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compon
 // workload.ReconcileInput.RemoveInstance callback. Mirrors the
 // removeInstanceStatus helper that previously lived in
 // omenative/ops/delete.go before the per-Instance Delete state machine
-// moved to workload/ops (part 2 slice 4c of N). Kept in internalsource
-// rather than the status package because the post-commit
-// Expectations.Forget step needs the workload-typed component, which
-// would force a forward dependency from the v1beta1-typed status
-// package onto workload.
+// moved to workload/ops. Kept in internalsource rather than the status
+// package because the post-write Expectations.Forget step needs the
+// workload-typed component, which would force a forward dependency from
+// the v1beta1-typed status package onto workload.
 //
 // exp is the expectations cache the closure forgets on successful
 // removal. When nil the workload-level DefaultExpectations singleton
@@ -253,11 +251,10 @@ func buildRemoveInstance(c client.Client, isvc *v1beta1.InferenceService, compon
 // condition writer as a workload.ReconcileInput.WriteAggregateCondition
 // callback. The closure merges cond into the per-Component condition
 // list under retry.RetryOnConflict so LastTransitionTime only bumps
-// on a real transition and concurrent reconciles can't lose the
-// write to each other. Mirrors the v1beta1-typed
-// patchGangSchedulingCondition that previously lived in
-// omenative/gang.go before the workload extraction (part 2 slice 4g
-// of N).
+// on a real transition and concurrent reconciles can't lose the write
+// to each other. Mirrors the v1beta1-typed patchGangSchedulingCondition
+// that previously lived in omenative/gang.go before the workload
+// extraction.
 //
 // The legacy bumpCollisionCount + buildRemoveInstance helpers above
 // use the same retry shape so a future refactor can collapse them

@@ -59,7 +59,7 @@ func mkSymmetricRatioFixture(tol int32) *v1beta1.InferenceService {
 //
 // Pre-#401 the code hardcoded -1 for ALL strategies, so even a
 // SurgeThenDrain roll hit the drain math and BOTH members deadlocked at
-// the start (the bug #400 exposed by activating the gate on the default
+// the start (the gate-projection bug exposed by activating the gate on the default
 // IR-managed path). Asymmetric large skews still stay denied — see
 // ratio_drain_tiebreaker_test.go.
 func TestCheckRatio_SurgeVsDrainProjection_SymmetricBand(t *testing.T) {

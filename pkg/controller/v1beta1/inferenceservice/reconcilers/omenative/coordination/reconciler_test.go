@@ -78,7 +78,7 @@ func TestReconcile_EmitsPerRevisionServiceForOMENativeComponent(t *testing.T) {
 
 func TestReconcile_DataPlaneRunsWithoutCoordinationGroup(t *testing.T) {
 	// Updated contract: per-revision Services + Traffic[] are the
-	// data plane for OEP-0011 HTTPRoute weighted-backendRef consumers.
+	// data plane for HTTPRoute weighted-backendRef consumers.
 	// They emit for every OMENative-mode Component, with or without a
 	// rolloutCoordination group declared. Only the per-group state
 	// machine (Status.RolloutCoordination, RolloutCoordinationReady
@@ -372,7 +372,7 @@ func buildPod(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, r
 }
 
 func podName(isvc string, component v1beta1.ComponentType, idx int) string {
-	// Test pod names — don't need the full Loop A pattern.
+	// Test pod names — simplified pattern for test fixtures.
 	return isvc + "-" + string(component) + "-pod-" + itoa(idx)
 }
 
@@ -482,7 +482,7 @@ func TestReconcile_ConsiderCoordinationGroupEventNotFiredWhenGroupDeclared(t *te
 // --- buildComponentObservation per-Instance failure rollup ---
 
 // withInstanceStatus builds an ISVC carrying the given InstanceStatus
-// slice on Components.<c>.OMENative. Used by the propagation tests.
+// view on Components.<c>.OMENative. Used by the propagation tests.
 func withInstanceStatus(c v1beta1.ComponentType, instances []v1beta1.OMENativeInstanceStatus) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "isvc-test"},
@@ -621,9 +621,8 @@ func TestCollectFailedInstanceIndices_EmptyOnNoFailures(t *testing.T) {
 }
 
 // TestBuildRatioState_DefersSnapshotWhenStatusEmpty pins the fix for
-// the BlueGreen+RatioBalanced deadlock (`.claude/specs/2026-05-30-kind-test-walk/
-// ratiobalanced-bluegreen-deadlock-no-progress.md`). The first reconcile
-// of a freshly-created ISVC observes every Component with
+// the BlueGreen+RatioBalanced deadlock. The first reconcile of a
+// freshly-created ISVC observes every Component with
 // status.OMENative.Replicas == 0 (the OMENative status writer hasn't
 // run yet). Snapshotting from that empty status anchored Original to
 // {Engine: 1, Decoder: 1} via SnapshotOriginal's zero-clamp, deadlocking

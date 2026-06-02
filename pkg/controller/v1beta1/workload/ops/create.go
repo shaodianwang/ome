@@ -127,7 +127,7 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 	// surge promote in the SAME reconcile (with stale ObservedState
 	// showing the pre-promote ActiveOrdinal) or in a follow-up reconcile
 	// where target has since moved past the in-flight surge's pinned
-	// rev — both are the X-2 bump-during-bump scenario (bug #58). Naively
+	// rev — both are the X-2 bump-during-bump scenario. Naively
 	// promoting to target.Name here writes
 	// `RunningRevision=<latest-target>` while the pod is on the prior
 	// rev. The next reconcile sees RunningRev==target and short-circuits
@@ -158,7 +158,7 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 // Create pass's Ready promote to avoid stamping
 // RunningRevision=target.Name on pods that are actually on a different
 // (typically intermediate) revision — the X-2 bump-during-bump
-// corruption mode (bug #58).
+// corruption mode.
 //
 // Returns true when:
 //   - existing is non-empty AND

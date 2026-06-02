@@ -16,8 +16,9 @@ const (
 	// ConditionGangSchedulingUnavailable is True when the Component
 	// has at least one multi-pod Instance but the scheduler-plugins
 	// PodGroup CRD is missing. The reconciler still creates pods —
-	// gang scheduling is a soft requirement per OEP-0007 — but
-	// partial-gang placement is possible and the runtime may hang.
+	// gang scheduling is a soft requirement so workloads proceed
+	// without blocking — but partial-gang placement is possible and
+	// the runtime may hang.
 	ConditionGangSchedulingUnavailable ConditionType = "GangSchedulingUnavailable"
 )
 

@@ -159,13 +159,13 @@ func TestGatewayAPIStrategy_Reconcile(t *testing.T) {
 
 func TestGatewayAPIStrategy_Reconcile_GateOnOEPIntent(t *testing.T) {
 	// The default BackendTrafficPolicy created by this strategy and the
-	// per-ISVC BTP created by the OEP-0011 traffic.Reconciler write the
-	// same resource name. To prevent the two loops from fighting, this
+	// per-ISVC BTP created by the traffic.Reconciler write the same
+	// resource name. To prevent the two loops from fighting, this
 	// strategy must skip BTP create/check when the operator has declared
-	// OEP-0011 traffic intent (spec.traffic or any ome.io/* annotation).
+	// traffic intent (spec.traffic or any ome.io/* annotation).
 	//
 	// Cases:
-	//   - no intent  -> default BTP created (preserves PR #118 behavior)
+	//   - no intent  -> default BTP created (preserves prior behavior)
 	//   - intent set -> default BTP NOT created (traffic.Reconciler owns it)
 	alg := v1beta1.LoadBalancingTypeRoundRobin
 
@@ -175,19 +175,19 @@ func TestGatewayAPIStrategy_Reconcile_GateOnOEPIntent(t *testing.T) {
 		expectBTPCreated bool
 	}{
 		{
-			name:             "no OEP intent: default BTP is created",
+			name:             "no traffic intent: default BTP is created",
 			mutateIsvc:       func(_ *v1beta1.InferenceService) {},
 			expectBTPCreated: true,
 		},
 		{
-			name: "OEP intent via spec.traffic: default BTP skipped",
+			name: "traffic intent via spec.traffic: default BTP skipped",
 			mutateIsvc: func(isvc *v1beta1.InferenceService) {
 				isvc.Spec.Traffic = &v1beta1.TrafficSpec{Algorithm: &alg}
 			},
 			expectBTPCreated: false,
 		},
 		{
-			name: "OEP intent via ome.io annotation: default BTP skipped",
+			name: "traffic intent via ome.io annotation: default BTP skipped",
 			mutateIsvc: func(isvc *v1beta1.InferenceService) {
 				if isvc.Annotations == nil {
 					isvc.Annotations = map[string]string{}
@@ -427,8 +427,8 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses(t *testing.T) {
 		expectedCondition corev1.ConditionStatus
 	}{
 		{
-			// OEP-0011 C1: engine HTTPRoute is "<isvc>-engine"; top-level
-			// is "<isvc>". Both lookups must succeed.
+			// engine HTTPRoute is "<isvc>-engine"; top-level is "<isvc>".
+			// Both lookups must succeed.
 			name: "all HTTPRoutes ready",
 			isvc: createTestInferenceServiceGateway("test-isvc", "default"),
 			httpRoutes: []client.Object{
@@ -480,10 +480,10 @@ func TestGatewayAPIStrategy_CheckHTTPRouteStatuses(t *testing.T) {
 // TestGatewayAPIStrategy_CheckHTTPRouteStatuses_NotFoundIsTolerated guards
 // against a regression of the live-cluster bug where checkHTTPRouteStatuses
 // returned IsNotFound as a hard error, crashing the reconcile every loop
-// during PD-disaggregated bring-up. PR #316 made reconcileComponentHTTPRoute
-// correctly skip create when a component isn't Ready (Builder returns nil);
-// this test asserts the downstream status-check tolerates the resulting
-// absence of HTTPRoutes by continuing past them rather than failing.
+// during PD-disaggregated bring-up. reconcileComponentHTTPRoute correctly
+// skips create when a component isn't Ready (Builder returns nil); this
+// test asserts the downstream status-check tolerates the resulting absence
+// of HTTPRoutes by continuing past them rather than failing.
 //
 // Production trace (sandbox/sglang-llama4x-nvfp4-pd-cc-fallback):
 //
@@ -626,8 +626,8 @@ func TestGatewayAPIStrategy_GetComponentType(t *testing.T) {
 		expectedType string
 	}{
 		{
-			// OEP-0011 C1: engine HTTPRoute is "<isvc>-engine" (distinct
-			// from the top-level "<isvc>"). Pre-C1 they collided.
+			// engine HTTPRoute is "<isvc>-engine" (distinct from the
+			// top-level "<isvc>"). Previously they collided.
 			name:         "engine component",
 			serviceName:  "test-isvc-engine",
 			isvc:         createTestInferenceServiceGateway("test-isvc", "default"),
@@ -647,7 +647,7 @@ func TestGatewayAPIStrategy_GetComponentType(t *testing.T) {
 		},
 		{
 			// Top-level HTTPRoute is named "<isvc>"; distinct from the
-			// engine route post-OEP-0011 C1.
+			// engine route.
 			name:         "toplevel component",
 			serviceName:  "test-isvc",
 			isvc:         createTestInferenceServiceGateway("test-isvc", "default"),

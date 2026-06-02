@@ -24,7 +24,7 @@ const defaultDispatchMinReplicas int32 = 1
 // build this from their local state and the committed IR returned by
 // irprojector.EnsureInferenceReplica.
 //
-// Alpha (OEP-0013). The shape may change without notice.
+// Alpha API. The shape may change without notice.
 type IRDispatchInput struct {
 	// Client is the controller-runtime client used to apply the HPA
 	// or ScaledObject.
@@ -67,8 +67,8 @@ type IRDispatchInput struct {
 //     by controllerutil semantics). Foreground GC cascades on IR
 //     delete.
 //   - ScaleTargetRef: ome.io/v1beta1/InferenceReplica/<ir-name>. The
-//     IR's /scale subresource is the canonical scale target per OEP-
-//     0013 §"Generated autoscaler resources".
+//     IR's /scale subresource is the canonical scale target for
+//     IR-managed Components.
 //   - Min/Max replicas: input.ComponentExt.MinReplicas (default 1) and
 //     input.ComponentExt.MaxReplicas (clamped up to MinReplicas in the
 //     generator).
@@ -76,7 +76,7 @@ type IRDispatchInput struct {
 // Errors are wrapped with the IR namespace/name so the operator log
 // reveals which Component failed dispatch.
 //
-// Alpha (OEP-0013). The signature may change without notice.
+// Alpha API. The signature may change without notice.
 func DispatchForIRComponent(ctx context.Context, input IRDispatchInput) error {
 	if input.IR == nil {
 		return fmt.Errorf("DispatchForIRComponent: nil IR (refusing to stamp orphaned autoscaler)")

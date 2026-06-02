@@ -25,7 +25,7 @@ const (
 	// (path, offset, mtime) with no size in the key; writing a smaller
 	// chunk shadows the real one. Operators who override the daemon's
 	// chunk size must pass options.chunk_size_bytes to keep this in
-	// sync — there is no runtime discovery endpoint after PR #1181.
+	// sync — there is no runtime discovery endpoint.
 	defaultChunkSizeBytes uint64 = 96 * 1024 * 1024
 
 	reasonSourceReachable    = "SourceReachable"

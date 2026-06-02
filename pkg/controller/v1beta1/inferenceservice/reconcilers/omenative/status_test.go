@@ -556,14 +556,14 @@ func TestMutateInstanceStatus_NoWriteWhenMutateReturnsFalse(t *testing.T) {
 }
 
 // TestSurgeUpdate_SingleBump_URMatchesCR_OnlyOneNewCR is the unit
-// reproduction of task #56's A-2 cluster symptom: a single bump of an
+// reproduction of the orphan-hash cluster symptom: a single bump of an
 // ISVC's pod-template annotation must, after the surge cycle fully
 // completes, leave:
 //   - exactly ONE new ControllerRevision created (count 1 → 2);
 //   - status.UpdateRevision == status.CurrentRevision == the new CR's
 //     name (no orphan-hash drift between the two status fields).
 //
-// The production observation (cluster f783c1b0, post-#256+#258):
+// The production observation:
 //   - CRs count 1 → 2 (one new CR created — correct).
 //   - status.UpdateRevision = 300e2aa3 (the new target).
 //   - status.CurrentRevision = e176faf1 (a hash with NO backing CR).
@@ -816,20 +816,19 @@ func crNamesSlice(items []appsv1.ControllerRevision) []string {
 }
 
 // TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler pins the
-// X-2 bug #58: when a second spec bump (v2 → v3) arrives WHILE the
-// first bump's (v1 → v2) surge is still in flight (surge pod created
-// but not yet promoted), the controller MUST:
+// bump-during-bump (X-2) scenario: when a second spec bump (v2 → v3)
+// arrives WHILE the first bump's (v1 → v2) surge is still in flight
+// (surge pod created but not yet promoted), the controller MUST:
 //
 //  1. Create the v3 ControllerRevision (it MUST exist after the
 //     bump-during-bump reconcile, not just after v2 promotes).
 //  2. Eventually drive every pod to v3 (no v2 stragglers).
 //  3. Stamp status.CurrentRevision = v3 once convergence completes.
 //
-// Production observation (cluster sandbox, X-2 spec): the v3 CR was
-// never created, a v2-flavored pod lingered (+1 vs expected), and
-// status.CurrentRevision stayed at v2 forever. The spec bumps via the
-// `test.ome.io/rollout-trigger` annotation (no image change), exactly
-// like the X-2 SRT test does.
+// Production observation: the v3 CR was never created, a v2-flavored pod
+// lingered (+1 vs expected), and status.CurrentRevision stayed at v2
+// forever. The spec bumps via the `test.ome.io/rollout-trigger`
+// annotation (no image change), exactly like the X-2 SRT test does.
 //
 // The test drives the full surge cycle through ReconcileComponent so
 // the bug surfaces from the same code path the cluster exercises.
@@ -958,8 +957,8 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 
 	// Pass 1 (v3 bump): ensureRevisionWithCollisionRetry MUST create the
 	// v3 CR even while the v2 surge is in flight. This is the
-	// load-bearing assertion for bug #58 — the production cluster
-	// observed the v3 CR was NEVER created.
+	// load-bearing assertion — the production cluster observed the v3 CR
+	// was NEVER created.
 	if _, err := ReconcileComponent(context.Background(), pV3); err != nil {
 		t.Fatalf("v3 bump pass 1: %v", err)
 	}
@@ -970,7 +969,7 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 		for _, cr := range postV3List.Items {
 			names = append(names, cr.Name)
 		}
-		t.Fatalf("after v3 bump: CR count got %d (%v) want 3 (v1+v2+v3) — bug #58 fires here when v3 CR is never created",
+		t.Fatalf("after v3 bump: CR count got %d (%v) want 3 (v1+v2+v3) — bump-during-bump bug fires here when v3 CR is never created",
 			len(postV3List.Items), names)
 	}
 	var v3CR *appsv1.ControllerRevision
@@ -990,8 +989,8 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 	// deleted), serving flip, then promote.
 	//
 	// Note: at this point, the v2 surge is in-flight (Op pinned to v2).
-	// We drive it to completion FIRST (PR #256 contract: pinned target
-	// continues), then the post-v2-promote reconcile fires the v3 surge.
+	// We drive it to completion FIRST (pinned target continues), then
+	// the post-v2-promote reconcile fires the v3 surge.
 
 	// Step: flip v2 surge pod to ContainersReady.
 	v2SurgePodFresh := &corev1.Pod{}
@@ -1105,7 +1104,7 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 
 	// --- FINAL ASSERTIONS ---
 
-	// 1. The v3 CR exists (the load-bearing assertion for bug #58).
+	// 1. The v3 CR exists (the load-bearing assertion).
 	finalCRs := &appsv1.ControllerRevisionList{}
 	_ = c.List(context.Background(), finalCRs, client.InNamespace("sandbox"))
 	crByName := make(map[string]struct{}, len(finalCRs.Items))
@@ -1113,7 +1112,7 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 		crByName[cr.Name] = struct{}{}
 	}
 	if _, ok := crByName[v3CR.Name]; !ok {
-		t.Errorf("v3 CR %q missing from cluster — bug #58 fires here (have: %v)",
+		t.Errorf("v3 CR %q missing from cluster — bump-during-bump bug fires here (have: %v)",
 			v3CR.Name, crNamesSlice(finalCRs.Items))
 	}
 
@@ -1143,7 +1142,7 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 		pod := &livePods.Items[i]
 		hash := pod.Labels[query.LabelRevisionHash]
 		if hash == v2Hash {
-			t.Errorf("X-2 FAIL: pod %s/%s labeled with v2 hash %q — v2 straggler survived (bug #58)",
+			t.Errorf("X-2 FAIL: pod %s/%s labeled with v2 hash %q — v2 straggler survived (bump-during-bump bug)",
 				pod.Namespace, pod.Name, v2Hash)
 		}
 		if hash != v1Hash && hash != v3Hash {
@@ -1154,19 +1153,19 @@ func TestSurgeUpdate_BumpDuringBump_V3CRCreated_NoV2Straggler(t *testing.T) {
 }
 
 // TestAggregateAndWriteStatus_MirrorsCommittedRevisionFieldsOntoInMemoryISVC
-// pins the (d)-style fix for task #56: after AggregateAndWriteStatus
-// commits UR / CR to the cluster, the just-committed values must also
-// land on the caller's in-memory ISVC snapshot. Pairs with PR #246's
-// MutateInstance mirror (per-Instance fields) and reconciler.go's
-// bumpCollisionCount mirror (CollisionCount) — every status-write
-// entry point owns the same post-commit observability contract.
+// pins the fix: after AggregateAndWriteStatus commits UR / CR to the
+// cluster, the just-committed values must also land on the caller's
+// in-memory ISVC snapshot. Pairs with MutateInstance mirror (per-Instance
+// fields) and reconciler.go's bumpCollisionCount mirror (CollisionCount) —
+// every status-write entry point owns the same post-write observability
+// contract.
 //
 // Without the mirror, a downstream caller that reads
 // p.ISVC.Status.Components[X].Lifecycle within the same reconcile
 // (coordination's latestRevisionHash, ops/create.go's
-// revisionHashForInstance, etc.) observes the stale pre-write values,
-// which is the operative fault mode for the A-2 SurgeThenDrain
-// orphan-hash drift symptom on the cluster.
+// revisionHashForInstance, etc.) observes the stale pre-write values, which
+// is the operative fault mode for the SurgeThenDrain orphan-hash drift
+// symptom on the cluster.
 func TestAggregateAndWriteStatus_MirrorsCommittedRevisionFieldsOntoInMemoryISVC(t *testing.T) {
 	resetExpectations(t)
 	// Single Instance already on the target revision and Phase=Ready —

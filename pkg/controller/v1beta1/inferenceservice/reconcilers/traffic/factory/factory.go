@@ -1,5 +1,5 @@
-// Package factory selects the active OEP-0011 traffic translator at
-// controller startup.
+// Package factory selects the active traffic translator at controller
+// startup.
 //
 // Exactly one Translator is active per controller process. The
 // selection rules (highest priority wins):

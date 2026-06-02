@@ -27,7 +27,7 @@ import (
 // Shared test fixtures used by every *_test.go in the omenative/ops
 // package. Originally lived in create_test.go before the per-Instance
 // Create state machine moved to pkg/controller/v1beta1/workload/ops
-// (part 2 slice 4b of N). Lifted here so the peer test files (restart,
+// (the workload-extraction refactor). Lifted here so the peer test files (restart,
 // delete, migrate, surge, timeouts, update) keep compiling after the
 // move; they shrink as each peer migrates to the workload package and
 // brings its own test scaffolding with it.
@@ -35,7 +35,7 @@ import (
 // minimalISVC builds an ISVC with the minimum metadata Create() needs.
 // findInstanceStatusForISVCTest is the test-local replacement for the
 // removed query.FindInstanceStatus. The workload-side query package no
-// longer takes a v1beta1.InferenceService handle (slice 7 boundary
+// longer takes a v1beta1.InferenceService handle (workload boundary
 // purge); adapters now scan their typed status surface directly.
 func findInstanceStatusForISVCTest(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) *v1beta1.OMENativeInstanceStatus {
 	if isvc == nil {
@@ -125,7 +125,7 @@ func resetExpectations(t *testing.T) {
 // Status().Update mirrors API-server behavior. Used by every *_test.go
 // in this package that constructs an ISVC + pod fixture set;
 // originally lived in delete_test.go before the per-Instance Delete
-// state machine moved to workload/ops (part 2 slice 4c of N).
+// state machine moved to workload/ops (the workload-extraction refactor).
 func newFakeClientWithDiscovery(t *testing.T, initObjs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()

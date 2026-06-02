@@ -178,15 +178,14 @@ func (b *HTTPRouteBuilder) buildEngineHTTPRoute(isvc *v1beta1.InferenceService) 
 		return nil, nil
 	}
 
-	// OEP-0011: the engine HTTPRoute is always named "<isvc>-engine",
-	// distinct from the top-level "<isvc>" HTTPRoute. Pre-OEP-0011 the
-	// engine route was named via PredictorServiceName which returns
-	// "<isvc>" — colliding with the top-level route's name and
-	// pointing at a backend Service that no longer exists (the engine
-	// Service is named "<isvc>-engine"). Using EngineServiceName for
-	// both the route name and the backend fixes both bugs and makes
-	// the engine externally addressable on its own subdomain even
-	// when a router is present.
+	// The engine HTTPRoute is always named "<isvc>-engine", distinct from the
+	// top-level "<isvc>" HTTPRoute. The legacy engine route was named via
+	// PredictorServiceName which returns "<isvc>" — colliding with the
+	// top-level route's name and pointing at a backend Service that no longer
+	// exists (the engine Service is named "<isvc>-engine"). Using
+	// EngineServiceName for both the route name and the backend fixes both
+	// bugs and makes the engine externally addressable on its own subdomain
+	// even when a router is present.
 	engineName := constants.EngineServiceName(isvc.Name)
 	prefix := b.pathPrefix(isvc, engineName)
 	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace), b.urlRewriteFilter()}
@@ -284,12 +283,11 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 			})
 			return nil, nil
 		}
-		// OEP-0011: align with the engine Service name produced by
-		// engine.go (defaultEngineName = isvc.Name + "-engine") rather
-		// than the legacy PredictorServiceName (returns isvc.Name).
-		// The PredictorServiceName path pointed at a backend Service
-		// that no longer exists in the Engine-architecture
-		// post-Predictor world.
+		// Align with the engine Service name produced by engine.go
+		// (defaultEngineName = isvc.Name + "-engine") rather than the legacy
+		// PredictorServiceName (returns isvc.Name). The PredictorServiceName
+		// path pointed at a backend Service that no longer exists in the
+		// Engine-architecture post-Predictor world.
 		serviceName = constants.EngineServiceName(isvc.Name)
 		port = EngineDefaultPort
 		timeout = DefaultTimeout

@@ -130,7 +130,7 @@ func (r *Router) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	// re-run after a Sequential / Ratio gate denial OR to poll an
 	// in-flight Update / Create. Discarding it strands the rollout
 	// until an unrelated watch event happens to fire another reconcile
-	// (the post-decoder Sequential stall, see PR #240 follow-up).
+	// (the post-decoder Sequential stall).
 	deploymentResult, err := r.reconcileDeployment(ctx, isvc, objectMeta, podSpec)
 	if err != nil {
 		return deploymentResult, err
@@ -175,10 +175,10 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		// cluster-wide --disable-ir-managed-omenative manager flag.
 		if irprojector.IsIRManagedComponent(r.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
 			// Resolve the authoritative ComponentAutoscaler from the
-			// ISVC → runtime → default chain (OEP-0013 §"Inheritance
-			// chain"). See engine dispatch for the full design —
-			// dispatches HPA / KEDA / external / none against the
-			// committed IR (always-on per Q7).
+			// ISVC → runtime → default chain. See engine dispatch for the
+			// full design — dispatches HPA / KEDA / external / none
+			// against the committed IR (autoscaler dispatch is always-on
+			// per Component).
 			resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(r.Runtime, isvc, v1beta1.RouterComponent)
 			ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
 				ISVC:               isvc,
@@ -193,7 +193,7 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			if err != nil {
 				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for router")
 			}
-			// Always-on per-IR autoscaler dispatch (OEP-0013 Q7).
+			// Autoscaler dispatch is always-on per InferenceReplica.
 			// See engine dispatch for the full owner-ref + scaleTargetRef
 			// rationale.
 			if err := autoscaler.DispatchForIRComponent(ctx, autoscaler.IRDispatchInput{

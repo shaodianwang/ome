@@ -127,8 +127,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	//     so the in-flight op converges. Without fall-through the
 	//     dispatcher loops indefinitely at the MigrateRequeueInterval and
 	//     the in-flight op never runs — the affinity-trigger-not-detected
-	//     deadlock; see
-	//     .claude/specs/2026-05-30-kind-test-walk/migrate-affinity-isvc-never-detected.md.
+	//     deadlock.
 	if plan.MigrationMode != MigrationModeNever && input.DetectMigrationRequest != nil {
 		uuid, req, sourceIdx, found, mderr := input.DetectMigrationRequest(ctx)
 		if mderr != nil {
@@ -298,8 +297,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		// All Updates that ran returned done=true (steady-state for those
 		// instances). Requeue without running Create so the next pass
 		// sees fresh ObservedState — see anyUpdateRan comment above for
-		// the bug #58 (X-2 bump-during-bump) corruption modes this guards
-		// against.
+		// the X-2 (bump-during-bump) corruption modes this guards against.
 		if anyUpdateRan {
 			return ctrl.Result{Requeue: true}, nil
 		}

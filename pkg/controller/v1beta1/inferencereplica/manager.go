@@ -30,11 +30,11 @@ import (
 //     path's pod watch on the ISVC controller).
 //   - ControllerRevisions (owned): re-enqueue on revision GC so the
 //     workload-side retention sweep doesn't fight a manual delete.
-//   - HorizontalPodAutoscaler (owned): re-enqueue when the OEP-0013
-//     dispatch-emitted HPA changes — the status writer mirrors
+//   - HorizontalPodAutoscaler (owned): re-enqueue when the dispatcher-
+//     emitted HPA changes — the status writer mirrors
 //     HPA.Status.Conditions onto the IR / ISVC status surface.
 //   - ScaledObject (owned): KEDA scheme is registered unconditionally
-//     per OEP-0013 Q6, so the Owns() is unconditional. Re-enqueue on
+//     so the Owns() is unconditional. Re-enqueue on
 //     ScaledObject status churn for the same status mirror.
 //
 // The parent InferenceService is NOT watched — the IR's owner ref to

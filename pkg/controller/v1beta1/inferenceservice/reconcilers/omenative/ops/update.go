@@ -1,9 +1,9 @@
 // Dispatch shim for Update — the per-Instance Update state machine
 // itself (in-place / recreate / surge variants) lives in
 // pkg/controller/v1beta1/workload/ops after the workload-extraction
-// refactor (part 2 slice 4f of N). update.go was the BIGGEST op move
-// and carried the SurgeThenDrain state machine; the workload-side body
-// is byte-for-byte equivalent with types swapped from v1beta1 to
+// refactor. update.go was the largest op move and carried the
+// SurgeThenDrain state machine; the workload-side body is
+// byte-for-byte equivalent with types swapped from v1beta1 to
 // workload-owned mirrors.
 //
 // The shim's only job is to build the workload.ReconcileInput +

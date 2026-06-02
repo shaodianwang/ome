@@ -1,4 +1,5 @@
-// Package traffic implements the OEP-0011 traffic translator.
+// Package traffic translates an InferenceService's traffic policy into
+// gateway-specific routing resources.
 //
 // The translator reads the operator's intent (TrafficSpec typed core +
 // ome.io/* annotation extension) from an InferenceService, resolves it

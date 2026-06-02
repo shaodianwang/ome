@@ -24,7 +24,7 @@ import (
 // ResolveComponentAutoscaler), the projected IR identity (for owner-ref
 // + scale-target), and the per-Component min/max replicas.
 //
-// Alpha (OEP-0013). The shape may change without notice.
+// Alpha API. The shape may change without notice.
 type DispatchParams struct {
 	// Client is the controller-runtime client used to Get / Create /
 	// Update / Delete the HPA + ScaledObject.
@@ -37,7 +37,7 @@ type DispatchParams struct {
 	Scheme *runtime.Scheme
 
 	// Owner is the OwnerReference stamped on every emitted HPA /
-	// ScaledObject. For the OEP-0013 IR-managed path it points at the
+	// ScaledObject. For the IR-managed path it points at the
 	// InferenceReplica so foreground GC cascades the autoscaler when
 	// the IR is deleted. Required — DispatchAutoscaler returns an
 	// error if Owner.UID is empty (defends against a caller wiring
@@ -53,7 +53,7 @@ type DispatchParams struct {
 	Name      string
 
 	// ScaleTargetRef is forwarded verbatim to the generated HPA /
-	// ScaledObject. For the OEP-0013 IR-managed path callers supply
+	// ScaledObject. For the IR-managed path callers supply
 	// `{ome.io/v1beta1, InferenceReplica, <ir-name>}` so the HPA /
 	// ScaledObject targets the IR's /scale subresource.
 	ScaleTargetRef autoscalingv2.CrossVersionObjectReference
@@ -61,8 +61,8 @@ type DispatchParams struct {
 	// Autoscaler is the resolved ComponentAutoscaler block — the output
 	// of autoscaler.ResolveComponentAutoscaler. nil is treated as
 	// Class=none (every OME-managed HPA / SO for this (Namespace, Name)
-	// is deleted). Q5: none + external are status-field twins and share
-	// the same reconciliation path.
+	// is deleted). NOTE: none + external are status-field twins and
+	// share the same reconciliation path.
 	Autoscaler *v1beta1.ComponentAutoscaler
 
 	// MinReplicas + MaxReplicas drive the corresponding bounds on the
@@ -73,13 +73,13 @@ type DispatchParams struct {
 }
 
 // DispatchAutoscaler reconciles the per-(IR, Component) autoscaler from
-// the resolved ComponentAutoscaler block. Q7 (locked 2026-05-29): always-on
-// per reconcile — the caller invokes DispatchAutoscaler unconditionally on
-// every Component reconcile. Deep-equal-on-Get inside the per-class
-// reconciler keeps the cost bounded (no-op when nothing diffs).
+// the resolved ComponentAutoscaler block. Always-on per reconcile — the
+// caller invokes DispatchAutoscaler unconditionally on every Component
+// reconcile. Deep-equal-on-Get inside the per-class reconciler keeps the
+// cost bounded (no-op when nothing diffs).
 //
-// Three-way dispatch on Autoscaler.Class (Q5: none + external are status-
-// field twins, both fall through to the "delete both" branch — the
+// Three-way dispatch on Autoscaler.Class (NOTE: none + external are
+// status-field twins, both fall through to the "delete both" branch — the
 // status writer distinguishes them via ManagedBy):
 //
 //   - hpa  → ensure the per-IR HPA exists; delete any pre-existing
@@ -101,7 +101,7 @@ type DispatchParams struct {
 // circuits (the create / update for the new class is skipped) so the
 // next reconcile pass retries the same sequence from the same state.
 //
-// Alpha (OEP-0013). The signature may change without notice.
+// Alpha API. The signature may change without notice.
 func DispatchAutoscaler(ctx context.Context, p DispatchParams) error {
 	if p.Client == nil {
 		return fmt.Errorf("DispatchAutoscaler: nil client")
@@ -135,11 +135,10 @@ func DispatchAutoscaler(ctx context.Context, p DispatchParams) error {
 		return ensureScaledObject(ctx, p)
 
 	default:
-		// Q5 twins: AutoscalerNone, AutoscalerExternal, and nil all
-		// converge here. Delete any OME-managed HPA + SO; the status
-		// writer is responsible for the surface-level distinction
-		// between "none" (no autoscaler at all) and "external"
-		// (operator-managed autoscaler).
+		// AutoscalerNone, AutoscalerExternal, and nil all converge here.
+		// Delete any OME-managed HPA + SO; the status writer is responsible
+		// for the surface-level distinction between "none" (no autoscaler at
+		// all) and "external" (operator-managed autoscaler).
 		if err := deleteHPAIfExists(ctx, p.Client, p.Namespace, p.Name); err != nil {
 			return fmt.Errorf("delete OME-managed HPA on class=%s (ns=%s, name=%s): %w", class, p.Namespace, p.Name, err)
 		}
@@ -150,11 +149,10 @@ func DispatchAutoscaler(ctx context.Context, p DispatchParams) error {
 	}
 }
 
-// autoscalerClass extracts the resolved Class, treating nil as none. Q5
-// folds external + none into the same dispatch branch (both => delete
-// both); we keep them as distinct AutoscalerClass values so the status
-// writer wired off the same resolved block can still emit the correct
-// ManagedBy.
+// autoscalerClass extracts the resolved Class, treating nil as none. NOTE:
+// external + none fold into the same dispatch branch (both => delete both);
+// we keep them as distinct AutoscalerClass values so the status writer wired
+// off the same resolved block can still emit the correct ManagedBy.
 func autoscalerClass(a *v1beta1.ComponentAutoscaler) v1beta1.AutoscalerClass {
 	if a == nil {
 		return v1beta1.AutoscalerNone
@@ -270,10 +268,10 @@ func deleteScaledObjectIfExists(ctx context.Context, c client.Client, namespace,
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		// Q6 (locked 2026-05-29): KEDA scheme is registered
-		// unconditionally at manager startup. IsNotRegistered is dead
-		// code at steady state, but keep the defensive guard so a
-		// rolling-uninstall-during-reconcile race doesn't panic.
+		// KEDA scheme is registered unconditionally at manager startup.
+		// IsNotRegistered is dead code at steady state, but we keep the
+		// defensive guard so a rolling-uninstall-during-reconcile race
+		// doesn't panic.
 		if runtime.IsNotRegisteredError(err) {
 			return nil
 		}

@@ -4,12 +4,12 @@
 //
 // Boundary: this package is a leaf. It depends on Kubernetes API
 // machinery and the workload package's own type set; the v1beta1
-// import was removed in slice 7 of the workload-extraction refactor
-// — adapters convert from CRD-typed status into workload.InstanceStatus
-// before calling CollectLiveRevisionNames. The labels stamped on
-// emitted CRs are taken from the caller-supplied revision.Key so the
-// same labels carry through the pod-selector composition the rest of
-// the workload pipeline does.
+// import was removed in the workload-extraction refactor — adapters
+// convert from CRD-typed status into workload.InstanceStatus before
+// calling CollectLiveRevisionNames. The labels stamped on emitted CRs
+// are taken from the caller-supplied revision.Key so the same labels
+// carry through the pod-selector composition the rest of the workload
+// pipeline does.
 //
 // Imports the audit subpackage solely to share the
 // MigrationRequestAnnotationPrefix constant — the controller-written
@@ -120,8 +120,8 @@ func Hash(template *corev1.PodSpec, templateMeta *metav1.ObjectMeta, collisionCo
 // image / env / resource bump triggers a new revision and a rollout. The
 // alternative — rendering the worker payload at create time without
 // hashing it — leaves worker-only spec changes silently un-rolled,
-// which is exactly the split-brain failure OEP-0007 §"Update Strategy"
-// requires the revision pipeline to prevent.
+// which violates the revision pipeline's contract: every template
+// change must produce a new revision and trigger a rollout.
 //
 // ownerUID is folded into the hash so two owners with the same name +
 // spec — produced by delete-and-recreate cycles — emit distinct CR names.

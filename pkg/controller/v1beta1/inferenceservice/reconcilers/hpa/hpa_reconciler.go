@@ -34,7 +34,7 @@ type HPAReconciler struct {
 // ComponentExtensionSpec:
 //
 //   - Bounds: ComponentExtensionSpec.MinReplicas / MaxReplicas (the
-//     canonical replica bound location; OEP-0013 keeps these here).
+//     canonical replica bound location).
 //   - Metric: Autoscaler.HPA.Metrics when set, else CPU=80% default.
 //     ome.io/targetUtilizationPercentage annotation overrides the
 //     default CPU target.
@@ -55,10 +55,10 @@ func NewHPAReconciler(client client.Client,
 // NewHPAReconcilerForTarget builds an HPAReconciler whose generated HPA
 // targets the caller-supplied scaleTargetRef (typically an InferenceReplica
 // for the IR-managed path). hpaSpec carries the resolved HPAAutoscaler
-// block (resolver output); nil / empty Metrics expands to the OEP-0013
-// default of a single CPU=80% Resource metric per README 731 + 1148.
+// block (resolver output); nil / empty Metrics expands to the default of a
+// single CPU=80% Resource metric.
 //
-// It is the entry point for OEP-0013's per-IR dispatch and stays free of
+// It is the entry point for the IR-managed dispatch and stays free of
 // any ComponentExtensionSpec concerns so the two callers are completely
 // decoupled.
 func NewHPAReconcilerForTarget(
@@ -86,7 +86,7 @@ func NewHPAReconcilerForTarget(
 // hpaSpec / minReplicas / maxReplicas come from the resolver or the Raw
 // Deployment shim (createHPAFromComponentExt). When hpaSpec is nil or
 // hpaSpec.Metrics is empty the generator emits a single CPU=80% Resource
-// metric per the OEP-0013 default contract (README 731, 1148).
+// metric (the default).
 func createHPA(
 	componentMeta metav1.ObjectMeta,
 	scaleTargetRef autoscalingv2.CrossVersionObjectReference,

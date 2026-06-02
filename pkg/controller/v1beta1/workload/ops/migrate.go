@@ -44,11 +44,10 @@ const MigrateRequeueInterval = 5 * time.Second
 //     persist Completed entry — in that order (crash window if
 //     reversed).
 //
-// SINGLE-POD ONLY: multi-pod migration is OEP-deferred — surge sizing
-// must mirror the source's full Runner layout and satisfy the gang
-// readiness gate before drain proceeds. Rejected up-front with a
-// Failed audit row so the requester observes the rejection within
-// its SLA.
+// SINGLE-POD ONLY: multi-pod migration is deferred — surge sizing must
+// mirror the source's full Runner layout and satisfy the gang readiness
+// gate before drain proceeds. Rejected up-front with a Failed audit row
+// so the requester observes the rejection within its SLA.
 //
 // Returns (done, accepted, err):
 //   - done=true: migration finished (success or terminal failure);
@@ -63,8 +62,7 @@ const MigrateRequeueInterval = 5 * time.Second
 //     because of an in-flight Update/Restart/Create). Caller SHOULD
 //     fall through to Update/Create/etc. so the in-flight op converges;
 //     otherwise the dispatcher loops indefinitely in the Migrate-defer
-//     branch and the source never reaches Ready (silent deadlock — see
-//     .claude/specs/2026-05-30-kind-test-walk/migrate-affinity-isvc-never-detected.md).
+//     branch and the source never reaches Ready (silent deadlock).
 func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, requestUUID string, req *audit.MigrationRequest) (done bool, accepted bool, err error) {
 	if deps.Client == nil {
 		return false, false, fmt.Errorf("Migrate: nil client")

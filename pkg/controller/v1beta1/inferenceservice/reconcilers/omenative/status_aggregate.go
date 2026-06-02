@@ -38,7 +38,7 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 	// v1component is the v1beta1.ComponentType form of plan.Component for
 	// the v1beta1-typed status / event / map-index sites in this file.
 	// plan.Component itself is the workload-side ComponentType after the
-	// workload boundary purge (slice 7 of N).
+	// workload package moved to its own typed enums.
 	v1component := v1beta1convert.ComponentTypeFromWorkload(plan.Component)
 
 	pods, err := query.ListOMENativePodsByName(ctx, p.Client, p.ISVC.Namespace, p.ISVC.Name, plan.Component)
@@ -55,8 +55,8 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 
 	// Re-read + recompute on each retry so a parallel reconciler that
 	// added/removed an Instance doesn't get its bookkeeping clobbered.
-	// Captured outside the closure so the post-commit retention sweep
-	// sees the names that actually committed.
+	// Captured outside the closure so the retention sweep after the
+	// write succeeds sees the names that actually committed.
 	var liveRevisionNames []string
 	isvcGone := false
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -183,9 +183,9 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		}
 		// Mirror the just-committed Component-level revision fields
 		// (UpdateRevision, CurrentRevision) onto the cached ISVC the
-		// caller is reading. Same shape as PR #246's MutateInstance
-		// mirror and bumpCollisionCount's CollisionCount mirror in
-		// reconciler.go: any downstream caller that reads
+		// caller is reading. Same shape as MutateInstance mirror and
+		// bumpCollisionCount's CollisionCount mirror in reconciler.go:
+		// any downstream caller that reads
 		// p.ISVC.Status.Components[X].Lifecycle within the same
 		// reconcile (coordination's latestRevisionHash, ops/create.go's
 		// revisionHashForInstance, etc.) sees the post-write state, not
@@ -193,9 +193,9 @@ func AggregateAndWriteStatus(ctx context.Context, p ReconcileParams, plan Compon
 		// Without the mirror, a future code path that fires AFTER
 		// AggregateAndWriteStatus would observe a stale
 		// UpdateRevision / CurrentRevision and could re-compute a
-		// downstream hash off the wrong value, surfacing as the A-2
-		// orphan-hash drift symptom (status field references a CR
-		// that no longer matches what the controller just decided).
+		// downstream hash off the wrong value, surfacing as orphan-hash
+		// drift (status field references a CR that no longer matches
+		// what the controller just decided).
 		mirrorComponentRevisionFields(p.ISVC, v1component, cs.Lifecycle)
 		return nil
 	})
@@ -282,7 +282,7 @@ var StuckPodFailureGracePeriod = 60 * time.Second
 // computed for counters) so we don't re-list pods. Walks
 // p.ISVC.Status.Components after the AggregateAndWriteStatus retry has
 // committed, so the InstanceStatus.Phase we read is the post-counters
-// version (no pre-commit / post-commit race).
+// version (no write-ordering race).
 func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan ComponentPlan, byIndex map[int32][]*corev1.Pod) error {
 	if p.ISVC == nil {
 		return nil
@@ -349,7 +349,7 @@ func escalateStuckPodFailures(ctx context.Context, p ReconcileParams, plan Compo
 // without this refresh the conditions written by the AggregateAndWriteStatus
 // retry loop reflect the pre-escalation state and operators see
 // `Progressing=True/RolloutInProgress` on a rollout that has terminally
-// failed (bug #52).
+// failed.
 //
 // Fast-path skip: the escalator mirrors any Phase mutation back onto
 // p.ISVC via status.MutateInstance. We read off the in-memory cache
@@ -557,19 +557,18 @@ func componentLabelSelectorString(isvc string, component v1beta1.ComponentType) 
 // caller doesn't need to pre-allocate when this is the first
 // AggregateAndWriteStatus pass for a brand-new Component.
 //
-// Bug context: the A-2 SurgeThenDrain orphan-hash symptom (task #56)
-// observed UpdateRevision and CurrentRevision pointing at hashes with
-// no backing ControllerRevision. The most likely fault mode is a
-// downstream caller that reads UR/CR from p.ISVC (stale, pre-write)
-// while AggregateAndWriteStatus had already written different values to
-// the apiserver — the parent reconciler's updateStatus flush then
-// commits the stale in-memory values via desiredService.Status,
-// overwriting the OMENative reconciler's write. The parent's
-// mergeLifecycleStatus restores the OMENative substatus from
-// the post-conflict re-read, so in practice this race is closed there
-// — but mirroring the values onto p.ISVC also closes the in-reconcile
-// observability gap and matches the precedent set by PR #246 for
-// per-Instance fields.
+// Bug context: the SurgeThenDrain orphan-hash symptom observed
+// UpdateRevision and CurrentRevision pointing at hashes with no backing
+// ControllerRevision. The most likely fault mode is a downstream caller
+// that reads UR/CR from p.ISVC (stale, pre-write) while
+// AggregateAndWriteStatus had already written different values to the
+// apiserver — the parent reconciler's updateStatus flush then commits
+// the stale in-memory values via desiredService.Status, overwriting the
+// OMENative reconciler's write. The parent's mergeLifecycleStatus
+// restores the OMENative substatus from the post-conflict re-read, so
+// in practice this race is closed there — but mirroring the values onto
+// p.ISVC also closes the in-reconcile observability gap and matches the
+// precedent set by MutateInstance for per-Instance fields.
 func mirrorComponentRevisionFields(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, src *v1beta1.LifecycleStatus) {
 	if isvc == nil || src == nil {
 		return

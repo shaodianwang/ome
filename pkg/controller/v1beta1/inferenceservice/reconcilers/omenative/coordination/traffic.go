@@ -103,8 +103,8 @@ func NormalizeWeights(in []RevisionWeight) []RevisionWeight {
 
 // ComputeWeightsFromPods produces a RevisionWeight slice from observed
 // per-revision pod counts. New-vs-old apportioning is the natural
-// "what fraction of capacity is the new revision" — equivalent to the
-// OEP's producer contract.
+// "what fraction of capacity is the new revision" — mirrors the traffic
+// producer contract.
 //
 // totals must be the total live pod count for the Component (any
 // revision); a zero total returns nil.

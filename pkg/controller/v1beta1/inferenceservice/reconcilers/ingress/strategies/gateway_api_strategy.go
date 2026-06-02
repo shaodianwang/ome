@@ -89,10 +89,9 @@ func (g *GatewayAPIStrategy) Reconcile(ctx context.Context, isvc *v1beta1.Infere
 
 		// The default BTP (ConsistentHash on configured headers) is
 		// emitted here only when the operator has NOT declared any
-		// OEP-0011 traffic intent. When intent is declared, the
-		// per-ISVC traffic.Reconciler owns the BTP — both
-		// reconcilers writing the same resource name would fight on
-		// every loop.
+		// traffic intent. When intent is declared, the per-ISVC
+		// traffic.Reconciler owns the BTP — both reconcilers writing
+		// the same resource name would fight on every loop.
 		ownsBackendTrafficPolicy := !traffic.Resolve(isvc).HasIntent()
 		if ownsBackendTrafficPolicy {
 			if err := g.reconcileBackendTrafficPolicy(ctx, isvc); err != nil {
@@ -235,9 +234,9 @@ func (g *GatewayAPIStrategy) reconcileBackendTrafficPolicy(ctx context.Context, 
 }
 
 func (g *GatewayAPIStrategy) checkHTTPRouteStatuses(ctx context.Context, isvc *v1beta1.InferenceService) error {
-	// OEP-0011 C1: the engine HTTPRoute is always emitted as
-	// "<isvc>-engine" (distinct from the top-level "<isvc>"); these
-	// lookups must match the builder-produced names.
+	// The engine HTTPRoute is always emitted as "<isvc>-engine" (distinct
+	// from the top-level "<isvc>"); these lookups must match the
+	// builder-produced names.
 	components := []struct {
 		name      string
 		condition func() bool
@@ -365,7 +364,7 @@ func (g *GatewayAPIStrategy) isHTTPRouteReady(httpRouteStatus gatewayapiv1.HTTPR
 }
 
 // getComponentType returns the component type name for display purposes.
-// OEP-0011 C1: engine HTTPRoute is "<isvc>-engine", top-level is "<isvc>".
+// Engine HTTPRoute is "<isvc>-engine", top-level is "<isvc>".
 func (g *GatewayAPIStrategy) getComponentType(name string, isvc *v1beta1.InferenceService) string {
 	switch name {
 	case constants.EngineServiceName(isvc.Name): // "<isvc>-engine"

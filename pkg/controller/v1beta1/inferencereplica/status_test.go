@@ -476,16 +476,16 @@ func withIRStuckPodGracePeriod(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { workload.StuckPodFailureGracePeriod = prev })
 }
 
-// TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed is the
-// bug #52 reproduction on the IR-managed path: a SurgeThenDrain surge
-// pod stuck in ImagePullBackOff past StuckPodFailureGracePeriod must
-// escalate the Instance Phase to Failed, the same way the omenative
-// direct path does via PR #314. Without this fix, the production
-// cluster observes the Instance stuck at Phase=Updating for the full
-// 30-minute InstanceReadyTimeout (and even past it, because the IR
-// controller doesn't wire ExpireOperationsIfDeadlinePassed either),
-// so the parent ISVC's coordination layer never sees Component.Failed
-// and the group sits at Surging indefinitely.
+// TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed reproduces
+// the IR-managed-path failure where a SurgeThenDrain surge pod stuck in
+// ImagePullBackOff past StuckPodFailureGracePeriod must escalate the
+// Instance Phase to Failed, the same way the omenative direct path does.
+// Without this fix, the production cluster observes the Instance stuck at
+// Phase=Updating for the full 30-minute InstanceReadyTimeout (and even
+// past it, because the IR controller doesn't wire
+// ExpireOperationsIfDeadlinePassed either), so the parent ISVC's
+// coordination layer never sees Component.Failed and the group sits at
+// Surging indefinitely.
 //
 // Setup mirrors the operator-reported real-cluster shape:
 //   - Instance idx=0 carries Phase=Updating with an in-flight
@@ -557,7 +557,7 @@ func TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed(t *testing.T) {
 	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(1))
 	g.Expect(got.Status.InstanceStatuses[0].Phase).
 		To(gomega.Equal(v1beta1.OMENativeInstanceFailed),
-			"IR aggregator must run the workload stuck-pod escalator: surge pod stuck in ImagePullBackOff past grace must flip Instance Phase to Failed (bug #52 IR-path equivalent)")
+			"IR aggregator must run the workload stuck-pod escalator: surge pod stuck in ImagePullBackOff past grace must flip Instance Phase to Failed")
 	// Operation is preserved as the breadcrumb operators read to find
 	// which step wedged.
 	g.Expect(got.Status.InstanceStatuses[0].Operation).NotTo(gomega.BeNil(),

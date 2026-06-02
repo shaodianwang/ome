@@ -252,11 +252,10 @@ func (r *Reconciler) applyPolicy(ctx context.Context, isvc *v1beta1.InferenceSer
 		return fmt.Errorf("get backend policy %s: %w", key, err)
 	}
 
-	// ConflictingPolicy guard (OEP-0011 alpha-phase behavior):
-	// if the existing object isn't owned by this InferenceService,
-	// refuse to overwrite. This matches the README's coexistence
-	// contract: alpha defers to hand-authored policies of the same
-	// name; beta warns; GA rejects without an ack annotation.
+	// ConflictingPolicy guard: if the existing object isn't owned by
+	// this InferenceService, refuse to overwrite. This defers to hand-
+	// authored policies of the same name (alpha-phase behavior); later
+	// phases will warn (beta) or reject without an ack annotation (GA).
 	if !ownedBy(existingObj, isvc) {
 		return fmt.Errorf(
 			"%w: %s already exists with %s",

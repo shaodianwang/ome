@@ -87,7 +87,7 @@ func MapToClusterBaseModels(ctx context.Context, kubeClient client.Client, log l
 }
 
 // pvcSpecMatches reports whether spec references the PVC identified
-// by (pvcName, pvcNamespace) per OEP-0004's URI shape. Namespaced
+// by (pvcName, pvcNamespace). pvc:// URI format is pvc://namespace/name. Namespaced
 // callers scope their List by namespace; cluster-scoped callers don't.
 func pvcSpecMatches(spec *v1beta1.BaseModelSpec, pvcName, pvcNamespace string, isClusterScoped bool) bool {
 	if !IsPVCStorage(spec) {

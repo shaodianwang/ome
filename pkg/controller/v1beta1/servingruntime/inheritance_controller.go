@@ -27,7 +27,7 @@ import (
 // +kubebuilder:rbac:groups=ome.io,resources=servingruntimes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=ome.io,resources=servingruntimes/status,verbs=get;update;patch
 
-// InheritanceReconciler resolves OEP-0012 inheritance for both
+// InheritanceReconciler resolves runtime inheritance for both
 // cluster- and namespace-scoped runtimes. Reconcile branches on
 // request namespace: empty → ClusterServingRuntime, set →
 // ServingRuntime in that namespace.

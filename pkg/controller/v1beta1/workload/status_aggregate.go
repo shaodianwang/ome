@@ -55,10 +55,10 @@ var terminalPullFailureReasons = map[string]struct{}{
 	// with broken entrypoint. Permanent until the spec changes — even
 	// if the pod briefly transitions through Running between attempts,
 	// the kubelet's stable steady-state for a wedged container is
-	// Waiting{Reason=CrashLoopBackOff}. Closes the bug #52 follow-up
-	// where a bumped image that pulls cleanly but crashes immediately
-	// was not classified as terminal and the rollout sat at
-	// Phase=Updating for the full 30-minute InstanceReadyTimeout.
+	// Waiting{Reason=CrashLoopBackOff}. Closes the follow-up where a
+	// bumped image that pulls cleanly but crashes immediately was not
+	// classified as terminal and the rollout sat at Phase=Updating for
+	// the full 30-minute InstanceReadyTimeout.
 	"CrashLoopBackOff": {},
 	// RunContainerError signals the container runtime rejected the
 	// start (corrupt manifest, missing required shared libraries,

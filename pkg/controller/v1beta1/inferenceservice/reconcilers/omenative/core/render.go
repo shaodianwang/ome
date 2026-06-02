@@ -18,8 +18,8 @@ import (
 // coordination.InjectPeerEnv hook so per-Component peer DNS env vars
 // land on each rendered pod.
 //
-// Adapter callers in commit 9 skip this wrapper and pass the hook
-// directly via Deps.
+// Adapter callers in future refactors skip this wrapper and pass the
+// hook directly via Deps.
 func RenderWithRevisionForISVC(
 	p ReconcileParams,
 	template *corev1.PodSpec,
@@ -100,7 +100,7 @@ func isvcRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
 // WouldOverlayConflictForISVC is the (PodSpec, *MigrationOverlay)
 // wrapper around workload/ops.WouldOverlayConflictWithNodeAffinity.
 // Provided for the legacy ops/migrate.go callers; adapter callers in
-// commit 9 use the workload form directly.
+// future refactors use the workload form directly.
 func WouldOverlayConflictForISVC(spec *corev1.PodSpec, overlay *workload.MigrationOverlay) bool {
 	return ops.WouldOverlayConflictWithNodeAffinity(spec, overlay)
 }

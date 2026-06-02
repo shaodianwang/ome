@@ -155,8 +155,8 @@ func TestRender_Labels(t *testing.T) {
 
 // TestRender_SinglePod_OmitsPodGroupLabel pins that single-pod
 // Instances do NOT carry the scheduler-plugins pod-group label. The
-// OEP-0007 contract is clear: no PodGroup, no gang — and stamping the
-// label without a matching PodGroup would put the scheduler-plugins
+// gang-scheduling contract is clear: no PodGroup, no gang — and stamping
+// the label without a matching PodGroup would put the scheduler-plugins
 // coscheduler into a wait-for-non-existent-gang state.
 func TestRender_SinglePod_OmitsPodGroupLabel(t *testing.T) {
 	plan, inst, runner := singlePodPlan()
@@ -432,9 +432,9 @@ func TestRender_OMEEnvVarsInEveryContainer(t *testing.T) {
 // OME_LEADER_ADDRESS points at itself so leader-side code that reads the
 // var to identify the gang head sees the same value as workers.
 //
-// Address shape per OEP-0007 §"Service Discovery" + sign-off answer #1:
-// short form <pod-name>.<headless-service>; cluster DNS search path
-// resolves it the same as the fully qualified <pod>.<headless>.<ns>.svc.<cluster-domain>.
+// Address shape: short form <pod-name>.<headless-service>; cluster DNS
+// search path resolves it the same as the fully qualified
+// <pod>.<headless>.<ns>.svc.<cluster-domain>.
 func TestRender_MultiPod_LeaderEnvVarsForLeader(t *testing.T) {
 	plan, inst, runners := multiPodPlan(2)
 	leader := runners[0]

@@ -64,10 +64,9 @@ func NewKEDAReconciler(
 // InferenceReplica for the IR-managed path). kedaSpec carries the
 // resolved KedaAutoscaler block (resolver output); Triggers, Advanced,
 // PollingInterval, CooldownPeriod, IdleReplicaCount, and Fallback are all
-// forwarded verbatim to the ScaledObject spec per OEP-0013 README
-// 678-706.
+// forwarded verbatim to the ScaledObject spec.
 //
-// It is the entry point for OEP-0013's per-IR dispatch and stays free of
+// It is the entry point for the IR-managed dispatch and stays free of
 // any ComponentExtensionSpec concerns so the two callers are completely
 // decoupled.
 //
@@ -98,12 +97,11 @@ func NewKEDAReconcilerForTarget(
 //
 // kedaSpec / minReplicas / maxReplicas come from the resolver or the Raw
 // Deployment shim (createScaledObjectFromComponentExt). When kedaSpec is
-// non-nil the Triggers, Advanced, PollingInterval,
-// CooldownPeriod, IdleReplicaCount, and Fallback fields are all forwarded
-// verbatim per OEP-0013 README 678-706. When kedaSpec is nil or
-// kedaSpec.Triggers is empty the generated ScaledObject ends up with no
-// triggers; Reconcile() then skips the apply to avoid creating an invalid
-// (zero-trigger) ScaledObject.
+// non-nil the Triggers, Advanced, PollingInterval, CooldownPeriod,
+// IdleReplicaCount, and Fallback fields are all forwarded verbatim. When
+// kedaSpec is nil or kedaSpec.Triggers is empty the generated ScaledObject
+// ends up with no triggers; Reconcile() then skips the apply to avoid
+// creating an invalid (zero-trigger) ScaledObject.
 func createScaledObject(
 	componentMeta metav1.ObjectMeta,
 	scaleTargetRef kedav1.ScaleTarget,
@@ -237,8 +235,8 @@ func shouldDeleteScaledObject(desired *kedav1.ScaledObject) bool {
 }
 
 // shouldCreateScaledObject determines if the ScaledObject should be created.
-// Phase 1: require at least one trigger; otherwise skip apply to avoid
-// creating an invalid (zero-trigger) ScaledObject.
+// Require at least one trigger; otherwise skip apply to avoid creating an
+// invalid (zero-trigger) ScaledObject.
 func shouldCreateScaledObject(desired *kedav1.ScaledObject) bool {
 	if len(desired.Spec.Triggers) == 0 {
 		return false

@@ -32,7 +32,8 @@ import (
 // status.components.<comp>.{autoscaler,scaleTargetRef}. The scaleTargetRef
 // return value is a deep copy of the input so the caller can mutate freely.
 //
-// Three-way ManagedBy mapping (Q5: none and external are status-field twins):
+// Three-way ManagedBy mapping (NOTE: none and external are status-field
+// twins):
 //
 //   - resolvedAutoscaler == nil           → ManagedBy=none
 //   - resolvedAutoscaler.Class == hpa     → ManagedBy=ome (try mirror HPA)
@@ -60,7 +61,7 @@ import (
 // the static fields (Class / ManagedBy / SpecSource) only. Useful for unit
 // tests that exercise the mapping logic without a live client.
 //
-// Alpha (OEP-0013). The signature may change without notice.
+// Alpha API. The signature may change without notice.
 func WriteAutoscalerStatus(
 	ctx context.Context,
 	cli client.Client,
@@ -117,8 +118,8 @@ func resolvedClass(a *v1beta1.ComponentAutoscaler) v1beta1.AutoscalerClass {
 }
 
 // managedByForClass maps the resolved AutoscalerClass to the operator-visible
-// ManagedBy field per Q5: hpa + keda => ome (OME owns + reconciles); external
-// => external (operator owns); none / unknown => none.
+// ManagedBy field: hpa + keda => ome (OME owns + reconciles); external =>
+// external (operator owns); none / unknown => none.
 func managedByForClass(class v1beta1.AutoscalerClass) v1beta1.AutoscalerManagedBy {
 	switch class {
 	case v1beta1.AutoscalerHPA, v1beta1.AutoscalerKEDA:
@@ -126,7 +127,7 @@ func managedByForClass(class v1beta1.AutoscalerClass) v1beta1.AutoscalerManagedB
 	case v1beta1.AutoscalerExternal:
 		return v1beta1.AutoscalerManagedByExternal
 	default:
-		// Q5 + defensive fallback: AutoscalerNone, "", and any unrecognized
+		// Defensive fallback: AutoscalerNone, "", and any unrecognized
 		// value all surface as ManagedBy=none. We refuse to claim ownership
 		// for a Class value we don't know how to dispatch.
 		return v1beta1.AutoscalerManagedByNone
@@ -169,8 +170,8 @@ func mirrorHPAStatus(ctx context.Context, cli client.Client, namespace, name str
 // there. Both lookups tolerate NotFound (transient or unwired state).
 //
 // NotRegistered errors on the SO Get are swallowed too: if the cluster
-// hasn't installed KEDA but somebody resolved class=keda upstream (Q6:
-// shouldn't happen at steady state because dispatch validates earlier),
+// hasn't installed KEDA but somebody resolved class=keda upstream
+// (shouldn't happen at steady state because dispatch validates earlier),
 // we still want the parent reconcile to make forward progress.
 func mirrorScaledObjectStatus(ctx context.Context, cli client.Client, namespace, name string, status *v1beta1.ComponentAutoscalerStatus) error {
 	soName := utils.GetScaledObjectName(name)
@@ -180,7 +181,7 @@ func mirrorScaledObjectStatus(ctx context.Context, cli client.Client, namespace,
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		// Q6: KEDA is registered unconditionally at manager startup; this
+		// KEDA is registered unconditionally at manager startup; this
 		// branch is defensive against a rolling-uninstall race.
 		if runtime.IsNotRegisteredError(err) {
 			return nil

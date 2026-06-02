@@ -442,11 +442,9 @@ func TestComputeTransition_SequentialNoSoakRunsImmediately(t *testing.T) {
 }
 
 // TestComputeSurgeBudgetWithRatio_UsesServingPodsBaseline pins the
-// fix for the spurious RatioSkewRejected event spam at rollout start
-// (`.claude/specs/2026-05-30-kind-test-walk/
-// ratiobalanced-bluegreen-deadlock-no-progress.md`). The function MUST
-// project against live serving capacity (ServingPods), NOT against
-// NewRevisionPods which is zero before the first surge lands.
+// fix for the spurious RatioSkewRejected event spam at rollout start.
+// The function MUST project against live serving capacity (ServingPods),
+// NOT against NewRevisionPods which is zero before the first surge lands.
 //
 // Without populating state.Serving the EvaluateSurge call falls back
 // to NewPods={Engine:0, Decoder:0} at rollout start, and pairwise

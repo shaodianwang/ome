@@ -68,9 +68,9 @@ var terminalPullFailureReasons = map[string]struct{}{
 	// per-pod cap (~5 minutes between attempts). Common operator-
 	// reported triggers: bad command-line args, missing config, image
 	// with broken entrypoint. Permanent until the spec changes.
-	// Closes bug #52: a bumped image that pulls cleanly but crashes
-	// immediately was not classified as terminal and the rollout sat
-	// at Phase=Updating for the full 30-minute InstanceReadyTimeout.
+	// Without this escalation, a bumped image that pulls cleanly but
+	// crashes immediately would sit at Phase=Updating for the full
+	// 30-minute InstanceReadyTimeout.
 	"CrashLoopBackOff": {},
 	// RunContainerError signals the container runtime rejected the
 	// start (corrupt manifest, missing required shared libraries,

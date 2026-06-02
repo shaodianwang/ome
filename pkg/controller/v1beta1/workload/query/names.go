@@ -32,7 +32,7 @@ func HeadlessServiceName(isvc string, component workload.ComponentType) string {
 // The Service selects all OMENative pods for the Component regardless
 // of revision; it is the cross-revision aggregate ingress target. The
 // per-revision Services (PerRevisionServiceName) remain available for
-// the OEP-0011 weighted-routing path.
+// the weighted-routing path.
 func StableServiceName(isvc string, component workload.ComponentType) string {
 	return fmt.Sprintf("%s-%s", isvc, component)
 }

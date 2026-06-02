@@ -24,8 +24,8 @@ type pinResult struct {
 }
 
 // resolvePinnedRuntime fetches the runtime spec via the
-// ControllerRevision pin (OEP-0014 Phase 1). Called only when
-// spec.runtime.autoSync is false.
+// ControllerRevision pin. Called only when spec.runtime.autoSync is
+// false.
 //
 //   - First reconcile (no PinnedRevisionName yet) → resolve live
 //     spec, find-or-create a revision, save the pin.

@@ -368,20 +368,19 @@ func NewTerminalEntry(prev Entry, phase, outcome string) Entry {
 	return out
 }
 
-// Migration capacity defaults from OEP §5.4. Cluster-wide caps that
-// gate Alfred or any other automated migration caller from flooding
-// the controller's destructive-action pipeline with too many concurrent
-// or hourly requests.
+// Migration capacity defaults. Cluster-wide caps that gate Alfred or
+// any other automated migration caller from flooding the controller's
+// destructive-action pipeline with too many concurrent or hourly requests.
 const (
 	// DefaultInFlightCap is the maximum number of Started (not yet
 	// terminal) migration UUIDs in the audit ledger before new requests
-	// are RateLimited. Same as OEP §5.4 default of 3.
+	// are RateLimited. Default of 3.
 	DefaultInFlightCap = 3
 
 	// DefaultPerHourCap is the maximum number of NEWLY Started migration
 	// UUIDs in the trailing hour. Older ledger entries (Started or
-	// terminal) are still counted by their StartedAt timestamp. OEP §5.4
-	// default of 10.
+	// terminal) are still counted by their StartedAt timestamp. Default
+	// of 10.
 	DefaultPerHourCap = 10
 )
 

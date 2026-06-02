@@ -35,7 +35,7 @@ func newStatusTestScheme(t *testing.T) *runtime.Scheme {
 }
 
 // TestWriteAutoscalerStatus_ManagedByMatrix pins the three-way mapping
-// Class → ManagedBy specified in OEP-0013 + Q5:
+// Class → ManagedBy:
 //
 //   - nil resolved block               → ManagedBy=none
 //   - Class=hpa | keda                 → ManagedBy=ome

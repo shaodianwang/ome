@@ -68,16 +68,16 @@ func surgeStuckPodEnv(t *testing.T, podAge time.Duration, reason string) (*v1bet
 	return isvc, oldPod, surgePod
 }
 
-// TestSurgeUpdate_CrashLoopBackOff_MarksInstanceFailed pins the bug #52
-// gap: a surge pod that pulls successfully but then crashes immediately
-// (kubelet flips it into CrashLoopBackOff) is just as wedged as one
-// stuck in ImagePullBackOff — operators cannot recover without a spec
-// change, and waiting 30 minutes for the InstanceReadyTimeout deadline
-// is the wrong UX. CrashLoopBackOff must escalate the Instance to
-// Phase=Failed within the same grace window the pull-failure reasons
-// honor. Prior to the fix the escalator's terminal-reason set covered
-// only the pull-side failures; pods that crash after a successful pull
-// fall through the slow-path 30-min deadline.
+// TestSurgeUpdate_CrashLoopBackOff_MarksInstanceFailed pins the gap: a
+// surge pod that pulls successfully but then crashes immediately (kubelet
+// flips it into CrashLoopBackOff) is just as wedged as one stuck in
+// ImagePullBackOff — operators cannot recover without a spec change, and
+// waiting 30 minutes for the InstanceReadyTimeout deadline is the wrong
+// UX. CrashLoopBackOff must escalate the Instance to Phase=Failed within
+// the same grace window the pull-failure reasons honor. Prior to the fix
+// the escalator's terminal-reason set covered only the pull-side failures;
+// pods that crash after a successful pull fall through the slow-path
+// 30-min deadline.
 func TestSurgeUpdate_CrashLoopBackOff_MarksInstanceFailed(t *testing.T) {
 	resetExpectations(t)
 	withStuckPodGracePeriod(t, 1*time.Second)
@@ -154,8 +154,8 @@ func TestSurgeUpdate_ImagePullBackOff_MarksInstanceFailed(t *testing.T) {
 		t.Errorf("Phase: got %q want Failed (surge pod ImagePullBackOff past grace should fast-fail)", s.Phase)
 	}
 	// Operation must be preserved so operators can see WHAT was in flight
-	// (the OEP-0007.2 contract — the breadcrumb tells them which step
-	// wedged, distinct from the InstanceFailed event's pod-name detail).
+	// (the breadcrumb tells them which step wedged, distinct from the
+	// InstanceFailed event's pod-name detail).
 	if s.Operation == nil {
 		t.Fatalf("Operation must be preserved on stuck-pod escalation; got nil")
 	}
@@ -256,8 +256,8 @@ func TestSurgeUpdate_NoOperation_NoEscalation(t *testing.T) {
 }
 
 // TestSurgeUpdate_WedgedSurgePod_NoTransientPhase_EscalatesFailed pins
-// the bad-image (bad_image_kind) follow-up scenario (task #52): the
-// surge pod is stuck in
+// the bad-image (bad_image_kind) follow-up scenario: the surge pod is
+// stuck in
 // ImagePullBackOff but the InstanceStatus has somehow drifted out of
 // the {Creating, Updating, Restarting, Migrating} transient set —
 // Phase=Ready with Operation=nil — even though a pod whose
@@ -268,7 +268,7 @@ func TestSurgeUpdate_NoOperation_NoEscalation(t *testing.T) {
 // CurrentRevision in the Component's view) because no Component
 // observed Failed and no RolloutInFlight.
 //
-// The original PR #257 escalator's guard (Operation != nil AND Phase in
+// The original escalator's guard (Operation != nil AND Phase in
 // transient set) is correct for the in-flight surge path it was
 // designed for, but misses this wedged-state recovery case. The fix
 // loosens the guard to ALSO escalate when a stuck pod's revision-hash
@@ -396,13 +396,12 @@ func TestSurgeUpdate_WedgedSurgePod_HashMatchesCurrent_NoEscalation(t *testing.T
 }
 
 // TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd is the
-// bug #52 end-to-end repro: AggregateAndWriteStatus (escalator) followed
-// by coordination.Reconcile must flip the group's Phase to Failed AND
-// stamp the RolloutCoordinationReady=False/Reason=Failed condition on
-// the parent ISVC. Without the full chain working, operators reported
-// the group sitting at Idle (or RolloutInProgress) for the full
-// 30-minute InstanceReadyTimeout even though the surge pod was wedged
-// from second 5.
+// end-to-end repro: AggregateAndWriteStatus (escalator) followed by
+// coordination.Reconcile must flip the group's Phase to Failed AND stamp
+// the RolloutCoordinationReady=False/Reason=Failed condition on the parent
+// ISVC. Without the full chain working, operators reported the group
+// sitting at Idle (or RolloutInProgress) for the full 30-minute
+// InstanceReadyTimeout even though the surge pod was wedged from second 5.
 //
 // This test exercises both halves of the contract at once:
 //
@@ -469,8 +468,8 @@ func TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd(t *testing.T) {
 	}
 
 	// Verify the Component-level Progressing condition reflects the
-	// failure (the bug #52 follow-up: previously this stayed at
-	// True/RolloutInProgress because CurrentRevision != UpdateRevision).
+	// failure (previously this stayed at True/RolloutInProgress because
+	// CurrentRevision != UpdateRevision).
 	cs := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 	progressing := apimeta.FindStatusCondition(cs.Conditions, status.ConditionProgressing)
 	if progressing == nil {
@@ -527,9 +526,9 @@ func TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd(t *testing.T) {
 // bad-image (bad_image_kind) fix would surface Instance.Failed but the
 // group would still sit at Surging / Waiting.
 //
-// Equivalent to PR #236's reconciler_test rollup tests; pinned here so
-// a refactor of buildComponentObservation can't silently break the
-// surface contract this fix depends on.
+// Equivalent to the reconciler_test rollup tests; pinned here so a
+// refactor of buildComponentObservation can't silently break the surface
+// contract this fix depends on.
 func TestSurgeUpdate_FailedInstanceSurfacesAtComponentObservation(t *testing.T) {
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{

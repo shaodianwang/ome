@@ -272,9 +272,9 @@ func TestExpectedPodNamesForInstance_RespectsActiveOrdinal(t *testing.T) {
 }
 
 // TestExpectedPodNamesForInstance_StaleActiveOrdinalDoesNotResurrect
-// pins the post-promote ord-resurrection invariant (PR #246): after a
-// surge promote stamps ActiveOrdinal=1, the next steady-state Create
-// pass must NOT see "ordinal 0 is missing" and resurrect a pod there.
+// pins the post-promote ord-resurrection invariant: after a surge
+// promote stamps ActiveOrdinal=1, the next steady-state Create pass
+// must NOT see "ordinal 0 is missing" and resurrect a pod there.
 // Walking the function with a status carrying ActiveOrdinal=1 must
 // emit exactly one target at ordinal 1.
 func TestExpectedPodNamesForInstance_StaleActiveOrdinalDoesNotResurrect(t *testing.T) {
@@ -336,9 +336,8 @@ func TestExpectedPodNamesForInstance_MultiPodPreservesAllOrdinals(t *testing.T) 
 }
 
 // TestReclassifyByRevisionHash_KeepsValidSurge pins the recheck's
-// no-op contract (PR #261 part 1): a surge pod labeled with the
-// in-flight target (or unrelated label) must NOT be moved into the
-// drain bucket.
+// no-op contract: a surge pod labeled with the in-flight target (or
+// unrelated label) must NOT be moved into the drain bucket.
 func TestReclassifyByRevisionHash_KeepsValidSurge(t *testing.T) {
 	mk := func(rev string) *corev1.Pod {
 		return &corev1.Pod{
@@ -376,9 +375,9 @@ func TestReclassifyByRevisionHash_KeepsValidSurge(t *testing.T) {
 }
 
 // TestReclassifyByRevisionHash_DrainsStaleByRunningRev pins the
-// recheck's primary purpose (PR #261 part 2): a pod labeled with the
-// just-promoted RunningRevision but sitting in the surge bucket MUST
-// be moved to drain so Phase 2 deletes it.
+// recheck's primary purpose: a pod labeled with the just-promoted
+// RunningRevision but sitting in the surge bucket MUST be moved to
+// drain so Phase 2 deletes it.
 func TestReclassifyByRevisionHash_DrainsStaleByRunningRev(t *testing.T) {
 	mk := func(rev string) *corev1.Pod {
 		return &corev1.Pod{
@@ -403,10 +402,9 @@ func TestReclassifyByRevisionHash_DrainsStaleByRunningRev(t *testing.T) {
 }
 
 // TestSurgeUpdate_PostPromoteCreateDoesNotResurrectDrainedOrdinal
-// pins the integration-shaped surge-cycle invariant (PR #243). After
-// surge has completed (drain + promote), the next reconcile pass that
-// lands in Create must NOT recreate a pod at the now-drained ordinal
-// slot.
+// pins the integration-shaped surge-cycle invariant. After surge has
+// completed (drain + promote), the next reconcile pass that lands in
+// Create must NOT recreate a pod at the now-drained ordinal slot.
 func TestSurgeUpdate_PostPromoteCreateDoesNotResurrectDrainedOrdinal(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
@@ -454,10 +452,10 @@ func TestSurgeUpdate_PostPromoteCreateDoesNotResurrectDrainedOrdinal(t *testing.
 }
 
 // TestSurgeUpdate_MultiInstance_NoOrdResurrectionAfterPromote pins
-// the multi-instance follow-up to PR #243 (PR #246). Even when BOTH
-// instances have been promoted to ActiveOrdinal=1, the next Create
-// pass must not see "ordinal 0 is missing" for either instance and
-// resurrect a drained slot.
+// the multi-instance follow-up. Even when BOTH instances have been
+// promoted to ActiveOrdinal=1, the next Create pass must not see
+// "ordinal 0 is missing" for either instance and resurrect a drained
+// slot.
 func TestSurgeUpdate_MultiInstance_NoOrdResurrectionAfterPromote(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCMultiInstance("llama-70b", "prod", 1)
@@ -511,9 +509,9 @@ func TestSurgeUpdate_MultiInstance_NoOrdResurrectionAfterPromote(t *testing.T) {
 }
 
 // TestSurgeUpdate_MultiInstance_InterleavedPromotes pins the
-// post-promote mirror behavior under interleaved promotes (PR #246).
-// Promoting instance 0 and then promoting instance 1 in the same
-// reconcile must NOT lose the ActiveOrdinal bump on either instance.
+// post-promote mirror behavior under interleaved promotes. Promoting
+// instance 0 and then promoting instance 1 in the same reconcile must
+// NOT lose the ActiveOrdinal bump on either instance.
 func TestSurgeUpdate_MultiInstance_InterleavedPromotes(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCMultiInstance("llama-70b", "prod", 1)
@@ -557,11 +555,11 @@ func TestSurgeUpdate_MultiInstance_InterleavedPromotes(t *testing.T) {
 }
 
 // TestSurgeUpdate_BumpDuringBump_ConvergesToFinalRev pins the
-// bump-during-bump target-stability invariant (PR #256). A mid-surge
-// spec bump to a new rev must NOT corrupt the in-flight surge — the
-// surge in progress continues to drive to its pinned target, and the
-// next surge cycle starts naturally for the newer rev after the
-// in-flight one promotes.
+// bump-during-bump target-stability invariant. A mid-surge spec bump
+// to a new rev must NOT corrupt the in-flight surge — the surge in
+// progress continues to drive to its pinned target, and the next surge
+// cycle starts naturally for the newer rev after the in-flight one
+// promotes.
 func TestSurgeUpdate_BumpDuringBump_ConvergesToFinalRev(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
@@ -673,10 +671,10 @@ func TestSurgeUpdate_SingleBump_DoesNotShiftTarget(t *testing.T) {
 }
 
 // TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires pins the
-// X-2 follow-up regression (PR #261, post-#256): after a v1→v2 surge
-// cycle COMPLETES with RunningRevision=v2 and ActiveOrdinal=1, a fresh
-// spec bump to v3 must drive the Instance to RunningRevision=v3 with
-// the v2 pod fully drained.
+// X-2 follow-up regression: after a v1→v2 surge cycle COMPLETES with
+// RunningRevision=v2 and ActiveOrdinal=1, a fresh spec bump to v3 must
+// drive the Instance to RunningRevision=v3 with the v2 pod fully
+// drained.
 func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
@@ -774,10 +772,10 @@ func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 }
 
 // TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained pins the X-2 follow-up
-// invariant for the fix-shape-A drain path (PR #261, task #54). When a
-// pod labeled with the just-promoted RunningRevision survives at the
-// surge ordinal, the rev-hash recheck must route it through drain +
-// delete; Phase 3 must NOT promote on it.
+// invariant for the fix-shape-A drain path. When a pod labeled with the
+// just-promoted RunningRevision survives at the surge ordinal, the
+// rev-hash recheck must route it through drain + delete; Phase 3 must
+// NOT promote on it.
 func TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)

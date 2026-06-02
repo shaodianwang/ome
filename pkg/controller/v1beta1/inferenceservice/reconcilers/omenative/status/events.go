@@ -11,9 +11,8 @@ import (
 
 // Event reasons emitted by OMENative. Centralized so a `git grep` on
 // the constant catches every site that fires the same event class.
-// Each reason maps to one or two transition points; see the OBS-1
-// table in `.claude/specs/2026-05-21-oep-0007-omenative-review-merged.md`
-// for the canonical inventory.
+// Each reason maps to one or two transition points in the OMENative
+// lifecycle state machine.
 const (
 	// Create / scale up lifecycle.
 	EventReasonInstanceCreated = "InstanceCreated"
@@ -80,8 +79,8 @@ const (
 	// surfacing the heuristic). De-duplicated per (ISVC, Component)
 	// per controller process so reconciles do not spam the event log;
 	// see workload/gang.maybeWarnNoGangScheduler for the dedup map
-	// (the workload-extraction refactor (part 2 slice 4g of N) moved
-	// the helper out of omenative/gang.go).
+	// (the workload-extraction refactor moved the helper out of
+	// omenative/gang.go).
 	EventReasonMaybeNoGangScheduler = "MaybeNoGangScheduler"
 )
 

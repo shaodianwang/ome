@@ -210,7 +210,7 @@ func TestReconcile_Create_MaterializesPods(t *testing.T) {
 }
 
 // TestReconcile_Create_AlsoCreatesHeadlessService pins the headless
-// Service wire-in (IR PR 2.1): a fresh IR reconcile must call
+// Service wire-in: a fresh IR reconcile must call
 // workload.ReconcileHeadlessService alongside workload.Reconcile so a
 // per-Component headless Service appears in the same pass that creates
 // the pods. The Service rendering itself is unit-tested in
@@ -269,7 +269,7 @@ func TestReconcile_Create_AlsoCreatesHeadlessService(t *testing.T) {
 
 	// Owner ref points at the IR — not the parent ISVC — so deletion of
 	// the IR cascades to the Service. The ISVC controller manages IR
-	// lifecycle at the per-Component layer (PR 3); inside its lifetime,
+	// lifecycle at the per-Component layer; inside its lifetime,
 	// the IR controller owns the per-Component supporting resources.
 	g.Expect(svc.OwnerReferences).To(gomega.HaveLen(1))
 	ref := svc.OwnerReferences[0]

@@ -1,5 +1,5 @@
-// Package podreadiness implements the OEP-0007 multi-writer readiness
-// gate protocol for OMENative's `ome.io/serving` pod condition.
+// Package podreadiness implements the multi-writer readiness gate
+// protocol for OMENative's `ome.io/serving` pod condition.
 //
 // Pattern ported from RBG (`sigs.k8s.io/rbgs/pkg/inplace/pod/readiness`).
 // The condition's Message field carries a JSON list of {UserAgent, Key}
@@ -22,14 +22,13 @@
 //
 // # Gang readiness equivalence (multi-pod)
 //
-// OEP-0007 §"Readiness and Warmup" describes a "Lifecycle-instance-gang"
-// keyed writer that holds serving=False on each pod until every sibling
-// in the Instance reaches ContainersReady. v1 of the multi-pod path does
-// NOT implement a separately-keyed writer; instead, the equivalent
-// gang-readiness contract is enforced by the Create flow in
-// ops/create.go: the controller calls MarkPodServing on the Instance's
-// pods ONLY after query.AllPodsRuntimeReady(existing) returns true for
-// the WHOLE Instance (every leader + every worker has
+// Multi-pod Instances require gang-readiness: each pod should remain
+// NotReady until every sibling in the Instance reaches ContainersReady.
+// v1 of the multi-pod path does NOT implement a separately-keyed writer;
+// instead, the equivalent gang-readiness contract is enforced by the
+// Create flow in ops/create.go: the controller calls MarkPodServing on
+// the Instance's pods ONLY after query.AllPodsRuntimeReady(existing)
+// returns true for the WHOLE Instance (every leader + every worker has
 // ContainersReady=True). Before that gate, no pod in the gang has
 // serving=True, so none receives traffic.
 //
@@ -49,7 +48,7 @@
 // be added without re-architecting; the multi-writer protocol already
 // supports it. For now, the spec field's "intent" semantic (gang
 // readiness mandatory) and the controller's Create-time gate
-// (AllPodsRuntimeReady) cover the OEP contract.
+// (AllPodsRuntimeReady) cover the contract.
 package podreadiness
 
 import (

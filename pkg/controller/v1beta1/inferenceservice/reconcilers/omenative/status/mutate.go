@@ -25,22 +25,21 @@ import (
 // import of status/ rather than depending on whichever op file
 // originally hosted it.
 //
-// In-memory mirror: after a successful commit MutateInstance mirrors
-// the post-write (component, idx) InstanceStatus onto the caller's
-// `isvc` snapshot. The dispatcher (ops.ReconcileComponentOps) drives
-// multiple per-Instance operations off a single in-memory ISVC bag
-// (ReconcileParams.ISVC) during one reconcile pass — without the
-// mirror, the second operation reads pre-write state for every field
-// the first operation just mutated. The user-visible symptom that
-// motivated this is the SurgeThenDrain multi-instance ord-0
-// resurrection (PR #243 follow-up): inst-0 promotes (Phase 3 advances
-// ActiveOrdinal to 1), Update returns done=true, dispatcher falls
-// through to Create on the same reconcile, and Create's
-// expectedPodNamesForInstance reads the stale ActiveOrdinal=0 from
-// `isvc` and re-creates a pod at the drained slot. The mirror keeps
-// `isvc.Status` aligned with what was just committed so the rest of
-// the reconcile sees fresh state. Same shape as the
-// bumpCollisionCount precedent in reconciler.go.
+// In-memory mirror: after a successful write MutateInstance mirrors the
+// post-write (component, idx) InstanceStatus onto the caller's `isvc`
+// snapshot. The dispatcher (ops.ReconcileComponentOps) drives multiple
+// per-Instance operations off a single in-memory ISVC bag
+// (ReconcileParams.ISVC) during one reconcile pass — without the mirror,
+// the second operation reads pre-write state for every field the first
+// operation just mutated. The user-visible symptom is the SurgeThenDrain
+// multi-instance ord-0 resurrection: inst-0 promotes (Phase 3 advances
+// ActiveOrdinal to 1), Update returns done=true, dispatcher falls through
+// to Create on the same reconcile, and Create's
+// expectedPodNamesForInstance reads the stale ActiveOrdinal=0 from `isvc`
+// and re-creates a pod at the drained slot. The mirror keeps
+// `isvc.Status` aligned with what was just committed so the rest of the
+// reconcile sees fresh state. Same shape as the bumpCollisionCount
+// precedent in reconciler.go.
 //
 // NotFound handling: if the ISVC was deleted between the caller pulling
 // the work item and us re-reading, both the Get and the Status().Update
@@ -54,7 +53,7 @@ import (
 func MutateInstance(ctx context.Context, c client.Client, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32, mutate func(*v1beta1.OMENativeInstanceStatus) bool) error {
 	// committed captures the (component, idx) InstanceStatus that
 	// successfully landed at the apiserver on the final retry attempt,
-	// for the post-commit in-memory mirror below.
+	// for the in-memory mirror below (after the write succeeds).
 	var committed *v1beta1.OMENativeInstanceStatus
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		committed = nil

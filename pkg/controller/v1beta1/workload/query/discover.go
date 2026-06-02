@@ -53,8 +53,9 @@ func ListOMENativePodsByName(ctx context.Context, c client.Reader, namespace, is
 // server still holds them.
 //
 // Cache-driven ListOMENativePodsByName is fine for plan computation and
-// status aggregation (the OEP §8.3 "Cache Lag Rule"), but every step
-// that mutates pod state needs a live read first.
+// status aggregation (stale reads are acceptable for non-destructive
+// operations), but every step that mutates pod state needs a live read
+// first.
 //
 // Takes primitive args (reader + namespace + isvcName + component) so
 // the workload/query leaf doesn't take on a backward import to either

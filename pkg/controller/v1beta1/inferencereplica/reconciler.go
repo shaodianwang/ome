@@ -52,8 +52,8 @@ import (
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create;update;patch;delete
 
-// Reconciler is the per-IR lifecycle reconciler. Replaces the no-op
-// skeleton from PR 1 (#245) with the real workload-driven pipeline.
+// Reconciler is the per-IR lifecycle reconciler. Replaced the no-op
+// skeleton with the real workload-driven pipeline.
 type Reconciler struct {
 	client.Client
 	Log      logr.Logger
@@ -159,7 +159,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		Recorder:     r.Recorder,
 		Expectations: r.Expectations,
 		// RenderHook stays nil for the IR adapter — peer-env injection
-		// lives on the parent ISVC controller for v1 (per design doc).
+		// lives on the parent ISVC controller for v1
 	}
 
 	// Compute the target ControllerRevision before kicking off the

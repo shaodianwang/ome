@@ -118,11 +118,10 @@ func setRuntimeAutoscaler(rt *v1beta1.ServingRuntimeSpec, component v1beta1.Comp
 	}
 }
 
-// TestResolveComponentAutoscaler_PriorityMatrix pins the OEP-0013
-// inheritance chain — ISVC wins over runtime, runtime wins over the
-// default. The 6 (isvc, runtime) × 3 (component) matrix exhausts every
-// branch + every Component-to-spec mapping. Deep-equality assertions
-// catch:
+// TestResolveComponentAutoscaler_PriorityMatrix pins the inheritance
+// chain — ISVC wins over runtime, runtime wins over the default. The
+// 6 (isvc, runtime) × 3 (component) matrix exhausts every branch + every
+// Component-to-spec mapping. Deep-equality assertions catch:
 //   - wrong layer returned (priority bug)
 //   - shallow copy returned (state-leakage bug; covered separately too)
 //   - SpecSource mislabeled (operator-visible regression)

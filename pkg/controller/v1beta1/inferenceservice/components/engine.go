@@ -138,7 +138,7 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	// re-run after a Sequential / Ratio gate denial OR to poll an
 	// in-flight Update / Create. Discarding it strands the rollout
 	// until an unrelated watch event happens to fire another reconcile
-	// (the post-decoder Sequential stall, see PR #240 follow-up).
+	// (the post-decoder Sequential stall).
 	deploymentResult, err := e.reconcileDeployment(ctx, isvc, objectMeta, podSpec, size, workerPodSpec)
 	if err != nil {
 		return deploymentResult, err
@@ -147,12 +147,12 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	// Per-Component stable Service + PodMonitor for OMENative. Inlined
 	// here (rather than driven from the omenative dispatch) so the same
 	// pair of supporting resources is emitted for BOTH OMENative
-	// sub-paths uniformly: the IR-managed path (default since PR #320,
-	// which bypasses omenative.ReconcileComponent entirely) AND the
-	// legacy direct omenative path. The omenative package itself manages
-	// only pods + the per-Component headless Service (whose naming is
-	// tied to the per-Component pod template); every other top-level
-	// per-Component sub-resource is owned by the ISVC controller.
+	// sub-paths uniformly: the IR-managed path (default, which bypasses
+	// omenative.ReconcileComponent entirely) AND the legacy direct
+	// omenative path. The omenative package itself manages only pods +
+	// the per-Component headless Service (whose naming is tied to the
+	// per-Component pod template); every other top-level per-Component
+	// sub-resource is owned by the ISVC controller.
 	//
 	// Raw / MultiNode keep their dispatcher-side service+podmonitor calls
 	// because their selectors are mode-specific (Raw: nil → pod template
@@ -216,11 +216,11 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		// below.
 		if irprojector.IsIRManagedComponent(e.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
 			// Resolve the authoritative ComponentAutoscaler from the
-			// ISVC → runtime → default chain (OEP-0013 §"Inheritance
-			// chain"). The resolved block is projected onto
-			// ir.Spec.Autoscaler by the projector and dispatched as
-			// HPA / KEDA / external / none against the committed IR
-			// (always-on per Q7).
+			// ISVC → runtime → default chain. The resolved block is
+			// projected onto ir.Spec.Autoscaler by the projector and
+			// dispatched as HPA / KEDA / external / none against the
+			// committed IR (autoscaler dispatch is always-on per
+			// Component).
 			resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(e.Runtime, isvc, v1beta1.EngineComponent)
 			ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
 				ISVC:               isvc,
@@ -237,12 +237,12 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			if err != nil {
 				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for engine")
 			}
-			// Always-on per-IR autoscaler dispatch (OEP-0013 Q7).
+			// Autoscaler dispatch is always-on per InferenceReplica.
 			// Owner-ref the HPA / SO to the IR so foreground GC cascades
 			// when the IR is deleted; ScaleTargetRef points at the IR's
-			// /scale subresource. Q5: external + none are status-field
-			// twins — both fall through to the dispatch's "delete both"
-			// branch with no separate code path.
+			// /scale subresource. external + none are status-field twins —
+			// both fall through to the dispatch's "delete both" branch
+			// with no separate code path.
 			if err := autoscaler.DispatchForIRComponent(ctx, autoscaler.IRDispatchInput{
 				Client:             e.Client,
 				Scheme:             e.Scheme,
@@ -320,7 +320,7 @@ func (e *Engine) determineEngineName(ctx context.Context, isvc *v1beta1.Inferenc
 // or multi-pod OMENative) rather than the top-level engine spec
 // (single-pod shape). It is a pure structural check on the spec; it
 // deliberately does NOT consult the deployment mode, so dispatch-mode
-// classification and template selection stay decoupled (see review §5).
+// classification and template selection stay decoupled.
 func engineUsesLeaderTemplate(spec *v1beta1.EngineSpec) bool {
 	return spec != nil && spec.Leader != nil
 }
@@ -332,7 +332,7 @@ func (e *Engine) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *me
 	// construction time; calling isvcutils.DetermineEngineDeploymentMode
 	// here would re-infer it from the spec and disagree with the dispatch
 	// for OMENative-mode engines that also set Leader/Worker (the helper
-	// returns MultiNode; the dispatch is OMENative). See review §5.
+	// returns MultiNode; the dispatch is OMENative).
 	var basePodSpec v1beta1.PodSpec
 	var runnerSpec *v1beta1.RunnerSpec
 

@@ -873,7 +873,7 @@ func TestEngineWorkerPodSpec(t *testing.T) {
 // (helper said MultiNode; dispatch said OMENative); the bug was masked
 // only because the MultiNode branch happened to also use Leader.PodSpec.
 // Replacing the helper with engineUsesLeaderTemplate decouples template
-// selection from dispatch-mode classification. See review §5 / bug 1.
+// selection from dispatch-mode classification.
 func TestEngineUsesLeaderTemplate(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
@@ -938,7 +938,7 @@ func TestEngineUsesLeaderTemplate(t *testing.T) {
 // TestEngineReconcilePodSpec_OMENativeWithLeader pins that the
 // OMENative-mode engine with Leader != nil picks the Leader pod template
 // (not the top-level engine spec template). This is the latent-bug
-// regression test from review §5 / bug 1: the OLD code called
+// regression test for a bug where the code called
 // isvcutils.DetermineEngineDeploymentMode which would return MultiNode
 // for this shape, and the MultiNode branch happened to use Leader.PodSpec
 // — so today it accidentally works. Pin the behavior so a future refactor
@@ -1007,7 +1007,7 @@ func TestEngineReconcilePodSpec_OMENativeWithLeader(t *testing.T) {
 // cancellation propagates through the name-discovery Get call. The earlier
 // implementation hardcoded context.TODO() inside a controller reconcile
 // flow, which silently ignored the reconcile manager's cancellation
-// signal. See review §5 / bug 3.
+// signal.
 //
 // With a canceled ctx the fake client's Get returns immediately with the
 // ctx error — the determineEngineName helper does NOT propagate that error

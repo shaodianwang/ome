@@ -625,7 +625,7 @@ func TestCreate_PromoteSkipsRunningRevisionForOffTargetPods(t *testing.T) {
 	// The load-bearing assertion: RunningRevision must NOT have been
 	// updated to target.Name — the pod is genuinely on priorRev.
 	if s.RunningRevision != priorRev {
-		t.Errorf("RunningRevision: got %q want %q (bug #58 — Create promote must NOT clobber RunningRevision when pods are off-target)",
+		t.Errorf("RunningRevision: got %q want %q (X-2 guard — Create promote must NOT clobber RunningRevision when pods are off-target)",
 			s.RunningRevision, priorRev)
 	}
 }

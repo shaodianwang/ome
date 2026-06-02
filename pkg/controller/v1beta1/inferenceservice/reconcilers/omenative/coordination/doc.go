@@ -1,8 +1,8 @@
 // Package coordination implements cross-Component rollout coordination
 // for OMENative-managed InferenceServices.
 //
-// The coordination layer plugs in on top of Loop A (the per-Component
-// reconciler) and adds:
+// The coordination layer plugs in after the per-Component reconciler
+// runs and adds:
 //
 //   - group resolution from spec.rolloutCoordination.groups[]
 //   - per-policy state machines (BlueGreen, Independent, RollingUpdate,

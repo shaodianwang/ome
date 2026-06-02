@@ -127,7 +127,7 @@ type InferenceServiceReconciler struct {
 	Recorder        record.EventRecorder
 	RuntimeSelector runtimeselector.Selector
 	ModelCache      sharded.Provider
-	// TrafficReconciler is the OEP-0011 backend-policy reconciler.
+	// TrafficReconciler is the backend-policy reconciler.
 	// Built from the active translator at controller startup; the
 	// active translator is selected by traffic/factory.New based on
 	// installed Gateway-implementation CRDs.
@@ -139,7 +139,7 @@ type InferenceServiceReconciler struct {
 	// scheduling code path runs only when the CRD is actually present.
 	// When false, multi-pod OMENative Instances still create pods but
 	// the controller stamps a `GangSchedulingUnavailable=True`
-	// Component condition (soft-fail per OEP-0007 §"Gang Scheduling").
+	// Component condition.
 	GangSchedulingAvailable bool
 }
 
@@ -385,8 +385,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Step 5: Create reconcilers based on merged specs. The
 	// "Creating <component> reconciler" / "Determined ingress
 	// deployment mode" lines fire every reconcile but observe no
-	// state change — demoted to V(1) per review §2 (hot-path /
-	// steady-state breadcrumbs).
+	// state change — demoted to V(1) because they're hot-path /
+	// steady-state breadcrumbs.
 	if mergedEngine != nil {
 		engineSupportedModelFormats := r.RuntimeSelector.GetSupportedModelFormat(ctx, rt, baseModel, userSpecifiedRuntime)
 		log.V(1).Info("Creating engine reconciler",
@@ -504,8 +504,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// — coordination.Reconcile above just mutated isvc.Status in-memory
 	// (Traffic[], RolloutCoordination, RolloutCoordinationReady); without
 	// flushing it here those writes are dropped on every requeuing pass,
-	// which is the steady state during active rollouts. Review §6.2 in
-	// .claude/specs/2026-05-30-code-quality-review/06-isvc-controller.md.
+	// which is the steady state during active rollouts.
 	if pendingRequeue.Requeue || pendingRequeue.RequeueAfter > 0 {
 		if err := r.updateStatus(isvc, deploymentMode); err != nil {
 			r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
@@ -538,7 +537,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile external service")
 	}
 
-	// OEP-0011 traffic management. Skipped when the InferenceService
+	// Traffic management reconciler. Skipped when the InferenceService
 	// declares no traffic intent (spec.traffic or ome.io/* annotation).
 	// The reconciler invokes the active translator (chosen at startup
 	// by the factory), applies the emitted backend policy resource,
@@ -700,9 +699,7 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 			// in-flight reconcile racing the delete has nothing left to
 			// write. Returning nil drops the work item cleanly instead
 			// of triggering controller-runtime retries that saturate the
-			// work queue and stall unrelated tests (see
-			// .claude/specs/2026-05-25-oep-0007.1-api-audit/SHIPPED.md
-			// for the test-stability fallout this used to cause).
+			// work queue and stall unrelated tests.
 			return nil
 		}
 		return err
@@ -840,10 +837,10 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	// Decision Q6 (OEP-0013): KEDA is a hard dependency, not an optional
-	// CRD probe. Owns(&kedav1.ScaledObject{}) is unconditional below; if
-	// KEDA is absent from the cluster the controller will fail fast on
-	// the first reconcile rather than silently ignoring scaler-class=keda.
+	// KEDA is a hard dependency, not an optional CRD probe.
+	// Owns(&kedav1.ScaledObject{}) is unconditional below; if KEDA is
+	// absent from the cluster the controller will fail fast on the first
+	// reconcile rather than silently ignoring scaler-class=keda.
 
 	podMonitorFound, err := utils.IsCrdAvailable(r.ClientConfig, monitoringv1.SchemeGroupVersion.String(), constants.PodMonitorKind)
 	if err != nil {
@@ -870,41 +867,40 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&v1.PersistentVolumeClaim{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
-		// OEP-0007 OMENative: revision history is owned by the ISVC
+		// OMENative revision history is owned by the ISVC
 		// so revision-driven status writes enqueue the parent.
 		Owns(&appsv1.ControllerRevision{}).
-		// IR PR 3: InferenceReplica is owned by the ISVC controller —
+		// InferenceReplica is owned by the ISVC controller —
 		// the projector at the dispatch site (irprojector.EnsureInferenceReplica)
 		// stamps the ISVC as the IR's controller OwnerReference so
 		// foreground GC cascades on ISVC delete, and Owns() re-enqueues
 		// the parent ISVC when the IR controller flips IR.Status
 		// (Replicas / ReadyReplicas / phase progression). This is what
-		// lets the ISVC status aggregator (status_aggregator.go in
-		// commit 2) pick up IR-side counter updates without polling.
+		// lets the ISVC status aggregator pick up IR-side counter
+		// updates without polling.
 		Owns(&v1beta1.InferenceReplica{}).
-		// OEP-0007 OMENative Loop B: a Pod event handler that updates
-		// the per-controller Expectations cache before enqueueing the
-		// parent ISVC. The predicate restricts the watch to
-		// `ome.io/managed-by=OMENative` pods so non-OMENative
-		// deployment modes don't pay the per-event cost.
+		// OMENative Pod event handler that updates the per-controller
+		// Expectations cache before enqueueing the parent ISVC. The
+		// predicate restricts the watch to `ome.io/managed-by=OMENative`
+		// pods so non-OMENative deployment modes don't pay the per-event
+		// cost.
 		Watches(
 			&v1.Pod{},
 			omenative.NewPodEventHandler(r.Expectations),
 			builder.WithPredicates(omenative.ManagedByOMENativePredicate()),
 		).
-		// OEP-0007 OMENative Loop B: EndpointSlice events for
-		// OMENative headless Services enqueue the parent ISVC so
-		// drain checks (IsPodDrained / IsPodInRotation) react to
-		// kube-proxy convergence without waiting on the periodic
+		// EndpointSlice events for OMENative headless Services enqueue
+		// the parent ISVC so drain checks (IsPodDrained / IsPodInRotation)
+		// react to kube-proxy convergence without waiting on the periodic
 		// requeue. The mapper rejects slices that don't target an
 		// OMENative-managed Service.
 		Watches(
 			&discoveryv1.EndpointSlice{},
 			handler.EnqueueRequestsFromMapFunc(omenative.EndpointSliceToISVC),
 		).
-		// Decision Q6 (OEP-0013): KEDA ScaledObject is owned
-		// unconditionally — the scheme is registered at startup and KEDA
-		// is a hard cluster-side dependency for OME.
+		// KEDA ScaledObject is owned unconditionally — the scheme is
+		// registered at startup and KEDA is a hard cluster-side
+		// dependency for OME.
 		Owns(&kedav1.ScaledObject{})
 
 	if podMonitorFound {
@@ -928,10 +924,10 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Log.Info("The InferenceService controller won't watch scheduling.x-k8s.io/v1alpha1/PodGroup resources because the CRD is not available; OMENative multi-pod Instances will degrade to non-gang scheduling.")
 	}
 
-	// OEP-0011: register an Owns() watch on the backend policy
-	// resource type the active translator emits, so changes to the
-	// policy re-enqueue the owning InferenceService. The noop
-	// translator returns nil, in which case there is nothing to watch.
+	// Register an Owns() watch on the backend policy resource type
+	// the active translator emits, so changes to the policy re-enqueue
+	// the owning InferenceService. The noop translator returns nil, in
+	// which case there is nothing to watch.
 	if r.TrafficReconciler != nil {
 		if watch := r.TrafficReconciler.Watches(); watch != nil {
 			ctrlBuilder = ctrlBuilder.Owns(watch)

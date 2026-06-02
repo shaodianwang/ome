@@ -78,7 +78,7 @@ func BuildHeadlessServiceSpec(isvc *v1beta1.InferenceService, component v1beta1.
 // per-Component Reconcile() in components/{engine,decoder,router}.go's
 // reconcileOMENativeSubresources method. That placement covers BOTH
 // OMENative sub-paths (direct and IR-managed); the IR-managed path
-// (default since PR #320) bypasses ReconcileComponent entirely.
+// (now the default) bypasses ReconcileComponent entirely.
 func ensureHeadlessService(ctx context.Context, p ReconcileParams) error {
 	if p.ISVC == nil {
 		return fmt.Errorf("OMENative reconciler: ensure headless service (component=%s): nil ISVC", p.Component)

@@ -60,9 +60,9 @@ func derefInt32(p *int32) int32 {
 	return *p
 }
 
-// ReconcileComponent is the Loop A entry point for OMENative-managed
-// Components. The InferenceService controller calls it from the
-// `case constants.OMENative` branch of each Component's
+// ReconcileComponent is the per-Component reconcile entry point for
+// OMENative-managed Components. The InferenceService controller calls
+// it from the `case constants.OMENative` branch of each Component's
 // reconcileDeployment switch.
 //
 // Loop:
@@ -123,8 +123,8 @@ func ReconcileComponent(ctx context.Context, p ReconcileParams) (result ctrl.Res
 	//
 	// Bridges into workload/gang via internalsource.BuildReconcileInput;
 	// the legacy v1beta1-typed ensurePodGroups helper that previously
-	// lived in omenative/gang.go is gone after the workload extraction
-	// (part 2 slice 4g of N).
+	// lived in omenative/gang.go moved to the workload package during
+	// the workload boundary extraction.
 	gangDeps := workload.Deps{
 		Client:       p.Client,
 		APIReader:    p.APIReader,

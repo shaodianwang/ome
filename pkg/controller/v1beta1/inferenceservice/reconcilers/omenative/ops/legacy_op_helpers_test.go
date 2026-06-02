@@ -12,7 +12,7 @@ import (
 
 // Tests for the omenative dispatcher (dispatch.go) entry point
 // ReconcileComponentOps. The original delete-state-machine test moved
-// to workload/ops (part 2 slice 4c of N); this case stays here because
+// to workload/ops (the workload-extraction refactor); this case stays here because
 // it exercises the omenative-adapter dispatcher shim end-to-end against
 // a v1beta1 ISVC fixture.
 

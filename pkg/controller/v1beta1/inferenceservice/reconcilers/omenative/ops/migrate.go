@@ -1,6 +1,6 @@
 // Dispatch shim for Migrate — the per-Instance Migrate surge state
 // machine itself lives in pkg/controller/v1beta1/workload/ops after the
-// workload-extraction refactor (part 2 slice 4d of N).
+// workload-extraction refactor.
 //
 // The shim's only job is to build the workload.ReconcileInput +
 // workload.Deps pair from the legacy core.ReconcileParams (wiring the

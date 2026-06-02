@@ -229,9 +229,9 @@ func TestReconcile_RealTranslator_UpdatesExistingPolicy(t *testing.T) {
 
 func TestReconcile_ConflictingPolicy_RefusesOverwriteAndSurfacesReason(t *testing.T) {
 	// Pre-existing same-name policy with NO controller-ref simulates a
-	// hand-authored BTP (the alpha-phase coexistence case from the
-	// OEP-0011 README): Reconcile must refuse to Update and surface
-	// BackendPolicyReady=False/ConflictingPolicy.
+	// hand-authored BTP. Reconcile must refuse to Update and surface
+	// BackendPolicyReady=False/ConflictingPolicy (alpha-phase coexistence
+	// behavior).
 	existing := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "isvc-btp",

@@ -15,7 +15,7 @@ import (
 
 // HandleModelDeletion short-circuits the per-node ConfigMap wait for
 // Sharded models. cluster_cache manages chunks daemon-side and
-// model-agent's scout skips Sharded entirely (OEP-0009), so leftover
+// model-agent's scout skips Sharded models entirely, so leftover
 // per-node entries from a prior PerNode lifecycle never get marked
 // Deleted on their own. Best-effort scrub, then drop the finalizer —
 // scrub failures don't block the deletion.

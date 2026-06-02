@@ -115,10 +115,10 @@ func TestCreateScaledObject_IRScaleTarget(t *testing.T) {
 	}
 }
 
-// TestCreateScaledObject_AdvancedPassThrough pins the OEP-0013 README 678-706
-// verbatim contract for the KEDA Advanced block: the entire AdvancedConfig
-// struct (HorizontalPodAutoscalerConfig, RestoreToOriginalReplicaCount) must
-// land on the ScaledObject without any field-level filtering.
+// TestCreateScaledObject_AdvancedPassThrough pins the verbatim contract for
+// the KEDA Advanced block: the entire AdvancedConfig struct
+// (HorizontalPodAutoscalerConfig, RestoreToOriginalReplicaCount) must land
+// on the ScaledObject without any field-level filtering.
 func TestCreateScaledObject_AdvancedPassThrough(t *testing.T) {
 	componentMeta := metav1.ObjectMeta{Name: "foo-engine", Namespace: "ns"}
 	scaleTargetRef := kedav1.ScaleTarget{
@@ -147,9 +147,9 @@ func TestCreateScaledObject_AdvancedPassThrough(t *testing.T) {
 	}
 }
 
-// TestCreateScaledObject_PollingCooldownFallback pins the OEP-0013 README
-// 678-706 verbatim contract for the scalar pass-through fields:
-// PollingInterval, CooldownPeriod, IdleReplicaCount, Fallback. Each must
+// TestCreateScaledObject_PollingCooldownFallback pins the verbatim contract
+// for the scalar pass-through fields: PollingInterval, CooldownPeriod,
+// IdleReplicaCount, Fallback. Each must
 // land on the ScaledObject as the same pointer/struct.
 func TestCreateScaledObject_PollingCooldownFallback(t *testing.T) {
 	componentMeta := metav1.ObjectMeta{Name: "foo-engine", Namespace: "ns"}

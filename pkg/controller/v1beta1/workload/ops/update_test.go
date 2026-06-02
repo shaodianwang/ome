@@ -520,8 +520,8 @@ func TestUpdate_RecreatePod_BumpsIncarnationAndDrainsOld(t *testing.T) {
 // TestUpdate_MultiPodSurgeFallsBackToRecreate pins that an Instance with
 // >1 desired pod under SurgeThenDrain routes to recreateUpdate instead
 // of surgeUpdate. The single-pod surge implementation requires a
-// per-gang-member ordinal scheme that the OEP defers; recreate is the
-// safe fallback. The user's spec field stays "SurgeThenDrain" — this is
+// per-gang-member ordinal scheme that is deferred; recreate is the safe
+// fallback. The user's spec field stays "SurgeThenDrain" — this is
 // execution best-effort, not a defaulter rewrite. When multi-pod surge
 // lands the fallback path goes away with zero user-facing churn.
 func TestUpdate_MultiPodSurgeFallsBackToRecreate(t *testing.T) {

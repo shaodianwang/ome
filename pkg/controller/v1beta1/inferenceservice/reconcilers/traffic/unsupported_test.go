@@ -74,8 +74,8 @@ func TestComputeUnsupportedAnnotations_WrongPassthroughPrefix(t *testing.T) {
 }
 
 func TestComputeUnsupportedAnnotations_UnsupportedPerKey(t *testing.T) {
-	// EG translator that doesn't yet support per-endpoint cap (alpha-
-	// subset translator). Operator set it -> unsupported.
+	// EG translator that doesn't yet support per-endpoint cap (subset
+	// translator). Operator set it -> unsupported.
 	tr := &classifyStub{
 		name: "alpha-eg",
 		supports: sets.New(

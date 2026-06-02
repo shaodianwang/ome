@@ -8,9 +8,8 @@
 // Background. Before this file the only rollout budget the dispatcher
 // consulted was the coordination-group MaxSurge / MaxUnavailable
 // (group-wide ceiling across Components in a RolloutCoordinationGroup).
-// PR #380 widened the per-Component
-// LifecycleSpec.UpdateStrategy.RollingUpdate.{MaxSurge,MaxUnavailable}
-// to *intstr.IntOrString and the converter copies them onto
+// The per-Component LifecycleSpec.UpdateStrategy.RollingUpdate fields
+// were widened to *intstr.IntOrString and the converter copies them onto
 // workload.RollingUpdate — but the dispatcher never read them. This
 // file closes that gap: budgets here cap WITHIN-Component pod surge /
 // drain, regardless of whether the Component participates in any

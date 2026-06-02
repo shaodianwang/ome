@@ -1,4 +1,4 @@
-// Package servingruntime hosts the OEP-0012 inheritance controllers
+// Package servingruntime hosts the runtime inheritance controllers
 // (one reconciler per CRD scope).
 package servingruntime
 

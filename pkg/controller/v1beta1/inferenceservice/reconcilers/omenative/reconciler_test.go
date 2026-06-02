@@ -86,7 +86,7 @@ func TestReconcileComponent_DispatchesToCreate(t *testing.T) {
 // watch event happens to wake controller-runtime, which on the dev
 // cluster has been observed to take 60-90s post-decoder convergence.
 //
-// Set-up mirrors the moment-of-bump shape PR #240 already exercises in
+// Set-up mirrors the moment-of-bump shape already exercised in
 // coordination/sequential_gate_test.go: isvc.Generation advanced one
 // step (operator just bumped both Components), both Components carry
 // stale ObservedGeneration. activeSequentialComponent picks decoder

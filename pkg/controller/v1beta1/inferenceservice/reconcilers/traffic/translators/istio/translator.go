@@ -1,5 +1,5 @@
-// Package istio translates OEP-0011 traffic intent into an Istio
-// DestinationRule (networking.istio.io/v1).
+// Package istio translates traffic intent into an Istio DestinationRule
+// (networking.istio.io/v1).
 //
 // The translator emits an unstructured.Unstructured object so OME does
 // not vendor the Istio API. Field paths are pinned by the Istio
@@ -8,8 +8,8 @@
 //
 // Hosting model: one DR per InferenceService targeting the top-level
 // Service hostname (isvc.Name in the ISVC namespace). Per-Component
-// Services (engine, decoder, router) are not covered in alpha — operators
-// needing per-component behavior can hand-author additional DRs.
+// Services (engine, decoder, router) are not covered — operators needing
+// per-component behavior can hand-author additional DRs.
 //
 // Pass-through (ome.io/dr.<path>=<value>) is applied last so an operator
 // can override any structured field.
@@ -49,8 +49,8 @@ var drGVK = schema.GroupVersionKind{
 	Kind:    kindDR,
 }
 
-// algorithmToIstioSimple maps OEP-0011 LoadBalancingType values to
-// Istio's loadBalancer.simple enum (Istio uses UPPER_SNAKE_CASE).
+// algorithmToIstioSimple maps LoadBalancingType values to Istio's
+// loadBalancer.simple enum (Istio uses UPPER_SNAKE_CASE).
 // ConsistentHash is handled separately (it sets consistentHash, not
 // simple).
 var algorithmToIstioSimple = map[v1beta1.LoadBalancingType]string{

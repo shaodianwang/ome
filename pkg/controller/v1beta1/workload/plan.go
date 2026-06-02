@@ -15,8 +15,7 @@ import (
 //   - Single-pod (desired.MultiPod=false): one "default" Runner of
 //     size 1. Used by Router and Engine/Decoder without Leader+Worker.
 //   - Multi-pod (desired.MultiPod=true): one "leader" Runner of size 1
-//     plus one "worker" Runner of the user-set Worker.Size. Matches
-//     OEP-0007 Story 1.
+//     plus one "worker" Runner of the user-set Worker.Size.
 //
 // The mutating webhook fills in Lifecycle fields in production;
 // BuildPlan re-applies defaults inline for robustness against
@@ -31,7 +30,7 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 
 	// Compute the plan's Instance index set. Existing InstanceStatus
 	// entries — including any migration-surge index above the replica
-	// count — are preserved so the rest of Loop A keeps driving them.
+	// count — are preserved so the reconcile loop keeps driving them.
 	// The plan grows beyond replicas during the surge phase of a
 	// migration; scale-down logic is responsible for picking the right
 	// deletion target after that surge resolves.

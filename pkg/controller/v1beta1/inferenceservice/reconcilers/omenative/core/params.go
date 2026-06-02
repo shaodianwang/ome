@@ -9,7 +9,8 @@
 // (omenative.{ComponentPlan,InstancePlan,...,BuildPlan,NewExpectations})
 // keep compiling unchanged while the bodies live in workload/.
 // Adapter-aware callers should depend on workload directly; this
-// package will shrink to the per-Source projection helpers in commit 9.
+// package will shrink to the per-Source projection helpers in future
+// refactors.
 package core
 
 import (
@@ -49,8 +50,8 @@ var (
 // workload.AllocateSurgeIndex. It centralizes the
 // ISVC.Status.Components[c].Lifecycle.InstanceStatuses projection so
 // callers don't repeat the nil-guard dance. Converts at the boundary
-// via v1beta1convert.InstanceStatusSliceToWorkload — slice 3 of the
-// workload-extraction refactor flipped workload.AllocateSurgeIndex to
+// via v1beta1convert.InstanceStatusSliceToWorkload — the
+// workload-extraction refactor moved workload.AllocateSurgeIndex to
 // take workload-owned types so the workload package itself stays free
 // of pkg/apis/ome/v1beta1.
 func AllocateSurgeIndex(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) int32 {
@@ -76,10 +77,9 @@ func extractInstanceStatuses(isvc *v1beta1.InferenceService, component v1beta1.C
 // workload.BuildPlan. Projects ReconcileParams to the workload
 // (DesiredSpec, ObservedState) shape, then delegates.
 //
-// Adapter callers in commit 9 will skip this wrapper and call
+// Adapter callers in future refactors will skip this wrapper and call
 // workload.BuildPlan directly with their own projection; this shim
-// keeps the legacy dispatch chain compiling during the per-commit
-// extraction.
+// keeps the legacy dispatch chain compiling during the extraction.
 func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
 	if p.ComponentExt == nil {
 		return ComponentPlan{}, errNilComponentExt(p.Component)
@@ -183,9 +183,9 @@ type ReconcileParams struct {
 	// this to decide whether to call podgroup.EnsurePodGroup for each
 	// multi-pod Instance. When false AND the plan has a multi-pod
 	// Instance, the reconciler still creates pods but stamps the
-	// `GangSchedulingUnavailable=True` Component condition (per
-	// OEP-0007's soft-fail contract: gang scheduling is recommended,
-	// not required). Tests / single-pod Components / pre-wiring
+	// `GangSchedulingUnavailable=True` Component condition (gang
+	// scheduling is recommended but not required; pods will still be
+	// scheduled individually). Tests / single-pod Components / pre-wiring
 	// callers leave it false.
 	GangSchedulingAvailable bool
 

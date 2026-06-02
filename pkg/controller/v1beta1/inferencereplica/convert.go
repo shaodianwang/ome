@@ -61,7 +61,9 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 //
 // DetectMigrationRequest is left nil: the IR controller doesn't yet
 // handle ISVC-orchestrated migrations (that stays on the ISVC controller
-// per the design doc §3.3); the workload dispatcher treats a nil
+//
+//	the workload dispatcher treats a nil
+//
 // DetectMigrationRequest as "no migration in flight".
 //
 // UpdateGate IS wired (when the parent ISVC is resolvable) onto the
@@ -170,7 +172,7 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent *v
 // (a) the v1beta1.InferenceReplica handle, (b) the owner-ref shape —
 // the IR owns its per-Component headless Service so deletion of the IR
 // cascades to the Service. The ISVC controller continues to manage the
-// IR lifecycle (PR 3); inside its own lifetime, the IR controller is
+// IR lifecycle; inside its own lifetime, the IR controller is
 // the sole Service writer.
 //
 // OwnerName on the Service name resolves through the parent ISVC
@@ -182,7 +184,7 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent *v
 // (see render.go::podLabels): ome.io/inferenceservice + component +
 // managed-by=OMENative. The trio is identical to the ISVC adapter so
 // the Services from both paths select the same pod set; this is what
-// keeps the shadow-mode diff in PR 3 byte-identical.
+// keeps the shadow-mode diff byte-identical.
 func buildHeadlessServiceSpec(ir *v1beta1.InferenceReplica) workloadtypes.PerComponentServiceSpec {
 	selector := map[string]string{
 		constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,

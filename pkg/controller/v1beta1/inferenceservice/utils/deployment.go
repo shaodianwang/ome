@@ -42,7 +42,7 @@ func DetermineDeploymentModes(engine *v1beta1.EngineSpec, decoder *v1beta1.Decod
 // determineComponentDeploymentMode determines deployment mode for a generic component.
 // Annotation takes precedence; otherwise infer MultiNode from Leader/Worker presence and
 // default to RawDeployment. Symmetric for Engine, Decoder, and Router so PD-disaggregated
-// ISVCs can opt each component into OMENative independently (OEP-0007.1).
+// ISVCs can opt each component into OMENative independently.
 func determineComponentDeploymentMode(spec interface{}, runtime *v1beta1.ServingRuntimeSpec) constants.DeploymentModeType {
 	switch s := spec.(type) {
 	case *v1beta1.EngineSpec:
@@ -119,10 +119,9 @@ func IsMultiPodComponent(isvc *v1beta1.InferenceService, component v1beta1.Compo
 }
 
 // engineSpawnsMultiplePods is the Engine-specific tail of
-// IsMultiPodComponent. Mirrors the webhook's engineIsMultiPod but
-// (per the gate rule in OEP-0007.x Gap 3) does NOT treat a Leader
-// without Worker as multi-pod — the validator rejects that shape
-// before reconcile, but we stay strict on the
+// IsMultiPodComponent. Mirrors the webhook's engineIsMultiPod but does
+// NOT treat a Leader without Worker as multi-pod — the validator rejects
+// that shape before reconcile, but we stay strict on the
 // `Worker.Size > 0` half so the selector tightening only fires when
 // at least 2 pods exist per Instance.
 func engineSpawnsMultiplePods(engine *v1beta1.EngineSpec) bool {

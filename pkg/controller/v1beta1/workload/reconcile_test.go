@@ -298,8 +298,7 @@ func TestReconcile_UpdateGateNil_AllowsAll(t *testing.T) {
 // returns found=true; Migrate sees Phase=Updating, returns done=false
 // without stamping. Without this fix the dispatcher requeues at
 // MigrateRequeueInterval indefinitely; Update never runs; the test's
-// Eventually for the audit ledger times out at 300s. See
-// .claude/specs/2026-05-30-kind-test-walk/migrate-affinity-isvc-never-detected.md.
+// Eventually for the audit ledger times out at 300s.
 //
 // Test shape: instrument MutateInstance to count calls. Without the
 // fix: zero mutations (Migrate's defer doesn't mutate; Update never
@@ -375,8 +374,8 @@ func TestReconcile_FreshMigrateOnNonReadySource_FallsThroughToUpdate(t *testing.
 	}
 }
 
-// TestReconcile_UpdateRan_RequeuesAndSkipsCreate pins the bug #58
-// (X-2 bump-during-bump) fix: when ANY Update.call fires in the per-
+// TestReconcile_UpdateRan_RequeuesAndSkipsCreate pins the X-2
+// (bump-during-bump) fix: when ANY Update.call fires in the per-
 // Instance loop (even one returning done=true), the dispatcher MUST
 // return Requeue WITHOUT running the Create pass. The Create pass
 // reads ObservedState (a snapshot) which is now stale wrt the mutations
@@ -384,8 +383,8 @@ func TestReconcile_FreshMigrateOnNonReadySource_FallsThroughToUpdate(t *testing.
 // corrupts RunningRevision (Create promotes pods to target.Name even
 // when the pods are on a different revision) and creates duplicate
 // pods (Create's scale-up reads the pre-promote ActiveOrdinal and
-// thinks the canonical slot is missing). Both are the bug #58 X-2
-// corruption modes.
+// thinks the canonical slot is missing). Both are the X-2 corruption
+// modes.
 //
 // We exercise the path by seeding an Instance with Phase=Updating —
 // DetectUpdateTrigger returns true on this phase, so Update fires —
@@ -420,9 +419,9 @@ func TestReconcile_UpdateRan_RequeuesAndSkipsCreate(t *testing.T) {
 		t.Logf("Reconcile op error (expected for dispatch-shape test): %v", err)
 	}
 	// The load-bearing assertion: dispatcher returned Requeue=true (or
-	// RequeueAfter > 0) — Create did NOT run. Without the bug #58 fix,
-	// the dispatcher returned Create's result (possibly Requeue=false).
+	// RequeueAfter > 0) — Create did NOT run. Without the X-2 fix, the
+	// dispatcher returned Create's result (possibly Requeue=false).
 	if !result.Requeue && result.RequeueAfter == 0 {
-		t.Errorf("dispatcher must Requeue when any Update fired (bug #58 guard); got %+v", result)
+		t.Errorf("dispatcher must Requeue when any Update fired (X-2 guard); got %+v", result)
 	}
 }

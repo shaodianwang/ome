@@ -1,6 +1,6 @@
 // Package status builds the TrafficStatus the InferenceService
-// controller writes back to the API server after invoking the OEP-0011
-// traffic translator.
+// controller writes back to the API server after invoking the traffic
+// translator.
 //
 // Build is a pure function so the writer can be unit-tested without a
 // live API server or controller-runtime client. The reconciler is

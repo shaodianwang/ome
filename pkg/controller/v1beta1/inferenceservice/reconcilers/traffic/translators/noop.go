@@ -1,4 +1,6 @@
-// Package translators holds Translator implementations for OEP-0011.
+// Package translators holds Translator implementations that turn
+// resolved traffic-management intent into backend policy resources for
+// specific Gateway implementations.
 //
 // Each translator turns a resolved traffic-management intent into the
 // backend policy resource its target Gateway implementation expects.

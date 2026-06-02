@@ -2,13 +2,12 @@
 // `scheduling.x-k8s.io/v1alpha1` PodGroup objects for OMENative multi-pod
 // Instances.
 //
-// Gang scheduling contract (per OEP-0007 §"Gang Scheduling"): every
-// multi-pod Instance (leader + N workers) gets one PodGroup with
-// MinMember == TotalPodsForInstance(inst). The scheduler-plugins
-// coscheduler enforces that all minMember pods can be placed before any
-// is bound to a node — without it, the leader can schedule alone, the
-// workers stay Pending, and the LLM runtime hangs waiting for peer
-// connections.
+// Gang scheduling contract: every multi-pod Instance (leader + N workers)
+// gets one PodGroup with MinMember == TotalPodsForInstance(inst). The
+// scheduler-plugins coscheduler enforces that all minMember pods can be
+// placed before any is bound to a node — without it, the leader can
+// schedule alone, the workers stay Pending, and the LLM runtime hangs
+// waiting for peer connections.
 //
 // Single-pod Instances do NOT get a PodGroup — there's nothing to gang.
 //
@@ -21,19 +20,18 @@
 // SchedulerName contract — operator's responsibility. The PodGroup
 // objects this package emits are only honored by a scheduler that
 // reads `scheduling.x-k8s.io/v1alpha1` (today: scheduler-plugins'
-// Coscheduling plugin, or a custom equivalent). The OEP requires the
-// operator to set `runtime.spec.schedulerName` on the
-// ServingRuntime (or `podSpec.schedulerName` on the InferenceService)
-// to a gang-aware scheduler name — typically
-// `scheduler-plugins-scheduler` when scheduler-plugins is deployed as
-// a secondary scheduler. The controller does NOT enforce or default
-// this field (the operator may have installed Coscheduling as a
-// plugin inside the default scheduler, in which case the value
-// `default-scheduler` IS gang-aware and a hard check would produce
-// false positives). Instead, the workload gang reconciler emits a
-// one-shot Warning event `MaybeNoGangScheduler` against the parent
-// owner when a PodGroup is created for a pod whose effective
-// SchedulerName is empty or `default-scheduler`; see
+// Coscheduling plugin, or a custom equivalent). The operator must set
+// `runtime.spec.schedulerName` on the ServingRuntime (or
+// `podSpec.schedulerName` on the InferenceService) to a gang-aware
+// scheduler name — typically `scheduler-plugins-scheduler` when
+// scheduler-plugins is deployed as a secondary scheduler. The controller
+// does NOT enforce or default this field (the operator may have installed
+// Coscheduling as a plugin inside the default scheduler, in which case
+// the value `default-scheduler` IS gang-aware and a hard check would
+// produce false positives). Instead, the workload gang reconciler emits a
+// one-shot Warning event `MaybeNoGangScheduler` against the parent owner
+// when a PodGroup is created for a pod whose effective SchedulerName is
+// empty or `default-scheduler`; see
 // `pkg/controller/v1beta1/workload/gang/gang.go`
 // `maybeWarnNoGangScheduler` for the heuristic and dedup behavior.
 package podgroup
@@ -55,13 +53,12 @@ import (
 
 // maxScheduleTimeoutSeconds caps the per-PodGroup
 // scheduleTimeoutSeconds value derived from
-// LifecycleSpec.InstanceReadyTimeout. The OEP keeps the
-// instanceReadyTimeout default at 30 minutes (large-model loading);
-// the gang-scheduling wait should NOT block that long because the
-// scheduler can only ever fail-fast on infeasibility, never wait for
-// the runtime. 10 minutes is the upstream coscheduler's documented
-// reasonable upper bound; anything larger just delays the
-// GangSchedulingTimeout signal.
+// LifecycleSpec.InstanceReadyTimeout. The instanceReadyTimeout default
+// is 30 minutes (large-model loading), but the gang-scheduling wait
+// should NOT block that long because the scheduler can only ever
+// fail-fast on infeasibility, never wait for the runtime. 10 minutes is
+// the upstream coscheduler's documented reasonable upper bound; anything
+// larger just delays the GangSchedulingTimeout signal.
 const maxScheduleTimeoutSeconds int32 = 600
 
 // minScheduleTimeoutSeconds is the floor when the caller passes a
@@ -71,7 +68,7 @@ const minScheduleTimeoutSeconds int32 = 60
 
 // IsMultiPodInstance reports whether the Instance has more than one pod
 // across all Runners — i.e., it needs a PodGroup. Wraps
-// InstancePlan.TotalPods with the OEP threshold (>=2) so callers
+// InstancePlan.TotalPods with the multi-pod threshold (>=2) so callers
 // don't repeat the constant.
 func IsMultiPodInstance(inst workload.InstancePlan) bool {
 	return inst.TotalPods() > 1

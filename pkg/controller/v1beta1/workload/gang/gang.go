@@ -82,10 +82,9 @@ func extraPodGroupIndices(observed []workload.InstanceStatus, plan workload.Comp
 //   - When the cluster does NOT have the PodGroup CRD AND the plan
 //     has at least one multi-pod Instance, skip PodGroup creation
 //     entirely and stamp the `GangSchedulingUnavailable=True`
-//     Component condition. Per OEP-0007 §"Gang Scheduling" this is
-//     a soft-fail (the workload reconciler still creates pods) —
-//     the condition is the operator-facing signal that gang
-//     placement may race.
+//     Component condition. This is a soft-fail (the workload reconciler
+//     still creates pods) — the condition is the operator-facing signal
+//     that gang placement may race.
 //
 //   - When the Component is single-pod (no multi-pod Instances in the
 //     plan), the condition is set to False with reason
@@ -119,8 +118,8 @@ func EnsurePodGroups(ctx context.Context, deps workload.Deps, input workload.Rec
 
 	// No multi-pod Instances in the plan? Nothing to create. (Even
 	// when input.DesiredSpec.GangSchedulingAvailable is true,
-	// single-pod Instances skip the PodGroup per OEP — no gang to
-	// enforce on a single pod.)
+	// single-pod Instances skip the PodGroup — no gang to enforce on
+	// a single pod.)
 	if !anyMultiPod {
 		return nil
 	}

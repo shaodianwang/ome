@@ -591,14 +591,14 @@ func TestInferenceServiceReconcile(t *testing.T) {
 	}
 }
 
-// TestUpdateStatusFlushesCoordinationWrites is the regression for
-// review §6.2 (.claude/specs/2026-05-30-code-quality-review/06-isvc-controller.md):
-// when a Component asks the reconciler to requeue, the controller now
-// flushes coordination's in-memory status mutations (Status.RolloutCoordination,
-// per-Component Status.Components.<c>.Traffic[]) BEFORE returning the
-// requeue. Before the fix, those writes were dropped on every requeuing
-// pass — the steady state during active rollouts — because updateStatus
-// ran only on the no-requeue tail of Reconcile.
+// TestUpdateStatusFlushesCoordinationWrites is the regression test for
+// a bug where per-Component requeues would drop coordination's in-memory
+// status mutations. When a Component asks the reconciler to requeue, the
+// controller now flushes coordination's in-memory status mutations
+// (Status.RolloutCoordination, per-Component Status.Components.<c>.Traffic[])
+// BEFORE returning the requeue. Before the fix, those writes were dropped
+// on every requeuing pass — the steady state during active rollouts —
+// because updateStatus ran only on the no-requeue tail of Reconcile.
 //
 // This test asserts the contract updateStatus must satisfy for the fix
 // to be effective: an in-memory desiredService with coordination-style

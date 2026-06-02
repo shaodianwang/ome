@@ -214,7 +214,7 @@ func TestEnsurePodGroups_MultiPodCRDAvailableCreatesGang(t *testing.T) {
 }
 
 // TestEnsurePodGroups_MultiPodCRDMissingSetsConditionTrueNoPodGroup —
-// the degradation path the OEP describes.
+// the degradation path for multi-pod when the CRD is absent.
 func TestEnsurePodGroups_MultiPodCRDMissingSetsConditionTrueNoPodGroup(t *testing.T) {
 	owner := newOwner("prod", "llama")
 	c := newGangClient(t, owner)

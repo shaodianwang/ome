@@ -11,7 +11,6 @@ import (
 // live on `status.components.<comp>.lifecycle.conditions`;
 // Instance-level conditions live on
 // `status.components.<comp>.lifecycle.instanceStatuses[*].conditions`.
-// Type names match OEP §3.3.
 const (
 	// Component-level.
 	ConditionAvailable      = "Available"
@@ -21,10 +20,9 @@ const (
 	// at least one multi-pod Instance but the cluster does not have the
 	// scheduler-plugins `scheduling.x-k8s.io/v1alpha1` PodGroup CRD
 	// installed. The controller still creates pods — gang scheduling is
-	// a soft requirement per OEP-0007 §"Gang Scheduling" — but
-	// partial-gang placement is possible and the runtime may hang
-	// waiting for missing peer pods. False when the CRD is present or
-	// the Component is single-pod.
+	// recommended but not required — but partial-gang placement is
+	// possible and the runtime may hang waiting for missing peer pods.
+	// False when the CRD is present or the Component is single-pod.
 	ConditionGangSchedulingUnavailable = "GangSchedulingUnavailable"
 
 	// Instance-level.
@@ -144,11 +142,10 @@ func availableCondition(cs *v1beta1.LifecycleStatus, generation int64, now metav
 // required; reporting RolloutInProgress would lie to operators who
 // kubectl-wait on the condition or page on stuck rollouts.
 //
-// Closes the bug #52 follow-up: SurgeThenDrain bumps to a bad image
-// left Progressing=True/RolloutInProgress forever even after the
-// per-Instance escalator stamped Phase=Failed, because
-// CurrentRevision (the old rev) never advanced to UpdateRevision (the
-// new bad rev).
+// Without this check, SurgeThenDrain bumps to a bad image would leave
+// Progressing=True/RolloutInProgress forever even after the per-Instance
+// escalator stamped Phase=Failed, because CurrentRevision (the old rev)
+// never advanced to UpdateRevision (the new bad rev).
 func progressingCondition(cs *v1beta1.LifecycleStatus, generation int64, now metav1.Time) metav1.Condition {
 	if hasFailedInstance(cs) {
 		return metav1.Condition{
@@ -241,8 +238,8 @@ func progressingMessage(cs *v1beta1.LifecycleStatus) string {
 
 // operationStuckCondition reports True when any Instance has an
 // Operation with Reason=DeadlineExceeded — the breadcrumb timeouts.go
-// stamps when a non-recoverable op step times out. Lifts the
-// breadcrumb into the operator-facing condition surface per OEP §3.3.
+// stamps when a non-recoverable op step times out. Lifts the breadcrumb
+// into the operator-facing condition surface.
 func operationStuckCondition(cs *v1beta1.LifecycleStatus, generation int64, now metav1.Time) metav1.Condition {
 	stuckInstances := stuckOperations(cs)
 	if len(stuckInstances) == 0 {
@@ -384,10 +381,9 @@ func ApplyComponentConditions(cs *v1beta1.LifecycleStatus, desired []metav1.Cond
 }
 
 // GangSchedulingUnavailableCondition builds the
-// `GangSchedulingUnavailable` Component-level condition with the
-// canonical reason / message pair the OEP specifies. Set True when the
-// Component has at least one multi-pod Instance but the cluster lacks
-// the scheduler-plugins PodGroup CRD; False otherwise.
+// `GangSchedulingUnavailable` Component-level condition. Set True when
+// the Component has at least one multi-pod Instance but the cluster
+// lacks the scheduler-plugins PodGroup CRD; False otherwise.
 //
 // Kept separate from ComputeComponentConditions because the input is
 // cluster-discovery state (caller's `crdPresent` boolean), not the
