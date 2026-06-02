@@ -83,16 +83,8 @@ func validateComponentLifecycle(name string, lc *v1beta1.LifecycleSpec) error {
 	if err := validateRollingUpdateIntOrString(name, "maxSurge", ru.MaxSurge); err != nil {
 		return err
 	}
-	// The zero-budget check applies only to surge/drain strategies. In-place
-	// strategies (InPlaceIfPossible / InPlaceOnly) patch pods in place — they
-	// neither surge nor drain — so maxSurge=0 && maxUnavailable=0 is the
-	// natural, correct budget for them, not an unstartable rollout. (Empty
-	// Type defaults to SurgeThenDrain, so it is correctly subject to the check.)
-	t := lc.UpdateStrategy.Type
-	if t != v1beta1.UpdateStrategyInPlaceIfPossible && t != v1beta1.UpdateStrategyInPlaceOnly {
-		if err := validateRollingUpdateNotBothZero(name, ru.MaxSurge, ru.MaxUnavailable); err != nil {
-			return err
-		}
+	if err := validateRollingUpdateNotBothZero(name, ru.MaxSurge, ru.MaxUnavailable); err != nil {
+		return err
 	}
 	return nil
 }
@@ -102,6 +94,15 @@ func validateComponentLifecycle(name string, lc *v1beta1.LifecycleSpec) error {
 // the same Component's rollingUpdate block. With no surge headroom and
 // no drain headroom the rollout can never make progress — the operator
 // almost certainly mistyped one of the two.
+//
+// This applies to in-place strategies too. An in-place update marks the
+// pod not-ready while it patches the running container, which consumes the
+// per-Component MaxUnavailable budget — so maxUnavailable=0 stalls an
+// in-place roll exactly like a surge/drain one: the patch never starts and
+// the pods sit untouched. #408 briefly exempted in-place here on the premise
+// that it "neither surges nor drains"; real-cluster testing showed the
+// mark-not-ready does consume the budget, so the exemption only converted a
+// fail-fast admission error into a silent runtime deadlock. Hence reverted.
 //
 // Either field nil (operator left it for the layer below to default)
 // does NOT trip this check; the per-Component layer treats nil as "no
