@@ -104,6 +104,39 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 				Reason:            "drain within tolerance",
 			}
 		}
+		// Discrete-granularity tiebreaker (rounding-error only). When the
+		// tolerance band is narrower than one whole pod at the current
+		// operating point, NO single -1 drain can satisfy the strict band,
+		// and a drain-first strategy (RecreatePod / in-place) deadlocks
+		// permanently — e.g. a symmetric 4:4 pair at tol 25%: draining
+		// either side projects max/min = 4/3 = 1.333 > 1.25.
+		//
+		// Allow exactly ONE in-flight pod through, but only when the skew it
+		// introduces is rounding-error-sized:
+		//   (a) the drained Component is at FULL original serving — no pod of
+		//       it is already out of rotation. CheckRatio nets in-flight
+		//       drains out of the baseline, so this is true only for the
+		//       FIRST pod; the second pod sees a reduced baseline and is
+		//       refused. This bounds in-flight to one pod AND restricts the
+		//       tiebreaker to the genuine "can't even start" deadlock (a
+		//       Component that has already drained pods isn't deadlocked, so
+		//       the strict band edge stands — see the 30:10 boundary test);
+		//   (b) the pair is currently balanced (baseline in band);
+		//   (c) the drained Component keeps >=1 pod serving — the mass-drain
+		//       guard (zero-serving side) stays intact; and
+		//   (d) the projection respects a band relaxed by one extra
+		//       tolerance width (2x band). A large asymmetric skew (e.g.
+		//       4:2 decoder->1 = 4:1) exceeds 2x band and stays an honest
+		//       deadlock the operator resolves by widening tolerance.
+		if baseline[component] >= state.Original[component] &&
+			respectsBand(state.Original, baseline, band) &&
+			projected[component] >= 1 &&
+			respectsBand(state.Original, projected, band*2) {
+			return RatioDecision{
+				AllowedSurgeDelta: proposedDelta,
+				Reason:            "drain allowed by discrete-granularity tiebreaker (1 pod, rounding-error overshoot)",
+			}
+		}
 		return RatioDecision{
 			AllowedSurgeDelta: 0,
 			SkewRejected:      true,

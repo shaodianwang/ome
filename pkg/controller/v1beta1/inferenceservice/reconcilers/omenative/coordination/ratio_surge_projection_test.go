@@ -48,26 +48,29 @@ func mkSymmetricRatioFixture(tol int32) *v1beta1.InferenceService {
 	}
 }
 
-// TestCheckRatio_SurgeVsDrainProjection_SymmetricBand pins the
-// projection-sign fix at the gate level. Symmetric 4:4, tol=25% → band
-// [0.75, 1.25]:
-//   - a drain (-1) projects max/min = 4/3 = 1.333 > 1.25 → correctly
-//     denied (a genuine drain on a 1:1 pair has no slack at tol 25%);
-//   - a surge (+1) projects 5/4 = 1.25, in band → MUST be allowed.
+// TestCheckRatio_SurgeVsDrainProjection_SymmetricBand pins that a
+// symmetric 4:4 RatioBalanced pair (tol=25% → band [0.75, 1.25]) is not
+// deadlocked in EITHER direction:
+//   - surge (+1) projects 5/4 = 1.25, in band → allowed (#401
+//     projection-sign fix);
+//   - drain (-1) projects 4/3 = 1.333, which the STRICT band rejects, but
+//     the Part-2 discrete-granularity tiebreaker allows one rounding-error
+//     pod from a balanced baseline (1.333 <= 2x band 1.5) → allowed.
 //
-// The pre-fix code hardcoded -1 for ALL strategies, so a SurgeThenDrain
-// roll hit the drain math and BOTH members were denied at the start →
-// the permanent deadlock #400 exposed by activating the gate on the
-// default IR-managed path.
+// Pre-#401 the code hardcoded -1 for ALL strategies, so even a
+// SurgeThenDrain roll hit the drain math and BOTH members deadlocked at
+// the start (the bug #400 exposed by activating the gate on the default
+// IR-managed path). Asymmetric large skews still stay denied — see
+// ratio_drain_tiebreaker_test.go.
 func TestCheckRatio_SurgeVsDrainProjection_SymmetricBand(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
 	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)
 
-	if allowed, _ := ctx.CheckRatio(0, -1); allowed {
-		t.Errorf("drain projection (-1) on symmetric 4:4 tol=25%% should be denied (4/3=1.333 > 1.25)")
-	}
 	if allowed, reason := ctx.CheckRatio(0, +1); !allowed {
 		t.Errorf("surge projection (+1) on symmetric 4:4 tol=25%% must be allowed (5/4=1.25 <= 1.25); got denied: %s", reason)
+	}
+	if allowed, reason := ctx.CheckRatio(0, -1); !allowed {
+		t.Errorf("drain (-1) on symmetric 4:4 tol=25%% must be allowed by the discrete-granularity tiebreaker (1.333 <= 2x band 1.5); got denied: %s", reason)
 	}
 }
 
@@ -82,13 +85,6 @@ func TestEvaluateUpdateGate_RatioBalancedSurgeNotDeadlocked(t *testing.T) {
 		workloadtypes.UpdateStrategySurgeThenDrain, 0, 0); !allowed {
 		t.Errorf("SurgeThenDrain RatioBalanced 4:4 must be allowed (no deadlock); got denied: %s", reason)
 	}
-
-	// RecreatePod genuinely drops capacity (-1) first, so on a symmetric
-	// pair at tol=25%% it is still gated. This documents the boundary the
-	// Part-2 (discrete-granularity tiebreaker) follow-up addresses; it is
-	// intentionally NOT fixed by the projection-sign change.
-	if allowed, _ := EvaluateUpdateGate(isvc, v1beta1.EngineComponent, nil,
-		workloadtypes.UpdateStrategyRecreatePod, 0, 0); allowed {
-		t.Errorf("RecreatePod on symmetric 4:4 tol=25%% is expected to still be gated (Part-2 follow-up); got allowed")
-	}
+	// (RecreatePod on a symmetric pair is now also cleared by the Part-2
+	// tiebreaker — see TestEvaluateUpdateGate_RecreatePodSymmetricCleared.)
 }
