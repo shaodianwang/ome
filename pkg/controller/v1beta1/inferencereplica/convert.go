@@ -14,6 +14,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -139,8 +140,25 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent *v
 	// no coordination block to enforce and the dispatcher's nil-gate
 	// fallback ("always allowed") is correct.
 	if parent != nil {
+		// The gates read the GATED Component's serving / in-flight counts to
+		// enforce surge / unavailability / ratio budgets. On the IR-managed
+		// path the parent ISVC's per-Component status is PROJECTED from the IR
+		// by the (separate) ISVC controller, so it lags the IR's own rollout
+		// and the gate bounds leak across reconcile wake-ups (group MaxSurge
+		// overshoot; RatioBalanced over-drain). Overlay the IR's OWN fresh
+		// status for the Component being gated so the gates see current counts;
+		// peers stay projected (the leaking bounds are all about the gated
+		// Component's own count, and the dispatcher threads this-wake-up
+		// surge/unavail deltas to the gate separately).
+		gateParent := parent.DeepCopy()
+		if gateParent.Status.Components == nil {
+			gateParent.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+		}
+		gated := gateParent.Status.Components[ir.Spec.Component]
+		gated.Lifecycle = irprojector.IRStatusToComponentStatus(ir)
+		gateParent.Status.Components[ir.Spec.Component] = gated
 		input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
-			return coordination.EvaluateUpdateGate(parent, ir.Spec.Component, r.Recorder, strategy, inFlightSurge, inFlightUnavail)
+			return coordination.EvaluateUpdateGate(gateParent, ir.Spec.Component, r.Recorder, strategy, inFlightSurge, inFlightUnavail)
 		}
 	}
 	return input

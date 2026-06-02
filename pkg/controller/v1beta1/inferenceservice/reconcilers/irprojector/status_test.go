@@ -491,7 +491,7 @@ func TestIrStatusToComponentStatus_DeepCopiesInstanceStatuses(t *testing.T) {
 			CollisionCount: ptr.To(int32(5)),
 		},
 	}
-	out := irStatusToComponentStatus(ir)
+	out := IRStatusToComponentStatus(ir)
 	g.Expect(out.InstanceStatuses).To(gomega.HaveLen(1))
 
 	// Mutate the output, verify the IR is unaffected.

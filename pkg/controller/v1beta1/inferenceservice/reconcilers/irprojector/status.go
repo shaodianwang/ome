@@ -144,7 +144,7 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 			isvc.Namespace, name, component, err)
 	}
 
-	desired := irStatusToComponentStatus(ir)
+	desired := IRStatusToComponentStatus(ir)
 	// topCond is the standard top-level Component-ready condition
 	// (EngineReady / DecoderReady / RouterReady) derived from the same
 	// OMENative counters the legacy direct path uses. Computed once
@@ -215,7 +215,7 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 	return nil
 }
 
-// irStatusToComponentStatus projects the IR.Status fields onto a
+// IRStatusToComponentStatus projects the IR.Status fields onto a
 // fresh LifecycleStatus. 1:1 field mapping — the two types
 // were intentionally shaped identically so the dual-write window
 // (when both paths could be active in different clusters) can
@@ -227,7 +227,7 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 // (status_aggregate.go in the omenative package + the controller's
 // preserveLifecycleStatus helper) treat the nil/non-nil
 // boundary as load-bearing.
-func irStatusToComponentStatus(ir *v1beta1.InferenceReplica) *v1beta1.LifecycleStatus {
+func IRStatusToComponentStatus(ir *v1beta1.InferenceReplica) *v1beta1.LifecycleStatus {
 	out := &v1beta1.LifecycleStatus{
 		ObservedGeneration:   ir.Status.ObservedGeneration,
 		Replicas:             ir.Status.Replicas,

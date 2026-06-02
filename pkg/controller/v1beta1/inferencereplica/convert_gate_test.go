@@ -105,3 +105,65 @@ func TestBuildReconcileInput_NilParentLeavesGateNil(t *testing.T) {
 	g.Expect(input.UpdateGate).To(gomega.BeNil(),
 		"no parent ⇒ no coordination to enforce ⇒ gate stays nil")
 }
+
+// TestBuildReconcileInput_GateUsesFreshIRStatus pins the IR-path
+// gate-staleness fix (p44/p51): the gate must read the GATED Component's
+// counts from the IR's OWN fresh status, not the parent ISVC's lagged
+// projection. Here the IR's fresh status shows the engine already one pod
+// down (serving 3/4); a RatioBalanced drain (RecreatePod → -1) must be
+// DENIED — the tiebreaker bounds in-flight to one pod — even though the
+// parent's projected status still reports a full 4/4 (which, if the gate
+// read it, would let the tiebreaker fire again and over-drain).
+func TestBuildReconcileInput_GateUsesFreshIRStatus(t *testing.T) {
+	g := gomega.NewWithT(t)
+	r, _ := newReconciler(t)
+	ir := baselineIR("llama-engine", "default", 4) // engine, parent llama
+	ir.Status.Replicas = 4
+	ir.Status.ServingReplicas = 3 // FRESH: one engine pod already out of rotation
+
+	tol := int32(25)
+	parent := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "default", Generation: 1},
+		Spec: v1beta1.InferenceServiceSpec{
+			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:           v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerance: &tol,
+					},
+				}},
+			},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name:       "0",
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
+						Original: map[v1beta1.ComponentType]int32{
+							v1beta1.EngineComponent:  4,
+							v1beta1.DecoderComponent: 4,
+						},
+					},
+				}},
+			},
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				// STALE projection: still reports engine fully serving (4/4).
+				v1beta1.EngineComponent:  {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 4, ServingReplicas: 4}},
+				v1beta1.DecoderComponent: {Lifecycle: &v1beta1.LifecycleStatus{Replicas: 4, ServingReplicas: 4}},
+			},
+		},
+	}
+
+	input := r.buildReconcileInput(ir, parent)
+	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
+
+	allowed, reason := input.UpdateGate(workload.UpdateStrategyRecreatePod, 0, 0)
+	g.Expect(allowed).To(gomega.BeFalse(),
+		"with the IR's fresh status (engine serving 3/4 = one pod already out), the "+
+			"RatioBalanced tiebreaker must refuse a second drain; got allowed — the gate "+
+			"read the stale parent projection (4/4) instead of the IR's fresh status: "+reason)
+}
