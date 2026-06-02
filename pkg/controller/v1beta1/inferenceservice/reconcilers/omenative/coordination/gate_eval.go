@@ -30,12 +30,18 @@ import (
 // wins; later gates short-circuit. The caller reads only the allowed bit;
 // denyReason is for logging/observability.
 //
+// Ratio projection is strategy-aware (see the projDelta computation
+// below): SurgeThenDrain projects +1 (a Ready pod is added before the old
+// drains), drain-first strategies project -1. A hardcoded -1 for surge
+// rolls mis-models the surge as a capacity loss and deadlocks symmetric
+// RatioBalanced groups.
+//
 // OEP-0007.3 Bug 1: in-place strategies (InPlaceIfPossible / InPlaceOnly)
-// skip CheckRatio. CheckRatio always projects a -1 drain (capacity loss);
-// for in-place that drain is paired 1:1 with a same-pod return
-// (mark-not-ready -> patch -> mark-ready), so the net capacity change is
-// ~0. The -1 projection misrepresents that transient as a permanent loss
-// and indefinitely over-blocks the smaller Component of a ratio pair
+// skip CheckRatio entirely. For in-place the drain is paired 1:1 with a
+// same-pod return (mark-not-ready -> patch -> mark-ready), so the net
+// capacity change is ~0; running the gate would project a -1 loss that
+// misrepresents that transient as permanent and indefinitely over-blocks
+// the smaller Component of a ratio pair
 // (e.g. the decoder in a 4:2 engine:decoder pair with 25% tolerance
 // deadlocks because 4:1 = 4.0 sits above the [1.5, 2.5] band).
 // CheckUnavailability (called below for non-surge strategies, which
@@ -62,7 +68,17 @@ func EvaluateUpdateGate(
 	inPlace := strategy == workloadtypes.UpdateStrategyInPlaceIfPossible ||
 		strategy == workloadtypes.UpdateStrategyInPlaceOnly
 	if !inPlace {
-		if ok, reason := ctx.CheckRatio(inFlightUnavail); !ok {
+		// Strategy-aware ratio projection. SurgeThenDrain adds a Ready pod
+		// (+1) BEFORE draining the old, so the transient is a capacity GAIN,
+		// not a -1 loss. Projecting -1 for a surge roll mis-models it and
+		// deadlocks symmetric RatioBalanced groups (both members denied at
+		// the start, neither can go first). Drain-first strategies (recreate)
+		// keep the honest -1.
+		projDelta := int32(-1)
+		if strategy == workloadtypes.UpdateStrategySurgeThenDrain || strategy == "" {
+			projDelta = 1
+		}
+		if ok, reason := ctx.CheckRatio(inFlightUnavail, projDelta); !ok {
 			return false, reason
 		}
 	} else {

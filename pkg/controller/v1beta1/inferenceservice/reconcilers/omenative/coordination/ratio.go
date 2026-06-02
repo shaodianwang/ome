@@ -260,7 +260,10 @@ func SnapshotOriginal(replicas map[v1beta1.ComponentType]int32) map[v1beta1.Comp
 // same stale snapshot answer and the dispatcher fires past the band
 // before status catches up.
 func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
-	return ResolveGateContext(isvc, component).CheckRatio(inFlightDelta)
+	// Drain projection (-1) is the conservative default. The strategy-aware
+	// caller (coordination.EvaluateUpdateGate) uses the GateContext method
+	// directly with a +1 surge projection for SurgeThenDrain.
+	return ResolveGateContext(isvc, component).CheckRatio(inFlightDelta, -1)
 }
 
 // CheckRatio is the GateContext-aware variant of CheckRatioGate. The
@@ -268,7 +271,7 @@ func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentT
 // threads the resulting context into each gate via CheckRatio /
 // CheckSurge / CheckUnavailability / CheckSequential, paying the
 // resolve prelude exactly once per tick instead of once per gate.
-func (ctx GateContext) CheckRatio(inFlightDelta int32) (allowed bool, reason string) {
+func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool, reason string) {
 	if ctx.ShortCircuit {
 		return true, ctx.ShortReason
 	}
@@ -331,14 +334,21 @@ func (ctx GateContext) CheckRatio(inFlightDelta int32) (allowed bool, reason str
 		}
 	}
 
-	// Project the drain (–1): the dispatcher is about to pull one more
-	// pod from serving rotation. The redesign's "projection = current –
-	// 1" semantic (ratio.go header comment) applies here. Using +1
-	// (surge) only makes sense once real surge-then-drain ships and the
-	// dispatcher creates a new pod before draining the old; today every
-	// update strategy drains first, so –1 is the immediate transient
-	// the gate must keep in band.
-	decision := EvaluateSurge(group.Pacing, state, component, -1)
+	// projDelta is the projected per-pod transient capacity change for THIS
+	// update step, set by the strategy-aware caller:
+	//   - SurgeThenDrain → +1: a new pod is created and goes Ready BEFORE
+	//     the old one drains, so the transient is +1 capacity.
+	//   - recreate / drain-first → -1: the old pod leaves rotation first,
+	//     so the transient is -1 capacity.
+	// The package-level CheckRatioGate wrapper defaults to -1 (drain).
+	//
+	// Getting this sign right is load-bearing. A hardcoded -1 for a
+	// SurgeThenDrain roll mis-models the surge as a capacity loss: on a
+	// symmetric ratio (e.g. 4:4, tol 25% → band [0.75, 1.25]) a single -1
+	// projects max/min = 4/3 = 1.333 > 1.25, so BOTH members are denied at
+	// the start and neither can go first → permanent deadlock. With +1 the
+	// same roll projects 5/4 = 1.25 (in band) and proceeds.
+	decision := EvaluateSurge(group.Pacing, state, component, projDelta)
 	if decision.AllowedSurgeDelta != 0 {
 		return true, decision.Reason
 	}
