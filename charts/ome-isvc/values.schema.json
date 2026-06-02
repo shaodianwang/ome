@@ -218,7 +218,8 @@
               "additionalProperties": false,
               "properties": {
                 "partition":      {"type": "integer", "minimum": 0, "description": "Hold back updates for Instances whose index is < partition. 0 updates all."},
-                "maxUnavailable": {"type": "integer", "minimum": 0, "description": "Max Instances allowed to be non-Ready during the rollout."}
+                "maxUnavailable": {"type": "integer", "minimum": 0, "description": "Max Instances allowed to be non-Ready during the rollout."},
+                "maxSurge":       {"type": "integer", "minimum": 0, "description": "Max extra Instances created above desired during the rollout."}
               }
             },
             "inPlaceUpdateStrategy": {

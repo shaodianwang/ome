@@ -415,7 +415,7 @@ Args:  dict "block" .prefill | .decode | .engine | .router
 {{- $ru := and $us $us.rollingUpdate -}}
 {{- $ip := and $us $us.inPlaceUpdateStrategy -}}
 {{- $mp := $lc.migrationPolicy -}}
-{{- $hasRU := and $ru (or (hasKey $ru "partition") (hasKey $ru "maxUnavailable")) -}}
+{{- $hasRU := and $ru (or (hasKey $ru "partition") (hasKey $ru "maxUnavailable") (hasKey $ru "maxSurge")) -}}
 {{- $hasIP := and $ip (or (hasKey $ip "gracePeriodSeconds") (hasKey $ip "markNotReadyDuringLifecycle")) -}}
 {{- $hasUS := and $us (or $us.type $hasRU $hasIP) -}}
 {{- $hasMP := and $mp $mp.mode -}}
@@ -437,6 +437,9 @@ lifecycle:
       {{- end }}
       {{- if hasKey $ru "maxUnavailable" }}
       maxUnavailable: {{ $ru.maxUnavailable }}
+      {{- end }}
+      {{- if hasKey $ru "maxSurge" }}
+      maxSurge: {{ $ru.maxSurge }}
       {{- end }}
     {{- end }}
     {{- if $hasIP }}

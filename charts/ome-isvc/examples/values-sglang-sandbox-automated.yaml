@@ -14,14 +14,11 @@
 #   helm template sglang-sb charts/ome-isvc \
 #     -f charts/ome-isvc/examples/values-sglang-sandbox-automated.yaml
 #
-# !! KNOWN MISMATCH: the bundled cks-gb300-sglang-pd vendor profile declares
-#    modelArchitecture: Llama4ForConditionalGeneration, but the model
-#    (prod-code-0522-testing-nvfp4-ptq) + live runtime are Llama4xForCausalLM.
-#    The chart's child runtime does NOT override supportedModelFormats, so the
-#    child inherits the vendor's architecture. Since the ISVC pins
-#    spec.runtime.name explicitly this renders fine, but to match the model on
-#    a live cluster either (a) add an Llama4xForCausalLM vendor profile, or
-#    (b) use the Path-2 raw runtime in config/samples/sglang-omenative-rollout.
+# This renders the same OMENative shape as the raw sample in
+# config/samples/sglang-omenative-rollout/ (per-component OMENative on every
+# component, RollingUpdate + RatioBalanced pacing). The vendor profile now
+# declares modelArchitecture: Llama4xForCausalLM, matching the model and the
+# live gb300 sglang runtime.
 
 namespace:
   name: sandbox
@@ -38,6 +35,12 @@ deployments:
 
     prefill:
       replicas: { min: 2, max: 2 }
+      lifecycle:
+        updateStrategy:
+          type: SurgeThenDrain     # zero-dip per pod (needs +1 GPU slot)
+          rollingUpdate:
+            maxSurge: 1
+            maxUnavailable: 0
       contextLength: 1048576
       tensorParallelSize: 4
       # Typed knobs -> synthesised sglang flags (emitted only when set).
@@ -82,6 +85,12 @@ deployments:
 
     decode:
       replicas: { min: 2, max: 2 }
+      lifecycle:
+        updateStrategy:
+          type: SurgeThenDrain
+          rollingUpdate:
+            maxSurge: 1
+            maxUnavailable: 0
       contextLength: 1048576
       tensorParallelSize: 4
       dtype: bfloat16
@@ -125,12 +134,12 @@ deployments:
       loadBalancingAlgorithm: round-robin
 
     coordination:
-      policy: Sequential
-      order: [decode, prefill]
+      policy: RollingUpdate          # roll prefill + decode together, paced
       pacing:
-        type: PerComponent
-        maxSurge: 0
-        maxUnavailable: 1
+        type: RatioBalanced          # surge prefill : decode in lockstep
+        maxSurge: 1
+        maxUnavailable: 0
+        ratioTolerance: 5            # keep prefill:decode within 5% of start
 
     modelRef:
       name: prod-code-0522-testing-nvfp4-ptq

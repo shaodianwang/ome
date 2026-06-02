@@ -64,21 +64,29 @@ spec:
   {{- /* prefill -> engine -------------------------------------------- */ -}}
   {{- if $hasPrefill }}
   engine:
+    annotations:
+      ome.io/deploymentMode: OMENative
     {{- include "ome-isvc.renderComponent" (dict "block" $deployment.prefill) | trim | nindent 4 }}
   {{- end }}
   {{- /* decode -> decoder -------------------------------------------- */ -}}
   {{- if $hasDecode }}
   decoder:
+    annotations:
+      ome.io/deploymentMode: OMENative
     {{- include "ome-isvc.renderComponent" (dict "block" $deployment.decode) | trim | nindent 4 }}
   {{- end }}
   {{- /* engine (standalone / multinode) ------------------------------ */ -}}
   {{- if $hasEngine }}
   engine:
+    annotations:
+      ome.io/deploymentMode: OMENative
     {{- include "ome-isvc.renderEngineComponent" (dict "block" $deployment.engine "servingMode" $servingMode) | trim | nindent 4 }}
   {{- end }}
   {{- /* router -------------------------------------------------------- */ -}}
   {{- if $hasRouter }}
   router:
+    annotations:
+      ome.io/deploymentMode: OMENative
     {{- include "ome-isvc.renderRouter" (dict "block" $deployment.router) | trim | nindent 4 }}
   {{- end }}
   {{- /* coordination: synthesise a single group covering the deployment's Components */ -}}

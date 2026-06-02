@@ -62,7 +62,7 @@ spec:
       modelFramework:
         name: transformers
         operator: Equal
-      modelArchitecture: Llama4ForConditionalGeneration
+      modelArchitecture: Llama4xForCausalLM
       quantization: nvfp4
       modelCacheProviders:
         - cluster_cache
@@ -76,7 +76,7 @@ spec:
       modelFramework:
         name: transformers
         operator: Equal
-      modelArchitecture: Llama4ForConditionalGeneration
+      modelArchitecture: Llama4xForCausalLM
       quantization: nvfp4
       autoSelect: false
       priority: 1
