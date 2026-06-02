@@ -91,3 +91,34 @@ func TestEvaluateUpdateGate_RecreatePodSymmetricCleared(t *testing.T) {
 		t.Errorf("RecreatePod on symmetric 4:4 (MaxUnavailable=3) must be allowed via the tiebreaker; got denied: %s", reason)
 	}
 }
+
+// TestEvaluateSurge_DrainTiebreaker_InFlightOpBoundsAcrossWakeups pins the
+// p51 cross-wake-up fix: when a prior recreate's drain is still in flight
+// (operation-tracked InFlightUnavail=1) but the cache-derived Serving still
+// over-reports a full 4:4 (the watch lag), the tiebreaker must NOT fire — it
+// would let a SECOND pod drain (2:4, past the band) during a recreate burst.
+// The fresh op count is what catches it; stale Serving alone does not.
+func TestEvaluateSurge_DrainTiebreaker_InFlightOpBoundsAcrossWakeups(t *testing.T) {
+	eng, dec := v1beta1.EngineComponent, v1beta1.DecoderComponent
+	pacing := v1beta1.CoordinationPacing{
+		Type:           v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerance: int32Ptr(25),
+	}
+	// Serving STALE-high at 4:4 (cache hasn't observed the prior drain), but
+	// InFlightUnavail=1 (op-tracked: one engine pod is already mid-recreate).
+	state := RatioState{
+		Original:        map[v1beta1.ComponentType]int32{eng: 4, dec: 4},
+		Serving:         map[v1beta1.ComponentType]int32{eng: 4, dec: 4},
+		InFlightUnavail: map[v1beta1.ComponentType]int32{eng: 1},
+	}
+	if d := EvaluateSurge(pacing, state, eng, -1); d.AllowedSurgeDelta != 0 {
+		t.Errorf("a second drain must be denied while a prior drain is in flight "+
+			"(InFlightUnavail=1), even though stale Serving shows a full 4:4; got allowed (reason=%q)", d.Reason)
+	}
+
+	// Sanity: with InFlightUnavail=0 (no prior drain), the FIRST pod IS allowed.
+	state.InFlightUnavail = map[v1beta1.ComponentType]int32{}
+	if d := EvaluateSurge(pacing, state, eng, -1); d.AllowedSurgeDelta == 0 {
+		t.Errorf("the first drain (no in-flight op) must be allowed by the tiebreaker; got denied (reason=%q)", d.Reason)
+	}
+}

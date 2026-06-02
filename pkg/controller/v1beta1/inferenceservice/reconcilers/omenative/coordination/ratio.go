@@ -32,6 +32,18 @@ type RatioState struct {
 	// against this — operators care about live traffic capacity, not
 	// rollout progress fractions.
 	Serving map[v1beta1.ComponentType]int32
+
+	// InFlightUnavail maps Component → number of Instances currently
+	// taken OUT of serving by an in-flight drain/recreate/in-place
+	// operation, counted from Operation.Step (NOT the cache-derived
+	// Serving). The dispatcher stamps Operation.Step synchronously, so
+	// this is FRESH even when Serving (pod-cache derived) still
+	// over-reports during a recreate burst. The discrete-granularity
+	// tiebreaker reads it to bound in-flight drains to a single pod
+	// across reconcile wake-ups. Optional: a nil map reads as 0 (no
+	// in-flight), which is the correct default for the surge path and
+	// for unit callers that don't populate it.
+	InFlightUnavail map[v1beta1.ComponentType]int32
 }
 
 // RatioDecision is the answer for "may we surge new-revision pods for
@@ -113,14 +125,17 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 		//
 		// Allow exactly ONE in-flight pod through, but only when the skew it
 		// introduces is rounding-error-sized:
-		//   (a) the drained Component is at FULL original serving — no pod of
-		//       it is already out of rotation. CheckRatio nets in-flight
-		//       drains out of the baseline, so this is true only for the
-		//       FIRST pod; the second pod sees a reduced baseline and is
-		//       refused. This bounds in-flight to one pod AND restricts the
-		//       tiebreaker to the genuine "can't even start" deadlock (a
-		//       Component that has already drained pods isn't deadlocked, so
-		//       the strict band edge stands — see the 30:10 boundary test);
+		//   (a) NO pod of the drained Component is already out of rotation:
+		//       - no in-flight drain/recreate op (state.InFlightUnavail is
+		//         operation-tracked, so it is FRESH even when the cache-derived
+		//         Serving lags during a recreate burst); AND
+		//       - the baseline is at full original serving (CheckRatio nets
+		//         THIS-wake-up drains out of the baseline, so the second pod in
+		//         one wake-up sees a reduced baseline and is refused).
+		//       Together these bound in-flight to one pod ACROSS wake-ups and
+		//       restrict the tiebreaker to the genuine "can't even start"
+		//       deadlock — a Component mid-roll isn't deadlocked, so the strict
+		//       band edge stands (see the 30:10 boundary test).
 		//   (b) the pair is currently balanced (baseline in band);
 		//   (c) the drained Component keeps >=1 pod serving — the mass-drain
 		//       guard (zero-serving side) stays intact; and
@@ -128,7 +143,8 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 		//       tolerance width (2x band). A large asymmetric skew (e.g.
 		//       4:2 decoder->1 = 4:1) exceeds 2x band and stays an honest
 		//       deadlock the operator resolves by widening tolerance.
-		if baseline[component] >= state.Original[component] &&
+		if state.InFlightUnavail[component] == 0 &&
+			baseline[component] >= state.Original[component] &&
 			respectsBand(state.Original, baseline, band) &&
 			projected[component] >= 1 &&
 			respectsBand(state.Original, projected, band*2) {
@@ -267,6 +283,33 @@ func SnapshotOriginal(replicas map[v1beta1.ComponentType]int32) map[v1beta1.Comp
 	return out
 }
 
+// unavailableInFlight counts a Component's Instances currently taken OUT
+// of serving rotation by an in-flight operation (Drain for recreate,
+// InPlace for in-place patch). Surge / SurgeDrain ADD a pod rather than
+// remove one, so they are excluded. Mirrors
+// workload.CurrentUnavailableInFlight on the v1beta1 status shape.
+//
+// This is OPERATION-tracked (the dispatcher stamps Operation.Step
+// synchronously when it starts the op), so it is fresh even when the
+// pod-cache-derived ServingReplicas still over-reports during a recreate
+// burst — which is what lets the discrete-granularity tiebreaker bound
+// in-flight drains to a single pod across reconcile wake-ups.
+func unavailableInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
+	var n int32
+	for _, s := range statuses {
+		if s.Operation == nil {
+			continue
+		}
+		switch s.Operation.Step {
+		case "Surge", "SurgeDrain":
+			// surge adds a pod, it doesn't remove one
+		default:
+			n++
+		}
+	}
+	return n
+}
+
 // CheckRatioGate is the consumer side of RatioBalanced pacing. The
 // OMENative ops dispatcher calls it before kicking off a per-Instance
 // Update to ask: "given the live cross-Component pod distribution, may
@@ -323,10 +366,11 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 	// at rollout start). If absent (first reconcile), let the surge
 	// through — the next pass will snapshot and gate.
 	state := RatioState{
-		Original: make(map[v1beta1.ComponentType]int32, len(group.Components)),
-		Current:  make(map[v1beta1.ComponentType]int32, len(group.Components)),
-		NewPods:  make(map[v1beta1.ComponentType]int32, len(group.Components)),
-		Serving:  make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		Original:        make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		Current:         make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		NewPods:         make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		Serving:         make(map[v1beta1.ComponentType]int32, len(group.Components)),
+		InFlightUnavail: make(map[v1beta1.ComponentType]int32, len(group.Components)),
 	}
 	var groupStatus *v1beta1.RolloutCoordinationGroupStatus
 	if isvc.Status.RolloutCoordination != nil {
@@ -353,6 +397,8 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 			// Serving is what the band check projects against — live
 			// traffic capacity, not rollout progress.
 			state.Serving[c] = cs.Lifecycle.ServingReplicas
+			// Operation-tracked in-flight drains (fresh; see RatioState doc).
+			state.InFlightUnavail[c] = unavailableInFlight(cs.Lifecycle.InstanceStatuses)
 		}
 	}
 	// Account for pods this wake-up has already started pulling out of
