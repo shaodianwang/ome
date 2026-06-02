@@ -92,6 +92,45 @@ func TestValidateLifecycle_RollingUpdate_RejectsBothZero(t *testing.T) {
 	}
 }
 
+// TestValidateLifecycle_InPlace_AcceptsZeroBudget pins the fix: in-place
+// strategies neither surge nor drain, so maxSurge=0 && maxUnavailable=0 is
+// their natural budget and must be accepted (the zero-budget rule applies
+// to surge/drain strategies only). SurgeThenDrain with the same zero budget
+// stays rejected.
+func TestValidateLifecycle_InPlace_AcceptsZeroBudget(t *testing.T) {
+	for _, typ := range []v1beta1.UpdateStrategyType{
+		v1beta1.UpdateStrategyInPlaceOnly,
+		v1beta1.UpdateStrategyInPlaceIfPossible,
+	} {
+		t.Run(string(typ), func(t *testing.T) {
+			spec := &v1beta1.InferenceServiceSpec{
+				Engine: &v1beta1.EngineSpec{
+					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+						Lifecycle: &v1beta1.LifecycleSpec{
+							UpdateStrategy: &v1beta1.UpdateStrategy{
+								Type: typ,
+								RollingUpdate: &v1beta1.RollingUpdate{
+									MaxUnavailable: intstrPtr(intstr.FromInt(0)),
+									MaxSurge:       intstrPtr(intstr.FromInt(0)),
+								},
+							},
+						},
+					},
+				},
+			}
+			if err := ValidateLifecycle(spec); err != nil {
+				t.Fatalf("%s with maxSurge=0 && maxUnavailable=0 must be accepted (in-place needs no surge/drain budget); got %v", typ, err)
+			}
+		})
+	}
+
+	// Control: SurgeThenDrain with the same zero budget is still rejected.
+	surge := lifecycleSpec(intstrPtr(intstr.FromInt(0)), intstrPtr(intstr.FromInt(0)))
+	if err := ValidateLifecycle(surge); err == nil || !strings.Contains(err.Error(), ReasonRollingUpdateZeroBudget) {
+		t.Fatalf("SurgeThenDrain zero-budget must still be rejected with %s; got %v", ReasonRollingUpdateZeroBudget, err)
+	}
+}
+
 // TestValidateLifecycle_RollingUpdate_RejectsNegativeInteger covers
 // the int-form rejection path — both MaxUnavailable and MaxSurge must
 // reject negative absolute counts with ReasonInvalidRollingUpdateInteger.

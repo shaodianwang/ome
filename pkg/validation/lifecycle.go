@@ -83,8 +83,16 @@ func validateComponentLifecycle(name string, lc *v1beta1.LifecycleSpec) error {
 	if err := validateRollingUpdateIntOrString(name, "maxSurge", ru.MaxSurge); err != nil {
 		return err
 	}
-	if err := validateRollingUpdateNotBothZero(name, ru.MaxSurge, ru.MaxUnavailable); err != nil {
-		return err
+	// The zero-budget check applies only to surge/drain strategies. In-place
+	// strategies (InPlaceIfPossible / InPlaceOnly) patch pods in place — they
+	// neither surge nor drain — so maxSurge=0 && maxUnavailable=0 is the
+	// natural, correct budget for them, not an unstartable rollout. (Empty
+	// Type defaults to SurgeThenDrain, so it is correctly subject to the check.)
+	t := lc.UpdateStrategy.Type
+	if t != v1beta1.UpdateStrategyInPlaceIfPossible && t != v1beta1.UpdateStrategyInPlaceOnly {
+		if err := validateRollingUpdateNotBothZero(name, ru.MaxSurge, ru.MaxUnavailable); err != nil {
+			return err
+		}
 	}
 	return nil
 }
