@@ -11,7 +11,6 @@ import (
 
 func TestValidateRollout(t *testing.T) {
 	manual := v1beta1.PromotionPolicyManual
-	canary10 := int64(10)
 	completeSteps := []v1beta1.RolloutStep{
 		{
 			NewCapacity:   intstr.FromString("10%"),
@@ -142,59 +141,6 @@ func TestValidateRollout(t *testing.T) {
 				},
 			},
 			wantContains: "InvalidStepCapacity",
-		},
-		{
-			name: "mixed forms — rollout AND engine.canaryTrafficPercent",
-			spec: &v1beta1.InferenceServiceSpec{
-				Engine: &v1beta1.EngineSpec{
-					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-						CanaryTrafficPercent: &canary10,
-					},
-				},
-				Traffic: &v1beta1.TrafficSpec{
-					Rollout: &v1beta1.RolloutSpec{Steps: completeSteps},
-				},
-			},
-			wantContains: "MixedRolloutForms",
-		},
-		{
-			name: "mixed forms — rollout AND decoder.canaryTrafficPercent",
-			spec: &v1beta1.InferenceServiceSpec{
-				Decoder: &v1beta1.DecoderSpec{
-					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-						CanaryTrafficPercent: &canary10,
-					},
-				},
-				Traffic: &v1beta1.TrafficSpec{
-					Rollout: &v1beta1.RolloutSpec{Steps: completeSteps},
-				},
-			},
-			wantContains: "MixedRolloutForms",
-		},
-		{
-			name: "mixed forms — rollout AND router.canaryTrafficPercent",
-			spec: &v1beta1.InferenceServiceSpec{
-				Router: &v1beta1.RouterSpec{
-					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-						CanaryTrafficPercent: &canary10,
-					},
-				},
-				Traffic: &v1beta1.TrafficSpec{
-					Rollout: &v1beta1.RolloutSpec{Steps: completeSteps},
-				},
-			},
-			wantContains: "MixedRolloutForms",
-		},
-		{
-			name: "only canaryTrafficPercent (no rollout) is OK",
-			spec: &v1beta1.InferenceServiceSpec{
-				Engine: &v1beta1.EngineSpec{
-					ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-						CanaryTrafficPercent: &canary10,
-					},
-				},
-			},
-			wantOK: true,
 		},
 		{
 			name: "empty steps is rejected (does not panic)",

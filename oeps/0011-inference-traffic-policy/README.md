@@ -1,5 +1,7 @@
 # OEP-0011: Inference Service Traffic Management
 
+> **Superseded:** the simple per-Component `canaryTrafficPercent` form described in this document has been removed; use `spec.traffic.rollout` instead. The text below is retained as the historical proposal.
+
 <!-- toc -->
 - [Summary](#summary)
 - [Motivation](#motivation)

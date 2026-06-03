@@ -769,13 +769,6 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 							Format:      "int64",
 						},
 					},
-					"canaryTrafficPercent": {
-						SchemaProps: spec.SchemaProps{
-							Description: "CanaryTrafficPercent defines the traffic split percentage between the candidate revision and the last ready revision",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
 					"labels": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Labels that will be added to the component pod. More info: http://kubernetes.io/docs/user-guide/labels",
@@ -1577,13 +1570,6 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 							Format:      "int64",
 						},
 					},
-					"canaryTrafficPercent": {
-						SchemaProps: spec.SchemaProps{
-							Description: "CanaryTrafficPercent defines the traffic split percentage between the candidate revision and the last ready revision",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
 					"labels": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Labels that will be added to the component pod. More info: http://kubernetes.io/docs/user-guide/labels",
@@ -2306,13 +2292,6 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					"timeoutSeconds": {
 						SchemaProps: spec.SchemaProps{
 							Description: "TimeoutSeconds specifies the number of seconds to wait before timing out a request to the component.",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"canaryTrafficPercent": {
-						SchemaProps: spec.SchemaProps{
-							Description: "CanaryTrafficPercent defines the traffic split percentage between the candidate revision and the last ready revision",
 							Type:        []string{"integer"},
 							Format:      "int64",
 						},
@@ -6152,7 +6131,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutSpec(ref common.ReferenceCallback) commo
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutSpec defines a multi-step progressive rollout plan. When set on TrafficSpec.Rollout, the controller advances through the steps under the configured PromotionPolicy and the simple per-Component ComponentExtensionSpec.CanaryTrafficPercent MUST NOT be set on the same Component (admission rejects).\n\nStep semantics:\n  - Each step specifies pod capacity (NewCapacity, OldCapacity)\n    independently of traffic weight (TrafficWeight). This lets\n    operators run the new revision at full capacity with 0% traffic\n    for validation, then atomically shift traffic.\n  - The final step's TrafficWeight must be 100 (admission enforces)\n    so the rollout always completes.\n  - Each step's optional Pause holds the rollout. Under Manual\n    promotion, operators advance via the ome.io/rollout-promote\n    annotation; under Auto, the controller advances based on\n    Pause.Duration.",
+				Description: "RolloutSpec defines a multi-step progressive rollout plan. When set on TrafficSpec.Rollout, the controller advances through the steps under the configured PromotionPolicy.\n\nStep semantics:\n  - Each step specifies pod capacity (NewCapacity, OldCapacity)\n    independently of traffic weight (TrafficWeight). This lets\n    operators run the new revision at full capacity with 0% traffic\n    for validation, then atomically shift traffic.\n  - The final step's TrafficWeight must be 100 (admission enforces)\n    so the rollout always completes.\n  - Each step's optional Pause holds the rollout. Under Manual\n    promotion, operators advance via the ome.io/rollout-promote\n    annotation; under Auto, the controller advances based on\n    Pause.Duration.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"steps": {
@@ -6726,13 +6705,6 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 					"timeoutSeconds": {
 						SchemaProps: spec.SchemaProps{
 							Description: "TimeoutSeconds specifies the number of seconds to wait before timing out a request to the component.",
-							Type:        []string{"integer"},
-							Format:      "int64",
-						},
-					},
-					"canaryTrafficPercent": {
-						SchemaProps: spec.SchemaProps{
-							Description: "CanaryTrafficPercent defines the traffic split percentage between the candidate revision and the last ready revision",
 							Type:        []string{"integer"},
 							Format:      "int64",
 						},
@@ -8139,7 +8111,7 @@ func schema_pkg_apis_ome_v1beta1_TrafficSpec(ref common.ReferenceCallback) commo
 					},
 					"rollout": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Rollout configures a step-based progressive rollout plan. When set, the controller advances through the steps under the configured PromotionPolicy and the per-Component ComponentExtensionSpec.CanaryTrafficPercent MUST NOT be set on the same Component (admission rejects with MixedRolloutForms). When unset, operators drive rollouts directly via ComponentExtensionSpec.CanaryTrafficPercent.",
+							Description: "Rollout configures a step-based progressive rollout plan. When set, the controller advances through the steps under the configured PromotionPolicy.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec"),
 						},
 					},

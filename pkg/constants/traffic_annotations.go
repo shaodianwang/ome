@@ -3,9 +3,7 @@
 // All annotations live under the OME group prefix (ome.io/). Operators
 // set them on the InferenceService metadata; the traffic translator
 // reads them and threads the values into the emitted backend policy
-// resource. The simple-form `canaryTrafficPercent` stays on the
-// per-Component ComponentExtensionSpec; everything else is on the
-// InferenceService.
+// resource.
 package constants
 
 // Backend-policy annotation keys.
@@ -66,8 +64,7 @@ var (
 	// RolloutRollbackAnnotation is the operator verb for instant
 	// rollback. Value: "true". Traffic shifts to 100% old, new
 	// revision drains after scaleDownDelaySeconds. Controller clears
-	// the annotation after consuming it. Works for both the simple
-	// canaryTrafficPercent form and step-based rollouts.
+	// the annotation after consuming it.
 	RolloutRollbackAnnotation = OMEAPIGroupName + "/rollout-rollback"
 )
 

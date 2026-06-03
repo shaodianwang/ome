@@ -2134,9 +2134,6 @@ spec:
                       required:
                         - class
                       type: object
-                    canaryTrafficPercent:
-                      format: int64
-                      type: integer
                     containers:
                       items:
                         properties:
@@ -15580,9 +15577,6 @@ spec:
                       required:
                         - class
                       type: object
-                    canaryTrafficPercent:
-                      format: int64
-                      type: integer
                     containers:
                       items:
                         properties:
@@ -29058,9 +29052,6 @@ spec:
                       required:
                         - class
                       type: object
-                    canaryTrafficPercent:
-                      format: int64
-                      type: integer
                     config:
                       additionalProperties:
                         type: string

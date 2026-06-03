@@ -1,11 +1,9 @@
-// OEP-0011 rollout validation.
+// Rollout validation.
 //
 // Webhook-level validation for spec.traffic.rollout (step-based
-// progressive rollout plans) and its mutual exclusivity with the
-// existing per-Component ComponentExtensionSpec.CanaryTrafficPercent.
-// CRD enum tags enforce per-field types (TrafficWeight in [0,100],
-// at least one step, etc.); this file adds the cross-step and
-// cross-field rules the webhook owns.
+// progressive rollout plans). CRD enum tags enforce per-field types
+// (TrafficWeight in [0,100], at least one step, etc.); this file adds
+// the cross-step rules the webhook owns.
 package validation
 
 import (
@@ -57,11 +55,6 @@ func ValidateRollout(spec *v1beta1.InferenceServiceSpec) error {
 			len(steps)-1, last.TrafficWeight)
 	}
 
-	// Mutual exclusivity with the simple per-Component form.
-	if err := validateMixedRolloutForms(spec); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -97,29 +90,6 @@ func validateRolloutStepCapacity(stepIdx int, fieldName string, v intstr.IntOrSt
 	default:
 		return fmt.Errorf("spec.traffic.rollout.steps[%d].%s has unsupported IntOrString type %d (InvalidStepCapacity)",
 			stepIdx, fieldName, v.Type)
-	}
-	return nil
-}
-
-// validateMixedRolloutForms enforces the mutual exclusivity between
-// spec.traffic.rollout (declarative step-based) and the per-Component
-// canaryTrafficPercent (simple form). Operators must pick one per
-// ISVC.
-func validateMixedRolloutForms(spec *v1beta1.InferenceServiceSpec) error {
-	if spec.Engine != nil && spec.Engine.CanaryTrafficPercent != nil {
-		return fmt.Errorf(
-			"spec.traffic.rollout is set AND spec.engine.canaryTrafficPercent=%d; pick one rollout form per ISVC (MixedRolloutForms)",
-			*spec.Engine.CanaryTrafficPercent)
-	}
-	if spec.Decoder != nil && spec.Decoder.CanaryTrafficPercent != nil {
-		return fmt.Errorf(
-			"spec.traffic.rollout is set AND spec.decoder.canaryTrafficPercent=%d; pick one rollout form per ISVC (MixedRolloutForms)",
-			*spec.Decoder.CanaryTrafficPercent)
-	}
-	if spec.Router != nil && spec.Router.CanaryTrafficPercent != nil {
-		return fmt.Errorf(
-			"spec.traffic.rollout is set AND spec.router.canaryTrafficPercent=%d; pick one rollout form per ISVC (MixedRolloutForms)",
-			*spec.Router.CanaryTrafficPercent)
 	}
 	return nil
 }

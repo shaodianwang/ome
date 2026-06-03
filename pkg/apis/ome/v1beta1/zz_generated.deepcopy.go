@@ -359,11 +359,6 @@ func (in *ComponentExtensionSpec) DeepCopyInto(out *ComponentExtensionSpec) {
 		*out = new(int64)
 		**out = **in
 	}
-	if in.CanaryTrafficPercent != nil {
-		in, out := &in.CanaryTrafficPercent, &out.CanaryTrafficPercent
-		*out = new(int64)
-		**out = **in
-	}
 	if in.Labels != nil {
 		in, out := &in.Labels, &out.Labels
 		*out = make(map[string]string, len(*in))

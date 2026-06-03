@@ -48,11 +48,7 @@ type TrafficSpec struct {
 
 	// Rollout configures a step-based progressive rollout plan.
 	// When set, the controller advances through the steps under the
-	// configured PromotionPolicy and the per-Component
-	// ComponentExtensionSpec.CanaryTrafficPercent MUST NOT be set on
-	// the same Component (admission rejects with MixedRolloutForms).
-	// When unset, operators drive rollouts directly via
-	// ComponentExtensionSpec.CanaryTrafficPercent.
+	// configured PromotionPolicy.
 	// +optional
 	Rollout *RolloutSpec `json:"rollout,omitempty"`
 }

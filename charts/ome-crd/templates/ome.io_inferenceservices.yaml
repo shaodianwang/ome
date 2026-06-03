@@ -994,9 +994,6 @@ spec:
                             - triggers
                           type: object
                       type: object
-                    canaryTrafficPercent:
-                      format: int64
-                      type: integer
                     containers:
                       items:
                         properties:
@@ -13736,9 +13733,6 @@ spec:
                             - triggers
                           type: object
                       type: object
-                    canaryTrafficPercent:
-                      format: int64
-                      type: integer
                     containers:
                       items:
                         properties:
@@ -26574,9 +26568,6 @@ spec:
                             - triggers
                           type: object
                       type: object
-                    canaryTrafficPercent:
-                      format: int64
-                      type: integer
                     config:
                       additionalProperties:
                         type: string

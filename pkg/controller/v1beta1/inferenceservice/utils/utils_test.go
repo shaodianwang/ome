@@ -913,10 +913,9 @@ func TestMergeEngineSpec(t *testing.T) {
 			name: "complex merge scenario - partial overrides",
 			runtimeEngine: &v1beta1.EngineSpec{
 				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					MinReplicas:          intPtr(1),
-					MaxReplicas:          5,
-					TimeoutSeconds:       int64Ptr(50),
-					CanaryTrafficPercent: int64Ptr(20),
+					MinReplicas:    intPtr(1),
+					MaxReplicas:    5,
+					TimeoutSeconds: int64Ptr(50),
 				},
 				PodSpec: v1beta1.PodSpec{
 					ServiceAccountName: "runtime-sa",
@@ -976,10 +975,9 @@ func TestMergeEngineSpec(t *testing.T) {
 			},
 			expectedEngine: &v1beta1.EngineSpec{
 				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					MinReplicas:          intPtr(1),
-					MaxReplicas:          10,
-					TimeoutSeconds:       int64Ptr(80),
-					CanaryTrafficPercent: int64Ptr(20),
+					MinReplicas:    intPtr(1),
+					MaxReplicas:    10,
+					TimeoutSeconds: int64Ptr(80),
 				},
 				PodSpec: v1beta1.PodSpec{
 					ServiceAccountName: "runtime-sa",
@@ -1298,10 +1296,9 @@ func TestMergeDecoderSpec(t *testing.T) {
 			name: "complex PD-disaggregated decoder merge",
 			runtimeDecoder: &v1beta1.DecoderSpec{
 				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					MinReplicas:          intPtr(2),
-					MaxReplicas:          8,
-					TimeoutSeconds:       int64Ptr(80),
-					CanaryTrafficPercent: int64Ptr(50),
+					MinReplicas:    intPtr(2),
+					MaxReplicas:    8,
+					TimeoutSeconds: int64Ptr(80),
 				},
 				PodSpec: v1beta1.PodSpec{
 					Containers: []v1.Container{
@@ -1354,10 +1351,9 @@ func TestMergeDecoderSpec(t *testing.T) {
 			},
 			expectedDecoder: &v1beta1.DecoderSpec{
 				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					MinReplicas:          intPtr(2),
-					MaxReplicas:          16,
-					TimeoutSeconds:       int64Ptr(80),
-					CanaryTrafficPercent: int64Ptr(50),
+					MinReplicas:    intPtr(2),
+					MaxReplicas:    16,
+					TimeoutSeconds: int64Ptr(80),
 				},
 				PodSpec: v1beta1.PodSpec{
 					Containers: []v1.Container{

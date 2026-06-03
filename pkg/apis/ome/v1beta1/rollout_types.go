@@ -1,9 +1,6 @@
 // Package v1beta1 — rollout strategy types.
 //
 // This file defines the multi-step progressive rollout shape.
-// Single-step rollouts (the today-or-canary case) continue to use the
-// existing per-Component ComponentExtensionSpec.CanaryTrafficPercent
-// field. The two forms are mutually exclusive at admission.
 package v1beta1
 
 import (
@@ -13,9 +10,7 @@ import (
 
 // RolloutSpec defines a multi-step progressive rollout plan. When set
 // on TrafficSpec.Rollout, the controller advances through the steps
-// under the configured PromotionPolicy and the simple per-Component
-// ComponentExtensionSpec.CanaryTrafficPercent MUST NOT be set on the
-// same Component (admission rejects).
+// under the configured PromotionPolicy.
 //
 // Step semantics:
 //   - Each step specifies pod capacity (NewCapacity, OldCapacity)

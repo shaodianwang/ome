@@ -173,8 +173,7 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
-	// OEP-0011 traffic block: typed core, ome.io/* annotations, rollout
-	// plan, per-Component canary range + PD coupling.
+	// Traffic block: typed core, ome.io/* annotations, rollout plan.
 	if err := validation.ValidateTrafficSpec(isvc.Spec.Traffic); err != nil {
 		return allWarnings, err
 	}
@@ -184,9 +183,6 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	}
 	allWarnings = append(allWarnings, trafficWarnings...)
 	if err := validation.ValidateRollout(&isvc.Spec); err != nil {
-		return allWarnings, err
-	}
-	if err := validation.ValidateCanaryPercent(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
 
