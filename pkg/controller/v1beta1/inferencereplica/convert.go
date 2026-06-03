@@ -87,6 +87,9 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // the nil check correct.
 func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService) workload.ReconcileInput {
 	desired := desiredFromIR(ir)
+	// Thread the controller's cached gang-availability into DesiredSpec —
+	// EnsurePodGroups gates per-Instance PodGroup creation on this flag.
+	desired.GangSchedulingAvailable = r.GangSchedulingAvailable
 	observed := observedFromIR(ir)
 	eventTarget := client.Object(ir)
 	if parent != nil {

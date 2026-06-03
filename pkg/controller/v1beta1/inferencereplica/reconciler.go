@@ -36,6 +36,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
@@ -71,6 +72,14 @@ type Reconciler struct {
 	// when nil the workload-level DefaultExpectations singleton is
 	// used.
 	Expectations *workload.Expectations
+
+	// GangSchedulingAvailable is the cached cluster-discovery boolean —
+	// true when the scheduler-plugins PodGroup CRD is installed. Set once
+	// in SetupWithManager (mirrors the ISVC controller's flag) and threaded
+	// into DesiredSpec so EnsurePodGroups runs. Without it, IR-managed
+	// multi-node renders the gang reference on pods but never creates the
+	// PodGroup object, leaving the gang stuck Pending ("PodGroup not found").
+	GangSchedulingAvailable bool
 }
 
 // Reconcile loads the InferenceReplica, projects (Spec, Status) onto a
@@ -160,6 +169,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		Expectations: r.Expectations,
 		// RenderHook stays nil for the IR adapter — peer-env injection
 		// lives on the parent ISVC controller for v1
+	}
+
+	// PodGroups must exist BEFORE the first pod of any multi-pod Instance is
+	// created, or the gang scheduler rejects the pods with "PodGroup not
+	// found" and they stay Pending forever. The direct OMENative path does
+	// this; the IR-managed path (the default) must too. No-op for single-pod
+	// Components and when the PodGroup CRD is absent — EnsurePodGroups gates
+	// on DesiredSpec.GangSchedulingAvailable, stamps GangSchedulingUnavailable,
+	// and returns. Runs before the revision/dispatch so the gang is announced
+	// ahead of pod creation.
+	if gerr := workloadgang.EnsurePodGroups(ctx, deps, input, plan); gerr != nil {
+		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: ensure pod groups (component=%s): %w", ir.Spec.Component, gerr)
 	}
 
 	// Compute the target ControllerRevision before kicking off the

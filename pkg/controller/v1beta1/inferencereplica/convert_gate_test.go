@@ -106,6 +106,26 @@ func TestBuildReconcileInput_NilParentLeavesGateNil(t *testing.T) {
 		"no parent ⇒ no coordination to enforce ⇒ gate stays nil")
 }
 
+// TestBuildReconcileInput_ThreadsGangSchedulingAvailable pins the IR-path
+// multi-node gang fix: buildReconcileInput must thread the controller's
+// GangSchedulingAvailable flag into DesiredSpec, because EnsurePodGroups gates
+// per-Instance PodGroup creation on it. Without this, IR-managed multi-node
+// pods render the gang reference but no PodGroup object is ever created, so the
+// gang stays Pending forever ("PodGroup not found") — the bug this fixes.
+func TestBuildReconcileInput_ThreadsGangSchedulingAvailable(t *testing.T) {
+	g := gomega.NewWithT(t)
+	r, _ := newReconciler(t)
+	ir := baselineIR("llama-engine", "default", 1)
+
+	r.GangSchedulingAvailable = true
+	g.Expect(r.buildReconcileInput(ir, nil).DesiredSpec.GangSchedulingAvailable).To(gomega.BeTrue(),
+		"DesiredSpec.GangSchedulingAvailable must follow the controller flag (true) so EnsurePodGroups runs")
+
+	r.GangSchedulingAvailable = false
+	g.Expect(r.buildReconcileInput(ir, nil).DesiredSpec.GangSchedulingAvailable).To(gomega.BeFalse(),
+		"flag false ⇒ DesiredSpec false ⇒ EnsurePodGroups skips (CRD absent / degradation surface)")
+}
+
 // TestBuildReconcileInput_GateUsesFreshIRStatus pins the IR-path
 // gate-staleness fix (p44/p51): the gate must read the GATED Component's
 // counts from the IR's OWN fresh status, not the parent ISVC's lagged

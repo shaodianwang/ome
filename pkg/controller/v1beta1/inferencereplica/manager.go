@@ -7,9 +7,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // SetupWithManager wires the Reconciler into the controller manager.
@@ -55,6 +58,15 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Expectations == nil {
 		r.Expectations = workload.NewExpectations()
 	}
+	// Discover the scheduler-plugins PodGroup CRD once at setup (mirrors the
+	// ISVC controller). Gates per-Instance PodGroup creation for multi-pod
+	// Instances; absence is a degradation surface, not a hard fail (the
+	// reconciler stamps GangSchedulingUnavailable and skips PodGroup creation).
+	podGroupFound, err := utils.IsCrdAvailable(mgr.GetConfig(), schedulingv1alpha1.SchemeGroupVersion.String(), constants.PodGroupKind)
+	if err != nil {
+		return err
+	}
+	r.GangSchedulingAvailable = podGroupFound
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.InferenceReplica{}).
 		Owns(&appsv1.ControllerRevision{}).
