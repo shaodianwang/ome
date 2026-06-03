@@ -697,12 +697,15 @@ func canonicalScaleTargetRef(mode constants.DeploymentModeType, isvcName, compon
 // round-robin to all pods of the gang and ~(Size-1)/Size of
 // requests would 502.
 //
+// The multi-pod filter is runner=leader AND pod-ordinal=0: pod-ordinal
+// is numbered per runner, so the rank-0 worker also carries ordinal 0
+// and pod-ordinal alone would still admit a worker. runner=leader pins
+// the one serving pod.
+//
 // Single-pod Components keep the broader selector: SurgeThenDrain
 // alternates the pod-naming ordinal between 0 and 1 across surges
 // (see query.LabelPodOrdinal docstring), so pinning ordinal=0
-// would zero-endpoint the Service during the surge phase. Multi-pod
-// Components use RecreateInstance (not SurgeThenDrain), so the
-// rank-0 pod ordinal is stable.
+// would zero-endpoint the Service during the surge phase.
 //
 // PodMonitor intentionally uses the base selector (no pod-ordinal
 // filter) so Prometheus scrapes EVERY pod of the gang — workers
@@ -734,8 +737,8 @@ func ReconcileOMENativeSubresources(
 	}
 	// Base selector — narrows to OMENative-managed pods of this (ISVC,
 	// Component) pair. Used as-is for PodMonitor; augmented with a
-	// `pod-ordinal=0` filter for the stable Service of multi-pod
-	// Components (see function-level docstring for rationale).
+	// `runner=leader` + `pod-ordinal=0` filter for the stable Service of
+	// multi-pod Components (see function-level docstring for rationale).
 	baseSelector := map[string]string{
 		constants.InferenceServicePodLabelKey: isvc.Name,
 		constants.OMEComponentLabel:           string(componentType),
@@ -743,10 +746,15 @@ func ReconcileOMENativeSubresources(
 	}
 	stableSelector := baseSelector
 	if isvcutils.IsMultiPodComponent(isvc, componentType) {
-		stableSelector = make(map[string]string, len(baseSelector)+1)
+		stableSelector = make(map[string]string, len(baseSelector)+2)
 		for k, v := range baseSelector {
 			stableSelector[k] = v
 		}
+		// pod-ordinal is numbered PER RUNNER, so the rank-0 worker also carries
+		// pod-ordinal=0; without runner=leader the selector matches leader +
+		// worker-0 and kube-proxy round-robins customer traffic onto a worker
+		// that cannot serve. runner=leader + pod-ordinal=0 selects only the leader.
+		stableSelector[query.LabelRunner] = string(v1beta1.RunnerNameLeader)
 		stableSelector[query.LabelPodOrdinal] = "0"
 	}
 	componentMeta := objectMeta.DeepCopy()

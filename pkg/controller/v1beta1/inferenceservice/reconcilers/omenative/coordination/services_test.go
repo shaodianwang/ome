@@ -159,6 +159,13 @@ func TestEnsurePerRevisionServices_MultiPodTightensRoutingOnly(t *testing.T) {
 		t.Errorf("multi-pod routing Service selector must have %s=0; got %q (ok=%v)",
 			query.LabelPodOrdinal, got, ok)
 	}
+	// runner=leader is required alongside pod-ordinal=0: ordinals are per
+	// runner, so the rank-0 worker also carries pod-ordinal=0; without this the
+	// routing Service would admit a worker.
+	if got, ok := routing.Spec.Selector[query.LabelRunner]; !ok || got != string(v1beta1.RunnerNameLeader) {
+		t.Errorf("multi-pod routing Service selector must have %s=leader; got %q (ok=%v)",
+			query.LabelRunner, got, ok)
+	}
 	// Headless Service stays broad — workers must remain discoverable.
 	headless := &corev1.Service{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: out.HeadlessName}, headless); err != nil {
@@ -167,6 +174,10 @@ func TestEnsurePerRevisionServices_MultiPodTightensRoutingOnly(t *testing.T) {
 	if _, ok := headless.Spec.Selector[query.LabelPodOrdinal]; ok {
 		t.Errorf("headless Service selector must NEVER include %s; got %v",
 			query.LabelPodOrdinal, headless.Spec.Selector)
+	}
+	if _, ok := headless.Spec.Selector[query.LabelRunner]; ok {
+		t.Errorf("headless Service selector must NEVER include %s; got %v",
+			query.LabelRunner, headless.Spec.Selector)
 	}
 }
 

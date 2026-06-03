@@ -1165,15 +1165,23 @@ func TestEngineReconcileOMENativeSubresources_Rank0Selector(t *testing.T) {
 				constants.OMEComponentLabel, string(v1beta1.EngineComponent)))
 			g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
 				query.LabelManagedBy, query.ManagedByOMENative))
-			// Rank-0 filter present only when multi-pod.
+			// Rank-0 filter (runner=leader + pod-ordinal=0) present only when
+			// multi-pod. runner=leader is required because pod-ordinal is
+			// numbered per runner, so the rank-0 worker also carries ordinal 0.
 			if tt.wantStableSelectorHas == "" {
 				g.Expect(svc.Spec.Selector).NotTo(gomega.HaveKey(query.LabelPodOrdinal),
 					"single-pod Service selector must NOT carry %s", query.LabelPodOrdinal)
+				g.Expect(svc.Spec.Selector).NotTo(gomega.HaveKey(query.LabelRunner),
+					"single-pod Service selector must NOT carry %s", query.LabelRunner)
 			} else {
 				g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
 					query.LabelPodOrdinal, tt.wantStableSelectorHas),
 					"multi-pod Service selector must carry %s=%s",
 					query.LabelPodOrdinal, tt.wantStableSelectorHas)
+				g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+					query.LabelRunner, string(v1beta1.RunnerNameLeader)),
+					"multi-pod Service selector must carry %s=leader so it can't match a worker",
+					query.LabelRunner)
 			}
 
 			// PodMonitor selector NEVER carries the rank-0 filter —
@@ -1185,6 +1193,9 @@ func TestEngineReconcileOMENativeSubresources_Rank0Selector(t *testing.T) {
 			g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey(query.LabelPodOrdinal),
 				"PodMonitor selector must NEVER carry %s (workers emit metrics too)",
 				query.LabelPodOrdinal)
+			g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey(query.LabelRunner),
+				"PodMonitor selector must NEVER carry %s (workers emit metrics too)",
+				query.LabelRunner)
 		})
 	}
 }
@@ -1282,9 +1293,12 @@ func TestDecoderReconcileOMENativeSubresources_Rank0Selector(t *testing.T) {
 				constants.OMEComponentLabel, string(v1beta1.DecoderComponent)))
 			if tt.wantStableSelectorHas == "" {
 				g.Expect(svc.Spec.Selector).NotTo(gomega.HaveKey(query.LabelPodOrdinal))
+				g.Expect(svc.Spec.Selector).NotTo(gomega.HaveKey(query.LabelRunner))
 			} else {
 				g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
 					query.LabelPodOrdinal, tt.wantStableSelectorHas))
+				g.Expect(svc.Spec.Selector).To(gomega.HaveKeyWithValue(
+					query.LabelRunner, string(v1beta1.RunnerNameLeader)))
 			}
 
 			pm := &monitoringv1.PodMonitor{}
@@ -1292,6 +1306,7 @@ func TestDecoderReconcileOMENativeSubresources_Rank0Selector(t *testing.T) {
 				client.ObjectKey{Namespace: "default", Name: "test-isvc-decoder"},
 				pm)).To(gomega.Succeed())
 			g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey(query.LabelPodOrdinal))
+			g.Expect(pm.Spec.Selector.MatchLabels).NotTo(gomega.HaveKey(query.LabelRunner))
 		})
 	}
 }

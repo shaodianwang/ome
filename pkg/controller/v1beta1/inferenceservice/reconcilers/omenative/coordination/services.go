@@ -76,9 +76,10 @@ func PerRevisionServiceNames(isvcName string, component v1beta1.ComponentType, r
 //   - false (single-pod) → broad selector. SurgeThenDrain alternates
 //     the pod-naming ordinal between 0 and 1; pinning ordinal=0 would
 //     zero-endpoint the Service during surge.
-//   - true (multi-pod) → adds `ome.io/pod-ordinal=0` so only the
-//     leader (rank-0) pod handles customer traffic. Workers run
-//     distributed-init peers and cannot serve.
+//   - true (multi-pod) → adds `ome.io/runner=leader` + `ome.io/pod-ordinal=0`
+//     so only the leader (rank-0) pod handles customer traffic. Workers run
+//     distributed-init peers and cannot serve; pod-ordinal alone is not enough
+//     because it is numbered per runner, so the rank-0 worker also carries 0.
 //
 // The routing Service's label map intentionally does NOT include the
 // `pod-ordinal=0` key — Labels describe the Service itself for
@@ -94,10 +95,15 @@ func BuildPerRevisionRoutingService(isvc *v1beta1.InferenceService, component v1
 	labels := perRevisionServiceSelector(isvc.Name, component, revisionHash)
 	selector := labels
 	if multiPod {
-		selector = make(map[string]string, len(labels)+1)
+		selector = make(map[string]string, len(labels)+2)
 		for k, v := range labels {
 			selector[k] = v
 		}
+		// Pin the leader: pod-ordinal is numbered PER RUNNER, so the rank-0
+		// worker also carries pod-ordinal=0. Without runner=leader the selector
+		// would match leader + worker-0 and route customer traffic to a worker
+		// that cannot serve. runner=leader + pod-ordinal=0 selects only the leader.
+		selector[query.LabelRunner] = string(v1beta1.RunnerNameLeader)
 		selector[query.LabelPodOrdinal] = "0"
 	}
 	return &corev1.Service{
