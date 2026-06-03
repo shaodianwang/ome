@@ -89,15 +89,17 @@ func TestEvaluateUpdateGate_RatioBalancedSurgeNotDeadlocked(t *testing.T) {
 	// tiebreaker — see TestEvaluateUpdateGate_RecreatePodSymmetricCleared.)
 }
 
-// TestEvaluateSurge_SurgeTiebreaker pins the bounded surge-side tiebreaker
-// (the dual of #404's drain tiebreaker). When the band is narrower than one
-// whole pod, a surge-first roll deadlocks because the discrete (N+1):N step
-// exceeds the band. A surge only ADDS capacity (never starves a peer), so ONE
-// rounding-error pod (overshoot within 2x band, from a balanced full-original
-// baseline) is allowed through; larger overshoots stay an honest deadlock the
-// operator resolves by widening tolerance. The real-cluster playground caught
-// the cleared shapes as p54 (N=3) and p52/p56 (asymmetric small side); p55
-// (N=1) and p53 (tol=10) are the intentionally-NOT-cleared honest deadlocks.
+// TestEvaluateSurge_SurgeTiebreaker pins the surge-side tiebreaker. When the
+// band is narrower than one whole pod, a surge-first roll deadlocks because the
+// discrete (N+1):N step exceeds the band. A surge only ADDS capacity (it can
+// NEVER starve a peer) and SurgeThenDrain drains it back, so ONE minimal +1
+// surge from a balanced full-original baseline is allowed through regardless of
+// overshoot magnitude. Only mid-roll / already-skewed / zero-peer baselines
+// stay denied (guards (a) full-original + (b) balanced). The overshoot is NOT
+// capped: the earlier 2x-band cap permanently wedged the unavoidable minimal
+// surge at small N / tight band (N=1 2:1, tol 10% at N=4 5:4) — a roll that can
+// only proceed by surging. Playground: cleared shapes p54 (N=3), p52/p56
+// (asymmetric), and now p53/p55 (single-pod) + p80/p81/p96 (gangs).
 func TestEvaluateSurge_SurgeTiebreaker(t *testing.T) {
 	eng, dec := v1beta1.EngineComponent, v1beta1.DecoderComponent
 	cases := []struct {
@@ -124,14 +126,19 @@ func TestEvaluateSurge_SurgeTiebreaker(t *testing.T) {
 			original: map[v1beta1.ComponentType]int32{eng: 8, dec: 2},
 			serving:  map[v1beta1.ComponentType]int32{eng: 8, dec: 2},
 		},
-		// Honest deadlock — overshoot exceeds 2x band, stays denied:
-		{ // p55: 1:1 -> 2:1 = 2.0 > 2x band 1.5
-			name: "N=1 (2:1 exceeds 2x band)", tol: 25, comp: eng, wantAllowed: false,
+		// Now CLEARED — a minimal +1 surge on a balanced full-original
+		// baseline is allowed regardless of overshoot magnitude: a surge
+		// can't starve a peer and SurgeThenDrain drains it back. The prior
+		// 2x-band cap left these as permanent deadlocks, wedging a roll that
+		// can ONLY proceed by surging — caught on the cluster as p53/p55
+		// (single-pod) and p80/p81/p96 (gangs).
+		{ // p55/p81: 1:1 -> 2:1 — N=1 can only roll by surging
+			name: "N=1 minimal surge (cleared)", tol: 25, comp: eng, wantAllowed: true,
 			original: map[v1beta1.ComponentType]int32{eng: 1, dec: 1},
 			serving:  map[v1beta1.ComponentType]int32{eng: 1, dec: 1},
 		},
-		{ // p53: 4:4 tol=10 -> 5:4 = 1.25 > 2x band 1.2
-			name: "tight tol=10 at N=4 (5:4 exceeds 2x band)", tol: 10, comp: eng, wantAllowed: false,
+		{ // p53/p80: 4:4 tol=10 -> 5:4 — band narrower than one pod
+			name: "tight tol=10 at N=4 minimal surge (cleared)", tol: 10, comp: eng, wantAllowed: true,
 			original: map[v1beta1.ComponentType]int32{eng: 4, dec: 4},
 			serving:  map[v1beta1.ComponentType]int32{eng: 4, dec: 4},
 		},
