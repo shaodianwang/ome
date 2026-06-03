@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
@@ -24,6 +25,25 @@ import (
 // surge migration is in flight. Exported so the dispatcher's pacing
 // stays in lockstep.
 const MigrateRequeueInterval = 5 * time.Second
+
+// ledgerOwnerObject / ledgerOwnerGVK resolve the object that owns the
+// migration audit-ledger ConfigMap. The IR caller sets input.LedgerOwner
+// to the parent ISVC (so the ledger + the operator's migration-request
+// annotation share the user-facing resource while the IR owns the pods);
+// every other caller leaves it nil and the ledger lives on OwnerObject.
+func ledgerOwnerObject(input workload.ReconcileInput) client.Object {
+	if input.LedgerOwner != nil {
+		return input.LedgerOwner
+	}
+	return input.OwnerObject
+}
+
+func ledgerOwnerGVK(input workload.ReconcileInput) schema.GroupVersionKind {
+	if input.LedgerOwner != nil {
+		return input.LedgerOwnerGVK
+	}
+	return input.OwnerGVK
+}
 
 // Migrate drives one surge migration toward completion. Triggered by
 // an adapter-side annotation (or other source-of-truth carrier) the
@@ -71,7 +91,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, false, fmt.Errorf("Migrate: nil request (instance=%d)", sourceIdx)
 	}
 
-	ledger, err := audit.LoadLedgerForOwner(ctx, deps.Reader(), input.OwnerObject)
+	ledger, err := audit.LoadLedgerForOwner(ctx, deps.Reader(), ledgerOwnerObject(input))
 	if err != nil {
 		return false, false, fmt.Errorf("Migrate: load audit ledger: %w", err)
 	}
@@ -183,7 +203,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			return false, false, fmt.Errorf("Migrate: stamp surge status (instance=%d): %w", surgeIdx, err)
 		}
 		ledger.UpsertEntry(audit.NewStartedEntry(req, requestUUID, surgeIdx))
-		if err := audit.PersistLedgerForOwner(ctx, deps.Client, input.OwnerObject, input.OwnerGVK, ledger); err != nil {
+		if err := audit.PersistLedgerForOwner(ctx, deps.Client, ledgerOwnerObject(input), ledgerOwnerGVK(input), ledger); err != nil {
 			return false, false, fmt.Errorf("Migrate: persist Started ledger: %w", err)
 		}
 		// Clear the annotation after stamping Started so a re-delivery
@@ -406,7 +426,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, accepted, fmt.Errorf("Migrate: remove source InstanceStatus: %w", rerr)
 	}
 	ledger.UpsertEntry(audit.NewTerminalEntry(*ledger.InFlightEntryOrSeed(requestUUID, req, surgeIdx), audit.PhaseCompleted, "migrated"))
-	if err := audit.PersistLedgerForOwner(ctx, deps.Client, input.OwnerObject, input.OwnerGVK, ledger); err != nil {
+	if err := audit.PersistLedgerForOwner(ctx, deps.Client, ledgerOwnerObject(input), ledgerOwnerGVK(input), ledger); err != nil {
 		return false, accepted, fmt.Errorf("Migrate: persist Completed ledger: %w", err)
 	}
 	// Re-clear in case a re-delivery slipped in between the accept-time
@@ -474,7 +494,7 @@ func failMigration(ctx context.Context, deps workload.Deps, input workload.Recon
 		Outcome:     reason,
 	}
 	ledger.UpsertEntry(entry)
-	if err := audit.PersistLedgerForOwner(ctx, deps.Client, input.OwnerObject, input.OwnerGVK, ledger); err != nil {
+	if err := audit.PersistLedgerForOwner(ctx, deps.Client, ledgerOwnerObject(input), ledgerOwnerGVK(input), ledger); err != nil {
 		return false, fmt.Errorf("Migrate: persist Failed ledger (%s): %w", reason, err)
 	}
 	// Clear on rejection too — the requester retries against the same

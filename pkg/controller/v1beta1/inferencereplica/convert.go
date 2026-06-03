@@ -16,6 +16,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
+	omenativeops "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -30,6 +31,11 @@ import (
 // ReconcileInput.OwnerGVK. Mirrors the same approach
 // internalsource.isvcGVK takes on the ISVC adapter side.
 var irGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceReplica")
+
+// isvcGVK is the parent InferenceService's GVK — stamped as the owner of
+// the migration audit-ledger ConfigMap (input.LedgerOwnerGVK) so the
+// ledger lives on the user-facing ISVC, not the IR.
+var isvcGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
 // IRGVK returns the InferenceReplica GroupVersionKind. Exposed so
 // the reconciler can pass it directly to revision/podgroup helpers
@@ -166,6 +172,22 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent *v
 			return coordination.EvaluateUpdateGate(gateParent, ir.Spec.Component, r.Recorder, strategy, inFlightSurge, inFlightUnavail)
 		}
 	}
+	// Wire migration detection onto the IR-managed path. The operator's
+	// migration-request annotation + the audit ledger live on the
+	// user-facing parent ISVC, and AggregateIRStatus mirrors the IR's
+	// per-Instance statuses back onto it — so detection reads the parent,
+	// while Migrate drives the IR's own pods. LedgerOwner=parent keeps the
+	// ledger Migrate reads/writes the same ISVC-owned ledger detection
+	// uses. Nil parent (brief foreground-GC window) → migration simply
+	// doesn't fire this pass.
+	if parent != nil {
+		input.LedgerOwner = parent
+		input.LedgerOwnerGVK = isvcGVK
+		input.DetectMigrationRequest = func(ctx context.Context) (string, *workloadtypes.MigrationRequestSummary, int32, bool, error) {
+			return omenativeops.DetectMigrationRequestForISVC(ctx, parent, r.APIReader, r.Client, r.Recorder, ir.Spec.Component)
+		}
+	}
+
 	return input
 }
 

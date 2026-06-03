@@ -38,6 +38,15 @@ type ReconcileInput struct {
 	// falls back to OwnerObject.
 	EventTarget client.Object
 
+	// LedgerOwner owns the migration audit-ledger ConfigMap (load +
+	// persist + its controller OwnerReference). Usually OwnerObject; the
+	// IR caller sets it to the parent ISVC so the migration ledger lives
+	// on the same user-facing resource as the operator's migration-request
+	// annotation (the IR owns the pods; the ISVC owns the migration audit
+	// trail). Nil falls back to OwnerObject. LedgerOwnerGVK is its GVK.
+	LedgerOwner    client.Object
+	LedgerOwnerGVK schema.GroupVersionKind
+
 	// Key is the workload-owned identity. Adapters compose it from the
 	// owner-CRD shape; workload code reads it opaquely.
 	Key Key

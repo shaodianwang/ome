@@ -106,6 +106,36 @@ func TestBuildReconcileInput_NilParentLeavesGateNil(t *testing.T) {
 		"no parent ⇒ no coordination to enforce ⇒ gate stays nil")
 }
 
+// TestBuildReconcileInput_WiresMigrationWhenParentSet pins Layer 2: with
+// a resolvable parent, the IR-managed path wires DetectMigrationRequest
+// (so explicit + ProgressDeadlineSeconds auto migration fire on the
+// production-default path) and points the migration audit ledger at the
+// parent ISVC via LedgerOwner — so the ledger Migrate reads/writes is the
+// same ISVC-owned ledger detection uses, while the IR still owns the pods.
+// Nil parent leaves both nil (migration dormant), matching the gate/
+// EventTarget fallback.
+func TestBuildReconcileInput_WiresMigrationWhenParentSet(t *testing.T) {
+	g := gomega.NewWithT(t)
+	r, _ := newReconciler(t)
+	ir := baselineIR("llama-engine", "default", 1)
+
+	parent := mkSequentialParent() // any non-nil ISVC named "llama"
+	input := r.buildReconcileInput(ir, parent)
+
+	g.Expect(input.DetectMigrationRequest).NotTo(gomega.BeNil(),
+		"DetectMigrationRequest must be wired on the IR path when the parent is resolvable")
+	g.Expect(input.LedgerOwner).NotTo(gomega.BeNil(),
+		"the migration ledger must be owned by the parent ISVC, not the IR")
+	g.Expect(input.LedgerOwner.GetName()).To(gomega.Equal(parent.Name))
+	g.Expect(input.LedgerOwnerGVK).To(gomega.Equal(isvcGVK))
+
+	// Nil parent ⇒ migration dormant.
+	nilInput := r.buildReconcileInput(ir, nil)
+	g.Expect(nilInput.DetectMigrationRequest).To(gomega.BeNil(),
+		"no parent ⇒ migration has no ISVC to read ⇒ DetectMigrationRequest stays nil")
+	g.Expect(nilInput.LedgerOwner).To(gomega.BeNil())
+}
+
 // TestBuildReconcileInput_ThreadsGangSchedulingAvailable pins the IR-path
 // multi-node gang fix: buildReconcileInput must thread the controller's
 // GangSchedulingAvailable flag into DesiredSpec, because EnsurePodGroups gates

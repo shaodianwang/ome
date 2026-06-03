@@ -35,6 +35,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	omenativeops "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -225,6 +226,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			log.Info("Instance escalation observed; at least one Instance reached Phase=Failed")
 		}
 	}()
+
+	// Self-trigger auto-migration for Instances stuck past
+	// MigrationPolicy.ProgressDeadlineSeconds (node failure / wedged
+	// scheduler / stuck image pull). Mirrors the direct OMENative
+	// dispatcher: it writes synthetic AutoRecover ledger entries that
+	// DetectMigrationRequest (wired in buildReconcileInput) picks up
+	// inside workload.Reconcile below. Reads the parent ISVC's ledger +
+	// aggregated InstanceStatuses; no-op when the parent is unresolved or
+	// ProgressDeadlineSeconds is unset. Runs BEFORE the dispatch so the
+	// request is visible this pass.
+	if parent != nil {
+		if merr := omenativeops.DetectStuckInstancesForISVC(ctx, parent,
+			&v1beta1.ComponentExtensionSpec{Lifecycle: ir.Spec.Lifecycle},
+			r.APIReader, r.Client, r.Recorder, ir.Spec.Component); merr != nil {
+			return ctrl.Result{}, fmt.Errorf(
+				"InferenceReplica reconciler: detect stuck instances for auto-migration (component=%s): %w",
+				ir.Spec.Component, merr)
+		}
+	}
 
 	result, err = workload.Reconcile(ctx, deps, input, plan, target)
 
