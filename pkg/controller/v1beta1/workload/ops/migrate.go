@@ -82,18 +82,21 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return true, true, nil
 	}
 
-	// Reject multi-pod up-front per the SINGLE-POD ONLY guard.
-	if isMultiPodInstance(plan, sourceIdx) {
-		d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID,
-			"multi-pod Instance migration not yet supported (single-pod surge cannot satisfy a multi-pod gang)")
-		return d, true, ferr
-	}
+	// Multi-pod (gang) Instances migrate the whole gang to the surge
+	// index — see the gang-shaped surgeInst + WorkerPodSpec wiring + the
+	// surge-gang PodGroup below.
+	gang := isMultiPodInstance(plan, sourceIdx)
 
 	// Recover surge index from source status (post-stamp) or ledger
 	// (post-Started, pre-stamp crash); allocate on a fresh request.
 	source := findInstanceStatus(input.ObservedState.InstanceStatuses, sourceIdx)
 	inFlight := ledger.InFlightEntry(requestUUID)
 	var surgeIdx int32
+	// freshStamp records that THIS pass allocated + stamped the surge
+	// (the default case below). A gang surge requeues right after, so the
+	// next pass's EnsurePodGroups creates the surge PodGroup before any
+	// surge pod is rendered.
+	freshStamp := false
 	switch {
 	case source != nil && source.Operation != nil && source.Operation.Type == workload.InstanceOperationMigrate && source.Operation.SurgeIndex != nil:
 		// In-flight via stamped source status — accepted on a prior pass.
@@ -154,7 +157,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// the rejection within its SLA. (nil, nil) means the CR was GC'd
 		// or RunningRevision isn't set yet — defer without ownership so
 		// other ops can run.
-		_, surgeRevSpec, err := surgeRevisionAndSpec(ctx, deps, input, sourceIdx)
+		_, surgeRevSpec, _, err := surgeRevisionAndSpec(ctx, deps, input, sourceIdx)
 		if err != nil {
 			return false, false, fmt.Errorf("Migrate: resolve surge revision: %w", err)
 		}
@@ -193,6 +196,18 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			instanceKey(input.Key.Component, sourceIdx), requestUUID, req.FromNode, surgeIdx)
 		// Stamped + ledger persisted — Migrate has taken ownership.
 		accepted = true
+		freshStamp = true
+	}
+
+	// A gang surge stamped its surge status THIS pass, but the IR
+	// reconciler's EnsurePodGroups already ran with the pre-stamp plan (no
+	// surge index yet) — so the surge PodGroup doesn't exist. Requeue so
+	// the next pass pins the surge index, EnsurePodGroups creates its
+	// PodGroup, and only then are the surge gang's pods rendered (the
+	// coscheduler needs the PodGroup before its pods). Single-pod surges
+	// and gangs without gang scheduling skip this and proceed in one pass.
+	if freshStamp && gang && input.DesiredSpec.GangSchedulingAvailable {
+		return false, accepted, nil
 	}
 
 	// From this point onward Migrate has taken ownership of the request
@@ -209,8 +224,8 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	}
 
 	// Migration moves placement, not template — surge runs at the source's
-	// RunningRevision.
-	surgeRev, surgeRevSpec, err := surgeRevisionAndSpec(ctx, deps, input, sourceIdx)
+	// RunningRevision (leader + worker templates for a gang).
+	surgeRev, surgeRevSpec, surgeWorkerSpec, err := surgeRevisionAndSpec(ctx, deps, input, sourceIdx)
 	if err != nil {
 		return false, accepted, fmt.Errorf("Migrate: resolve surge revision: %w", err)
 	}
@@ -219,11 +234,23 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, accepted, nil
 	}
 
+	// The surge mirrors the source's Runner layout: a single "default"
+	// pod, or leader + workers for a gang.
+	surgeRunners := []workload.RunnerPlan{{Name: "default", Size: 1}}
+	if gang {
+		for i := range plan.Instances {
+			if plan.Instances[i].Index == sourceIdx {
+				surgeRunners = append([]workload.RunnerPlan(nil), plan.Instances[i].Runners...)
+				break
+			}
+		}
+	}
+
 	// Migration overlay tells Render to stamp anti-affinity vs FromNode.
 	surgeInst := workload.InstancePlan{
 		Index:       surgeIdx,
 		Incarnation: 1,
-		Runners:     []workload.RunnerPlan{{Name: "default", Size: 1}},
+		Runners:     surgeRunners,
 		MigrationOverlay: &workload.MigrationOverlay{
 			FromNode:        req.FromNode,
 			HintTargetNodes: req.HintTargetNodes,
@@ -231,15 +258,25 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	}
 
 	// Refuse a surge whose hard NodeAffinity would collapse to
-	// "hostname=FromNode AND hostname!=FromNode". Without this gate the
-	// surge sits Pending until timeout — silent rejection vs. early fail.
-	if WouldOverlayConflictWithNodeAffinity(surgeRevSpec, surgeInst.MigrationOverlay) {
+	// "hostname=FromNode AND hostname!=FromNode". Check the leader and
+	// (for a gang) the worker template. Without this gate the surge sits
+	// Pending until timeout — silent rejection vs. early fail.
+	if WouldOverlayConflictWithNodeAffinity(surgeRevSpec, surgeInst.MigrationOverlay) ||
+		(surgeWorkerSpec != nil && WouldOverlayConflictWithNodeAffinity(surgeWorkerSpec, surgeInst.MigrationOverlay)) {
 		reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
 		recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationNodeAffinityConflict,
 			"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
 		d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
 		return d, accepted, ferr
 	}
+
+	// A gang surge needs its PodGroup before its pods so the coscheduler
+	// gangs them. The surge index is pinned in the plan (its Migrate-op
+	// status lands it in migrationInFlightIndices), so the IR reconciler's
+	// EnsurePodGroups — which runs BEFORE this dispatch — creates the
+	// PodGroup. The fresh-stamp pass requeues (see freshStamp below) so
+	// that ordering holds: stamp surge status → next pass EnsurePodGroups
+	// makes the PodGroup → then the surge gang's pods are created here.
 
 	desired := expectedPodNamesForInstance(input, plan, surgeInst)
 	existingByName := query.IndexPodsByName(surgePods)
@@ -253,13 +290,13 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, surgeIdx) {
 			return false, accepted, nil
 		}
-		// Render against the surge revision's PodSpec, not input.DesiredSpec.PodSpec.
-		// Use a shallow ReconcileInput copy with the surge revision's PodSpec so
-		// renderHook + per-Component metadata stay intact. Expectations bucket on
-		// surgeIdx (not sourceIdx) so surge creates track separately from
-		// source-side deletes.
+		// Render against the surge revision's leader + worker PodSpecs (not
+		// input.DesiredSpec) so renderHook + per-Component metadata stay
+		// intact. Expectations bucket on surgeIdx (not sourceIdx) so surge
+		// creates track separately from source-side deletes.
 		surgeInput := input
 		surgeInput.DesiredSpec.PodSpec = surgeRevSpec
+		surgeInput.DesiredSpec.WorkerPodSpec = surgeWorkerSpec
 		if _, cerr := createMissingPods(ctx, deps, surgeInput, plan, surgeInst, surgeIdx, missing, revisionHashFromTarget(surgeRev)); cerr != nil {
 			return false, accepted, fmt.Errorf("Migrate: create surge pod set: %w", cerr)
 		}
@@ -468,33 +505,35 @@ func isMultiPodInstance(plan workload.ComponentPlan, sourceIdx int32) bool {
 	return false
 }
 
-// surgeRevisionAndSpec returns the source's RunningRevision CR + PodSpec.
-// (nil, nil, nil) means no recorded RunningRevision yet OR the CR was
-// deleted — caller retries.
+// surgeRevisionAndSpec returns the source's RunningRevision CR + leader
+// (single-pod) PodSpec + worker PodSpec. (nil, nil, nil, nil) means no
+// recorded RunningRevision yet OR the CR was deleted — caller retries.
+// workerSpec is nil for single-pod Instances; for a gang it carries the
+// worker template so the surge gang's worker pods render correctly.
 //
 // Reads the source's running revision from input.ObservedState; fetches
 // the CR via deps.Reader() (live read) so a stale cache doesn't return
 // a deleted CR as still-present.
-func surgeRevisionAndSpec(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, sourceIdx int32) (*appsv1.ControllerRevision, *corev1.PodSpec, error) {
+func surgeRevisionAndSpec(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, sourceIdx int32) (*appsv1.ControllerRevision, *corev1.PodSpec, *corev1.PodSpec, error) {
 	source := findInstanceStatus(input.ObservedState.InstanceStatuses, sourceIdx)
 	if source == nil || source.RunningRevision == "" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	cr := &appsv1.ControllerRevision{}
 	if err := deps.Reader().Get(ctx, client.ObjectKey{Namespace: input.Key.Namespace, Name: source.RunningRevision}, cr); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, nil, nil
+			return nil, nil, nil, nil
 		}
-		return nil, nil, fmt.Errorf("get source CR %s: %w", source.RunningRevision, err)
+		return nil, nil, nil, fmt.Errorf("get source CR %s: %w", source.RunningRevision, err)
 	}
 	var payload revision.DataPayload
 	if err := json.Unmarshal(cr.Data.Raw, &payload); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal source CR data: %w", err)
+		return nil, nil, nil, fmt.Errorf("unmarshal source CR data: %w", err)
 	}
 	if payload.PodSpec == nil {
-		return nil, nil, fmt.Errorf("source CR %s missing podSpec payload", source.RunningRevision)
+		return nil, nil, nil, fmt.Errorf("source CR %s missing podSpec payload", source.RunningRevision)
 	}
-	return cr, payload.PodSpec, nil
+	return cr, payload.PodSpec, payload.WorkerPodSpec, nil
 }
 
 // migrationRole picks which side of the pair stampMigrationStatus is

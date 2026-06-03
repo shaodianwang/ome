@@ -373,13 +373,12 @@ func TestMigrate_MissingSourceMarksFailed(t *testing.T) {
 	}
 }
 
-// TestMigrate_MultiPodRejectedWithAuditEntry pins that Migrate refuses a
-// multi-pod Instance migration with a Failed audit row. Multi-pod migration
-// requires per-Runner surge ordinal allocation that is deferred; without
-// this guard a multi-pod ISVC's migration would silently create a single-pod
-// surge that can never satisfy the gang readiness gate, leaving the
-// migration wedged until the deadline.
-func TestMigrate_MultiPodRejectedWithAuditEntry(t *testing.T) {
+// TestMigrate_MultiPodProceedsAndStampsBothStatuses pins that a gang
+// (multi-pod) Instance migration is no longer rejected — Migrate stamps
+// the source Migrating and allocates a surge index for the replacement
+// gang (the gang-shaped surgeInst + WorkerPodSpec wiring), exactly like
+// the single-pod first pass. No Failed audit row is written.
+func TestMigrate_MultiPodProceedsAndStampsBothStatuses(t *testing.T) {
 	resetExpectations(t)
 	isvc := isvcReadyAtIncarnation("llama-70b", "prod", 1)
 	sourceSpec := targetSpecImage("llama:v1")
@@ -412,41 +411,34 @@ func TestMigrate_MultiPodRejectedWithAuditEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if !done {
-		t.Errorf("expected done=true (rejection is terminal)")
+	if done {
+		t.Errorf("expected done=false: gang migration is multi-pass, not a terminal rejection")
 	}
 
-	// Source InstanceStatus must NOT be stamped Phase=Migrating — the
-	// rejection happened up-front, before any status mutation.
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
-	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
-	if s.Phase == v1beta1.OMENativeInstanceMigrating {
-		t.Errorf("source must NOT be stamped Migrating for multi-pod rejection; got %q", s.Phase)
-	}
+	statuses := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses
 
-	// Audit ledger must carry the Failed entry naming the reason.
-	ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
-	if !ledger.HasCompletedOrFailedRequest("req-multipod") {
-		t.Fatalf("ledger should record Failed entry for the multi-pod request")
+	// Source stamped Migrating + a surge index allocated → 2 statuses.
+	if len(statuses) != 2 {
+		t.Fatalf("expected 2 instance statuses (source + surge gang); got %d: %+v", len(statuses), statuses)
 	}
-	failed := false
-	for _, e := range ledger.Entries {
-		if e.RequestUUID == "req-multipod" && e.Phase == audit.PhaseFailed {
-			failed = true
-			if e.Outcome == "" {
-				t.Errorf("Failed entry should carry a non-empty Outcome reason")
-			}
+	srcMigrating := false
+	for _, s := range statuses {
+		if s.Index == 0 && s.Phase == v1beta1.OMENativeInstanceMigrating {
+			srcMigrating = true
 		}
 	}
-	if !failed {
-		t.Errorf("expected a Failed entry for req-multipod; got %+v", ledger.Entries)
+	if !srcMigrating {
+		t.Errorf("source (index 0) must be stamped Migrating; got %+v", statuses)
 	}
 
-	// No surge InstanceStatus should be allocated.
-	if len(fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses) != 1 {
-		t.Errorf("no surge should be allocated; got %+v",
-			fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses)
+	// The migration must NOT be recorded as Failed — it proceeds.
+	ledger, _ := internalsource.LoadAuditLedgerForISVC(context.Background(), c, isvc)
+	for _, e := range ledger.Entries {
+		if e.RequestUUID == "req-multipod" && e.Phase == audit.PhaseFailed {
+			t.Errorf("gang migration must not be recorded Failed; got %+v", e)
+		}
 	}
 }
 

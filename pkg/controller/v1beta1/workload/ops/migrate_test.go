@@ -21,6 +21,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -133,5 +134,46 @@ func TestValidateFromNode_NoLivePodsRejects(t *testing.T) {
 	}
 	if mismatch == "" {
 		t.Errorf("expected mismatch reason for no-live-pods")
+	}
+}
+
+// TestSurgeRevisionAndSpec_ReturnsGangWorkerSpec pins that the migrate
+// surge resolver returns the source revision's WORKER template (not just
+// the leader) so a gang migration renders its worker pods from the right
+// template. Before gang migrate support this returned only the leader
+// spec; the worker spec is nil for single-pod revisions.
+func TestSurgeRevisionAndSpec_ReturnsGangWorkerSpec(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	c := legacyNewFakeClient(t, isvc)
+
+	leader := &corev1.PodSpec{Containers: []corev1.Container{{Name: "leader", Image: "llama:v1"}}}
+	worker := &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "llama:v1"}}}
+	cr, _, err := revision.EnsureControllerRevisionWithWorker(
+		context.Background(), c, c, isvc,
+		v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
+		legacyEngineRevisionKey(isvc),
+		leader, worker, nil, nil, isvc.UID,
+	)
+	if err != nil {
+		t.Fatalf("EnsureControllerRevisionWithWorker: %v", err)
+	}
+	// Point instance 0's running revision at the gang CR (mutates through
+	// the shared Lifecycle pointer + slice backing array).
+	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0].RunningRevision = cr.Name
+
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	gotCR, gotLeader, gotWorker, err := surgeRevisionAndSpec(context.Background(), legacyTestDeps(c), input, 0)
+	if err != nil {
+		t.Fatalf("surgeRevisionAndSpec: %v", err)
+	}
+	if gotCR == nil || gotLeader == nil {
+		t.Fatalf("expected CR + leader spec, got cr=%v leader=%v", gotCR, gotLeader)
+	}
+	if gotWorker == nil {
+		t.Fatalf("expected a worker spec for a gang revision, got nil")
+	}
+	if len(gotWorker.Containers) == 0 || gotWorker.Containers[0].Name != "worker" {
+		t.Errorf("worker spec mismatch: %+v", gotWorker)
 	}
 }
