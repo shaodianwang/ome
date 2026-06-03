@@ -291,27 +291,37 @@ func (d *Decoder) determineDecoderName(ctx context.Context, isvc *v1beta1.Infere
 	return defaultDecoderName, nil
 }
 
+// decoderUsesLeaderTemplate reports whether the decoder should source its
+// primary pod template from the Leader block (multi-pod shape — MultiNode
+// or multi-pod OMENative) rather than the top-level decoder spec
+// (single-pod shape). Pure structural check on the spec; it deliberately
+// does NOT consult the deployment mode, so dispatch-mode classification and
+// template selection stay decoupled. Mirrors engineUsesLeaderTemplate.
+func decoderUsesLeaderTemplate(spec *v1beta1.DecoderSpec) bool {
+	return spec != nil && spec.Leader != nil
+}
+
 // reconcilePodSpec creates the pod spec for the decoder component
 func (d *Decoder) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *metav1.ObjectMeta) (*v1.PodSpec, error) {
-	// Get the appropriate pod spec and runner based on deployment mode
-	deploymentMode := d.DeploymentMode
-
+	// Template selection is keyed on the presence of a Leader block, NOT on
+	// the deployment mode. d.DeploymentMode is set authoritatively at
+	// construction time; switching on it here mis-selects the top-level
+	// (empty) template for OMENative-mode decoders that also set
+	// Leader/Worker — the dispatch classifies multi-pod OMENative as
+	// OMENative, not MultiNode, so a `case constants.MultiNode` never
+	// matches and the spec collapses to the empty top-level runner ("no
+	// containers found in pod spec and no runner spec provided"). Mirrors
+	// the engine path (engineUsesLeaderTemplate).
 	var basePodSpec v1beta1.PodSpec
 	var runnerSpec *v1beta1.RunnerSpec
 
-	switch deploymentMode {
-	case constants.MultiNode:
-		// For multi-node, use leader spec
-		if d.decoderSpec.Leader != nil {
-			basePodSpec = d.decoderSpec.Leader.PodSpec
-			runnerSpec = d.decoderSpec.Leader.Runner
-		} else {
-			// Fallback to decoder spec if leader is not defined
-			basePodSpec = d.decoderSpec.PodSpec
-			runnerSpec = d.decoderSpec.Runner
-		}
-	default:
-		// For raw deployment and serverless, use decoder spec
+	if decoderUsesLeaderTemplate(d.decoderSpec) {
+		basePodSpec = d.decoderSpec.Leader.PodSpec
+		runnerSpec = d.decoderSpec.Leader.Runner
+	} else {
+		// Fallback to the top-level decoder spec — covers single-pod
+		// OMENative, RawDeployment, and the malformed-but-tolerated
+		// MultiNode-without-Leader shape.
 		basePodSpec = d.decoderSpec.PodSpec
 		runnerSpec = d.decoderSpec.Runner
 	}

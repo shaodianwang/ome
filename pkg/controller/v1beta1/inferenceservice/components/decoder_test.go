@@ -768,3 +768,75 @@ func TestDecoderSetupMocks(t *testing.T) {
 		})
 	}
 }
+
+// TestDecoderUsesLeaderTemplate pins the structural predicate that drives
+// pod-template selection in decoder.reconcilePodSpec. The earlier
+// implementation switched on d.DeploymentMode and only sourced the Leader
+// template under `case constants.MultiNode`. A multi-pod OMENative decoder
+// (Leader/Worker set, DeploymentMode == OMENative) fell to the default
+// branch and collapsed onto the empty top-level runner — reconcilePodSpec
+// then failed with "no containers found in pod spec and no runner spec
+// provided", which short-circuited the component loop and left the decoder
+// (and router) InferenceReplicas un-projected. decoderUsesLeaderTemplate
+// decouples template selection from dispatch-mode classification, matching
+// engineUsesLeaderTemplate.
+func TestDecoderUsesLeaderTemplate(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	tests := []struct {
+		name     string
+		spec     *v1beta1.DecoderSpec
+		expected bool
+	}{
+		{
+			name:     "nil spec returns false",
+			spec:     nil,
+			expected: false,
+		},
+		{
+			name:     "empty spec — no leader — false",
+			spec:     &v1beta1.DecoderSpec{},
+			expected: false,
+		},
+		{
+			name: "leader set — true (regardless of mode)",
+			spec: &v1beta1.DecoderSpec{
+				Leader: &v1beta1.LeaderSpec{
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "leader"}},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "leader + worker set — true (multi-pod OMENative shape)",
+			spec: &v1beta1.DecoderSpec{
+				Leader: &v1beta1.LeaderSpec{
+					PodSpec: v1beta1.PodSpec{
+						Containers: []v1.Container{{Name: "leader"}},
+					},
+				},
+				Worker: &v1beta1.WorkerSpec{
+					Size: intPtr(2),
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "worker only — false (template still from top-level)",
+			spec: &v1beta1.DecoderSpec{
+				Worker: &v1beta1.WorkerSpec{
+					Size: intPtr(2),
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g.Expect(decoderUsesLeaderTemplate(tt.spec)).To(gomega.Equal(tt.expected))
+		})
+	}
+}
