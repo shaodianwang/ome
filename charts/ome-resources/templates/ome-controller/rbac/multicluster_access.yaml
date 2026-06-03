@@ -1,0 +1,71 @@
+{{- if .Values.ome.multiclusterAccess.enabled }}
+{{- $serviceAccountName := "ome-multicluster-access" }}
+{{- $tokenSecretName := "ome-multicluster-access-token" }}
+{{- $clusterRoleName := "ome-multicluster-access" }}
+{{- $clusterRoleBindingName := "ome-multicluster-access" }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $serviceAccountName | quote }}
+  labels:
+    app.kubernetes.io/name: {{ $serviceAccountName | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+    app.kubernetes.io/part-of: ome
+    ome.io/component: multicluster-access
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $tokenSecretName | quote }}
+  labels:
+    app.kubernetes.io/name: {{ $serviceAccountName | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+    app.kubernetes.io/part-of: ome
+    ome.io/component: multicluster-access
+  annotations:
+    kubernetes.io/service-account.name: {{ $serviceAccountName | quote }}
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $clusterRoleName | quote }}
+  labels:
+    app.kubernetes.io/name: {{ $serviceAccountName | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+    app.kubernetes.io/part-of: ome
+    ome.io/component: multicluster-access
+rules:
+- apiGroups:
+  - ome.io
+  resources:
+  - clusterservingruntimes
+  - inferenceservices
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $clusterRoleBindingName | quote }}
+  labels:
+    app.kubernetes.io/name: {{ $serviceAccountName | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+    app.kubernetes.io/part-of: ome
+    ome.io/component: multicluster-access
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $clusterRoleName | quote }}
+subjects:
+- kind: ServiceAccount
+  name: {{ $serviceAccountName | quote }}
+  namespace: {{ .Release.Namespace | quote }}
+{{- end }}

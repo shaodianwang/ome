@@ -12,6 +12,11 @@ ome:
   metricsaggregator:
     enableMetricAggregation: "false"
     enablePrometheusScraping: "false"
+  # multiclusterAccess installs the long-lived ServiceAccount token used by
+  # InferenceDeploymentOperator to manage OME resources from a control-plane
+  # cluster.
+  multiclusterAccess:
+    enabled: true
   # modelCache configures the optional cluster-wide model cache provider used
   # by BaseModel and ClusterBaseModel resources with spec.distribution: Sharded.
   # Leave provider empty to keep the default PerNode/model-agent behavior.

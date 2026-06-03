@@ -58,6 +58,7 @@ OME Resources and Controller
 | ome.modelCache.endpoint | string | `""` | HTTP endpoint for the optional model cache provider control-plane API. |
 | ome.modelCache.options | object | `{}` | Provider-specific options. For `cluster_cache`, supported keys include `timeout` and `operation_retention`. |
 | ome.modelCache.provider | string | `""` | Optional model cache provider name. Use `cluster_cache` for sharded model distribution through cluster_cache. |
+| ome.multiclusterAccess.enabled | bool | `true` | Install ServiceAccount, token Secret, and scoped RBAC for InferenceDeploymentOperator. |
 | ome.omeAgent.authType | string | `"InstancePrincipal"` |  |
 | ome.omeAgent.compartmentId | string | `"ocid1.compartment.oc1..dummy-compartment"` |  |
 | ome.omeAgent.fineTunedAdapter.cpuLimit | int | `15` |  |
@@ -129,3 +130,10 @@ For long-term observability, deploy a separate full Prometheus stack
 (kube-prometheus-stack, etc.) and leave `prometheus.enabled=false`.
 
 [oep-0013]: ../../oeps/0013-autoscaling/README.md
+
+## Multicluster Access
+
+`ome.multiclusterAccess.enabled=true` installs a ServiceAccount and long-lived
+token Secret that a control-plane InferenceDeploymentOperator can use to manage
+OME resources in this workload cluster. The RBAC is scoped to OME
+`InferenceService` and `ClusterServingRuntime` resources.
