@@ -134,7 +134,7 @@ func EnsurePodGroups(ctx context.Context, deps workload.Deps, input workload.Rec
 		if !podgroup.IsMultiPodInstance(inst) {
 			continue
 		}
-		if err := podgroup.EnsurePodGroup(ctx, deps.Client, input.OwnerObject, input.OwnerGVK, plan, inst); err != nil {
+		if err := podgroup.EnsurePodGroup(ctx, deps.Client, input.OwnerObject, input.OwnerGVK, input.Key.OwnerName, plan, inst); err != nil {
 			return fmt.Errorf("EnsurePodGroups: instance %d: %w", inst.Index, err)
 		}
 	}
@@ -147,7 +147,7 @@ func EnsurePodGroups(ctx context.Context, deps workload.Deps, input workload.Rec
 	// Per-Instance PodGroup GC. Whole-owner teardown is handled by
 	// the cascade-delete OwnerReference.
 	for _, idx := range extraPodGroupIndices(input.ObservedState.InstanceStatuses, plan) {
-		if err := podgroup.DeletePodGroup(ctx, deps.Client, input.OwnerObject, plan.Component, idx); err != nil {
+		if err := podgroup.DeletePodGroup(ctx, deps.Client, input.OwnerObject, input.Key.OwnerName, plan.Component, idx); err != nil {
 			return fmt.Errorf("EnsurePodGroups: delete extra instance %d: %w", idx, err)
 		}
 	}

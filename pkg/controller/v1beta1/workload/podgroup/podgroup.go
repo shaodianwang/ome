@@ -87,7 +87,15 @@ func IsMultiPodInstance(inst workload.InstancePlan) bool {
 // maxScheduleTimeoutSeconds].
 //
 // Pure compute, no I/O.
-func BuildPodGroup(owner client.Object, ownerGVK schema.GroupVersionKind, plan workload.ComponentPlan, inst workload.InstancePlan) (*schedulingv1alpha1.PodGroup, error) {
+//
+// ownerName is the workload owner name (Key.OwnerName) — the SAME base the pod
+// renderer uses for each pod's pod-group label (render.go: isvcName =
+// key.OwnerName). It is deliberately NOT owner.GetName(): on the IR-managed
+// path the owner object is the InferenceReplica ("<isvc>-<component>"), whose
+// name would double the component (e.g. PodGroup "p66-engine-engine-0") and
+// never match the pods' "p66-engine-0" label → "PodGroup not found". owner is
+// still used for the OwnerReference (GC) and namespace.
+func BuildPodGroup(owner client.Object, ownerGVK schema.GroupVersionKind, ownerName string, plan workload.ComponentPlan, inst workload.InstancePlan) (*schedulingv1alpha1.PodGroup, error) {
 	if owner == nil {
 		return nil, fmt.Errorf("BuildPodGroup: nil owner")
 	}
@@ -98,11 +106,11 @@ func BuildPodGroup(owner client.Object, ownerGVK schema.GroupVersionKind, plan w
 	minMember := inst.TotalPods()
 	timeout := clampScheduleTimeoutSeconds(int32(plan.InstanceReadyTimeout.Seconds()))
 
-	labels := podGroupLabels(owner.GetName(), plan.Component, inst.Index)
+	labels := podGroupLabels(ownerName, plan.Component, inst.Index)
 
 	return &schedulingv1alpha1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodGroupName(owner.GetName(), plan.Component, inst.Index),
+			Name:      query.PodGroupName(ownerName, plan.Component, inst.Index),
 			Namespace: owner.GetNamespace(),
 			Labels:    labels,
 			OwnerReferences: []metav1.OwnerReference{
@@ -152,14 +160,14 @@ func clampScheduleTimeoutSeconds(in int32) int32 {
 // unknown PodGroup and falls back to scheduling them individually
 // (defeating the gang). Callers wire this before the per-Instance
 // Create / Restart op.
-func EnsurePodGroup(ctx context.Context, c client.Client, owner client.Object, ownerGVK schema.GroupVersionKind, plan workload.ComponentPlan, inst workload.InstancePlan) error {
+func EnsurePodGroup(ctx context.Context, c client.Client, owner client.Object, ownerGVK schema.GroupVersionKind, ownerName string, plan workload.ComponentPlan, inst workload.InstancePlan) error {
 	if c == nil {
 		return fmt.Errorf("EnsurePodGroup: nil client")
 	}
 	if !IsMultiPodInstance(inst) {
 		return nil
 	}
-	desired, err := BuildPodGroup(owner, ownerGVK, plan, inst)
+	desired, err := BuildPodGroup(owner, ownerGVK, ownerName, plan, inst)
 	if err != nil {
 		return fmt.Errorf("EnsurePodGroup: build desired: %w", err)
 	}
@@ -196,7 +204,7 @@ func EnsurePodGroup(ctx context.Context, c client.Client, owner client.Object, o
 // owner is taken as the abstract client.Object (rather than a concrete
 // v1beta1.InferenceService) for the same reason BuildPodGroup /
 // EnsurePodGroup do — see those docstrings.
-func DeletePodGroup(ctx context.Context, c client.Client, owner client.Object, component workload.ComponentType, instanceIdx int32) error {
+func DeletePodGroup(ctx context.Context, c client.Client, owner client.Object, ownerName string, component workload.ComponentType, instanceIdx int32) error {
 	if c == nil {
 		return fmt.Errorf("DeletePodGroup: nil client")
 	}
@@ -205,7 +213,7 @@ func DeletePodGroup(ctx context.Context, c client.Client, owner client.Object, c
 	}
 	pg := &schedulingv1alpha1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodGroupName(owner.GetName(), component, instanceIdx),
+			Name:      query.PodGroupName(ownerName, component, instanceIdx),
 			Namespace: owner.GetNamespace(),
 		},
 	}

@@ -53,7 +53,7 @@ func TestIsMultiPodInstance(t *testing.T) {
 func TestBuildPodGroup_NilISVC(t *testing.T) {
 	plan := core.ComponentPlan{Component: workload.ComponentEngine}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
-	if _, err := BuildPodGroup(nil, testPodGroupOwnerGVK, plan, inst); err == nil {
+	if _, err := BuildPodGroup(nil, testPodGroupOwnerGVK, "", plan, inst); err == nil {
 		t.Fatal("expected error for nil owner")
 	}
 }
@@ -62,8 +62,33 @@ func TestBuildPodGroup_SinglePodRejected(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	plan := core.ComponentPlan{Component: workload.ComponentEngine}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "default", Size: 1}}}
-	if _, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, plan, inst); err == nil {
+	if _, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err == nil {
 		t.Fatal("expected single-pod build to error (caller must guard with IsMultiPodInstance)")
+	}
+}
+
+// TestBuildPodGroup_NameUsesOwnerNameNotOwnerObject pins the IR-path naming
+// fix: the PodGroup NAME must follow ownerName (the workload owner name =
+// Key.OwnerName, what the pod renderer uses), NOT owner.GetName(). On the
+// IR-managed path the owner OBJECT is the InferenceReplica ("p66-engine"),
+// but the pods' pod-group label is "p66-engine-0" (ISVC "p66"). Using
+// owner.GetName() would emit "p66-engine-engine-0" → the gang scheduler's
+// "PodGroup not found". The OwnerReference must still target the owner object
+// (the IR) for GC.
+func TestBuildPodGroup_NameUsesOwnerNameNotOwnerObject(t *testing.T) {
+	irOwner := newPodGroupISVC("sandbox", "p66-engine") // owner object named like an IR: "<isvc>-<component>"
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 15 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+
+	pg, err := BuildPodGroup(irOwner, testPodGroupOwnerGVK, "p66", plan, inst) // ownerName = ISVC name (Key.OwnerName)
+	if err != nil {
+		t.Fatalf("BuildPodGroup: %v", err)
+	}
+	if pg.Name != "p66-engine-0" {
+		t.Errorf("Name: got %q want p66-engine-0 — must follow ownerName, not owner.GetName()=%q (which would give p66-engine-engine-0)", pg.Name, irOwner.GetName())
+	}
+	if len(pg.OwnerReferences) != 1 || pg.OwnerReferences[0].Name != "p66-engine" {
+		t.Errorf("OwnerReference must still target the owner object (IR p66-engine) for GC; got %+v", pg.OwnerReferences)
 	}
 }
 
@@ -84,7 +109,7 @@ func TestBuildPodGroup_Shape(t *testing.T) {
 		},
 	}
 
-	pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, plan, inst)
+	pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
 	if err != nil {
 		t.Fatalf("BuildPodGroup: %v", err)
 	}
@@ -165,7 +190,7 @@ func TestBuildPodGroup_TimeoutClamp(t *testing.T) {
 					{Name: "worker", Size: 1},
 				},
 			}
-			pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, plan, inst)
+			pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
 			if err != nil {
 				t.Fatalf("BuildPodGroup: %v", err)
 			}
@@ -192,7 +217,7 @@ func TestBuildPodGroup_HighWorkerCount(t *testing.T) {
 			{Name: "worker", Size: 7}, // tensor-parallel-8 setup
 		},
 	}
-	pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, plan, inst)
+	pg, err := BuildPodGroup(isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst)
 	if err != nil {
 		t.Fatalf("BuildPodGroup: %v", err)
 	}
@@ -217,7 +242,7 @@ func TestEnsurePodGroup_SinglePodNoOp(t *testing.T) {
 	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "default", Size: 1}}}
 
-	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
+	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
 		t.Fatalf("EnsurePodGroup: %v", err)
 	}
 
@@ -237,7 +262,7 @@ func TestEnsurePodGroup_CreatesWhenAbsent(t *testing.T) {
 	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 3}}}
 
-	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
+	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
 		t.Fatalf("EnsurePodGroup: %v", err)
 	}
 
@@ -273,7 +298,7 @@ func TestEnsurePodGroup_DriftCorrected(t *testing.T) {
 	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 3 * time.Minute}
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
 
-	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
+	if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
 		t.Fatalf("EnsurePodGroup: %v", err)
 	}
 
@@ -304,7 +329,7 @@ func TestEnsurePodGroup_Idempotent(t *testing.T) {
 	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 2}}}
 
 	for i := 0; i < 2; i++ {
-		if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, plan, inst); err != nil {
+		if err := EnsurePodGroup(context.Background(), c, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
 			t.Fatalf("EnsurePodGroup pass %d: %v", i, err)
 		}
 	}
@@ -329,7 +354,7 @@ func TestDeletePodGroup_Removes(t *testing.T) {
 	}
 	c := newPodGroupClient(t, isvc, existing)
 
-	if err := DeletePodGroup(context.Background(), c, isvc, workload.ComponentEngine, 0); err != nil {
+	if err := DeletePodGroup(context.Background(), c, isvc, isvc.GetName(), workload.ComponentEngine, 0); err != nil {
 		t.Fatalf("DeletePodGroup: %v", err)
 	}
 	got := &schedulingv1alpha1.PodGroup{}
@@ -342,7 +367,7 @@ func TestDeletePodGroup_Removes(t *testing.T) {
 func TestDeletePodGroup_AbsentIsNoOp(t *testing.T) {
 	isvc := newPodGroupISVC("prod", "llama")
 	c := newPodGroupClient(t, isvc)
-	if err := DeletePodGroup(context.Background(), c, isvc, workload.ComponentEngine, 7); err != nil {
+	if err := DeletePodGroup(context.Background(), c, isvc, isvc.GetName(), workload.ComponentEngine, 7); err != nil {
 		t.Errorf("DeletePodGroup on absent PodGroup should be no-op, got %v", err)
 	}
 }
