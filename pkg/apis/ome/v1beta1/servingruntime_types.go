@@ -202,10 +202,18 @@ type ServingRuntimeSpec struct {
 // ModelSizeRangeSpec defines the range of model sizes supported by this runtime
 // +k8s:openapi-gen=true
 type ModelSizeRangeSpec struct {
-	// Minimum size of the model in bytes
+	// Minimum model parameter count supported by this runtime, given as a
+	// string with an optional suffix M (million), B (billion), or T (trillion),
+	// e.g. "1B", "7B", "70B", "1T". It is compared against the model's parameter
+	// size during runtime auto-selection. A value not in the <number>[M|B|T]
+	// form is treated as 0.
 	// +optional
 	Min *string `json:"min,omitempty"`
-	// Maximum size of the model in bytes
+	// Maximum model parameter count supported by this runtime, given as a
+	// string with an optional suffix M (million), B (billion), or T (trillion),
+	// e.g. "1B", "7B", "70B", "1T". It is compared against the model's parameter
+	// size during runtime auto-selection. A value not in the <number>[M|B|T]
+	// form is treated as 0.
 	// +optional
 	Max *string `json:"max,omitempty"`
 }

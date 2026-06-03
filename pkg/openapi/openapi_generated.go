@@ -4834,14 +4834,14 @@ func schema_pkg_apis_ome_v1beta1_ModelSizeRangeSpec(ref common.ReferenceCallback
 				Properties: map[string]spec.Schema{
 					"min": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Minimum size of the model in bytes",
+							Description: "Minimum model parameter count supported by this runtime, given as a string with an optional suffix M (million), B (billion), or T (trillion), e.g. \"1B\", \"7B\", \"70B\", \"1T\". It is compared against the model's parameter size during runtime auto-selection. A value not in the <number>[M|B|T] form is treated as 0.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
 					"max": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Maximum size of the model in bytes",
+							Description: "Maximum model parameter count supported by this runtime, given as a string with an optional suffix M (million), B (billion), or T (trillion), e.g. \"1B\", \"7B\", \"70B\", \"1T\". It is compared against the model's parameter size during runtime auto-selection. A value not in the <number>[M|B|T] form is treated as 0.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

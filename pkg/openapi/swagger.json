@@ -2733,11 +2733,11 @@
       "type": "object",
       "properties": {
         "max": {
-          "description": "Maximum size of the model in bytes",
+          "description": "Maximum model parameter count supported by this runtime, given as a string with an optional suffix M (million), B (billion), or T (trillion), e.g. \"1B\", \"7B\", \"70B\", \"1T\". It is compared against the model's parameter size during runtime auto-selection. A value not in the \u003cnumber\u003e[M|B|T] form is treated as 0.",
           "type": "string"
         },
         "min": {
-          "description": "Minimum size of the model in bytes",
+          "description": "Minimum model parameter count supported by this runtime, given as a string with an optional suffix M (million), B (billion), or T (trillion), e.g. \"1B\", \"7B\", \"70B\", \"1T\". It is compared against the model's parameter size during runtime auto-selection. A value not in the \u003cnumber\u003e[M|B|T] form is treated as 0.",
           "type": "string"
         }
       }
