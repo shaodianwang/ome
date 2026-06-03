@@ -359,22 +359,25 @@ func declaredComponents(spec *v1beta1.InferenceServiceSpec) map[v1beta1.Componen
 	return out
 }
 
-// omenativeDeploymentModeMap returns Component → declared
-// deploymentMode annotation value for each Component on the spec.
-// Empty string when the annotation is absent.
+// omenativeDeploymentModeMap returns Component → effective
+// deploymentMode value for each Component on the spec. Effective value
+// follows the resolution chain: per-Component annotation >
+// spec.deploymentMode > "" (empty when neither is set). The shape-derived
+// modes (MultiNode, PDDisaggregated) are intentionally NOT considered
+// — coordination only cares about the dispatch backend, not the shape.
 func omenativeDeploymentModeMap(spec *v1beta1.InferenceServiceSpec) map[v1beta1.ComponentType]string {
 	out := map[v1beta1.ComponentType]string{}
 	if spec == nil {
 		return out
 	}
 	if spec.Engine != nil {
-		out[v1beta1.EngineComponent] = spec.Engine.Annotations[constants.DeploymentMode]
+		out[v1beta1.EngineComponent] = resolveComponentDeploymentMode(spec.Engine.Annotations, spec.DeploymentMode)
 	}
 	if spec.Decoder != nil {
-		out[v1beta1.DecoderComponent] = spec.Decoder.Annotations[constants.DeploymentMode]
+		out[v1beta1.DecoderComponent] = resolveComponentDeploymentMode(spec.Decoder.Annotations, spec.DeploymentMode)
 	}
 	if spec.Router != nil {
-		out[v1beta1.RouterComponent] = spec.Router.Annotations[constants.DeploymentMode]
+		out[v1beta1.RouterComponent] = resolveComponentDeploymentMode(spec.Router.Annotations, spec.DeploymentMode)
 	}
 	return out
 }

@@ -117,7 +117,7 @@ func TestDetermineDeploymentModes_PerComponentAnnotations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			engineMode, decoderMode, routerMode, err := DetermineDeploymentModes(tt.engine, tt.decoder, tt.router, nil)
+			engineMode, decoderMode, routerMode, err := DetermineDeploymentModes(tt.engine, tt.decoder, tt.router, nil, nil)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.wantEngineMode, engineMode, "engine mode mismatch")
 			assert.Equal(t, tt.wantDecoder, decoderMode, "decoder mode mismatch")
@@ -127,8 +127,121 @@ func TestDetermineDeploymentModes_PerComponentAnnotations(t *testing.T) {
 }
 
 func TestDetermineDeploymentModes_NilEngineRejected(t *testing.T) {
-	_, _, _, err := DetermineDeploymentModes(nil, nil, nil, nil)
+	_, _, _, err := DetermineDeploymentModes(nil, nil, nil, nil, nil)
 	assert.Error(t, err)
+}
+
+// TestDetermineDeploymentModes_SpecDeploymentModeField covers the
+// precedence chain that includes the new typed spec.deploymentMode
+// field: per-Component annotation > spec.deploymentMode > Leader/Worker
+// shape (MultiNode) > RawDeployment default.
+func TestDetermineDeploymentModes_SpecDeploymentModeField(t *testing.T) {
+	omeNativePtr := func() *constants.DeploymentModeType {
+		m := constants.OMENative
+		return &m
+	}
+	rawDeploymentPtr := func() *constants.DeploymentModeType {
+		m := constants.RawDeployment
+		return &m
+	}
+	omeAnnot := map[string]string{
+		constants.DeploymentMode: string(constants.OMENative),
+	}
+	rawAnnot := map[string]string{
+		constants.DeploymentMode: string(constants.RawDeployment),
+	}
+
+	tests := []struct {
+		name           string
+		engine         *v1beta1.EngineSpec
+		decoder        *v1beta1.DecoderSpec
+		router         *v1beta1.RouterSpec
+		specMode       *constants.DeploymentModeType
+		wantEngineMode constants.DeploymentModeType
+		wantDecoder    constants.DeploymentModeType
+		wantRouter     constants.DeploymentModeType
+	}{
+		{
+			name:           "spec.deploymentMode=OMENative propagates to bare Engine",
+			engine:         &v1beta1.EngineSpec{},
+			specMode:       omeNativePtr(),
+			wantEngineMode: constants.OMENative,
+			wantDecoder:    constants.RawDeployment,
+			wantRouter:     constants.RawDeployment,
+		},
+		{
+			name:           "spec.deploymentMode=OMENative propagates to PD shape (Engine + Decoder)",
+			engine:         &v1beta1.EngineSpec{},
+			decoder:        &v1beta1.DecoderSpec{},
+			specMode:       omeNativePtr(),
+			wantEngineMode: constants.OMENative,
+			wantDecoder:    constants.OMENative,
+			wantRouter:     constants.RawDeployment,
+		},
+		{
+			name:           "spec.deploymentMode=OMENative propagates to all three Components",
+			engine:         &v1beta1.EngineSpec{},
+			decoder:        &v1beta1.DecoderSpec{},
+			router:         &v1beta1.RouterSpec{},
+			specMode:       omeNativePtr(),
+			wantEngineMode: constants.OMENative,
+			wantDecoder:    constants.OMENative,
+			wantRouter:     constants.OMENative,
+		},
+		{
+			name: "per-Component annotation overrides spec.deploymentMode (Decoder pinned Raw)",
+			engine: &v1beta1.EngineSpec{
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: omeAnnot},
+			},
+			decoder: &v1beta1.DecoderSpec{
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: rawAnnot},
+			},
+			specMode:       omeNativePtr(),
+			wantEngineMode: constants.OMENative,
+			wantDecoder:    constants.RawDeployment,
+			wantRouter:     constants.RawDeployment,
+		},
+		{
+			name: "spec.deploymentMode wins over Leader/Worker shape",
+			engine: &v1beta1.EngineSpec{
+				Leader: &v1beta1.LeaderSpec{},
+				Worker: &v1beta1.WorkerSpec{},
+			},
+			specMode:       omeNativePtr(),
+			wantEngineMode: constants.OMENative,
+			wantDecoder:    constants.RawDeployment,
+			wantRouter:     constants.RawDeployment,
+		},
+		{
+			name: "spec.deploymentMode=RawDeployment overrides Leader/Worker shape (operator opt-out)",
+			engine: &v1beta1.EngineSpec{
+				Leader: &v1beta1.LeaderSpec{},
+				Worker: &v1beta1.WorkerSpec{},
+			},
+			specMode:       rawDeploymentPtr(),
+			wantEngineMode: constants.RawDeployment,
+			wantDecoder:    constants.RawDeployment,
+			wantRouter:     constants.RawDeployment,
+		},
+		{
+			name:           "nil spec.deploymentMode → Leader/Worker shape still wins (MultiNode)",
+			engine:         &v1beta1.EngineSpec{Leader: &v1beta1.LeaderSpec{}},
+			specMode:       nil,
+			wantEngineMode: constants.MultiNode,
+			wantDecoder:    constants.RawDeployment,
+			wantRouter:     constants.RawDeployment,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engineMode, decoderMode, routerMode, err := DetermineDeploymentModes(tt.engine, tt.decoder, tt.router, nil, tt.specMode)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantEngineMode, engineMode, "engine mode mismatch")
+			assert.Equal(t, tt.wantDecoder, decoderMode, "decoder mode mismatch")
+			assert.Equal(t, tt.wantRouter, routerMode, "router mode mismatch")
+		})
+	}
 }
 
 func TestIsMultiPodComponent(t *testing.T) {

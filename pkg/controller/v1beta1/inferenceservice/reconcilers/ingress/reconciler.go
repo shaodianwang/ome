@@ -113,7 +113,7 @@ func (r *IngressReconciler) getDeploymentMode(isvc *v1beta1.InferenceService, en
 	entrypointComponent := isvcutils.DetermineEntrypointComponent(isvc)
 
 	// Determine deployment modes for all components
-	engineMode, decoderMode, routerMode, err := isvcutils.DetermineDeploymentModes(engine, decoder, router, nil)
+	engineMode, decoderMode, routerMode, err := isvcutils.DetermineDeploymentModes(engine, decoder, router, nil, isvc.Spec.DeploymentMode)
 	if err != nil {
 		mainLog.Error(err, "Failed to determine deployment modes, falling back to RawDeployment", "isvc", isvc.Name)
 		return constants.RawDeployment

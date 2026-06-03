@@ -8,12 +8,25 @@ import (
 )
 
 // DetermineEngineDeploymentMode determines the deployment mode for the engine based on its configuration.
-func DetermineEngineDeploymentMode(engine *v1beta1.EngineSpec) constants.DeploymentModeType {
+//
+// Resolution order:
+//  1. Per-Component annotation (ome.io/deploymentMode) — highest priority,
+//     preserved as the operator escape hatch for mixed-mode experiments.
+//  2. specMode — the typed top-level spec.deploymentMode field. When set,
+//     propagates to every Component without mutating per-Component
+//     annotations (kept clean for `kubectl get -o yaml`).
+//  3. Leader/Worker shape inference → MultiNode.
+//  4. Default → RawDeployment.
+func DetermineEngineDeploymentMode(engine *v1beta1.EngineSpec, specMode *constants.DeploymentModeType) constants.DeploymentModeType {
 	if engine == nil {
 		return constants.RawDeployment
 	}
 
 	if mode, found := GetDeploymentModeFromAnnotations(engine.Annotations); found {
+		return mode
+	}
+
+	if mode, found := deploymentModeFromSpecField(specMode); found {
 		return mode
 	}
 
@@ -27,10 +40,11 @@ func DetermineEngineDeploymentMode(engine *v1beta1.EngineSpec) constants.Deploym
 }
 
 // DetermineDeploymentModes determines the deployment modes for all components based on their specs.
-func DetermineDeploymentModes(engine *v1beta1.EngineSpec, decoder *v1beta1.DecoderSpec, router *v1beta1.RouterSpec, runtime *v1beta1.ServingRuntimeSpec) (engineMode, decoderMode, routerMode constants.DeploymentModeType, err error) {
-	engineMode = determineComponentDeploymentMode(engine, runtime)
-	decoderMode = determineComponentDeploymentMode(decoder, runtime)
-	routerMode = determineComponentDeploymentMode(router, runtime)
+// See DetermineEngineDeploymentMode for the precedence chain that also governs Decoder and Router.
+func DetermineDeploymentModes(engine *v1beta1.EngineSpec, decoder *v1beta1.DecoderSpec, router *v1beta1.RouterSpec, runtime *v1beta1.ServingRuntimeSpec, specMode *constants.DeploymentModeType) (engineMode, decoderMode, routerMode constants.DeploymentModeType, err error) {
+	engineMode = determineComponentDeploymentMode(engine, runtime, specMode)
+	decoderMode = determineComponentDeploymentMode(decoder, runtime, specMode)
+	routerMode = determineComponentDeploymentMode(router, runtime, specMode)
 
 	if engine == nil {
 		return "", "", "", fmt.Errorf("engine component is required")
@@ -40,18 +54,21 @@ func DetermineDeploymentModes(engine *v1beta1.EngineSpec, decoder *v1beta1.Decod
 }
 
 // determineComponentDeploymentMode determines deployment mode for a generic component.
-// Annotation takes precedence; otherwise infer MultiNode from Leader/Worker presence and
-// default to RawDeployment. Symmetric for Engine, Decoder, and Router so PD-disaggregated
+// Per-Component annotation > spec.deploymentMode (specMode) > Leader/Worker shape (MultiNode) >
+// RawDeployment default. Symmetric for Engine, Decoder, and Router so PD-disaggregated
 // ISVCs can opt each component into OMENative independently.
-func determineComponentDeploymentMode(spec interface{}, runtime *v1beta1.ServingRuntimeSpec) constants.DeploymentModeType {
+func determineComponentDeploymentMode(spec interface{}, runtime *v1beta1.ServingRuntimeSpec, specMode *constants.DeploymentModeType) constants.DeploymentModeType {
 	switch s := spec.(type) {
 	case *v1beta1.EngineSpec:
-		return DetermineEngineDeploymentMode(s)
+		return DetermineEngineDeploymentMode(s, specMode)
 	case *v1beta1.DecoderSpec:
 		if s == nil {
 			return constants.RawDeployment
 		}
 		if mode, found := GetDeploymentModeFromAnnotations(s.Annotations); found {
+			return mode
+		}
+		if mode, found := deploymentModeFromSpecField(specMode); found {
 			return mode
 		}
 		if s.Leader != nil || s.Worker != nil {
@@ -65,10 +82,29 @@ func determineComponentDeploymentMode(spec interface{}, runtime *v1beta1.Serving
 		if mode, found := GetDeploymentModeFromAnnotations(s.Annotations); found {
 			return mode
 		}
+		if mode, found := deploymentModeFromSpecField(specMode); found {
+			return mode
+		}
 		return constants.RawDeployment
 	}
 
 	return constants.RawDeployment
+}
+
+// deploymentModeFromSpecField returns (mode, true) when the typed
+// spec.deploymentMode field is set to a valid value. Invalid values are
+// ignored here; the CRD enum marker rejects them at admission time so
+// reaching this code with an invalid value would indicate a CRD/schema
+// mismatch — quietly falling through to the next precedence rung is the
+// safer behavior.
+func deploymentModeFromSpecField(specMode *constants.DeploymentModeType) (constants.DeploymentModeType, bool) {
+	if specMode == nil {
+		return "", false
+	}
+	if !specMode.IsValid() {
+		return "", false
+	}
+	return *specMode, true
 }
 
 // DetermineEntrypointComponent determines which component should be the main entrypoint for the InferenceService.

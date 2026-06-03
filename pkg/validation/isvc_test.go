@@ -168,6 +168,29 @@ func TestValidateEngineDecoderDeploymentMode(t *testing.T) {
 				Decoder: decoderWith(withMode(string(constants.RawDeployment))),
 			},
 		},
+		{
+			name: "spec.deploymentMode=OMENative propagates to both — no mismatch",
+			spec: &v1beta1.InferenceServiceSpec{
+				DeploymentMode: func() *constants.DeploymentModeType {
+					m := constants.OMENative
+					return &m
+				}(),
+				Engine:  engineWith(nil),
+				Decoder: decoderWith(nil),
+			},
+		},
+		{
+			name: "spec.deploymentMode=OMENative; engine annotation pins Raw — mismatch",
+			spec: &v1beta1.InferenceServiceSpec{
+				DeploymentMode: func() *constants.DeploymentModeType {
+					m := constants.OMENative
+					return &m
+				}(),
+				Engine:  engineWith(withMode(string(constants.RawDeployment))),
+				Decoder: decoderWith(nil),
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {

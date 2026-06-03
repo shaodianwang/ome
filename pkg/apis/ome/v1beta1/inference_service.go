@@ -3,10 +3,33 @@ package v1beta1
 import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 // InferenceServiceSpec is the top level type for this resource
 type InferenceServiceSpec struct {
+	// DeploymentMode selects the dispatch backend that drives every
+	// Component on this InferenceService. When set, it propagates to
+	// the Engine, Decoder, and Router resolver at read-time without
+	// mutating per-Component annotations — `kubectl get -o yaml` stays
+	// clean. A per-Component
+	// `ome.io/deploymentMode` annotation still wins as an explicit
+	// override (the escape hatch is preserved for backward compat and
+	// mixed-mode experiments).
+	//
+	// Valid values:
+	//   - "OMENative"     — OEP-0007 native lifecycle-managed pods
+	//   - "RawDeployment" — Kubernetes Deployment/HPA-backed dispatch
+	//
+	// MultiNode and PDDisaggregated are SHAPE descriptors derived from
+	// Leader/Worker presence and engine+decoder pairing respectively;
+	// they are not valid dispatch backends and are rejected by the CRD
+	// enum. VirtualDeployment is legacy and not supported here.
+	// +kubebuilder:validation:Enum=OMENative;RawDeployment
+	// +optional
+	DeploymentMode *constants.DeploymentModeType `json:"deploymentMode,omitempty"`
+
 	// Engine defines the serving engine spec
 	// This provides detailed container and pod specifications for model serving.
 	// It allows defining the model runner (container spec), as well as complete pod specifications

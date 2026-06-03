@@ -76,19 +76,19 @@ func DefaultInferenceService(ctx context.Context, c client.Client, isvc *v1beta1
 	}
 
 	if isvc.Spec.Engine != nil {
-		defaultEngine(isvc.Spec.Engine)
+		defaultEngine(isvc.Spec.Engine, isvc.Spec.DeploymentMode)
 	}
 	if isvc.Spec.Decoder != nil {
-		defaultDecoder(isvc.Spec.Decoder)
+		defaultDecoder(isvc.Spec.Decoder, isvc.Spec.DeploymentMode)
 	}
 	if isvc.Spec.Router != nil {
-		defaultRouter(isvc.Spec.Router)
+		defaultRouter(isvc.Spec.Router, isvc.Spec.DeploymentMode)
 	}
 	defaultRolloutCoordination(isvc.Spec.RolloutCoordination)
 	return nil
 }
 
-func defaultEngine(engine *v1beta1.EngineSpec) {
+func defaultEngine(engine *v1beta1.EngineSpec, specMode *constants.DeploymentModeType) {
 	if engine.MinReplicas == nil {
 		minReplicas := 1
 		engine.MinReplicas = &minReplicas
@@ -98,10 +98,10 @@ func defaultEngine(engine *v1beta1.EngineSpec) {
 		engine.MaxReplicas = 3
 	}
 	defaultWorkerSize(engine.Leader, engine.Worker)
-	defaultOMENativeComponent(&engine.ComponentExtensionSpec, engineIsMultiPod(engine))
+	defaultOMENativeComponent(&engine.ComponentExtensionSpec, engineIsMultiPod(engine), specMode)
 }
 
-func defaultDecoder(decoder *v1beta1.DecoderSpec) {
+func defaultDecoder(decoder *v1beta1.DecoderSpec, specMode *constants.DeploymentModeType) {
 	if decoder.MinReplicas == nil {
 		minReplicas := 1
 		decoder.MinReplicas = &minReplicas
@@ -110,7 +110,7 @@ func defaultDecoder(decoder *v1beta1.DecoderSpec) {
 		decoder.MaxReplicas = 3
 	}
 	defaultWorkerSize(decoder.Leader, decoder.Worker)
-	defaultOMENativeComponent(&decoder.ComponentExtensionSpec, decoderIsMultiPod(decoder))
+	defaultOMENativeComponent(&decoder.ComponentExtensionSpec, decoderIsMultiPod(decoder), specMode)
 }
 
 // defaultWorkerSize fills Worker.Size=1 when a multi-pod pairing is
@@ -141,7 +141,7 @@ func defaultWorkerSize(leader *v1beta1.LeaderSpec, worker *v1beta1.WorkerSpec) {
 	worker.Size = &size
 }
 
-func defaultRouter(router *v1beta1.RouterSpec) {
+func defaultRouter(router *v1beta1.RouterSpec, specMode *constants.DeploymentModeType) {
 	if router.MinReplicas == nil {
 		minReplicas := 1
 		router.MinReplicas = &minReplicas
@@ -150,7 +150,7 @@ func defaultRouter(router *v1beta1.RouterSpec) {
 		router.MaxReplicas = 2
 	}
 	// Router has no Leader/Worker; always single-pod.
-	defaultOMENativeComponent(&router.ComponentExtensionSpec, false)
+	defaultOMENativeComponent(&router.ComponentExtensionSpec, false, specMode)
 }
 
 // engineIsMultiPod reports whether the Engine spawns more than one pod per
@@ -178,11 +178,14 @@ func decoderIsMultiPod(decoder *v1beta1.DecoderSpec) bool {
 }
 
 // defaultOMENativeComponent fills in OEP-0007 lifecycle-policy defaults on
-// the Component's omenative sub-block. Only acts when the Component is
-// annotated ome.io/deploymentMode=OMENative; for any other mode the block is
-// left untouched. multiPod toggles the restart/ready policy defaults: a
-// multi-pod Instance defaults to group restart + AllPodReady aggregation;
-// a single-pod Instance defaults to None for both.
+// the Component's omenative sub-block. Only acts when the Component
+// resolves to OMENative — either via its own
+// ome.io/deploymentMode annotation or via the top-level
+// spec.deploymentMode field (per-Component annotation wins). For any
+// other mode the block is left untouched. multiPod toggles the
+// restart/ready policy defaults: a multi-pod Instance defaults to group
+// restart + AllPodReady aggregation; a single-pod Instance defaults to
+// None for both.
 //
 // OEP-0007 multi-node Phase 3 multi-pod defaults (re-stated for
 // documentation; the rules below were already in place but Phase 3
@@ -195,11 +198,11 @@ func decoderIsMultiPod(decoder *v1beta1.DecoderSpec) bool {
 //     the execution falls back to recreate for multi-pod per Phase-1
 //     sign-off in #242, and lights up automatically when Phase 5
 //     multi-pod surge ships — no operator spec churn needed)
-func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod bool) {
+func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod bool, specMode *constants.DeploymentModeType) {
 	if ext == nil {
 		return
 	}
-	if ext.Annotations[constants.DeploymentMode] != string(constants.OMENative) {
+	if !componentResolvesToOMENative(ext.Annotations, specMode) {
 		return
 	}
 	if ext.Lifecycle == nil {
@@ -307,4 +310,23 @@ func defaultRolloutCoordination(spec *v1beta1.RolloutCoordinationSpec) {
 			g.Pacing.RatioTolerance = &tol
 		}
 	}
+}
+
+// componentResolvesToOMENative reports whether a Component dispatches
+// to the OMENative backend after applying the precedence chain:
+//  1. Per-Component ome.io/deploymentMode annotation (escape hatch).
+//  2. Top-level spec.deploymentMode (typed default).
+//
+// Returns false when neither resolves to OMENative. Used by the
+// lifecycle-policy defaulter so spec.deploymentMode=OMENative also
+// triggers the OMENative defaults without forcing operators to repeat
+// the annotation on every Component.
+func componentResolvesToOMENative(annotations map[string]string, specMode *constants.DeploymentModeType) bool {
+	if annotations[constants.DeploymentMode] != "" {
+		return annotations[constants.DeploymentMode] == string(constants.OMENative)
+	}
+	if specMode != nil {
+		return *specMode == constants.OMENative
+	}
+	return false
 }

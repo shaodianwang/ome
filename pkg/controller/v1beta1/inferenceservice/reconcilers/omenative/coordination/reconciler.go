@@ -268,33 +268,43 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 }
 
 // collectOMENativeComponents returns the Components on the ISVC that
-// declare ome.io/deploymentMode=OMENative. Only those Components
-// participate in coordination's per-revision service emission /
-// traffic write.
+// resolve to OMENative dispatch. Only those Components participate in
+// coordination's per-revision service emission / traffic write.
+// Resolution follows the precedence chain: per-Component annotation >
+// spec.deploymentMode > none.
 func collectOMENativeComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentType {
 	if isvc == nil {
 		return nil
 	}
+	specMode := isvc.Spec.DeploymentMode
 	out := make([]v1beta1.ComponentType, 0, 3)
-	if isvc.Spec.Engine != nil && componentIsOMENative(&isvc.Spec.Engine.ComponentExtensionSpec) {
+	if isvc.Spec.Engine != nil && componentIsOMENative(&isvc.Spec.Engine.ComponentExtensionSpec, specMode) {
 		out = append(out, v1beta1.EngineComponent)
 	}
-	if isvc.Spec.Decoder != nil && componentIsOMENative(&isvc.Spec.Decoder.ComponentExtensionSpec) {
+	if isvc.Spec.Decoder != nil && componentIsOMENative(&isvc.Spec.Decoder.ComponentExtensionSpec, specMode) {
 		out = append(out, v1beta1.DecoderComponent)
 	}
-	if isvc.Spec.Router != nil && componentIsOMENative(&isvc.Spec.Router.ComponentExtensionSpec) {
+	if isvc.Spec.Router != nil && componentIsOMENative(&isvc.Spec.Router.ComponentExtensionSpec, specMode) {
 		out = append(out, v1beta1.RouterComponent)
 	}
 	return out
 }
 
-// componentIsOMENative reports whether the Component declares
-// ome.io/deploymentMode=OMENative via its Annotations.
-func componentIsOMENative(ext *v1beta1.ComponentExtensionSpec) bool {
+// componentIsOMENative reports whether the Component dispatches to the
+// OMENative backend. Resolves the per-Component
+// ome.io/deploymentMode annotation first, then falls back to the
+// top-level spec.deploymentMode field.
+func componentIsOMENative(ext *v1beta1.ComponentExtensionSpec, specMode *constants.DeploymentModeType) bool {
 	if ext == nil {
 		return false
 	}
-	return ext.Annotations[constants.DeploymentMode] == string(constants.OMENative)
+	if ann := ext.Annotations[constants.DeploymentMode]; ann != "" {
+		return ann == string(constants.OMENative)
+	}
+	if specMode != nil {
+		return *specMode == constants.OMENative
+	}
+	return false
 }
 
 // observePerRevisionPods returns per-Component, per-revisionHash pod

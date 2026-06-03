@@ -12781,6 +12781,11 @@ spec:
                           x-kubernetes-list-type: map
                       type: object
                   type: object
+                deploymentMode:
+                  enum:
+                    - OMENative
+                    - RawDeployment
+                  type: string
                 engine:
                   properties:
                     activeDeadlineSeconds:

@@ -1817,6 +1817,10 @@
           "description": "Decoder defines the decoder spec This is specifically used for PD (Prefill-Decode) disaggregated serving deployments. Similar to Engine in structure, it allows for container and pod specifications, but is only utilized when implementing the disaggregated serving pattern to separate the prefill and decode phases of inference.",
           "$ref": "#/definitions/v1beta1.DecoderSpec"
         },
+        "deploymentMode": {
+          "description": "DeploymentMode selects the dispatch backend that drives every Component on this InferenceService. When set, it propagates to the Engine, Decoder, and Router resolver at read-time without mutating per-Component annotations — `kubectl get -o yaml` stays clean. A per-Component `ome.io/deploymentMode` annotation still wins as an explicit override (the escape hatch is preserved for backward compat and mixed-mode experiments).\n\nValid values:\n  - \"OMENative\"     — OEP-0007 native lifecycle-managed pods\n  - \"RawDeployment\" — Kubernetes Deployment/HPA-backed dispatch\n\nMultiNode and PDDisaggregated are SHAPE descriptors derived from Leader/Worker presence and engine+decoder pairing respectively; they are not valid dispatch backends and are rejected by the CRD enum. VirtualDeployment is legacy and not supported here.",
+          "type": "string"
+        },
         "engine": {
           "description": "Engine defines the serving engine spec This provides detailed container and pod specifications for model serving. It allows defining the model runner (container spec), as well as complete pod specifications including init containers, sidecar containers, and other pod-level configurations. Engine can also be configured for multi-node deployments using leader and worker specifications.",
           "$ref": "#/definitions/v1beta1.EngineSpec"

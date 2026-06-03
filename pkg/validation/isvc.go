@@ -349,25 +349,50 @@ func multiPodComponents(spec *v1beta1.InferenceServiceSpec) map[v1beta1.Componen
 }
 
 // ValidateEngineDecoderDeploymentMode enforces that when both Engine and
-// Decoder are present and either carries ome.io/deploymentMode=OMENative,
-// both components carry the same value for that annotation.
+// Decoder are present and either resolves to OMENative, both components
+// resolve to the same dispatch mode. The per-Component
+// ome.io/deploymentMode annotation wins over spec.deploymentMode, but
+// spec.deploymentMode acts as a uniform default — so a spec that sets
+// spec.deploymentMode=OMENative without per-Component overrides
+// satisfies this check (both Engine and Decoder resolve to OMENative).
 func ValidateEngineDecoderDeploymentMode(spec *v1beta1.InferenceServiceSpec) error {
 	if spec.Engine == nil || spec.Decoder == nil {
 		return nil
 	}
-	engineMode := spec.Engine.Annotations[constants.DeploymentMode]
-	decoderMode := spec.Decoder.Annotations[constants.DeploymentMode]
+	engineMode := resolveComponentDeploymentMode(spec.Engine.Annotations, spec.DeploymentMode)
+	decoderMode := resolveComponentDeploymentMode(spec.Decoder.Annotations, spec.DeploymentMode)
 	if engineMode != string(constants.OMENative) && decoderMode != string(constants.OMENative) {
 		return nil
 	}
 	if engineMode != decoderMode {
 		return fmt.Errorf(
-			"InvalidDeploymentModeCombination: engine %s=%q does not match decoder %s=%q; when either is OMENative, both must use the same value",
-			constants.DeploymentMode, engineMode,
-			constants.DeploymentMode, decoderMode,
+			"InvalidDeploymentModeCombination: engine deploymentMode=%q does not match decoder deploymentMode=%q; when either is OMENative, both must use the same value",
+			engineMode, decoderMode,
 		)
 	}
 	return nil
+}
+
+// resolveComponentDeploymentMode returns the effective dispatch
+// deployment mode for a single Component as a string, applying the
+// resolution chain shared by all admission and reconcile call sites:
+//
+//  1. Per-Component ome.io/deploymentMode annotation (escape hatch).
+//  2. spec.deploymentMode (the typed top-level default).
+//  3. Empty string when neither is set.
+//
+// Shape-derived modes (MultiNode from Leader/Worker; PDDisaggregated
+// from Engine+Decoder pairing) are intentionally NOT considered here:
+// this helper is consumed by admission rules that only care about the
+// DISPATCH backend (OMENative vs RawDeployment), not the shape.
+func resolveComponentDeploymentMode(annotations map[string]string, specMode *constants.DeploymentModeType) string {
+	if mode, ok := annotations[constants.DeploymentMode]; ok && mode != "" {
+		return mode
+	}
+	if specMode != nil {
+		return string(*specMode)
+	}
+	return ""
 }
 
 func ValidateReplicaBounds(min, max *int) error {

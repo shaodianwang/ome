@@ -3245,6 +3245,13 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 				Description: "InferenceServiceSpec is the top level type for this resource",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"deploymentMode": {
+						SchemaProps: spec.SchemaProps{
+							Description: "DeploymentMode selects the dispatch backend that drives every Component on this InferenceService. When set, it propagates to the Engine, Decoder, and Router resolver at read-time without mutating per-Component annotations — `kubectl get -o yaml` stays clean. A per-Component `ome.io/deploymentMode` annotation still wins as an explicit override (the escape hatch is preserved for backward compat and mixed-mode experiments).\n\nValid values:\n  - \"OMENative\"     — OEP-0007 native lifecycle-managed pods\n  - \"RawDeployment\" — Kubernetes Deployment/HPA-backed dispatch\n\nMultiNode and PDDisaggregated are SHAPE descriptors derived from Leader/Worker presence and engine+decoder pairing respectively; they are not valid dispatch backends and are rejected by the CRD enum. VirtualDeployment is legacy and not supported here.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"engine": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Engine defines the serving engine spec This provides detailed container and pod specifications for model serving. It allows defining the model runner (container spec), as well as complete pod specifications including init containers, sidecar containers, and other pod-level configurations. Engine can also be configured for multi-node deployments using leader and worker specifications.",

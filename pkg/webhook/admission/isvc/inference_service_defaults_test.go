@@ -223,7 +223,7 @@ func TestDefaultComponents(t *testing.T) {
 
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				defaultEngine(tt.engine)
+				defaultEngine(tt.engine, nil)
 				require.NotNil(t, tt.engine.MinReplicas)
 				assert.Equal(t, tt.wantMinReplicas, *tt.engine.MinReplicas)
 				assert.Equal(t, tt.wantMaxReplicas, tt.engine.MaxReplicas)
@@ -259,7 +259,7 @@ func TestDefaultComponents(t *testing.T) {
 
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				defaultDecoder(tt.decoder)
+				defaultDecoder(tt.decoder, nil)
 				require.NotNil(t, tt.decoder.MinReplicas)
 				assert.Equal(t, tt.wantMinReplicas, *tt.decoder.MinReplicas)
 				assert.Equal(t, tt.wantMaxReplicas, tt.decoder.MaxReplicas)
@@ -295,7 +295,7 @@ func TestDefaultComponents(t *testing.T) {
 
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				defaultRouter(tt.router)
+				defaultRouter(tt.router, nil)
 				require.NotNil(t, tt.router.MinReplicas)
 				assert.Equal(t, tt.wantMinReplicas, *tt.router.MinReplicas)
 				assert.Equal(t, tt.wantMaxReplicas, tt.router.MaxReplicas)
@@ -313,19 +313,19 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		ext := &v1beta1.ComponentExtensionSpec{
 			Annotations: map[string]string{constants.DeploymentMode: string(constants.MultiNode)},
 		}
-		defaultOMENativeComponent(ext, true)
+		defaultOMENativeComponent(ext, true, nil)
 		assert.Nil(t, ext.Lifecycle)
 	})
 
 	t.Run("no annotation — omenative block untouched", func(t *testing.T) {
 		ext := &v1beta1.ComponentExtensionSpec{}
-		defaultOMENativeComponent(ext, true)
+		defaultOMENativeComponent(ext, true, nil)
 		assert.Nil(t, ext.Lifecycle)
 	})
 
 	t.Run("OMENative + multi-pod — full defaults applied", func(t *testing.T) {
 		ext := &v1beta1.ComponentExtensionSpec{Annotations: omenativeMode}
-		defaultOMENativeComponent(ext, true)
+		defaultOMENativeComponent(ext, true, nil)
 
 		require.NotNil(t, ext.Lifecycle)
 		spec := ext.Lifecycle
@@ -353,7 +353,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 
 	t.Run("OMENative + single-pod — restart/ready default to None", func(t *testing.T) {
 		ext := &v1beta1.ComponentExtensionSpec{Annotations: omenativeMode}
-		defaultOMENativeComponent(ext, false)
+		defaultOMENativeComponent(ext, false, nil)
 
 		require.NotNil(t, ext.Lifecycle)
 		require.NotNil(t, ext.Lifecycle.RestartPolicy)
@@ -372,7 +372,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 				InstanceReadyTimeout: &customTimeout,
 			},
 		}
-		defaultOMENativeComponent(ext, true)
+		defaultOMENativeComponent(ext, true, nil)
 
 		// preserved
 		require.NotNil(t, ext.Lifecycle.RestartPolicy)
@@ -402,7 +402,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 				},
 			},
 		}
-		defaultOMENativeComponent(ext, true)
+		defaultOMENativeComponent(ext, true, nil)
 
 		assert.Equal(t, v1beta1.UpdateStrategyRecreatePod, ext.Lifecycle.UpdateStrategy.Type)
 		assert.Equal(t, int32(60), *ext.Lifecycle.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
@@ -421,7 +421,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 				},
 			},
 		}
-		defaultOMENativeComponent(ext, false)
+		defaultOMENativeComponent(ext, false, nil)
 		require.NotNil(t, ext.Lifecycle.MigrationPolicy.MaxAutoRetries)
 		assert.Equal(t, int32(3), *ext.Lifecycle.MigrationPolicy.MaxAutoRetries)
 		// ProgressDeadlineSeconds preserved.
@@ -433,7 +433,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		ext := &v1beta1.ComponentExtensionSpec{
 			Annotations: omenativeMode,
 		}
-		defaultOMENativeComponent(ext, false)
+		defaultOMENativeComponent(ext, false, nil)
 		require.NotNil(t, ext.Lifecycle.MigrationPolicy)
 		assert.Nil(t, ext.Lifecycle.MigrationPolicy.ProgressDeadlineSeconds, "no auto-migration opt-in → no deadline")
 		assert.Nil(t, ext.Lifecycle.MigrationPolicy.MaxAutoRetries, "no auto-migration opt-in → no cap (cap is meaningless without trigger)")
@@ -451,7 +451,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 				},
 			},
 		}
-		defaultOMENativeComponent(ext, false)
+		defaultOMENativeComponent(ext, false, nil)
 		require.NotNil(t, ext.Lifecycle.MigrationPolicy.MaxAutoRetries)
 		assert.Equal(t, int32(7), *ext.Lifecycle.MigrationPolicy.MaxAutoRetries, "explicit MaxAutoRetries must be preserved")
 	})
@@ -496,7 +496,7 @@ func TestDefaultEngine_OMENativeAnnotationTriggersDefaults(t *testing.T) {
 		},
 		Worker: &v1beta1.WorkerSpec{Size: func() *int { v := 3; return &v }()},
 	}
-	defaultEngine(engine)
+	defaultEngine(engine, nil)
 	require.NotNil(t, engine.Lifecycle)
 	require.NotNil(t, engine.Lifecycle.RestartPolicy)
 	assert.Equal(t, v1beta1.InstanceRestartPolicyRecreateInstance, *engine.Lifecycle.RestartPolicy)
@@ -508,7 +508,7 @@ func TestDefaultRouter_OMENativeAlwaysSinglePod(t *testing.T) {
 			Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
 		},
 	}
-	defaultRouter(router)
+	defaultRouter(router, nil)
 	require.NotNil(t, router.Lifecycle)
 	require.NotNil(t, router.Lifecycle.RestartPolicy)
 	assert.Equal(t, v1beta1.InstanceRestartPolicyNone, *router.Lifecycle.RestartPolicy)
@@ -528,7 +528,7 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 			Leader: &v1beta1.LeaderSpec{},
 			Worker: &v1beta1.WorkerSpec{},
 		}
-		defaultEngine(engine)
+		defaultEngine(engine, nil)
 		require.NotNil(t, engine.Worker.Size)
 		assert.Equal(t, 1, *engine.Worker.Size)
 		// downstream multi-pod detection should kick in:
@@ -544,7 +544,7 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 			Leader: &v1beta1.LeaderSpec{},
 			Worker: &v1beta1.WorkerSpec{Size: intPtr(3)},
 		}
-		defaultEngine(engine)
+		defaultEngine(engine, nil)
 		require.NotNil(t, engine.Worker.Size)
 		assert.Equal(t, 3, *engine.Worker.Size)
 	})
@@ -557,7 +557,7 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 			Leader: &v1beta1.LeaderSpec{},
 			Worker: &v1beta1.WorkerSpec{Size: intPtr(0)},
 		}
-		defaultEngine(engine)
+		defaultEngine(engine, nil)
 		require.NotNil(t, engine.Worker.Size)
 		assert.Equal(t, 0, *engine.Worker.Size)
 	})
@@ -567,7 +567,7 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 		// defaulter handles. The validator catches it with
 		// LeaderRequiresWorker.
 		engine := &v1beta1.EngineSpec{Leader: &v1beta1.LeaderSpec{}}
-		defaultEngine(engine)
+		defaultEngine(engine, nil)
 		assert.Nil(t, engine.Worker)
 	})
 
@@ -577,7 +577,7 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 		// WorkerRequiresLeader; the malformed Size remains for the
 		// error message to surface.
 		engine := &v1beta1.EngineSpec{Worker: &v1beta1.WorkerSpec{}}
-		defaultEngine(engine)
+		defaultEngine(engine, nil)
 		assert.Nil(t, engine.Worker.Size)
 	})
 
@@ -589,7 +589,7 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 			Leader: &v1beta1.LeaderSpec{},
 			Worker: &v1beta1.WorkerSpec{},
 		}
-		defaultDecoder(decoder)
+		defaultDecoder(decoder, nil)
 		require.NotNil(t, decoder.Worker.Size)
 		assert.Equal(t, 1, *decoder.Worker.Size)
 		require.NotNil(t, decoder.Lifecycle)
@@ -599,7 +599,7 @@ func TestDefaultWorkerSize_MultiPodWithoutSize(t *testing.T) {
 
 	t.Run("single-pod engine — Worker field unset, no panic", func(t *testing.T) {
 		engine := &v1beta1.EngineSpec{}
-		defaultEngine(engine)
+		defaultEngine(engine, nil)
 		assert.Nil(t, engine.Worker)
 		assert.Nil(t, engine.Leader)
 	})
@@ -623,7 +623,7 @@ func TestDefaultOMENativeComponent_MultiPodPhase3(t *testing.T) {
 	// before
 	assert.Nil(t, ext.Lifecycle)
 
-	defaultOMENativeComponent(ext, true /* multiPod */)
+	defaultOMENativeComponent(ext, true /* multiPod */, nil)
 
 	// after
 	require.NotNil(t, ext.Lifecycle)
@@ -646,7 +646,7 @@ func TestDefaultOMENativeComponent_SinglePodPhase3(t *testing.T) {
 	ext := &v1beta1.ComponentExtensionSpec{
 		Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
 	}
-	defaultOMENativeComponent(ext, false /* singlePod */)
+	defaultOMENativeComponent(ext, false /* singlePod */, nil)
 
 	require.NotNil(t, ext.Lifecycle)
 	require.NotNil(t, ext.Lifecycle.RestartPolicy)
