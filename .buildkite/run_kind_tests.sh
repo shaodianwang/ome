@@ -2,7 +2,7 @@
 # KIND-backed integration test step for the BuildKite pipeline.
 #
 # Runs the KIND-backed suites under tests/integration/singlecluster/
-# controller/coordination_kind/. Each suite spins up a TWO-node KIND
+# controller/omenative_coordination_kind/. Each suite spins up a TWO-node KIND
 # cluster (1 control-plane + 1 worker — migration/interleave specs need
 # a second node to schedule the off-source surge pod), builds the
 # fake-serving image, kind-loads it, starts an in-process
@@ -83,12 +83,19 @@ kind get clusters 2>/dev/null | while read -r c; do
   kind delete cluster --name "$c"
 done
 
+# Vendor the optional CRD YAMLs the suite installs. OMECRDPaths points at
+# gitignored tests/integration/dep-crds/{keda,prometheus-operator}, which are
+# regenerated from go.mod by `make dep-crds` and absent on a clean checkout.
+# The `go test` below bypasses the `make integration-test` prerequisite that
+# normally runs this, so vendor them explicitly first.
+make dep-crds
+
 # Run the KIND-backed suites. Set KIND_KEEP_CLUSTER=true so a
 # multi-package test invocation (if added later) reuses the same
 # cluster across packages.
-echo "--- go test ./tests/integration/singlecluster/controller/coordination_kind/... ---"
+echo "--- go test ./tests/integration/singlecluster/controller/omenative_coordination_kind/... ---"
 KIND_KEEP_CLUSTER=true \
-  go test ./tests/integration/singlecluster/controller/coordination_kind/... \
+  go test ./tests/integration/singlecluster/controller/omenative_coordination_kind/... \
   -v -timeout 90m -ginkgo.v
 
 # Best-effort cleanup so the agent isn't left holding ~6 GB of kind

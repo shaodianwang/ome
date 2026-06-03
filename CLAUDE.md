@@ -26,7 +26,7 @@ make coverage             # Show coverage summary (48% threshold enforced)
 ```
 
 `make test-kind` runs only the coordination suite under
-`tests/integration/singlecluster/controller/coordination_kind/`. It
+`tests/integration/singlecluster/controller/omenative_coordination_kind/`. It
 needs Docker on the host and a `kind` binary on PATH (install with
 `go install sigs.k8s.io/kind@v0.27.0`). `KIND_KEEP_CLUSTER=true` is
 on by default so re-runs are fast; set `KIND_RECREATE=true` to force
@@ -60,13 +60,13 @@ Integration suites live under `tests/integration/` and split into two halves:
 
 ```
 tests/integration/
-├── dep-crds/                              # vendored optional-CRD YAMLs (LWS, KEDA, Gateway API, Envoy Gateway, Prometheus)
+├── dep-crds/                              # vendored optional-CRD YAMLs (LWS, KEDA, Gateway API, scheduler-plugins, Envoy Gateway, Prometheus)
 ├── framework/                             # shared test scaffolding (envtest)
 ├── kindutil/                              # shared test scaffolding (KIND) + fake-serving image source
 ├── components/, util/                     # helpers
 └── singlecluster/
     ├── webhook/{inferenceservice,inferenceservice_defaulter,basemodel,servingruntime,pod,runtimepreset,runtimerevision}
-    ├── controller/{inferenceservice,basemodel,servingruntime,runtimerevision,coordination_kind}
+    ├── controller/{inferenceservice,basemodel,servingruntime,runtimerevision,omenative_coordination_kind}
     ├── clustercache/
     └── agents/metadata/
 ```
@@ -83,7 +83,7 @@ KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.30 -p path)" \
 
 `KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true` forwards the envtest kube-apiserver/etcd stdout+stderr into test logs when debugging control-plane startup failures.
 
-**KIND suite** (`coordination_kind/`) — real kubelet + scheduler + containerd via Docker. Authoritative for: cross-Component rollout coordination, pod-lifecycle timing (drain races, recreate ordering, in-place patch convergence), per-revision Service convergence, Sequential handoff timing, RatioBalanced gate at scale, ImagePullBackOff failure escalation, pod-UID rotation, migration, PD-disaggregated topologies. ~30 spec files, ~5 min/file wall-clock.
+**KIND suite** (`omenative_coordination_kind/`) — real kubelet + scheduler + containerd via Docker. Authoritative for: cross-Component rollout coordination, pod-lifecycle timing (drain races, recreate ordering, in-place patch convergence), per-revision Service convergence, Sequential handoff timing, RatioBalanced gate at scale, ImagePullBackOff failure escalation, pod-UID rotation, migration, PD-disaggregated topologies. ~30 spec files, ~5 min/file wall-clock.
 
 ```sh
 make test-kind                                       # full suite (~30-60 min)
@@ -102,7 +102,7 @@ Direct `go test` (when you need extra flags):
 
 ```sh
 KIND_KEEP_CLUSTER=true \
-  go test ./tests/integration/singlecluster/controller/coordination_kind/... \
+  go test ./tests/integration/singlecluster/controller/omenative_coordination_kind/... \
   -v -timeout 30m -ginkgo.v -ginkgo.focus 'rollout converges'
 ```
 
@@ -154,7 +154,7 @@ Always prefer `make` targets over raw `go`/`kubectl`/etc. commands — they wire
 | Touching kustomize patches in `config/` | `make manifests` |
 | Touching `charts/*/templates/` directly (rare; usually generated) | `make helm-lint` |
 | Touching `go.mod` / `go.sum` | `make tidy` |
-| Bumping `sigs.k8s.io/lws`, `github.com/kedacore/keda/v2`, or `sigs.k8s.io/gateway-api` in `go.mod` | `make dep-crds` (re-vendors CRD YAMLs into `tests/integration/dep-crds/`; CI does not run this — maintainers commit the result) |
+| Bumping `sigs.k8s.io/lws`, `github.com/kedacore/keda/v2`, `sigs.k8s.io/gateway-api`, or `sigs.k8s.io/scheduler-plugins` in `go.mod` | `make dep-crds` (re-vendors CRD YAMLs into `tests/integration/dep-crds/`, which are gitignored — not committed; CI's `dep-crds-drift` step catches a forgotten regen) |
 
 **Required before every commit / hand-off:**
 

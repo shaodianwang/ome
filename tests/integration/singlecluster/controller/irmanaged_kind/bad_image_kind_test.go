@@ -19,7 +19,7 @@ import (
 // see Component.Failed and flip the group's Phase to Failed.
 //
 // The omenative-direct-path bad-image scenario is covered by
-// coordination_kind/bad_image_kind_test.go. This spec is the
+// omenative_coordination_kind/bad_image_kind_test.go. This spec is the
 // IR-managed equivalent — without it the operator-reported regression
 // (Phase=Updating for 30+ minutes on the production default path)
 // would re-surface every time the IR-managed path drifts.

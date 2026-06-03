@@ -16,7 +16,7 @@ import (
 // budget_test.go; these tests pin the dispatcher behavior when the
 // per-Component layer denies, allows, and composes with the group-
 // level UpdateGate. The end-to-end pod surge behavior at scale is
-// covered in the KIND suite (tests/integration/.../coordination_kind/).
+// covered in the KIND suite (tests/integration/.../omenative_coordination_kind/).
 
 // TestReconcile_PerComponentMaxSurge_DeniesAtBudget pins the
 // per-Component gate refusing to start a fresh surge when the layer's

@@ -199,7 +199,7 @@ def ci_steps() -> str:
             key: "integration-test-kind"
 {_gh_status("integration-test-kind")}
             # KIND-backed suites under
-            # tests/integration/singlecluster/controller/coordination_kind/
+            # tests/integration/singlecluster/controller/omenative_coordination_kind/
             # exercise OEP-0007.{{1,2}} + OEP-0011 contracts against real
             # kubelet + scheduler + containerd that the envtest sibling's
             # PodKubeletSimulator can't model (drain races, in-place

@@ -28,7 +28,7 @@ import (
 //
 // These run ONLY against the IR-managed path — suite mgrSetup enables
 // IR-managed and registers the inferencereplica controller. The legacy
-// direct path is covered by coordination_kind (which disables IR).
+// direct path is covered by omenative_coordination_kind (which disables IR).
 var _ = ginkgo.Describe("IR-managed OMENative rollout", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 

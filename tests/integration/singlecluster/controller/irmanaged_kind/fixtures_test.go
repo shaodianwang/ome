@@ -7,7 +7,6 @@ import (
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/apis"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -18,13 +17,13 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
+	"github.com/ome-projects/ome/tests/integration/kindfix"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
-	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // irFixture bundles the cluster-scoped CBM + CSR and the namespaced
 // ISVC for one test. Self-contained (this package can't import
-// coordination_kind's _test.go helpers).
+// omenative_coordination_kind's _test.go helpers).
 type irFixture struct {
 	CBM  *v1beta1.ClusterBaseModel
 	CSR  *v1beta1.ClusterServingRuntime
@@ -71,18 +70,8 @@ func newIRFixture(namespace string, opts ...irFixtureOption) *irFixture {
 	cbmName := o.isvcName + "-cbm"
 	csrName := o.isvcName + "-csr"
 
-	cbm := v1beta1testing.MakeClusterBaseModel(cbmName).
-		StorageURI("oci://n/test/b/models/o/llama-7b").
-		ModelFormat("safetensors").
-		ModelType("llama").
-		ModelArchitecture("LlamaForCausalLM").
-		ModelFramework("Transformers").
-		Obj()
-
-	csr := v1beta1testing.MakeClusterServingRuntime(csrName).
-		SupportsModelFormat("safetensors", true, 10).
-		WithLastFormatArchitecture("LlamaForCausalLM").
-		Obj()
+	cbm := kindfix.StandardClusterBaseModel(cbmName, kindfix.StandardModelStorageURI)
+	csr := kindfix.StandardClusterServingRuntime(csrName)
 
 	engineAnnots := map[string]string{
 		constants.DeploymentMode: string(constants.OMENative),
@@ -120,50 +109,26 @@ func newIRFixture(namespace string, opts ...irFixtureOption) *irFixture {
 	return &irFixture{CBM: cbm, CSR: csr, ISVC: isvc}
 }
 
-// applyIRFixture creates CBM + CSR, labels nodes model-Ready (no
-// model-agent under KIND), waits for the controller cache to observe
-// CBM/CSR, then creates the ISVC. Mirrors coordination_kind's
-// applyFixture to avoid the "ClusterBaseModel not found" backoff storm.
+// applyIRFixture creates CBM + CSR, labels nodes model-Ready, waits for the
+// in-process manager's cache to observe them, then creates the ISVC. The cache
+// wait passes the manager's cached client so the ISVC is not created before the
+// reconciler can see its model + runtime.
 func applyIRFixture(g gomega.Gomega, f *irFixture) {
-	g.ExpectWithOffset(1, k8sClient.Create(suiteCtx, f.CBM)).To(gomega.Succeed(), "create CBM")
-	g.ExpectWithOffset(1, k8sClient.Create(suiteCtx, f.CSR)).To(gomega.Succeed(), "create CSR")
-	g.ExpectWithOffset(1, kindutil.LabelClusterBaseModelReady(suiteCtx, k8sClient, f.CBM.Name)).
-		To(gomega.Succeed(), "label nodes for CBM")
-
-	cachedClient := kindutil.Suite().Manager.GetClient()
-	gomega.EventuallyWithOffset(1, func(gg gomega.Gomega) {
-		got := &v1beta1.ClusterBaseModel{}
-		gg.Expect(cachedClient.Get(suiteCtx, client.ObjectKey{Name: f.CBM.Name}, got)).To(gomega.Succeed())
-		got2 := &v1beta1.ClusterServingRuntime{}
-		gg.Expect(cachedClient.Get(suiteCtx, client.ObjectKey{Name: f.CSR.Name}, got2)).To(gomega.Succeed())
-	}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(gomega.Succeed())
+	kindfix.ApplyModelRuntime(suiteCtx, g, k8sClient, f.CBM, f.CSR, kindfix.ApplyModelRuntimeOpts{
+		CachedReader: kindutil.Suite().Manager.GetClient(),
+	})
 	g.ExpectWithOffset(1, k8sClient.Create(suiteCtx, f.ISVC)).To(gomega.Succeed(), "create ISVC")
 }
 
-// deferIRFixtureCleanup tears the fixture down ISVC-first (waiting for
-// full deletion) then CBM/CSR — same ordering rationale as the
-// coordination suite (avoid the cross-test backoff storm).
+// deferIRFixtureCleanup tears the fixture down ISVC-first (waiting for full
+// deletion) then CBM/CSR, avoiding the cross-test "ClusterBaseModel not found"
+// backoff storm.
 func deferIRFixtureCleanup(f *irFixture) {
 	ginkgo.DeferCleanup(func() {
 		if f == nil {
 			return
 		}
-		if f.ISVC != nil {
-			_ = k8sClient.Delete(suiteCtx, f.ISVC)
-			isvcKey := client.ObjectKeyFromObject(f.ISVC)
-			gomega.Eventually(func() bool {
-				fresh := &v1beta1.InferenceService{}
-				err := k8sClient.Get(suiteCtx, isvcKey, fresh)
-				return apierrors.IsNotFound(err)
-			}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(gomega.BeTrue(),
-				"ISVC %s/%s should be fully deleted before CBM/CSR cleanup", f.ISVC.Namespace, f.ISVC.Name)
-		}
-		if f.CBM != nil {
-			_ = k8sClient.Delete(suiteCtx, f.CBM)
-		}
-		if f.CSR != nil {
-			_ = k8sClient.Delete(suiteCtx, f.CSR)
-		}
+		kindfix.CleanupModelRuntime(suiteCtx, k8sClient, f.CBM, f.CSR, f.ISVC)
 	})
 }
 

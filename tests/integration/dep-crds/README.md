@@ -13,10 +13,11 @@ buying anything that the go.mod pin doesn't already give us.
 
 ```
 dep-crds/
-├── lws/                  # leaderworkerset.x-k8s.io CRDs
-├── keda/                 # keda.sh CRDs
+├── lws/                  # leaderworkerset.x-k8s.io CRDs (module-sourced)
+├── keda/                 # keda.sh CRDs (module-sourced)
+├── gateway-api/          # sigs.k8s.io/gateway-api HTTPRoute (module-sourced)
+├── scheduler-plugins/    # scheduling.x-k8s.io PodGroup (module-sourced)
 ├── envoy-gateway/        # gateway.envoyproxy.io BackendTrafficPolicy (hand-vendored)
-├── gateway-api/          # sigs.k8s.io/gateway-api HTTPRoute (hand-vendored)
 ├── prometheus-operator/  # monitoring.coreos.com PodMonitor (hand-vendored)
 └── README.md
 ```

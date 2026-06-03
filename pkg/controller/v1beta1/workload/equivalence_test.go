@@ -274,7 +274,7 @@ func TestEquivalence_FivePassSteadyState(t *testing.T) {
 // depends on real kubelet behaviour (ContainersReady=True after image
 // roll, drained EndpointSlice convergence) that the controller-runtime
 // fake client cannot synthesize. The KIND suite under
-// tests/integration/singlecluster/controller/coordination_kind/ is
+// tests/integration/singlecluster/controller/omenative_coordination_kind/ is
 // the authoritative coverage for cross-Component rollout dynamics.
 
 // runLegacy drives `omenative.ReconcileComponent` once against a

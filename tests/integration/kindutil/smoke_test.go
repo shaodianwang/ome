@@ -24,7 +24,7 @@ import (
 //
 // Intentionally does NOT register OME reconcilers (Setup is nil) so
 // the smoke test is independent of the controller wiring — that's
-// exercised by the per-suite tests under coordination_kind/ etc.
+// exercised by the per-suite tests under omenative_coordination_kind/ etc.
 //
 // To run with cluster reuse:
 //

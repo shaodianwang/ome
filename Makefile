@@ -574,15 +574,19 @@ coverage: ## Show coverage summary and enforce threshold
 		exit 1; \
 	fi
 .PHONY: dep-crds
-dep-crds: lws-crds keda-crds gateway-api-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
+dep-crds: lws-crds keda-crds gateway-api-crds scheduler-plugins-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
 
 DEP_CRDS_DIR := tests/integration/dep-crds
 
 # Each <bundle>-crds target: copies CRD YAMLs from the corresponding
-# go.mod module into tests/integration/dep-crds/<bundle>/. Tests use
-# OptionalCRDBundle entries pointing at these directories. CI does NOT
-# run dep-crds — the directories are committed. Maintainers run this
-# locally when bumping a vendored dep.
+# go.mod module into tests/integration/dep-crds/<bundle>/. Tests point
+# at these directories (envtest via framework.OptionalCRDBundle, KIND via
+# kindfix CRDPaths). The module-vendored bundles (lws, keda, gateway-api,
+# scheduler-plugins) are gitignored and regenerated here — NOT committed;
+# only the hand-vendored bundles (envoy-gateway, prometheus-operator) are
+# tracked, with a SOURCE file. `make integration-test` runs dep-crds as a
+# prerequisite, and CI's dep-crds-drift step runs it to catch a forgotten
+# regen after a go.mod bump. Maintainers run it locally when bumping a dep.
 #
 # Pattern follows kueue/Makefile-deps.mk: locate via `go list -m
 # -mod=readonly`, copy via `cp -f`, never write to GOPATH.
@@ -611,6 +615,14 @@ gateway-api-crds: ## Vendor sigs.k8s.io/gateway-api standard-channel CRDs (HTTPR
 	cp -f "$$GA_DIR/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml" $(DEP_CRDS_DIR)/gateway-api/ ; \
 	echo "✅ Vendored Gateway API CRDs to $(DEP_CRDS_DIR)/gateway-api/"
 
+.PHONY: scheduler-plugins-crds
+scheduler-plugins-crds: ## Vendor sigs.k8s.io/scheduler-plugins CRDs (scheduling.x-k8s.io — PodGroup, for KIND gang specs)
+	@mkdir -p $(DEP_CRDS_DIR)/scheduler-plugins
+	@SP_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" sigs.k8s.io/scheduler-plugins 2>/dev/null) ; \
+	if [ -z "$$SP_DIR" ]; then echo "sigs.k8s.io/scheduler-plugins not in go.mod; skipping scheduler-plugins-crds" >&2; exit 0; fi ; \
+	cp -f "$$SP_DIR/config/crd/bases/scheduling.x-k8s.io_podgroups.yaml" $(DEP_CRDS_DIR)/scheduler-plugins/ ; \
+	echo "✅ Vendored scheduler-plugins CRDs to $(DEP_CRDS_DIR)/scheduler-plugins/"
+
 .PHONY: integration-test
 integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tests
 	@echo "🧪 Running integration tests..."
@@ -624,14 +636,13 @@ integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tes
 	@#     a Ginkgo suite. -ginkgo.trace below would error with
 	@#     `flag provided but not defined: -ginkgo.trace` and fail the
 	@#     binary before any test runs.
-	@#   - tests/integration/singlecluster/controller/coordination_kind
-	@#     — KIND-backed suite (real kubelet via Docker). Run locally
-	@#     with `make test-kind`; not wired into envtest CI because
-	@#     mks-cpu agents don't expose a Docker daemon.
-	@#   - tests/integration/singlecluster/controller/irmanaged_kind
-	@#     — KIND-backed suite (real kubelet via Docker). Run locally
-	@#     with `make test-kind-irmanaged`; not wired into envtest CI
-	@#     because mks-cpu agents don't expose a Docker daemon.
+	@#   - tests/integration/.../*_kind  — KIND-backed suites (real
+	@#     kubelet via Docker): omenative_coordination_kind, irmanaged_kind,
+	@#     rawdeployment_kind, omenative_perm_kind. Run locally via the
+	@#     `make test-kind*` targets; not wired into envtest CI because
+	@#     mks-cpu agents don't expose a Docker daemon. The `_kind$$` filter
+	@#     below excludes ANY such suite, so a newly added KIND suite is
+	@#     dropped automatically instead of hanging the envtest run.
 	@#
 	@# Verbosity policy: -ginkgo.v is OFF by default. With it on, Ginkgo
 	@# flushes the per-spec GinkgoWriter for every passing spec, which
@@ -645,12 +656,12 @@ integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tes
 	@# Timeout: go test defaults to 10m PER PACKAGE. 20m gives headroom
 	@# without masking a genuine deadlock — any real loop bug would
 	@# still hang past 20m.
-	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|/coordination_kind$$|/irmanaged_kind$$') ; \
+	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|_kind$$') ; \
 	$(TEST_ENV) go test -v -timeout=20m $$PKGS $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@echo "✅ Integration tests passed"
 
 .PHONY: test-kind
-test-kind: xet-build ## 🧪 Run KIND-backed integration tests (real kubelet — needs docker + kind locally)
+test-kind: xet-build dep-crds ## 🧪 Run KIND-backed integration tests (real kubelet — needs docker + kind locally)
 	@echo "🧪 Running KIND-backed integration tests..."
 	@command -v kind >/dev/null 2>&1 || { \
 		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
@@ -669,12 +680,12 @@ test-kind: xet-build ## 🧪 Run KIND-backed integration tests (real kubelet —
 	@LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
 		DYLD_LIBRARY_PATH="$(XET_LIB_PATH):$$DYLD_LIBRARY_PATH" \
 		KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
-		go test ./tests/integration/singlecluster/controller/coordination_kind/... \
+		go test ./tests/integration/singlecluster/controller/omenative_coordination_kind/... \
 		-v -timeout 90m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
 	@echo "✅ KIND integration tests passed"
 
 .PHONY: test-kind-irmanaged
-test-kind-irmanaged: xet-build ## 🧪 Run KIND-backed IR-managed OMENative tests (real kubelet — needs docker + kind locally)
+test-kind-irmanaged: xet-build dep-crds ## 🧪 Run KIND-backed IR-managed OMENative tests (real kubelet — needs docker + kind locally)
 	@echo "🧪 Running KIND IR-managed OMENative tests..."
 	@command -v kind >/dev/null 2>&1 || { \
 		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
@@ -685,7 +696,7 @@ test-kind-irmanaged: xet-build ## 🧪 Run KIND-backed IR-managed OMENative test
 		exit 1; \
 	}
 	@# Exercises the IR-managed path (the production default since #320),
-	@# which test-kind's coordination_kind suite deliberately disables. Uses
+	@# which test-kind's omenative_coordination_kind suite deliberately disables. Uses
 	@# its OWN cluster (ome-irmanaged-kind) with the inferencereplica
 	@# controller registered + IR-managed enabled. On a resource-constrained
 	@# host (e.g. an 8GB Colima VM) run `make test-kind-clean` first so this
@@ -696,6 +707,84 @@ test-kind-irmanaged: xet-build ## 🧪 Run KIND-backed IR-managed OMENative test
 		go test ./tests/integration/singlecluster/controller/irmanaged_kind/... \
 		-v -timeout 30m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
 	@echo "✅ KIND IR-managed tests passed"
+
+.PHONY: test-kind-raw
+test-kind-raw: xet-build dep-crds ## 🧪 Run KIND-backed RawDeployment tests (real kubelet — needs docker + kind locally)
+	@echo "🧪 Running KIND RawDeployment tests..."
+	@command -v kind >/dev/null 2>&1 || { \
+		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		exit 1; \
+	}
+	@docker info >/dev/null 2>&1 || { \
+		echo "❌ docker is not reachable. KIND tests need a running Docker daemon."; \
+		exit 1; \
+	}
+	@# RawDeployment end-to-end on a real kubelet (its own cluster ome-raw-kind):
+	@# the Deployment must actually schedule pods that report Ready, which the
+	@# envtest controller/inferenceservice suite cannot observe.
+	@LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
+		DYLD_LIBRARY_PATH="$(XET_LIB_PATH):$$DYLD_LIBRARY_PATH" \
+		KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
+		go test ./tests/integration/singlecluster/controller/rawdeployment_kind/... \
+		-v -timeout 20m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
+	@echo "✅ KIND RawDeployment tests passed"
+
+PERM_KUBECONFIG ?= /tmp/kind-ome-coord.kubeconfig
+PERM_PROCS ?= 2
+
+.PHONY: test-kind-perm-up
+test-kind-perm-up: dep-crds ## 🧪 Bring up the perm KIND cluster + CRDs + fake-serving images (no specs); then run the external manager
+	@command -v kind >/dev/null 2>&1 || { \
+		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		exit 1; \
+	}
+	@docker info >/dev/null 2>&1 || { \
+		echo "❌ docker is not reachable. KIND tests need a running Docker daemon."; \
+		exit 1; \
+	}
+	@# PERM_SETUP_ONLY makes the suite entrypoint bring up the cluster + CRDs +
+	@# fake-serving images via RunKindSuite, then return BEFORE RunSpecs.
+	@# -count=1 defeats the go-test result cache (otherwise a second `-up` is a
+	@# no-op and never re-runs RunKindSuite).
+	@echo "🧪 Bringing up perm KIND cluster (ome-coord-kind) — cluster + CRDs + images, no specs..."
+	@KIND_KEEP_CLUSTER=true PERM_SETUP_ONLY=1 \
+		go test -count=1 -v -timeout 20m -run TestOMENativePerm \
+		./tests/integration/singlecluster/controller/omenative_perm_kind/
+	@kind get kubeconfig --name ome-coord-kind > "$(PERM_KUBECONFIG)"
+	@echo ""
+	@echo "✅ Cluster up. Kubeconfig written to $(PERM_KUBECONFIG)"
+	@echo ""
+	@echo "Next — in a SEPARATE terminal, run the OME manager against it"
+	@echo "(default IR-managed path; coordination is gated there):"
+	@echo "    KUBECONFIG=$(PERM_KUBECONFIG) make run-ome-manager"
+	@echo ""
+	@echo "Then drive the parallel rollout specs:"
+	@echo "    make test-kind-perm"
+
+.PHONY: test-kind-perm
+test-kind-perm: dep-crds ## 🧪 Run the watch-driven OMENative rollout specs in parallel (needs test-kind-perm-up + an external manager)
+	@command -v kind >/dev/null 2>&1 || { \
+		echo "❌ kind is not installed. Install with: go install sigs.k8s.io/kind@v0.27.0"; \
+		exit 1; \
+	}
+	@kind get clusters 2>/dev/null | grep -qx ome-coord-kind || { \
+		echo "❌ KIND cluster 'ome-coord-kind' not found. Run 'make test-kind-perm-up' first."; \
+		exit 1; \
+	}
+	@# Watch-driven, EXTERNAL-manager suite (RunKindSuite Setup=nil): the OME
+	@# controller must already be running against the cluster (see
+	@# test-kind-perm-up output). Specs are pure drivers, so we run them in
+	@# PARALLEL via the ginkgo CLI (go run, since there is no vendored binary).
+	@# PERM_PROCS defaults to 2 (== Workers); raise it only with a bigger
+	@# cluster — each PD spec brings up a ~10-pod fleet. KIND_KEEP_CLUSTER keeps
+	@# the shared cluster alive across the parallel processes.
+	@echo "🧪 Driving OMENative rollout specs ($(PERM_PROCS) parallel procs)..."
+	@KIND_KEEP_CLUSTER=true \
+		go run github.com/onsi/ginkgo/v2/ginkgo \
+		-procs=$(PERM_PROCS) --timeout=40m -v \
+		$(if $(GINKGO_FOCUS),--focus '$(GINKGO_FOCUS)') \
+		./tests/integration/singlecluster/controller/omenative_perm_kind/
+	@echo "✅ OMENative rollout specs passed"
 
 .PHONY: test-kind-clean
 test-kind-clean: ## 🧹 Delete leftover KIND clusters from prior test-kind runs

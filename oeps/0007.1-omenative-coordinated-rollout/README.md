@@ -1556,7 +1556,7 @@ pod-UID rotation reliably (the `PodKubeletSimulator` had timing races
 that made the suite chronically flaky); KIND with a real kubelet,
 scheduler, and containerd is now authoritative for the per-policy
 correctness tests below. The suite lives under
-`tests/integration/singlecluster/controller/coordination_kind/` with
+`tests/integration/singlecluster/controller/omenative_coordination_kind/` with
 a 2-node default and a 90-minute outer timeout; see
 [`CLAUDE.md`](../../CLAUDE.md) for run instructions
 (`make test-kind`).
