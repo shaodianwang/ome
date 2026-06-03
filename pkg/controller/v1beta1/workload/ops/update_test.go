@@ -517,14 +517,13 @@ func TestUpdate_RecreatePod_BumpsIncarnationAndDrainsOld(t *testing.T) {
 	}
 }
 
-// TestUpdate_MultiPodSurgeFallsBackToRecreate pins that an Instance with
-// >1 desired pod under SurgeThenDrain routes to recreateUpdate instead
-// of surgeUpdate. The single-pod surge implementation requires a
-// per-gang-member ordinal scheme that is deferred; recreate is the safe
-// fallback. The user's spec field stays "SurgeThenDrain" — this is
-// execution best-effort, not a defaulter rewrite. When multi-pod surge
-// lands the fallback path goes away with zero user-facing churn.
-func TestUpdate_MultiPodSurgeFallsBackToRecreate(t *testing.T) {
+// TestUpdate_MultiPodGangSurges pins that an Instance with >1 desired pod
+// under SurgeThenDrain now routes to the gang surge (gangSurgeUpdate),
+// NOT recreate. The distinguishing signal is the source Incarnation: a
+// recreate bumps it (1→2, same index), whereas a gang surge leaves the
+// source untouched and brings up a replacement at a fresh index. The
+// source is stamped Phase=Updating with an in-flight surge Operation.
+func TestUpdate_MultiPodGangSurges(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
@@ -539,44 +538,95 @@ func TestUpdate_MultiPodSurgeFallsBackToRecreate(t *testing.T) {
 	c := legacyNewFakeClient(t, isvc, pod, slice)
 
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
-	// Multi-pod plan via legacyMultiPodComponentPlan — TotalPods()=2 → chooser
-	// downgrades surge to recreate.
+	// Multi-pod plan (TotalPods()=2) under SurgeThenDrain → gang surge.
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 	if plan.UpdateStrategy.Type != workload.UpdateStrategySurgeThenDrain {
 		t.Fatalf("test setup: expected SurgeThenDrain strategy, got %q", plan.UpdateStrategy.Type)
 	}
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	// Update must NOT error with the pre-multi-node "multi-pod not yet
-	// supported" message from surgeUpdate. It must dispatch to recreate.
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 	if done {
-		t.Fatalf("expected done=false: recreate is multi-pass")
+		t.Fatalf("expected done=false: gang surge is multi-pass")
 	}
 
-	// Recreate stamps Phase=Updating with TargetRevision and bumps the
-	// Incarnation, exactly like RecreatePod. If the dispatcher had picked
-	// surge, the InstanceStatus would still be Phase=Ready.
+	// Gang surge stamps the SOURCE Phase=Updating but must NOT bump its
+	// Incarnation (that would be a recreate). The replacement gang comes
+	// up at a fresh index instead.
 	fresh := &v1beta1.InferenceService{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
 	s := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses[0]
 	if s.Phase != v1beta1.OMENativeInstanceUpdating {
 		t.Errorf("Phase: got %q want Updating", s.Phase)
 	}
-	if s.Incarnation != 2 {
-		t.Errorf("Incarnation: got %d want 2 (recreate bumps)", s.Incarnation)
+	if s.Incarnation != 1 {
+		t.Errorf("Incarnation: got %d want 1 (gang surge must NOT bump like recreate)", s.Incarnation)
 	}
 }
 
-// TestChooseUpdateMode_MultiPodSurgeFallsBackToRecreate is the chooser's
-// per-mode contract: when multiPod=true and strategy=SurgeThenDrain,
-// the returned mode is recreate. Tested separately from the higher-
-// level Update path because chooseUpdateMode is the single source of
-// truth that every Update call routes through.
-func TestChooseUpdateMode_MultiPodSurgeFallsBackToRecreate(t *testing.T) {
+// TestGangSurgeUpdate_StampsReplacementAtNewIndex pins the novel gang
+// surge behavior: the first pass stamps the source for a surge and
+// creates a SECOND InstanceStatus at a fresh index (the replacement
+// gang) — unlike single-pod surge, which stays at the same index and
+// toggles ActiveOrdinal. The source stays Phase=Updating without an
+// Incarnation bump (a recreate would bump it).
+func TestGangSurgeUpdate_StampsReplacementAtNewIndex(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategySurgeThenDrain},
+	}
+	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
+	target := legacyTargetSpecImage("llama:v2")
+	c := legacyNewFakeClient(t, isvc, pod)
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+	tcr := legacyEnsureTargetCR(t, c, isvc, target)
+
+	done, err := gangSurgeUpdate(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
+	if err != nil {
+		t.Fatalf("gangSurgeUpdate pass 1: %v", err)
+	}
+	if done {
+		t.Fatalf("expected done=false on the surge-stamp pass")
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	_ = c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh)
+	statuses := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses
+	if len(statuses) != 2 {
+		t.Fatalf("expected 2 instance statuses (source + replacement at a new index), got %d: %+v", len(statuses), statuses)
+	}
+	var sawSource, sawReplacement bool
+	for _, s := range statuses {
+		if s.Index == 0 {
+			sawSource = true
+			if s.Phase != v1beta1.OMENativeInstanceUpdating {
+				t.Errorf("source phase: got %q want Updating", s.Phase)
+			}
+			if s.Incarnation != 1 {
+				t.Errorf("source incarnation: got %d want 1 (no recreate bump)", s.Incarnation)
+			}
+		} else {
+			sawReplacement = true // a fresh index != 0
+		}
+	}
+	if !sawSource || !sawReplacement {
+		t.Fatalf("want source(0) + a fresh replacement index; got %+v", statuses)
+	}
+}
+
+// TestChooseUpdateMode_MultiPodSurges is the chooser's per-mode
+// contract: multi-pod SurgeThenDrain now resolves to updateModeSurge —
+// gang surge (per-gang index allocation) is implemented, so the
+// previous Surge→Recreate fallback is gone. In-place modes still fall
+// back to recreate for gangs (see the InPlace test). Tested separately
+// from the higher-level Update path because chooseUpdateMode is the
+// single source of truth every Update call routes through.
+func TestChooseUpdateMode_MultiPodSurges(t *testing.T) {
 	running := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v1"}}}
 	target := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v2"}}}
 
@@ -584,8 +634,8 @@ func TestChooseUpdateMode_MultiPodSurgeFallsBackToRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if mode != updateModeRecreate {
-		t.Errorf("multi-pod surge: got mode %v want recreate", mode)
+	if mode != updateModeSurge {
+		t.Errorf("multi-pod surge: got mode %v want surge", mode)
 	}
 
 	// Sanity: single-pod path keeps surge mode.

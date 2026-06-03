@@ -115,6 +115,13 @@ const (
 	InstanceOperationDelete  InstanceOperationType = "Delete"
 )
 
+// UpdateStepGangSurgeTarget is the InstanceOperation.Step marking the
+// surge-target (replacement) Instance of an in-flight multi-pod (gang)
+// SurgeThenDrain update. Lives here in the leaf types package so both the
+// plan (root workload) and the ops dispatcher reference one canonical
+// value. The gang SOURCE uses Step="Surge" so the surge budget counts it.
+const UpdateStepGangSurgeTarget = "GangSurgeTarget"
+
 // InstanceOperation is the durable recovery anchor written before any
 // destructive action against an Instance and cleared on completion.
 // Mirrors the CRD InstanceOperation field-for-field.

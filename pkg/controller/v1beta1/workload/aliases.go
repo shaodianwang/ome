@@ -83,6 +83,8 @@ const (
 	InstanceOperationMigrate = types.InstanceOperationMigrate
 	InstanceOperationDelete  = types.InstanceOperationDelete
 
+	UpdateStepGangSurgeTarget = types.UpdateStepGangSurgeTarget
+
 	EventReasonInstanceCreated               = types.EventReasonInstanceCreated
 	EventReasonInstanceReady                 = types.EventReasonInstanceReady
 	EventReasonInPlaceUpdateStarted          = types.EventReasonInPlaceUpdateStarted

@@ -83,20 +83,11 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 			instanceKey(input.Key.Component, inst.Index), err)
 		return false, fmt.Errorf("choose update mode (instance=%d): %w", inst.Index, err)
 	}
-	// Surface the fallback once per dispatch so operators can correlate
-	// a recreate-flavored rollout with the SurgeThenDrain spec they
-	// wrote. Multi-pod SurgeThenDrain needs per-gang-member ordinal
-	// allocation (not yet implemented); until that lands recreate is
-	// the safe execution.
-	if multiPod && strategy == workload.UpdateStrategySurgeThenDrain && mode == updateModeRecreate {
-		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
-			"OMENative %s: multi-pod SurgeThenDrain falls back to recreate (per-gang-member surge deferred)",
-			instanceKey(input.Key.Component, inst.Index))
-	}
 
 	// Status stamping is per-mode: recreate bumps Incarnation atomically
 	// with the Updating transition; in-place must NOT bump (same
-	// materialization); surge advances ActiveOrdinal on promote.
+	// materialization); surge advances ActiveOrdinal (single-pod) or
+	// promotes the surge index (gang) on completion.
 	switch mode {
 	case updateModeInPlace:
 		return inPlaceUpdate(ctx, deps, input, plan, inst, target, targetSpec, pods)
@@ -133,17 +124,19 @@ const (
 )
 
 // chooseUpdateModeForInstance is chooseUpdateMode with the multi-pod
-// fallback layered on top.
+// adjustment layered on top.
 //
-// Multi-pod adjustments:
-//   - SurgeThenDrain → recreate: per-gang-member surge ordinal scheme
-//     is not yet implemented.
+// Multi-pod adjustment:
 //   - In-place modes → recreate: inPlaceEligible compares only the
 //     leader's PodSpec, so a worker-only image bump would produce an
 //     in-place rollout that patches only the leader, leaving workers
 //     on the old image (split-brain).
 //
-// RecreatePod is already recreate; multiPod has no additional effect.
+// SurgeThenDrain keeps updateModeSurge for gangs — surgeUpdate performs a
+// per-gang index surge (a whole replacement gang at a fresh instance
+// index, gang-scheduled via its own PodGroup, then the source gang is
+// drained). RecreatePod is already recreate; multiPod has no additional
+// effect on it.
 func chooseUpdateModeForInstance(strategy workload.UpdateStrategyType, running, target *corev1.PodSpec, multiPod bool) (updateMode, error) {
 	mode, err := chooseUpdateMode(strategy, running, target)
 	if err != nil {
@@ -155,7 +148,7 @@ func chooseUpdateModeForInstance(strategy workload.UpdateStrategyType, running, 
 		}
 		return mode, err
 	}
-	if multiPod && (mode == updateModeSurge || mode == updateModeInPlace) {
+	if multiPod && mode == updateModeInPlace {
 		return updateModeRecreate, nil
 	}
 	return mode, nil
@@ -1036,6 +1029,202 @@ func surgeDrainKey(idx int32, newOrdinal int32) string {
 	return fmt.Sprintf("update-surge-drain-%d-%d", idx, newOrdinal)
 }
 
+// gangSurgeUpdate performs a SurgeThenDrain rollout for a multi-pod
+// (gang) Instance by surging a whole replacement gang at a freshly
+// allocated instance index, then draining the source gang once the
+// replacement is fully Ready. The source keeps serving throughout, so
+// capacity never drops below N-1 and the cross-Component coordination
+// gate (which counts the source's Op.Step=Surge against MaxSurge) paces
+// it like any single-pod surge.
+//
+// Phases (one advanced per reconcile; the loop requeues between them):
+//  1. Stamp the source Op{Update,Surge,SurgeIndex=k} + a GangSurgeTarget
+//     marker on k. Both land k in instancePlanIndices' pinned set, so
+//     EnsurePodGroups creates k's PodGroup before any of its pods and
+//     the scale-down pass won't delete k mid-surge.
+//  2. Create k's gang (leader + workers) on the target revision.
+//  3. Wait until every pod of k's gang is Ready, then mark them serving.
+//  4. Drain (delete) the source gang's pods.
+//  5. Promote k to Ready and remove the source InstanceStatus; the plan
+//     settles on k and EnsurePodGroups GCs the source's PodGroup.
+//
+// Why a new index rather than the single-pod ActiveOrdinal toggle: for a
+// gang the pod-ordinal already enumerates gang members (leader=0,
+// worker=0..W-1), so there is no free ordinal slot to host a parallel
+// generation. A fresh index gives the replacement gang a distinct
+// identity and (via per-index PodGroup naming) its own PodGroup for free.
+func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision) (bool, error) {
+	sourceIdx := inst.Index
+	ns, owner, comp := input.Key.Namespace, input.Key.OwnerName, plan.Component
+
+	// 1. Recover the surge index from the in-flight Op, or allocate one
+	// and stamp the source + target markers.
+	src := findInstanceStatus(input.ObservedState.InstanceStatuses, sourceIdx)
+	surging := src != nil && src.Operation != nil &&
+		src.Operation.Type == workload.InstanceOperationUpdate &&
+		src.Operation.Step == updateStepSurge && src.Operation.SurgeIndex != nil
+	var surgeIdx int32
+	if surging {
+		surgeIdx = *src.Operation.SurgeIndex
+	} else {
+		surgeIdx = workload.AllocateSurgeIndex(input.ObservedState.InstanceStatuses)
+		if err := patchInstanceStatusGangSurging(ctx, input, sourceIdx, surgeIdx, target.Name, plan.InstanceReadyTimeout); err != nil {
+			return false, fmt.Errorf("stamp gang surge source (instance=%d): %w", sourceIdx, err)
+		}
+		if err := patchInstanceStatusGangSurgeTarget(ctx, input, surgeIdx, target.Name, plan.InstanceReadyTimeout); err != nil {
+			return false, fmt.Errorf("stamp gang surge target (instance=%d): %w", surgeIdx, err)
+		}
+		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
+			"OMENative %s gang surge to revision %s (surge-index=%d)",
+			instanceKey(comp, sourceIdx), target.Name, surgeIdx)
+		// Requeue so the next pass sees k in the plan — EnsurePodGroups
+		// creates k's PodGroup before we create its pods.
+		return false, nil
+	}
+
+	// 2. Create the replacement gang at k on the target revision (leader
+	// + workers; createMissingPods picks the per-runner spec).
+	surgeInst := workload.InstancePlan{
+		Index:       surgeIdx,
+		Incarnation: 1,
+		Runners:     append([]workload.RunnerPlan(nil), inst.Runners...),
+	}
+	surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, surgeIdx)
+	if err != nil {
+		return false, fmt.Errorf("list surge gang pods (instance=%d): %w", surgeIdx, err)
+	}
+	existingByName := query.IndexPodsByName(surgePods)
+	missing := make([]podTarget, 0)
+	for _, t := range expectedPodNamesForInstance(input, plan, surgeInst) {
+		if _, ok := existingByName[t.Name]; !ok {
+			missing = append(missing, t)
+		}
+	}
+	if len(missing) > 0 {
+		if !deps.ExpectationsCache().Satisfied(ns, owner, comp, surgeIdx) {
+			return false, nil
+		}
+		if _, cerr := createMissingPods(ctx, deps, input, plan, surgeInst, surgeIdx, missing, revisionHashFromTarget(target)); cerr != nil {
+			return false, fmt.Errorf("create surge gang (instance=%d): %w", surgeIdx, cerr)
+		}
+		return false, nil
+	}
+
+	// 3. Wait for the WHOLE replacement gang to be Ready, then serving.
+	// Draining the source before every member is Ready would reintroduce
+	// the capacity dip this whole change exists to remove.
+	if int32(len(surgePods)) < inst.TotalPods() || !query.AllPodsRuntimeReady(surgePods) {
+		return false, nil
+	}
+	for _, pod := range surgePods {
+		if podreadiness.IsServing(pod) {
+			continue
+		}
+		if err := podreadiness.MarkPodServing(ctx, deps.Client, pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
+			return false, fmt.Errorf("serving=True on surge pod %s: %w", pod.Name, err)
+		}
+	}
+
+	// 4. Drain the source gang — replacement is Ready, so capacity holds.
+	sourcePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, sourceIdx)
+	if err != nil {
+		return false, fmt.Errorf("list source gang pods (instance=%d): %w", sourceIdx, err)
+	}
+	if len(sourcePods) > 0 {
+		if !deps.ExpectationsCache().Satisfied(ns, owner, comp, sourceIdx) {
+			return false, nil
+		}
+		for _, pod := range sourcePods {
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
+			deps.ExpectationsCache().ExpectDeletes(ns, owner, comp, sourceIdx, 1)
+			if err := deps.Client.Delete(ctx, pod); err != nil {
+				deps.ExpectationsCache().ObservedDelete(ns, owner, comp, sourceIdx)
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return false, fmt.Errorf("delete source pod %s/%s: %w", pod.Namespace, pod.Name, err)
+			}
+		}
+		return false, nil
+	}
+
+	// 5. Promote the replacement to Ready and drop the source. The plan
+	// settles on k; EnsurePodGroups GCs the source's PodGroup next pass.
+	if err := patchInstanceStatusReadyOnRevision(ctx, input, surgeIdx, target.Name); err != nil {
+		return false, fmt.Errorf("promote surge gang (instance=%d): %w", surgeIdx, err)
+	}
+	if _, rerr := input.RemoveInstance(ctx, sourceIdx); rerr != nil {
+		return false, fmt.Errorf("remove source InstanceStatus (instance=%d): %w", sourceIdx, rerr)
+	}
+	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
+		"OMENative %s gang surge complete: instance %d promoted to revision %s",
+		instanceKey(comp, sourceIdx), surgeIdx, target.Name)
+	return true, nil
+}
+
+// patchInstanceStatusGangSurging stamps the SOURCE Instance of a gang
+// surge: Phase=Updating, Op{Update, Step=Surge, SurgeIndex=k}. Step=Surge
+// makes CurrentSurgeInFlight / the coordination CheckSurge gate count it
+// against MaxSurge; the SurgeIndex pointer distinguishes a gang surge
+// (new index) from a single-pod surge (ActiveOrdinal toggle). Idempotent.
+func patchInstanceStatusGangSurging(ctx context.Context, input workload.ReconcileInput, idx, surgeIdx int32, targetRev string, timeout time.Duration) error {
+	now := metav1.NewTime(time.Now())
+	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+		if s.Phase == workload.InstancePhaseUpdating && s.Operation != nil &&
+			s.Operation.Type == workload.InstanceOperationUpdate &&
+			s.Operation.Step == updateStepSurge && s.Operation.SurgeIndex != nil &&
+			*s.Operation.SurgeIndex == surgeIdx && s.TargetRevision == targetRev {
+			return false
+		}
+		k := surgeIdx
+		s.Phase = workload.InstancePhaseUpdating
+		s.TargetRevision = targetRev
+		s.Operation = &workload.InstanceOperation{
+			ID:             fmt.Sprintf("gangsurge-%d-%d", idx, now.Unix()),
+			Type:           workload.InstanceOperationUpdate,
+			Step:           updateStepSurge,
+			SurgeIndex:     &k,
+			TargetRevision: targetRev,
+			StartedAt:      now,
+			LastProgressAt: now,
+			Deadline:       metav1.NewTime(now.Add(timeout)),
+		}
+		return true
+	})
+}
+
+// patchInstanceStatusGangSurgeTarget stamps the TARGET (surge) index of a
+// gang surge: Phase=Creating, Op{Update, Step=GangSurgeTarget}. The
+// marker pins the index in instancePlanIndices so EnsurePodGroups creates
+// its PodGroup and scale-down won't delete it. Creates the InstanceStatus
+// if absent. Idempotent.
+func patchInstanceStatusGangSurgeTarget(ctx context.Context, input workload.ReconcileInput, surgeIdx int32, targetRev string, timeout time.Duration) error {
+	now := metav1.NewTime(time.Now())
+	return input.MutateInstance(ctx, surgeIdx, func(s *workload.InstanceStatus) bool {
+		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
+			s.Operation.Step == workload.UpdateStepGangSurgeTarget {
+			return false
+		}
+		if s.Incarnation == 0 {
+			s.Incarnation = 1
+		}
+		s.Phase = workload.InstancePhaseCreating
+		s.TargetRevision = targetRev
+		s.Operation = &workload.InstanceOperation{
+			ID:             fmt.Sprintf("gangsurgetarget-%d-%d", surgeIdx, now.Unix()),
+			Type:           workload.InstanceOperationUpdate,
+			Step:           workload.UpdateStepGangSurgeTarget,
+			TargetRevision: targetRev,
+			StartedAt:      now,
+			LastProgressAt: now,
+			Deadline:       metav1.NewTime(now.Add(timeout)),
+		}
+		return true
+	})
+}
+
 // surgeUpdate runs the SurgeThenDrain rollout for one Instance.
 //
 // State machine (per Instance):
@@ -1067,13 +1256,17 @@ func surgeDrainKey(idx int32, newOrdinal int32) string {
 //     Without pinning, the surge would silently drift the in-flight
 //     pod (still on X) to "RunningRevision=Y" in status.
 //
-// Single-pod scope (Runner.Size == 1). Multi-pod SurgeThenDrain needs
-// per-gang-member ordinal allocation and is deferred.
+// Single-pod path (Runner.Size == 1). Multi-pod (gang) SurgeThenDrain
+// branches to gangSurgeUpdate at the top of this function.
 func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, pods []*corev1.Pod) (bool, error) {
-	// Single-pod guard — multi-pod gangs need a different ordinal
-	// dimension (per-member surge) not yet plumbed.
+	// Multi-pod (gang) Instances surge a whole replacement gang at a
+	// fresh instance index (gangSurgeUpdate); single-pod Instances toggle
+	// the ActiveOrdinal slot in place below.
+	if inst.TotalPods() > 1 {
+		return gangSurgeUpdate(ctx, deps, input, plan, inst, target)
+	}
 	if len(inst.Runners) == 0 || inst.Runners[0].Size != 1 {
-		return false, fmt.Errorf("surgeUpdate: multi-pod not yet supported (instance=%d)", inst.Index)
+		return false, fmt.Errorf("surgeUpdate: unexpected single-pod runner layout (instance=%d)", inst.Index)
 	}
 	runner := inst.Runners[0]
 

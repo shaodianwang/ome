@@ -338,6 +338,42 @@ func TestInstancePlanIndices_PreservesSparseMigrationLayout(t *testing.T) {
 	}
 }
 
+func TestInstancePlanIndices_GangSurgePinsPair(t *testing.T) {
+	// replicas=2 with a gang surge in flight: source 0 (Updating, surge→3),
+	// unrelated sibling 1 (Ready), replacement 3 (GangSurgeTarget). The
+	// plan must include all three — the source counts toward the steady
+	// budget (so sibling 1 isn't dropped into scale-down) and the surge
+	// target is pinned as the transient +1.
+	k := int32(3)
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseUpdating, Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k}},
+		{Index: 1, Phase: InstancePhaseReady},
+		{Index: 3, Phase: InstancePhaseCreating, Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTarget}},
+	}
+	got := instancePlanIndices(instances, 2)
+	hit := map[int32]bool{}
+	for _, idx := range got {
+		hit[idx] = true
+	}
+	if !hit[0] || !hit[1] || !hit[3] {
+		t.Errorf("plan must include source 0, sibling 1, surge target 3; got %v", got)
+	}
+}
+
+func TestInstancePlanIndices_SinglePodSurgeNotPinnedAsPair(t *testing.T) {
+	// A single-pod surge carries Op.Step=Surge but NO SurgeIndex (it
+	// toggles ActiveOrdinal in place). It must NOT be treated as a gang
+	// surge pair — replicas=1, one Updating instance → plan stays {0}, no
+	// phantom surge index.
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseUpdating, Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge"}},
+	}
+	got := instancePlanIndices(instances, 1)
+	if len(got) != 1 || got[0] != 0 {
+		t.Errorf("single-pod surge must plan exactly {0}; got %v", got)
+	}
+}
+
 func TestAllocateSurgeIndex(t *testing.T) {
 	// Smoke: with statuses {0, 1, 3}, surge should land at 2.
 	instances := []InstanceStatus{

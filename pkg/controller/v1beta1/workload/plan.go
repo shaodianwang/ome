@@ -157,8 +157,19 @@ func migrationModeOrDefault(p *MigrationPolicy) MigrationMode {
 // the plan and into scale-down.
 func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 	used := existingInstanceIndices(instances)
+	// "Protected" / "source" sets cover BOTH migration surge pairs and
+	// multi-pod (gang) update-surge pairs — the two cases that transiently
+	// hold an extra index over the replica cap. Union the gang-surge sets
+	// in so the Pass 1/2/3 algorithm below treats them identically (pin
+	// the pair; count only the source toward the steady budget).
 	migrationProtected := migrationInFlightIndices(instances)
+	for idx := range updateSurgeInFlightIndices(instances) {
+		migrationProtected[idx] = struct{}{}
+	}
 	migrationSource := migrationSourceIndices(instances)
+	for idx := range updateSurgeSourceIndices(instances) {
+		migrationSource[idx] = struct{}{}
+	}
 
 	sorted := make([]int32, 0, len(used))
 	for idx := range used {
@@ -251,6 +262,47 @@ func migrationSourceIndices(instances []InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	for _, s := range instances {
 		if s.Phase == InstancePhaseMigrating {
+			out[s.Index] = struct{}{}
+		}
+	}
+	return out
+}
+
+// updateSurgeInFlightIndices returns the indices participating in a
+// multi-pod (gang) SurgeThenDrain update — both the source (Op.Type=
+// Update with a SurgeIndex set) and the surge target (Op.Step=
+// updateStepGangSurgeTarget). Like migration surge pairs, these stay in
+// the plan past the replica cap so the replacement gang isn't scale-down-
+// deleted mid-surge and EnsurePodGroups keeps its PodGroup alive.
+//
+// The gang source carries Op.Step=Surge so CurrentSurgeInFlight counts
+// it against MaxSurge; the SurgeIndex pointer is what distinguishes a
+// gang surge (new index) from a single-pod surge (ActiveOrdinal toggle,
+// SurgeIndex nil).
+func updateSurgeInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
+	out := map[int32]struct{}{}
+	for _, s := range instances {
+		if s.Operation == nil || s.Operation.Type != InstanceOperationUpdate {
+			continue
+		}
+		if s.Operation.SurgeIndex != nil { // source
+			out[s.Index] = struct{}{}
+		}
+		if s.Operation.Step == UpdateStepGangSurgeTarget { // target
+			out[s.Index] = struct{}{}
+		}
+	}
+	return out
+}
+
+// updateSurgeSourceIndices returns the source-side indices of an
+// in-flight gang surge (Op.Type=Update with SurgeIndex set). These count
+// toward the steady replica budget — the source IS the user-facing
+// replica being rolled; the surge target is the transient +1.
+func updateSurgeSourceIndices(instances []InstanceStatus) map[int32]struct{} {
+	out := map[int32]struct{}{}
+	for _, s := range instances {
+		if s.Operation != nil && s.Operation.Type == InstanceOperationUpdate && s.Operation.SurgeIndex != nil {
 			out[s.Index] = struct{}{}
 		}
 	}

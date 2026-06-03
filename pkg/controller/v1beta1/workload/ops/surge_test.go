@@ -1007,24 +1007,27 @@ func TestSurgeUpdate_AlternatesOrdinalAcrossSurges(t *testing.T) {
 	}
 }
 
-// TestSurgeUpdate_MultiPodRejected confirms the single-pod guard. Until
-// multi-pod surge plumbing lands, surgeUpdate refuses to act on a gang
-// runner (Size > 1) rather than producing an inconsistent state.
-func TestSurgeUpdate_MultiPodRejected(t *testing.T) {
+// TestSurgeUpdate_GangSurges pins that a multi-pod Instance no longer
+// errors out of surgeUpdate — it branches to gangSurgeUpdate, which on
+// its first pass stamps the source for a surge and requeues (done=false)
+// rather than refusing to act.
+func TestSurgeUpdate_GangSurges(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
 	c := legacyNewFakeClient(t, isvc)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
-	// Synthesize a multi-pod plan (BuildPlan won't produce this normally,
-	// but the guard must hold for any caller that constructs one).
+	// Synthesize a multi-pod (gang) Instance.
 	plan.Instances[0].Runners[0].Size = 4
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	_, err := surgeUpdate(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], tcr, nil)
-	if err == nil {
-		t.Fatalf("expected error: multi-pod surge not yet supported")
+	done, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, nil)
+	if err != nil {
+		t.Fatalf("gang surge: unexpected error: %v", err)
+	}
+	if done {
+		t.Fatalf("expected done=false: gang surge is multi-pass")
 	}
 }
 
