@@ -139,7 +139,7 @@ deployments:
         type: RatioBalanced          # surge prefill : decode in lockstep
         maxSurge: 1
         maxUnavailable: 0
-        ratioTolerance: 5            # keep prefill:decode within 5% of start
+        ratioTolerancePercent: 5            # keep prefill:decode within 5% of start
 
     modelRef:
       name: prod-code-0522-testing-nvfp4-ptq

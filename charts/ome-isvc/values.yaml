@@ -73,7 +73,7 @@ deployments:
       # Cross-Component rollout coordination. See README §7 for full schema:
       #   policy:       BlueGreen | Sequential | RollingUpdate | Independent
       #   pacing.type:  PerComponent (default) | RatioBalanced
-      #   soak / pacing.ratioTolerance: see §7 for usage + defaults.
+      #   soak / pacing.ratioTolerancePercent: see §7 for usage + defaults.
       policy: Sequential
       order: [decode, prefill]
       pacing:

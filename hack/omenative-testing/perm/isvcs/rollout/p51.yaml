@@ -27,4 +27,4 @@ spec:
       groups:
         - components: [engine, decoder]
           policy: RollingUpdate
-          pacing: { type: RatioBalanced, ratioTolerance: 25, maxUnavailable: 3 }
+          pacing: { type: RatioBalanced, ratioTolerancePercent: 25, maxUnavailable: 3 }

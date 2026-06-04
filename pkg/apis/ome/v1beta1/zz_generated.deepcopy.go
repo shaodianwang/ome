@@ -545,8 +545,8 @@ func (in *CoordinationPacing) DeepCopyInto(out *CoordinationPacing) {
 		*out = new(intstr.IntOrString)
 		**out = **in
 	}
-	if in.RatioTolerance != nil {
-		in, out := &in.RatioTolerance, &out.RatioTolerance
+	if in.RatioTolerancePercent != nil {
+		in, out := &in.RatioTolerancePercent, &out.RatioTolerancePercent
 		*out = new(int32)
 		**out = **in
 	}

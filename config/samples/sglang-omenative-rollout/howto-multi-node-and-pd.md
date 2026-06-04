@@ -73,7 +73,7 @@ spec:
             type: RatioBalanced     # roll prefill:decode in lockstep, never lopsided
             maxSurge: 1
             maxUnavailable: 0
-            ratioTolerance: 5       # keep prefill:decode within 5% of the starting ratio
+            ratioTolerancePercent: 5       # keep prefill:decode within 5% of the starting ratio
 ```
 
 **Why `RatioBalanced`:** prefill and decode serve one model at a fixed ratio and

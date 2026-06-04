@@ -97,9 +97,9 @@ func pacingWithDefaults(in *v1beta1.CoordinationPacing) v1beta1.CoordinationPaci
 		// MaxUnavailableBudget math.
 		out.MaxUnavailable = ptrIntOrStringFromString("25%")
 	}
-	if out.Type == v1beta1.CoordinationPacingRatioBalanced && out.RatioTolerance == nil {
+	if out.Type == v1beta1.CoordinationPacingRatioBalanced && out.RatioTolerancePercent == nil {
 		t := int32(5)
-		out.RatioTolerance = &t
+		out.RatioTolerancePercent = &t
 	}
 	return out
 }

@@ -64,4 +64,4 @@ spec:
             type: RatioBalanced          # surge prefill : decode in lockstep
             maxSurge: 1                  # +1 pod of headroom across the group
             maxUnavailable: 0            # never drop below serving capacity
-            ratioTolerance: 5            # keep prefill:decode within 5% of start
+            ratioTolerancePercent: 5            # keep prefill:decode within 5% of start

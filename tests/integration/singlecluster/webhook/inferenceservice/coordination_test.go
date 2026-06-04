@@ -23,7 +23,7 @@ import (
 // constant fails the test loudly here instead of silently changing the
 // operator-facing error string.
 //
-// Defaulter-side tests (MaxSurge/MaxUnavailable/RatioTolerance fills)
+// Defaulter-side tests (MaxSurge/MaxUnavailable/RatioTolerancePercent fills)
 // live in tests/integration/singlecluster/webhook/inferenceservice_defaulter/.
 // The defaulter is not wired in this suite's webhook fixture.
 
@@ -292,13 +292,13 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 		Expect(err.Error()).To(ContainSubstring(validation.ReasonRollingUpdateRequiresMultipleComponents))
 	})
 
-	// W-11: RatioTolerance above the warning threshold (50%)
+	// W-11: RatioTolerancePercent above the warning threshold (50%)
 	// effectively disables ratio enforcement. The validator allows it
 	// but surfaces a CoordinationRatioToleranceWarning the operator
 	// can grep on. Exercised via the helper directly (the apiserver's
 	// AdmissionResponse warnings aren't surfaced through controller-
 	// runtime's typed Create error).
-	ginkgo.It("W-11 emits warning when RatioTolerance > 50", func() {
+	ginkgo.It("W-11 emits warning when RatioTolerancePercent > 50", func() {
 		tol := int32(75)
 		spec := &v1beta1.InferenceServiceSpec{
 			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
@@ -306,8 +306,8 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: &tol,
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: &tol,
 					},
 				}},
 			}},
@@ -360,37 +360,37 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 	})
 
-	// W-17: CRD validation bounds RatioTolerance to [0, 100]. Below 0
+	// W-17: CRD validation bounds RatioTolerancePercent to [0, 100]. Below 0
 	// is rejected at the schema layer.
-	ginkgo.It("W-17 rejects RatioTolerance < 0 (CRD schema)", func() {
+	ginkgo.It("W-17 rejects RatioTolerancePercent < 0 (CRD schema)", func() {
 		neg := int32(-5)
 		isvc := coordISVC("coord-w17", v1beta1.RolloutCoordinationGroup{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 			Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			Pacing: &v1beta1.CoordinationPacing{
-				Type:           v1beta1.CoordinationPacingRatioBalanced,
-				RatioTolerance: &neg,
+				Type:                  v1beta1.CoordinationPacingRatioBalanced,
+				RatioTolerancePercent: &neg,
 			},
 		})
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred(),
-			"CRD Minimum=0 must reject negative ratioTolerance")
+			"CRD Minimum=0 must reject negative ratioTolerancePercent")
 	})
 
 	// W-18: CRD Maximum=100 — anything above is schema-rejected.
-	ginkgo.It("W-18 rejects RatioTolerance > 100 (CRD schema)", func() {
+	ginkgo.It("W-18 rejects RatioTolerancePercent > 100 (CRD schema)", func() {
 		over := int32(150)
 		isvc := coordISVC("coord-w18", v1beta1.RolloutCoordinationGroup{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 			Policy:     v1beta1.CoordinationPolicyBlueGreen,
 			Pacing: &v1beta1.CoordinationPacing{
-				Type:           v1beta1.CoordinationPacingRatioBalanced,
-				RatioTolerance: &over,
+				Type:                  v1beta1.CoordinationPacingRatioBalanced,
+				RatioTolerancePercent: &over,
 			},
 		})
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred(),
-			"CRD Maximum=100 must reject over-100 ratioTolerance")
+			"CRD Maximum=100 must reject over-100 ratioTolerancePercent")
 	})
 
 	// W-19: IntOrString CRD validation rejects garbage strings on the

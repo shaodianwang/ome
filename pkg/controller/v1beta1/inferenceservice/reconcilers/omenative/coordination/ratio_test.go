@@ -44,8 +44,8 @@ func TestEvaluateSurge_SingleComponentGroupAllowsSurge(t *testing.T) {
 func TestEvaluateSurge_2to1RatioWithinTolerance(t *testing.T) {
 	tol := int32(5)
 	pacing := v1beta1.CoordinationPacing{
-		Type:           v1beta1.CoordinationPacingRatioBalanced,
-		RatioTolerance: &tol,
+		Type:                  v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerancePercent: &tol,
 	}
 	// engine 40 : decoder 20 = 2:1. 10 new engine + 5 new decoder
 	// keeps the ratio exact.
@@ -68,8 +68,8 @@ func TestEvaluateSurge_2to1RatioWithinTolerance(t *testing.T) {
 func TestEvaluateSurge_AlreadySkewedRejectsAnyFurtherSurge(t *testing.T) {
 	tol := int32(5)
 	pacing := v1beta1.CoordinationPacing{
-		Type:           v1beta1.CoordinationPacingRatioBalanced,
-		RatioTolerance: &tol,
+		Type:                  v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerancePercent: &tol,
 	}
 	// 40 engine : 20 decoder. The component being surged already
 	// has 15 new pods (37.5%) while decoder has only 5 (25%). The
@@ -99,8 +99,8 @@ func TestEvaluateSurge_AlreadySkewedRejectsAnyFurtherSurge(t *testing.T) {
 func TestEvaluateSurge_BacksOffWhenLiveRatioWouldExceedBand(t *testing.T) {
 	tol := int32(5)
 	pacing := v1beta1.CoordinationPacing{
-		Type:           v1beta1.CoordinationPacingRatioBalanced,
-		RatioTolerance: &tol,
+		Type:                  v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerancePercent: &tol,
 	}
 	// Live serving ratio (larger/smaller).
 	// 40 engine : 20 decoder original → orig_ratio = 2.0,
@@ -128,8 +128,8 @@ func TestEvaluateSurge_BacksOffWhenLiveRatioWouldExceedBand(t *testing.T) {
 func TestEvaluateSurge_AllowsSurgeWhenLiveRatioStaysInBand(t *testing.T) {
 	tol := int32(20)
 	pacing := v1beta1.CoordinationPacing{
-		Type:           v1beta1.CoordinationPacingRatioBalanced,
-		RatioTolerance: &tol,
+		Type:                  v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerancePercent: &tol,
 	}
 	// 40 engine : 20 decoder original → orig_ratio = 2.0,
 	// band [1.6, 2.4] at tol=20%.
@@ -159,8 +159,8 @@ func TestEvaluateSurge_AllowsSurgeWhenLiveRatioStaysInBand(t *testing.T) {
 func TestEvaluateSurge_RejectsWhenPeerSerivngWouldBeZero(t *testing.T) {
 	tol := int32(50)
 	pacing := v1beta1.CoordinationPacing{
-		Type:           v1beta1.CoordinationPacingRatioBalanced,
-		RatioTolerance: &tol,
+		Type:                  v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerancePercent: &tol,
 	}
 	// Peer's serving count is zero → ratio undefined → any surge of
 	// the other component is rejected. This is the mass-drain
@@ -184,8 +184,8 @@ func TestEvaluateSurge_RejectsWhenPeerSerivngWouldBeZero(t *testing.T) {
 func TestEvaluateSurge_3WayRatioIsPairwise(t *testing.T) {
 	tol := int32(5)
 	pacing := v1beta1.CoordinationPacing{
-		Type:           v1beta1.CoordinationPacingRatioBalanced,
-		RatioTolerance: &tol,
+		Type:                  v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerancePercent: &tol,
 	}
 	// router 1 : engine 40 : decoder 20. Propose 4 new router pods
 	// (fraction = 400%) — should be rejected wholly because router
@@ -207,8 +207,8 @@ func TestEvaluateSurge_3WayRatioIsPairwise(t *testing.T) {
 func TestEvaluateSurge_ZeroOriginalReplicasIgnored(t *testing.T) {
 	tol := int32(5)
 	pacing := v1beta1.CoordinationPacing{
-		Type:           v1beta1.CoordinationPacingRatioBalanced,
-		RatioTolerance: &tol,
+		Type:                  v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerancePercent: &tol,
 	}
 	// One component has zero original replicas — it shouldn't
 	// anchor ratio enforcement. Treating it as a valid pair would
@@ -293,8 +293,8 @@ func TestCheckRatioGate_FirstReconcileAllowed(t *testing.T) {
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: int32Ptr(5),
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: int32Ptr(5),
 					},
 				}},
 			}},
@@ -403,8 +403,8 @@ func TestCheckRatioGate_SingleComponentGroupBypasses(t *testing.T) {
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: int32Ptr(0),
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: int32Ptr(0),
 					},
 				}},
 			}},
@@ -455,8 +455,8 @@ func TestCheckRatioGate_InFlightProjectionTightensBand(t *testing.T) {
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: &tol,
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: &tol,
 					},
 				}},
 			}},
@@ -536,8 +536,8 @@ func TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock(t *testing.T) {
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: &tol,
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: &tol,
 					},
 				}},
 			}},
@@ -600,8 +600,8 @@ func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: &tol,
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: &tol,
 					},
 				}},
 			}},
@@ -662,8 +662,8 @@ func mkPDFixture(tolerance *int32) *v1beta1.InferenceService {
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: tolerance,
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: tolerance,
 					},
 				}},
 			}},

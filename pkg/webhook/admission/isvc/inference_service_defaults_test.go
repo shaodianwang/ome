@@ -703,8 +703,8 @@ func TestDefaultRolloutCoordination_FillsPacingDefaults(t *testing.T) {
 	if g.Pacing.MaxUnavailable == nil || g.Pacing.MaxUnavailable.IntValue() != 0 {
 		t.Errorf("MaxUnavailable default: got %+v want 0", g.Pacing.MaxUnavailable)
 	}
-	if g.Pacing.RatioTolerance != nil {
-		t.Errorf("PerComponent should not set RatioTolerance: got %+v", g.Pacing.RatioTolerance)
+	if g.Pacing.RatioTolerancePercent != nil {
+		t.Errorf("PerComponent should not set RatioTolerancePercent: got %+v", g.Pacing.RatioTolerancePercent)
 	}
 }
 
@@ -719,11 +719,11 @@ func TestDefaultRolloutCoordination_RatioBalancedSetsRatioTolerance(t *testing.T
 		},
 	}
 	defaultRolloutCoordination(spec)
-	if spec.Groups[0].Pacing.RatioTolerance == nil {
-		t.Fatalf("RatioBalanced should default RatioTolerance")
+	if spec.Groups[0].Pacing.RatioTolerancePercent == nil {
+		t.Fatalf("RatioBalanced should default RatioTolerancePercent")
 	}
-	if *spec.Groups[0].Pacing.RatioTolerance != 5 {
-		t.Errorf("RatioTolerance: got %d want 5", *spec.Groups[0].Pacing.RatioTolerance)
+	if *spec.Groups[0].Pacing.RatioTolerancePercent != 5 {
+		t.Errorf("RatioTolerancePercent: got %d want 5", *spec.Groups[0].Pacing.RatioTolerancePercent)
 	}
 }
 
@@ -754,10 +754,10 @@ func TestDefaultRolloutCoordination_PreservesOperatorOverrides(t *testing.T) {
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				Pacing: &v1beta1.CoordinationPacing{
-					Type:           v1beta1.CoordinationPacingRatioBalanced,
-					MaxSurge:       &ms,
-					MaxUnavailable: &mu,
-					RatioTolerance: &tol,
+					Type:                  v1beta1.CoordinationPacingRatioBalanced,
+					MaxSurge:              &ms,
+					MaxUnavailable:        &mu,
+					RatioTolerancePercent: &tol,
 				},
 			},
 		},
@@ -770,8 +770,8 @@ func TestDefaultRolloutCoordination_PreservesOperatorOverrides(t *testing.T) {
 	if g.Pacing.MaxUnavailable.IntValue() != 3 {
 		t.Errorf("MaxUnavailable preserved: got %+v want 3", g.Pacing.MaxUnavailable)
 	}
-	if *g.Pacing.RatioTolerance != 15 {
-		t.Errorf("RatioTolerance preserved: got %d want 15", *g.Pacing.RatioTolerance)
+	if *g.Pacing.RatioTolerancePercent != 15 {
+		t.Errorf("RatioTolerancePercent preserved: got %d want 15", *g.Pacing.RatioTolerancePercent)
 	}
 }
 

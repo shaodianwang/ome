@@ -88,7 +88,7 @@ stacks. Per stack, the chart emits:
 | `deployments[].coordination.pacing.type` | enum |  | `PerComponent` (default) or `RatioBalanced`. |
 | `deployments[].coordination.pacing.maxSurge` | int / string |  | Forwarded onto the synthesised RolloutCoordinationGroup. |
 | `deployments[].coordination.pacing.maxUnavailable` | int / string |  | Forwarded onto the synthesised RolloutCoordinationGroup. |
-| `deployments[].coordination.pacing.ratioTolerance` | int |  | RatioBalanced only. |
+| `deployments[].coordination.pacing.ratioTolerancePercent` | int |  | RatioBalanced only. |
 | `deployments[].modelRef.name` | string | (required) | Name of the (Cluster)BaseModel to serve. |
 | `deployments[].modelRef.scope` | enum | `cluster` | `cluster` -> ClusterBaseModel, `namespace` -> BaseModel. |
 | `vendors.deployAll` | bool | `false` | When `true`, emit every bundled vendor runtime. When `false`, emit only referenced ones. |
@@ -380,7 +380,7 @@ for `standalone` / `multinode`).
 - **PerComponent** (default) — each Component honors `maxSurge` /
   `maxUnavailable` independently.
 - **RatioBalanced** — gates per-Component churn against the ratio of
-  prefill:decode pods (use with `pacing.ratioTolerance` to bound how
+  prefill:decode pods (use with `pacing.ratioTolerancePercent` to bound how
   far the ratio may drift mid-rollout).
 
 ### Defaults
@@ -393,7 +393,7 @@ controller defaulter stamps:
 | `type`            | `PerComponent`       |
 | `maxSurge`        | `"25%"`              |
 | `maxUnavailable`  | `0`                  |
-| `ratioTolerance`  | `5` (RatioBalanced only) |
+| `ratioTolerancePercent`  | `5` (RatioBalanced only) |
 
 `soak` is `0` (no inter-Component wait) unless explicitly set; only
 honored for `policy: Sequential`.

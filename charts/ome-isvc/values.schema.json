@@ -368,7 +368,7 @@
             },
             "maxSurge":       {"type": ["integer", "string"]},
             "maxUnavailable": {"type": ["integer", "string"]},
-            "ratioTolerance": {"type": "integer"}
+            "ratioTolerancePercent": {"type": "integer"}
           }
         }
       }

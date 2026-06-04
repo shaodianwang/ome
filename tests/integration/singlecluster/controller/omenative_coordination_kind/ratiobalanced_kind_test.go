@@ -43,9 +43,9 @@ var _ = ginkgo.Describe("behavior — BlueGreen + RatioBalanced", ginkgo.Ordered
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				Pacing: &v1beta1.CoordinationPacing{
-					Type:           v1beta1.CoordinationPacingRatioBalanced,
-					RatioTolerance: &tol,
-					MaxUnavailable: &maxUnavail,
+					Type:                  v1beta1.CoordinationPacingRatioBalanced,
+					RatioTolerancePercent: &tol,
+					MaxUnavailable:        &maxUnavail,
 				},
 			}),
 			WithEngineImage("fake-serving:v1"))

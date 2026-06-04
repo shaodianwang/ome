@@ -270,10 +270,10 @@ func buildPermISVC(ns string, pc permCase) *v1beta1.InferenceService {
 		}
 		if pc.pacingType != "" || pc.groupSurge != nil || pc.groupUnavail != nil {
 			g.Pacing = &v1beta1.CoordinationPacing{
-				Type:           pc.pacingType,
-				MaxSurge:       pc.groupSurge,
-				MaxUnavailable: pc.groupUnavail,
-				RatioTolerance: pc.ratioTol,
+				Type:                  pc.pacingType,
+				MaxSurge:              pc.groupSurge,
+				MaxUnavailable:        pc.groupUnavail,
+				RatioTolerancePercent: pc.ratioTol,
 			}
 		}
 		isvc.Spec.Rollout = &v1beta1.RolloutSpec{

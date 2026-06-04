@@ -258,7 +258,7 @@ The group also has a `pacing` block:
 - `type: PerComponent` — no cross-component ratio coupling; each component rolls
   under the `min(group, per-component)` surge/unavailable caps.
 - `type: RatioBalanced` — surge the components *in lockstep*, keeping their
-  ratio (e.g. prefill:decode = 1:1) within `ratioTolerance` percent of where it
+  ratio (e.g. prefill:decode = 1:1) within `ratioTolerancePercent` percent of where it
   started. This is the one to use for PD: the two pools come up in proportion,
   so you never roll into a lopsided skew.
 

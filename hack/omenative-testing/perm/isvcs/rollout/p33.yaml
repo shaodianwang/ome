@@ -25,4 +25,4 @@ spec:
       groups:
         - components: [engine, decoder]
           policy: BlueGreen
-          pacing: { type: RatioBalanced, ratioTolerance: 50, maxUnavailable: 1 }
+          pacing: { type: RatioBalanced, ratioTolerancePercent: 50, maxUnavailable: 1 }

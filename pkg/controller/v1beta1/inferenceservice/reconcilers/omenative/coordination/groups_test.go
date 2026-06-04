@@ -61,11 +61,11 @@ func TestResolveGroups_RatioBalancedDefaultsTolerance(t *testing.T) {
 		},
 	}
 	g := ResolveGroups(spec)[0]
-	if g.Pacing.RatioTolerance == nil {
-		t.Fatalf("RatioTolerance default: got nil want 5")
+	if g.Pacing.RatioTolerancePercent == nil {
+		t.Fatalf("RatioTolerancePercent default: got nil want 5")
 	}
-	if *g.Pacing.RatioTolerance != 5 {
-		t.Errorf("RatioTolerance default: got %d want 5", *g.Pacing.RatioTolerance)
+	if *g.Pacing.RatioTolerancePercent != 5 {
+		t.Errorf("RatioTolerancePercent default: got %d want 5", *g.Pacing.RatioTolerancePercent)
 	}
 }
 

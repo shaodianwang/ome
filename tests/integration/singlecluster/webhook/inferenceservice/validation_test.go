@@ -694,8 +694,8 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 					Policy:     v1beta1.CoordinationPolicySequential,
 					Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: &tol,
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: &tol,
 					},
 				}},
 			},

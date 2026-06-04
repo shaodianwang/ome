@@ -29,8 +29,8 @@ func mkBug1Fixture() *v1beta1.InferenceService {
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: &tol,
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: &tol,
 					},
 				}},
 			}},

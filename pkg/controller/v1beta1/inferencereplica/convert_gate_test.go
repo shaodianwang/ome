@@ -180,8 +180,8 @@ func TestBuildReconcileInput_GateUsesFreshIRStatus(t *testing.T) {
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: &tol,
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: &tol,
 					},
 				}},
 			}},

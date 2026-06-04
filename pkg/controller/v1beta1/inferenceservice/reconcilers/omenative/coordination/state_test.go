@@ -466,8 +466,8 @@ func TestComputeSurgeBudgetWithRatio_UsesServingPodsBaseline(t *testing.T) {
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 		Policy:     v1beta1.CoordinationPolicyBlueGreen,
 		Pacing: v1beta1.CoordinationPacing{
-			Type:           v1beta1.CoordinationPacingRatioBalanced,
-			RatioTolerance: &tol,
+			Type:                  v1beta1.CoordinationPacingRatioBalanced,
+			RatioTolerancePercent: &tol,
 		},
 	}
 	// Live state: 4 engine + 2 decoder pods, all serving, NO surge
@@ -525,8 +525,8 @@ func TestComputeSurgeBudgetWithRatio_NewPodsBaselineWouldDeadlock(t *testing.T) 
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 		Policy:     v1beta1.CoordinationPolicyBlueGreen,
 		Pacing: v1beta1.CoordinationPacing{
-			Type:           v1beta1.CoordinationPacingRatioBalanced,
-			RatioTolerance: &tol,
+			Type:                  v1beta1.CoordinationPacingRatioBalanced,
+			RatioTolerancePercent: &tol,
 		},
 	}
 	// Same fleet, but ServingPods left at zero — simulates the OLD

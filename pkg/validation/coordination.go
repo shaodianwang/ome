@@ -118,13 +118,13 @@ func CoordinationRatioToleranceWarning(spec *v1beta1.InferenceServiceSpec) strin
 		if g.Pacing == nil || g.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
 			continue
 		}
-		if g.Pacing.RatioTolerance == nil {
+		if g.Pacing.RatioTolerancePercent == nil {
 			continue
 		}
-		if *g.Pacing.RatioTolerance > ratioToleranceWarningThreshold {
+		if *g.Pacing.RatioTolerancePercent > ratioToleranceWarningThreshold {
 			return fmt.Sprintf(
-				"spec.rollout.coordination.groups[%d].pacing.ratioTolerance=%d effectively disables ratio enforcement (>%d) (%s)",
-				i, *g.Pacing.RatioTolerance, ratioToleranceWarningThreshold, ReasonRatioToleranceTooHigh)
+				"spec.rollout.coordination.groups[%d].pacing.ratioTolerancePercent=%d effectively disables ratio enforcement (>%d) (%s)",
+				i, *g.Pacing.RatioTolerancePercent, ratioToleranceWarningThreshold, ReasonRatioToleranceTooHigh)
 		}
 	}
 	return ""

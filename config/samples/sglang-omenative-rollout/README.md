@@ -117,7 +117,7 @@ control it at two layers in the ISVC.
 
 Prefill and decode serve one model together at a fixed ratio (1:1 here) and
 talk to each other over NIXL. **RatioBalanced** pacing rolls them in lockstep —
-it never lets the live prefill:decode ratio drift past `ratioTolerance` (5%),
+it never lets the live prefill:decode ratio drift past `ratioTolerancePercent` (5%),
 so new-revision prefill and decode come up in proportion and never end up
 talking across a lopsided version skew. Sequential would roll one pool fully
 before the other (maximizing that skew window); BlueGreen would need double the

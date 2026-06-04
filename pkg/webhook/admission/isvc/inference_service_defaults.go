@@ -281,7 +281,7 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 //     a type)
 //   - pacing.maxSurge:       "25%"
 //   - pacing.maxUnavailable: 0
-//   - pacing.ratioTolerance: 5 (only for RatioBalanced)
+//   - pacing.ratioTolerancePercent: 5 (only for RatioBalanced)
 //
 // The defaulter never populates groups[]; coordination is opt-in via
 // explicit operator declaration.
@@ -305,9 +305,9 @@ func defaultRolloutCoordination(spec *v1beta1.RolloutCoordinationSpec) {
 			mu := intstr.FromInt(0)
 			g.Pacing.MaxUnavailable = &mu
 		}
-		if g.Pacing.Type == v1beta1.CoordinationPacingRatioBalanced && g.Pacing.RatioTolerance == nil {
+		if g.Pacing.Type == v1beta1.CoordinationPacingRatioBalanced && g.Pacing.RatioTolerancePercent == nil {
 			tol := int32(5)
-			g.Pacing.RatioTolerance = &tol
+			g.Pacing.RatioTolerancePercent = &tol
 		}
 	}
 }

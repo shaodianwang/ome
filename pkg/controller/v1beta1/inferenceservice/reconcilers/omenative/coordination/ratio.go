@@ -93,8 +93,8 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 		return RatioDecision{AllowedSurgeDelta: proposedDelta, Reason: "single-component group"}
 	}
 	tolerance := int32(5)
-	if pacing.RatioTolerance != nil {
-		tolerance = *pacing.RatioTolerance
+	if pacing.RatioTolerancePercent != nil {
+		tolerance = *pacing.RatioTolerancePercent
 	}
 	band := float64(tolerance) / 100.0
 
@@ -349,7 +349,7 @@ func unavailableInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
 //   - The component is alone in its group (no peer to skew against),
 //   - The group has no ObservedRatio snapshot yet (first reconcile),
 //   - OR the projected NewPods[component]+1 stays within the group's
-//     RatioTolerance band against every peer Component.
+//     RatioTolerancePercent band against every peer Component.
 //
 // Returns allowed=false when EvaluateSurge rejects the +1 surge. Caller
 // requeues; the peer Component will have caught up by the next reconcile.

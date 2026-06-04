@@ -20,8 +20,8 @@ func mkSymmetricRatioFixture(tol int32) *v1beta1.InferenceService {
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerance: int32Ptr(tol),
+						Type:                  v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerancePercent: int32Ptr(tol),
 					},
 				}},
 			}},
@@ -146,8 +146,8 @@ func TestEvaluateSurge_SurgeTiebreaker(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pacing := v1beta1.CoordinationPacing{
-				Type:           v1beta1.CoordinationPacingRatioBalanced,
-				RatioTolerance: int32Ptr(tc.tol),
+				Type:                  v1beta1.CoordinationPacingRatioBalanced,
+				RatioTolerancePercent: int32Ptr(tc.tol),
 			}
 			d := EvaluateSurge(pacing, RatioState{Original: tc.original, Serving: tc.serving}, tc.comp, +1)
 			got := d.AllowedSurgeDelta != 0
@@ -166,8 +166,8 @@ func TestEvaluateSurge_SurgeTiebreaker(t *testing.T) {
 func TestEvaluateSurge_DrainStaysStrictAfterSurgeTiebreaker(t *testing.T) {
 	eng, dec := v1beta1.EngineComponent, v1beta1.DecoderComponent
 	pacing := v1beta1.CoordinationPacing{
-		Type:           v1beta1.CoordinationPacingRatioBalanced,
-		RatioTolerance: int32Ptr(25),
+		Type:                  v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerancePercent: int32Ptr(25),
 	}
 	d := EvaluateSurge(pacing, RatioState{
 		Original: map[v1beta1.ComponentType]int32{eng: 4, dec: 2},

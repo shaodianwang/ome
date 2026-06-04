@@ -132,13 +132,21 @@ type CoordinationPacing struct {
 	// +kubebuilder:validation:XIntOrString
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
-	// RatioTolerance is the percentage drift from the original
-	// cross-Component ratio that RatioBalanced pacing allows before
-	// refusing further surge. Default: 5.
+	// RatioTolerancePercent bounds how far the components in a
+	// RatioBalanced group may drift from their starting proportion during
+	// a roll. The ratio is taken larger-pool : smaller-pool, so it is
+	// direction-independent — prefill:decode and decode:prefill are the
+	// same constraint — and is anchored to the counts observed when the
+	// roll began. A surge OR drain is paused whenever a step would push
+	// any component pair's live serving proportion outside
+	// starting_ratio ± this percent, and resumes once the pools
+	// rebalance. Example: a group that starts 2:1 with a value of 5 holds
+	// the live proportion between 1.9:1 and 2.1:1. For three or more
+	// components every pair is checked. Default: 5 (i.e. 5%).
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
-	RatioTolerance *int32 `json:"ratioTolerance,omitempty"`
+	RatioTolerancePercent *int32 `json:"ratioTolerancePercent,omitempty"`
 }
 
 // CoordinationPacingType selects the surge-pacing computation for a

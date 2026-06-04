@@ -1108,9 +1108,9 @@ func schema_pkg_apis_ome_v1beta1_CoordinationPacing(ref common.ReferenceCallback
 							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
 						},
 					},
-					"ratioTolerance": {
+					"ratioTolerancePercent": {
 						SchemaProps: spec.SchemaProps{
-							Description: "RatioTolerance is the percentage drift from the original cross-Component ratio that RatioBalanced pacing allows before refusing further surge. Default: 5.",
+							Description: "RatioTolerancePercent bounds how far the components in a RatioBalanced group may drift from their starting proportion during a roll. The ratio is taken larger-pool : smaller-pool, so it is direction-independent — prefill:decode and decode:prefill are the same constraint — and is anchored to the counts observed when the roll began. A surge OR drain is paused whenever a step would push any component pair's live serving proportion outside starting_ratio ± this percent, and resumes once the pools rebalance. Example: a group that starts 2:1 with a value of 5 holds the live proportion between 1.9:1 and 2.1:1. For three or more components every pair is checked. Default: 5 (i.e. 5%).",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},

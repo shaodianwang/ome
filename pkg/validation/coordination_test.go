@@ -407,7 +407,7 @@ func TestValidateCoordination_OmittedPacingAccepted(t *testing.T) {
 
 // The zero-budget check only fires for PerComponent pacing (or empty,
 // which defaults to PerComponent). RatioBalanced has its own knob
-// (ratioTolerance) and the maxSurge/maxUnavailable fields are
+// (ratioTolerancePercent) and the maxSurge/maxUnavailable fields are
 // interpreted differently — don't reject on the same shape.
 func TestValidateCoordination_RatioBalancedWithZeroBudgetNotRejected(t *testing.T) {
 	zero := intstr.FromInt(0)
@@ -479,8 +479,8 @@ func TestCoordinationRatioToleranceWarning_AboveThreshold(t *testing.T) {
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				Pacing: &v1beta1.CoordinationPacing{
-					Type:           v1beta1.CoordinationPacingRatioBalanced,
-					RatioTolerance: &tol,
+					Type:                  v1beta1.CoordinationPacingRatioBalanced,
+					RatioTolerancePercent: &tol,
 				},
 			},
 		},
@@ -500,8 +500,8 @@ func TestCoordinationRatioToleranceWarning_BelowThresholdEmpty(t *testing.T) {
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				Pacing: &v1beta1.CoordinationPacing{
-					Type:           v1beta1.CoordinationPacingRatioBalanced,
-					RatioTolerance: &tol,
+					Type:                  v1beta1.CoordinationPacingRatioBalanced,
+					RatioTolerancePercent: &tol,
 				},
 			},
 		},

@@ -183,7 +183,7 @@ per-component value unset and that layer doesn't cap, so the group budget is the
 only constraint (the common case). The defaults you get if you declare a `pacing`
 block but leave the values unset depend on which path applies: the admission **webhook**
 defaults `maxSurge: 25%`, `maxUnavailable: 0`, `type: PerComponent`,
-`ratioTolerance: 5` (the last only when `type: RatioBalanced`), while the
+`ratioTolerancePercent: 5` (the last only when `type: RatioBalanced`), while the
 **runtime resolver** defaults `maxUnavailable` to `25%` (a default of `0` would
 deadlock single-replica rollouts). These are runtime/webhook defaults, not
 apiserver/kubebuilder CRD defaults — they land only for components that resolve
@@ -191,7 +191,7 @@ to OMENative.
 
 > There is **no** `minReady` / `minReadySeconds` knob on the `pacing` struct or
 > exposed as a field on the `lifecycle` update-strategy types. The full pacing
-> knob set is exactly `type`, `maxSurge`, `maxUnavailable`, `ratioTolerance`. The
+> knob set is exactly `type`, `maxSurge`, `maxUnavailable`, `ratioTolerancePercent`. The
 > group-level `soak` (Sequential only) and the in-place `gracePeriodSeconds`
 > (default `30`) are wait knobs. (A `minReadySeconds` field does exist on the
 > underlying replica spec, propagated from the ISVC, and gates a pod's
@@ -220,7 +220,7 @@ spec:
             type: RatioBalanced     # roll prefill:decode in lockstep, never lopsided
             maxSurge: 1
             maxUnavailable: 0
-            ratioTolerance: 5       # keep prefill:decode within 5% of the starting ratio
+            ratioTolerancePercent: 5       # keep prefill:decode within 5% of the starting ratio
 ```
 
 **Use this when** you want steady, capacity-efficient upgrades and your
@@ -231,7 +231,7 @@ member's image *together* — a partial bump is rejected (lockstep).
 ### RatioBalanced pacing for PD
 
 `pacing.type: RatioBalanced` surges the components *in lockstep*, holding the
-cross-component ratio (e.g. prefill:decode = 1:1) within `ratioTolerance` percent
+cross-component ratio (e.g. prefill:decode = 1:1) within `ratioTolerancePercent` percent
 of where it was at rollout start. The two pools come up in proportion, so a
 new-revision prefill never ends up talking to an old-revision decode across a
 lopsided skew. The anchor ratio is snapshotted once at rollout start and held
@@ -517,7 +517,7 @@ Caught at `kubectl apply` (run `--dry-run=server` first):
 - **Non-OMENative member** — a coordination group referencing a component that
   doesn't resolve to OMENative is rejected.
 - **Duplicate membership** — a component in two groups is rejected.
-- **`ratioTolerance` > 50** is a non-blocking **warning** (it effectively
+- **`ratioTolerancePercent` > 50** is a non-blocking **warning** (it effectively
   disables ratio enforcement), not a rejection.
 
 ## Canary (gradual traffic %) — reserved, not available

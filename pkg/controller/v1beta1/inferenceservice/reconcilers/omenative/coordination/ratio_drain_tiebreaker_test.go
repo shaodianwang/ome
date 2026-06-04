@@ -17,8 +17,8 @@ import (
 func TestEvaluateSurge_DrainTiebreaker(t *testing.T) {
 	eng, dec := v1beta1.EngineComponent, v1beta1.DecoderComponent
 	pacing := v1beta1.CoordinationPacing{
-		Type:           v1beta1.CoordinationPacingRatioBalanced,
-		RatioTolerance: int32Ptr(25), // band [0.75, 1.25]; 2x band [0.5, 1.5]
+		Type:                  v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerancePercent: int32Ptr(25), // band [0.75, 1.25]; 2x band [0.5, 1.5]
 	}
 	cases := []struct {
 		name        string
@@ -101,8 +101,8 @@ func TestEvaluateUpdateGate_RecreatePodSymmetricCleared(t *testing.T) {
 func TestEvaluateSurge_DrainTiebreaker_InFlightOpBoundsAcrossWakeups(t *testing.T) {
 	eng, dec := v1beta1.EngineComponent, v1beta1.DecoderComponent
 	pacing := v1beta1.CoordinationPacing{
-		Type:           v1beta1.CoordinationPacingRatioBalanced,
-		RatioTolerance: int32Ptr(25),
+		Type:                  v1beta1.CoordinationPacingRatioBalanced,
+		RatioTolerancePercent: int32Ptr(25),
 	}
 	// Serving STALE-high at 4:4 (cache hasn't observed the prior drain), but
 	// InFlightUnavail=1 (op-tracked: one engine pod is already mid-recreate).

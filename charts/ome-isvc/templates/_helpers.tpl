@@ -662,8 +662,8 @@ Args:  dict "deployment" . "components" (list of OME component names)
     {{- if hasKey $coord.pacing "maxUnavailable" }}
     maxUnavailable: {{ $coord.pacing.maxUnavailable }}
     {{- end }}
-    {{- if $coord.pacing.ratioTolerance }}
-    ratioTolerance: {{ $coord.pacing.ratioTolerance }}
+    {{- if $coord.pacing.ratioTolerancePercent }}
+    ratioTolerancePercent: {{ $coord.pacing.ratioTolerancePercent }}
     {{- end }}
   {{- end }}
 {{- end -}}

@@ -518,7 +518,7 @@ assertion.
 = 2:1 is clean. 11:7 is not. Mitigation: ratio is enforced as
 "don't let new-pod-count / old-pod-count drift past the original
 ratio + tolerance" with a small default tolerance (5%) tunable via
-`pacing.ratioTolerance`.
+`pacing.ratioTolerancePercent`.
 
 **Per-revision Services proliferate.** During a multi-revision
 rollout an `InferenceService` may have 4–8 active per-revision
@@ -638,7 +638,7 @@ type CoordinationPacing struct {
     // +optional
     // +kubebuilder:validation:Minimum=0
     // +kubebuilder:validation:Maximum=100
-    RatioTolerance *int32 `json:"ratioTolerance,omitempty"`
+    RatioTolerance *int32 `json:"ratioTolerancePercent,omitempty"`
 }
 
 type CoordinationPacingType string
@@ -765,10 +765,10 @@ primarily for gang-readiness rather than ratio enforcement.
 `desiredReplicas` across Components in the group at rollout start
 (e.g., 40:20 = 2:1). During the rollout it refuses to surge new pods
 for one Component if doing so would skew the new-vs-old ratio of any
-other Component past `(originalRatio × (1 ± ratioTolerance%))`.
+other Component past `(originalRatio × (1 ± ratioTolerancePercent%))`.
 
 Concretely for 40 engine : 20 decoder with `maxSurge: 25%` and
-`ratioTolerance: 5`:
+`ratioTolerancePercent: 5`:
 
 - Original ratio: engine:decoder = 2:1
 - Tolerance band: 1.9:1 to 2.1:1
@@ -1214,7 +1214,7 @@ Admission rules added to the `InferenceService` validator:
 | Each Component appears in at most one `groups[]` entry | `DuplicateComponentInCoordinationGroups` |
 | `groups[].components[]` references only `router`, `engine`, `decoder` | `InvalidComponentInCoordinationGroup` |
 | Every Component listed in `groups[]` has `ome.io/deploymentMode=OMENative` | `CoordinationRequiresOMENative` |
-| `policy: BlueGreen` with `pacing.type: RatioBalanced` and `pacing.ratioTolerance > 50%` | `RatioToleranceTooHigh` (admission warning) |
+| `policy: BlueGreen` with `pacing.type: RatioBalanced` and `pacing.ratioTolerancePercent > 50%` | `RatioToleranceTooHigh` (admission warning) |
 | `groups[]` non-empty but `InferenceService` has no Components matching any group | `OrphanCoordinationGroup` |
 | `groups[].order[]` references Components not in `groups[].components[]` | `InvalidCoordinationOrder` |
 | `policy: RollingUpdate` with only one Component | `RollingUpdateRequiresMultipleComponents` |
@@ -1237,7 +1237,7 @@ present, the defaulter fills in:
 - `pacing.type: PerComponent` if no type was given
 - `pacing.maxSurge: "25%"` if absent
 - `pacing.maxUnavailable: 0` if absent
-- `pacing.ratioTolerance: 5` if `pacing.type=RatioBalanced` without
+- `pacing.ratioTolerancePercent: 5` if `pacing.type=RatioBalanced` without
   explicit tolerance
 
 ### Observability
@@ -1500,7 +1500,7 @@ spec:
     groups:
       - components: [engine, decoder]
         policy: RollingUpdate
-        pacing: { type: RatioBalanced, ratioTolerance: 5 }
+        pacing: { type: RatioBalanced, ratioTolerancePercent: 5 }
   # router not listed → Independent (today's v1 default)
 ```
 
@@ -1718,7 +1718,7 @@ no new CRD vendoring.
    paired; document the assertion in the OEP and quickstart.
 3. **RatioBalanced math has tolerance for non-integer ratios.** A
    40:21 topology can't enforce 2:1 exactly. Mitigation: configurable
-   `ratioTolerance` (default 5%).
+   `ratioTolerancePercent` (default 5%).
 4. **Per-revision Service count grows with active revisions.** Bounded
    by `revision-history-limit` (default 3) × Components × 2 (routing
    + headless) — at most ~24 per `InferenceService`. Cheap Kubernetes
