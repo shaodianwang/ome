@@ -63,8 +63,8 @@ def emit(cid, desc, comps, coord=None):
     print(f"  {cid}: {desc}")
 
 
-RB = "{ type: RatioBalanced, ratioTolerance: 25, maxUnavailable: 1 }"
-RB10 = "{ type: RatioBalanced, ratioTolerance: 10, maxUnavailable: 1 }"  # tight band (multi-node p53 analog)
+RB = "{ type: RatioBalanced, ratioTolerancePercent: 25, maxUnavailable: 1 }"
+RB10 = "{ type: RatioBalanced, ratioTolerancePercent: 10, maxUnavailable: 1 }"  # tight band (multi-node p53 analog)
 PC = "{ type: PerComponent, maxUnavailable: 1 }"
 RTR = C("router", 2, 2, 0, "SurgeThenDrain", 1, 0)   # router: single-pod control
 

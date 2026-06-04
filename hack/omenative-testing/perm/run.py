@@ -176,7 +176,7 @@ def get_spec_info(case_id):
         info["soak"] = parse_duration(g.get("soak"))
         pacing = g.get("pacing", {}) or {}
         info["pacing"] = pacing.get("type")
-        info["ratio_tol"] = pacing.get("ratioTolerance")
+        info["ratio_tol"] = pacing.get("ratioTolerancePercent")
     return info
 
 
@@ -1084,7 +1084,7 @@ def run_case(case_id):
         bumped = {"engine"} & configured
     controls = configured - bumped   # non-bumped configured comps = negative control
     # RatioBalanced pair: the two bumped members whose live serving ratio the
-    # CheckRatio gate must hold within ratioTolerance. Only meaningful for a
+    # CheckRatio gate must hold within ratioTolerancePercent. Only meaningful for a
     # 2-member RatioBalanced group.
     rp = [c for c in COMPS if c in bumped and N[c] > 0]
     if pacing == "RatioBalanced" and len(rp) == 2:
@@ -1111,7 +1111,7 @@ def run_case(case_id):
     # 2/4 when the window expired). Add headroom proportional to the bumped pod
     # count for Sequential groups.
     if policy == "Sequential" and len(bumped) > 1:
-        rotate_budget = min(MAX_BUDGET_S, rotate_budget + ROTATE_PER_POD_S * sum(N[c] * ctx["pods_per_inst"][c] for c in bumped))
+        rotate_budget = min(MAX_BUDGET_S, rotate_budget + ROTATE_PER_POD_S * sum(N[c] * (1 + info["workers"].get(c, 0)) for c in bumped))
 
     # Start watcher subprocess.
     print(f"  starting watcher (init≤{init_budget}s, rotate≤{rotate_budget}s)")
@@ -1270,7 +1270,7 @@ def run_case(case_id):
                         done_ts[c] = tnow
                 # RatioBalanced: track the worst serving-ratio deviation between the
                 # two paired members. CheckRatio must keep serving(a):serving(b)
-                # within ratioTolerance of N(a):N(b); a large swing means the gate
+                # within ratioTolerancePercent of N(a):N(b); a large swing means the gate
                 # is not holding (e.g. the IR-path bypass let one race ahead).
                 if ratio_pair:
                     ra = agg.get(ratio_pair[0], (0, 0, 0))[1]
@@ -1566,4 +1566,16 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("usage: run.py <case_id>", file=sys.stderr)
         sys.exit(1)
-    sys.exit(run_case(sys.argv[1]) or 0)
+    _case = sys.argv[1]
+    try:
+        sys.exit(run_case(_case) or 0)
+    except Exception:
+        # Cleanup-on-crash: a case that errors mid-run (before _finish) would
+        # otherwise leak its already-applied ISVC. Always tear it down, then
+        # surface the traceback so the failure is still visible in the log.
+        import traceback
+        traceback.print_exc()
+        _f = find_isvc(_case)
+        if _f:
+            kubectl("delete", "-n", NS, "-f", str(_f), "--wait=false")
+        sys.exit(1)

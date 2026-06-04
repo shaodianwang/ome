@@ -116,7 +116,7 @@ def coord_for(kind, comps=("engine", "decoder")):
     if kind == "rolling":
         return coord_group(cl, "RollingUpdate")
     if kind == "ratio":
-        return coord_group(cl, "RollingUpdate", {"type": "RatioBalanced", "ratioTolerance": 25})
+        return coord_group(cl, "RollingUpdate", {"type": "RatioBalanced", "ratioTolerancePercent": 25})
     if kind == "percomp":
         return coord_group(cl, "RollingUpdate", {"type": "PerComponent"})
     if kind == "seq":
