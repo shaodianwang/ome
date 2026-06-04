@@ -26,7 +26,7 @@ func TestValidateCoordination_MissingCoordinationBlockIsOK(t *testing.T) {
 
 func TestValidateCoordination_EmptyGroupsIsOK(t *testing.T) {
 	spec := &v1beta1.InferenceServiceSpec{
-		RolloutCoordination: &v1beta1.RolloutCoordinationSpec{Groups: nil},
+		Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{Groups: nil}},
 	}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("empty groups: unexpected error %v", err)
@@ -35,12 +35,12 @@ func TestValidateCoordination_EmptyGroupsIsOK(t *testing.T) {
 
 func TestValidateCoordination_DuplicateComponentRejected(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonDuplicateComponentInCoordinationGroups) {
 		t.Errorf("duplicate component: got %v want error with %s", err, ReasonDuplicateComponentInCoordinationGroups)
@@ -49,11 +49,11 @@ func TestValidateCoordination_DuplicateComponentRejected(t *testing.T) {
 
 func TestValidateCoordination_InvalidComponentName(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{Components: []v1beta1.ComponentType{"frontend"}, Policy: v1beta1.CoordinationPolicyBlueGreen},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonInvalidComponentInCoordinationGroup) {
 		t.Errorf("invalid component: got %v want %s", err, ReasonInvalidComponentInCoordinationGroup)
@@ -63,11 +63,11 @@ func TestValidateCoordination_InvalidComponentName(t *testing.T) {
 func TestValidateCoordination_OrphanGroup(t *testing.T) {
 	// Spec declares only engine; group references decoder + router.
 	spec := omeNativeEngineOnlySpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.RouterComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonOrphanCoordinationGroup) {
 		t.Errorf("orphan group: got %v want %s", err, ReasonOrphanCoordinationGroup)
@@ -78,11 +78,11 @@ func TestValidateCoordination_ComponentMustBeOMENative(t *testing.T) {
 	spec := omeNativePDSpec()
 	// Strip the OMENative annotation off engine.
 	spec.Engine.Annotations = map[string]string{}
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonCoordinationRequiresOMENative) {
 		t.Errorf("non-OMENative component: got %v want %s", err, ReasonCoordinationRequiresOMENative)
@@ -91,14 +91,14 @@ func TestValidateCoordination_ComponentMustBeOMENative(t *testing.T) {
 
 func TestValidateCoordination_SequentialWithoutOrder(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 				Policy:     v1beta1.CoordinationPolicySequential,
 			},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonSequentialRequiresOrder) {
 		t.Errorf("sequential without order: got %v want %s", err, ReasonSequentialRequiresOrder)
@@ -112,7 +112,7 @@ func TestValidateCoordination_SequentialIncompleteOrder(t *testing.T) {
 			Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
 		},
 	}
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent, v1beta1.RouterComponent},
@@ -120,7 +120,7 @@ func TestValidateCoordination_SequentialIncompleteOrder(t *testing.T) {
 				Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 			},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonSequentialIncompleteOrder) {
 		t.Errorf("sequential incomplete order: got %v want %s", err, ReasonSequentialIncompleteOrder)
@@ -129,7 +129,7 @@ func TestValidateCoordination_SequentialIncompleteOrder(t *testing.T) {
 
 func TestValidateCoordination_SequentialSingleComponentRejected(t *testing.T) {
 	spec := omeNativeEngineOnlySpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
@@ -137,7 +137,7 @@ func TestValidateCoordination_SequentialSingleComponentRejected(t *testing.T) {
 				Order:      []v1beta1.ComponentType{v1beta1.EngineComponent},
 			},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonSequentialRequiresMultipleComponents) {
 		t.Errorf("sequential single component: got %v want %s", err, ReasonSequentialRequiresMultipleComponents)
@@ -146,14 +146,14 @@ func TestValidateCoordination_SequentialSingleComponentRejected(t *testing.T) {
 
 func TestValidateCoordination_RollingUpdateSingleComponentRejected(t *testing.T) {
 	spec := omeNativeEngineOnlySpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 				Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 			},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonRollingUpdateRequiresMultipleComponents) {
 		t.Errorf("rollingupdate single: got %v want %s", err, ReasonRollingUpdateRequiresMultipleComponents)
@@ -162,7 +162,7 @@ func TestValidateCoordination_RollingUpdateSingleComponentRejected(t *testing.T)
 
 func TestValidateCoordination_InvalidOrderComponent(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -170,7 +170,7 @@ func TestValidateCoordination_InvalidOrderComponent(t *testing.T) {
 				Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.RouterComponent},
 			},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonInvalidCoordinationOrder) {
 		t.Errorf("foreign order entry: got %v want %s", err, ReasonInvalidCoordinationOrder)
@@ -179,11 +179,11 @@ func TestValidateCoordination_InvalidOrderComponent(t *testing.T) {
 
 func TestValidateCoordination_HappyPath_BlueGreen(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
 		},
-	}
+	}}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("happy atomic: unexpected error %v", err)
 	}
@@ -191,7 +191,7 @@ func TestValidateCoordination_HappyPath_BlueGreen(t *testing.T) {
 
 func TestValidateCoordination_HappyPath_Sequential(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
@@ -199,7 +199,7 @@ func TestValidateCoordination_HappyPath_Sequential(t *testing.T) {
 				Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 			},
 		},
-	}
+	}}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("happy sequential: unexpected error %v", err)
 	}
@@ -209,7 +209,7 @@ func TestValidateCoordination_HappyPath_Sequential(t *testing.T) {
 // serializes Components so the cross-Component ratio is undefined.
 func TestValidateCoordination_SequentialWithRatioBalancedRejected(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
@@ -220,7 +220,7 @@ func TestValidateCoordination_SequentialWithRatioBalancedRejected(t *testing.T) 
 				},
 			},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonSequentialIncompatibleWithRatioBalanced) {
 		t.Errorf("Sequential+RatioBalanced: got %v want error with %s", err, ReasonSequentialIncompatibleWithRatioBalanced)
@@ -232,7 +232,7 @@ func TestValidateCoordination_SequentialWithRatioBalancedRejected(t *testing.T) 
 // validator must not over-reject.
 func TestValidateCoordination_SequentialWithPerComponentPacingAccepted(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
@@ -243,7 +243,7 @@ func TestValidateCoordination_SequentialWithPerComponentPacingAccepted(t *testin
 				},
 			},
 		},
-	}
+	}}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("Sequential+PerComponent: unexpected error %v", err)
 	}
@@ -254,7 +254,7 @@ func TestValidateCoordination_SequentialWithPerComponentPacingAccepted(t *testin
 // only fires for Sequential.
 func TestValidateCoordination_RatioBalancedWithBlueGreenAccepted(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -264,7 +264,7 @@ func TestValidateCoordination_RatioBalancedWithBlueGreenAccepted(t *testing.T) {
 				},
 			},
 		},
-	}
+	}}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("BlueGreen+RatioBalanced: unexpected error %v", err)
 	}
@@ -275,7 +275,7 @@ func TestValidateCoordination_RatioBalancedWithBlueGreenAccepted(t *testing.T) {
 func TestValidateCoordination_ZeroBudgetPacingRejected(t *testing.T) {
 	zero := intstr.FromInt(0)
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -287,7 +287,7 @@ func TestValidateCoordination_ZeroBudgetPacingRejected(t *testing.T) {
 				},
 			},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonZeroBudgetPacingUnstartable) {
 		t.Errorf("zero-budget pacing: got %v want error with %s", err, ReasonZeroBudgetPacingUnstartable)
@@ -300,7 +300,7 @@ func TestValidateCoordination_ZeroBudgetPacingRejectedStringForm(t *testing.T) {
 	zeroPct := intstr.FromString("0%")
 	zeroInt := intstr.FromInt(0)
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -312,7 +312,7 @@ func TestValidateCoordination_ZeroBudgetPacingRejectedStringForm(t *testing.T) {
 				},
 			},
 		},
-	}
+	}}
 	err := ValidateCoordination(spec)
 	if err == nil || !strings.Contains(err.Error(), ReasonZeroBudgetPacingUnstartable) {
 		t.Errorf("zero-budget (str/int mix): got %v want error with %s", err, ReasonZeroBudgetPacingUnstartable)
@@ -325,7 +325,7 @@ func TestValidateCoordination_NonZeroSurgePacingAccepted(t *testing.T) {
 	surge := intstr.FromInt(2)
 	zero := intstr.FromInt(0)
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -337,7 +337,7 @@ func TestValidateCoordination_NonZeroSurgePacingAccepted(t *testing.T) {
 				},
 			},
 		},
-	}
+	}}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("non-zero surge + zero unavailable: unexpected error %v", err)
 	}
@@ -349,7 +349,7 @@ func TestValidateCoordination_NonZeroUnavailablePacingAccepted(t *testing.T) {
 	zero := intstr.FromInt(0)
 	pct := intstr.FromString("25%")
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -361,7 +361,7 @@ func TestValidateCoordination_NonZeroUnavailablePacingAccepted(t *testing.T) {
 				},
 			},
 		},
-	}
+	}}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("zero surge + non-zero unavailable: unexpected error %v", err)
 	}
@@ -372,7 +372,7 @@ func TestValidateCoordination_NonZeroUnavailablePacingAccepted(t *testing.T) {
 // zero-budget check only fires when both are explicitly set to 0.
 func TestValidateCoordination_NilPacingAccepted(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -381,7 +381,7 @@ func TestValidateCoordination_NilPacingAccepted(t *testing.T) {
 				// MaxSurge / MaxUnavailable nil — defaulter fills 25%.
 			},
 		},
-	}
+	}}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("nil pacing values: unexpected error %v", err)
 	}
@@ -391,7 +391,7 @@ func TestValidateCoordination_NilPacingAccepted(t *testing.T) {
 // the defaulter fills a complete pacing block.
 func TestValidateCoordination_OmittedPacingAccepted(t *testing.T) {
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -399,7 +399,7 @@ func TestValidateCoordination_OmittedPacingAccepted(t *testing.T) {
 				// Pacing entirely absent.
 			},
 		},
-	}
+	}}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("omitted pacing: unexpected error %v", err)
 	}
@@ -412,7 +412,7 @@ func TestValidateCoordination_OmittedPacingAccepted(t *testing.T) {
 func TestValidateCoordination_RatioBalancedWithZeroBudgetNotRejected(t *testing.T) {
 	zero := intstr.FromInt(0)
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -424,7 +424,7 @@ func TestValidateCoordination_RatioBalancedWithZeroBudgetNotRejected(t *testing.
 				},
 			},
 		},
-	}
+	}}
 	if err := ValidateCoordination(spec); err != nil {
 		t.Errorf("RatioBalanced + zero surge/unavailable: unexpected error %v (zero-budget check is PerComponent-only)", err)
 	}
@@ -433,11 +433,11 @@ func TestValidateCoordination_RatioBalancedWithZeroBudgetNotRejected(t *testing.
 func TestValidateCoordinationUpdate_RollingUpdateBothBumped(t *testing.T) {
 	oldSpec := omeNativePDSpecWithImages("v1", "v1")
 	newSpec := omeNativePDSpecWithImages("v2", "v2")
-	newSpec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	newSpec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyRollingUpdate},
 		},
-	}
+	}}
 	if err := ValidateCoordinationUpdate(oldSpec, newSpec); err != nil {
 		t.Errorf("pairedmixable both-bumped: unexpected error %v", err)
 	}
@@ -446,11 +446,11 @@ func TestValidateCoordinationUpdate_RollingUpdateBothBumped(t *testing.T) {
 func TestValidateCoordinationUpdate_RollingUpdateOnlyOneBumpedRejected(t *testing.T) {
 	oldSpec := omeNativePDSpecWithImages("v1", "v1")
 	newSpec := omeNativePDSpecWithImages("v2", "v1")
-	newSpec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	newSpec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyRollingUpdate},
 		},
-	}
+	}}
 	err := ValidateCoordinationUpdate(oldSpec, newSpec)
 	if err == nil || !strings.Contains(err.Error(), ReasonRollingUpdateLockstepViolation) {
 		t.Errorf("rollingupdate lockstep: got %v want %s", err, ReasonRollingUpdateLockstepViolation)
@@ -460,11 +460,11 @@ func TestValidateCoordinationUpdate_RollingUpdateOnlyOneBumpedRejected(t *testin
 func TestValidateCoordinationUpdate_RollingUpdateNoBumpsNoOp(t *testing.T) {
 	oldSpec := omeNativePDSpecWithImages("v1", "v1")
 	newSpec := omeNativePDSpecWithImages("v1", "v1")
-	newSpec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	newSpec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyRollingUpdate},
 		},
-	}
+	}}
 	if err := ValidateCoordinationUpdate(oldSpec, newSpec); err != nil {
 		t.Errorf("no bumps: unexpected error %v", err)
 	}
@@ -473,7 +473,7 @@ func TestValidateCoordinationUpdate_RollingUpdateNoBumpsNoOp(t *testing.T) {
 func TestCoordinationRatioToleranceWarning_AboveThreshold(t *testing.T) {
 	tol := int32(80)
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -484,7 +484,7 @@ func TestCoordinationRatioToleranceWarning_AboveThreshold(t *testing.T) {
 				},
 			},
 		},
-	}
+	}}
 	w := CoordinationRatioToleranceWarning(spec)
 	if !strings.Contains(w, ReasonRatioToleranceTooHigh) {
 		t.Errorf("tolerance warning: got %q want contains %s", w, ReasonRatioToleranceTooHigh)
@@ -494,7 +494,7 @@ func TestCoordinationRatioToleranceWarning_AboveThreshold(t *testing.T) {
 func TestCoordinationRatioToleranceWarning_BelowThresholdEmpty(t *testing.T) {
 	tol := int32(5)
 	spec := omeNativePDSpec()
-	spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -505,7 +505,7 @@ func TestCoordinationRatioToleranceWarning_BelowThresholdEmpty(t *testing.T) {
 				},
 			},
 		},
-	}
+	}}
 	if w := CoordinationRatioToleranceWarning(spec); w != "" {
 		t.Errorf("safe tolerance: got %q want empty", w)
 	}

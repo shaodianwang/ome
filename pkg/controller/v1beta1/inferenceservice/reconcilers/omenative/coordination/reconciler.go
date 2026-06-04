@@ -23,7 +23,7 @@ import (
 // every Component's per-Component reconciler has run).
 type ReconcileInputs struct {
 	// ISVC is the parent InferenceService. The coordination layer
-	// reads ISVC.Spec.RolloutCoordination and writes
+	// reads ISVC.Spec.Rollout.Coordination and writes
 	// ISVC.Status.RolloutCoordination + per-Component
 	// Status.Components.<c>.Traffic.
 	ISVC *v1beta1.InferenceService
@@ -68,7 +68,7 @@ type Result struct {
 // reconciler once per ISVC reconcile, after every Component's
 // per-Component reconciler has run. It:
 //
-//  1. resolves the spec.rolloutCoordination.groups[] declaration
+//  1. resolves the spec.rollout.coordination.groups[] declaration
 //  2. observes each Component's current per-revision pod state
 //  3. drives the per-policy state machine
 //  4. ensures per-revision Services
@@ -90,7 +90,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	groups := ResolveGroups(in.ISVC.Spec.RolloutCoordination)
+	groups := ResolveGroups(in.ISVC.Spec.GetRolloutCoordination())
 	result := &Result{}
 
 	// Bind a logger keyed to the ISVC so every downstream V(1)
@@ -103,7 +103,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	ctx = log.IntoContext(ctx, logger)
 
 	// Per-revision Service / Traffic[] producer: emitted for EVERY
-	// OMENative-mode Component, with or without a rolloutCoordination
+	// OMENative-mode Component, with or without a spec.rollout.coordination
 	// group declared. These artifacts are the data-plane for the
 	// HTTPRoute weighted-backendRef consumer; an opt-in gate would
 	// break the traffic layer for ISVCs that haven't (yet) declared a
@@ -122,14 +122,14 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		"components", componentsTouched)
 
 	// Informational hint: ISVC has multiple OMENative Components but
-	// no rolloutCoordination block declared. Default behavior rolls
+	// no spec.rollout.coordination block declared. Default behavior rolls
 	// each Component independently, which can break PD pairs or
 	// shared-state workloads. Operator may want a coord group.
 	// K8s event recorder aggregates by (reason, involvedObject) so
 	// repeated firings collapse to one event with a count.
 	if len(componentsTouched) >= 2 && len(groups) == 0 && in.Recorder != nil {
 		in.Recorder.Eventf(in.ISVC, corev1.EventTypeNormal, EventReasonConsiderCoordinationGroup,
-			"InferenceService has %d OMENative Components (%v) but no rolloutCoordination block declared; consider adding a coord group to define rollout behavior across them",
+			"InferenceService has %d OMENative Components (%v) but no spec.rollout.coordination block declared; consider adding a coord group to define rollout behavior across them",
 			len(componentsTouched), componentsTouched)
 	}
 

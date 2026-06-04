@@ -265,7 +265,7 @@ func TestCheckRatioGate_NoCoordBlock(t *testing.T) {
 func TestCheckRatioGate_PerComponentPacingBypasses(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -273,7 +273,7 @@ func TestCheckRatioGate_PerComponentPacingBypasses(t *testing.T) {
 						Type: v1beta1.CoordinationPacingPerComponent,
 					},
 				}},
-			},
+			}},
 		},
 	}
 	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
@@ -288,7 +288,7 @@ func TestCheckRatioGate_FirstReconcileAllowed(t *testing.T) {
 	// next pass.
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -297,7 +297,7 @@ func TestCheckRatioGate_FirstReconcileAllowed(t *testing.T) {
 						RatioTolerance: int32Ptr(5),
 					},
 				}},
-			},
+			}},
 		},
 	}
 	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
@@ -398,7 +398,7 @@ func TestCheckRatioGate_PDScenarioWiderToleranceAllowsDrain(t *testing.T) {
 func TestCheckRatioGate_SingleComponentGroupBypasses(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -407,7 +407,7 @@ func TestCheckRatioGate_SingleComponentGroupBypasses(t *testing.T) {
 						RatioTolerance: int32Ptr(0),
 					},
 				}},
-			},
+			}},
 		},
 	}
 	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
@@ -420,7 +420,7 @@ func TestCheckRatioGate_ComponentNotInAnyGroup(t *testing.T) {
 	// router not in declared group → no gate, allowed.
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -428,7 +428,7 @@ func TestCheckRatioGate_ComponentNotInAnyGroup(t *testing.T) {
 						Type: v1beta1.CoordinationPacingRatioBalanced,
 					},
 				}},
-			},
+			}},
 		},
 	}
 	allowed, _ := CheckRatioGate(isvc, v1beta1.RouterComponent, 0)
@@ -450,7 +450,7 @@ func TestCheckRatioGate_InFlightProjectionTightensBand(t *testing.T) {
 	tol := int32(10)
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
@@ -459,7 +459,7 @@ func TestCheckRatioGate_InFlightProjectionTightensBand(t *testing.T) {
 						RatioTolerance: &tol,
 					},
 				}},
-			},
+			}},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
@@ -531,7 +531,7 @@ func TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock(t *testing.T) {
 	tol := int32(25)
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -540,7 +540,7 @@ func TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock(t *testing.T) {
 						RatioTolerance: &tol,
 					},
 				}},
-			},
+			}},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
@@ -595,7 +595,7 @@ func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.
 	tol := int32(25)
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -604,7 +604,7 @@ func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.
 						RatioTolerance: &tol,
 					},
 				}},
-			},
+			}},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
@@ -657,7 +657,7 @@ func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.
 func mkPDFixture(tolerance *int32) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -666,7 +666,7 @@ func mkPDFixture(tolerance *int32) *v1beta1.InferenceService {
 						RatioTolerance: tolerance,
 					},
 				}},
-			},
+			}},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
@@ -710,11 +710,11 @@ func TestCheckUnavailabilityGate_NoCoordBlock(t *testing.T) {
 func TestCheckUnavailabilityGate_ComponentNotInAnyGroup(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 				}},
-			},
+			}},
 		},
 	}
 	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.RouterComponent, 0)
@@ -879,7 +879,7 @@ func iosInt(v int) *intstr.IntOrString {
 func mkUnavailFixture(maxUnavail *intstr.IntOrString) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -888,7 +888,7 @@ func mkUnavailFixture(maxUnavail *intstr.IntOrString) *v1beta1.InferenceService 
 						MaxUnavailable: maxUnavail,
 					},
 				}},
-			},
+			}},
 		},
 	}
 }
@@ -904,7 +904,7 @@ func mkUnavailFixture(maxUnavail *intstr.IntOrString) *v1beta1.InferenceService 
 func mkSurgeFixture(maxSurge *intstr.IntOrString) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -913,7 +913,7 @@ func mkSurgeFixture(maxSurge *intstr.IntOrString) *v1beta1.InferenceService {
 						MaxSurge: maxSurge,
 					},
 				}},
-			},
+			}},
 		},
 	}
 }

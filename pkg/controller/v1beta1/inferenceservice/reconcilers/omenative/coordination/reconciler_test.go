@@ -50,7 +50,7 @@ func TestReconcile_NoOpForNonOMENativeISVC(t *testing.T) {
 
 func TestReconcile_EmitsPerRevisionServiceForOMENativeComponent(t *testing.T) {
 	isvc := testOMENativeISVC()
-	isvc.Spec.RolloutCoordination = independentEngineGroup()
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: independentEngineGroup()}
 	pods := []runtime.Object{
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 1),
@@ -109,7 +109,7 @@ func TestReconcile_DataPlaneRunsWithoutCoordinationGroup(t *testing.T) {
 
 func TestReconcile_WritesTrafficStatus(t *testing.T) {
 	isvc := testOMENativeISVC()
-	isvc.Spec.RolloutCoordination = independentEngineGroup()
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: independentEngineGroup()}
 	pods := []runtime.Object{
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 1),
@@ -286,11 +286,11 @@ func independentEngineGroup() *v1beta1.RolloutCoordinationSpec {
 
 func TestReconcile_WritesGroupStatus(t *testing.T) {
 	isvc := testOMENativeISVC()
-	isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyIndependent},
 		},
-	}
+	}}
 	pods := []runtime.Object{buildPod(isvc, v1beta1.EngineComponent, "hash1", 0)}
 	c := testClient(pods...)
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
@@ -317,14 +317,14 @@ func TestReconcile_InvalidGroupShapeErrors(t *testing.T) {
 	isvc := testOMENativeISVC()
 	// Sequential without order — Should be caught by webhook in
 	// production, but ValidateGroupShape is the runtime safety net.
-	isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 				Policy:     v1beta1.CoordinationPolicySequential,
 			},
 		},
-	}
+	}}
 	c := testClient()
 	_, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
@@ -457,12 +457,12 @@ func TestReconcile_ConsiderCoordinationGroupEventNotFiredWhenGroupDeclared(t *te
 			},
 		},
 	}
-	isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 			Policy:     v1beta1.CoordinationPolicyBlueGreen,
 		}},
-	}
+	}}
 	rec := record.NewFakeRecorder(10)
 	c := testClient()
 	_, err := Reconcile(context.Background(), ReconcileInputs{

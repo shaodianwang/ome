@@ -14,11 +14,11 @@ import (
 // group, after defaults are applied and the group is indexed.
 type ResolvedGroup struct {
 	// Name is the stable identifier for the group, derived from the
-	// group's position in spec.rolloutCoordination.groups[].
+	// group's position in spec.rollout.coordination.groups[].
 	Name string
 
 	// Index is the group's position in
-	// spec.rolloutCoordination.groups[].
+	// spec.rollout.coordination.groups[].
 	Index int
 
 	// Components is the deduplicated, order-preserving Component set
@@ -43,7 +43,7 @@ type ResolvedGroup struct {
 	Soak time.Duration
 }
 
-// ResolveGroups turns spec.rolloutCoordination into a slice of
+// ResolveGroups turns spec.rollout.coordination into a slice of
 // ResolvedGroups in declaration order. Returns an empty slice when no
 // coordination block is declared.
 func ResolveGroups(spec *v1beta1.RolloutCoordinationSpec) []ResolvedGroup {

@@ -69,7 +69,7 @@ somewhere to fall back to while CC is still being hardened.
 When you change the spec (e.g. a new image), OMENative rolls the pods. You
 control it at two layers in the ISVC.
 
-### Layer A — group `rolloutCoordination`: how components roll *together*
+### Layer A — group `rollout.coordination`: how components roll *together*
 
 | Policy | What happens | Best for |
 |--------|--------------|----------|

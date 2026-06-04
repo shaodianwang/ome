@@ -68,17 +68,12 @@ type InferenceServiceSpec struct {
 	// +optional
 	Traffic *TrafficSpec `json:"traffic,omitempty"`
 
-	// RolloutCoordination declares cross-Component rollout coupling
-	// for OMENative-managed Components. Each group lists the
-	// Components that roll together and the policy that governs their
-	// coordination. Components not listed in any group roll
-	// independently (the default).
-	//
-	// Only meaningful when at least one referenced Component uses
-	// ome.io/deploymentMode=OMENative. Webhook rejects groups that
-	// reference non-OMENative Components.
+	// Rollout is the single home for rollout configuration on this
+	// InferenceService: cross-Component coordination
+	// (spec.rollout.coordination), plus a reserved, not-yet-implemented
+	// progressive-traffic canary plan (spec.rollout.canary).
 	// +optional
-	RolloutCoordination *RolloutCoordinationSpec `json:"rolloutCoordination,omitempty"`
+	Rollout *RolloutSpec `json:"rollout,omitempty"`
 
 	// ScalingPolicy coordinates replica counts across Components when more
 	// than one autoscaler would otherwise drift (e.g., engine + decoder in
@@ -87,6 +82,16 @@ type InferenceServiceSpec struct {
 	// may change without notice.
 	// +optional
 	ScalingPolicy *ScalingPolicy `json:"scalingPolicy,omitempty"`
+}
+
+// GetRolloutCoordination returns the cross-Component coordination spec
+// (spec.rollout.coordination), or nil if spec.rollout or its coordination is
+// unset. Nil-safe on a nil receiver so callers can drop their own guards.
+func (s *InferenceServiceSpec) GetRolloutCoordination() *RolloutCoordinationSpec {
+	if s == nil || s.Rollout == nil {
+		return nil
+	}
+	return s.Rollout.Coordination
 }
 
 // EngineSpec defines the configuration for the Engine component (can be used for both single-node and multi-node deployments)

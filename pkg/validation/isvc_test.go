@@ -569,14 +569,14 @@ func TestValidateSequentialMultiPodOrder(t *testing.T) {
 			spec: &v1beta1.InferenceServiceSpec{
 				Engine:  multiPodEngine,
 				Decoder: multiPodDecoder,
-				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 					Groups: []v1beta1.RolloutCoordinationGroup{
 						{
 							Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 							Policy:     v1beta1.CoordinationPolicyBlueGreen,
 						},
 					},
-				},
+				}},
 			},
 		},
 		{
@@ -584,14 +584,14 @@ func TestValidateSequentialMultiPodOrder(t *testing.T) {
 			spec: &v1beta1.InferenceServiceSpec{
 				Engine:  &v1beta1.EngineSpec{},
 				Decoder: &v1beta1.DecoderSpec{},
-				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 					Groups: []v1beta1.RolloutCoordinationGroup{
 						{
 							Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 							Policy:     v1beta1.CoordinationPolicySequential,
 						},
 					},
-				},
+				}},
 			},
 		},
 		{
@@ -599,14 +599,14 @@ func TestValidateSequentialMultiPodOrder(t *testing.T) {
 			spec: &v1beta1.InferenceServiceSpec{
 				Engine:  multiPodEngine,
 				Decoder: &v1beta1.DecoderSpec{},
-				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 					Groups: []v1beta1.RolloutCoordinationGroup{
 						{
 							Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 							Policy:     v1beta1.CoordinationPolicySequential,
 						},
 					},
-				},
+				}},
 			},
 			wantErr: true,
 		},
@@ -615,14 +615,14 @@ func TestValidateSequentialMultiPodOrder(t *testing.T) {
 			spec: &v1beta1.InferenceServiceSpec{
 				Engine:  &v1beta1.EngineSpec{},
 				Decoder: multiPodDecoder,
-				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 					Groups: []v1beta1.RolloutCoordinationGroup{
 						{
 							Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 							Policy:     v1beta1.CoordinationPolicySequential,
 						},
 					},
-				},
+				}},
 			},
 			wantErr: true,
 		},
@@ -631,7 +631,7 @@ func TestValidateSequentialMultiPodOrder(t *testing.T) {
 			spec: &v1beta1.InferenceServiceSpec{
 				Engine:  multiPodEngine,
 				Decoder: multiPodDecoder,
-				RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+				Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 					Groups: []v1beta1.RolloutCoordinationGroup{
 						{
 							Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
@@ -639,7 +639,7 @@ func TestValidateSequentialMultiPodOrder(t *testing.T) {
 							Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 						},
 					},
-				},
+				}},
 			},
 		},
 	}

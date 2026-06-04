@@ -30,7 +30,7 @@ var _ = ginkgo.Describe("baseline — PD without rolloutCoordination", ginkgo.Or
 	ginkgo.It("A-6 engine + decoder converge with no rolloutCoordination block; status.rolloutCoordination stays nil", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("nocoord-a6"),
 			WithEngineImage("fake-serving:v1"))
-		// No WithCoordinationGroup → fixture leaves Spec.RolloutCoordination
+		// No WithCoordinationGroup → fixture leaves Spec.Rollout
 		// nil. Both Components are still OMENative; the coordination layer
 		// just doesn't engage.
 		applyFixture(Default, fix)

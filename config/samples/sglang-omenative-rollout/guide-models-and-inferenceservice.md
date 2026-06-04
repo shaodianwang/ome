@@ -60,7 +60,7 @@ The InferenceService is the resource you deploy. A minimal OMENative one has:
 - one or more components — `engine`, `decoder`, `router` — each with
   `minReplicas`/`maxReplicas`, an optional `priorityClassName`, and an optional
   `lifecycle` block.
-- optional `spec.rolloutCoordination` — how the components roll together.
+- optional `spec.rollout.coordination` — how the components roll together.
 
 That's the whole surface a scientist touches: which runtime, how many of each
 component, and how upgrades should behave.

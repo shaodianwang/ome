@@ -3,7 +3,7 @@
 #
 # As a scientist you set two things here:
 #   1. replicas per component (engine = prefill, decoder = decode, router)
-#   2. rollout behavior — group `rolloutCoordination` (how components roll
+#   2. rollout behavior — group `rollout.coordination` (how components roll
 #      relative to each other) + per-component `lifecycle` (how one component's
 #      pods roll). See README for the full menu (Sequential / BlueGreen /
 #      RollingUpdate / Independent + the lifecycle update strategies).
@@ -61,12 +61,13 @@ spec:
     minReplicas: 1
     maxReplicas: 1
     priorityClassName: staging
-  rolloutCoordination:
-    groups:
-      - components: [engine, decoder]
-        policy: RollingUpdate          # parallel roll, mixed revisions tolerated
-        pacing:
-          type: RatioBalanced          # surge prefill : decode in lockstep
-          maxSurge: 1                  # +1 pod of headroom across the group
-          maxUnavailable: 0            # never drop below serving capacity
-          ratioTolerance: 5            # keep prefill:decode within 5% of start
+  rollout:
+    coordination:
+      groups:
+        - components: [engine, decoder]
+          policy: RollingUpdate          # parallel roll, mixed revisions tolerated
+          pacing:
+            type: RatioBalanced          # surge prefill : decode in lockstep
+            maxSurge: 1                  # +1 pod of headroom across the group
+            maxUnavailable: 0            # never drop below serving capacity
+            ratioTolerance: 5            # keep prefill:decode within 5% of start

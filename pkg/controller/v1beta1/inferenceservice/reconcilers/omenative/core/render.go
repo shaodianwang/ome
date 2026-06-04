@@ -78,11 +78,15 @@ func ISVCRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
 // entry point so the existing RenderWithRevisionForISVC wiring keeps
 // using the unqualified name.
 func isvcRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
-	if isvc == nil || isvc.Spec.RolloutCoordination == nil {
+	if isvc == nil {
+		return nil
+	}
+	coord := isvc.Spec.GetRolloutCoordination()
+	if coord == nil {
 		return nil
 	}
 	return func(pod *corev1.Pod, _ string, _ int32, revisionHash string) {
-		groups := coordination.ResolveGroups(isvc.Spec.RolloutCoordination)
+		groups := coordination.ResolveGroups(coord)
 		// component is recoverable from the pod's ome.io/component label.
 		c := v1beta1.ComponentType(pod.Labels["ome.io/component"])
 		peers := coordination.SortedPeers(groups, c, nil)

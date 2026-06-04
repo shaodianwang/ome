@@ -364,24 +364,6 @@ func TestValidateTrafficAnnotations_CrossRules(t *testing.T) {
 			},
 			wantOK: true,
 		},
-		{
-			name: "rollout-promote without spec.traffic.rollout warns (annotation is a no-op)",
-			annotations: map[string]string{
-				constants.RolloutPromoteAnnotation: "2",
-			},
-			wantOK:      true,
-			wantWarning: "no-op without spec.traffic.rollout",
-		},
-		{
-			name: "rollout-promote with spec.traffic.rollout — no warning",
-			annotations: map[string]string{
-				constants.RolloutPromoteAnnotation: "2",
-			},
-			traffic: &v1beta1.TrafficSpec{
-				Rollout: &v1beta1.RolloutSpec{},
-			},
-			wantOK: true,
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

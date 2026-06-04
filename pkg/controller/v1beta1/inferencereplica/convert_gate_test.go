@@ -20,13 +20,13 @@ func mkSequentialParent() *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "default", Generation: 2},
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 					Policy:     v1beta1.CoordinationPolicySequential,
 					Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 				}},
-			},
+			}},
 		},
 	}
 }
@@ -175,7 +175,7 @@ func TestBuildReconcileInput_GateUsesFreshIRStatus(t *testing.T) {
 	parent := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "default", Generation: 1},
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
@@ -184,7 +184,7 @@ func TestBuildReconcileInput_GateUsesFreshIRStatus(t *testing.T) {
 						RatioTolerance: &tol,
 					},
 				}},
-			},
+			}},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{

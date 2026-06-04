@@ -24,7 +24,7 @@ func mkBug1Fixture() *v1beta1.InferenceService {
 	tol := int32(25)
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -33,7 +33,7 @@ func mkBug1Fixture() *v1beta1.InferenceService {
 						RatioTolerance: &tol,
 					},
 				}},
-			},
+			}},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{

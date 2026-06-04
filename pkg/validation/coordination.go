@@ -1,6 +1,6 @@
 // Cross-Component rollout coordination validation.
 //
-// Webhook-level admission rules for spec.rolloutCoordination.groups[]:
+// Webhook-level admission rules for spec.rollout.coordination.groups[]:
 // per-group structural checks (duplicate components, order coverage,
 // policy-specific requirements) and cross-spec checks (Components in
 // a group must declare OMENative deployment mode; RollingUpdate
@@ -48,7 +48,7 @@ var validComponents = map[v1beta1.ComponentType]struct{}{
 	v1beta1.DecoderComponent: {},
 }
 
-// ValidateCoordination runs the spec.rolloutCoordination.groups[]
+// ValidateCoordination runs the spec.rollout.coordination.groups[]
 // admission rules. Returns the first error encountered; nil on
 // success.
 //
@@ -56,10 +56,11 @@ var validComponents = map[v1beta1.ComponentType]struct{}{
 // lockstep) here — those need the prior object to compare against.
 // ValidateCoordinationUpdate is the entry point for those.
 func ValidateCoordination(spec *v1beta1.InferenceServiceSpec) error {
-	if spec == nil || spec.RolloutCoordination == nil {
+	coord := spec.GetRolloutCoordination()
+	if coord == nil {
 		return nil
 	}
-	groups := spec.RolloutCoordination.Groups
+	groups := coord.Groups
 	if len(groups) == 0 {
 		return nil
 	}
@@ -90,10 +91,11 @@ func ValidateCoordination(spec *v1beta1.InferenceServiceSpec) error {
 // bump" lockstep. The full structural validation should be invoked
 // separately on the new spec.
 func ValidateCoordinationUpdate(oldSpec, newSpec *v1beta1.InferenceServiceSpec) error {
-	if newSpec == nil || newSpec.RolloutCoordination == nil {
+	newCoord := newSpec.GetRolloutCoordination()
+	if newCoord == nil {
 		return nil
 	}
-	for _, g := range newSpec.RolloutCoordination.Groups {
+	for _, g := range newCoord.Groups {
 		if g.Policy != v1beta1.CoordinationPolicyRollingUpdate {
 			continue
 		}
@@ -108,10 +110,11 @@ func ValidateCoordinationUpdate(oldSpec, newSpec *v1beta1.InferenceServiceSpec) 
 // RatioBalanced group sets a ratio tolerance above the safe
 // threshold. Empty when no warning applies.
 func CoordinationRatioToleranceWarning(spec *v1beta1.InferenceServiceSpec) string {
-	if spec == nil || spec.RolloutCoordination == nil {
+	coord := spec.GetRolloutCoordination()
+	if coord == nil {
 		return ""
 	}
-	for i, g := range spec.RolloutCoordination.Groups {
+	for i, g := range coord.Groups {
 		if g.Pacing == nil || g.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
 			continue
 		}
@@ -120,7 +123,7 @@ func CoordinationRatioToleranceWarning(spec *v1beta1.InferenceServiceSpec) strin
 		}
 		if *g.Pacing.RatioTolerance > ratioToleranceWarningThreshold {
 			return fmt.Sprintf(
-				"spec.rolloutCoordination.groups[%d].pacing.ratioTolerance=%d effectively disables ratio enforcement (>%d) (%s)",
+				"spec.rollout.coordination.groups[%d].pacing.ratioTolerance=%d effectively disables ratio enforcement (>%d) (%s)",
 				i, *g.Pacing.RatioTolerance, ratioToleranceWarningThreshold, ReasonRatioToleranceTooHigh)
 		}
 	}
@@ -131,7 +134,7 @@ func validateGroupShapes(groups []v1beta1.RolloutCoordinationGroup) error {
 	for i, g := range groups {
 		for _, c := range g.Components {
 			if _, ok := validComponents[c]; !ok {
-				return fmt.Errorf("spec.rolloutCoordination.groups[%d]: component %q is not one of router/engine/decoder (%s)",
+				return fmt.Errorf("spec.rollout.coordination.groups[%d]: component %q is not one of router/engine/decoder (%s)",
 					i, c, ReasonInvalidComponentInCoordinationGroup)
 			}
 		}
@@ -142,7 +145,7 @@ func validateGroupShapes(groups []v1beta1.RolloutCoordinationGroup) error {
 			}
 		case v1beta1.CoordinationPolicyRollingUpdate:
 			if len(g.Components) < 2 {
-				return fmt.Errorf("spec.rolloutCoordination.groups[%d]: RollingUpdate requires at least 2 components (%s)",
+				return fmt.Errorf("spec.rollout.coordination.groups[%d]: RollingUpdate requires at least 2 components (%s)",
 					i, ReasonRollingUpdateRequiresMultipleComponents)
 			}
 		case v1beta1.CoordinationPolicyBlueGreen:
@@ -160,15 +163,15 @@ func validateGroupShapes(groups []v1beta1.RolloutCoordinationGroup) error {
 
 func validateSequentialGroup(idx int, g v1beta1.RolloutCoordinationGroup) error {
 	if len(g.Components) < 2 {
-		return fmt.Errorf("spec.rolloutCoordination.groups[%d]: Sequential requires at least 2 components (%s)",
+		return fmt.Errorf("spec.rollout.coordination.groups[%d]: Sequential requires at least 2 components (%s)",
 			idx, ReasonSequentialRequiresMultipleComponents)
 	}
 	if len(g.Order) == 0 {
-		return fmt.Errorf("spec.rolloutCoordination.groups[%d]: Sequential requires order (%s)",
+		return fmt.Errorf("spec.rollout.coordination.groups[%d]: Sequential requires order (%s)",
 			idx, ReasonSequentialRequiresOrder)
 	}
 	if len(g.Order) != len(g.Components) {
-		return fmt.Errorf("spec.rolloutCoordination.groups[%d]: Sequential order must cover every component (%s)",
+		return fmt.Errorf("spec.rollout.coordination.groups[%d]: Sequential order must cover every component (%s)",
 			idx, ReasonSequentialIncompleteOrder)
 	}
 	return validateOrderSubset(idx, g.Components, g.Order)
@@ -185,11 +188,11 @@ func validateOrderSubset(idx int, components, order []v1beta1.ComponentType) err
 	seen := make(map[v1beta1.ComponentType]struct{}, len(order))
 	for _, c := range order {
 		if _, ok := in[c]; !ok {
-			return fmt.Errorf("spec.rolloutCoordination.groups[%d]: order entry %q is not in components (%s)",
+			return fmt.Errorf("spec.rollout.coordination.groups[%d]: order entry %q is not in components (%s)",
 				idx, c, ReasonInvalidCoordinationOrder)
 		}
 		if _, dup := seen[c]; dup {
-			return fmt.Errorf("spec.rolloutCoordination.groups[%d]: order entry %q appears more than once; each Component must walk the Sequential / BlueGreen order exactly once (%s)",
+			return fmt.Errorf("spec.rollout.coordination.groups[%d]: order entry %q appears more than once; each Component must walk the Sequential / BlueGreen order exactly once (%s)",
 				idx, c, ReasonSequentialDuplicateOrder)
 		}
 		seen[c] = struct{}{}
@@ -202,7 +205,7 @@ func validateNoDuplicateMembership(groups []v1beta1.RolloutCoordinationGroup) er
 	for i, g := range groups {
 		for _, c := range g.Components {
 			if prev, ok := seen[c]; ok {
-				return fmt.Errorf("spec.rolloutCoordination.groups: component %q appears in groups[%d] and groups[%d] (%s)",
+				return fmt.Errorf("spec.rollout.coordination.groups: component %q appears in groups[%d] and groups[%d] (%s)",
 					c, prev, i, ReasonDuplicateComponentInCoordinationGroups)
 			}
 			seen[c] = i
@@ -222,7 +225,7 @@ func validateOrphanGroups(spec *v1beta1.InferenceServiceSpec, groups []v1beta1.R
 			}
 		}
 		if !anyDeclared {
-			return fmt.Errorf("spec.rolloutCoordination.groups[%d]: no component in this group is declared on the InferenceService (%s)",
+			return fmt.Errorf("spec.rollout.coordination.groups[%d]: no component in this group is declared on the InferenceService (%s)",
 				i, ReasonOrphanCoordinationGroup)
 		}
 	}
@@ -239,7 +242,7 @@ func validateComponentsAreOMENative(spec *v1beta1.InferenceServiceSpec, groups [
 				continue
 			}
 			if declared != string(constants.OMENative) {
-				return fmt.Errorf("spec.rolloutCoordination.groups[%d]: component %q has deploymentMode=%q; coordination requires OMENative (%s)",
+				return fmt.Errorf("spec.rollout.coordination.groups[%d]: component %q has deploymentMode=%q; coordination requires OMENative (%s)",
 					i, c, declared, ReasonCoordinationRequiresOMENative)
 			}
 		}
@@ -265,7 +268,7 @@ func validatePacingCompatibility(groups []v1beta1.RolloutCoordinationGroup) erro
 			continue
 		}
 		if g.Pacing.Type == v1beta1.CoordinationPacingRatioBalanced {
-			return fmt.Errorf("spec.rolloutCoordination.groups[%d]: Sequential cannot use RatioBalanced pacing — only one Component rolls at a time, so the cross-Component ratio is undefined (%s)",
+			return fmt.Errorf("spec.rollout.coordination.groups[%d]: Sequential cannot use RatioBalanced pacing — only one Component rolls at a time, so the cross-Component ratio is undefined (%s)",
 				i, ReasonSequentialIncompatibleWithRatioBalanced)
 		}
 	}
@@ -301,7 +304,7 @@ func validatePacingNotZeroBudget(groups []v1beta1.RolloutCoordinationGroup) erro
 		if !explicitZeroIntOrString(g.Pacing.MaxSurge) || !explicitZeroIntOrString(g.Pacing.MaxUnavailable) {
 			continue
 		}
-		return fmt.Errorf("spec.rolloutCoordination.groups[%d]: maxSurge=0 AND maxUnavailable=0 deadlocks rollouts — set at least one non-zero (%s)",
+		return fmt.Errorf("spec.rollout.coordination.groups[%d]: maxSurge=0 AND maxUnavailable=0 deadlocks rollouts — set at least one non-zero (%s)",
 			i, ReasonZeroBudgetPacingUnstartable)
 	}
 	return nil
@@ -334,7 +337,7 @@ func validateRollingUpdateLockstep(oldSpec, newSpec *v1beta1.InferenceServiceSpe
 		}
 	}
 	if anyChanged && !allChanged {
-		return fmt.Errorf("spec.rolloutCoordination: RollingUpdate group requires all components to bump together (%s)",
+		return fmt.Errorf("spec.rollout.coordination: RollingUpdate group requires all components to bump together (%s)",
 			ReasonRollingUpdateLockstepViolation)
 	}
 	return nil

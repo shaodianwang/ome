@@ -25553,70 +25553,110 @@ spec:
                   required:
                     - name
                   type: object
-                rolloutCoordination:
+                rollout:
                   properties:
-                    groups:
-                      items:
-                        properties:
-                          components:
-                            items:
-                              type: string
-                            minItems: 1
-                            type: array
-                            x-kubernetes-list-type: atomic
-                          order:
-                            items:
-                              type: string
-                            type: array
-                            x-kubernetes-list-type: atomic
-                          pacing:
+                    canary:
+                      properties:
+                        promotionPolicy:
+                          type: string
+                        scaleDownDelaySeconds:
+                          format: int32
+                          type: integer
+                        steps:
+                          items:
                             properties:
-                              maxSurge:
+                              newCapacity:
                                 anyOf:
                                   - type: integer
                                   - type: string
                                 x-kubernetes-int-or-string: true
-                              maxUnavailable:
+                              oldCapacity:
                                 anyOf:
                                   - type: integer
                                   - type: string
                                 x-kubernetes-int-or-string: true
-                              ratioTolerance:
+                              pause:
+                                properties:
+                                  duration:
+                                    type: string
+                                type: object
+                              trafficWeight:
                                 format: int32
                                 maximum: 100
                                 minimum: 0
                                 type: integer
-                              type:
+                            required:
+                              - newCapacity
+                              - trafficWeight
+                            type: object
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      type: object
+                    coordination:
+                      properties:
+                        groups:
+                          items:
+                            properties:
+                              components:
+                                items:
+                                  type: string
+                                minItems: 1
+                                type: array
+                                x-kubernetes-list-type: atomic
+                              order:
+                                items:
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: atomic
+                              pacing:
+                                properties:
+                                  maxSurge:
+                                    anyOf:
+                                      - type: integer
+                                      - type: string
+                                    x-kubernetes-int-or-string: true
+                                  maxUnavailable:
+                                    anyOf:
+                                      - type: integer
+                                      - type: string
+                                    x-kubernetes-int-or-string: true
+                                  ratioTolerance:
+                                    format: int32
+                                    maximum: 100
+                                    minimum: 0
+                                    type: integer
+                                  type:
+                                    allOf:
+                                      - enum:
+                                          - PerComponent
+                                          - RatioBalanced
+                                      - enum:
+                                          - PerComponent
+                                          - RatioBalanced
+                                    type: string
+                                type: object
+                              policy:
                                 allOf:
                                   - enum:
-                                      - PerComponent
-                                      - RatioBalanced
+                                      - BlueGreen
+                                      - RollingUpdate
+                                      - Independent
+                                      - Sequential
                                   - enum:
-                                      - PerComponent
-                                      - RatioBalanced
+                                      - BlueGreen
+                                      - RollingUpdate
+                                      - Independent
+                                      - Sequential
                                 type: string
+                              soak:
+                                type: string
+                            required:
+                              - components
+                              - policy
                             type: object
-                          policy:
-                            allOf:
-                              - enum:
-                                  - BlueGreen
-                                  - RollingUpdate
-                                  - Independent
-                                  - Sequential
-                              - enum:
-                                  - BlueGreen
-                                  - RollingUpdate
-                                  - Independent
-                                  - Sequential
-                            type: string
-                          soak:
-                            type: string
-                        required:
-                          - components
-                          - policy
-                        type: object
-                      type: array
-                      x-kubernetes-list-type: atomic
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      type: object
                   type: object
                 router:
                   properties:
@@ -29918,48 +29958,6 @@ spec:
                             - Header
                             - Metadata
                           type: string
-                      type: object
-                    rollout:
-                      properties:
-                        promotionPolicy:
-                          enum:
-                            - Manual
-                            - Auto
-                          type: string
-                        scaleDownDelaySeconds:
-                          default: 30
-                          format: int32
-                          minimum: 0
-                          type: integer
-                        steps:
-                          items:
-                            properties:
-                              newCapacity:
-                                anyOf:
-                                  - type: integer
-                                  - type: string
-                                x-kubernetes-int-or-string: true
-                              oldCapacity:
-                                anyOf:
-                                  - type: integer
-                                  - type: string
-                                x-kubernetes-int-or-string: true
-                              pause:
-                                properties:
-                                  duration:
-                                    type: string
-                                type: object
-                              trafficWeight:
-                                format: int32
-                                maximum: 100
-                                minimum: 0
-                                type: integer
-                            required:
-                              - newCapacity
-                              - trafficWeight
-                            type: object
-                          minItems: 1
-                          type: array
                       type: object
                   type: object
               type: object

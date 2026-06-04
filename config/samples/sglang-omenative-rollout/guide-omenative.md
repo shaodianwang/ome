@@ -226,7 +226,7 @@ dip is acceptable; use `InPlace*` for changes that don't need a reschedule
 
 A prefill/decode model is two pools that talk to each other. Rolling them
 independently can leave all-new prefill talking to all-old decode — a version
-skew across the pair that must interoperate. `spec.rolloutCoordination` exists
+skew across the pair that must interoperate. `spec.rollout.coordination` exists
 to prevent that.
 
 Architecturally, coordination is a **thin layer on top** of the per-Component

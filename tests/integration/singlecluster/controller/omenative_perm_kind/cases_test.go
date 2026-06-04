@@ -276,7 +276,9 @@ func buildPermISVC(ns string, pc permCase) *v1beta1.InferenceService {
 				RatioTolerance: pc.ratioTol,
 			}
 		}
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{Groups: []v1beta1.RolloutCoordinationGroup{g}}
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{Groups: []v1beta1.RolloutCoordinationGroup{g}},
+		}
 	}
 	return isvc
 }

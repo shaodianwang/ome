@@ -427,8 +427,10 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 
 	isvc := wrapper.Obj()
 	if len(o.coordGroups) > 0 {
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: append([]v1beta1.RolloutCoordinationGroup(nil), o.coordGroups...),
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: append([]v1beta1.RolloutCoordinationGroup(nil), o.coordGroups...),
+			},
 		}
 	}
 

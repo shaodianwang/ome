@@ -84,7 +84,7 @@ func DefaultInferenceService(ctx context.Context, c client.Client, isvc *v1beta1
 	if isvc.Spec.Router != nil {
 		defaultRouter(isvc.Spec.Router, isvc.Spec.DeploymentMode)
 	}
-	defaultRolloutCoordination(isvc.Spec.RolloutCoordination)
+	defaultRolloutCoordination(isvc.Spec.GetRolloutCoordination())
 	return nil
 }
 

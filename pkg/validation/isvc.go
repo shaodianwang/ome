@@ -207,15 +207,16 @@ func validateLeaderSize(component string, spec interface{}) error {
 // reason so operators see the relevant OEP context in the error.
 //
 // Returns nil when:
-//   - spec.rolloutCoordination is absent or has no groups
+//   - spec.rollout.coordination is absent or has no groups
 //   - no Sequential group contains a multi-pod Component
 //   - every multi-pod-containing Sequential group has Order set
 func ValidateSequentialMultiPodOrder(spec *v1beta1.InferenceServiceSpec) error {
-	if spec == nil || spec.RolloutCoordination == nil {
+	coord := spec.GetRolloutCoordination()
+	if coord == nil {
 		return nil
 	}
 	multiPod := multiPodComponents(spec)
-	for i, g := range spec.RolloutCoordination.Groups {
+	for i, g := range coord.Groups {
 		if g.Policy != v1beta1.CoordinationPolicySequential {
 			continue
 		}
@@ -228,7 +229,7 @@ func ValidateSequentialMultiPodOrder(spec *v1beta1.InferenceServiceSpec) error {
 				continue
 			}
 			return fmt.Errorf(
-				"spec.rolloutCoordination.groups[%d]: Sequential policy with multi-pod component %q requires explicit Order; the controller has no default gang-rollout sequencing for multi-pod components (%s)",
+				"spec.rollout.coordination.groups[%d]: Sequential policy with multi-pod component %q requires explicit Order; the controller has no default gang-rollout sequencing for multi-pod components (%s)",
 				i, c, ReasonSequentialMultiPodRequiresOrder,
 			)
 		}

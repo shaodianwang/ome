@@ -108,8 +108,7 @@ func (r *ResolvedIntent) HasIntent() bool {
 	}
 	if r.Traffic != nil && (r.Traffic.Algorithm != nil ||
 		r.Traffic.ConsistentHash != nil ||
-		r.Traffic.EndpointOverride != nil ||
-		r.Traffic.Rollout != nil) {
+		r.Traffic.EndpointOverride != nil) {
 		return true
 	}
 	if r.CircuitBreaker != nil {

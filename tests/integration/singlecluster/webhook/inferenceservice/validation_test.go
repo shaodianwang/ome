@@ -405,74 +405,6 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(err.Error()).To(ContainSubstring("MissingRetryOn"))
 	})
 
-	// ---- OEP-0011 spec.traffic.rollout validation ----
-
-	ginkgo.It("rejects step-based rollout whose final step doesn't reach 100%", func() {
-		isvc := v1beta1testing.MakeInferenceService("rollout-incomplete", "isvc-webhook").
-			Model("any-model").
-			Traffic(&v1beta1.TrafficSpec{
-				Rollout: &v1beta1.RolloutSpec{
-					Steps: []v1beta1.RolloutStep{
-						{NewCapacity: intstr.FromString("50%"), TrafficWeight: 50},
-						{NewCapacity: intstr.FromString("75%"), TrafficWeight: 75},
-					},
-				},
-			}).
-			Engine(&v1beta1.EngineSpec{
-				PodSpec: v1beta1.PodSpec{
-					Containers: []corev1.Container{{Name: "ome-container", Image: "x"}},
-				},
-			}).Obj()
-		err := k8sClient.Create(suiteCtx, isvc)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("IncompleteRolloutPlan"))
-	})
-
-	ginkgo.It("rejects step capacity > 200%", func() {
-		isvc := v1beta1testing.MakeInferenceService("rollout-capacity-too-big", "isvc-webhook").
-			Model("any-model").
-			Traffic(&v1beta1.TrafficSpec{
-				Rollout: &v1beta1.RolloutSpec{
-					Steps: []v1beta1.RolloutStep{
-						{NewCapacity: intstr.FromString("300%"), TrafficWeight: 100},
-					},
-				},
-			}).
-			Engine(&v1beta1.EngineSpec{
-				PodSpec: v1beta1.PodSpec{
-					Containers: []corev1.Container{{Name: "ome-container", Image: "x"}},
-				},
-			}).Obj()
-		err := k8sClient.Create(suiteCtx, isvc)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("InvalidStepCapacity"))
-	})
-
-	ginkgo.It("accepts step-based rollout that reaches 100% in one step", func() {
-		isvc := v1beta1testing.MakeInferenceService("rollout-single-step", "isvc-webhook").
-			Model("any-model").
-			Traffic(&v1beta1.TrafficSpec{
-				Rollout: &v1beta1.RolloutSpec{
-					Steps: []v1beta1.RolloutStep{
-						{NewCapacity: intstr.FromString("100%"), TrafficWeight: 100},
-					},
-				},
-			}).
-			Engine(&v1beta1.EngineSpec{
-				PodSpec: v1beta1.PodSpec{
-					Containers: []corev1.Container{{Name: "ome-container", Image: "x"}},
-				},
-			}).Obj()
-		err := k8sClient.Create(suiteCtx, isvc)
-		// Model lookup may fail; rollout validation must not.
-		if err != nil {
-			Expect(err.Error()).NotTo(ContainSubstring("IncompleteRolloutPlan"))
-			Expect(err.Error()).NotTo(ContainSubstring("InvalidStepCapacity"))
-		} else {
-			ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
-		}
-	})
-
 	// ----- OEP-0011 Test 19 backfill + new admission gaps -----
 
 	ginkgo.It("rejects ome.io/rollout-ready-timeout not a duration (InvalidDuration)", func() {
@@ -487,12 +419,9 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		Expect(err.Error()).To(ContainSubstring("InvalidDuration"))
 	})
 
-	ginkgo.It("accepts ome.io/rollout-promote without spec.traffic.rollout but surfaces a warning", func() {
-		// Without spec.traffic.rollout the annotation is a no-op; the
-		// webhook accepts but warns so operators don't wait silently.
-		// (Admission warnings come through controller-runtime client
-		// Create on the apiserver — we can't easily assert the warning
-		// text here, but we CAN assert Create succeeds.)
+	ginkgo.It("accepts ome.io/rollout-promote as a known annotation", func() {
+		// rollout-promote is a recognized ome.io/* traffic annotation; a
+		// well-formed value must not produce a hard admission rejection.
 		isvc := v1beta1testing.MakeInferenceService("isvc-promote-no-rollout", "isvc-webhook").
 			Annotation(constants.RolloutPromoteAnnotation, "2").
 			Engine(&v1beta1.EngineSpec{
@@ -501,10 +430,9 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 
 		err := k8sClient.Create(suiteCtx, isvc)
 		if err != nil {
-			// Model lookup may fail; promote-without-rollout must not
+			// Model lookup may fail; a valid rollout-promote value must not
 			// produce a hard rejection.
 			Expect(err.Error()).NotTo(ContainSubstring("InvalidRolloutPromoteTarget"))
-			Expect(err.Error()).NotTo(ContainSubstring("no-op without spec.traffic.rollout"))
 		} else {
 			ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 		}
@@ -638,12 +566,14 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
 				},
 			}).Obj()
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{
-				{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicySequential,
-					// Order intentionally absent.
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{
+					{
+						Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+						Policy:     v1beta1.CoordinationPolicySequential,
+						// Order intentionally absent.
+					},
 				},
 			},
 		}
@@ -757,16 +687,18 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 				},
 			}).Obj()
 		tol := int32(10)
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{{
-				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-				Policy:     v1beta1.CoordinationPolicySequential,
-				Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-				Pacing: &v1beta1.CoordinationPacing{
-					Type:           v1beta1.CoordinationPacingRatioBalanced,
-					RatioTolerance: &tol,
-				},
-			}},
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+					Policy:     v1beta1.CoordinationPolicySequential,
+					Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:           v1beta1.CoordinationPacingRatioBalanced,
+						RatioTolerance: &tol,
+					},
+				}},
+			},
 		}
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred())
@@ -793,16 +725,18 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
 				},
 			}).Obj()
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{{
-				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyRollingUpdate,
-				Pacing: &v1beta1.CoordinationPacing{
-					Type:           v1beta1.CoordinationPacingPerComponent,
-					MaxSurge:       &zero,
-					MaxUnavailable: &zero,
-				},
-			}},
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+					Pacing: &v1beta1.CoordinationPacing{
+						Type:           v1beta1.CoordinationPacingPerComponent,
+						MaxSurge:       &zero,
+						MaxUnavailable: &zero,
+					},
+				}},
+			},
 		}
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred())
@@ -827,15 +761,17 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
 				},
 			}).Obj()
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{{
-				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-				Policy:     v1beta1.CoordinationPolicySequential,
-				Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-				Pacing: &v1beta1.CoordinationPacing{
-					Type: v1beta1.CoordinationPacingPerComponent,
-				},
-			}},
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+					Policy:     v1beta1.CoordinationPolicySequential,
+					Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+					Pacing: &v1beta1.CoordinationPacing{
+						Type: v1beta1.CoordinationPacingPerComponent,
+					},
+				}},
+			},
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })

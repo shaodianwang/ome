@@ -138,9 +138,6 @@ func ValidateTrafficAnnotations(annotations map[string]string, traffic *v1beta1.
 	} else if w != "" {
 		warnings = append(warnings, w)
 	}
-	if w := crossRulePromoteWithoutRollout(annotations, traffic); w != "" {
-		warnings = append(warnings, w)
-	}
 
 	return warnings, nil
 }
@@ -305,24 +302,6 @@ func min3(a, b, c int) int {
 		m = c
 	}
 	return m
-}
-
-// crossRulePromoteWithoutRollout warns when ome.io/rollout-promote is
-// set without a corresponding spec.traffic.rollout block. The
-// annotation is a no-op in that case (the controller has no step list
-// to advance), so the warning surfaces the misconfiguration at
-// admission instead of letting the operator wait for nothing to happen.
-func crossRulePromoteWithoutRollout(annotations map[string]string, traffic *v1beta1.TrafficSpec) string {
-	if _, ok := annotations[constants.RolloutPromoteAnnotation]; !ok {
-		return ""
-	}
-	if traffic != nil && traffic.Rollout != nil {
-		return ""
-	}
-	return fmt.Sprintf(
-		"annotation %q is a no-op without spec.traffic.rollout; the controller has no step list to advance — set spec.traffic.rollout or remove the annotation",
-		constants.RolloutPromoteAnnotation,
-	)
 }
 
 // hasMatchingPrefix reports whether key starts with any prefix in the

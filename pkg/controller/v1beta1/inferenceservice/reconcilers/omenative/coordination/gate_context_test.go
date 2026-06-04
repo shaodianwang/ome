@@ -37,14 +37,14 @@ func TestResolveGateContext_NoCoordBlock(t *testing.T) {
 func TestResolveGateContext_ComponentNotInAnyGroup(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{
 					{
 						Components: []v1beta1.ComponentType{v1beta1.DecoderComponent},
 						Policy:     v1beta1.CoordinationPolicyIndependent,
 					},
 				},
-			},
+			}},
 		},
 	}
 	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)
@@ -59,14 +59,14 @@ func TestResolveGateContext_ComponentNotInAnyGroup(t *testing.T) {
 func TestResolveGateContext_ResolvesGroup(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{
 					{
 						Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 						Policy:     v1beta1.CoordinationPolicyBlueGreen,
 					},
 				},
-			},
+			}},
 		},
 	}
 	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)

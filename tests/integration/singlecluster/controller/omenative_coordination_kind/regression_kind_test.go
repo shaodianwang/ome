@@ -33,7 +33,7 @@ var _ = ginkgo.Describe("REG — coordination regression contracts", ginkgo.Orde
 			WithEngineImage("fake-serving:v1"))
 		// Explicit nil — fixture default is already nil but make the
 		// regression's intent unambiguous in the spec.
-		Expect(fix.ISVC.Spec.RolloutCoordination).To(BeNil())
+		Expect(fix.ISVC.Spec.GetRolloutCoordination()).To(BeNil())
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 

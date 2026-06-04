@@ -173,7 +173,7 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 
-	// Traffic block: typed core, ome.io/* annotations, rollout plan.
+	// Traffic block: typed core load-balancing config + ome.io/* annotations.
 	if err := validation.ValidateTrafficSpec(isvc.Spec.Traffic); err != nil {
 		return allWarnings, err
 	}
@@ -182,7 +182,10 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 		return allWarnings, err
 	}
 	allWarnings = append(allWarnings, trafficWarnings...)
-	if err := validation.ValidateRollout(&isvc.Spec); err != nil {
+
+	// spec.rollout.canary is a reserved progressive-traffic plan with no
+	// step executor yet; reject any attempt to set it.
+	if err := validation.ValidateRolloutCanaryReserved(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
 

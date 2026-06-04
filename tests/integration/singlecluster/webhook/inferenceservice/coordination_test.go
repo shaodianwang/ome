@@ -100,7 +100,9 @@ func coordISVC(name string, groups ...v1beta1.RolloutCoordinationGroup) *v1beta1
 		Decoder(omeNativeDecoder()).
 		Obj()
 	if len(groups) > 0 {
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{Groups: groups}
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{Groups: groups},
+		}
 	}
 	return isvc
 }
@@ -144,7 +146,9 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 	// The validator must accept it so existing manifests don't break.
 	ginkgo.It("W-1 accepts ISVC with empty rolloutCoordination.groups[]", func() {
 		isvc := coordISVC("coord-w1")
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{Groups: []v1beta1.RolloutCoordinationGroup{}}
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{Groups: []v1beta1.RolloutCoordinationGroup{}},
+		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 	})
 
@@ -198,11 +202,13 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 			Engine(omeNativeEngine()).
 			Router(rawRouter).
 			Obj()
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{{
-				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.RouterComponent},
-				Policy:     v1beta1.CoordinationPolicyBlueGreen,
-			}},
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.RouterComponent},
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
+				}},
+			},
 		}
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred())
@@ -295,7 +301,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 	ginkgo.It("W-11 emits warning when RatioTolerance > 50", func() {
 		tol := int32(75)
 		spec := &v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
@@ -304,7 +310,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 						RatioTolerance: &tol,
 					},
 				}},
-			},
+			}},
 		}
 		warning := validation.CoordinationRatioToleranceWarning(spec)
 		Expect(warning).To(ContainSubstring(validation.ReasonRatioToleranceTooHigh))
@@ -346,8 +352,10 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 	// chose none. No-op for the controller.
 	ginkgo.It("W-16 accepts rolloutCoordination block with empty groups", func() {
 		isvc := coordISVC("coord-w16")
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{},
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{},
+			},
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 	})
@@ -417,13 +425,15 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 			Decoder(omeNativeDecoder()).
 			Router(omeNativeRouter()).
 			Obj()
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{{
-				Components: []v1beta1.ComponentType{
-					v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent,
-				},
-				Policy: v1beta1.CoordinationPolicyBlueGreen,
-			}},
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{
+						v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent,
+					},
+					Policy: v1beta1.CoordinationPolicyBlueGreen,
+				}},
+			},
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 	})
@@ -437,11 +447,13 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 			DeploymentMode(constants.OMENative).
 			Engine(omeNativeEngine()).
 			Obj()
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{{
-				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-				Policy:     v1beta1.CoordinationPolicyBlueGreen,
-			}},
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
+				}},
+			},
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 	})
@@ -454,11 +466,13 @@ var _ = ginkgo.Describe("InferenceService webhook validation — rolloutCoordina
 			DeploymentMode(constants.OMENative).
 			Engine(omeNativeEngine()).
 			Obj()
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{{
-				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyIndependent,
-			}},
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyIndependent,
+				}},
+			},
 		}
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred())
@@ -585,7 +599,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 	// shape rules on the new spec. Pin observed behavior.
 	ginkgo.It("WU-3 accepts policy change BlueGreen → Independent mid-rollout", func() {
 		got := createBaselineISVC("coord-wu3", atomicGroup())
-		got.Spec.RolloutCoordination.Groups[0].Policy = v1beta1.CoordinationPolicyIndependent
+		got.Spec.Rollout.Coordination.Groups[0].Policy = v1beta1.CoordinationPolicyIndependent
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 	})
 
@@ -593,8 +607,10 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 	// (assuming it passes the structural rules).
 	ginkgo.It("WU-4 accepts adding a new group to an existing ISVC", func() {
 		got := createBaselineISVC("coord-wu4") // no groups initially
-		got.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{atomicGroup()},
+		got.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{atomicGroup()},
+			},
 		}
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 	})
@@ -603,7 +619,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 	// is allowed — coordination is opt-in, so opting out is symmetric.
 	ginkgo.It("WU-5 accepts removing the rolloutCoordination block entirely", func() {
 		got := createBaselineISVC("coord-wu5", atomicGroup())
-		got.Spec.RolloutCoordination = nil
+		got.Spec.Rollout.Coordination = nil
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 	})
 
@@ -618,7 +634,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 			Order:      []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 		}
 		got := createBaselineISVC("coord-wu6", seq)
-		got.Spec.RolloutCoordination.Groups[0].Order = []v1beta1.ComponentType{
+		got.Spec.Rollout.Coordination.Groups[0].Order = []v1beta1.ComponentType{
 			v1beta1.DecoderComponent, v1beta1.EngineComponent,
 		}
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
@@ -635,16 +651,18 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 			Decoder(omeNativeDecoder()).
 			Router(omeNativeRouter()).
 			Obj()
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{atomicGroup()},
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{atomicGroup()},
+			},
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 		got := &v1beta1.InferenceService{}
 		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: "isvc-webhook", Name: "coord-wu7"}, got)).To(Succeed())
 
-		got.Spec.RolloutCoordination.Groups[0].Components = append(
-			got.Spec.RolloutCoordination.Groups[0].Components, v1beta1.RouterComponent)
+		got.Spec.Rollout.Coordination.Groups[0].Components = append(
+			got.Spec.Rollout.Coordination.Groups[0].Components, v1beta1.RouterComponent)
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 	})
 
@@ -652,7 +670,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 	// removed Component then rolls independently.
 	ginkgo.It("WU-8 accepts removing a Component from an existing group", func() {
 		got := createBaselineISVC("coord-wu8", atomicGroup())
-		got.Spec.RolloutCoordination.Groups[0].Components = []v1beta1.ComponentType{v1beta1.EngineComponent}
+		got.Spec.Rollout.Coordination.Groups[0].Components = []v1beta1.ComponentType{v1beta1.EngineComponent}
 		// 1-Component BlueGreen is a degenerate but accepted shape (W-21).
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 	})
@@ -692,11 +710,13 @@ var _ = ginkgo.Describe("InferenceService webhook validation (UPDATE) — rollou
 			Engine(omeNativeEngine()).
 			Router(omeNativeRouter()).
 			Obj()
-		isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
-			Groups: []v1beta1.RolloutCoordinationGroup{{
-				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.RouterComponent},
-				Policy:     v1beta1.CoordinationPolicyBlueGreen,
-			}},
+		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+			Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.RouterComponent},
+					Policy:     v1beta1.CoordinationPolicyBlueGreen,
+				}},
+			},
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
@@ -733,12 +753,12 @@ var _ = ginkgo.Describe("validation reason constant stability", func() {
 	// Pin one shape so a refactor doesn't silently drop the index.
 	ginkgo.It("error messages include the offending group index", func() {
 		spec := &v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{"predictor"},
 					Policy:     v1beta1.CoordinationPolicyIndependent,
 				}},
-			},
+			}},
 		}
 		err := validation.ValidateCoordination(spec)
 		Expect(err).To(HaveOccurred())

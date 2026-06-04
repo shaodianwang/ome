@@ -1,0 +1,24 @@
+title: Unified InferenceService Rollout (spec.rollout)
+oep-number: "0015"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-06-03
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Reshapes (and partially supersedes) the rollout/traffic spec surface of:
+see-also:
+  - "/oeps/0007.1-omenative-coordinated-rollout"  # spec.rolloutCoordination -> spec.rollout.coordination
+  - "/oeps/0011-inference-traffic-policy"          # spec.traffic.rollout -> spec.rollout.canary (reserved)
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"

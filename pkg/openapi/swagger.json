@@ -194,6 +194,30 @@
         }
       }
     },
+    "v1beta1.CanarySpec": {
+      "description": "CanarySpec is a reserved multi-step progressive rollout plan (a new revision brought up at some pod capacity while a fraction of traffic shifts to it, advancing through steps). RESERVED: setting it is rejected at admission until a step executor exists.\n\nStep semantics (for when it is implemented):\n  - Each step specifies pod capacity (NewCapacity, OldCapacity) independently\n    of traffic weight (TrafficWeight), so the new revision can run at full\n    capacity with 0% traffic for validation, then shift traffic.\n  - The final step's TrafficWeight is 100 so the rollout completes.\n  - Each step's optional Pause holds the rollout (Manual: advance via\n    ome.io/rollout-promote; Auto: advance on Pause.Duration).",
+      "type": "object",
+      "properties": {
+        "promotionPolicy": {
+          "description": "PromotionPolicy controls how the rollout advances between paused steps.\n  - Manual: operator advances via the ome.io/rollout-promote annotation.\n  - Auto: controller advances based on each step's Pause.Duration.",
+          "type": "string"
+        },
+        "scaleDownDelaySeconds": {
+          "description": "ScaleDownDelaySeconds is the wait between shifting traffic away from the old revision and scaling its pods down, to drain in-flight requests.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "steps": {
+          "description": "Steps is the ordered list of rollout stages.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.RolloutStep"
+          },
+          "x-kubernetes-list-type": "atomic"
+        }
+      }
+    },
     "v1beta1.ClusterBaseModel": {
       "description": "ClusterBaseModel is the Schema for the basemodels API",
       "type": "object",
@@ -1814,9 +1838,9 @@
           "description": "Model defines the model to be used for inference, referencing either a BaseModel or a custom model. This allows models to be managed independently of the serving configuration.",
           "$ref": "#/definitions/v1beta1.ModelRef"
         },
-        "rolloutCoordination": {
-          "description": "RolloutCoordination declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently (the default).\n\nOnly meaningful when at least one referenced Component uses ome.io/deploymentMode=OMENative. Webhook rejects groups that reference non-OMENative Components.",
-          "$ref": "#/definitions/v1beta1.RolloutCoordinationSpec"
+        "rollout": {
+          "description": "Rollout is the single home for rollout configuration on this InferenceService: cross-Component coordination (spec.rollout.coordination), plus a reserved, not-yet-implemented progressive-traffic canary plan (spec.rollout.canary).",
+          "$ref": "#/definitions/v1beta1.RolloutSpec"
         },
         "router": {
           "description": "Router defines the router spec",
@@ -3443,39 +3467,27 @@
       "type": "object",
       "properties": {
         "duration": {
-          "description": "Duration to pause before auto-advancing.\n  - If unset and PromotionPolicy is Manual, the controller waits\n    indefinitely for the ome.io/rollout-promote annotation.\n  - If PromotionPolicy is Auto and Duration is unset, the\n    controller advances immediately (i.e., the Pause is a no-op).\n  - If both are set, the controller advances after Duration\n    regardless of policy.",
+          "description": "Duration to pause before auto-advancing.\n  - If unset and PromotionPolicy is Manual, the controller waits\n    indefinitely for the ome.io/rollout-promote annotation.\n  - If PromotionPolicy is Auto and Duration is unset, the controller\n    advances immediately (the Pause is a no-op).\n  - If both are set, the controller advances after Duration.",
           "$ref": "#/definitions/v1.Duration"
         }
       }
     },
     "v1beta1.RolloutSpec": {
-      "description": "RolloutSpec defines a multi-step progressive rollout plan. When set on TrafficSpec.Rollout, the controller advances through the steps under the configured PromotionPolicy.\n\nStep semantics:\n  - Each step specifies pod capacity (NewCapacity, OldCapacity)\n    independently of traffic weight (TrafficWeight). This lets\n    operators run the new revision at full capacity with 0% traffic\n    for validation, then atomically shift traffic.\n  - The final step's TrafficWeight must be 100 (admission enforces)\n    so the rollout always completes.\n  - Each step's optional Pause holds the rollout. Under Manual\n    promotion, operators advance via the ome.io/rollout-promote\n    annotation; under Auto, the controller advances based on\n    Pause.Duration.",
+      "description": "RolloutSpec is the single rollout surface for an InferenceService.",
       "type": "object",
-      "required": [
-        "steps"
-      ],
       "properties": {
-        "promotionPolicy": {
-          "description": "PromotionPolicy controls how the rollout advances between steps.\n  - Manual (default): operator advances via the\n    ome.io/rollout-promote annotation.\n  - Auto: controller advances based on each step's Pause.Duration.",
-          "type": "string"
+        "canary": {
+          "description": "Canary is a reserved step-based progressive-traffic-shift plan. The shape is fixed so enabling it later is not an API migration, but it is rejected at admission today (\"not yet implemented\") because no step executor exists. It carries no inner validation/default markers while reserved, so the only error an operator sees is the webhook rejection (apiserver structural validation would otherwise pre-empt it).",
+          "$ref": "#/definitions/v1beta1.CanarySpec"
         },
-        "scaleDownDelaySeconds": {
-          "description": "ScaleDownDelaySeconds is the wait between shifting traffic away from the old revision and scaling its pods down, to drain in-flight requests. Default: 30.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "steps": {
-          "description": "Steps is the ordered list of rollout stages.",
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/v1beta1.RolloutStep"
-          }
+        "coordination": {
+          "description": "Coordination declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently (the default).\n\nOnly meaningful when at least one referenced Component uses ome.io/deploymentMode=OMENative. The webhook rejects groups that reference non-OMENative Components.",
+          "$ref": "#/definitions/v1beta1.RolloutCoordinationSpec"
         }
       }
     },
     "v1beta1.RolloutStep": {
-      "description": "RolloutStep specifies one stage of a progressive rollout.\n\nNewCapacity and TrafficWeight are independent dimensions. Common patterns:\n  - Symmetric canary: NewCapacity=10%, OldCapacity=90%, TrafficWeight=10\n  - Capacity surge:   NewCapacity=10%, OldCapacity=100%, TrafficWeight=10\n  - Blue-green:       NewCapacity=100%, OldCapacity=100%, TrafficWeight=0\n    (validate at full scale; later step sets TrafficWeight=100)",
+      "description": "RolloutStep specifies one stage of a progressive (canary) rollout.\n\nNewCapacity and TrafficWeight are independent dimensions. Common patterns:\n  - Symmetric canary: NewCapacity=10%, OldCapacity=90%, TrafficWeight=10\n  - Capacity surge:   NewCapacity=10%, OldCapacity=100%, TrafficWeight=10\n  - Blue-green:       NewCapacity=100%, OldCapacity=100%, TrafficWeight=0\n    (validate at full scale; later step sets TrafficWeight=100)",
       "type": "object",
       "required": [
         "newCapacity",
@@ -3487,11 +3499,11 @@
           "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
         },
         "oldCapacity": {
-          "description": "OldCapacity is the fraction of desired replicas to keep for the old revision at this step. Defaults to (100% - NewCapacity). Setting both \u003e50% allows a temporary capacity surge — useful for keeping full old capacity while the new revision validates at the same scale.",
+          "description": "OldCapacity is the fraction of desired replicas to keep for the old revision at this step. Defaults to (100% - NewCapacity). Setting both \u003e50% allows a temporary capacity surge.",
           "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
         },
         "pause": {
-          "description": "Pause holds the rollout at this step. If absent, the controller advances to the next step immediately after the step's capacity, traffic, and drain operations complete.",
+          "description": "Pause holds the rollout at this step. If absent, the controller advances immediately after the step's capacity, traffic, and drain operations.",
           "$ref": "#/definitions/v1beta1.RolloutPause"
         },
         "trafficWeight": {
@@ -4567,10 +4579,6 @@
         "endpointOverride": {
           "description": "EndpointOverride routes requests to a specific pod when a request header (e.g. \"X-Endpoint-HostPort: 10.0.0.5:30000\") is present and the endpoint is healthy; falls back to the configured Algorithm when the endpoint is unhealthy or the header is absent.\n\nEnvoy Gateway only in alpha (no Istio equivalent). Translators that do not support endpoint override surface this as an UnsupportedField condition on the InferenceService.",
           "$ref": "#/definitions/v1beta1.EndpointOverrideSpec"
-        },
-        "rollout": {
-          "description": "Rollout configures a step-based progressive rollout plan. When set, the controller advances through the steps under the configured PromotionPolicy.",
-          "$ref": "#/definitions/v1beta1.RolloutSpec"
         }
       }
     },

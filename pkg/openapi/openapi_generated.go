@@ -16,6 +16,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                      schema_pkg_apis_ome_v1beta1_BaseModel(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":                  schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":                  schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanarySpec":                     schema_pkg_apis_ome_v1beta1_CanarySpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":               schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":           schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":          schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
@@ -432,6 +433,54 @@ func schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref common.ReferenceCallback) com
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec", "k8s.io/apimachinery/pkg/runtime.RawExtension"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_CanarySpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CanarySpec is a reserved multi-step progressive rollout plan (a new revision brought up at some pod capacity while a fraction of traffic shifts to it, advancing through steps). RESERVED: setting it is rejected at admission until a step executor exists.\n\nStep semantics (for when it is implemented):\n  - Each step specifies pod capacity (NewCapacity, OldCapacity) independently\n    of traffic weight (TrafficWeight), so the new revision can run at full\n    capacity with 0% traffic for validation, then shift traffic.\n  - The final step's TrafficWeight is 100 so the rollout completes.\n  - Each step's optional Pause holds the rollout (Manual: advance via\n    ome.io/rollout-promote; Auto: advance on Pause.Duration).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"steps": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Steps is the ordered list of rollout stages.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep"),
+									},
+								},
+							},
+						},
+					},
+					"promotionPolicy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PromotionPolicy controls how the rollout advances between paused steps.\n  - Manual: operator advances via the ome.io/rollout-promote annotation.\n  - Auto: controller advances based on each step's Pause.Duration.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"scaleDownDelaySeconds": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ScaleDownDelaySeconds is the wait between shifting traffic away from the old revision and scaling its pods down, to drain in-flight requests.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep"},
 	}
 }
 
@@ -3267,10 +3316,10 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"),
 						},
 					},
-					"rolloutCoordination": {
+					"rollout": {
 						SchemaProps: spec.SchemaProps{
-							Description: "RolloutCoordination declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently (the default).\n\nOnly meaningful when at least one referenced Component uses ome.io/deploymentMode=OMENative. Webhook rejects groups that reference non-OMENative Components.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec"),
+							Description: "Rollout is the single home for rollout configuration on this InferenceService: cross-Component coordination (spec.rollout.coordination), plus a reserved, not-yet-implemented progressive-traffic canary plan (spec.rollout.canary).",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec"),
 						},
 					},
 					"scalingPolicy": {
@@ -3283,7 +3332,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
 	}
 }
 
@@ -6115,7 +6164,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutPause(ref common.ReferenceCallback) comm
 				Properties: map[string]spec.Schema{
 					"duration": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Duration to pause before auto-advancing.\n  - If unset and PromotionPolicy is Manual, the controller waits\n    indefinitely for the ome.io/rollout-promote annotation.\n  - If PromotionPolicy is Auto and Duration is unset, the\n    controller advances immediately (i.e., the Pause is a no-op).\n  - If both are set, the controller advances after Duration\n    regardless of policy.",
+							Description: "Duration to pause before auto-advancing.\n  - If unset and PromotionPolicy is Manual, the controller waits\n    indefinitely for the ome.io/rollout-promote annotation.\n  - If PromotionPolicy is Auto and Duration is unset, the controller\n    advances immediately (the Pause is a no-op).\n  - If both are set, the controller advances after Duration.",
 							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
 						},
 					},
@@ -6131,43 +6180,26 @@ func schema_pkg_apis_ome_v1beta1_RolloutSpec(ref common.ReferenceCallback) commo
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutSpec defines a multi-step progressive rollout plan. When set on TrafficSpec.Rollout, the controller advances through the steps under the configured PromotionPolicy.\n\nStep semantics:\n  - Each step specifies pod capacity (NewCapacity, OldCapacity)\n    independently of traffic weight (TrafficWeight). This lets\n    operators run the new revision at full capacity with 0% traffic\n    for validation, then atomically shift traffic.\n  - The final step's TrafficWeight must be 100 (admission enforces)\n    so the rollout always completes.\n  - Each step's optional Pause holds the rollout. Under Manual\n    promotion, operators advance via the ome.io/rollout-promote\n    annotation; under Auto, the controller advances based on\n    Pause.Duration.",
+				Description: "RolloutSpec is the single rollout surface for an InferenceService.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"steps": {
+					"coordination": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Steps is the ordered list of rollout stages.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep"),
-									},
-								},
-							},
+							Description: "Coordination declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently (the default).\n\nOnly meaningful when at least one referenced Component uses ome.io/deploymentMode=OMENative. The webhook rejects groups that reference non-OMENative Components.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec"),
 						},
 					},
-					"promotionPolicy": {
+					"canary": {
 						SchemaProps: spec.SchemaProps{
-							Description: "PromotionPolicy controls how the rollout advances between steps.\n  - Manual (default): operator advances via the\n    ome.io/rollout-promote annotation.\n  - Auto: controller advances based on each step's Pause.Duration.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"scaleDownDelaySeconds": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ScaleDownDelaySeconds is the wait between shifting traffic away from the old revision and scaling its pods down, to drain in-flight requests. Default: 30.",
-							Type:        []string{"integer"},
-							Format:      "int32",
+							Description: "Canary is a reserved step-based progressive-traffic-shift plan. The shape is fixed so enabling it later is not an API migration, but it is rejected at admission today (\"not yet implemented\") because no step executor exists. It carries no inner validation/default markers while reserved, so the only error an operator sees is the webhook rejection (apiserver structural validation would otherwise pre-empt it).",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanarySpec"),
 						},
 					},
 				},
-				Required: []string{"steps"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanarySpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec"},
 	}
 }
 
@@ -6175,7 +6207,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutStep(ref common.ReferenceCallback) commo
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutStep specifies one stage of a progressive rollout.\n\nNewCapacity and TrafficWeight are independent dimensions. Common patterns:\n  - Symmetric canary: NewCapacity=10%, OldCapacity=90%, TrafficWeight=10\n  - Capacity surge:   NewCapacity=10%, OldCapacity=100%, TrafficWeight=10\n  - Blue-green:       NewCapacity=100%, OldCapacity=100%, TrafficWeight=0\n    (validate at full scale; later step sets TrafficWeight=100)",
+				Description: "RolloutStep specifies one stage of a progressive (canary) rollout.\n\nNewCapacity and TrafficWeight are independent dimensions. Common patterns:\n  - Symmetric canary: NewCapacity=10%, OldCapacity=90%, TrafficWeight=10\n  - Capacity surge:   NewCapacity=10%, OldCapacity=100%, TrafficWeight=10\n  - Blue-green:       NewCapacity=100%, OldCapacity=100%, TrafficWeight=0\n    (validate at full scale; later step sets TrafficWeight=100)",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"newCapacity": {
@@ -6186,7 +6218,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutStep(ref common.ReferenceCallback) commo
 					},
 					"oldCapacity": {
 						SchemaProps: spec.SchemaProps{
-							Description: "OldCapacity is the fraction of desired replicas to keep for the old revision at this step. Defaults to (100% - NewCapacity). Setting both >50% allows a temporary capacity surge — useful for keeping full old capacity while the new revision validates at the same scale.",
+							Description: "OldCapacity is the fraction of desired replicas to keep for the old revision at this step. Defaults to (100% - NewCapacity). Setting both >50% allows a temporary capacity surge.",
 							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
 						},
 					},
@@ -6200,7 +6232,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutStep(ref common.ReferenceCallback) commo
 					},
 					"pause": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Pause holds the rollout at this step. If absent, the controller advances to the next step immediately after the step's capacity, traffic, and drain operations complete.",
+							Description: "Pause holds the rollout at this step. If absent, the controller advances immediately after the step's capacity, traffic, and drain operations.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause"),
 						},
 					},
@@ -8109,17 +8141,11 @@ func schema_pkg_apis_ome_v1beta1_TrafficSpec(ref common.ReferenceCallback) commo
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec"),
 						},
 					},
-					"rollout": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Rollout configures a step-based progressive rollout plan. When set, the controller advances through the steps under the configured PromotionPolicy.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec"),
-						},
-					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ConsistentHashSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EndpointOverrideSpec"},
 	}
 }
 

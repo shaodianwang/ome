@@ -428,12 +428,12 @@ func TestSurgeUpdate_BadImage_EscalatesGroupToFailedEndToEnd(t *testing.T) {
 		isvc.Spec.Engine.Annotations = map[string]string{}
 	}
 	isvc.Spec.Engine.Annotations[constants.DeploymentMode] = string(constants.OMENative)
-	isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 			Policy:     v1beta1.CoordinationPolicyBlueGreen,
 		}},
-	}
+	}}
 	// CurrentRevision != UpdateRevision so coordination sees a rollout
 	// in flight (the SurgeThenDrain failure case operators reported).
 	isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision = "llama-70b-engine-old"

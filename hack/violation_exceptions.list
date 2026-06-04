@@ -1,4 +1,3 @@
-API rule violation: list_type_missing,github.com/ome-projects/ome/pkg/apis/ome/v1beta1,RolloutSpec,Steps
 API rule violation: names_match,github.com/ome-projects/ome/pkg/apis/ome/v1beta1,ModelStatusSpec,LifeCycle
 API rule violation: names_match,github.com/ome-projects/ome/pkg/apis/ome/v1beta1,PodSpec,DeprecatedServiceAccount
 API rule violation: names_match,github.com/ome-projects/ome/pkg/apis/ome/v1beta1,StorageSpec,StorageKey

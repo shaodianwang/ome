@@ -107,14 +107,14 @@ func TestReconcileComponent_SequentialGateDenialReturnsRequeue(t *testing.T) {
 	// window doesn't fire here because the gate routes off the active
 	// selector (decoder is in flight, engine is non-active).
 	soak := metav1.Duration{Duration: 30 * time.Second}
-	isvc.Spec.RolloutCoordination = &v1beta1.RolloutCoordinationSpec{
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 		Groups: []v1beta1.RolloutCoordinationGroup{{
 			Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 			Policy:     v1beta1.CoordinationPolicySequential,
 			Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 			Soak:       &soak,
 		}},
-	}
+	}}
 	// Operator just bumped both Components — isvc.Generation is N+1 but
 	// neither Component's status has caught up yet.
 	isvc.Generation = 2

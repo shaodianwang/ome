@@ -4,8 +4,8 @@
 // management surface: load-balancer algorithm, consistent-hash key,
 // and endpoint override. Long-tail knobs (circuit breaker, retries,
 // sub-second timeouts) live as ome.io/* annotations on the
-// InferenceService metadata; the Rollout sub-block (multi-step
-// progressive rollouts) is added separately.
+// InferenceService metadata. Progressive rollout lives on spec.rollout,
+// not here — this block is steady-state load balancing only.
 package v1beta1
 
 // TrafficSpec configures the load-balancing policy applied to all
@@ -45,12 +45,6 @@ type TrafficSpec struct {
 	// UnsupportedField condition on the InferenceService.
 	// +optional
 	EndpointOverride *EndpointOverrideSpec `json:"endpointOverride,omitempty"`
-
-	// Rollout configures a step-based progressive rollout plan.
-	// When set, the controller advances through the steps under the
-	// configured PromotionPolicy.
-	// +optional
-	Rollout *RolloutSpec `json:"rollout,omitempty"`
 }
 
 // LoadBalancingType selects the load-balancing algorithm applied to

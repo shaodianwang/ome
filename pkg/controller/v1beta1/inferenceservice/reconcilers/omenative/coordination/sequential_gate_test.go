@@ -78,17 +78,17 @@ func TestActiveSequentialComponent_RespectsOrderNotMapIteration(t *testing.T) {
 func mkSequentialFixture(name string, soak time.Duration) *v1beta1.InferenceService {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 					Policy:     v1beta1.CoordinationPolicySequential,
 					Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 				}},
-			},
+			}},
 		},
 	}
 	if soak > 0 {
-		isvc.Spec.RolloutCoordination.Groups[0].Soak = &metav1.Duration{Duration: soak}
+		isvc.Spec.Rollout.Coordination.Groups[0].Soak = &metav1.Duration{Duration: soak}
 	}
 	isvc.Name = name
 	return isvc
@@ -178,12 +178,12 @@ func TestCheckSequentialGate_ComponentNotInAnyGroup(t *testing.T) {
 func TestCheckSequentialGate_NonSequentialGroupBypasses(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 					Policy:     v1beta1.CoordinationPolicyBlueGreen,
 				}},
-			},
+			}},
 		},
 	}
 	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
@@ -521,13 +521,13 @@ func TestCheckSequentialGate_NoOrderBypasses(t *testing.T) {
 	// bypass with a noisy reason.
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			RolloutCoordination: &v1beta1.RolloutCoordinationSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
 				Groups: []v1beta1.RolloutCoordinationGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
 					Policy:     v1beta1.CoordinationPolicySequential,
 					// Order intentionally empty.
 				}},
-			},
+			}},
 		},
 	}
 	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)

@@ -84,7 +84,7 @@ func TestEvaluateSurge_DrainTiebreaker(t *testing.T) {
 func TestEvaluateUpdateGate_RecreatePodSymmetricCleared(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
 	mu := intstr.FromInt(3)
-	isvc.Spec.RolloutCoordination.Groups[0].Pacing.MaxUnavailable = &mu
+	isvc.Spec.Rollout.Coordination.Groups[0].Pacing.MaxUnavailable = &mu
 
 	if allowed, reason := EvaluateUpdateGate(isvc, v1beta1.EngineComponent, nil,
 		workloadtypes.UpdateStrategyRecreatePod, 0, 0); !allowed {
