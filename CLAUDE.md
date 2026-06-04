@@ -239,7 +239,7 @@ OME builds work out-of-the-box on a fully-provisioned developer Mac, but several
 
 ## OEP Convention
 
-Substantial architectural changes require an OEP (OME Enhancement Proposal) before implementation. OEPs live under `oeps/<number>-<slug>/`:
+Substantial architectural changes require an OEP (OME Enhancement Proposal) before implementation. See `oeps/README.md` for the process, and follow the **required** writing style in `oeps/WRITING-STYLE.md` — for an OEP, clarity is a correctness property, not a nicety. OEPs live under `oeps/<number>-<slug>/`:
 
 ```
 oeps/<number>-<slug>/
