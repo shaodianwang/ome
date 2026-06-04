@@ -135,7 +135,7 @@ Component name translation happens inside the templates:
 | `engine`          | `spec.engine`                | `servingMode: standalone` / `multinode`|
 | `router`          | `spec.router`                | optional; `pd` only                    |
 
-The same translation applies inside `rolloutCoordination.groups[].components`
+The same translation applies inside `spec.rollout.coordination.groups[].components`
 and `groups[].order` — scientists write `[decode, prefill]`; the chart
 emits `[decoder, engine]`.
 
@@ -358,8 +358,9 @@ vendor names.
 ## 7. Coordination knobs
 
 `deployments[].coordination` synthesises one `RolloutCoordinationGroup`
-that spans every Component the deployment renders (prefill+decode plus
-optional router for `pd`; engine for `standalone` / `multinode`).
+under `spec.rollout.coordination.groups` that spans every Component the
+deployment renders (prefill+decode plus optional router for `pd`; engine
+for `standalone` / `multinode`).
 
 ### Policies
 

@@ -2,7 +2,7 @@ apiVersion: v2
 name: ome-isvc
 description: One-shot deploy of a single OME InferenceService bundle (InferenceService + ServingRuntime + optional BaseModel) on top of an existing OME installation.
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "ome-1.0"
 keywords:
   - ome
