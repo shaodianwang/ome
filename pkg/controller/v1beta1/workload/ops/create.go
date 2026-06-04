@@ -78,6 +78,23 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 	// Only patch Creating when there's something to create — otherwise the
 	// next pass would oscillate status back to Creating after Ready.
 	if len(missing) > 0 {
+		// RecreateInstance owns partial-Instance recovery. When an Instance
+		// that already reached Ready loses a pod (some present, some missing),
+		// recreating only the missing pod here races the Restart pass — which
+		// drains and recreates the WHOLE Instance (the gang) per the policy
+		// contract. When this self-heal wins that race it also stamps
+		// Phase=Creating, which latches the outcome by making
+		// DetectRestartTrigger skip on every later pass — so RecreateInstance
+		// silently degrades to "recreate just the dead pod" (the leader and
+		// surviving workers keep their incarnation). Defer to Restart for an
+		// already-Ready Instance; fresh/empty Instances (initial create +
+		// scale-up) and partial Instances under other restart policies remain
+		// Create's responsibility.
+		if plan.RestartPolicy == workload.RestartPolicyRecreateInstance && len(existing) > 0 {
+			if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil && s.Phase == workload.InstancePhaseReady {
+				return false, nil
+			}
+		}
 		// Capture before patch — findInstanceStatus reads ObservedState,
 		// so the patch below doesn't backfill this view.
 		isFirstCreate := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index) == nil
