@@ -1,8 +1,8 @@
-title: Inference Service Traffic Management
-oep-number: 0011
+title: InferenceService Backend Traffic Policy
+oep-number: "0011"
 authors:
   - "@slin1237"
-status: provisional
+status: implementable
 creation-date: 2026-05-15
 reviewers:
   - TBD
@@ -11,29 +11,39 @@ approvers:
 
 see-also:
   - "/oeps/0007-omenative-workload-strategy"
+  - "/oeps/0007.1-omenative-coordinated-rollout"  # cross-Component rollout coordination lives at spec.rollout.coordination
+  - "/oeps/0015-unified-rollout"                   # progressive canary plan reserved (shape-only) at spec.rollout.canary
 
 # The target maturity stage in the current dev cycle for this OEP.
 stage: alpha
 
-# Draft — implementation phasing assumes annotation-first alpha, with
-# a beta decision on whether to promote knobs to typed Component
-# fields based on real-world usage.
-latest-milestone: "TBD"
+# Part 1 (backend traffic policy) is merged: the typed spec.traffic core,
+# the ome.io/* annotation contract, the Envoy/Istio/noop translator
+# factory, the BackendTrafficPolicy builder, and the TrafficStatus
+# surface all shipped. See Implementation History in the README.
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  # API (TrafficSpec/TrafficStatus + annotation constants) merged in #136
+  # on 2026-05-18; the translator + reconciler + EG/Istio + integration
+  # merged in #143 on 2026-05-19. The later date is the alpha mark.
+  alpha: "2026-05-19"
   beta: "TBD"
   stable: "TBD"
 
-# OMENative-style decision: no Kubernetes feature gate. Opt-in is
-# per-Component via the existing ome.io annotation namespace; OMENative
-# already established that pattern and there's no operational reason to
-# diverge.
+# No Kubernetes feature gate. Opt-in is per-ISVC by setting any
+# spec.traffic field or any ome.io/* traffic annotation; absence
+# preserves today's behavior (gateway-default load balancing, no
+# emitted policy).
 feature-gates: []
 disable-supported: true
 
 metrics:
-  # Backend traffic policy (Part 1)
+  # Backend traffic policy (Part 1). RESERVED — NOT YET IMPLEMENTED.
+  # Today observability is via TrafficStatus conditions
+  # (BackendPolicyReady + BackendPolicyUnsupportedFields), not metrics.
+  # Listed here as the planned set; grep the controller for any of these
+  # names returns zero hits as of 2026-06-04.
   - ome_traffic_policy_translated_total
   - ome_traffic_policy_translation_failures_total
   - ome_traffic_annotation_used_total
@@ -42,11 +52,8 @@ metrics:
   - ome_traffic_per_component_fallback_total
   - ome_backend_policy_accepted_total
   - ome_backend_policy_rejected_total
-  # Rollout strategies (Part 2)
-  - ome_rollout_phase_total           # labels: mode,isvc,phase  (Stable, Canarying, BlueGreenStandby, Paused, Pending, Promoting, RollingBack, Failed)
-  - ome_rollout_transition_total      # labels: mode,from,to,outcome  (operator-initiated transitions)
-  - ome_rollout_failure_total         # labels: mode,reason  (timeout, recovery)
-  - ome_rollout_revision_count        # labels: isvc,component  (per-Component revision count; alert if > retention limit)
-  - ome_rollout_step_total            # labels: mode,isvc,step,outcome  (step-based rollouts: per-step entry / completion)
-  - ome_rollout_promote_annotation_total  # labels: isvc,target  (consumption of ome.io/rollout-promote)
-  - ome_rollout_rollback_annotation_total # labels: isvc,source_phase  (consumption of ome.io/rollout-rollback)
+  # Progressive-rollout metrics (the former Part 2) moved out of this OEP.
+  # Cross-Component coordination shipped via OEP-0007.1 and emits its own
+  # ome_omenative_rollout_group_* / ome_omenative_* metrics from the
+  # omenative/coordination package — NOT the ome_rollout_* names this OEP
+  # once proposed. See OEP-0007.1 and OEP-0015 for the live surface.
