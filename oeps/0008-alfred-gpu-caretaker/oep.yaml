@@ -1,0 +1,54 @@
+title: Alfred GPU Cluster Caretaker
+oep-number: "0008"
+authors:
+  - "@slin1237"
+status: provisional
+creation-date: 2026-04-16
+last-revised: 2026-06-04
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "/oeps/0007-omenative-workload-strategy"
+  - "/oeps/0003-accelerator-aware-runtime-selection"
+  - "/oeps/0006-unified-workload-management"
+  - "/oeps/0013-autoscaling"
+replaces:
+  - "ome-operator/alfred (archived repository, auto-patch/auto-repair focus) — its node-health reaction is partially realized here as Policy #2 (evacuate + signal)"
+
+# The target maturity stage in the current dev cycle.
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+feature-gates:
+  - name: AlfredCaretaker
+    description: |
+      Enables the Alfred GPU Cluster Caretaker controller as an optional
+      component of the OME deployment. When disabled, Alfred does not
+      observe or act on the cluster. Individual policies (defragmentation,
+      node-health) are toggled per-policy in Alfred's ConfigMap.
+disable-supported: true
+
+# Existing recommendation/migration metrics gain a `policy` label
+# (e.g. policy=defragmentation|node-health) so per-policy behavior is
+# distinguishable on one dashboard.
+metrics:
+  - alfred_cluster_fragmentation_score
+  - alfred_node_fragmentation_score
+  - alfred_recommendations_produced_total          # labels: policy
+  - alfred_recommendations_accepted_total          # labels: policy
+  - alfred_recommendations_rejected_total          # labels: policy
+  - alfred_migration_calls_total                   # labels: policy
+  - alfred_migration_outcome_total                 # labels: policy
+  - alfred_observation_loop_duration_seconds
+  # Policy #2 — node-health evacuation
+  - alfred_nodehealth_evacuations_total            # labels: node, outcome
+  - alfred_nodehealth_signals_total                # labels: node, reason
