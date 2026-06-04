@@ -4,11 +4,11 @@
 · Next: [Runtimes](guide-runtimes.md) ·
 [Models & InferenceService](guide-models-and-inferenceservice.md)*
 
-OMENative is a deployment mode. You turn it on with one annotation —
-`ome.io/deploymentMode: OMENative` — and from then on OME manages the serving
-pods itself, directly, instead of handing them to a built-in Kubernetes
-controller. Everything interesting about rollouts in this guide only happens in
-this mode.
+OMENative is a deployment mode. You turn it on with one field —
+`spec.deploymentMode: OMENative` — set once, and it propagates to every
+component (engine/decoder/router). From then on OME manages the serving pods
+itself, directly, instead of handing them to a built-in Kubernetes controller.
+Everything interesting about rollouts in this guide only happens in this mode.
 
 On this page:
 - The deployment modes, and who actually runs the pods
@@ -255,14 +255,17 @@ You put the components in a group and pick a policy:
 
 The group also has a `pacing` block:
 
-- `type: PerComponent` — each component uses its own lifecycle budget.
+- `type: PerComponent` — no cross-component ratio coupling; each component rolls
+  under the `min(group, per-component)` surge/unavailable caps.
 - `type: RatioBalanced` — surge the components *in lockstep*, keeping their
   ratio (e.g. prefill:decode = 1:1) within `ratioTolerance` percent of where it
   started. This is the one to use for PD: the two pools come up in proportion,
   so you never roll into a lopsided skew.
 
-One precedence rule worth remembering: *the group's `pacing.maxSurge` caps each
-component's own `maxSurge`.* The group ceiling wins.
+One rule worth remembering: the group's `pacing.maxSurge` and a component's own
+`lifecycle…maxSurge` are **independent caps** — the effective surge is
+`min(group, per-component)`, and an unset per-component value defers to the group
+(same for `maxUnavailable`).
 
 The example in this folder uses `RollingUpdate` + `RatioBalanced`, which is the
 recommended shape for prefill/decode.
@@ -272,11 +275,12 @@ recommended shape for prefill/decode.
 These are not opinions; the controller behaves this way, and missing either one
 fails quietly.
 
-1. **Set `ome.io/deploymentMode: OMENative` on every component**, not just at
-   the top of the InferenceService. OME decides each component's mode from that
-   component's own annotation. The top-level annotation only affects ingress
-   and is not copied down. A component without it runs as a plain Deployment —
-   and you won't get an error, just the wrong behavior.
+1. **Set `spec.deploymentMode: OMENative` once** — it propagates to every
+   component (engine/decoder/router) and the ingress. The per-component
+   `ome.io/deploymentMode` annotation is an optional override for mixed-mode
+   (e.g. one component on RawDeployment); a component annotation wins over the
+   field for that component. Miss the field entirely and components run as plain
+   Deployments — you won't get an error, just the wrong behavior.
 
 2. **Name the engine/decoder container `ome-container`** (and the router
    container `router`). OME finds the main container by that exact name for

@@ -1,4 +1,23 @@
 
+# OME docs + a working PD sample
+
+This folder is both a runnable prefill-decode example and the OME doc set.
+
+**Just want to ship? Start with the task recipes (how-to):**
+
+1. [Launch a model](howto-launch-a-model.md) — get one model serving, ~10 min
+2. [Write a ServingRuntime](howto-write-a-runtime.md)
+3. [Update & roll safely](howto-update-and-roll.md) — blue/green, canary, sequential
+4. [Multi-node & PD](howto-multi-node-and-pd.md)
+
+**Want the concepts behind it?** Read the reference guides:
+[when to use OME](guide-when-to-use-ome.md) · [OMENative](guide-omenative.md) ·
+[runtimes](guide-runtimes.md) ·
+[models & InferenceService](guide-models-and-inferenceservice.md).
+
+The rest of this file documents the YAML in this folder — the PD rollout sample
+the how-tos point back to.
+
 ## Who edits what
 
 | File | Kind | Who owns it |
@@ -110,11 +129,12 @@ GPUs. Hence RollingUpdate + RatioBalanced for PD.
 
 ## Two rules that are easy to miss
 
-1. **`ome.io/deploymentMode: OMENative` must be set on every component**
-   (engine/decoder/router), not just at the ISVC top level. OME decides each
-   component's mode from that component's own annotation; the top-level one
-   only affects ingress and is not copied down. Miss it → that component
-   silently runs as a plain Deployment.
+1. **Set `spec.deploymentMode: OMENative` once** — it propagates to every
+   component (engine/decoder/router) and the ingress. The per-component
+   `ome.io/deploymentMode` annotation is an optional override for mixed-mode
+   (e.g. one component on RawDeployment); when set, it wins over the field for
+   that component. Miss the field entirely → components silently run as plain
+   Deployments.
 2. **The engine/decoder container must be named `ome-container`** (and the
    router `router`). OME keys off those names for status and pod injection;
    renaming breaks them.

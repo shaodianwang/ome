@@ -12,17 +12,17 @@
 # PD: prefill and decode roll together, in proportion, so the two pools that
 # talk to each other never drift into a lopsided version skew.
 #
-# REQUIRED: ome.io/deploymentMode: OMENative is set on EACH component below —
-# not just at the top. The top-level annotation alone leaves components as
-# plain Deployments (see README "deployment mode is per-component").
+# spec.deploymentMode: OMENative is set ONCE below and propagates to every
+# component (engine / decoder / router) and the ingress. A per-component
+# ome.io/deploymentMode annotation is only needed to override one component for
+# mixed-mode (see README "deployment mode").
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata:
   name: sglang-llama4x-nvfp4
   namespace: sandbox
-  annotations:
-    ome.io/deploymentMode: OMENative   # drives overall mode (ingress); NOT propagated to components
 spec:
+  deploymentMode: OMENative   # propagates to engine / decoder / router + ingress
   # OPTIONAL — the model is normally cluster-cache-fetched at runtime, so this
   # block can be omitted entirely. It is here only for the PVC fallback; remove
   # it together with the model file when CC is stable (see README).
@@ -32,8 +32,6 @@ spec:
   runtime:
     name: srt-llama4x-nvfp4-pd
   engine:                      # prefill
-    annotations:
-      ome.io/deploymentMode: OMENative   # REQUIRED per component
     minReplicas: 2
     maxReplicas: 2
     priorityClassName: staging
@@ -44,8 +42,6 @@ spec:
           maxSurge: 1
           maxUnavailable: 0
   decoder:                     # decode
-    annotations:
-      ome.io/deploymentMode: OMENative
     minReplicas: 2
     maxReplicas: 2
     priorityClassName: staging
@@ -56,8 +52,6 @@ spec:
           maxSurge: 1
           maxUnavailable: 0
   router:
-    annotations:
-      ome.io/deploymentMode: OMENative
     minReplicas: 1
     maxReplicas: 1
     priorityClassName: staging

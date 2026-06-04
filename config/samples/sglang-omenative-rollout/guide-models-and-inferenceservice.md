@@ -53,8 +53,8 @@ architecture, and where the weights live (`storageUri`). OME reads the rest
 
 The InferenceService is the resource you deploy. A minimal OMENative one has:
 
-- `metadata.annotations: ome.io/deploymentMode: OMENative` — and the same on
-  each component (see [OMENative](guide-omenative.md), rule #1).
+- `spec.deploymentMode: OMENative` — set once; it propagates to every component
+  and the ingress (see [OMENative](guide-omenative.md), rule #1).
 - `spec.runtime.name` — the runtime to use (usually your tenant runtime).
 - `spec.model` — optional; only for the PVC fallback.
 - one or more components — `engine`, `decoder`, `router` — each with
