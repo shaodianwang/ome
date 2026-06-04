@@ -1,0 +1,18 @@
+# p18: engine-only N=4 InPlaceOnly (rejects non-image diffs)  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p18 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,        name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime,   name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle:
+      updateStrategy:
+        type: InPlaceOnly
+        # in-place needs maxUnavailable>=1: the patch marks the pod not-ready
+        # (consumes the unavailable budget). maxSurge:0 is correct — in-place
+        # never surges. both-zero is unstartable and rejected at admission (#410).
+        rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }

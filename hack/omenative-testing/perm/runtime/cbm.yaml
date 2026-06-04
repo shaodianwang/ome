@@ -1,0 +1,18 @@
+# Test ClusterBaseModel — noop format, points at a tiny 1Mi PVC.
+# No real model bytes; the runtime is nginx and doesn't read the model.
+apiVersion: ome.io/v1beta1
+kind: ClusterBaseModel
+metadata:
+  name: ome-coordtest-noop
+  labels:
+    ome-coordtest/managed: "true"
+spec:
+  modelArchitecture: TestArchitecture
+  modelFormat:    { name: noop, operator: Equal, version: "1.0.0", weight: 1 }
+  modelFramework: { name: noop, operator: Equal,                  weight: 1 }
+  modelParameterSize: "0"
+  modelType: test
+  storage:
+    # PVC lives in sandbox; OME's CBM finalizer mounts read-only via a
+    # short-lived metadata-extraction Job to validate the BaseModel.
+    storageUri: pvc://sandbox:ome-coordtest-noop-pvc/.

@@ -136,3 +136,9 @@ tests/integration/dep-crds/*/
 # the PodMonitor CRD stub for envtest. See its SOURCE file.
 !tests/integration/dep-crds/prometheus-operator/
 !tests/integration/dep-crds/prometheus-operator/**
+
+# OMENative coordination test harness (hack/omenative-testing): per-run results
+# are local-only (regenerated each run). The generated isvcs/ test matrix IS
+# tracked — only results/ and Python bytecode caches are ignored.
+hack/omenative-testing/perm/results/
+__pycache__/

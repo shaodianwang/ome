@@ -1,0 +1,28 @@
+# p43: PD asymmetric per-Comp lifecycle (e.surge=1, d.surge=2) + BlueGreen (no pacing)  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=6 ceil_r=3 topo=pd
+# Tests whether BlueGreen group respects per-Comp lifecycle when no pacing is set.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p43 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,        name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime,   name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 2, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    coordination:
+      groups:
+        - components: [engine, decoder]
+          policy: BlueGreen

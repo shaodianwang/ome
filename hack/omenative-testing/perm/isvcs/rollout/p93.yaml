@@ -1,0 +1,14 @@
+# p93: MN engine leader+2w N=4 RecreatePod maxUnavail=2 (two 3-pod gangs recreate at once)  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine-mn
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p93 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 2 }
+    lifecycle: { updateStrategy: { type: RecreatePod, rollingUpdate: { maxSurge: 0, maxUnavailable: 2 } } }

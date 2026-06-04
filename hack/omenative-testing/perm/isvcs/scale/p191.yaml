@@ -1,0 +1,12 @@
+# p191: scaledown engine N=8->2  mode=scaledown Ne=8 Nd=0 Nr=0 ceil_e=8 ceil_d=0 ceil_r=0 to_e=2 co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p191 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

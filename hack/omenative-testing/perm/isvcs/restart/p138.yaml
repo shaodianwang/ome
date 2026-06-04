@@ -1,0 +1,14 @@
+# p138: kill engine-mn restartPolicy=RecreateISVC  mode=kill Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=RecreateISVC co=none topo=engine-mn
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p138 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateISVCOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

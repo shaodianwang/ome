@@ -1,0 +1,32 @@
+# p83: PD MN e+d leader+2w N=2 RatioBalanced STD (3-pod gangs, surge both)  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=3 topo=pd-mn
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p83 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 2 }
+    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 2 }
+    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    coordination:
+      groups:
+        - components: [engine, decoder]
+          policy: RollingUpdate
+          pacing: { type: RatioBalanced, ratioTolerance: 25, maxUnavailable: 1 }

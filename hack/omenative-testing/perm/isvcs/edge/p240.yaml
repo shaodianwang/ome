@@ -1,0 +1,12 @@
+# p240: InPlaceOnly engine  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p240 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

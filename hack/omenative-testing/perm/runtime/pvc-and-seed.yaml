@@ -1,0 +1,44 @@
+# 1Mi PVC the ClusterBaseModel references, plus a one-shot Job that writes
+# a minimal config.json so OME's CBM finalizer thinks the model is valid.
+# Apply once per cluster (idempotent — re-apply is fine).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ome-coordtest-noop-pvc
+  namespace: sandbox
+  labels:
+    ome-coordtest/managed: "true"
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests: { storage: 1Mi }
+  storageClassName: shared-vast
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ome-coordtest-noop-seed
+  namespace: sandbox
+  labels:
+    ome-coordtest/managed: "true"
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector: { kubernetes.io/arch: amd64 }
+      containers:
+        - name: seed
+          image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/nginxinc/nginx-unprivileged:1.27-alpine
+          command:
+            - sh
+            - -c
+            - |
+              cat > /m/config.json <<'JSON'
+              {"architectures":["TestArchitecture"],"model_type":"test","hidden_size":1,"num_attention_heads":1,"num_hidden_layers":1,"vocab_size":1,"torch_dtype":"float32"}
+              JSON
+              echo "seed written"
+          volumeMounts:
+            - { name: m, mountPath: /m }
+      volumes:
+        - name: m
+          persistentVolumeClaim: { claimName: ome-coordtest-noop-pvc }
