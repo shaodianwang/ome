@@ -227,6 +227,13 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		priorSurgeInFlight := CurrentSurgeInFlight(input.ObservedState.InstanceStatuses)
 		priorUnavailInFlight := CurrentUnavailableInFlight(input.ObservedState.InstanceStatuses)
 		for _, inst := range plan.Instances {
+			// RollingUpdate.Partition (canary): hold Instances with index <
+			// Partition on the old revision — skip their update entirely. Surge
+			// Instances (index >= replicas >= Partition) are never held, so a
+			// rolling Instance's own surge still proceeds.
+			if HeldByPartition(rollingUpdate, inst.Index) {
+				continue
+			}
 			needs, derr := workloadops.DetectUpdateTrigger(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec)
 			if derr != nil {
 				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: detect update trigger (instance=%d): %w", inst.Index, derr)

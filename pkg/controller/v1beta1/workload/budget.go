@@ -79,6 +79,18 @@ func PerComponentMaxUnavailableBudget(ru *RollingUpdate, replicas int32) int32 {
 	return resolveIntOrPercentCeil(ru.MaxUnavailable, replicas)
 }
 
+// HeldByPartition reports whether the Instance at `index` is held on the old
+// revision by RollingUpdate.Partition (the StatefulSet-style canary): Instances
+// with index < Partition are held. A nil RollingUpdate, nil Partition, or
+// Partition <= 0 holds nothing. Surge Instances are allocated above the replica
+// count, so their index >= replicas >= Partition and they are never held.
+func HeldByPartition(ru *RollingUpdate, index int32) bool {
+	if ru == nil || ru.Partition == nil || *ru.Partition <= 0 {
+		return false
+	}
+	return index < *ru.Partition
+}
+
 // resolveIntOrPercentCeil converts an IntOrString budget against a
 // total. Integers are clamped to >= 0; percent strings resolve via
 // ceil(total * pct / 100); the percent is clamped to [0, 100].
