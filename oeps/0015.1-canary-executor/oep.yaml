@@ -1,0 +1,40 @@
+title: Progressive (Canary) Rollout Executor
+oep-number: "0015.1"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-06-04
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follow-up to OEP-0015, which reserved spec.rollout.canary (the shape) and
+# admission-rejected it pending an executor. This OEP builds that executor.
+see-also:
+  - "/oeps/0015-unified-rollout"
+  - "/oeps/0007.1-omenative-coordinated-rollout"
+  - "/oeps/0013-autoscaling"
+  - "/oeps/0011-inference-traffic-policy"
+
+# The target maturity stage in the current dev cycle.
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# No feature gate: a canary runs only when an InferenceService sets
+# spec.rollout.canary. When unset, nothing in this OEP executes.
+feature-gates: []
+disable-supported: true
+
+metrics:
+  - ome_canary_step_total                  # labels: isvc, outcome (entered|completed)
+  - ome_canary_promotion_total             # labels: isvc, policy (manual|auto)
+  - ome_canary_rollback_total              # labels: isvc, source_phase
+  - ome_canary_phase_total                 # labels: isvc, phase (Pending|Canarying|Paused|Promoting|Stable|Failed|RollingBack)
+  - ome_canary_step_duration_seconds       # labels: isvc, step

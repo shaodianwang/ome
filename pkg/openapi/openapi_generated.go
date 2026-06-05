@@ -17,6 +17,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":                  schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":                  schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanarySpec":                     schema_pkg_apis_ome_v1beta1_CanarySpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus":                   schema_pkg_apis_ome_v1beta1_CanaryStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":               schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":           schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":          schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
@@ -440,7 +441,7 @@ func schema_pkg_apis_ome_v1beta1_CanarySpec(ref common.ReferenceCallback) common
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "CanarySpec is a reserved multi-step progressive rollout plan (a new revision brought up at some pod capacity while a fraction of traffic shifts to it, advancing through steps). RESERVED: setting it is rejected at admission until a step executor exists.\n\nStep semantics (for when it is implemented):\n  - Each step specifies pod capacity (NewCapacity, OldCapacity) independently\n    of traffic weight (TrafficWeight), so the new revision can run at full\n    capacity with 0% traffic for validation, then shift traffic.\n  - The final step's TrafficWeight is 100 so the rollout completes.\n  - Each step's optional Pause holds the rollout (Manual: advance via\n    ome.io/rollout-promote; Auto: advance on Pause.Duration).",
+				Description: "CanarySpec is a multi-step progressive rollout plan: a new revision is brought up at some pod capacity while a fraction of traffic shifts to it, advancing through steps.\n\nStep semantics:\n  - Each step specifies pod capacity (NewCapacity, OldCapacity) independently\n    of traffic weight (TrafficWeight), so the new revision can run at full\n    capacity with 0% traffic for validation, then shift traffic.\n  - The final step's TrafficWeight is 100 so the rollout completes.\n  - Each step's optional Pause holds the rollout (Manual: advance via\n    ome.io/rollout-promote; Auto: advance on Pause.Duration).",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"steps": {
@@ -481,6 +482,51 @@ func schema_pkg_apis_ome_v1beta1_CanarySpec(ref common.ReferenceCallback) common
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CanaryStatus tracks progress of a spec.rollout.canary rollout. It is the executor's persistent state machine: which step is active, when it was entered (Auto promotion measures Pause.Duration from here), and which revision is the canary. Absent when no canary is in progress.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"canaryRevisionHash": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CanaryRevisionHash is the revision hash being rolled out.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"currentStep": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CurrentStep is the zero-based index into spec.rollout.canary.Steps.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"stepEnteredTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "StepEnteredTime is when CurrentStep was entered. Auto promotion measures Pause.Duration from this timestamp.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"observedTrafficWeight": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedTrafficWeight is the external traffic weight currently programmed for the canary revision (mirrors the active step's TrafficWeight once applied).",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+				Required: []string{"currentStep", "observedTrafficWeight"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 
@@ -3467,6 +3513,12 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus"),
 						},
 					},
+					"canary": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Canary tracks an in-progress spec.rollout.canary rollout (the step state machine). Absent when no canary is running.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus"),
+						},
+					},
 					"pinnedRevisionName": {
 						SchemaProps: spec.SchemaProps{
 							Description: "PinnedRevisionName is the ControllerRevision (OME ns) driving pod specs. Empty when autoSync is true.",
@@ -3491,7 +3543,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus", "knative.dev/pkg/apis.Condition", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus", "knative.dev/pkg/apis.Condition", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
 	}
 }
 
@@ -6191,7 +6243,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutSpec(ref common.ReferenceCallback) commo
 					},
 					"canary": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Canary is a reserved step-based progressive-traffic-shift plan. The shape is fixed so enabling it later is not an API migration, but it is rejected at admission today (\"not yet implemented\") because no step executor exists. It carries no inner validation/default markers while reserved, so the only error an operator sees is the webhook rejection (apiserver structural validation would otherwise pre-empt it).",
+							Description: "Canary is a step-based progressive-traffic-shift plan: a new revision is brought up at some pod capacity and a fraction of traffic shifts to it, advancing through steps. Executed by the canary controller; mutually exclusive with Coordination.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanarySpec"),
 						},
 					},

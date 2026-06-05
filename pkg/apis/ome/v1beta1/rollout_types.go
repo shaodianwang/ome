@@ -23,22 +23,19 @@ type RolloutSpec struct {
 	// +optional
 	Coordination *RolloutCoordinationSpec `json:"coordination,omitempty"`
 
-	// Canary is a reserved step-based progressive-traffic-shift plan. The
-	// shape is fixed so enabling it later is not an API migration, but it is
-	// rejected at admission today ("not yet implemented") because no step
-	// executor exists. It carries no inner validation/default markers while
-	// reserved, so the only error an operator sees is the webhook rejection
-	// (apiserver structural validation would otherwise pre-empt it).
+	// Canary is a step-based progressive-traffic-shift plan: a new revision is
+	// brought up at some pod capacity and a fraction of traffic shifts to it,
+	// advancing through steps. Executed by the canary controller; mutually
+	// exclusive with Coordination.
 	// +optional
 	Canary *CanarySpec `json:"canary,omitempty"`
 }
 
-// CanarySpec is a reserved multi-step progressive rollout plan (a new revision
-// brought up at some pod capacity while a fraction of traffic shifts to it,
-// advancing through steps). RESERVED: setting it is rejected at admission until
-// a step executor exists.
+// CanarySpec is a multi-step progressive rollout plan: a new revision is brought
+// up at some pod capacity while a fraction of traffic shifts to it, advancing
+// through steps.
 //
-// Step semantics (for when it is implemented):
+// Step semantics:
 //   - Each step specifies pod capacity (NewCapacity, OldCapacity) independently
 //     of traffic weight (TrafficWeight), so the new revision can run at full
 //     capacity with 0% traffic for validation, then shift traffic.

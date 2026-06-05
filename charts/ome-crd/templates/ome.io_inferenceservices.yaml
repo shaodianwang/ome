@@ -29978,6 +29978,23 @@ spec:
                   additionalProperties:
                     type: string
                   type: object
+                canary:
+                  properties:
+                    canaryRevisionHash:
+                      type: string
+                    currentStep:
+                      format: int32
+                      type: integer
+                    observedTrafficWeight:
+                      format: int32
+                      type: integer
+                    stepEnteredTime:
+                      format: date-time
+                      type: string
+                  required:
+                    - currentStep
+                    - observedTrafficWeight
+                  type: object
                 components:
                   additionalProperties:
                     properties:

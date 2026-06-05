@@ -94,6 +94,16 @@ func (s *InferenceServiceSpec) GetRolloutCoordination() *RolloutCoordinationSpec
 	return s.Rollout.Coordination
 }
 
+// GetCanary returns the progressive canary plan (spec.rollout.canary), or nil
+// if spec.rollout or its canary is unset. Nil-safe on a nil receiver so callers
+// can drop their own guards.
+func (s *InferenceServiceSpec) GetCanary() *CanarySpec {
+	if s == nil || s.Rollout == nil {
+		return nil
+	}
+	return s.Rollout.Canary
+}
+
 // EngineSpec defines the configuration for the Engine component (can be used for both single-node and multi-node deployments)
 // Provides a comprehensive specification for deploying model serving containers and pods.
 // It allows for complete Kubernetes pod configuration including main containers,

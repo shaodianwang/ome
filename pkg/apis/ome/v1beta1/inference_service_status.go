@@ -50,6 +50,11 @@ type InferenceServiceStatus struct {
 	// +optional
 	Traffic *TrafficStatus `json:"traffic,omitempty"`
 
+	// Canary tracks an in-progress spec.rollout.canary rollout (the step
+	// state machine). Absent when no canary is running.
+	// +optional
+	Canary *CanaryStatus `json:"canary,omitempty"`
+
 	// PinnedRevisionName is the ControllerRevision (OME ns) driving
 	// pod specs. Empty when autoSync is true.
 	// +optional

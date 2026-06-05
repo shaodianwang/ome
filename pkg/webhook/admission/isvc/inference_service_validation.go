@@ -183,9 +183,8 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	}
 	allWarnings = append(allWarnings, trafficWarnings...)
 
-	// spec.rollout.canary is a reserved progressive-traffic plan with no
-	// step executor yet; reject any attempt to set it.
-	if err := validation.ValidateRolloutCanaryReserved(&isvc.Spec); err != nil {
+	// spec.rollout.canary: validate the progressive-traffic rollout plan.
+	if err := validation.ValidateCanary(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
 
