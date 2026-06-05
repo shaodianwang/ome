@@ -137,3 +137,10 @@ For long-term observability, deploy a separate full Prometheus stack
 token Secret that a control-plane InferenceDeploymentOperator can use to manage
 OME resources in this workload cluster. The RBAC is scoped to OME
 `InferenceService` and `ClusterServingRuntime` resources.
+
+## Default Runtime
+
+The chart always installs `ClusterServingRuntime/default-runtime`.
+InferenceDeploymentOperator-generated `InferenceService` resources reference
+this runtime and supply only per-deployment overrides such as image, checkpoint,
+resources, env, args, and replica envelopes.
