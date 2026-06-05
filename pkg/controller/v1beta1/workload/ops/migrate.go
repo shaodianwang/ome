@@ -642,6 +642,20 @@ func drainServiceForPod(input workload.ReconcileInput, plan workload.ComponentPl
 	if hash == "" {
 		return ""
 	}
+	// Workers are never members of the per-revision ROUTING Service: for
+	// multi-pod (gang) Components that Service pins runner=leader,pod-ordinal=0
+	// (coordination.BuildPerRevisionRoutingService) because workers run
+	// distributed-init peers and never serve customer traffic. Returning a
+	// routing-Service name for a worker would wedge the Migrate surge
+	// in-rotation gate forever — IsPodInRotation(worker) can never become true
+	// since the worker is not an endpoint — and is a no-op for the source
+	// drain gate (a worker is never routed, so it's trivially drained). Skip it
+	// so the gates assert only the routable leader; worker readiness is already
+	// covered upstream by AllPodsRuntimeReady, and worker availability by the
+	// headless-Service-based AvailablePodCount.
+	if pod.Labels[query.LabelRunner] == "worker" {
+		return ""
+	}
 	return query.PerRevisionServiceName(input.Key.OwnerName, plan.Component, hash)
 }
 

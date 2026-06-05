@@ -177,3 +177,38 @@ func TestSurgeRevisionAndSpec_ReturnsGangWorkerSpec(t *testing.T) {
 		t.Errorf("worker spec mismatch: %+v", gotWorker)
 	}
 }
+
+// TestDrainServiceForPod_GangWorkerNotRoutable pins the worker-aware fix for
+// gang migration finalization. The per-revision ROUTING Service selects the
+// rank-0 leader only for multi-pod Components (workers run distributed-init
+// peers and never serve customer traffic — see
+// coordination.BuildPerRevisionRoutingService), so a gang worker pod is never
+// a routing endpoint. drainServiceForPod must therefore return "" for a worker
+// so the Migrate surge in-rotation gate (and the source drain gate) skip it
+// instead of waiting forever on IsPodInRotation(worker) — the bug that wedged
+// every gang migration at ledger phase=Started. Leader + single-pod "default"
+// pods stay routable.
+func TestDrainServiceForPod_GangWorkerNotRoutable(t *testing.T) {
+	input := workload.ReconcileInput{Key: workload.Key{OwnerName: "llama-70b", Component: workload.ComponentEngine}}
+	plan := workload.ComponentPlan{Component: workload.ComponentEngine}
+
+	runnerPod := func(runner string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: "llama-70b-engine-0-" + runner + "-0",
+			Labels: map[string]string{
+				query.LabelRunner:       runner,
+				query.LabelRevisionHash: "abc123",
+			},
+		}}
+	}
+
+	if got := drainServiceForPod(input, plan, runnerPod("leader")); got == "" {
+		t.Errorf("leader pod must be routable (non-empty routing Service), got empty")
+	}
+	if got := drainServiceForPod(input, plan, runnerPod("default")); got == "" {
+		t.Errorf("single-pod default pod must be routable (non-empty routing Service), got empty")
+	}
+	if got := drainServiceForPod(input, plan, runnerPod("worker")); got != "" {
+		t.Errorf("gang worker must be skipped so the surge rotation gate does not wedge; got routing Service %q", got)
+	}
+}
