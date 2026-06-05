@@ -496,6 +496,64 @@ func TestRender_MultiPod_LeaderAddressOnWorker(t *testing.T) {
 	}
 }
 
+// TestRender_MultiPod_InstancePodRankAndCount pins the gang-global node-rank
+// env. OME_INSTANCE_POD_RANK is the pod's flat rank across the WHOLE Instance
+// (leader runner first, then worker runner); OME_INSTANCE_POD_COUNT is the
+// gang's total pod count. Multi-node frameworks (sglang --node-rank/--nnodes,
+// torchrun) read these directly instead of reconstructing a global rank from
+// the per-runner OME_RUNNER_INDEX — which can't serve as a gang rank because
+// leader and worker each index from 0 (raw OME_RUNNER_INDEX would collide
+// leader-0 with worker-0). Gated on multi-pod, like OME_LEADER_ADDRESS.
+func TestRender_MultiPod_InstancePodRankAndCount(t *testing.T) {
+	plan, inst, runners := multiPodPlan(3) // 1 leader + 3 workers = 4-node gang
+	leader, worker := runners[0], runners[1]
+
+	// Leader is global rank 0; gang size 4.
+	lpod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, leader, 0)
+	if err != nil {
+		t.Fatalf("leader: %v", err)
+	}
+	lenv := envByName(lpod.Spec.Containers[0].Env)
+	if lenv["OME_INSTANCE_POD_RANK"] != "0" {
+		t.Errorf("leader OME_INSTANCE_POD_RANK: got %q want 0", lenv["OME_INSTANCE_POD_RANK"])
+	}
+	if lenv["OME_INSTANCE_POD_COUNT"] != "4" {
+		t.Errorf("leader OME_INSTANCE_POD_COUNT: got %q want 4", lenv["OME_INSTANCE_POD_COUNT"])
+	}
+
+	// Workers follow the leader: ordinal 0/1/2 → global rank 1/2/3, count 4.
+	for _, w := range []struct {
+		ord  int32
+		rank string
+	}{{0, "1"}, {1, "2"}, {2, "3"}} {
+		wpod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, worker, w.ord)
+		if err != nil {
+			t.Fatalf("worker ord %d: %v", w.ord, err)
+		}
+		wenv := envByName(wpod.Spec.Containers[0].Env)
+		if wenv["OME_INSTANCE_POD_RANK"] != w.rank {
+			t.Errorf("worker ord %d OME_INSTANCE_POD_RANK: got %q want %s", w.ord, wenv["OME_INSTANCE_POD_RANK"], w.rank)
+		}
+		if wenv["OME_INSTANCE_POD_COUNT"] != "4" {
+			t.Errorf("worker ord %d OME_INSTANCE_POD_COUNT: got %q want 4", w.ord, wenv["OME_INSTANCE_POD_COUNT"])
+		}
+	}
+
+	// Single-pod Instances must NOT get the gang-global vars (same multi-pod
+	// gate as OME_LEADER_ADDRESS) — runtimes branch on presence to detect multi-node.
+	splan, sinst, srunner := singlePodPlan()
+	spod, err := testRender(basicISVC(), basicPodSpec(), splan, sinst, srunner, 0)
+	if err != nil {
+		t.Fatalf("single-pod: %v", err)
+	}
+	senv := envByName(spod.Spec.Containers[0].Env)
+	for _, k := range []string{"OME_INSTANCE_POD_RANK", "OME_INSTANCE_POD_COUNT"} {
+		if v, ok := senv[k]; ok {
+			t.Errorf("single-pod must not set %s (multi-pod only); got %q", k, v)
+		}
+	}
+}
+
 // TestRender_MultiPod_LeaderAddressPerInstance pins that the leader
 // address is per-Instance: Instance 0's workers point at the Instance 0
 // leader; Instance 1's workers point at the Instance 1 leader. Cross-talk

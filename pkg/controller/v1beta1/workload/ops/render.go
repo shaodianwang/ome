@@ -424,10 +424,42 @@ func buildOMENativeEnv(plan workload.ComponentPlan, inst workload.InstancePlan, 
 	// Instance has a "leader" Runner). Single-pod Instances have one
 	// "default" Runner with no leader, so the variable is omitted —
 	// runtimes branch on its presence to detect a multi-pod environment.
+	//
+	// Alongside it, OME_INSTANCE_POD_RANK / OME_INSTANCE_POD_COUNT give the
+	// gang-global node identity multi-node frameworks need (sglang
+	// --node-rank/--nnodes, torchrun, NCCL): a flat rank 0..N-1 across the
+	// whole Instance plus its size. OME_RUNNER_INDEX alone is per-runner
+	// (leader and worker each index from 0) and can't be a gang-wide rank,
+	// so without these every multi-node runtime has to reconstruct the rank
+	// itself (leader=0, worker=index+1). Same multi-pod gate as the address.
 	if addr := leaderAddressForInstance(isvcName, plan.Component, inst); addr != "" {
-		env = append(env, corev1.EnvVar{Name: "OME_LEADER_ADDRESS", Value: addr})
+		env = append(env,
+			corev1.EnvVar{Name: "OME_LEADER_ADDRESS", Value: addr},
+			corev1.EnvVar{Name: "OME_INSTANCE_POD_RANK", Value: fmt.Sprintf("%d", instancePodRank(inst, runner, ordinal))},
+			corev1.EnvVar{Name: "OME_INSTANCE_POD_COUNT", Value: fmt.Sprintf("%d", inst.TotalPods())},
+		)
 	}
 	return env
+}
+
+// instancePodRank returns the pod's rank within the whole gang Instance —
+// a flat 0..TotalPods-1 across runners in declared order (the leader runner's
+// pod first, then the worker runner's). This is the global node-rank a
+// multi-node framework wants; OME_RUNNER_INDEX is per-runner (leader and
+// worker each restart at 0) and can't serve as a gang-wide rank.
+//
+// The rank is (sum of the sizes of the runners declared before this one) +
+// the pod's ordinal within its runner. With the canonical leader(1)+worker(N)
+// layout that yields leader→0 and worker ordinal k→k+1.
+func instancePodRank(inst workload.InstancePlan, runner workload.RunnerPlan, ordinal int32) int32 {
+	var offset int32
+	for _, r := range inst.Runners {
+		if r.Name == runner.Name {
+			break
+		}
+		offset += r.Size
+	}
+	return offset + ordinal
 }
 
 // leaderAddressForInstance returns the peer-DNS address of the Instance's
