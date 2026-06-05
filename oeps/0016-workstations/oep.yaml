@@ -1,0 +1,24 @@
+title: Workstations — on-demand GPU developer boxes
+oep-number: "0016"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-06-04
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "/oeps/0007-omenative-workload-strategy"  # the per-Instance workload engine a Workstation drives
+  - "/oeps/0012-generic-runtimes"             # the model-optional "lean path" + runtime-as-pod-template
+  - "/oeps/0014-runtime-revisions"            # spec.runtime autoSync/revision pinning, reused verbatim
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
