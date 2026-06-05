@@ -68,6 +68,10 @@ type lc struct {
 	strat   v1beta1.UpdateStrategyType
 	surge   *intstr.IntOrString
 	unavail *intstr.IntOrString
+	// partition is the StatefulSet-style RollingUpdate.Partition: Instances with
+	// index < partition are held on the old revision (the partition/canary
+	// verb). Nil = no partition (full roll).
+	partition *int32
 }
 
 // permCase is one rollout permutation — the Go analog of a pXX.yaml. Ceilings are
@@ -228,10 +232,10 @@ func buildPermISVC(ns string, pc permCase) *v1beta1.InferenceService {
 			MinReplicas: &n,
 			MaxReplicas: n,
 		}
-		if l.strat != "" || l.surge != nil || l.unavail != nil {
+		if l.strat != "" || l.surge != nil || l.unavail != nil || l.partition != nil {
 			us := &v1beta1.UpdateStrategy{Type: l.strat}
-			if l.surge != nil || l.unavail != nil {
-				us.RollingUpdate = &v1beta1.RollingUpdate{MaxSurge: l.surge, MaxUnavailable: l.unavail}
+			if l.surge != nil || l.unavail != nil || l.partition != nil {
+				us.RollingUpdate = &v1beta1.RollingUpdate{MaxSurge: l.surge, MaxUnavailable: l.unavail, Partition: l.partition}
 			}
 			e.Lifecycle = &v1beta1.LifecycleSpec{UpdateStrategy: us}
 		}
