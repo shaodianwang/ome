@@ -6753,7 +6753,6 @@ spec:
                           enum:
                             - None
                             - RecreateInstanceOnPodRestart
-                            - RecreateISVCOnPodRestart
                           type: string
                         updateStrategy:
                           properties:
@@ -19492,7 +19491,6 @@ spec:
                           enum:
                             - None
                             - RecreateInstanceOnPodRestart
-                            - RecreateISVCOnPodRestart
                           type: string
                         updateStrategy:
                           properties:
@@ -28097,7 +28095,6 @@ spec:
                           enum:
                             - None
                             - RecreateInstanceOnPodRestart
-                            - RecreateISVCOnPodRestart
                           type: string
                         updateStrategy:
                           properties:

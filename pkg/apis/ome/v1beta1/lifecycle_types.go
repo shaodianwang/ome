@@ -367,7 +367,7 @@ type LifecycleSpec struct {
 // InstanceRestartPolicy controls what OMENative does when a managed pod
 // fails. Applies only when the Component is annotated
 // ome.io/deploymentMode=OMENative.
-// +kubebuilder:validation:Enum=None;RecreateInstanceOnPodRestart;RecreateISVCOnPodRestart
+// +kubebuilder:validation:Enum=None;RecreateInstanceOnPodRestart
 type InstanceRestartPolicy string
 
 const (
@@ -377,10 +377,6 @@ const (
 	// InstanceRestartPolicyRecreateInstance drains, deletes, and recreates
 	// every pod in the failed pod's Instance. Default for multi-pod Instances.
 	InstanceRestartPolicyRecreateInstance InstanceRestartPolicy = "RecreateInstanceOnPodRestart"
-	// InstanceRestartPolicyRecreateISVC cascades the recreate across every
-	// OMENative-managed Component-Instance in the InferenceService. Reserved
-	// for workloads with cross-Component state coupling.
-	InstanceRestartPolicyRecreateISVC InstanceRestartPolicy = "RecreateISVCOnPodRestart"
 )
 
 // UpdateStrategy controls how OMENative rolls template changes

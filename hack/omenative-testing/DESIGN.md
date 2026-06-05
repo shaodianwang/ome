@@ -16,7 +16,7 @@ that original stays the stable runner for regression re-runs.
 perm/isvcs/
   rollout/      # 96 existing cases (topology × lifecycle × coordination)
   migration/    # P2 — MigrationPolicy Auto/Surge/Never, ProgressDeadline, MaxAutoRetries
-  restart/      # P3 — RestartPolicy None / RecreateInstance / RecreateISVC
+  restart/      # P3 — RestartPolicy None / RecreateInstance
   partition/    # P4 — RollingUpdate.Partition canary holds
   scale/        # P4 — scale-down, X-2 re-bump mid-roll
   edge/         # P4 — mixed-strategy groups, %-budgets, ReadyPolicy, in-place tuning
@@ -53,7 +53,7 @@ at any depth (flat layout still works).
     *different* node + source drain + ledger reaches `Completed` (+
     ProgressDeadline timeout / MaxAutoRetries paths).
   - **kill** — delete a pod → assert RestartPolicy behavior (None = no recreate;
-    RecreateInstance = gang/instance recreated; RecreateISVC = full rebuild).
+    RecreateInstance = gang/instance recreated).
   - **partition** — set `RollingUpdate.Partition` → assert canary count holds,
     rest stay on old revision.
   - **scaledown** / **rebump** — shrink replicas; bump revision twice (X-2)
@@ -81,8 +81,8 @@ prometheus deployment in `sandbox`. Parked until that lands.
 UpdateStrategy {SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly} ·
 RollingUpdate {MaxSurge, MaxUnavailable IntOrString, **Partition**} ·
 Coordination {none, RollingUpdate(+RatioBalanced/PerComponent), Sequential,
-BlueGreen} · **RestartPolicy** {None, RecreateInstanceOnPodRestart,
-RecreateISVCOnPodRestart} · **MigrationPolicy** {Mode Auto/Surge/Never,
+BlueGreen} · **RestartPolicy** {None, RecreateInstanceOnPodRestart} ·
+**MigrationPolicy** {Mode Auto/Surge/Never,
 ProgressDeadlineSeconds, MaxAutoRetries} · **ReadyPolicy** {AllPodReady, None} ·
 InPlaceUpdateStrategy {GracePeriodSeconds, MarkNotReadyDuringLifecycle}.
 

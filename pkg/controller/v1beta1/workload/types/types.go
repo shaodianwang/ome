@@ -82,9 +82,6 @@ const (
 	// RestartPolicyRecreateInstance drains, deletes, and recreates
 	// every pod in the Instance at a bumped Incarnation.
 	RestartPolicyRecreateInstance RestartPolicy = "RecreateInstanceOnPodRestart"
-	// RestartPolicyRecreateISVC triggers a fresh top-level rollout.
-	// Driven by the parent ISVC controller, not the workload dispatcher.
-	RestartPolicyRecreateISVC RestartPolicy = "RecreateISVCOnPodRestart"
 )
 
 // MigrationMode is the migration disposition. String-mirrors the CRD

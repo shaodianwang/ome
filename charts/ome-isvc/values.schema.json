@@ -200,7 +200,7 @@
       "properties": {
         "restartPolicy": {
           "type": "string",
-          "enum": ["None", "RecreateInstanceOnPodRestart", "RecreateISVCOnPodRestart"],
+          "enum": ["None", "RecreateInstanceOnPodRestart"],
           "description": "What OMENative does when a managed pod fails. Distinct from corev1.PodSpec.restartPolicy (which tells kubelet about container-level restarts)."
         },
         "updateStrategy": {

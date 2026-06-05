@@ -750,7 +750,6 @@ def _kill(case_id, yaml_file, desc, hdr):
     new UIDs (recreated):
       None             -> only the deleted pod is recreated (1 pod)
       RecreateInstance -> the whole Instance (leader+workers) recreates
-      RecreateISVC     -> every Instance of every Component recreates (cascade)
     `kill=leader|worker` (gangs) selects which pod dies."""
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
@@ -774,8 +773,7 @@ def _kill(case_id, yaml_file, desc, hdr):
     ctx["trigger_ts"] = time.time()
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in configured))
     print(f"  Phase 3: watching recovery (≤{budget}s)")
-    exp = {"None": 1, "RecreateInstance": ppi[kcomp],
-           "RecreateISVC": sum(N[c] * ppi[c] for c in configured)}.get(policy, 1)
+    exp = {"None": 1, "RecreateInstance": ppi[kcomp]}.get(policy, 1)
 
     def recreated_now():
         return [p for p in ctx["pod_state"].values()
@@ -810,21 +808,17 @@ def _kill(case_id, yaml_file, desc, hdr):
         checks.append(f"  ✗ never recovered to N ready (state={state}; {rc} pod(s) recreated so far)")
     else:
         checks.append(f"  ✓ recovered to N ready at {ctx['converged_at']:.1f}s")
-    if policy in ("None", "RecreateInstance"):
-        if elsewhere:
-            verdict = "FAIL"; notes.append(f"{policy}: {len(elsewhere)} pods recreated outside killed instance")
-            checks.append(f"  ✗ {policy}: {len(elsewhere)} pod(s) recreated OUTSIDE killed instance {kcomp}/{killed_inst} — over-cascade")
-        if rc != exp:
-            verdict = "FAIL"; notes.append(f"{policy}: recreated {rc}, want {exp}")
-            checks.append(f"  ✗ {policy}: {rc} pod(s) recreated, expected {exp} ({'pod-only' if policy == 'None' else 'whole instance'})")
-        elif not elsewhere:
-            checks.append(f"  ✓ {policy}: exactly {rc} pod(s) recreated, scoped to killed instance {kcomp}/{killed_inst}")
-    else:  # RecreateISVC
-        if rc != exp:
-            verdict = "FAIL"; notes.append(f"RecreateISVC: recreated {rc}, want all {exp}")
-            checks.append(f"  ✗ RecreateISVC: {rc} pod(s) recreated, expected the full cascade ({exp})")
-        else:
-            checks.append(f"  ✓ RecreateISVC: full cascade — all {rc} pods recreated")
+    # Only None + RecreateInstance are supported (RecreateISVC was dropped from
+    # the API as semantically incoherent on the IR-managed path). Both scope the
+    # recreate to the killed Instance: assert no over-cascade + the exact count.
+    if elsewhere:
+        verdict = "FAIL"; notes.append(f"{policy}: {len(elsewhere)} pods recreated outside killed instance")
+        checks.append(f"  ✗ {policy}: {len(elsewhere)} pod(s) recreated OUTSIDE killed instance {kcomp}/{killed_inst} — over-cascade")
+    if rc != exp:
+        verdict = "FAIL"; notes.append(f"{policy}: recreated {rc}, want {exp}")
+        checks.append(f"  ✗ {policy}: {rc} pod(s) recreated, expected {exp} ({'pod-only' if policy == 'None' else 'whole instance'})")
+    elif not elsewhere:
+        checks.append(f"  ✓ {policy}: exactly {rc} pod(s) recreated, scoped to killed instance {kcomp}/{killed_inst}")
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 

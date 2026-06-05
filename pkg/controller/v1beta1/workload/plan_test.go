@@ -282,14 +282,15 @@ func TestBuildPlan_IncarnationScopedToWorkload(t *testing.T) {
 
 func TestBuildPlan_RestartPolicyExplicitWinsOverDefault(t *testing.T) {
 	desired := singlePodDesired(0, Lifecycle{
-		RestartPolicy: restartPolicyPtr(RestartPolicyRecreateISVC),
+		RestartPolicy: restartPolicyPtr(RestartPolicyRecreateInstance),
 	})
 	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if plan.RestartPolicy != RestartPolicyRecreateISVC {
-		t.Errorf("RestartPolicy: got %q want RecreateISVCOnPodRestart", plan.RestartPolicy)
+	// Single-pod defaults to None; an explicit RecreateInstance must win.
+	if plan.RestartPolicy != RestartPolicyRecreateInstance {
+		t.Errorf("RestartPolicy: got %q want RecreateInstanceOnPodRestart", plan.RestartPolicy)
 	}
 }
 

@@ -472,9 +472,6 @@ Three values:
   fails, all pods in that Instance are drained, deleted, and
   recreated. Default for multi-pod Instances; the OMENative analog of
   LWS's `RecreateGroupOnPodRestart`, scoped to the Instance.
-- **`RecreateISVCOnPodRestart`** — a pod failure cascades through the
-  whole `InferenceService`. Rare; reserved for cross-Component state
-  coupling.
 
 Defaults: `RecreateInstanceOnPodRestart` when the Component has any
 multi-pod Runner; `None` when all Runners have `size == 1`.

@@ -20,7 +20,7 @@ restart/, partition/, rebump record MODE_TODO until their run.py mode lands — 
 YAMLs are valid and apply; only the trigger/verdict is pending.
 
 CRD field paths (pkg/apis/ome/v1beta1/lifecycle_types.go):
-  lifecycle.restartPolicy            None | RecreateInstanceOnPodRestart | RecreateISVCOnPodRestart
+  lifecycle.restartPolicy            None | RecreateInstanceOnPodRestart
   lifecycle.readyPolicy              AllPodReady | None
   lifecycle.migrationPolicy.mode     Auto | Surge | Never  (+progressDeadlineSeconds>=30, maxAutoRetries 0-10)
   lifecycle.updateStrategy.type      SurgeThenDrain | RecreatePod | InPlaceIfPossible | InPlaceOnly
@@ -199,8 +199,7 @@ def C(folder, desc, comps, coord=None, **kv):
     CASES.append((folder, name, desc, comps, coord, kv))
 
 
-RP = {"None": "None", "RecreateInstance": "RecreateInstanceOnPodRestart",
-      "RecreateISVC": "RecreateISVCOnPodRestart"}
+RP = {"None": "None", "RecreateInstance": "RecreateInstanceOnPodRestart"}
 
 # ── migration/  (mode=migrate; explicit annotation; surge → peak N+1) ─────────
 for topo in TOPOS:

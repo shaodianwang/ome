@@ -68,7 +68,6 @@ const (
 
 	RestartPolicyNone             = types.RestartPolicyNone
 	RestartPolicyRecreateInstance = types.RestartPolicyRecreateInstance
-	RestartPolicyRecreateISVC     = types.RestartPolicyRecreateISVC
 
 	MigrationModeAuto  = types.MigrationModeAuto
 	MigrationModeSurge = types.MigrationModeSurge

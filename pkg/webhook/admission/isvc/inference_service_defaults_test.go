@@ -363,7 +363,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 	})
 
 	t.Run("OMENative + existing values — preserved, nil siblings filled", func(t *testing.T) {
-		customRestart := v1beta1.InstanceRestartPolicyRecreateISVC
+		customRestart := v1beta1.InstanceRestartPolicyNone
 		customTimeout := metav1.Duration{Duration: 5 * time.Minute}
 		ext := &v1beta1.ComponentExtensionSpec{
 			Annotations: omenativeMode,
@@ -376,7 +376,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 
 		// preserved
 		require.NotNil(t, ext.Lifecycle.RestartPolicy)
-		assert.Equal(t, v1beta1.InstanceRestartPolicyRecreateISVC, *ext.Lifecycle.RestartPolicy)
+		assert.Equal(t, v1beta1.InstanceRestartPolicyNone, *ext.Lifecycle.RestartPolicy)
 		assert.Equal(t, 5*time.Minute, ext.Lifecycle.InstanceReadyTimeout.Duration)
 
 		// filled

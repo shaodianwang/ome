@@ -420,7 +420,7 @@ deployments:
     prefill:        # or decode / engine / router
       # ... other knobs ...
       lifecycle:
-        restartPolicy: None  # None | RecreateInstanceOnPodRestart | RecreateISVCOnPodRestart
+        restartPolicy: None  # None | RecreateInstanceOnPodRestart
         updateStrategy:
           type: SurgeThenDrain  # SurgeThenDrain | RecreatePod | InPlaceIfPossible | InPlaceOnly
           rollingUpdate:

@@ -348,8 +348,6 @@ func InstanceRestartPolicyToWorkload(v v1beta1.InstanceRestartPolicy) workload.R
 		return workload.RestartPolicyNone
 	case v1beta1.InstanceRestartPolicyRecreateInstance:
 		return workload.RestartPolicyRecreateInstance
-	case v1beta1.InstanceRestartPolicyRecreateISVC:
-		return workload.RestartPolicyRecreateISVC
 	default:
 		return workload.RestartPolicy("")
 	}
