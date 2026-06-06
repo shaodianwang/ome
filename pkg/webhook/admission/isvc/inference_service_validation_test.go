@@ -1713,10 +1713,165 @@ func TestResolveModelAndRuntime_ExplicitShardedRuntimeRequiresConfiguredCachePro
 				return
 			}
 			assert.NoError(t, err)
-			assert.Len(t, warnings, 1)
-			assert.Contains(t, warnings[0], "Runtime cache-runtime is valid for model sharded-model")
+			// A valid explicit runtime emits no advisory warning — the
+			// redundant "is valid for model" Warning was dropped.
+			assert.Empty(t, warnings)
 		})
 	}
+}
+
+// TestResolveModelAndRuntime_ExplicitRuntimeCompatIsAdvisory pins the
+// behavior change: when a runtime is named explicitly, a pure
+// supportedModelFormats mismatch (format / architecture / framework) is
+// downgraded from a hard admission error to an advisory warning and the
+// ISVC is admitted. The auto-select path (no explicit runtime) must still
+// hard-fail when nothing supports the model.
+func TestResolveModelAndRuntime_ExplicitRuntimeCompatIsAdvisory(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1beta1.AddToScheme(scheme)
+
+	// llama model.
+	llamaModel := &v1beta1.ClusterBaseModel{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-model"},
+		Spec: v1beta1.BaseModelSpec{
+			ModelArchitecture:  stringPtr("llama"),
+			ModelParameterSize: stringPtr("7B"),
+			ModelFormat: v1beta1.ModelFormat{
+				Name:    "llama",
+				Version: stringPtr("1.0.0"),
+			},
+		},
+	}
+
+	// A generic runtime that only *declares* support for a different
+	// architecture/format ("gpt"). It does not enumerate "llama", so the
+	// compatibility matcher reports a mismatch — but the operator named it
+	// explicitly, so admission should warn-and-admit rather than reject.
+	genericRuntime := &v1beta1.ClusterServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "generic-runtime"},
+		Spec: v1beta1.ServingRuntimeSpec{
+			SupportedModelFormats: []v1beta1.SupportedModelFormat{
+				{
+					ModelFormat:       &v1beta1.ModelFormat{Name: "gpt", Version: stringPtr("1.0.0")},
+					ModelArchitecture: stringPtr("gpt"),
+					AutoSelect:        boolPtr(true),
+				},
+			},
+		},
+	}
+
+	// A runtime that genuinely declares support for llama.
+	matchingRuntime := &v1beta1.ClusterServingRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "matching-runtime"},
+		Spec: v1beta1.ServingRuntimeSpec{
+			SupportedModelFormats: []v1beta1.SupportedModelFormat{
+				{
+					ModelFormat:       &v1beta1.ModelFormat{Name: "llama", Version: stringPtr("1.0.0"), Weight: int64(1)},
+					ModelArchitecture: stringPtr("llama"),
+					AutoSelect:        boolPtr(true),
+				},
+			},
+		},
+	}
+
+	t.Run("explicit runtime + format mismatch is admitted with advisory warning", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(llamaModel.DeepCopy(), genericRuntime.DeepCopy()).
+			Build()
+		validator := &InferenceServiceValidator{
+			Client:          fakeClient,
+			RuntimeSelector: runtimeselector.New(fakeClient),
+		}
+		isvc := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+			Spec: v1beta1.InferenceServiceSpec{
+				Model:   &v1beta1.ModelRef{Name: "llama-model"},
+				Runtime: &v1beta1.ServingRuntimeRef{Name: "generic-runtime"},
+			},
+		}
+
+		warnings, err := validator.resolveModelAndRuntime(context.Background(), isvc, admission.Warnings{})
+
+		assert.NoError(t, err, "explicit-runtime compat mismatch must be admitted, not rejected")
+		assert.Len(t, warnings, 1)
+		assert.Contains(t, warnings[0], "does not declare support for model")
+		assert.Contains(t, warnings[0], "proceeding because the runtime was named explicitly")
+		// The dropped success-warning phrasing must not reappear.
+		assert.NotContains(t, warnings[0], "is valid for model")
+	})
+
+	t.Run("explicit runtime that matches is admitted with no warning", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(llamaModel.DeepCopy(), matchingRuntime.DeepCopy()).
+			Build()
+		validator := &InferenceServiceValidator{
+			Client:          fakeClient,
+			RuntimeSelector: runtimeselector.New(fakeClient),
+		}
+		isvc := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+			Spec: v1beta1.InferenceServiceSpec{
+				Model:   &v1beta1.ModelRef{Name: "llama-model"},
+				Runtime: &v1beta1.ServingRuntimeRef{Name: "matching-runtime"},
+			},
+		}
+
+		warnings, err := validator.resolveModelAndRuntime(context.Background(), isvc, admission.Warnings{})
+
+		assert.NoError(t, err)
+		assert.Empty(t, warnings, "a matching explicit runtime emits no advisory warning")
+	})
+
+	t.Run("explicit runtime not found still hard-fails", func(t *testing.T) {
+		// A non-existent runtime is not a declared-format mismatch; it must
+		// stay a hard error even on the explicit path.
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(llamaModel.DeepCopy()).
+			Build()
+		validator := &InferenceServiceValidator{
+			Client:          fakeClient,
+			RuntimeSelector: runtimeselector.New(fakeClient),
+		}
+		isvc := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+			Spec: v1beta1.InferenceServiceSpec{
+				Model:   &v1beta1.ModelRef{Name: "llama-model"},
+				Runtime: &v1beta1.ServingRuntimeRef{Name: "does-not-exist"},
+			},
+		}
+
+		_, err := validator.resolveModelAndRuntime(context.Background(), isvc, admission.Warnings{})
+
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("auto-select with no matching runtime still hard-fails", func(t *testing.T) {
+		// Same model, only the non-matching generic runtime present, and NO
+		// explicit runtime named: OME is choosing, so compat MUST gate.
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(llamaModel.DeepCopy(), genericRuntime.DeepCopy()).
+			Build()
+		validator := &InferenceServiceValidator{
+			Client:          fakeClient,
+			RuntimeSelector: runtimeselector.New(fakeClient),
+		}
+		isvc := &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
+			Spec: v1beta1.InferenceServiceSpec{
+				Model: &v1beta1.ModelRef{Name: "llama-model"},
+			},
+		}
+
+		_, err := validator.resolveModelAndRuntime(context.Background(), isvc, admission.Warnings{})
+
+		assert.Error(t, err, "auto-select must still reject when nothing supports the model")
+		assert.Contains(t, err.Error(), "no supporting runtime found for model llama-model")
+	})
 }
 
 func TestValidateCreate_ExplicitShardedRuntimeRequiresConfiguredCacheProvider(t *testing.T) {

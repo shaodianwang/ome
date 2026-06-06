@@ -376,11 +376,34 @@ func (v *InferenceServiceValidator) resolveModelAndRuntime(ctx context.Context, 
 
 	if isvc.Spec.Runtime != nil && isvc.Spec.Runtime.Name != "" {
 		if err := v.RuntimeSelector.ValidateRuntime(ctx, isvc.Spec.Runtime.Name, baseModel, isvc); err != nil {
+			// The operator named this runtime explicitly, so OME should
+			// not block on the runtime's *declared* supportedModelFormats:
+			// a generic runtime (e.g. sglang) can serve many architectures
+			// it never enumerates. Downgrade a pure compatibility mismatch
+			// (format / architecture / framework) to an advisory warning
+			// and admit — the deliberate choice wins over the declaration.
+			//
+			// Everything else stays a hard error:
+			//   - runtime not found / disabled / malformed model: the
+			//     runtime genuinely cannot run, so admitting would only
+			//     produce a broken ISVC.
+			//   - a sharded (Distribution=Sharded) model with no configured
+			//     cache provider: this surfaces as a RuntimeCompatibilityError
+			//     too, but it is a real cluster-config blocker — a sharded
+			//     model physically cannot load without a cache provider — not
+			//     an over-conservative declared-format check. Keep it gating.
+			if runtimeselector.IsRuntimeCompatibilityError(err) && !modelRequiresCacheProvider(baseModel) {
+				warnings = append(warnings, fmt.Sprintf(
+					"runtime %q does not declare support for model %q (%v); proceeding because the runtime was named explicitly",
+					isvc.Spec.Runtime.Name, isvc.Spec.Model.Name, err))
+				return warnings, nil
+			}
 			return warnings, fmt.Errorf("runtime %s does not support model %s: %w",
 				isvc.Spec.Runtime.Name, isvc.Spec.Model.Name, err)
 		}
-		warnings = append(warnings, fmt.Sprintf("Runtime %s is valid for model %s",
-			isvc.Spec.Runtime.Name, isvc.Spec.Model.Name))
+		// Success is the common case and emits nothing — a bare "is valid"
+		// admission Warning showed up as `Warning:` in kubectl and read as
+		// if something were wrong.
 		return warnings, nil
 	}
 	selection, err := v.RuntimeSelector.SelectRuntime(ctx, baseModel, isvc)
@@ -467,6 +490,19 @@ func isvcAutoscalerChecks(isvc *v1beta1.InferenceService) []validation.Component
 		})
 	}
 	return checks
+}
+
+// modelRequiresCacheProvider reports whether the model is sharded
+// (Distribution=Sharded) and therefore needs a configured cluster cache
+// provider to load. A sharded model that names a runtime explicitly must
+// still hard-fail when no provider is configured — it physically cannot
+// load — so resolveModelAndRuntime keeps gating that case instead of
+// downgrading it to an advisory warning. Mirrors the (unexported)
+// runtimeselector helper of the same name.
+func modelRequiresCacheProvider(model *v1beta1.BaseModelSpec) bool {
+	return model != nil &&
+		model.Distribution != nil &&
+		*model.Distribution == v1beta1.DistributionSharded
 }
 
 // hasFullRunnerConfig reports whether the engine has enough runner
