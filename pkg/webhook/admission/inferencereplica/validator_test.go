@@ -153,6 +153,68 @@ func withImage(ir *v1beta1.InferenceReplica, image string) *v1beta1.InferenceRep
 	return out
 }
 
+// withContainerMount returns a clone whose first runner's first
+// container mounts `volName` at /mnt/<volName>. No matching volume is
+// added, so callers exercising the resolve-success path must pair this
+// with withVolume.
+func withContainerMount(ir *v1beta1.InferenceReplica, volName string) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	c := &out.Spec.Runners[0].Template.Spec.Containers[0]
+	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+		Name:      volName,
+		MountPath: "/mnt/" + volName,
+	})
+	return out
+}
+
+// withInitContainerMount returns a clone whose first runner gains an
+// initContainer that mounts `volName`. Used to prove initContainers are
+// validated against the same declared-volume set as containers.
+func withInitContainerMount(ir *v1beta1.InferenceReplica, volName string) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	s := &out.Spec.Runners[0].Template.Spec
+	s.InitContainers = append(s.InitContainers, corev1.Container{
+		Name:  "model-init",
+		Image: "init:1.0",
+		VolumeMounts: []corev1.VolumeMount{{
+			Name:      volName,
+			MountPath: "/mnt/" + volName,
+		}},
+	})
+	return out
+}
+
+// withVolume returns a clone declaring an emptyDir volume named
+// `volName` on the first runner's pod spec.
+func withVolume(ir *v1beta1.InferenceReplica, volName string) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	s := &out.Spec.Runners[0].Template.Spec
+	s.Volumes = append(s.Volumes, corev1.Volume{
+		Name:         volName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	return out
+}
+
+// withModelPVCVolume returns a clone declaring a model-PVC-style volume
+// (the shape UpdatePodSpecVolumes injects for a PVC-backed BaseModel)
+// named `volName`. Used to prove a mount that resolves to an
+// operator-injected volume is admitted.
+func withModelPVCVolume(ir *v1beta1.InferenceReplica, volName string) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	s := &out.Spec.Runners[0].Template.Spec
+	s.Volumes = append(s.Volumes, corev1.Volume{
+		Name: volName,
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: "model-pvc",
+				ReadOnly:  true,
+			},
+		},
+	})
+	return out
+}
+
 // withAutoscaler returns a clone with the Autoscaler block set on
 // spec.autoscaler. Used by the OEP-0013 IR-side webhook shape tests.
 func withAutoscaler(ir *v1beta1.InferenceReplica, as *v1beta1.ComponentAutoscaler) *v1beta1.InferenceReplica {
@@ -476,6 +538,144 @@ func TestHandle(t *testing.T) {
 			name: "create with partition=0 (default canary) and replicas=5 → allowed",
 			req: func(t *testing.T) admission.Request {
 				return createReq(t, withReplicasAndPacingPartition(baselineIR(wcw), 5, 0))
+			},
+			wantAllowed: true,
+		},
+		// volumeMount-resolves-to-a-volume gate. A rendered Runner pod
+		// template whose container mounts an undeclared volume is accepted
+		// by the apiserver here but REJECTED at pod-create time during
+		// reconcile, surfacing only as a buried log error. The webhook
+		// turns that silent failure into a clear admission rejection.
+		{
+			name: "create with container mount of undeclared volume → denied",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withContainerMount(baselineIR(wcw), "dshm"))
+			},
+			wantAllowed: false,
+			wantContains: []string{
+				`runner "default"`,
+				`container "ome-container"`,
+				`volumeMount "dshm" has no matching volume`,
+				"engineConfig.leader.volumes",
+			},
+		},
+		{
+			name: "create with container mount + matching volume → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withVolume(withContainerMount(baselineIR(wcw), "dshm"), "dshm"))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "create with container mount of model-PVC-style injected volume → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withModelPVCVolume(withContainerMount(baselineIR(wcw), "llama-model"), "llama-model"))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "create with initContainer mount of undeclared volume → denied",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withInitContainerMount(baselineIR(wcw), "scratch"))
+			},
+			wantAllowed: false,
+			wantContains: []string{
+				`runner "default"`,
+				`container "model-init"`,
+				`volumeMount "scratch" has no matching volume`,
+			},
+		},
+		{
+			name: "create with initContainer mount + matching volume → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withVolume(withInitContainerMount(baselineIR(wcw), "scratch"), "scratch"))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "create with no volumeMounts at all → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, baselineIR(wcw))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "update rerendering runner with dangling mount → denied",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, baselineIR(wcw), withContainerMount(baselineIR(wcw), "dshm"))
+			},
+			wantAllowed: false,
+			wantContains: []string{
+				`volumeMount "dshm" has no matching volume`,
+			},
+		},
+		{
+			name: "create with leader/worker runners, worker mounts undeclared dshm → denied naming worker",
+			req: func(t *testing.T) admission.Request {
+				ir := baselineIR(wcw)
+				// Multi-node shape: leader (declares dshm) + worker (mounts
+				// dshm but forgets to declare it). The leader is fine; the
+				// gate must flag the worker by name.
+				ir.Spec.Runners = []v1beta1.Runner{
+					{
+						Name: v1beta1.RunnerNameLeader,
+						Size: 1,
+						Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:         "ome-container",
+								Image:        "sgl:1.0",
+								VolumeMounts: []corev1.VolumeMount{{Name: "dshm", MountPath: "/dev/shm"}},
+							}},
+							Volumes: []corev1.Volume{{
+								Name:         "dshm",
+								VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}},
+							}},
+						}},
+					},
+					{
+						Name: v1beta1.RunnerNameWorker,
+						Size: 2,
+						Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:         "ome-container",
+								Image:        "sgl:1.0",
+								VolumeMounts: []corev1.VolumeMount{{Name: "dshm", MountPath: "/dev/shm"}},
+							}},
+							// Worker forgets to declare dshm.
+						}},
+					},
+				}
+				return createReq(t, ir)
+			},
+			wantAllowed: false,
+			wantContains: []string{
+				`runner "worker"`,
+				`volumeMount "dshm" has no matching volume`,
+			},
+		},
+		{
+			name: "create with leader/worker runners, both declare dshm → allowed",
+			req: func(t *testing.T) admission.Request {
+				ir := baselineIR(wcw)
+				mk := func(name v1beta1.RunnerName, size int32) v1beta1.Runner {
+					return v1beta1.Runner{
+						Name: name,
+						Size: size,
+						Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:         "ome-container",
+								Image:        "sgl:1.0",
+								VolumeMounts: []corev1.VolumeMount{{Name: "dshm", MountPath: "/dev/shm"}},
+							}},
+							Volumes: []corev1.Volume{{
+								Name:         "dshm",
+								VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}},
+							}},
+						}},
+					}
+				}
+				ir.Spec.Runners = []v1beta1.Runner{mk(v1beta1.RunnerNameLeader, 1), mk(v1beta1.RunnerNameWorker, 2)}
+				return createReq(t, ir)
 			},
 			wantAllowed: true,
 		},

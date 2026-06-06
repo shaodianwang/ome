@@ -25,6 +25,7 @@ import (
 	"reflect"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -148,6 +149,22 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 			req.Namespace, req.Name, err.Error()))
 	}
 
+	// Every container/initContainer volumeMount in a rendered Runner pod
+	// template must resolve to a volume declared in that same pod spec.
+	// A mount that names an undeclared volume is accepted here but
+	// REJECTED by the kube-apiserver at pod-create time during reconcile
+	// ("spec.containers[0].volumeMounts[0].name: Not found: <name>"),
+	// which only ever surfaced as a buried InferenceReplica reconcile
+	// error in the manager log — there was NO signal at kubectl apply.
+	// This gate is defense-in-depth: it turns that silent failure into a
+	// clear admission rejection (and also catches plain volumeMount
+	// typos in a runtime's pod template).
+	if err := validateIRRunnerVolumes(newObj); err != nil {
+		return admission.Denied(fmt.Sprintf(
+			"InferenceReplica %s/%s: %s",
+			req.Namespace, req.Name, err.Error()))
+	}
+
 	return admission.Allowed("")
 }
 
@@ -195,6 +212,68 @@ func validateIRPacing(ir *v1beta1.InferenceReplica) error {
 			"spec.pacing.partition (%d) must be <= spec.replicas (%d); "+
 				"an over-partition silently holds every Instance back forever",
 			partition, replicas)
+	}
+	return nil
+}
+
+// validateIRRunnerVolumes checks every Runner's fully-rendered pod
+// template so that each container/initContainer volumeMount references a
+// volume declared in that same pod spec. The IR webhook sees the final
+// rendered leader+worker templates, so this is the most precise place to
+// catch a dangling mount before it reaches the apiserver at pod-create
+// time (where it fails as "spec.containers[i].volumeMounts[j].name: Not
+// found: <name>" and surfaces only as a buried reconcile error). Names
+// the runner, container, and missing volume so the operator can fix the
+// runtime spec — including the multi-node hint, since a dshm/shared
+// volume must be declared under engineConfig.leader.volumes /
+// engineConfig.worker.volumes for the leader+worker templates that mount
+// it.
+func validateIRRunnerVolumes(ir *v1beta1.InferenceReplica) error {
+	if ir == nil {
+		return nil
+	}
+	for i := range ir.Spec.Runners {
+		runner := &ir.Spec.Runners[i]
+		spec := &runner.Template.Spec
+
+		declared := make(map[string]struct{}, len(spec.Volumes))
+		for j := range spec.Volumes {
+			declared[spec.Volumes[j].Name] = struct{}{}
+		}
+
+		// initContainers and containers share the pod's volume set, so
+		// validate both against the same declared map.
+		if err := validateContainerVolumeMounts(
+			string(runner.Name), spec.InitContainers, declared); err != nil {
+			return err
+		}
+		if err := validateContainerVolumeMounts(
+			string(runner.Name), spec.Containers, declared); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateContainerVolumeMounts verifies every volumeMount in the given
+// containers resolves to a name in `declared`. Returns a message naming
+// the runner, container, and missing volume on the first violation.
+func validateContainerVolumeMounts(
+	runnerName string, containers []corev1.Container, declared map[string]struct{},
+) error {
+	for c := range containers {
+		container := &containers[c]
+		for m := range container.VolumeMounts {
+			name := container.VolumeMounts[m].Name
+			if _, ok := declared[name]; !ok {
+				return fmt.Errorf(
+					"runner %q container %q: volumeMount %q has no matching "+
+						"volume in the pod (for a multi-node runtime declare it "+
+						"under engineConfig.leader.volumes / "+
+						"engineConfig.worker.volumes)",
+					runnerName, container.Name, name)
+			}
+		}
 	}
 	return nil
 }
