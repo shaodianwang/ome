@@ -1031,6 +1031,264 @@ func TestSurgeUpdate_GangSurges(t *testing.T) {
 	}
 }
 
+// gangSurgePlan builds a multi-pod (leader + worker) single-Instance
+// SurgeThenDrain ComponentPlan — the topology p247 (engine-mn) and
+// p248 (pd-mn) exercise. inst.TotalPods() == 2 routes surgeUpdate to
+// gangSurgeUpdate.
+func gangSurgePlan() workload.ComponentPlan {
+	return workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  1,
+		Instances: []workload.InstancePlan{{
+			Index:       0,
+			Incarnation: 1,
+			Runners: []workload.RunnerPlan{
+				{Name: "leader", Size: 1},
+				{Name: "worker", Size: 1},
+			},
+		}},
+		InstanceReadyTimeout: 30 * time.Minute,
+		UpdateStrategy: workload.UpdateStrategy{
+			Type: workload.UpdateStrategySurgeThenDrain,
+		},
+	}
+}
+
+// gangPodAt fabricates a leader/worker gang member pod for a multi-pod
+// SurgeThenDrain instance, labeled with revHash so the convergence
+// assertions can tell which revision the pod actually carries.
+func gangPodAt(isvc *v1beta1.InferenceService, instanceIdx int32, runner, revHash string, ready, serving bool) *corev1.Pod {
+	pod := legacyPodForInstance(isvc, instanceIdx, ready, serving)
+	pod.Name = query.PodName(isvc.Name, workload.ComponentEngine, instanceIdx, runner, 0)
+	pod.Labels[query.LabelRunner] = runner
+	pod.Labels[query.LabelPodOrdinal] = "0"
+	pod.Labels[query.LabelRevisionHash] = revHash
+	return pod
+}
+
+// gangSurgeInFlightStatus seeds the in-flight v2 gang-surge status: the
+// source (idx=0) is Phase=Updating with an Operation pinned to v2
+// (Step=Surge, SurgeIndex=1), and the surge index (idx=1) carries the
+// GangSurgeTarget marker. The dispatcher's `target` pointer may already
+// have moved to a newer rev (the re-bump), but the Operation stays pinned.
+func gangSurgeInFlightStatus(runningRev, pinnedRev string) map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec {
+	return map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			Lifecycle: &v1beta1.LifecycleStatus{
+				InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+					{
+						Index:           0,
+						Incarnation:     1,
+						Phase:           v1beta1.OMENativeInstanceUpdating,
+						RunningRevision: runningRev,
+						TargetRevision:  pinnedRev,
+						Operation: &v1beta1.InstanceOperation{
+							ID:             "gangsurge-0-1",
+							Type:           v1beta1.InstanceOperationType(workload.InstanceOperationUpdate),
+							Step:           updateStepSurge,
+							SurgeIndex:     ptrInt32(1),
+							TargetRevision: pinnedRev,
+						},
+					},
+					{
+						Index:          1,
+						Incarnation:    1,
+						Phase:          v1beta1.OMENativeInstanceCreating,
+						TargetRevision: pinnedRev,
+						Operation: &v1beta1.InstanceOperation{
+							ID:             "gangsurgetarget-1-1",
+							Type:           v1beta1.InstanceOperationType(workload.InstanceOperationUpdate),
+							Step:           workload.UpdateStepGangSurgeTarget,
+							TargetRevision: pinnedRev,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// gangInputWithRemove is legacyTestInput with RemoveInstance wired —
+// gangSurgeUpdate's promote step drops the source InstanceStatus, so the
+// bare legacyTestInput (RemoveInstance == nil) would NPE before reaching
+// the convergence assertion.
+func gangInputWithRemove(isvc *v1beta1.InferenceService, c client.Client) workload.ReconcileInput {
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	input.RemoveInstance = func(ctx context.Context, idx int32) (bool, error) {
+		fresh := &v1beta1.InferenceService{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
+			return false, err
+		}
+		cs := fresh.Status.Components[v1beta1.EngineComponent]
+		if cs.Lifecycle == nil {
+			return false, nil
+		}
+		kept := cs.Lifecycle.InstanceStatuses[:0]
+		removed := false
+		for _, s := range cs.Lifecycle.InstanceStatuses {
+			if s.Index == idx {
+				removed = true
+				continue
+			}
+			kept = append(kept, s)
+		}
+		cs.Lifecycle.InstanceStatuses = kept
+		fresh.Status.Components[v1beta1.EngineComponent] = cs
+		if err := c.Status().Update(ctx, fresh); err != nil {
+			return false, err
+		}
+		isvc.Status.Components[v1beta1.EngineComponent] = cs
+		return removed, nil
+	}
+	return input
+}
+
+// TestGangSurgeUpdate_BumpDuringBump_PromotesPinnedRev pins the gang
+// (multi-pod) X-2 "re-bump mid-roll" convergence-safety invariant the
+// harness reproduced on p247 (engine-mn) / p248 (pd-mn).
+//
+// Setup is the moment the v2 gang surge reaches its promote step: a v2
+// replacement gang at the surge index (idx=1) is Ready + serving, the
+// source gang (idx=0) is already drained, and the source's recorded
+// Operation is pinned to v2 (Step=Surge, SurgeIndex=1, TargetRevision=v2).
+// A second spec bump to v3 has already moved the dispatcher's `target`
+// pointer to v3 (the re-bump mid-roll) — but the surge in flight is
+// committed to v2.
+//
+// The promote MUST stamp RunningRevision=v2 (the rev the surged pods
+// actually carry), NOT v3 (the latest target). Stamping v3 is the X-2
+// corruption: status would claim v3 while the pods run v2, and
+// DetectUpdateTrigger's fast path (RunningRevision == target) would then
+// short-circuit forever — the rollout never re-fires to drive the pods to
+// v3, leaving them stranded on the intermediate revision (the harness's
+// "did not settle on one final rev (state=ROTATING)" failure). With the
+// running rev pinned to v2, the next reconcile sees RunningRevision=v2 !=
+// target=v3 and starts a fresh surge cycle toward v3 — convergence.
+func TestGangSurgeUpdate_BumpDuringBump_PromotesPinnedRev(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := surgeISVCReady("llama-70b", "prod", 1)
+	plan := gangSurgePlan()
+
+	v1Name := "llama-70b-engine-rev-v1hash"
+	v2Name := "llama-70b-engine-rev-v2hash"
+	v3Name := "llama-70b-engine-rev-v3hash"
+	v2Hash := query.RevisionHashFromControllerRevisionName(v2Name)
+
+	// Seed the in-flight v2 gang surge at its promote step.
+	isvc.Status.Components = gangSurgeInFlightStatus(v1Name, v2Name)
+
+	c := legacyNewFakeClient(t, isvc)
+	makeCR(t, c, isvc, v2Name)
+	makeCR(t, c, isvc, v3Name)
+
+	// v2 replacement gang (leader + worker) at the surge index, Ready +
+	// serving — the source has been drained, so step 5 (promote) is next.
+	for _, runner := range []string{"leader", "worker"} {
+		if err := c.Create(context.Background(), gangPodAt(isvc, 1, runner, v2Hash, true, true)); err != nil {
+			t.Fatalf("seed v2 surge pod (%s): %v", runner, err)
+		}
+	}
+
+	input := gangInputWithRemove(isvc, c)
+	// Dispatcher target is now v3 (the second bump landed mid-surge).
+	v3 := &appsv1.ControllerRevision{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: v3Name}, v3); err != nil {
+		t.Fatalf("get v3 CR: %v", err)
+	}
+
+	done, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], v3, nil)
+	if err != nil {
+		t.Fatalf("gang surge promote pass: %v", err)
+	}
+	if !done {
+		t.Fatalf("expected done=true after promote (source drained, surge Ready)")
+	}
+
+	// The promoted surge Instance (idx=1) must carry RunningRevision=v2 —
+	// the rev its pods actually run — NOT the latest target v3.
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("re-read ISVC after promote: %v", err)
+	}
+	var promoted *v1beta1.OMENativeInstanceStatus
+	statuses := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses
+	for i := range statuses {
+		if statuses[i].Index == 1 {
+			promoted = &statuses[i]
+		}
+	}
+	if promoted == nil {
+		t.Fatalf("surge Instance idx=1 missing after promote")
+	}
+	if promoted.RunningRevision != v2Name {
+		t.Errorf("X-2 re-bump: promoted RunningRevision=%q, want %q (the rev the pods actually carry). "+
+			"Stamping the latest target (%q) strands the pods on the intermediate rev — "+
+			"DetectUpdateTrigger's fast path short-circuits and the rollout never converges.",
+			promoted.RunningRevision, v2Name, v3Name)
+	}
+}
+
+// TestGangSurgeUpdate_BumpDuringBump_CreatesPinnedRevPods pins the
+// create-side half of the same invariant: while a gang surge is in flight
+// with Op pinned to v2, a second bump to v3 must NOT cause the surge gang's
+// pods to be created with the v3 revision-hash. The in-flight surge is
+// committed to v2; its pods must be labeled v2 so the per-revision drain
+// Service and the post-promote running-rev anchor stay consistent.
+func TestGangSurgeUpdate_BumpDuringBump_CreatesPinnedRevPods(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := surgeISVCReady("llama-70b", "prod", 1)
+	plan := gangSurgePlan()
+
+	v1Name := "llama-70b-engine-rev-v1hash"
+	v2Name := "llama-70b-engine-rev-v2hash"
+	v3Name := "llama-70b-engine-rev-v3hash"
+	v2Hash := query.RevisionHashFromControllerRevisionName(v2Name)
+	v3Hash := query.RevisionHashFromControllerRevisionName(v3Name)
+
+	// In-flight v2 gang surge, BEFORE the surge pods are created.
+	isvc.Status.Components = gangSurgeInFlightStatus(v1Name, v2Name)
+
+	c := legacyNewFakeClient(t, isvc)
+	makeCR(t, c, isvc, v2Name)
+	makeCR(t, c, isvc, v3Name)
+	// Source gang still alive at idx=0 (capacity holds during the surge).
+	for _, runner := range []string{"leader", "worker"} {
+		if err := c.Create(context.Background(), gangPodAt(isvc, 0, runner, v2Hash, true, true)); err != nil {
+			t.Fatalf("seed source pod (%s): %v", runner, err)
+		}
+	}
+
+	input := gangInputWithRemove(isvc, c)
+	v3 := &appsv1.ControllerRevision{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: v3Name}, v3); err != nil {
+		t.Fatalf("get v3 CR: %v", err)
+	}
+
+	// Create-surge-gang pass against the v3 target (the re-bump). The surge
+	// gang pods must be created on the PINNED v2 rev, not v3.
+	if _, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], v3, nil); err != nil {
+		t.Fatalf("gang surge create pass: %v", err)
+	}
+
+	surgePods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "llama-70b", workload.ComponentEngine, 1)
+	if err != nil {
+		t.Fatalf("list surge gang pods: %v", err)
+	}
+	if len(surgePods) == 0 {
+		t.Fatalf("expected surge gang pods to be created at idx=1; found none")
+	}
+	for _, pod := range surgePods {
+		if got := pod.Labels[query.LabelRevisionHash]; got != v2Hash {
+			t.Errorf("X-2 re-bump: surge pod %s revision-hash=%q, want %q (the pinned in-flight rev). "+
+				"Got the latest target hash %q — the surge drifted to v3 mid-flight.",
+				pod.Name, got, v2Hash, v3Hash)
+		}
+	}
+}
+
+// ptrInt32 returns a pointer to v — local helper for SurgeIndex fixtures.
+func ptrInt32(v int32) *int32 { return &v }
+
 // TestSurgeUpdate_PartitionByLabelHandlesLegacyPods pins backward
 // compatibility for partitionPodsBySurgeOrdinal: pods without the
 // LabelPodOrdinal label (pre-feature pods on the cluster) fall through
