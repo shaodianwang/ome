@@ -147,6 +147,50 @@ func restoreRunnerName(merged, runtime *v1beta1.RunnerSpec) {
 	}
 }
 
+// foldComponentPodSpecIntoLeaderWorker folds the component-level PodSpec
+// (the inline EngineSpec/DecoderSpec PodSpec) into the Leader and Worker
+// pod templates of a multi-pod component, reusing the same strategic-merge
+// path (mergeSpec) as every other merge in this file.
+//
+// Why this exists: for a multi-node component the renderer
+// (engine.go/decoder.go reconcilePodSpec/reconcileWorkerPodSpec) sources its
+// base PodSpec from Leader.PodSpec / Worker.PodSpec — NOT from the
+// component-level PodSpec. Without this fold, component-level pod fields
+// (volumes, nodeSelector, tolerations, affinity, imagePullSecrets, ...)
+// declared on engineConfig/decoderConfig are silently dropped from the
+// leader/worker pods while their container volumeMounts still apply, so a
+// runtime declaring `engineConfig.volumes:[dshm]` + a leader runner mounting
+// `dshm` renders a Pod that mounts a volume that doesn't exist → the
+// apiserver rejects it ("volumeMounts[0].name: Not found: dshm").
+//
+// The component PodSpec is the base and the leader/worker PodSpec is the
+// override, so leader/worker entries win — with the standard strategic-merge
+// semantics carried by the PodSpec field tags: name-keyed lists (volumes,
+// imagePullSecrets) merge by name; atomic fields (nodeSelector, tolerations)
+// are replaced wholesale when the child sets them; structs (affinity,
+// securityContext) deep-merge. Single-pod components render straight from the
+// component-level PodSpec, which is left intact, so they're unaffected.
+func foldComponentPodSpecIntoLeaderWorker(component *v1beta1.PodSpec, leader *v1beta1.LeaderSpec, worker *v1beta1.WorkerSpec) error {
+	if component == nil {
+		return nil
+	}
+	if leader != nil {
+		folded, err := mergeSpec(*component, leader.PodSpec)
+		if err != nil {
+			return err
+		}
+		leader.PodSpec = *folded
+	}
+	if worker != nil {
+		folded, err := mergeSpec(*component, worker.PodSpec)
+		if err != nil {
+			return err
+		}
+		worker.PodSpec = *folded
+	}
+	return nil
+}
+
 // MergeEngineSpec merges a runtime-provided EngineSpec with a user-provided EngineSpec from InferenceService.
 // The user-provided (isvcEngine) fields take precedence over the runtime defaults.
 func MergeEngineSpec(runtimeEngine, isvcEngine *v1beta1.EngineSpec) (*v1beta1.EngineSpec, error) {
@@ -156,7 +200,11 @@ func MergeEngineSpec(runtimeEngine, isvcEngine *v1beta1.EngineSpec) (*v1beta1.En
 		return nil, nil
 	case runtimeEngine == nil:
 		// if engine is not specified in runtime, return a copy of isvcEngine
-		return isvcEngine.DeepCopy(), nil
+		merged := isvcEngine.DeepCopy()
+		if err := foldComponentPodSpecIntoLeaderWorker(&merged.PodSpec, merged.Leader, merged.Worker); err != nil {
+			return nil, err
+		}
+		return merged, nil
 	}
 
 	merged, err := mergeSpec(v1beta1.EngineSpec{
@@ -170,6 +218,9 @@ func MergeEngineSpec(runtimeEngine, isvcEngine *v1beta1.EngineSpec) (*v1beta1.En
 		return nil, err
 	}
 	restoreRunnerName(merged.Runner, runtimeEngine.Runner)
+	if err := foldComponentPodSpecIntoLeaderWorker(&merged.PodSpec, merged.Leader, merged.Worker); err != nil {
+		return nil, err
+	}
 	return merged, nil
 }
 
@@ -182,7 +233,11 @@ func MergeDecoderSpec(runtimeDecoder, isvcDecoder *v1beta1.DecoderSpec) (*v1beta
 		return nil, nil
 	case runtimeDecoder == nil:
 		// if decoder is not specified in runtime, return a copy of isvcDecoder
-		return isvcDecoder.DeepCopy(), nil
+		merged := isvcDecoder.DeepCopy()
+		if err := foldComponentPodSpecIntoLeaderWorker(&merged.PodSpec, merged.Leader, merged.Worker); err != nil {
+			return nil, err
+		}
+		return merged, nil
 	}
 
 	merged, err := mergeSpec(v1beta1.DecoderSpec{
@@ -196,6 +251,9 @@ func MergeDecoderSpec(runtimeDecoder, isvcDecoder *v1beta1.DecoderSpec) (*v1beta
 		return nil, err
 	}
 	restoreRunnerName(merged.Runner, runtimeDecoder.Runner)
+	if err := foldComponentPodSpecIntoLeaderWorker(&merged.PodSpec, merged.Leader, merged.Worker); err != nil {
+		return nil, err
+	}
 	return merged, nil
 }
 
