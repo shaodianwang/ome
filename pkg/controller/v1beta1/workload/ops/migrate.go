@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -446,8 +447,16 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 //   - defer_=true — transient (pod not scheduled yet); caller requeues
 //   - rejectionReason != "" — permanent mismatch; caller fails
 //
-// Source pods on multiple nodes is a rejection — single-pod migration
-// can't legitimately span nodes.
+// The check is gang-aware. A multi-node gang Instance (leader + workers)
+// spans nodes BY DESIGN, so the whole-gang surge only needs req.FromNode
+// to host at least one of the source pods — that pod is the one the surge's
+// NotIn[FromNode] anti-affinity relocates off. Rejecting a gang merely for
+// spanning nodes (the single-pod assumption) wrongly failed every gang
+// migration whose pods didn't happen to co-locate. A single-pod Instance is
+// the degenerate case: its one pod must sit on FromNode, and "pods on
+// multiple nodes" stays a rejection because a single-pod migration can't
+// legitimately span nodes. Either way an unscheduled pod defers so the next
+// reconcile re-validates once scheduling settles.
 func validateFromNode(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, fromNode string) (string, bool, error) {
 	pods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, sourceIdx)
 	if err != nil {
@@ -456,6 +465,35 @@ func validateFromNode(ctx context.Context, deps workload.Deps, input workload.Re
 	if len(pods) == 0 {
 		return "source instance has no live pods", false, nil
 	}
+
+	if isMultiPodInstance(plan, sourceIdx) {
+		// Gang: the surge relocates the whole Instance, but FromNode names a
+		// single source node to evacuate. Defer first while any member is
+		// still unscheduled (the fresh-request guard — surge sizing and the
+		// gang readiness gate need the full layout settled, and an
+		// as-yet-unscheduled member could still land on FromNode). Once the
+		// gang is fully scheduled, accept iff FromNode hosts a member; reject
+		// only when none of them landed there (stale request — the gang has
+		// since moved off that node).
+		observed := make([]string, 0, len(pods))
+		onFromNode := false
+		for _, pod := range pods {
+			node := pod.Spec.NodeName
+			if node == "" {
+				// Unscheduled gang member — defer; next reconcile re-validates.
+				return "", true, nil
+			}
+			if node == fromNode {
+				onFromNode = true
+			}
+			observed = append(observed, node)
+		}
+		if onFromNode {
+			return "", false, nil
+		}
+		return "request.FromNode=" + fromNode + " hosts no source pod; gang spans nodes " + strings.Join(observed, ", "), false, nil
+	}
+
 	var observed string
 	for _, pod := range pods {
 		node := pod.Spec.NodeName

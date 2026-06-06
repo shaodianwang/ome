@@ -137,6 +137,112 @@ func TestValidateFromNode_NoLivePodsRejects(t *testing.T) {
 	}
 }
 
+// vfnGangFixture is vfnFixture for a multi-node (gang) Instance: the
+// plan carries an InstancePlan at idx=0 with leader + worker Runners so
+// isMultiPodInstance(plan, 0) is true and validateFromNode takes the
+// gang-aware branch.
+func vfnGangFixture(t *testing.T, pods ...*corev1.Pod) (workload.Deps, workload.ReconcileInput, workload.ComponentPlan) {
+	t.Helper()
+	deps, input, plan := vfnFixture(t, pods...)
+	plan.Instances = []workload.InstancePlan{{
+		Index:       0,
+		Incarnation: 1,
+		Runners: []workload.RunnerPlan{
+			{Name: "leader", Size: 1},
+			{Name: "worker", Size: 1},
+		},
+	}}
+	return deps, input, plan
+}
+
+// vfnGangPod fabricates a gang member pod (leader/worker) for Instance
+// idx=0 on the given node. Pod listing is purely label-based on
+// instance-index, so leader + worker share idx=0 and are returned
+// together by LiveListPodsForInstance even when scheduled to different
+// nodes.
+func vfnGangPod(runner, nodeName string) *corev1.Pod {
+	p := vfnPod(nodeName)
+	p.Name = "llama-70b-engine-0-" + runner + "-0"
+	p.Labels[query.LabelRunner] = runner
+	return p
+}
+
+// TestValidateFromNode_GangSpanningNodesNotRejected is the regression
+// for harness case p117: a multi-node gang Instance's pods span nodes BY
+// DESIGN (leader + worker land on different nodes), so a migration whose
+// FromNode hosts one of them must NOT be rejected. The pre-fix code
+// rejected any source whose pods spanned nodes, wrongly failing every
+// gang migration that wasn't co-located on a single node.
+func TestValidateFromNode_GangSpanningNodesNotRejected(t *testing.T) {
+	deps, input, plan := vfnGangFixture(t,
+		vfnGangPod("leader", "node5"),
+		vfnGangPod("worker", "node8"),
+	)
+	// FromNode = the leader's node; the gang spans node5 + node8.
+	mismatch, defer_, err := validateFromNode(context.Background(), deps, input, plan, 0, "node5")
+	if err != nil {
+		t.Fatalf("validateFromNode: %v", err)
+	}
+	if defer_ {
+		t.Errorf("gang with a scheduled pod on FromNode must not defer")
+	}
+	if mismatch != "" {
+		t.Errorf("gang spanning nodes with a pod on FromNode must pass; got mismatch=%q", mismatch)
+	}
+
+	// FromNode = the worker's node also passes — either member's node is a
+	// valid evacuation target for the whole-gang surge.
+	mismatch, defer_, err = validateFromNode(context.Background(), deps, input, plan, 0, "node8")
+	if err != nil {
+		t.Fatalf("validateFromNode (worker node): %v", err)
+	}
+	if defer_ || mismatch != "" {
+		t.Errorf("FromNode=worker node must pass; got mismatch=%q defer=%v", mismatch, defer_)
+	}
+}
+
+// TestValidateFromNode_GangFromNodeAbsentRejected pins that a stale
+// request — FromNode hosting none of the gang's pods (the gang has since
+// moved off that node) — is still a rejection, so the surge's
+// NotIn[FromNode] can't silently no-op against a node the gang no longer
+// occupies.
+func TestValidateFromNode_GangFromNodeAbsentRejected(t *testing.T) {
+	deps, input, plan := vfnGangFixture(t,
+		vfnGangPod("leader", "node5"),
+		vfnGangPod("worker", "node8"),
+	)
+	mismatch, defer_, err := validateFromNode(context.Background(), deps, input, plan, 0, "node99")
+	if err != nil {
+		t.Fatalf("validateFromNode: %v", err)
+	}
+	if defer_ {
+		t.Errorf("FromNode absent from a fully-scheduled gang must reject, not defer")
+	}
+	if mismatch == "" {
+		t.Errorf("expected a rejection reason when FromNode hosts no gang pod")
+	}
+}
+
+// TestValidateFromNode_GangUnscheduledDefers pins that the fresh-request
+// defer guard survives in the gang branch: an unscheduled gang member
+// defers (re-validated next reconcile) rather than rejecting.
+func TestValidateFromNode_GangUnscheduledDefers(t *testing.T) {
+	deps, input, plan := vfnGangFixture(t,
+		vfnGangPod("leader", "node5"),
+		vfnGangPod("worker", ""), // worker not scheduled yet
+	)
+	mismatch, defer_, err := validateFromNode(context.Background(), deps, input, plan, 0, "node5")
+	if err != nil {
+		t.Fatalf("validateFromNode: %v", err)
+	}
+	if !defer_ {
+		t.Errorf("unscheduled gang member must defer; got mismatch=%q defer=%v", mismatch, defer_)
+	}
+	if mismatch != "" {
+		t.Errorf("defer must not carry a rejection reason; got %q", mismatch)
+	}
+}
+
 // TestSurgeRevisionAndSpec_ReturnsGangWorkerSpec pins that the migrate
 // surge resolver returns the source revision's WORKER template (not just
 // the leader) so a gang migration renders its worker pods from the right
