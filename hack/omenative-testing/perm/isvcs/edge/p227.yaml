@@ -1,4 +1,4 @@
-# p227: %-budget maxSurge=50% pd under percomp  Ne=4 Nd=4 Nr=2 ceil_e=6 ceil_d=4 ceil_r=2 co=percomp topo=pd
+# p227: %-budget maxSurge=50% pd under percomp (decoder bumped, surges 1)  Ne=4 Nd=4 Nr=2 ceil_e=6 ceil_d=5 ceil_r=2 co=percomp topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p227 }
