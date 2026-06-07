@@ -408,6 +408,12 @@ var (
 	ServiceAnnotationDisallowedList = []string{
 		StorageInitializerSourceUriInternalAnnotationKey,
 		"kubectl.kubernetes.io/last-applied-configuration",
+		// Rollout operator verbs are ISVC-level signals consumed by the
+		// controller off the InferenceService; they must not propagate to
+		// managed pods/Services. (The revision layer also strips them from
+		// the pod-template hash so toggling one never mints a revision.)
+		RolloutPromoteAnnotation,
+		RolloutRollbackAnnotation,
 	}
 
 	RevisionTemplateLabelDisallowedList = []string{

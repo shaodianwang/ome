@@ -51,9 +51,9 @@ func TestValidateTrafficAnnotations_TypedValues(t *testing.T) {
 			wantOK: true,
 		},
 		{
-			name: "valid promote target int",
+			name: "valid promote target revision hash",
 			annotations: map[string]string{
-				constants.RolloutPromoteAnnotation: "2",
+				constants.RolloutPromoteAnnotation: "e5d6f79d",
 			},
 			wantOK: true,
 		},

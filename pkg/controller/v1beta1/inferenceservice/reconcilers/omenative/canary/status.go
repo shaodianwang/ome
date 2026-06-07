@@ -13,9 +13,3 @@ func setPhase(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, phase v1b
 	cs.RolloutPhase = phase
 	isvc.Status.Components[c] = cs
 }
-
-// clearCanaryStatus removes the canary state machine once a rollout completes or
-// rolls back — the next spec change starts a fresh canary.
-func clearCanaryStatus(isvc *v1beta1.InferenceService) {
-	isvc.Status.Canary = nil
-}

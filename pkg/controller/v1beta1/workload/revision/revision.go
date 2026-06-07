@@ -213,17 +213,33 @@ func hasLifecycleAnnotation(annotations map[string]string) bool {
 // importing coordination here would close a cycle.
 const pausedRolloutAnnotation = "ome.io/rollout-paused"
 
+// rolloutPromoteAnnotation and rolloutRollbackAnnotation are the canary
+// operator verbs (constants.RolloutPromoteAnnotation /
+// RolloutRollbackAnnotation). Like the pause signal they are written to
+// and consumed off the ISVC mid-rollout; duplicated here as literals to
+// keep this package a leaf.
+const (
+	rolloutPromoteAnnotation  = "ome.io/rollout-promote"
+	rolloutRollbackAnnotation = "ome.io/rollout-rollback"
+)
+
 // isLifecycleAnnotation reports whether the annotation key is one the
 // controller reads or writes as part of normal reconcile (migration
-// requests, rollout-paused signal) and therefore must not feed into
-// the pod-template revision hash. Without this filter, adding or
-// removing the annotation would flip the ControllerRevision name and
-// drive a phantom rollout on a spec the user never edited.
+// requests, rollout-paused signal, the canary promote/rollback verbs)
+// and therefore must not feed into the pod-template revision hash.
+// Without this filter, adding or removing the annotation would flip the
+// ControllerRevision name and drive a phantom rollout on a spec the user
+// never edited — e.g. an operator's `rollout-promote` would mint a new
+// revision and roll to it instead of the one being promoted.
 func isLifecycleAnnotation(key string) bool {
 	if strings.HasPrefix(key, audit.MigrationRequestAnnotationPrefix) {
 		return true
 	}
-	return key == pausedRolloutAnnotation
+	switch key {
+	case pausedRolloutAnnotation, rolloutPromoteAnnotation, rolloutRollbackAnnotation:
+		return true
+	}
+	return false
 }
 
 // Name composes the ControllerRevision object name from the Key and

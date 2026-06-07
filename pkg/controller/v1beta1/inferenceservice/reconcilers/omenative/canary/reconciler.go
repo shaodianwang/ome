@@ -14,6 +14,17 @@ import (
 // (capacity coming up, an Auto pause timer, or a drain window).
 const reconcileRequeue = 10 * time.Second
 
+// failedRequeue is the slow heartbeat once a canary step is escalated to Failed —
+// the rollout is parked (stable keeps serving) until the operator acts, so there
+// is no need to tight-poll.
+const failedRequeue = 5 * time.Minute
+
+// defaultReadyTimeout is how long a step's capacity gate may stay unsatisfied
+// before the canary is marked Failed, when the operator hasn't overridden it via
+// constants.RolloutReadyTimeoutAnnotation. Matches that annotation's documented
+// default.
+const defaultReadyTimeout = 15 * time.Minute
+
 // ReconcileInputs is the subset of state the canary executor needs. It mirrors
 // coordination.ReconcileInputs. PerRevisionPods is observed serving pod counts
 // keyed by revision hash for the canary's component (populated by the
@@ -27,7 +38,11 @@ type ReconcileInputs struct {
 	StableRevisionHash string
 	DesiredReplicas    int32
 	PerRevisionPods    map[string]int32
-	Now                time.Time
+	// SecondaryCapacityReady is true when every NON-primary component's canary
+	// pods have reached that component's step newCount (PD). The primary's own
+	// capacity is checked via PerRevisionPods. Single-component canaries pass true.
+	SecondaryCapacityReady bool
+	Now                    time.Time
 }
 
 // Result reports the executor's decision for one reconcile. Active=false means
@@ -36,8 +51,11 @@ type ReconcileInputs struct {
 // (instances < Partition are held on the stable revision). RequeueAfter > 0
 // asks the controller to re-reconcile (capacity / pause / drain pending).
 type Result struct {
-	Active       bool
-	Complete     bool
+	Active   bool
+	Complete bool
+	// Stepped is true on the reconcile that advanced to the next (intermediate)
+	// step — the edge the step counter + step Event are recorded on.
+	Stepped      bool
 	Partition    int32
 	RequeueAfter time.Duration
 }
@@ -52,30 +70,91 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		return &Result{Active: false}, nil
 	}
 
-	// Rollback takes precedence over normal stepping.
-	if isRollbackRequested(in.ISVC) {
-		return reconcileRollback(in), nil
+	// Rollback (ome.io/rollout-rollback) is deferred: the partition mechanism
+	// cannot revert instances already rolled to the canary, so the old
+	// hold-all-on-stable path wedged at RollingBack. The annotation is treated
+	// as a no-op here (the canary proceeds per its plan) and Dispatch surfaces a
+	// warning event. To roll back today, revert the component spec.
+
+	cs := in.ISVC.Status.Canary
+
+	// Done sentinel: a finished canary KEEPS its status with CurrentStep ==
+	// len(steps) rather than clearing it. EffectivePartition maps that to the
+	// final 100% step (partition 0, all instances on the canary revision); a nil
+	// status would instead re-default to step 0's partition and hold instances
+	// back on the old revision after completion. No-op unless a new target
+	// appears, in which case start a fresh canary.
+	if cs != nil && int(cs.CurrentStep) >= len(plan.Steps) {
+		if in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.CanaryRevisionHash {
+			cs.CurrentStep = 0
+			cs.CanaryRevisionHash = in.CanaryRevisionHash
+			cs.StepEnteredTime = &metav1.Time{Time: in.Now}
+			cs.ObservedTrafficWeight = 0
+		} else {
+			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
+			return &Result{Active: false}, nil
+		}
 	}
 
-	// Initialize the state machine on first sight of this canary.
-	if in.ISVC.Status.Canary == nil {
+	// Mid-rollout retarget: a NEW target revision appeared after traffic already
+	// shifted (e.g. the operator bumped the image again mid-canary). Restart the
+	// staged plan against the new target — otherwise the recorded hash goes stale
+	// and, under Manual, the operator's promote of the new hash would never match.
+	// The step-0 pre-traffic lag window (UpdateRevision briefly behind) is handled
+	// by the hash re-sync below, not here.
+	if cs != nil && int(cs.CurrentStep) < len(plan.Steps) &&
+		in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.CanaryRevisionHash &&
+		(cs.CurrentStep > 0 || cs.ObservedTrafficWeight > 0) {
+		cs.CurrentStep = 0
+		cs.CanaryRevisionHash = in.CanaryRevisionHash
+		cs.StepEnteredTime = &metav1.Time{Time: in.Now}
+		cs.ObservedTrafficWeight = 0
+	}
+
+	// Initialize the state machine on first sight of a NEW canary. Don't start
+	// one when the component is already fully converged on the target revision —
+	// or when the target isn't known yet — so adding a canary to an
+	// already-rolled-out ISVC is a no-op, not a phantom rollout.
+	if cs == nil {
+		if in.CanaryRevisionHash == "" || in.PerRevisionPods[in.CanaryRevisionHash] >= in.DesiredReplicas {
+			if in.CanaryRevisionHash != "" && in.DesiredReplicas > 0 {
+				setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
+			}
+			return &Result{Active: false}, nil
+		}
 		in.ISVC.Status.Canary = &v1beta1.CanaryStatus{
 			CanaryRevisionHash: in.CanaryRevisionHash,
 			CurrentStep:        0,
 			StepEnteredTime:    &metav1.Time{Time: in.Now},
 		}
-	}
-	cs := in.ISVC.Status.Canary
-	if int(cs.CurrentStep) >= len(plan.Steps) {
-		cs.CurrentStep = int32(len(plan.Steps) - 1) // safety clamp
+		cs = in.ISVC.Status.Canary
 	}
 	step := plan.Steps[cs.CurrentStep]
 
-	newCount, _ := resolveStepCapacity(step, in.DesiredReplicas)
+	newCount := resolveStepNewCount(step, in.DesiredReplicas)
 	partition := partitionForNewCount(in.DesiredReplicas, newCount)
 
-	// Capacity gate: don't shift traffic onto canary pods that aren't Ready yet.
-	if in.PerRevisionPods[in.CanaryRevisionHash] < newCount {
+	// Re-sync the recorded canary hash to the live target while step 0 is still
+	// waiting on capacity (before any traffic has shifted). The IR's
+	// UpdateRevision can briefly lag the spec bump on the first reconcile, so the
+	// hash captured at init may be the stale pre-roll revision; locking that for
+	// the life of the rollout would mis-report the canary. Once traffic moves the
+	// canary is committed, so this only re-syncs during the initial wait.
+	if cs.CurrentStep == 0 && in.CanaryRevisionHash != "" && in.PerRevisionPods[in.CanaryRevisionHash] < newCount {
+		cs.CanaryRevisionHash = in.CanaryRevisionHash
+	}
+
+	// Capacity gate: don't shift traffic until the canary pods are Ready — the
+	// primary's own newCount AND every secondary component's canary capacity (PD,
+	// so a Ready router can't advance the step while the engine/decoder canary
+	// pods behind it are still coming up). If the gate stays unsatisfied past the
+	// ready-timeout, escalate to Failed instead of polling Pending forever — the
+	// stable revision keeps serving since no traffic has shifted.
+	if in.PerRevisionPods[in.CanaryRevisionHash] < newCount || !in.SecondaryCapacityReady {
+		if capacityGateExpired(cs, readyTimeoutOrDefault(in.ISVC), in.Now) {
+			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseFailed)
+			return &Result{Active: true, Partition: partition, RequeueAfter: failedRequeue}, nil
+		}
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePending)
 		return &Result{Active: true, Partition: partition, RequeueAfter: reconcileRequeue}, nil
 	}
@@ -85,10 +164,23 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 
 	// Final step (TrafficWeight 100): drain the stable revision, then complete.
 	if int(cs.CurrentStep) == len(plan.Steps)-1 {
+		// Anchor the drain window to the moment 100% traffic actually shifts
+		// (capacity is met here — we are past the gate, applyTraffic just ran),
+		// not to step entry. On slow capacity the final step is entered well
+		// before traffic moves, so measuring the drain from step entry could
+		// consume the whole window before cutover. Re-stamp once, on entering
+		// Promoting.
+		if in.ISVC.Status.Components[in.Component].RolloutPhase != v1beta1.RolloutPhasePromoting {
+			cs.StepEnteredTime = &metav1.Time{Time: in.Now}
+		}
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePromoting)
 		if drainElapsed(cs, plan, in.Now) {
 			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
-			clearCanaryStatus(in.ISVC)
+			// Mark done (sentinel), don't clear: keeps EffectivePartition at
+			// partition 0 so the old revision drains instead of being re-held by
+			// a step-0 partition. ObservedTrafficWeight stays 100 (all on canary).
+			cs.CurrentStep = int32(len(plan.Steps))
+			cs.ObservedTrafficWeight = 100
 			return &Result{Active: true, Complete: true, Partition: 0}, nil
 		}
 		return &Result{Active: true, Partition: 0, RequeueAfter: reconcileRequeue}, nil
@@ -101,22 +193,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		return &Result{Active: true, Partition: partition, RequeueAfter: reconcileRequeue}, nil
 	}
 	advanceStep(in.ISVC, in.Now)
-	return &Result{Active: true, Partition: partition, RequeueAfter: reconcileRequeue}, nil
-}
-
-// reconcileRollback shifts all traffic back to the stable revision and scales
-// the canary revision to zero (Partition = DesiredReplicas holds every instance
-// on the stable revision). It completes once the canary pods have drained away.
-func reconcileRollback(in ReconcileInputs) *Result {
-	applyTraffic(in.ISVC, in.Component, in.CanaryRevisionHash, in.StableRevisionHash, 0)
-	if in.PerRevisionPods[in.CanaryRevisionHash] > 0 {
-		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseRollingBack)
-		return &Result{Active: true, Partition: in.DesiredReplicas, RequeueAfter: reconcileRequeue}
-	}
-	setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
-	clearCanaryStatus(in.ISVC)
-	delete(in.ISVC.Annotations, constants.RolloutRollbackAnnotation)
-	return &Result{Active: true, Complete: true, Partition: in.DesiredReplicas}
+	return &Result{Active: true, Stepped: true, Partition: partition, RequeueAfter: reconcileRequeue}, nil
 }
 
 // drainElapsed reports whether the ScaleDownDelaySeconds drain window has passed
@@ -130,4 +207,28 @@ func drainElapsed(cs *v1beta1.CanaryStatus, plan *v1beta1.CanarySpec, now time.T
 	}
 	deadline := cs.StepEnteredTime.Time.Add(time.Duration(*plan.ScaleDownDelaySeconds) * time.Second)
 	return !now.Before(deadline)
+}
+
+// readyTimeoutOrDefault is how long a step's capacity gate may stay unsatisfied
+// before the canary is marked Failed. Operators override via
+// constants.RolloutReadyTimeoutAnnotation; a missing/malformed value falls back
+// to defaultReadyTimeout (admission already rejects malformed values).
+func readyTimeoutOrDefault(isvc *v1beta1.InferenceService) time.Duration {
+	if v, ok := isvc.Annotations[constants.RolloutReadyTimeoutAnnotation]; ok {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultReadyTimeout
+}
+
+// capacityGateExpired reports whether the current step has waited on capacity
+// past the timeout. A nil status / missing step-entered time / non-positive
+// timeout is never treated as expired, so a transient nil cannot wrongly fail a
+// rollout.
+func capacityGateExpired(cs *v1beta1.CanaryStatus, timeout time.Duration, now time.Time) bool {
+	if cs == nil || cs.StepEnteredTime == nil || timeout <= 0 {
+		return false
+	}
+	return !now.Before(cs.StepEnteredTime.Time.Add(timeout))
 }

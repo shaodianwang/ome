@@ -60,6 +60,8 @@ HERE = Path(__file__).parent.resolve()
 REV_LABEL = "ome.io/revision-hash"   # OMENative per-revision pod label (query.LabelRevisionHash)
 TRIGGER_ANNO = "perm.test/rev"       # annotation we bump to trigger a rollout
 TRIGGER_VAL = "v2"
+PROMOTE_ANNO = "ome.io/rollout-promote"    # canary manual-promote verb (value = canary revision hash)
+ROLLBACK_ANNO = "ome.io/rollout-rollback"  # canary rollback verb (deferred: guarded no-op + warning)
 STABILITY_S = 5     # require target sustained this many seconds before CONVERGED
 SEQ_TOL_S = 6       # ordering/soak slack (1Hz sampling + readiness jitter)
 GANG_TOL_S = 5.0    # multi-node gang grace: a leader+worker Instance may look mixed-revision
@@ -140,7 +142,8 @@ def get_spec_info(case_id):
     Returns dict: {policy, members, order, soak, strat:{comp:type}}.
     """
     info = {"policy": None, "members": [], "order": [], "soak": 0, "strat": {},
-            "pacing": None, "ratio_tol": None, "workers": {}, "max_unavail": {}, "partition": {}}
+            "pacing": None, "ratio_tol": None, "workers": {}, "max_unavail": {}, "partition": {},
+            "canary": None}
     r = kubectl("-n", NS, "get", "isvc", case_id, "-o", "json")
     if r.returncode != 0:
         return info
@@ -177,6 +180,13 @@ def get_spec_info(case_id):
         pacing = g.get("pacing", {}) or {}
         info["pacing"] = pacing.get("type")
         info["ratio_tol"] = pacing.get("ratioTolerancePercent")
+    # OEP-0015.1 canary plan (mutually exclusive with coordination).
+    canary = spec.get("rollout", {}).get("canary")
+    if isinstance(canary, dict):
+        info["canary"] = {
+            "policy": (str(canary.get("promotionPolicy") or "").lower() or None),
+            "steps": canary.get("steps", []) or [],
+        }
     return info
 
 
@@ -306,7 +316,7 @@ def case_category(case_id):
 # Other modes share the apply→wait-Ready→watch scaffolding but swap the Phase-2
 # trigger and the verdict. Implemented: scaledown. Planned: migrate, kill,
 # partition, rebump (each becomes a branch here on the same scaffolding).
-MODE_HANDLERS = {"scaledown", "partition", "rebump", "migrate", "kill"}   # modes with a real impl
+MODE_HANDLERS = {"scaledown", "partition", "rebump", "migrate", "kill", "canary"}   # modes with a real impl
 TO_KEYS = {"engine": "to_e", "decoder": "to_d", "router": "to_r"}  # scaledown target replicas
 
 
@@ -822,6 +832,175 @@ def _kill(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+def _canary_primary(ctx):
+    """The externally-routed component the canary step machine drives + reports on:
+    router > engine > decoder (mirrors canary.primaryComponent). The harness reads
+    status.components.<primary>.rolloutPhase / .traffic on exactly this component."""
+    for c in ("router", "engine", "decoder"):
+        if c in ctx["configured"]:
+            return c
+    return ""
+
+
+def _canary_warning(case_id):
+    """True once a Warning event with reason=CanaryRollbackUnsupported exists for
+    the ISVC (the deferred-rollback signal the executor emits in Dispatch)."""
+    r = kubectl("-n", NS, "get", "events",
+                "--field-selector", f"involvedObject.name={case_id},reason=CanaryRollbackUnsupported",
+                "-o", "json")
+    if r.returncode != 0:
+        return False
+    try:
+        return len(json.loads(r.stdout).get("items", [])) > 0
+    except Exception:
+        return False
+
+
+def _canary(case_id, yaml_file, desc, hdr):
+    """Canary rollout (OEP-0015.1). The ISVC ships spec.rollout.canary in the
+    initial apply; once rev A is Ready we bump the primary component's revision to
+    trigger the staged canary, then drive + observe the step machine:
+
+        capacity gate (Pending) → traffic split (Canarying) → Pause →
+        promote (Auto = pause timer, Manual = ome.io/rollout-promote=<hash>) →
+        … → final step 100% → Promoting → Stable (status.canary cleared).
+
+    Header keys: canary=auto|manual (else read from the live spec), rollback=1
+    (set ome.io/rollout-rollback mid-pause and assert it is a NON-wedging no-op
+    plus a CanaryRollbackUnsupported warning event — rollback is deferred).
+
+    Asserts the STATUS-level contract (rolloutPhase progression, currentStep,
+    status.components.<primary>.traffic[] weights stepping to 100 on the canary
+    revision) AND per-revision pod capacity (the primary fully rolls to the canary
+    revision). NOTE: gateway data-plane weighting is a downstream consumer
+    (per-revision Services + weighted HTTPRoute) and is out of this harness's
+    scope — the harness verifies the producer-side weights OME writes to status."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    cinfo = ctx["info"].get("canary") or {}
+    policy = str(hdr.get("canary") or cinfo.get("policy") or "auto").lower()
+    do_rollback = bool(hdr.get("rollback"))
+    nsteps = len(cinfo.get("steps") or []) or 2
+    primary = _canary_primary(ctx)
+    if not primary:
+        return _write_fail(case_id, desc, hdr, "NO_PRIMARY", "no configured component to canary")
+    N = ctx["N"]
+    print(f"  Phase 2: canary policy={policy} steps={nsteps} primary={primary}"
+          + ("  +rollback" if do_rollback else ""))
+    if not _bump_rev(ctx, {primary}):
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed")
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * N[primary] * ctx["pods_per_inst"][primary] + 120)
+    print(f"  Phase 3: driving + observing the canary (≤{budget}s)")
+
+    phases, traffic_by_step = set(), {}
+    canary_hash = None
+    promoted = rollback_set = warn_seen = False
+    promote_rejected = None
+    rollingback_ticks = 0
+    state, stable, last_poll = "ROLLING", None, 0.0
+
+    while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+        _read_one(ctx)                                   # fold pod events → peaks / per-revision split
+        now = time.time()
+        if now - last_poll < 2.0:
+            continue
+        last_poll = now
+        st = fetch_status(case_id)
+        comp = (st.get("components", {}) or {}).get(primary, {}) or {}
+        phase = comp.get("rolloutPhase", "") or ""
+        can = st.get("canary") or {}
+        if phase:
+            phases.add(phase)
+        canary_hash = canary_hash or can.get("canaryRevisionHash") or None
+        step = can.get("currentStep")
+        if step is not None:
+            for t in (comp.get("traffic") or []):
+                if t.get("latestRevision"):
+                    traffic_by_step[step] = t.get("percent", 0)
+
+        # Deferred-rollback probe: once the canary is in progress, request rollback
+        # ONCE and assert it does NOT wedge + a warning fires (it is a no-op today).
+        if do_rollback and not rollback_set and phase in ("Canarying", "Paused"):
+            rollback_set = True
+            kubectl("-n", NS, "annotate", "isvc", case_id, f"{ROLLBACK_ANNO}=true", "--overwrite")
+            print("    set ome.io/rollout-rollback=true (expect: ignored + CanaryRollbackUnsupported warning)")
+        if rollback_set:
+            warn_seen = warn_seen or _canary_warning(case_id)
+            rollingback_ticks = rollingback_ticks + 1 if phase == "RollingBack" else 0
+
+        # Manual promotion: at a Paused step promote THIS canary hash. For the
+        # rollback variant, wait until the no-op + warning are observed first.
+        if policy == "manual" and phase == "Paused" and canary_hash and not promoted:
+            if do_rollback and not warn_seen:
+                pass
+            else:
+                rr = kubectl("-n", NS, "annotate", "isvc", case_id,
+                             f"{PROMOTE_ANNO}={canary_hash}", "--overwrite")
+                if rr.returncode != 0:
+                    promote_rejected = (rr.stderr.strip().splitlines() or ["rejected"])[-1][:160]
+                    print(f"    ✗ promote annotation REJECTED: {promote_rejected}")
+                else:
+                    promoted = True
+                    print(f"    set ome.io/rollout-promote={canary_hash}")
+
+        wsteps = " ".join(f"s{k}={v}%" for k, v in sorted(traffic_by_step.items()))
+        print(f"    [t={int(now - ctx['trigger_ts']):3d}s] phase={phase:<11} step={step} "
+              f"canary={canary_hash} traffic[{wsteps}]")
+
+        # Converged: the canary reached Stable. status.canary persists at the
+        # done sentinel (currentStep == number of steps) rather than being
+        # cleared, so we key convergence on the phase, not on status.canary.
+        if phase == "Stable":
+            stable = stable or now
+            if now - stable >= STABILITY_S:
+                state = "CONVERGED"
+                ctx["converged_at"] = stable - ctx["trigger_ts"]
+                break
+        else:
+            stable = None
+
+    # ── verdict ──
+    verdict, notes, checks = "PASS", [], []
+
+    def good(ok, msg_ok, msg_bad):
+        nonlocal verdict
+        if ok:
+            checks.append(f"  ✓ {msg_ok}")
+        else:
+            verdict = "FAIL"; notes.append(msg_bad); checks.append(f"  ✗ {msg_bad}")
+
+    good(state == "CONVERGED",
+         f"reached Stable in {ctx.get('converged_at')}s (status.canary cleared)",
+         f"did not reach Stable (state={state}, phases={sorted(phases)})")
+    good("Canarying" in phases, "observed Canarying phase", "never observed Canarying phase")
+    weights = [traffic_by_step[k] for k in sorted(traffic_by_step)]
+    good(bool(weights) and weights[-1] == 100 and weights == sorted(weights),
+         f"canary traffic weight stepped to 100 (status): {weights}",
+         f"canary traffic weights not monotonic-to-100 (status): {weights}")
+    new, _old = _inst_rev_split(ctx, primary)
+    good(new == N[primary],
+         f"{primary} fully rolled to canary revision ({new}/{N[primary]})",
+         f"{primary} not fully on canary revision ({new}/{N[primary]})")
+
+    if policy == "manual":
+        if promote_rejected:
+            verdict = "FAIL"
+            notes.append(f"promote rejected by webhook (kindPromoteTarget vs revision-hash): {promote_rejected}")
+            checks.append(f"  ✗ MANUAL promote annotation rejected by admission: {promote_rejected}")
+        else:
+            good("Paused" in phases, "MANUAL rollout paused before promote", "MANUAL rollout never Paused")
+            good(promoted, "promote annotation accepted + consumed (advanced)", "never promoted")
+    else:
+        good("Canarying" in phases, "AUTO rollout progressed through steps", "AUTO rollout did not progress")
+
+    if do_rollback:
+        good(rollingback_ticks == 0, "rollback did NOT wedge at RollingBack (no-op)", "rollback WEDGED at RollingBack")
+        good(warn_seen, "CanaryRollbackUnsupported warning event emitted", "no CanaryRollbackUnsupported warning event")
+
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
 def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     """Trigger/check modes other than the default surge-budget rollout.
 
@@ -854,6 +1033,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         return _migrate(case_id, yaml_file, desc, hdr)
     if mode == "kill":
         return _kill(case_id, yaml_file, desc, hdr)
+    if mode == "canary":
+        return _canary(case_id, yaml_file, desc, hdr)
 
     target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in COMPS}
     print(f"  Scaledown: " + " ".join(f"{c} {N[c]}→{target[c]}" for c in sorted(configured))

@@ -104,7 +104,30 @@ python3 run.py p72
 
 # explicit cases / subsets:
 python3 batch.py --conc 6 p26 p32 p72
+
+# canary rollout suite (OEP-0015.1) — Auto, Manual promote, deferred-rollback no-op:
+python3 batch.py --conc 4 c01 c02 c03
+python3 run.py c01            # single Auto canary, own watcher
 ```
+
+### Canary (`mode=canary`, OEP-0015.1)
+
+`isvcs/canary/` cases ship `spec.rollout.canary` in the initial apply; the harness
+bumps the primary component's revision (`perm.test/rev`) to trigger the staged
+canary, then drives + observes the step machine via `status.canary` +
+`status.components.<primary>.rolloutPhase` / `.traffic[]`:
+
+- `canary=auto` — advances on each step's `pause.duration` timer (no operator action).
+- `canary=manual` — pauses until the harness sets `ome.io/rollout-promote=<canaryRevisionHash>`.
+- `rollback=1` — sets `ome.io/rollout-rollback` mid-pause and asserts it is a
+  **non-wedging no-op** plus a `CanaryRollbackUnsupported` warning event (rollback
+  is deferred; see the OEP-0015.1 follow-up).
+
+The harness asserts the **status-level** contract (phase progression, per-step
+traffic weights stepping to 100 on the canary revision) and **per-revision pod
+capacity** (the primary fully rolls to the canary revision). Gateway data-plane
+weighting is a downstream consumer (per-revision Services + weighted HTTPRoute)
+and is intentionally out of scope here.
 
 **Concurrency is bounded by the controller, not the cluster.** The OME manager
 runs `MaxConcurrentReconciles=1` (controller-runtime default) behind leader

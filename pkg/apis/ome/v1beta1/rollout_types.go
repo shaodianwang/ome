@@ -36,9 +36,9 @@ type RolloutSpec struct {
 // through steps.
 //
 // Step semantics:
-//   - Each step specifies pod capacity (NewCapacity, OldCapacity) independently
-//     of traffic weight (TrafficWeight), so the new revision can run at full
-//     capacity with 0% traffic for validation, then shift traffic.
+//   - Each step specifies new-revision pod capacity (NewCapacity) independently
+//     of traffic weight (TrafficWeight), so the new revision can run at higher
+//     capacity than its traffic share before traffic shifts.
 //   - The final step's TrafficWeight is 100 so the rollout completes.
 //   - Each step's optional Pause holds the rollout (Manual: advance via
 //     ome.io/rollout-promote; Auto: advance on Pause.Duration).
@@ -76,19 +76,22 @@ const (
 // RolloutStep specifies one stage of a progressive (canary) rollout.
 //
 // NewCapacity and TrafficWeight are independent dimensions. Common patterns:
-//   - Symmetric canary: NewCapacity=10%, OldCapacity=90%, TrafficWeight=10
-//   - Capacity surge:   NewCapacity=10%, OldCapacity=100%, TrafficWeight=10
-//   - Blue-green:       NewCapacity=100%, OldCapacity=100%, TrafficWeight=0
-//     (validate at full scale; later step sets TrafficWeight=100)
+//   - Symmetric canary: NewCapacity=10%, TrafficWeight=10
+//   - Capacity ahead of traffic: NewCapacity=50%, TrafficWeight=10
+//     (run more new pods than the traffic share, e.g. to warm up)
+//   - Final cutover: NewCapacity=100%, TrafficWeight=100
 type RolloutStep struct {
 	// NewCapacity is the fraction of desired replicas to run for the new
 	// revision at this step. Percentage ("25%") or absolute ("3").
 	// +kubebuilder:validation:XIntOrString
 	NewCapacity intstr.IntOrString `json:"newCapacity"`
 
-	// OldCapacity is the fraction of desired replicas to keep for the old
-	// revision at this step. Defaults to (100% - NewCapacity). Setting both
-	// >50% allows a temporary capacity surge.
+	// OldCapacity is reserved. In v1 the old revision always runs the complement
+	// of NewCapacity (100% - NewCapacity) via the StatefulSet-style partition, so
+	// the total pod count never exceeds desired replicas. An explicit OldCapacity
+	// must equal that complement; an independent old capacity or a surge above
+	// desired (e.g. NewCapacity=100%, OldCapacity=100%) is admission-rejected —
+	// capacity surge is not supported in v1.
 	// +optional
 	// +kubebuilder:validation:XIntOrString
 	OldCapacity *intstr.IntOrString `json:"oldCapacity,omitempty"`

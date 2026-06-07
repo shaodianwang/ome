@@ -364,6 +364,39 @@ func TestRevisionHash_PausedRolloutAnnotationDoesNotDriftHash(t *testing.T) {
 	}
 }
 
+// The canary operator verbs (rollout-promote / rollout-rollback) are
+// added to and removed from the ISVC mid-rollout. They must NOT feed the
+// revision hash: otherwise an operator promoting revision X would mint a
+// NEW revision (the spec + the promote annotation) and roll to that
+// instead of X — and a rollback would mint a fresh revision rather than
+// returning to the existing stable one.
+func TestRevisionHash_CanaryVerbAnnotationsDoNotDriftHash(t *testing.T) {
+	ps := basicPodSpecForRevision()
+	base := &metav1.ObjectMeta{
+		Annotations: map[string]string{
+			"ome.io/base-model-name": "llama-7b",
+			"ome.io/deploymentMode":  "OMENative",
+		},
+	}
+	for _, verb := range []struct{ key, val string }{
+		{"ome.io/rollout-promote", "abc12345"},
+		{"ome.io/rollout-rollback", "true"},
+	} {
+		withVerb := &metav1.ObjectMeta{
+			Annotations: map[string]string{
+				"ome.io/base-model-name": "llama-7b",
+				"ome.io/deploymentMode":  "OMENative",
+				verb.key:                 verb.val,
+			},
+		}
+		hBase, _, _ := Hash(ps, base, nil, "")
+		hWith, _, _ := Hash(ps, withVerb, nil, "")
+		if hBase != hWith {
+			t.Errorf("%s annotation must be filtered from revision hash: base=%s withVerb=%s", verb.key, hBase, hWith)
+		}
+	}
+}
+
 // User-supplied annotations MUST still contribute to the hash so a
 // legitimate pod-template metadata change triggers a rollout.
 func TestRevisionHash_UserAnnotationStillDriftsHash(t *testing.T) {

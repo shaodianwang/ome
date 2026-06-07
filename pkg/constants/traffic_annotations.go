@@ -55,10 +55,12 @@ var (
 	// PreviousRolledoutRevision). Default: 3.
 	RevisionHistoryLimitAnnotation = OMEAPIGroupName + "/revision-history-limit"
 
-	// RolloutPromoteAnnotation is the operator verb for step-based
-	// rollouts: advance the rollout to the named step (integer index)
-	// or to completion ("full"). The controller clears the annotation
-	// after consuming it. No-op when spec.traffic.rollout is unset.
+	// RolloutPromoteAnnotation is the operator verb that advances a paused
+	// canary step under PromotionPolicy=Manual. Value: the canary revision
+	// hash (copied from status.canary.canaryRevisionHash) — the hash guards
+	// against promoting a stale revision; "full" is also accepted. The
+	// controller clears the annotation after consuming it. No-op when
+	// spec.rollout.canary is unset.
 	RolloutPromoteAnnotation = OMEAPIGroupName + "/rollout-promote"
 
 	// RolloutRollbackAnnotation is the operator verb for instant

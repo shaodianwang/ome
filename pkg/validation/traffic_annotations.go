@@ -172,15 +172,32 @@ func validateAnnotationValue(key, value string, kind trafficAnnotationKind) erro
 			}
 		}
 	case kindPromoteTarget:
+		// The canary manual-promote verb expects the canary revision hash (the
+		// value copied from status.canary.canaryRevisionHash); "full" is also
+		// accepted. See promotion.shouldAdvanceManual.
 		if value == "full" {
 			return nil
 		}
-		n, err := strconv.Atoi(value)
-		if err != nil || n < 0 {
-			return fmt.Errorf("annotation %q value %q must be a non-negative integer step index or \"full\" (InvalidRolloutPromoteTarget)", key, value)
+		if !isRevisionHashToken(value) {
+			return fmt.Errorf("annotation %q value %q must be a canary revision hash (lowercase alphanumeric, from status.canary.canaryRevisionHash) or \"full\" (InvalidRolloutPromoteTarget)", key, value)
 		}
 	}
 	return nil
+}
+
+// isRevisionHashToken reports whether s looks like a ControllerRevision hash
+// suffix — lowercase alphanumeric, at least 6 chars — the value the canary's
+// manual-promote verb expects (status.canary.canaryRevisionHash).
+func isRevisionHashToken(s string) bool {
+	if len(s) < 6 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
 }
 
 // crossRuleRetry enforces "retry-attempts > 0 requires retry-on".

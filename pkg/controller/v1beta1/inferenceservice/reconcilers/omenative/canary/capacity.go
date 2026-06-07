@@ -5,20 +5,15 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// resolveStepCapacity resolves a step's NewCapacity / OldCapacity against the
-// component's desired replica count, returning concrete (newCount, oldCount)
-// pod counts. NewCapacity rounds up (so a TrafficWeight>0 step always gets at
-// least one new pod). OldCapacity defaults to (desired - newCount) — i.e.
-// "100% - NewCapacity" — when unset; an explicit OldCapacity allows a temporary
-// surge (both sides may exceed 50%). Counts are clamped to [0, desired].
-func resolveStepCapacity(step v1beta1.RolloutStep, desired int32) (newCount, oldCount int32) {
-	newCount = clamp(scale(step.NewCapacity, desired), desired)
-	if step.OldCapacity != nil {
-		oldCount = clamp(scale(*step.OldCapacity, desired), desired)
-	} else {
-		oldCount = desired - newCount
-	}
-	return newCount, oldCount
+// resolveStepNewCount resolves a step's NewCapacity against the component's
+// desired replica count, returning the concrete new-revision pod count. Rounds
+// up (so a TrafficWeight>0 step always gets at least one new pod) and clamps to
+// [0, desired]. The old revision runs the complement (desired - newCount) via
+// the partition — there is no independent old capacity: OldCapacity is validated
+// at admission to equal that complement (surge above desired is unsupported in
+// v1), so it does not feed the runtime count.
+func resolveStepNewCount(step v1beta1.RolloutStep, desired int32) int32 {
+	return clamp(scale(step.NewCapacity, desired), desired)
 }
 
 // partitionForNewCount maps a desired new-revision count to the StatefulSet-style

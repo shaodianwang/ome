@@ -47,6 +47,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	multimodelconfig "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/modelconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	traffic "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
@@ -368,6 +369,22 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, err
 	}
 
+	// Canary: when spec.rollout.canary is set, stamp the current step's
+	// RollingUpdate.Partition onto each merged Component before the Component
+	// reconcilers run, so the standard spec→IR→plan→HeldByPartition path holds
+	// the staged old/new split. The step machine + traffic run in Step 6a below.
+	if isvc.Spec.GetCanary() != nil {
+		if mergedEngine != nil {
+			canary.StampStepPartition(isvc, v1beta1.EngineComponent, &mergedEngine.ComponentExtensionSpec)
+		}
+		if mergedDecoder != nil {
+			canary.StampStepPartition(isvc, v1beta1.DecoderComponent, &mergedDecoder.ComponentExtensionSpec)
+		}
+		if mergedRouter != nil {
+			canary.StampStepPartition(isvc, v1beta1.RouterComponent, &mergedRouter.ComponentExtensionSpec)
+		}
+	}
+
 	// Step 4: Determine deployment modes based on merged specs
 	engineDeploymentMode, decoderDeploymentMode, routerDeploymentMode, err := isvcutils.DetermineDeploymentModes(mergedEngine, mergedDecoder, mergedRouter, rt, isvc.Spec.DeploymentMode)
 	if err != nil {
@@ -484,7 +501,26 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// any single Component reconciler so the ingress / traffic
 	// reconciliation downstream reads the freshest producer-side
 	// status.
-	if _, err := coordination.Reconcile(ctx, coordination.ReconcileInputs{
+	if isvc.Spec.GetCanary() != nil {
+		// Canary owns the rollout for this ISVC (mutually exclusive with
+		// coordination, enforced at admission): observe per-revision pods,
+		// advance the step machine, and write Status.Components.<c>.Traffic +
+		// RolloutPhase. Per-Component capacity was stamped via
+		// StampStepPartition before the Component reconcilers ran.
+		ra, err := canary.Dispatch(ctx, canary.DispatchDeps{
+			ISVC:     isvc,
+			Client:   r.Client,
+			Reader:   r.APIReader,
+			Recorder: r.Recorder,
+		})
+		if err != nil {
+			log.Error(err, "Failed to reconcile canary rollout")
+			return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile canary")
+		}
+		if ra > pendingRequeue.RequeueAfter {
+			pendingRequeue.RequeueAfter = ra
+		}
+	} else if _, err := coordination.Reconcile(ctx, coordination.ReconcileInputs{
 		ISVC:     isvc,
 		Client:   r.Client,
 		Reader:   r.APIReader,

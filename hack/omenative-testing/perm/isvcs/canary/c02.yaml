@@ -1,0 +1,18 @@
+# c02: canary engine N=4 Manual 50%/100% (promote via ome.io/rollout-promote)  mode=canary Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 canary=manual co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: c02 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    canary:
+      promotionPolicy: Manual
+      steps:
+        - { newCapacity: "50%",  trafficWeight: 50,  pause: {} }
+        - { newCapacity: "100%", trafficWeight: 100 }

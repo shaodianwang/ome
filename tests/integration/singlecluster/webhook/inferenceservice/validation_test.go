@@ -423,7 +423,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 		// rollout-promote is a recognized ome.io/* traffic annotation; a
 		// well-formed value must not produce a hard admission rejection.
 		isvc := v1beta1testing.MakeInferenceService("isvc-promote-no-rollout", "isvc-webhook").
-			Annotation(constants.RolloutPromoteAnnotation, "2").
+			Annotation(constants.RolloutPromoteAnnotation, "e5d6f79d").
 			Engine(&v1beta1.EngineSpec{
 				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
 			}).Obj()

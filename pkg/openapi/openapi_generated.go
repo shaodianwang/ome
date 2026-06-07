@@ -442,7 +442,7 @@ func schema_pkg_apis_ome_v1beta1_CanarySpec(ref common.ReferenceCallback) common
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "CanarySpec is a multi-step progressive rollout plan: a new revision is brought up at some pod capacity while a fraction of traffic shifts to it, advancing through steps.\n\nStep semantics:\n  - Each step specifies pod capacity (NewCapacity, OldCapacity) independently\n    of traffic weight (TrafficWeight), so the new revision can run at full\n    capacity with 0% traffic for validation, then shift traffic.\n  - The final step's TrafficWeight is 100 so the rollout completes.\n  - Each step's optional Pause holds the rollout (Manual: advance via\n    ome.io/rollout-promote; Auto: advance on Pause.Duration).",
+				Description: "CanarySpec is a multi-step progressive rollout plan: a new revision is brought up at some pod capacity while a fraction of traffic shifts to it, advancing through steps.\n\nStep semantics:\n  - Each step specifies new-revision pod capacity (NewCapacity) independently\n    of traffic weight (TrafficWeight), so the new revision can run at higher\n    capacity than its traffic share before traffic shifts.\n  - The final step's TrafficWeight is 100 so the rollout completes.\n  - Each step's optional Pause holds the rollout (Manual: advance via\n    ome.io/rollout-promote; Auto: advance on Pause.Duration).",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"steps": {
@@ -6324,7 +6324,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutStep(ref common.ReferenceCallback) commo
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutStep specifies one stage of a progressive (canary) rollout.\n\nNewCapacity and TrafficWeight are independent dimensions. Common patterns:\n  - Symmetric canary: NewCapacity=10%, OldCapacity=90%, TrafficWeight=10\n  - Capacity surge:   NewCapacity=10%, OldCapacity=100%, TrafficWeight=10\n  - Blue-green:       NewCapacity=100%, OldCapacity=100%, TrafficWeight=0\n    (validate at full scale; later step sets TrafficWeight=100)",
+				Description: "RolloutStep specifies one stage of a progressive (canary) rollout.\n\nNewCapacity and TrafficWeight are independent dimensions. Common patterns:\n  - Symmetric canary: NewCapacity=10%, TrafficWeight=10\n  - Capacity ahead of traffic: NewCapacity=50%, TrafficWeight=10\n    (run more new pods than the traffic share, e.g. to warm up)\n  - Final cutover: NewCapacity=100%, TrafficWeight=100",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"newCapacity": {
@@ -6335,7 +6335,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutStep(ref common.ReferenceCallback) commo
 					},
 					"oldCapacity": {
 						SchemaProps: spec.SchemaProps{
-							Description: "OldCapacity is the fraction of desired replicas to keep for the old revision at this step. Defaults to (100% - NewCapacity). Setting both >50% allows a temporary capacity surge.",
+							Description: "OldCapacity is reserved. In v1 the old revision always runs the complement of NewCapacity (100% - NewCapacity) via the StatefulSet-style partition, so the total pod count never exceeds desired replicas. An explicit OldCapacity must equal that complement; an independent old capacity or a surge above desired (e.g. NewCapacity=100%, OldCapacity=100%) is admission-rejected — capacity surge is not supported in v1.",
 							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
 						},
 					},
