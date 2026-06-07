@@ -6,6 +6,9 @@
 package workload
 
 import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -18,6 +21,7 @@ type (
 	InstanceOperationType   = types.InstanceOperationType
 	InstanceOperation       = types.InstanceOperation
 	InstanceStatus          = types.InstanceStatus
+	InstanceTermination     = types.InstanceTermination
 	Key                     = types.Key
 	ReconcileInput          = types.ReconcileInput
 	MigrationRequestSummary = types.MigrationRequestSummary
@@ -118,6 +122,20 @@ func NewExpectations() *Expectations {
 // surge pod.
 func AllocateSurgeIndex(instances []InstanceStatus) int32 {
 	return types.AllocateSurgeIndex(instances)
+}
+
+// PodTermination re-exports types.PodTermination: extracts the most
+// operator-relevant container-failure diagnostics from pod into an
+// *InstanceTermination. Returns nil only when pod is nil.
+func PodTermination(pod *corev1.Pod, now metav1.Time) *InstanceTermination {
+	return types.PodTermination(pod, now)
+}
+
+// PodTerminationWithReason re-exports types.PodTerminationWithReason: like
+// PodTermination but with an explicit reason override used by the stuck-pod
+// escalator, which has already classified the wedge reason.
+func PodTerminationWithReason(pod *corev1.Pod, reason string, now metav1.Time) *InstanceTermination {
+	return types.PodTerminationWithReason(pod, reason, now)
 }
 
 // DefaultExpectations re-exports the package-level cache the

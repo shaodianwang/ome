@@ -199,6 +199,40 @@ type InstanceStatus struct {
 	// ActiveOrdinal identifies which of two pod-naming slots (0 or 1)
 	// currently holds the canonical pod for this single-pod Instance.
 	ActiveOrdinal int32
+
+	// LastFailure preserves the container-termination diagnostics of the
+	// pod whose failure (or stuck-pod escalation) last triggered a
+	// recreate of this Instance. Survives the drain+recreate that deletes
+	// the failing pod. Mirrors the CRD OMENativeInstanceStatus.LastFailure.
+	LastFailure *InstanceTermination
+}
+
+// InstanceTermination captures the container-termination diagnostics of a
+// pod that failed or was escalated. Mirrors the CRD InstanceTermination
+// field-for-field; the v1beta1convert helpers round-trip it at the adapter
+// boundary.
+type InstanceTermination struct {
+	// PodName is the name of the pod that failed or was escalated.
+	PodName string
+
+	// ContainerName is the container the diagnostics were read from.
+	// Empty when only a pod-level signal was available.
+	ContainerName string
+
+	// Reason is the kubelet terminated- or waiting-state reason
+	// (OOMKilled, Error, CrashLoopBackOff, ImagePullBackOff, ...), or
+	// "PodFailed" when only the pod phase was available.
+	Reason string
+
+	// ExitCode is the container exit code when the signal came from a
+	// terminated state; nil for a stuck waiting-state signal.
+	ExitCode *int32
+
+	// Message is the kubelet-supplied detail message, if any.
+	Message string
+
+	// Time is when OMENative recorded this termination.
+	Time metav1.Time
 }
 
 // Key uniquely identifies one logical workload (a per-Component slice

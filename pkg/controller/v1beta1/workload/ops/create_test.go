@@ -107,6 +107,7 @@ func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component w
 				RunningRevision: s.RunningRevision,
 				TargetRevision:  s.TargetRevision,
 				ActiveOrdinal:   s.ActiveOrdinal,
+				LastFailure:     fromV1beta1Termination(s.LastFailure),
 			})
 		}
 	}
@@ -172,6 +173,7 @@ func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 				TargetRevision:  s.TargetRevision,
 				ActiveOrdinal:   s.ActiveOrdinal,
 				Operation:       fromV1beta1Op(s.Operation),
+				LastFailure:     fromV1beta1Termination(s.LastFailure),
 			}
 		}
 		if !mutate(&w) {
@@ -185,6 +187,7 @@ func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 			TargetRevision:  w.TargetRevision,
 			ActiveOrdinal:   w.ActiveOrdinal,
 			Operation:       toV1beta1Op(w.Operation),
+			LastFailure:     toV1beta1Termination(w.LastFailure),
 		}
 		if pos == -1 {
 			cs.Lifecycle.InstanceStatuses = append(cs.Lifecycle.InstanceStatuses, updated)
@@ -246,6 +249,42 @@ func toV1beta1Op(op *workload.InstanceOperation) *v1beta1.InstanceOperation {
 	}
 	if op.HintTargetNodes != nil {
 		out.HintTargetNodes = append([]string(nil), op.HintTargetNodes...)
+	}
+	return out
+}
+
+func fromV1beta1Termination(t *v1beta1.InstanceTermination) *workload.InstanceTermination {
+	if t == nil {
+		return nil
+	}
+	out := &workload.InstanceTermination{
+		PodName:       t.PodName,
+		ContainerName: t.ContainerName,
+		Reason:        t.Reason,
+		Message:       t.Message,
+		Time:          t.Time,
+	}
+	if t.ExitCode != nil {
+		e := *t.ExitCode
+		out.ExitCode = &e
+	}
+	return out
+}
+
+func toV1beta1Termination(t *workload.InstanceTermination) *v1beta1.InstanceTermination {
+	if t == nil {
+		return nil
+	}
+	out := &v1beta1.InstanceTermination{
+		PodName:       t.PodName,
+		ContainerName: t.ContainerName,
+		Reason:        t.Reason,
+		Message:       t.Message,
+		Time:          t.Time,
+	}
+	if t.ExitCode != nil {
+		e := *t.ExitCode
+		out.ExitCode = &e
 	}
 	return out
 }

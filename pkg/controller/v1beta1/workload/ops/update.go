@@ -432,6 +432,18 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 	return true, nil
 }
 
+// recreateRevisionCause formats the "revision <from> → <to>" cause string
+// for a recreate-driven rollout. "from" is the Instance's recorded
+// RunningRevision; when it's empty (first-ever rollout, or a backfill gap)
+// the string degrades to "revision -> <to>" so the target is always named.
+func recreateRevisionCause(input workload.ReconcileInput, idx int32, targetRev string) string {
+	from := ""
+	if s := findInstanceStatus(input.ObservedState.InstanceStatuses, idx); s != nil {
+		from = s.RunningRevision
+	}
+	return fmt.Sprintf("revision %s -> %s", from, targetRev)
+}
+
 // recreateUpdate runs the recreate rollout: drain + delete every
 // current-incarnation pod, recreate at the bumped Incarnation. Shares
 // the drain/delete/recreate skeleton with Restart but pivots on
@@ -445,14 +457,20 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 		s.Operation.Step == updateStepDrain {
 		wasNotRecreating = false
 	}
-	newInc, err := patchInstanceStatusRecreatingForUpdate(ctx, input, inst.Index, target.Name, plan.InstanceReadyTimeout)
+	// Cause string for the recreate: "revision <from> → <to>". Recorded on
+	// Operation.Reason so a revision-roll recreate is distinguishable in
+	// status from a pod-failure Restart (Type=Update vs Type=Restart, and
+	// a revision-pair reason vs a termination reason). "from" is the
+	// recorded RunningRevision; empty on the first-ever rollout.
+	cause := recreateRevisionCause(input, inst.Index, target.Name)
+	newInc, err := patchInstanceStatusRecreatingForUpdate(ctx, input, inst.Index, target.Name, cause, plan.InstanceReadyTimeout)
 	if err != nil {
 		return false, fmt.Errorf("bump Incarnation (instance=%d): %w", inst.Index, err)
 	}
 	if wasNotRecreating {
 		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
-			"OMENative %s recreate to revision %s (incarnation=%d)",
-			instanceKey(input.Key.Component, inst.Index), target.Name, newInc)
+			"OMENative %s recreate (%s, incarnation=%d)",
+			instanceKey(input.Key.Component, inst.Index), cause, newInc)
 	}
 
 	oldPods, newPods, unknownPods := query.PartitionPodsByIncarnation(pods, newInc)
@@ -898,10 +916,12 @@ func patchInstanceStatusUpdating(ctx context.Context, input workload.ReconcileIn
 
 // patchInstanceStatusRecreatingForUpdate is the recreate entry point.
 // Bumps Incarnation (like Restart) and stamps Phase=Updating with
-// Step=Drain. Returns the post-write Incarnation. The idempotency guard
-// requires Step==Drain so a prior in-place pass at the same target
-// doesn't block the bump.
-func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, timeout time.Duration) (int64, error) {
+// Step=Drain. reason is the "revision <from> → <to>" cause string recorded
+// on Operation.Reason so a revision-roll recreate is distinguishable in
+// status from a pod-failure Restart. Returns the post-write Incarnation.
+// The idempotency guard requires Step==Drain so a prior in-place pass at
+// the same target doesn't block the bump.
+func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev, reason string, timeout time.Duration) (int64, error) {
 	var observedIncarnation int64
 	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseUpdating &&
@@ -924,6 +944,7 @@ func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.
 			Type:           workload.InstanceOperationUpdate,
 			Step:           updateStepDrain,
 			TargetRevision: targetRev,
+			Reason:         reason,
 			StartedAt:      now,
 			LastProgressAt: now,
 			Deadline:       metav1.NewTime(now.Add(timeout)),

@@ -271,6 +271,52 @@ func TestInstanceOperationRoundtrip_OptionalFieldsZero(t *testing.T) {
 	}
 }
 
+// --- InstanceTermination struct round-trips -----------------------------
+
+func TestInstanceTerminationRoundtrip_AllFieldsPopulated(t *testing.T) {
+	exit := int32(137)
+	in := &v1beta1.InstanceTermination{
+		PodName:       "engine-0-leader-0",
+		ContainerName: "main",
+		Reason:        "OOMKilled",
+		ExitCode:      &exit,
+		Message:       "out of memory",
+		Time:          metav1.NewTime(time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC)),
+	}
+	got := InstanceTerminationFromWorkload(InstanceTerminationToWorkload(in))
+	if diff := cmp.Diff(in, got); diff != "" {
+		t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+	// ExitCode must be deep-copied, not aliased.
+	if got.ExitCode == in.ExitCode {
+		t.Fatalf("ExitCode pointer was not deep-copied")
+	}
+}
+
+func TestInstanceTerminationRoundtrip_NilInput(t *testing.T) {
+	if got := InstanceTerminationToWorkload(nil); got != nil {
+		t.Fatalf("expected nil for nil v1beta1 input; got=%+v", got)
+	}
+	if got := InstanceTerminationFromWorkload(nil); got != nil {
+		t.Fatalf("expected nil for nil workload input; got=%+v", got)
+	}
+}
+
+func TestInstanceTerminationRoundtrip_NilExitCode(t *testing.T) {
+	in := &v1beta1.InstanceTermination{
+		PodName: "engine-0-leader-0",
+		Reason:  "ImagePullBackOff",
+		// ExitCode nil: a stuck waiting-state record.
+	}
+	got := InstanceTerminationFromWorkload(InstanceTerminationToWorkload(in))
+	if diff := cmp.Diff(in, got); diff != "" {
+		t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+	if got.ExitCode != nil {
+		t.Fatalf("ExitCode should remain nil; got=%v", got.ExitCode)
+	}
+}
+
 // --- InstanceStatus struct round-trips ----------------------------------
 
 func TestInstanceStatusRoundtrip_AllFieldsPopulated(t *testing.T) {
@@ -312,6 +358,14 @@ func TestInstanceStatusRoundtrip_AllFieldsPopulated(t *testing.T) {
 			Reason:         "template-change",
 		},
 		ActiveOrdinal: 1,
+		LastFailure: &v1beta1.InstanceTermination{
+			PodName:       "engine-5-leader-0",
+			ContainerName: "main",
+			Reason:        "OOMKilled",
+			ExitCode:      func() *int32 { e := int32(137); return &e }(),
+			Message:       "out of memory",
+			Time:          condTime,
+		},
 	}
 	got := InstanceStatusFromWorkload(InstanceStatusToWorkload(in))
 	if diff := cmp.Diff(in, got); diff != "" {

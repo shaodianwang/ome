@@ -30186,6 +30186,25 @@ spec:
                                 index:
                                   format: int32
                                   type: integer
+                                lastFailure:
+                                  properties:
+                                    containerName:
+                                      type: string
+                                    exitCode:
+                                      format: int32
+                                      type: integer
+                                    message:
+                                      type: string
+                                    podName:
+                                      type: string
+                                    reason:
+                                      type: string
+                                    time:
+                                      format: date-time
+                                      type: string
+                                  required:
+                                    - podName
+                                  type: object
                                 nodesOccupied:
                                   items:
                                     type: string

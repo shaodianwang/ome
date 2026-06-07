@@ -53,6 +53,14 @@ func DetectRestartTrigger(ctx context.Context, deps workload.Deps, input workloa
 
 	for _, pod := range pods {
 		if pod.Status.Phase == corev1.PodFailed {
+			// Build a richer reason from the failed pod's container
+			// termination so the RestartTriggered event names the actual
+			// cause (OOMKilled exit 137, CrashLoopBackOff, ...) instead of
+			// the bare "pod X Failed". Falls back to the pod name when no
+			// per-container detail is available.
+			if t := workload.PodTermination(pod, metav1.Now()); t != nil {
+				return true, t.ShortString(), nil
+			}
 			return true, fmt.Sprintf("pod %s Failed", pod.Name), nil
 		}
 	}
@@ -112,6 +120,22 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if err != nil {
 		return false, fmt.Errorf("Restart: list pods (instance=%d): %w", inst.Index, err)
 	}
+
+	// On the first pass, preserve the failing pod's diagnostics into
+	// InstanceStatus.LastFailure BEFORE Phase A drains and deletes it —
+	// otherwise the container termination reason / exit code vanish with
+	// the pod and a gang that keeps restarting leaves no failure trace.
+	// Only a genuine pod-failure restart populates this; a "pod count
+	// below desired" restart (the pod already vanished) finds nothing to
+	// capture and leaves any prior LastFailure intact.
+	if wasNotRestarting {
+		if t := firstFailedPodTermination(pods); t != nil {
+			if err := patchInstanceLastFailure(ctx, input, inst.Index, t); err != nil {
+				return false, fmt.Errorf("record LastFailure (instance=%d): %w", inst.Index, err)
+			}
+		}
+	}
+
 	oldPods, newPods, unknownPods := query.PartitionPodsByIncarnation(pods, newInc)
 
 	// Surface orphan pods (label-missing) as warnings and refuse to delete.
@@ -270,6 +294,74 @@ func patchInstanceStatusRestarting(ctx context.Context, input workload.Reconcile
 		return true
 	})
 	return observedIncarnation, err
+}
+
+// firstFailedPodTermination returns the InstanceTermination of the first
+// pod that is Phase=Failed or carries any container-termination diagnostics
+// worth preserving across the recreate. Returns nil when no pod yields a
+// signal (e.g. the failing pod already vanished — the "pod count below
+// desired" trigger). Order-deterministic by the input slice.
+func firstFailedPodTermination(pods []*corev1.Pod) *workload.InstanceTermination {
+	now := metav1.Now()
+	// Prefer an explicitly Failed pod — that's the pod the trigger fired on.
+	for _, pod := range pods {
+		if pod != nil && pod.Status.Phase == corev1.PodFailed {
+			if t := workload.PodTermination(pod, now); t != nil {
+				return t
+			}
+		}
+	}
+	// Otherwise capture any pod showing a crash / wedge in its container
+	// states (a not-yet-Failed-phase pod mid-CrashLoopBackOff still counts
+	// as the cause when Restart was triggered for it).
+	for _, pod := range pods {
+		if pod == nil || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if t := workload.PodTermination(pod, now); t != nil {
+			return t
+		}
+	}
+	return nil
+}
+
+// patchInstanceLastFailure stamps InstanceStatus.LastFailure with the
+// captured termination. Idempotent: a no-op when an identical record is
+// already stored (same pod + reason + exit code), so a repeated first-pass
+// (status conflict retry) doesn't churn the field.
+func patchInstanceLastFailure(ctx context.Context, input workload.ReconcileInput, idx int32, t *workload.InstanceTermination) error {
+	if t == nil {
+		return nil
+	}
+	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+		if sameTermination(s.LastFailure, t) {
+			return false
+		}
+		captured := *t
+		s.LastFailure = &captured
+		return true
+	})
+}
+
+// sameTermination reports whether two termination records carry the same
+// operator-relevant identity (pod, container, reason, exit code). Time and
+// Message are excluded so a re-capture that differs only in the recorded
+// timestamp doesn't trigger a redundant status write.
+func sameTermination(a, b *workload.InstanceTermination) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.PodName != b.PodName || a.ContainerName != b.ContainerName || a.Reason != b.Reason {
+		return false
+	}
+	switch {
+	case a.ExitCode == nil && b.ExitCode == nil:
+		return true
+	case a.ExitCode == nil || b.ExitCode == nil:
+		return false
+	default:
+		return *a.ExitCode == *b.ExitCode
+	}
 }
 
 // revisionHashForInstance returns the revision hash to stamp on pods

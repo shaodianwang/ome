@@ -52,6 +52,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceSpec":           schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceServiceStatus":         schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation":              schema_pkg_apis_ome_v1beta1_InstanceOperation(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceTermination":            schema_pkg_apis_ome_v1beta1_InstanceTermination(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.KedaAutoscaler":                 schema_pkg_apis_ome_v1beta1_KedaAutoscaler(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                     schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec":                  schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref),
@@ -3667,6 +3668,64 @@ func schema_pkg_apis_ome_v1beta1_InstanceOperation(ref common.ReferenceCallback)
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_InstanceTermination(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "InstanceTermination captures the container-termination diagnostics of a pod that failed or was escalated, preserved on OMENativeInstanceStatus so the trace survives the recreate that deletes the pod.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"podName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PodName is the name of the pod that failed or was escalated.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"containerName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ContainerName is the container the diagnostics were read from. Empty when the signal is pod-level (e.g. a pod-phase Failed with no per-container terminated state available).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reason is the kubelet reason for the termination or wedge — a terminated-state reason (OOMKilled, Error, ContainerCannotRun) or a terminal waiting-state reason (CrashLoopBackOff, ImagePullBackOff, CreateContainerError). Falls back to \"PodFailed\" when only the pod phase is available.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"exitCode": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ExitCode is the container's exit code when the diagnostics came from a terminated state. Nil when the pod was stuck in a waiting state (no process ever ran to produce an exit code).",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"message": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Message is the kubelet-supplied detail message, if any.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"time": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Time is when OMENative recorded this termination (reconcile time, not the kubelet transition time, which isn't always exposed).",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+				},
+				Required: []string{"podName"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_KedaAutoscaler(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -5264,12 +5323,18 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 							Format:      "int32",
 						},
 					},
+					"lastFailure": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastFailure preserves the diagnostics of the pod whose failure (or stuck-pod escalation) last triggered a recreate of this Instance. OMENative drains and deletes every gang pod on recreate, so the failing pod and its container termination state vanish from the cluster — this field is the surviving trace operators read when a multi-node Instance keeps recreating. Set on the first pass of a failure-driven Restart and on stuck-pod escalation; left untouched by revision-roll recreates (those carry their cause in Operation.Reason instead) so the most recent genuine failure isn't overwritten by a clean rollout.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceTermination"),
+						},
+					},
 				},
 				Required: []string{"index", "phase"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceOperation", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceTermination", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 

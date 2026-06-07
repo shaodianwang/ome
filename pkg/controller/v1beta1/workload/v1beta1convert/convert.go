@@ -255,10 +255,54 @@ func InstanceOperationFromWorkload(w *workload.InstanceOperation) *v1beta1.Insta
 	return out
 }
 
+// InstanceTerminationToWorkload converts a *v1beta1.InstanceTermination
+// to a *workload.InstanceTermination. Returns nil if v is nil. ExitCode is
+// copied by value (the returned struct allocates a fresh *int32) so callers
+// can mutate it independently.
+func InstanceTerminationToWorkload(v *v1beta1.InstanceTermination) *workload.InstanceTermination {
+	if v == nil {
+		return nil
+	}
+	out := &workload.InstanceTermination{
+		PodName:       v.PodName,
+		ContainerName: v.ContainerName,
+		Reason:        v.Reason,
+		Message:       v.Message,
+		Time:          v.Time,
+	}
+	if v.ExitCode != nil {
+		e := *v.ExitCode
+		out.ExitCode = &e
+	}
+	return out
+}
+
+// InstanceTerminationFromWorkload converts a *workload.InstanceTermination
+// to a *v1beta1.InstanceTermination. Returns nil if w is nil. ExitCode is
+// deep-copied for the same isolation reason as InstanceTerminationToWorkload.
+func InstanceTerminationFromWorkload(w *workload.InstanceTermination) *v1beta1.InstanceTermination {
+	if w == nil {
+		return nil
+	}
+	out := &v1beta1.InstanceTermination{
+		PodName:       w.PodName,
+		ContainerName: w.ContainerName,
+		Reason:        w.Reason,
+		Message:       w.Message,
+		Time:          w.Time,
+	}
+	if w.ExitCode != nil {
+		e := *w.ExitCode
+		out.ExitCode = &e
+	}
+	return out
+}
+
 // InstanceStatusToWorkload converts a v1beta1.OMENativeInstanceStatus
 // to a workload.InstanceStatus. NodesOccupied and Conditions slices
 // are deep-copied so the returned struct can be mutated independently
-// of the source. Operation is allocated via InstanceOperationToWorkload.
+// of the source. Operation is allocated via InstanceOperationToWorkload;
+// LastFailure via InstanceTerminationToWorkload.
 func InstanceStatusToWorkload(v v1beta1.OMENativeInstanceStatus) workload.InstanceStatus {
 	out := workload.InstanceStatus{
 		Index:             v.Index,
@@ -273,6 +317,7 @@ func InstanceStatusToWorkload(v v1beta1.OMENativeInstanceStatus) workload.Instan
 		ScheduledPodCount: v.ScheduledPodCount,
 		ActiveOrdinal:     v.ActiveOrdinal,
 		Operation:         InstanceOperationToWorkload(v.Operation),
+		LastFailure:       InstanceTerminationToWorkload(v.LastFailure),
 	}
 	if v.NodesOccupied != nil {
 		out.NodesOccupied = append([]string(nil), v.NodesOccupied...)
@@ -301,6 +346,7 @@ func InstanceStatusFromWorkload(w workload.InstanceStatus) v1beta1.OMENativeInst
 		ScheduledPodCount: w.ScheduledPodCount,
 		ActiveOrdinal:     w.ActiveOrdinal,
 		Operation:         InstanceOperationFromWorkload(w.Operation),
+		LastFailure:       InstanceTerminationFromWorkload(w.LastFailure),
 	}
 	if w.NodesOccupied != nil {
 		out.NodesOccupied = append([]string(nil), w.NodesOccupied...)

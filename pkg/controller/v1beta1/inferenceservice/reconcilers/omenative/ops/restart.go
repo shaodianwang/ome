@@ -16,6 +16,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
@@ -114,6 +115,14 @@ func detectRestartTrigger(ctx context.Context, p core.ReconcileParams, plan core
 
 	for _, pod := range pods {
 		if pod.Status.Phase == corev1.PodFailed {
+			// Richer reason from the failed pod's container termination so
+			// the RestartTriggered event names the cause (OOMKilled exit
+			// 137, CrashLoopBackOff, ...). Parity with the workload-driven
+			// DetectRestartTrigger; the shared workloadops.Restart body
+			// also preserves the full diagnostics into LastFailure.
+			if t := workload.PodTermination(pod, metav1.Now()); t != nil {
+				return true, t.ShortString(), nil
+			}
 			return true, fmt.Sprintf("pod %s Failed", pod.Name), nil
 		}
 	}

@@ -2057,6 +2057,41 @@
         }
       }
     },
+    "v1beta1.InstanceTermination": {
+      "description": "InstanceTermination captures the container-termination diagnostics of a pod that failed or was escalated, preserved on OMENativeInstanceStatus so the trace survives the recreate that deletes the pod.",
+      "type": "object",
+      "required": [
+        "podName"
+      ],
+      "properties": {
+        "containerName": {
+          "description": "ContainerName is the container the diagnostics were read from. Empty when the signal is pod-level (e.g. a pod-phase Failed with no per-container terminated state available).",
+          "type": "string"
+        },
+        "exitCode": {
+          "description": "ExitCode is the container's exit code when the diagnostics came from a terminated state. Nil when the pod was stuck in a waiting state (no process ever ran to produce an exit code).",
+          "type": "integer",
+          "format": "int32"
+        },
+        "message": {
+          "description": "Message is the kubelet-supplied detail message, if any.",
+          "type": "string"
+        },
+        "podName": {
+          "description": "PodName is the name of the pod that failed or was escalated.",
+          "type": "string",
+          "default": ""
+        },
+        "reason": {
+          "description": "Reason is the kubelet reason for the termination or wedge — a terminated-state reason (OOMKilled, Error, ContainerCannotRun) or a terminal waiting-state reason (CrashLoopBackOff, ImagePullBackOff, CreateContainerError). Falls back to \"PodFailed\" when only the pod phase is available.",
+          "type": "string"
+        },
+        "time": {
+          "description": "Time is when OMENative recorded this termination (reconcile time, not the kubelet transition time, which isn't always exposed).",
+          "$ref": "#/definitions/v1.Time"
+        }
+      }
+    },
     "v1beta1.KedaAutoscaler": {
       "description": "KedaAutoscaler holds KEDA ScaledObject configuration passed through verbatim. Alpha. The API may change without notice.",
       "type": "object",
@@ -2936,6 +2971,10 @@
           "type": "integer",
           "format": "int32",
           "default": 0
+        },
+        "lastFailure": {
+          "description": "LastFailure preserves the diagnostics of the pod whose failure (or stuck-pod escalation) last triggered a recreate of this Instance. OMENative drains and deletes every gang pod on recreate, so the failing pod and its container termination state vanish from the cluster — this field is the surviving trace operators read when a multi-node Instance keeps recreating. Set on the first pass of a failure-driven Restart and on stuck-pod escalation; left untouched by revision-roll recreates (those carry their cause in Operation.Reason instead) so the most recent genuine failure isn't overwritten by a clean rollout.",
+          "$ref": "#/definitions/v1beta1.InstanceTermination"
         },
         "nodesOccupied": {
           "description": "NodesOccupied is the set of node names hosting pods of this Instance.",

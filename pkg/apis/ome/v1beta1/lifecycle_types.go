@@ -175,6 +175,56 @@ type OMENativeInstanceStatus struct {
 	// +kubebuilder:validation:Maximum=1
 	// +optional
 	ActiveOrdinal int32 `json:"activeOrdinal,omitempty"`
+
+	// LastFailure preserves the diagnostics of the pod whose failure
+	// (or stuck-pod escalation) last triggered a recreate of this
+	// Instance. OMENative drains and deletes every gang pod on recreate,
+	// so the failing pod and its container termination state vanish from
+	// the cluster — this field is the surviving trace operators read when
+	// a multi-node Instance keeps recreating. Set on the first pass of a
+	// failure-driven Restart and on stuck-pod escalation; left untouched
+	// by revision-roll recreates (those carry their cause in
+	// Operation.Reason instead) so the most recent genuine failure isn't
+	// overwritten by a clean rollout.
+	// +optional
+	LastFailure *InstanceTermination `json:"lastFailure,omitempty"`
+}
+
+// InstanceTermination captures the container-termination diagnostics of
+// a pod that failed or was escalated, preserved on OMENativeInstanceStatus
+// so the trace survives the recreate that deletes the pod.
+type InstanceTermination struct {
+	// PodName is the name of the pod that failed or was escalated.
+	PodName string `json:"podName"`
+
+	// ContainerName is the container the diagnostics were read from.
+	// Empty when the signal is pod-level (e.g. a pod-phase Failed with no
+	// per-container terminated state available).
+	// +optional
+	ContainerName string `json:"containerName,omitempty"`
+
+	// Reason is the kubelet reason for the termination or wedge — a
+	// terminated-state reason (OOMKilled, Error, ContainerCannotRun) or a
+	// terminal waiting-state reason (CrashLoopBackOff, ImagePullBackOff,
+	// CreateContainerError). Falls back to "PodFailed" when only the pod
+	// phase is available.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// ExitCode is the container's exit code when the diagnostics came from
+	// a terminated state. Nil when the pod was stuck in a waiting state
+	// (no process ever ran to produce an exit code).
+	// +optional
+	ExitCode *int32 `json:"exitCode,omitempty"`
+
+	// Message is the kubelet-supplied detail message, if any.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// Time is when OMENative recorded this termination (reconcile time, not
+	// the kubelet transition time, which isn't always exposed).
+	// +optional
+	Time metav1.Time `json:"time,omitempty"`
 }
 
 // InstanceOperation is the recovery anchor written before any destructive

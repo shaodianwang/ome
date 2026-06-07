@@ -7,6 +7,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
@@ -525,7 +526,14 @@ func EscalateStuckPodFailures(ctx context.Context, input ReconcileInput, p Escal
 		if s.Phase == InstancePhaseFailed {
 			continue
 		}
-		if err := StampInstanceFailedForStuckPod(ctx, input, s.Index); err != nil {
+		// Preserve the stuck pod's diagnostics into LastFailure alongside
+		// the Phase=Failed flip — the escalation is followed by a recreate
+		// (or operator teardown) that deletes the wedged pod, so this is
+		// the surviving trace. `reason` is the live waiting-state reason the
+		// classifier matched; PodTerminationWithReason fills in container /
+		// exit-code detail when present and falls back to the bare reason.
+		termination := PodTerminationWithReason(stuckPod, reason, metav1.NewTime(now))
+		if err := StampInstanceFailedForStuckPod(ctx, input, s.Index, termination); err != nil {
 			return fmt.Errorf("stamp Phase=Failed (instance=%d): %w", s.Index, err)
 		}
 		input.WarnInstanceFailed(s.Index, stuckPod.Name, reason)
@@ -575,8 +583,11 @@ func ShouldCheckForStuckPods(s *InstanceStatus, pods []*corev1.Pod, currentHash,
 // Failed.
 //
 // The Operation field is preserved (when present) — operators want to
-// see WHAT was in flight when the kubelet wedge surfaced.
-func StampInstanceFailedForStuckPod(ctx context.Context, input ReconcileInput, idx int32) error {
+// see WHAT was in flight when the kubelet wedge surfaced. termination,
+// when non-nil, is recorded on LastFailure in the same write so the
+// wedged pod's diagnostics survive the recreate / teardown that follows
+// the escalation; nil leaves LastFailure untouched.
+func StampInstanceFailedForStuckPod(ctx context.Context, input ReconcileInput, idx int32, termination *InstanceTermination) error {
 	return input.MutateInstance(ctx, idx, func(s *InstanceStatus) bool {
 		if s.Phase == "" {
 			// Fresh-empty slot from MutateInstance's append path — the
@@ -588,6 +599,10 @@ func StampInstanceFailedForStuckPod(ctx context.Context, input ReconcileInput, i
 			return false
 		}
 		s.Phase = InstancePhaseFailed
+		if termination != nil {
+			captured := *termination
+			s.LastFailure = &captured
+		}
 		return true
 	})
 }
