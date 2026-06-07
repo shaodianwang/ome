@@ -1,0 +1,79 @@
+# The deployment (InferenceService). Links the tenant runtime and runs in
+# OMENative mode. This is a MULTI-NODE, engine-only (no PD / no decoder) shape:
+#
+#   - engine  = one multi-node gang: 1 leader + worker.size (3) workers = 4 nodes,
+#               gang-scheduled together.
+#   - router  = single CPU pod, the external entrypoint.
+#   - no decoder, no rollout.coordination (coordination groups are for keeping
+#     prefill:decode in lockstep — with a single GPU component there's nothing to
+#     balance; the engine rolls on its own lifecycle and the router rolls
+#     independently).
+#
+# spec.model → the PVC-backed ClusterBaseModel (clusterbasemodel-pvc.yaml) —
+# same shape as the rollout sample: the runtime loads CC_MODEL_PATH (cluster
+# cache) as primary and falls back to this model's PVC via $(MODEL_PATH) (OME
+# mounts the PVC + injects $(MODEL_PATH)). With CC ACL-blocked on this checkpoint
+# today, the PVC fallback is what actually serves. Drop spec.model + the
+# --fallback-model-path flag once CC is stable.
+#
+# Pods come up as:
+#   sglang-tier5-42b-bf16-engine-0-leader-0
+#   sglang-tier5-42b-bf16-engine-0-worker-0..2
+#   sglang-tier5-42b-bf16-router-0-default-0
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sglang-tier5-42b-bf16
+  namespace: sandbox
+spec:
+  deploymentMode: OMENative   # propagates to engine + router + ingress
+  model:
+    name: consolidation-sv3-tier5-42b-128k-ckpt150   # the ClusterBaseModel (clusterbasemodel-pvc.yaml)
+    kind: ClusterBaseModel
+  runtime:
+    name: srt-tier5-42b-bf16-mn
+  engine:
+    minReplicas: 1            # 1 instance = 1 leader + worker.size workers (one gang)
+    maxReplicas: 1
+    # priorityClassName MUST live under leader/worker for a multi-node gang — at
+    # the engine (component) level it is DROPPED (same OME #461 gap as volumes),
+    # leaving the gang at priority 0 (lowest tier, can't preempt). Mirror of the
+    # runtime's leader/worker pod-field placement.
+    # Declaring leader + worker is what makes this component multi-node.
+    leader:
+      priorityClassName: staging
+      # MNNVL co-location: this checkpoint needs the whole gang inside ONE
+      # NVLink (MNNVL) domain, so every gang pod is pinned to the same
+      # network.meta.com/domain via a REQUIRED podAffinity. The selector
+      # matches this ISVC's engine pods; with minReplicas=1 that is exactly
+      # the single 4-pod gang. (OME does not auto-inject this today, and the
+      # selector can't be scoped per-instance from a static manifest — so for
+      # minReplicas>1 every gang would collapse into one domain. See README.)
+      affinity: &mnnvlAffinity
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: network.meta.com/domain
+              labelSelector:
+                matchLabels:
+                  ome.io/inferenceservice: sglang-tier5-42b-bf16
+                  component: engine
+      runner:
+        name: ome-container   # template (image/command/resources) comes from the runtime
+    worker:
+      size: 3                 # 3 worker pods → 1 leader + 3 workers = 4 nodes
+      priorityClassName: staging   # under worker (not engine level) — OME #461
+      affinity: *mnnvlAffinity   # same domain as the leader (whole gang in one MNNVL domain)
+      runner:
+        name: ome-container
+    lifecycle:
+      updateStrategy:
+        # RecreatePod: drain + recreate the gang IN PLACE on a new revision.
+        # Chosen because the gang is 4 nodes and a budget of 4 nodes can't host
+        # a surge gang. If you have +1 gang (4 more nodes) of headroom, switch
+        # to SurgeThenDrain { maxSurge: 1, maxUnavailable: 0 } for zero-downtime
+        # rolls instead.
+        type: RecreatePod
+  router:
+    minReplicas: 1
+    maxReplicas: 1
+    priorityClassName: staging
