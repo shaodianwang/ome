@@ -9,7 +9,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -58,16 +57,25 @@ func canaryScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
+// canaryPod builds a Running + Ready (serving) OMENative pod. The canary capacity
+// gate counts only READY pods, so fixtures that represent live capacity must be
+// Ready — a pod that merely exists does not satisfy the gate.
 func canaryPod(ns, isvc, comp, hash, name string) *corev1.Pod {
-	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Namespace: ns, Name: name,
-		Labels: map[string]string{
-			constants.InferenceServicePodLabelKey: isvc,
-			constants.OMEComponentLabel:           comp,
-			query.LabelManagedBy:                  query.ManagedByOMENative,
-			query.LabelRevisionHash:               hash,
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns, Name: name,
+			Labels: map[string]string{
+				constants.InferenceServicePodLabelKey: isvc,
+				constants.OMEComponentLabel:           comp,
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+				query.LabelRevisionHash:               hash,
+			},
 		},
-	}}
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
 }
 
 // TestDispatch_ServicesHashAndRollbackWarning exercises the controller-side entry
@@ -89,6 +97,7 @@ func TestDispatch_ServicesHashAndRollbackWarning(t *testing.T) {
 	// hash from here, not the (stale) ISVC aggregate.
 	ir := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "d1-engine"}}
 	ir.Status.UpdateRevision = "d1-engine-newhash"
+	ir.Status.CurrentRevision = "d1-engine-stable0" // the stable revision rollback reverts to
 
 	objs := []runtime.Object{isvc, ir,
 		canaryPod(ns, "d1", "engine", "newhash", "d1-engine-2"),
@@ -119,29 +128,26 @@ func TestDispatch_ServicesHashAndRollbackWarning(t *testing.T) {
 		t.Fatalf("expected Paused (capacity met, Manual), got %q", got)
 	}
 
-	// Deferred-rollback warning fires only while the canary is active.
+	// Rollback: the executor records the rejected hash + Dispatch points the IR at
+	// the stable revision (Pacing.RollbackToRevision = IR CurrentRevision).
 	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
-	rec := record.NewFakeRecorder(8)
-	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, Recorder: rec, ISVC: isvc}); err != nil {
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
 		t.Fatalf("Dispatch (rollback) error: %v", err)
 	}
-	select {
-	case ev := <-rec.Events:
-		if !contains(ev, "CanaryRollbackUnsupported") {
-			t.Fatalf("expected CanaryRollbackUnsupported warning, got %q", ev)
-		}
-	default:
-		t.Fatal("expected a CanaryRollbackUnsupported warning event")
+	if isvc.Status.Canary == nil || isvc.Status.Canary.RolledBackRevisionHash != "newhash" {
+		t.Fatalf("rollback should record the rejected hash (newhash), got %+v", isvc.Status.Canary)
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
+	if got := isvc.Status.Components[v1beta1.EngineComponent].RolloutPhase; got != v1beta1.RolloutPhaseRollingBack {
+		t.Fatalf("expected RollingBack (canary pods still present), got %q", got)
 	}
-	return false
+	gotIR := &v1beta1.InferenceReplica{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: "d1-engine"}, gotIR); err != nil {
+		t.Fatal(err)
+	}
+	if gotIR.Spec.Pacing == nil || gotIR.Spec.Pacing.RollbackToRevision == nil ||
+		*gotIR.Spec.Pacing.RollbackToRevision != "d1-engine-stable0" {
+		t.Fatalf("IR should be signaled to roll back to the stable revision, got pacing=%+v", gotIR.Spec.Pacing)
+	}
 }
 
 func TestPrimaryComponent(t *testing.T) {

@@ -173,7 +173,7 @@ def ceils(topo, ce, n=N, nd=None):
 
 
 HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r", "to_e", "to_d", "to_r",
-             "partition", "mig", "restart", "kill", "inst", "co", "topo", "infeasible"]
+             "partition", "mig", "restart", "kill", "inst", "canary", "rollback", "co", "topo", "infeasible"]
 
 
 def header(name, desc, kv):
@@ -183,7 +183,7 @@ def header(name, desc, kv):
 
 
 CASES = []
-COUNTERS = {"migration": 100, "restart": 130, "partition": 160, "scale": 190, "edge": 220}
+COUNTERS = {"migration": 100, "restart": 130, "partition": 160, "scale": 190, "edge": 220, "canary": 300}
 
 
 def C(folder, desc, comps, coord=None, **kv):
@@ -316,6 +316,68 @@ for es, ds in [("SurgeThenDrain", "RecreatePod"), ("InPlaceIfPossible", "SurgeTh
 for topo in TOPOS:                            # X-2 re-bump (mode=rebump) across topologies
     C("edge", f"X-2 re-bump mid-roll {topo} (status revision == pod revision)",
       comps_for(topo, lifecycle()), mode="rebump", **nds(topo), **ceils(topo, N + 1), topo=topo, co="none")
+
+
+# ── canary/  (mode=canary; spec.rollout.canary staged rollout) ───────────────
+# Permutation of the canary step machine across all topologies × promotion
+# policies, plus a multi-step (3-gate) plan, a capacity-ahead smoke step, and a
+# rollback probe (drain to stable + sticky hold). The externally-routed primary
+# (router>engine>decoder) drives the step machine; every staged component surges
+# +1 (maxSurge=1), so ceilings are N+1 / NR+1.
+CANARY_PAUSE = {"auto": {"duration": "20s"}, "manual": {}}
+
+
+def canary_block(policy, steps):
+    lines = ["  rollout:", "    canary:", f"      promotionPolicy: {policy}", "      steps:"]
+    for s in steps:
+        item = f'newCapacity: "{s["nc"]}", trafficWeight: {s["tw"]}'
+        if "pause" in s:
+            item += f', pause: {flow(s["pause"])}'
+        lines.append(f"        - {{ {item} }}")
+    return "\n".join(lines)
+
+
+def canary_steps(policy, *pairs):
+    """(newCapacity, trafficWeight) pairs → step dicts; every step but the last
+    carries a pause so the rollout actually gates (Auto: timed; Manual: promote)."""
+    out = []
+    for i, (nc, tw) in enumerate(pairs):
+        s = {"nc": nc, "tw": tw}
+        if i < len(pairs) - 1:
+            s["pause"] = CANARY_PAUSE[policy]
+        out.append(s)
+    return out
+
+
+def canary_ceils(topo):
+    cl = ceils(topo, N + 1)
+    if is_pd(topo):
+        cl["ceil_d"] = N + 1
+        cl["ceil_r"] = NR + 1
+    return cl
+
+
+def Ccanary(desc, topo, policy, steps, **extra):
+    C("canary", f"canary {topo} {policy} {desc}",
+      comps_for(topo, strat_life("SurgeThenDrain")),
+      coord=canary_block(policy.capitalize(), steps),
+      mode="canary", **nds(topo), **canary_ceils(topo),
+      topo=topo, canary=policy, co="none", **extra)
+
+
+# Base matrix: every topology × promotion policy, 2-step 50/100.
+for topo in TOPOS:
+    for policy in ["auto", "manual"]:
+        Ccanary("50/100", topo, policy, canary_steps(policy, ("50%", 50), ("100%", 100)))
+# Multi-step (3 gates): Auto on engine + pd; Manual on engine (multi-promote path).
+Ccanary("25/50/100 3-step", "engine", "auto", canary_steps("auto", ("25%", 25), ("50%", 50), ("100%", 100)))
+Ccanary("25/50/100 3-step", "pd", "auto", canary_steps("auto", ("25%", 25), ("50%", 50), ("100%", 100)))
+Ccanary("25/50/100 3-step", "engine", "manual", canary_steps("manual", ("25%", 25), ("50%", 50), ("100%", 100)))
+# Capacity-ahead smoke: full new capacity at 0% traffic, then cut over to 100%.
+Ccanary("smoke 100cap/0tw->100tw", "engine", "auto", canary_steps("auto", ("100%", 0), ("100%", 100)))
+# Rollback probe (drain to stable + sticky hold at RolledBack): single-component and PD.
+Ccanary("rollback to stable", "engine", "manual", canary_steps("manual", ("50%", 50), ("100%", 100)), rollback=1)
+Ccanary("rollback to stable", "pd", "manual", canary_steps("manual", ("50%", 50), ("100%", 100)), rollback=1)
 
 
 def main():

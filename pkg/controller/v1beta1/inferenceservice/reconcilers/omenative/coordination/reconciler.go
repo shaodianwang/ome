@@ -133,7 +133,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			len(componentsTouched), componentsTouched)
 	}
 
-	perRevisionPods, err := observePerRevisionPods(ctx, in.Reader, in.ISVC, componentsTouched)
+	perRevisionPods, _, err := observePerRevisionPods(ctx, in.Reader, in.ISVC, componentsTouched)
 	if err != nil {
 		return nil, fmt.Errorf("observe per-revision pods: %w", err)
 	}
@@ -307,14 +307,19 @@ func componentIsOMENative(ext *v1beta1.ComponentExtensionSpec, specMode *constan
 	return false
 }
 
-// observePerRevisionPods returns per-Component, per-revisionHash pod
-// counts (both total and Ready). Reads pods via the live reader so
-// observations don't lag behind reality.
-func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) (map[v1beta1.ComponentType]map[string]int32, error) {
+// observePerRevisionPods returns per-Component, per-revisionHash pod counts —
+// both the TOTAL pods carrying each revision hash and the subset that are READY
+// (serving). Reads pods via the live reader so observations don't lag reality.
+// Callers that gate on serving capacity (e.g. the canary traffic-shift gate)
+// MUST use the ready map: a pod that merely exists (ContainerCreating/Pending)
+// is not serving yet, and counting it lets a rollout cut over before the new
+// revision can actually take traffic.
+func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) (map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]map[string]int32, error) {
+	total := make(map[v1beta1.ComponentType]map[string]int32, len(components))
+	ready := make(map[v1beta1.ComponentType]map[string]int32, len(components))
 	if reads == nil {
-		return map[v1beta1.ComponentType]map[string]int32{}, nil
+		return total, ready, nil
 	}
-	out := make(map[v1beta1.ComponentType]map[string]int32, len(components))
 	for _, c := range components {
 		pods := &corev1.PodList{}
 		sel := labels.SelectorFromSet(labels.Set{
@@ -323,19 +328,40 @@ func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1be
 			query.LabelManagedBy:                  query.ManagedByOMENative,
 		})
 		if err := reads.List(ctx, pods, client.InNamespace(isvc.Namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
-			return nil, fmt.Errorf("list pods for %s/%s: %w", isvc.Namespace, c, err)
+			return nil, nil, fmt.Errorf("list pods for %s/%s: %w", isvc.Namespace, c, err)
 		}
 		byHash := make(map[string]int32, 4)
+		readyByHash := make(map[string]int32, 4)
 		for i := range pods.Items {
 			hash := pods.Items[i].Labels[query.LabelRevisionHash]
 			if hash == "" {
 				continue
 			}
 			byHash[hash]++
+			if podReadyAndServing(&pods.Items[i]) {
+				readyByHash[hash]++
+			}
 		}
-		out[c] = byHash
+		total[c] = byHash
+		ready[c] = readyByHash
 	}
-	return out, nil
+	return total, ready, nil
+}
+
+// podReadyAndServing reports whether a pod is currently serving traffic: Running,
+// not being deleted, and reporting the PodReady condition True. Pods without a
+// readiness probe are marked Ready by the kubelet once their containers start, so
+// this holds for both real runtimes and probe-less test fixtures.
+func podReadyAndServing(pod *corev1.Pod) bool {
+	if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			return cond.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // updateTrafficStatus writes Status.Components.<c>.Traffic[] from

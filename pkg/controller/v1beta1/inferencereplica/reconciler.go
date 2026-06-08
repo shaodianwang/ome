@@ -157,6 +157,51 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	parent := r.resolveParent(ctx, ir)
 
 	input := r.buildReconcileInput(ir, parent)
+
+	// Spec target ControllerRevision (from the rendered desired). Computed up
+	// front and reported as UpdateRevision so a new spec target stays VISIBLE to
+	// the ISVC even during a rollback — when the actual roll targets the stable
+	// revision instead (below), this keeps the canary's re-arm-on-new-revision
+	// working. PodSpec nil (webhook-rejected today, but defensive) → no revision.
+	var specTarget *appsv1.ControllerRevision
+	if input.DesiredSpec.PodSpec != nil {
+		t, terr := r.ensureRevisionWithCollisionRetry(ctx, ir, input)
+		if terr != nil {
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: ensure revision (ir=%s/%s): %w",
+				ir.Namespace, ir.Name, terr)
+		}
+		specTarget = t
+	}
+
+	// Canary rollback: when the ISVC controller set Pacing.RollbackToRevision,
+	// roll every Instance back to that (stable) ControllerRevision by rendering
+	// the desired template from the revision's stored payload and using the
+	// revision as the ROLL target — while UpdateRevision keeps reporting the spec
+	// target (above). The forward-roll machinery then drains the canary pods onto
+	// stable. CR gone (GC'd) → fall through to the normal desired spec.
+	rollTarget := specTarget
+	if ir.Spec.Pacing != nil && ir.Spec.Pacing.RollbackToRevision != nil && *ir.Spec.Pacing.RollbackToRevision != "" {
+		cr := &appsv1.ControllerRevision{}
+		switch err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: ir.Namespace, Name: *ir.Spec.Pacing.RollbackToRevision}, cr); {
+		case err == nil:
+			payload, perr := revision.PayloadFromControllerRevision(cr)
+			if perr != nil {
+				return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: rollback revision payload (ir=%s/%s): %w", ir.Namespace, ir.Name, perr)
+			}
+			if payload != nil && payload.PodSpec != nil {
+				input.DesiredSpec.PodSpec = payload.PodSpec
+				input.DesiredSpec.WorkerPodSpec = payload.WorkerPodSpec
+				input.DesiredSpec.PodTemplateObjectMeta = payload.PodMeta
+				rollTarget = cr
+				log.Info("Canary rollback: rolling Instances back to stable revision", "revision", cr.Name)
+			}
+		case apierrors.IsNotFound(err):
+			// stable CR GC'd — nothing to roll back to; proceed normally.
+		default:
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: get rollback revision %s: %w", *ir.Spec.Pacing.RollbackToRevision, err)
+		}
+	}
+
 	plan, perr := workload.BuildPlan(v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), input.DesiredSpec, input.ObservedState)
 	if perr != nil {
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: build plan (ir=%s/%s): %w",
@@ -184,29 +229,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: ensure pod groups (component=%s): %w", ir.Spec.Component, gerr)
 	}
 
-	// Compute the target ControllerRevision before kicking off the
-	// dispatcher so the Update pass + status aggregator both see the
-	// same name. The collision-retry shape matches the ISVC adapter:
-	// on a hash collision bump CollisionCount and retry. When PodSpec
-	// is nil — webhook-rejected today but defensive — skip revision
-	// entirely; the workload Update pass short-circuits on nil target.
-	var target *appsv1.ControllerRevision
-	if input.DesiredSpec.PodSpec != nil {
-		t, terr := r.ensureRevisionWithCollisionRetry(ctx, ir, input)
-		if terr != nil {
-			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: ensure revision (ir=%s/%s): %w",
-				ir.Namespace, ir.Name, terr)
-		}
-		target = t
-	}
-
 	// Defer status aggregation so it runs regardless of whether the
 	// workload dispatcher returned a requeue or an error. Status-write
 	// errors don't clobber a real dispatcher error — they only surface
 	// when everything else succeeded. We log the suppressed error at
 	// V(1) so a dispatcher+status double-failure isn't fully invisible.
+	// Reports specTarget (the spec's desired) as UpdateRevision; in a rollback
+	// the roll itself targets rollTarget (stable) but the spec target stays the
+	// reported one so a new revision re-arms the canary.
 	defer func() {
-		if serr := r.aggregateAndWriteStatus(ctx, ir, parent, plan, target); serr != nil {
+		if serr := r.aggregateAndWriteStatus(ctx, ir, parent, plan, specTarget); serr != nil {
 			if err == nil {
 				err = fmt.Errorf("InferenceReplica reconciler: write status: %w", serr)
 				return
@@ -246,7 +278,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 	}
 
-	result, err = workload.Reconcile(ctx, deps, input, plan, target)
+	result, err = workload.Reconcile(ctx, deps, input, plan, rollTarget)
 
 	// Reconcile the per-Component headless Service. The Service gives every
 	// pod a stable FQDN for peer discovery during gang init (multi-node) and

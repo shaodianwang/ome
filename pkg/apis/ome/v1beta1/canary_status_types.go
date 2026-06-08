@@ -23,4 +23,12 @@ type CanaryStatus struct {
 	// for the canary revision (mirrors the active step's TrafficWeight once
 	// applied).
 	ObservedTrafficWeight int32 `json:"observedTrafficWeight"`
+
+	// RolledBackRevisionHash is set when a rollback (ome.io/rollout-rollback)
+	// abandons a canary: it records the rejected revision hash. While set, the
+	// component is held on the stable revision and the rejected revision is NOT
+	// retried — even after the annotation is cleared. The rollout re-arms only
+	// when a different target revision appears (a fresh spec change / fix).
+	// +optional
+	RolledBackRevisionHash string `json:"rolledBackRevisionHash,omitempty"`
 }

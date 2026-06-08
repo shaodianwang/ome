@@ -123,6 +123,11 @@ const (
 	// RolloutPhaseRollingBack indicates the canary is scaling down
 	// and the stable revision is scaling back to full. Transient.
 	RolloutPhaseRollingBack RolloutPhase = "RollingBack"
+	// RolloutPhaseRolledBack indicates a rollback completed: the
+	// component is fully back on the stable revision and is HELD there,
+	// rejecting the rolled-back revision. The rollout re-arms only when a
+	// new (different) target revision appears. Terminal until then.
+	RolloutPhaseRolledBack RolloutPhase = "RolledBack"
 	// RolloutPhaseFailed indicates the canary pods failed to reach
 	// Ready within the configured timeout. The canary is preserved
 	// for diagnosis; operator must roll back or recover explicitly.

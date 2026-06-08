@@ -522,6 +522,13 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 							Format:      "int32",
 						},
 					},
+					"rolledBackRevisionHash": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RolledBackRevisionHash is set when a rollback (ome.io/rollout-rollback) abandons a canary: it records the rejected revision hash. While set, the component is held on the stable revision and the rejected revision is NOT retried — even after the annotation is cleared. The rollout re-arms only when a different target revision appears (a fresh spec change / fix).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"currentStep", "observedTrafficWeight"},
 			},
@@ -968,7 +975,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 					},
 					"rolloutPhase": {
 						SchemaProps: spec.SchemaProps{
-							Description: "RolloutPhase reflects the current rollout state for this Component. One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
+							Description: "RolloutPhase reflects the current rollout state for this Component. One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, RolledBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -2950,6 +2957,13 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaPacing(ref common.ReferenceCall
 						SchemaProps: spec.SchemaProps{
 							Description: "MaxUnavailable caps in-rollout disruption. Accepts either a raw count or a percent string. When nil, the InferenceReplica controller falls back to its own default (currently 25%).",
 							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+					"rollbackToRevision": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RollbackToRevision, when set, names a ControllerRevision the InferenceReplica must roll every Instance back to — overriding the rendered desired template with that revision's stored pod template (and using it as the update target). The InferenceService controller sets this during a canary rollback so the forward-roll machinery drains the canary pods back onto the stable revision. Empty in steady state.",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 				},

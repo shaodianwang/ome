@@ -29985,6 +29985,8 @@ spec:
                     observedTrafficWeight:
                       format: int32
                       type: integer
+                    rolledBackRevisionHash:
+                      type: string
                     stepEnteredTime:
                       format: date-time
                       type: string
@@ -30331,6 +30333,7 @@ spec:
                           - Paused
                           - Promoting
                           - RollingBack
+                          - RolledBack
                           - Failed
                         type: string
                       scaleTargetRef:

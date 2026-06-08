@@ -45,13 +45,23 @@ func TestEffectivePartition(t *testing.T) {
 		t.Fatalf("done sentinel: want partition 0, got %v ok=%v", p, ok)
 	}
 
-	// Rollback is deferred → the annotation is ignored; partition follows the
-	// current step (here the final step → 0), NOT a hold-all-on-stable (which
-	// wedged the rollout). To roll back, revert the spec.
-	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
+	// Rolled back (RolledBackRevisionHash set) → partition 0 regardless of step,
+	// so the IR's RollbackToRevision target drives the revert without the partition
+	// fighting it. Step 0 would otherwise be partition 2.
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CurrentStep: 0, RolledBackRevisionHash: "rejected"}
 	p, ok = EffectivePartition(isvc, v1beta1.EngineComponent, 4)
 	if !ok || p == nil || *p != 0 {
-		t.Fatalf("rollback deferred: want step partition 0 (annotation ignored), got %v ok=%v", p, ok)
+		t.Fatalf("rolled back: want partition 0, got %v ok=%v", p, ok)
+	}
+
+	// The bare ome.io/rollout-rollback annotation does NOT change the partition —
+	// EffectivePartition keys off status (RolledBackRevisionHash), set by the
+	// executor, not the annotation directly.
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CurrentStep: 0}
+	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
+	p, ok = EffectivePartition(isvc, v1beta1.EngineComponent, 4)
+	if !ok || p == nil || *p != 2 {
+		t.Fatalf("annotation alone: want step-0 partition 2, got %v ok=%v", p, ok)
 	}
 }
 

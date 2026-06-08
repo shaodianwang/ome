@@ -242,6 +242,21 @@ func isLifecycleAnnotation(key string) bool {
 	return false
 }
 
+// PayloadFromControllerRevision unmarshals a ControllerRevision's Data into the
+// DataPayload (pod template + meta + worker template). Returns (nil, nil) when
+// the CR or its data is empty. Used by callers that need to render from a stored
+// revision (e.g. a canary rollback rolling Instances back to the stable CR).
+func PayloadFromControllerRevision(cr *appsv1.ControllerRevision) (*DataPayload, error) {
+	if cr == nil || len(cr.Data.Raw) == 0 {
+		return nil, nil
+	}
+	var p DataPayload
+	if err := json.Unmarshal(cr.Data.Raw, &p); err != nil {
+		return nil, fmt.Errorf("unmarshal ControllerRevision %s data: %w", cr.Name, err)
+	}
+	return &p, nil
+}
+
 // Name composes the ControllerRevision object name from the Key and
 // the hash — `<key.Name>-<hash>`. Deterministic, so "reuse-if-exists"
 // works.

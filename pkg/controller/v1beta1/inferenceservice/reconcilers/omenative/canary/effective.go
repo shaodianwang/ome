@@ -14,17 +14,24 @@ import "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 //
 //   - The current step's NewCapacity resolved against desired.
 //
-// Rollback (ome.io/rollout-rollback) is intentionally NOT special-cased here:
-// holding every instance on the stable revision (Partition = desired) cannot
-// revert instances already rolled to the canary — the workload skips held
-// instances rather than draining their canary pods — so it wedges the rollout
-// at RollingBack. Canary rollback is deferred; the annotation is a guarded
-// no-op (Dispatch surfaces a warning). To roll back today, revert the component
-// spec to the previous revision.
+// Rollback (ome.io/rollout-rollback) is special-cased: when the status records
+// a rolled-back revision, this returns Partition 0 (hold nothing). Partition
+// alone cannot reverse a roll — the workload skips held instances rather than
+// draining their canary pods — so the revert is driven by the IR's
+// RollbackToRevision target (it overrides the desired pod template with the
+// stable revision and rolls every instance back onto it). A non-zero partition
+// here would fight that revert, so it is forced to 0 for the duration.
 func EffectivePartition(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, desiredReplicas int32) (*int32, bool) {
 	plan := isvc.Spec.GetCanary()
 	if plan == nil || len(plan.Steps) == 0 {
 		return nil, false
+	}
+	// Rolled back: hold NOTHING via partition (0). The component is driven back
+	// onto the stable revision by the IR's RollbackToRevision target, not by the
+	// partition; a non-zero partition here would fight that revert.
+	if isvc.Status.Canary != nil && isvc.Status.Canary.RolledBackRevisionHash != "" {
+		zero := int32(0)
+		return &zero, true
 	}
 	idx := int32(0)
 	if isvc.Status.Canary != nil {

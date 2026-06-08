@@ -8,11 +8,12 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// ObservePerRevisionPods is the exported entry point to the per-revision serving
-// pod-count observation the coordination layer uses, so sibling rollout
-// executors (e.g. canary) can reuse the exact same accounting instead of
-// re-implementing it. Returns counts keyed by component → revision hash.
-func ObservePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) (map[v1beta1.ComponentType]map[string]int32, error) {
+// ObservePerRevisionPods is the exported entry point to the per-revision pod-count
+// observation the coordination layer uses, so sibling rollout executors (e.g.
+// canary) can reuse the exact same accounting instead of re-implementing it.
+// Returns TWO maps keyed by component → revision hash: total pods, and the READY
+// (serving) subset. Capacity gates that shift traffic must use the ready map.
+func ObservePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) (total, ready map[v1beta1.ComponentType]map[string]int32, err error) {
 	return observePerRevisionPods(ctx, reads, isvc, components)
 }
 

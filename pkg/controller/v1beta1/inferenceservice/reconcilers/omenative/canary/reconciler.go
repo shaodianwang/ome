@@ -55,7 +55,11 @@ type Result struct {
 	Complete bool
 	// Stepped is true on the reconcile that advanced to the next (intermediate)
 	// step — the edge the step counter + step Event are recorded on.
-	Stepped      bool
+	Stepped bool
+	// RolledBack is true while the canary is rolling back / held rolled-back; the
+	// controller reads it (and status.canary.RolledBackRevisionHash) to point the
+	// IR at the stable ControllerRevision.
+	RolledBack   bool
 	Partition    int32
 	RequeueAfter time.Duration
 }
@@ -70,13 +74,39 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		return &Result{Active: false}, nil
 	}
 
-	// Rollback (ome.io/rollout-rollback) is deferred: the partition mechanism
-	// cannot revert instances already rolled to the canary, so the old
-	// hold-all-on-stable path wedged at RollingBack. The annotation is treated
-	// as a no-op here (the canary proceeds per its plan) and Dispatch surfaces a
-	// warning event. To roll back today, revert the component spec.
-
 	cs := in.ISVC.Status.Canary
+
+	// Rollback (ome.io/rollout-rollback): abandon the canary and return the
+	// component to the stable revision, then HOLD there rejecting the rolled-back
+	// revision. The revert itself is driven by the controller — seeing
+	// cs.RolledBackRevisionHash it points the IR at the stable ControllerRevision
+	// so every Instance rolls back. Here we record the rejected revision, shift
+	// traffic to stable, and re-arm only when a different target appears (clearing
+	// the annotation alone never retries the rejected revision).
+	if cs != nil {
+		if cs.RolledBackRevisionHash != "" {
+			// Re-arm to a fresh canary ONLY when a genuinely NEW target appears.
+			// During the revert the IR targets the stable revision, so the
+			// observed target (in.CanaryRevisionHash) reports stable — that is the
+			// revision we're holding on, not a new target. Exclude both the stable
+			// revision and the rejected revision itself.
+			stableHash := otherRevision(in.PerRevisionPods, cs.RolledBackRevisionHash)
+			if in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.RolledBackRevisionHash && in.CanaryRevisionHash != stableHash {
+				*cs = v1beta1.CanaryStatus{
+					CanaryRevisionHash: in.CanaryRevisionHash,
+					CurrentStep:        0,
+					StepEnteredTime:    &metav1.Time{Time: in.Now},
+				}
+				delete(in.ISVC.Annotations, constants.RolloutRollbackAnnotation)
+				// fall through: start a fresh canary toward the new target.
+			} else {
+				return reconcileRollback(in, cs), nil
+			}
+		} else if isRollbackRequested(in.ISVC) && int(cs.CurrentStep) < len(plan.Steps) {
+			cs.RolledBackRevisionHash = cs.CanaryRevisionHash
+			return reconcileRollback(in, cs), nil
+		}
+	}
 
 	// Done sentinel: a finished canary KEEPS its status with CurrentStep ==
 	// len(steps) rather than clearing it. EffectivePartition maps that to the
@@ -194,6 +224,23 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	}
 	advanceStep(in.ISVC, in.Now)
 	return &Result{Active: true, Stepped: true, Partition: partition, RequeueAfter: reconcileRequeue}, nil
+}
+
+// reconcileRollback drives the component back to the stable revision and holds
+// there, rejecting cs.RolledBackRevisionHash. Traffic goes 100% to stable; the
+// controller reads cs.RolledBackRevisionHash and makes the IR roll every Instance
+// back to the stable ControllerRevision, so the rejected-revision pods drain.
+// While they drain → RollingBack; once gone → RolledBack (held until a different
+// target appears).
+func reconcileRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus) *Result {
+	stableHash := otherRevision(in.PerRevisionPods, cs.RolledBackRevisionHash)
+	applyTraffic(in.ISVC, in.Component, cs.RolledBackRevisionHash, stableHash, 0)
+	if in.PerRevisionPods[cs.RolledBackRevisionHash] > 0 {
+		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseRollingBack)
+		return &Result{Active: true, RolledBack: true, RequeueAfter: reconcileRequeue}
+	}
+	setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseRolledBack)
+	return &Result{Active: true, RolledBack: true}
 }
 
 // drainElapsed reports whether the ScaleDownDelaySeconds drain window has passed

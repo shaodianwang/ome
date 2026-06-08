@@ -224,34 +224,48 @@ func TestReconcile_FinalStepDrainWait(t *testing.T) {
 	}
 }
 
-// TestReconcile_RollbackDeferredIsNoop pins the deferred-rollback contract: the
-// partition mechanism cannot revert instances already rolled to the canary, so
-// honoring ome.io/rollout-rollback wedged the rollout at RollingBack. Until a
-// real rollback lands (target the stable ControllerRevision + a sticky hold),
-// the annotation is a guarded no-op — the canary proceeds per its plan and
-// never enters RollingBack. Dispatch surfaces a warning event (covered there).
-func TestReconcile_RollbackDeferredIsNoop(t *testing.T) {
+// TestReconcile_Rollback pins the rollback state machine: record the rejected
+// revision, shift traffic to stable, RollingBack while the rejected pods drain →
+// RolledBack (held), and re-arm only when a different target appears.
+func TestReconcile_Rollback(t *testing.T) {
 	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
-	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, ObservedTrafficWeight: 50}
 	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
 
-	res, _ := Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 2}))
-	if phaseOf(isvc) == v1beta1.RolloutPhaseRollingBack {
-		t.Fatal("deferred rollback must NOT enter RollingBack (it wedges)")
+	// Mid-canary rollback: rejected ("new") pods still present → RollingBack,
+	// 100% traffic to stable, the rejected hash recorded.
+	res, _ := Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 2, "old": 2}))
+	if !res.RolledBack || phaseOf(isvc) != v1beta1.RolloutPhaseRollingBack {
+		t.Fatalf("expected RollingBack + RolledBack result, got phase=%q res=%+v", phaseOf(isvc), res)
 	}
-	// Manual step-0 with capacity met and no promote → normal Paused 50/50.
-	if phaseOf(isvc) != v1beta1.RolloutPhasePaused {
-		t.Fatalf("expected canary to proceed normally (Paused), got phase=%q", phaseOf(isvc))
-	}
-	if res.Partition != 2 {
-		t.Fatalf("partition must follow the step (2), not hold-all-on-stable, got %d", res.Partition)
+	if isvc.Status.Canary.RolledBackRevisionHash != "new" {
+		t.Fatalf("rejected revision should be recorded, got %+v", isvc.Status.Canary)
 	}
 	tr := isvc.Status.Components[v1beta1.EngineComponent].Traffic
-	if len(tr) != 2 {
-		t.Fatalf("expected the normal 50/50 split, got %+v", tr)
+	if len(tr) != 1 || tr[0].Percent != 100 {
+		t.Fatalf("rollback must route 100%% to stable, got %+v", tr)
 	}
-	if isvc.Status.Canary == nil || isvc.Status.Canary.CurrentStep != 0 {
-		t.Fatal("canary state should persist normally under a deferred rollback")
+
+	// Rejected pods drained → RolledBack (held on stable).
+	res, _ = Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"old": 4}))
+	if !res.RolledBack || phaseOf(isvc) != v1beta1.RolloutPhaseRolledBack {
+		t.Fatalf("expected RolledBack (held) after drain, got phase=%q res=%+v", phaseOf(isvc), res)
+	}
+
+	// Clearing the annotation does NOT retry the rejected revision (still held).
+	delete(isvc.Annotations, constants.RolloutRollbackAnnotation)
+	in := baseInputs(isvc, map[string]int32{"old": 4})
+	res, _ = Reconcile(context.Background(), in)
+	if !res.RolledBack || isvc.Status.Canary.RolledBackRevisionHash != "new" {
+		t.Fatalf("rejected revision must stay held until a new target appears, got %+v res=%+v", isvc.Status.Canary, res)
+	}
+
+	// A NEW target re-arms: fresh canary toward it (rejected hash cleared).
+	in = baseInputs(isvc, map[string]int32{"old": 4})
+	in.CanaryRevisionHash = "v3"
+	Reconcile(context.Background(), in)
+	if isvc.Status.Canary.RolledBackRevisionHash != "" || isvc.Status.Canary.CanaryRevisionHash != "v3" || isvc.Status.Canary.CurrentStep != 0 {
+		t.Fatalf("new target must re-arm a fresh canary toward v3, got %+v", isvc.Status.Canary)
 	}
 }
 

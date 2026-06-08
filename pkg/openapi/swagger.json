@@ -242,6 +242,10 @@
           "format": "int32",
           "default": 0
         },
+        "rolledBackRevisionHash": {
+          "description": "RolledBackRevisionHash is set when a rollback (ome.io/rollout-rollback) abandons a canary: it records the rejected revision hash. While set, the component is held on the stable revision and the rejected revision is NOT retried — even after the annotation is cleared. The rollout re-arms only when a different target revision appears (a fresh spec change / fix).",
+          "type": "string"
+        },
         "stepEnteredTime": {
           "description": "StepEnteredTime is when CurrentStep was entered. Auto promotion measures Pause.Duration from this timestamp.",
           "$ref": "#/definitions/v1.Time"
@@ -512,7 +516,7 @@
           "$ref": "#/definitions/knative.URL"
         },
         "rolloutPhase": {
-          "description": "RolloutPhase reflects the current rollout state for this Component. One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
+          "description": "RolloutPhase reflects the current rollout state for this Component. One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, RolledBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes that haven't implemented the rollout contract yet — e.g. RawDeployment in alpha).",
           "type": "string"
         },
         "scaleTargetRef": {
@@ -1634,6 +1638,10 @@
           "description": "Partition holds back updates for Instances whose index is less than Partition. Mirrors RollingUpdate.Partition. 0 (the default) updates all Instances. Used for canary holds.",
           "type": "integer",
           "format": "int32"
+        },
+        "rollbackToRevision": {
+          "description": "RollbackToRevision, when set, names a ControllerRevision the InferenceReplica must roll every Instance back to — overriding the rendered desired template with that revision's stored pod template (and using it as the update target). The InferenceService controller sets this during a canary rollback so the forward-roll machinery drains the canary pods back onto the stable revision. Empty in steady state.",
+          "type": "string"
         }
       }
     },

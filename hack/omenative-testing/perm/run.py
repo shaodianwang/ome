@@ -61,7 +61,7 @@ REV_LABEL = "ome.io/revision-hash"   # OMENative per-revision pod label (query.L
 TRIGGER_ANNO = "perm.test/rev"       # annotation we bump to trigger a rollout
 TRIGGER_VAL = "v2"
 PROMOTE_ANNO = "ome.io/rollout-promote"    # canary manual-promote verb (value = canary revision hash)
-ROLLBACK_ANNO = "ome.io/rollout-rollback"  # canary rollback verb (deferred: guarded no-op + warning)
+ROLLBACK_ANNO = "ome.io/rollout-rollback"  # canary rollback verb (drain to stable + sticky hold)
 STABILITY_S = 5     # require target sustained this many seconds before CONVERGED
 SEQ_TOL_S = 6       # ordering/soak slack (1Hz sampling + readiness jitter)
 GANG_TOL_S = 5.0    # multi-node gang grace: a leader+worker Instance may look mixed-revision
@@ -842,20 +842,6 @@ def _canary_primary(ctx):
     return ""
 
 
-def _canary_warning(case_id):
-    """True once a Warning event with reason=CanaryRollbackUnsupported exists for
-    the ISVC (the deferred-rollback signal the executor emits in Dispatch)."""
-    r = kubectl("-n", NS, "get", "events",
-                "--field-selector", f"involvedObject.name={case_id},reason=CanaryRollbackUnsupported",
-                "-o", "json")
-    if r.returncode != 0:
-        return False
-    try:
-        return len(json.loads(r.stdout).get("items", [])) > 0
-    except Exception:
-        return False
-
-
 def _canary(case_id, yaml_file, desc, hdr):
     """Canary rollout (OEP-0015.1). The ISVC ships spec.rollout.canary in the
     initial apply; once rev A is Ready we bump the primary component's revision to
@@ -863,11 +849,13 @@ def _canary(case_id, yaml_file, desc, hdr):
 
         capacity gate (Pending) → traffic split (Canarying) → Pause →
         promote (Auto = pause timer, Manual = ome.io/rollout-promote=<hash>) →
-        … → final step 100% → Promoting → Stable (status.canary cleared).
+        … → final step 100% → Promoting → Stable (status.canary persists at the
+        done sentinel: currentStep == number of steps).
 
     Header keys: canary=auto|manual (else read from the live spec), rollback=1
-    (set ome.io/rollout-rollback mid-pause and assert it is a NON-wedging no-op
-    plus a CanaryRollbackUnsupported warning event — rollback is deferred).
+    (set ome.io/rollout-rollback mid-rollout and assert the canary drains every
+    Instance back to the stable revision, holds there at RolledBack, and records
+    the rejected revision in status.canary.rolledBackRevisionHash).
 
     Asserts the STATUS-level contract (rolloutPhase progression, currentStep,
     status.components.<primary>.traffic[] weights stepping to 100 on the canary
@@ -895,9 +883,10 @@ def _canary(case_id, yaml_file, desc, hdr):
 
     phases, traffic_by_step = set(), {}
     canary_hash = None
-    promoted = rollback_set = warn_seen = False
+    rollback_set = did_promote = False
+    promoted_step = -1  # highest step index already promoted (multi-step plans pause more than once)
     promote_rejected = None
-    rollingback_ticks = 0
+    rejected = None     # status.canary.rolledBackRevisionHash once a rollback is recorded
     state, stable, last_poll = "ROLLING", None, 0.0
 
     while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
@@ -919,39 +908,38 @@ def _canary(case_id, yaml_file, desc, hdr):
                 if t.get("latestRevision"):
                     traffic_by_step[step] = t.get("percent", 0)
 
-        # Deferred-rollback probe: once the canary is in progress, request rollback
-        # ONCE and assert it does NOT wedge + a warning fires (it is a no-op today).
+        # Rollback probe: once the canary is in progress, request a rollback. The
+        # canary reverts every Instance to the stable revision and HOLDS there
+        # (RolledBack), rejecting the rolled-back revision.
         if do_rollback and not rollback_set and phase in ("Canarying", "Paused"):
             rollback_set = True
             kubectl("-n", NS, "annotate", "isvc", case_id, f"{ROLLBACK_ANNO}=true", "--overwrite")
-            print("    set ome.io/rollout-rollback=true (expect: ignored + CanaryRollbackUnsupported warning)")
-        if rollback_set:
-            warn_seen = warn_seen or _canary_warning(case_id)
-            rollingback_ticks = rollingback_ticks + 1 if phase == "RollingBack" else 0
+            print("    set ome.io/rollout-rollback=true (expect: drain to stable -> RolledBack)")
+        rejected = can.get("rolledBackRevisionHash") or rejected
 
-        # Manual promotion: at a Paused step promote THIS canary hash. For the
-        # rollback variant, wait until the no-op + warning are observed first.
-        if policy == "manual" and phase == "Paused" and canary_hash and not promoted:
-            if do_rollback and not warn_seen:
-                pass
+        # Manual promotion: promote at EACH paused step (multi-step plans pause
+        # more than once; advanceStep consumes the annotation). Skipped when rolling
+        # back — the rollback drives the rollout instead of a promote.
+        if policy == "manual" and not do_rollback and phase == "Paused" and canary_hash and step is not None and step > promoted_step:
+            rr = kubectl("-n", NS, "annotate", "isvc", case_id,
+                         f"{PROMOTE_ANNO}={canary_hash}", "--overwrite")
+            if rr.returncode != 0:
+                promote_rejected = (rr.stderr.strip().splitlines() or ["rejected"])[-1][:160]
+                print(f"    ✗ promote annotation REJECTED: {promote_rejected}")
             else:
-                rr = kubectl("-n", NS, "annotate", "isvc", case_id,
-                             f"{PROMOTE_ANNO}={canary_hash}", "--overwrite")
-                if rr.returncode != 0:
-                    promote_rejected = (rr.stderr.strip().splitlines() or ["rejected"])[-1][:160]
-                    print(f"    ✗ promote annotation REJECTED: {promote_rejected}")
-                else:
-                    promoted = True
-                    print(f"    set ome.io/rollout-promote={canary_hash}")
+                promoted_step = step
+                did_promote = True
+                print(f"    promoted step {step} (ome.io/rollout-promote={canary_hash})")
 
         wsteps = " ".join(f"s{k}={v}%" for k, v in sorted(traffic_by_step.items()))
         print(f"    [t={int(now - ctx['trigger_ts']):3d}s] phase={phase:<11} step={step} "
-              f"canary={canary_hash} traffic[{wsteps}]")
+              f"canary={canary_hash} rejected={rejected} traffic[{wsteps}]")
 
-        # Converged: the canary reached Stable. status.canary persists at the
-        # done sentinel (currentStep == number of steps) rather than being
-        # cleared, so we key convergence on the phase, not on status.canary.
-        if phase == "Stable":
+        # Converged: rollback cases settle at RolledBack (held on stable); normal
+        # canaries at Stable. status.canary persists (done sentinel / rolled-back
+        # marker), so convergence keys on the phase.
+        target_phase = "RolledBack" if do_rollback else "Stable"
+        if phase == target_phase:
             stable = stable or now
             if now - stable >= STABILITY_S:
                 state = "CONVERGED"
@@ -970,15 +958,33 @@ def _canary(case_id, yaml_file, desc, hdr):
         else:
             verdict = "FAIL"; notes.append(msg_bad); checks.append(f"  ✗ {msg_bad}")
 
+    want = "RolledBack" if do_rollback else "Stable"
     good(state == "CONVERGED",
-         f"reached Stable in {ctx.get('converged_at')}s (status.canary cleared)",
-         f"did not reach Stable (state={state}, phases={sorted(phases)})")
-    good("Canarying" in phases, "observed Canarying phase", "never observed Canarying phase")
+         f"reached {want} in {ctx.get('converged_at')}s",
+         f"did not reach {want} (state={state}, phases={sorted(phases)})")
+    # NOTE: "Canarying" is transient — the reconciler sets it then immediately
+    # supersedes it with "Paused" in the same reconcile for any step that pauses,
+    # so it never persists for paused steps. Assert the canary entered an ACTIVE
+    # split phase (Canarying OR Paused) instead of jumping straight to terminal;
+    # do not assert Canarying alone (it false-fails every paused step).
+    good(("Canarying" in phases) or ("Paused" in phases),
+         "observed an active canary phase (Canarying/Paused)",
+         f"never observed an active canary phase (jumped straight to terminal); saw {sorted(phases)}")
+    new, _old = _inst_rev_split(ctx, primary)
+
+    if do_rollback:
+        # Rolled back: drained back to stable (0 canary Instances), the rejected
+        # revision recorded + held, and RollingBack observed during the drain.
+        good(new == 0, f"{primary} drained back to stable (0 canary Instances)",
+             f"{primary} still has {new} canary Instances after rollback")
+        good(bool(rejected), f"rejected revision recorded ({rejected})", "rolledBackRevisionHash not recorded")
+        good("RollingBack" in phases, "observed RollingBack (draining to stable)", "never observed RollingBack")
+        return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
     weights = [traffic_by_step[k] for k in sorted(traffic_by_step)]
     good(bool(weights) and weights[-1] == 100 and weights == sorted(weights),
          f"canary traffic weight stepped to 100 (status): {weights}",
          f"canary traffic weights not monotonic-to-100 (status): {weights}")
-    new, _old = _inst_rev_split(ctx, primary)
     good(new == N[primary],
          f"{primary} fully rolled to canary revision ({new}/{N[primary]})",
          f"{primary} not fully on canary revision ({new}/{N[primary]})")
@@ -990,13 +996,14 @@ def _canary(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✗ MANUAL promote annotation rejected by admission: {promote_rejected}")
         else:
             good("Paused" in phases, "MANUAL rollout paused before promote", "MANUAL rollout never Paused")
-            good(promoted, "promote annotation accepted + consumed (advanced)", "never promoted")
+            good(did_promote, "promote annotation accepted + consumed (advanced)", "never promoted")
     else:
-        good("Canarying" in phases, "AUTO rollout progressed through steps", "AUTO rollout did not progress")
-
-    if do_rollback:
-        good(rollingback_ticks == 0, "rollback did NOT wedge at RollingBack (no-op)", "rollback WEDGED at RollingBack")
-        good(warn_seen, "CanaryRollbackUnsupported warning event emitted", "no CanaryRollbackUnsupported warning event")
+        # AUTO advances on the pause timer with no manual promote, so it must step
+        # through the intermediate traffic weights on its own (not cut straight to
+        # 100%). Reaching the terminal phase above already proves auto-completion.
+        good(len(traffic_by_step) >= 2,
+             "AUTO rollout stepped through intermediate traffic weights",
+             f"AUTO rollout did not step through intermediate weights (saw steps {sorted(traffic_by_step)})")
 
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 

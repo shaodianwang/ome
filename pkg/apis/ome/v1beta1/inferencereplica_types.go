@@ -199,6 +199,15 @@ type InferenceReplicaPacing struct {
 	// (currently 25%).
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+
+	// RollbackToRevision, when set, names a ControllerRevision the
+	// InferenceReplica must roll every Instance back to — overriding the
+	// rendered desired template with that revision's stored pod template (and
+	// using it as the update target). The InferenceService controller sets this
+	// during a canary rollback so the forward-roll machinery drains the canary
+	// pods back onto the stable revision. Empty in steady state.
+	// +optional
+	RollbackToRevision *string `json:"rollbackToRevision,omitempty"`
 }
 
 // InferenceReplicaStatus is the observed state of one

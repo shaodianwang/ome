@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,8 +45,11 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	}
 	// Observe per-revision pods for EVERY configured component (not just the
 	// primary): the canary stages capacity on all of them, so the gate must wait
-	// on all of them before shifting traffic.
-	perRev, err := coordination.ObservePerRevisionPods(ctx, d.Reader, d.ISVC, configuredComponents(d.ISVC))
+	// on all of them before shifting traffic. perRev is TOTAL pods (used to ensure
+	// per-revision Services + pick the stable revision); readyRev is the READY
+	// (serving) subset — the capacity gate MUST use ready so traffic never shifts
+	// onto canary pods that exist but are not serving yet.
+	perRev, readyRev, err := coordination.ObservePerRevisionPods(ctx, d.Reader, d.ISVC, configuredComponents(d.ISVC))
 	if err != nil {
 		return 0, err
 	}
@@ -83,27 +87,67 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		CanaryRevisionHash:     canaryHash,
 		StableRevisionHash:     otherRevision(pods, canaryHash),
 		DesiredReplicas:        componentReplicas(d.ISVC, primary),
-		PerRevisionPods:        pods,
-		SecondaryCapacityReady: secondaryCapacityReady(d.ISVC, perRev, canaryHash, primary),
+		PerRevisionPods:        readyRev[primary],
+		SecondaryCapacityReady: secondaryCapacityReady(d.ISVC, readyRev, canaryHash, primary),
 		Now:                    now,
 	})
 	if err != nil {
 		return 0, err
 	}
 
-	// Canary rollback is deferred: the partition mechanism cannot revert instances
-	// already rolled to the canary, so honoring ome.io/rollout-rollback wedges the
-	// rollout at RollingBack. Treat it as a guarded no-op — surface a warning so
-	// the operator knows the verb had no effect (only while a canary is actually
-	// in progress, hence after Reconcile on res.Active), and let the canary
-	// proceed per its plan. To roll back, revert the component spec.
-	if d.Recorder != nil && res.Active && isRollbackRequested(d.ISVC) {
-		d.Recorder.Event(d.ISVC, "Warning", "CanaryRollbackUnsupported",
-			"ome.io/rollout-rollback is not yet supported for canary rollouts and was ignored; revert the component spec to roll back")
+	// Rollback signal: when the executor is rolling back, point the primary's IR
+	// at the stable ControllerRevision so it rolls every Instance back to stable;
+	// otherwise clear the signal. (Reconcile shifted traffic + set the phase; this
+	// drives the actual pod revert.)
+	if err := reconcileRollbackSignal(ctx, d.Client, d.Reader, d.ISVC, primary, res.RolledBack); err != nil {
+		return 0, err
 	}
 
 	recordDispatch(d.Recorder, d.ISVC, primary, res)
 	return res.RequeueAfter, nil
+}
+
+// reconcileRollbackSignal sets (rolledBack) or clears the primary IR's
+// Spec.Pacing.RollbackToRevision. When rolling back it points at the IR's
+// CurrentRevision (the stable, pre-canary revision) so the IR reconciler
+// overrides its desired template with that revision and rolls every Instance
+// back to it. Idempotent — only writes on a change.
+func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, rolledBack bool) error {
+	if c == nil || reads == nil {
+		return nil
+	}
+	ir := &v1beta1.InferenceReplica{}
+	key := types.NamespacedName{Namespace: isvc.Namespace, Name: irprojector.InferenceReplicaName(isvc.Name, comp)}
+	if err := reads.Get(ctx, key, ir); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	var want *string
+	if rolledBack && ir.Status.CurrentRevision != "" {
+		w := ir.Status.CurrentRevision
+		want = &w
+	}
+	var cur *string
+	if ir.Spec.Pacing != nil {
+		cur = ir.Spec.Pacing.RollbackToRevision
+	}
+	if ptrStrEqual(cur, want) {
+		return nil
+	}
+	if ir.Spec.Pacing == nil {
+		ir.Spec.Pacing = &v1beta1.InferenceReplicaPacing{}
+	}
+	ir.Spec.Pacing.RollbackToRevision = want
+	return c.Update(ctx, ir)
+}
+
+func ptrStrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // configuredComponents lists every present Component in primary order
@@ -131,7 +175,9 @@ func configuredComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentTyp
 // can advance the step while the engine/decoder canary pods behind it are still
 // coming up. True when there are no secondaries (single-component canary). The
 // step index mirrors EffectivePartition so the gate matches the staged partition.
-func secondaryCapacityReady(isvc *v1beta1.InferenceService, perRev map[v1beta1.ComponentType]map[string]int32, canaryHash string, primary v1beta1.ComponentType) bool {
+// readyPerRev must be the READY (serving) per-revision counts — not total — so a
+// secondary's pods that merely exist don't satisfy the gate prematurely.
+func secondaryCapacityReady(isvc *v1beta1.InferenceService, readyPerRev map[v1beta1.ComponentType]map[string]int32, canaryHash string, primary v1beta1.ComponentType) bool {
 	plan := isvc.Spec.GetCanary()
 	if plan == nil || len(plan.Steps) == 0 || canaryHash == "" {
 		return true
@@ -148,7 +194,7 @@ func secondaryCapacityReady(isvc *v1beta1.InferenceService, perRev map[v1beta1.C
 		if c == primary {
 			continue
 		}
-		if perRev[c][canaryHash] < resolveStepNewCount(step, componentReplicas(isvc, c)) {
+		if readyPerRev[c][canaryHash] < resolveStepNewCount(step, componentReplicas(isvc, c)) {
 			return false
 		}
 	}
