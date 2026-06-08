@@ -18,6 +18,14 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 )
 
+// isvcGVK is the GroupVersionKind the OMENative-on-ISVC audit wrappers
+// stamp on the audit ConfigMap's controller OwnerReference. Decoded ISVC
+// objects often have an empty TypeMeta (controller-runtime strips it
+// during deserialization), so the workload-side audit helper cannot
+// derive the GVK from the owner object — PersistAuditLedgerForISVC
+// passes the correct value explicitly.
+var isvcGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
+
 // AuditConfigMapNameForISVC returns the deterministic audit ConfigMap
 // name for the given ISVC. Thin wrapper around the owner-agnostic
 // audit.ConfigMapNameForOwner so callers holding a typed ISVC handle

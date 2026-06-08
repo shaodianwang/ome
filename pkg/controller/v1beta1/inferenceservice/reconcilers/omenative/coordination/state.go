@@ -121,21 +121,6 @@ type GroupTransition struct {
 	// Message is the operator-facing explanation of the phase.
 	Message string
 
-	// SurgeBudget reports the maximum number of new-revision pods the
-	// caller may create for each Component this reconcile, computed
-	// from the group's pacing block via MaxSurgeBudget AND (for
-	// RatioBalanced pacing) gated by EvaluateSurge. Nil when the
-	// transition's Phase doesn't authorize surge (Idle, Paused, Failed,
-	// Shifting, ScalingDown). Caller plumbs these into the per-Component
-	// surge logic to respect the operator-supplied MaxSurge.
-	SurgeBudget map[v1beta1.ComponentType]int32
-
-	// UnavailableBudget reports the maximum number of old-revision pods
-	// the caller may terminate before the new-revision replacements are
-	// Ready. Mirrors SurgeBudget — nil when not in a phase that
-	// authorizes pod termination.
-	UnavailableBudget map[v1beta1.ComponentType]int32
-
 	// RatioSkewRejected is true when at least one Component's surge
 	// budget was reduced to zero by RatioBalanced pacing this reconcile.
 	// Surfaces the EvaluateSurge SkewRejected signal so callers can
@@ -217,23 +202,19 @@ func blueGreenTransition(obs GroupObservation) GroupTransition {
 
 	switch {
 	case !allHaveSurge:
-		budget, skew := computeSurgeBudgetWithRatio(obs)
+		_, skew := computeSurgeBudgetWithRatio(obs)
 		return GroupTransition{
 			Phase:             v1beta1.CoordinationPhaseSurging,
 			CompositePhase:    string(v1beta1.CoordinationPhaseSurging),
 			Message:           "creating new-revision pods",
-			SurgeBudget:       budget,
-			UnavailableBudget: computeUnavailableBudget(obs),
 			RatioSkewRejected: skew,
 		}
 	case !allNewReady:
-		budget, skew := computeSurgeBudgetWithRatio(obs)
+		_, skew := computeSurgeBudgetWithRatio(obs)
 		return GroupTransition{
 			Phase:             v1beta1.CoordinationPhaseWaiting,
 			CompositePhase:    string(v1beta1.CoordinationPhaseWaiting),
 			Message:           "waiting for new-revision pods to be Ready",
-			SurgeBudget:       budget,
-			UnavailableBudget: computeUnavailableBudget(obs),
 			RatioSkewRejected: skew,
 		}
 	}
@@ -321,23 +302,19 @@ func rollingUpdateTransition(obs GroupObservation) GroupTransition {
 	}
 	switch {
 	case anySurging:
-		budget, skew := computeSurgeBudgetWithRatio(obs)
+		_, skew := computeSurgeBudgetWithRatio(obs)
 		return GroupTransition{
 			Phase:             v1beta1.CoordinationPhaseSurging,
 			CompositePhase:    string(v1beta1.CoordinationPhaseSurging),
 			Message:           "at least one Component is surging",
-			SurgeBudget:       budget,
-			UnavailableBudget: computeUnavailableBudget(obs),
 			RatioSkewRejected: skew,
 		}
 	case anyWaiting:
-		budget, skew := computeSurgeBudgetWithRatio(obs)
+		_, skew := computeSurgeBudgetWithRatio(obs)
 		return GroupTransition{
 			Phase:             v1beta1.CoordinationPhaseWaiting,
 			CompositePhase:    string(v1beta1.CoordinationPhaseWaiting),
 			Message:           "waiting for new-revision pods to be Ready",
-			SurgeBudget:       budget,
-			UnavailableBudget: computeUnavailableBudget(obs),
 			RatioSkewRejected: skew,
 		}
 	case anyScalingDown:
@@ -612,19 +589,4 @@ func computeSurgeBudgetWithRatio(obs GroupObservation) (map[v1beta1.ComponentTyp
 		}
 	}
 	return budget, skew
-}
-
-// computeUnavailableBudget mirrors computeSurgeBudget for the
-// MaxUnavailable side.
-func computeUnavailableBudget(obs GroupObservation) map[v1beta1.ComponentType]int32 {
-	pacing := obs.Group.Pacing
-	out := make(map[v1beta1.ComponentType]int32, len(obs.Components))
-	for c, comp := range obs.Components {
-		replicas := comp.DesiredReplicas
-		if replicas <= 0 {
-			replicas = 1
-		}
-		out[c] = MaxUnavailableBudget(pacing, replicas)
-	}
-	return out
 }

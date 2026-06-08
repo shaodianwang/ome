@@ -1476,3 +1476,22 @@ func TestDecoderSurgeBudget_InWakeUpDeltaGatesSecondSurge(t *testing.T) {
 		}
 	}
 }
+
+// CheckRatioGate, CheckUnavailabilityGate, and CheckSurgeGate are
+// test-only shims preserving the (isvc, component, inFlightDelta) call
+// shape the gate unit tests exercise. The production package-level
+// wrappers were removed (zero production callers — the dispatcher uses
+// the GateContext-aware methods via EvaluateUpdateGate); these helpers
+// keep the per-gate band-math coverage by delegating to the same
+// GateContext methods the wrappers did.
+func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (bool, string) {
+	return ResolveGateContext(isvc, component).CheckRatio(inFlightDelta, -1)
+}
+
+func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (bool, string) {
+	return ResolveGateContext(isvc, component).CheckUnavailability(inFlightDelta)
+}
+
+func CheckSurgeGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (bool, string) {
+	return ResolveGateContext(isvc, component).CheckSurge(inFlightDelta)
+}

@@ -30,14 +30,14 @@ func TestRecordNormal_EmitsAgainstISVC(t *testing.T) {
 	rec := record.NewFakeRecorder(2)
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "ns"}}
 
-	RecordNormal(rec, isvc, EventReasonInstanceReady, "Instance %d ready", 0)
+	RecordNormal(rec, isvc, EventReasonMigrationRequestRejected, "Instance %d rejected", 0)
 
 	if len(rec.Events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(rec.Events))
 	}
 	msg := <-rec.Events
 	// fake recorder formats as "<type> <reason> <message>".
-	want := "Normal InstanceReady Instance 0 ready"
+	want := "Normal MigrationRequestRejected Instance 0 rejected"
 	if msg != want {
 		t.Errorf("event format mismatch: got %q want %q", msg, want)
 	}
@@ -47,10 +47,10 @@ func TestRecordWarning_EventTypeWarning(t *testing.T) {
 	rec := record.NewFakeRecorder(1)
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "ns"}}
 
-	RecordWarning(rec, isvc, EventReasonOperationDeadlineExceeded, "stuck for %s", "30m")
+	RecordWarning(rec, isvc, EventReasonUnsupportedSchemaVersion, "stuck for %s", "30m")
 
 	msg := <-rec.Events
-	want := "Warning OperationDeadlineExceeded stuck for 30m"
+	want := "Warning UnsupportedSchemaVersion stuck for 30m"
 	if msg != want {
 		t.Errorf("event format mismatch: got %q want %q", msg, want)
 	}

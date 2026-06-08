@@ -338,11 +338,15 @@ func unavailableInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
 	return n
 }
 
-// CheckRatioGate is the consumer side of RatioBalanced pacing. The
-// OMENative ops dispatcher calls it before kicking off a per-Instance
-// Update to ask: "given the live cross-Component pod distribution, may
-// this Component bump one more pod to the new revision without skewing
-// the ratio past tolerance?"
+// CheckRatio is the consumer side of RatioBalanced pacing. The
+// dispatcher calls ResolveGateContext once per per-Instance tick and
+// threads the resulting context into each gate via CheckRatio /
+// CheckSurge / CheckUnavailability / CheckSequential, paying the
+// resolve prelude exactly once per tick instead of once per gate.
+//
+// It asks: "given the live cross-Component pod distribution, may this
+// Component bump one more pod to the new revision without skewing the
+// ratio past tolerance?"
 //
 // Returns allowed=true when:
 //   - The Component is not in any RatioBalanced coord group,
@@ -363,18 +367,6 @@ func unavailableInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
 // subtracting in-flight, every gate decision in one wake-up shares the
 // same stale snapshot answer and the dispatcher fires past the band
 // before status catches up.
-func CheckRatioGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
-	// Drain projection (-1) is the conservative default. The strategy-aware
-	// caller (coordination.EvaluateUpdateGate) uses the GateContext method
-	// directly with a +1 surge projection for SurgeThenDrain.
-	return ResolveGateContext(isvc, component).CheckRatio(inFlightDelta, -1)
-}
-
-// CheckRatio is the GateContext-aware variant of CheckRatioGate. The
-// dispatcher calls ResolveGateContext once per per-Instance tick and
-// threads the resulting context into each gate via CheckRatio /
-// CheckSurge / CheckUnavailability / CheckSequential, paying the
-// resolve prelude exactly once per tick instead of once per gate.
 func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool, reason string) {
 	if ctx.ShortCircuit {
 		return true, ctx.ShortReason
@@ -447,7 +439,6 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 	//     the old one drains, so the transient is +1 capacity.
 	//   - recreate / drain-first → -1: the old pod leaves rotation first,
 	//     so the transient is -1 capacity.
-	// The package-level CheckRatioGate wrapper defaults to -1 (drain).
 	//
 	// Getting this sign right is load-bearing. A hardcoded -1 for a
 	// SurgeThenDrain roll mis-models the surge as a capacity loss: on a
@@ -462,12 +453,14 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 	return false, decision.Reason
 }
 
-// CheckUnavailabilityGate is the consumer side of MaxUnavailable
-// pacing. The OMENative ops dispatcher calls it before kicking off a
-// disruptive operation (Update recreate, in-place drain, Restart) to
-// ask: "given the live pod observation PLUS the in-flight count from
-// this wake-up, may this Component take one more pod offline without
-// exceeding the group's MaxUnavailable budget?"
+// CheckUnavailability is the consumer side of MaxUnavailable pacing.
+// The OMENative ops dispatcher calls it before kicking off a disruptive
+// operation (Update recreate, in-place drain, Restart) to ask: "given
+// the live pod observation PLUS the in-flight count from this wake-up,
+// may this Component take one more pod offline without exceeding the
+// group's MaxUnavailable budget?" See GateContext / CheckRatio for the
+// pre-resolve pattern the dispatcher uses to pay the prelude once per
+// per-Instance tick.
 //
 // inFlightDelta is the number of pods the dispatcher has ALREADY
 // flipped to NotServing in this wake-up. Status counters from
@@ -494,14 +487,6 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 // will deadlock rollouts. SurgeThenDrain side-steps the gate by
 // creating new pods within the surge budget instead of taking old
 // ones offline.
-func CheckUnavailabilityGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
-	return ResolveGateContext(isvc, component).CheckUnavailability(inFlightDelta)
-}
-
-// CheckUnavailability is the GateContext-aware variant of
-// CheckUnavailabilityGate. See GateContext / CheckRatio for the
-// pre-resolve pattern the dispatcher uses to pay the prelude once per
-// per-Instance tick.
 func (ctx GateContext) CheckUnavailability(inFlightDelta int32) (allowed bool, reason string) {
 	if ctx.ShortCircuit {
 		return true, ctx.ShortReason
@@ -534,15 +519,17 @@ func (ctx GateContext) CheckUnavailability(inFlightDelta int32) (allowed bool, r
 	return true, "within unavailable budget"
 }
 
-// CheckSurgeGate is the surge-side dual of CheckUnavailabilityGate.
+// CheckSurge is the surge-side dual of CheckUnavailability.
 // SurgeThenDrain never takes pods OFFLINE (so the unavailability gate
 // is irrelevant) but it temporarily adds an extra pod per Instance
 // (alive = desired + N where N is the number of in-flight surges).
 // This gate enforces the group's MaxSurge budget across the Component.
+// See GateContext / CheckRatio for the pre-resolve pattern the
+// dispatcher uses to pay the prelude once per per-Instance tick.
 //
 // The dispatcher calls this only on `startingFresh` for instances
 // whose UpdateStrategy is SurgeThenDrain (other strategies go through
-// CheckUnavailabilityGate). Mirrors the inFlightDelta pattern from the
+// CheckUnavailability). Mirrors the inFlightDelta pattern from the
 // other gates: status counters can't see in-wake-up writes, so the
 // dispatcher threads its running tally to avoid the stale-snapshot
 // trap.
@@ -556,13 +543,6 @@ func (ctx GateContext) CheckUnavailability(inFlightDelta int32) (allowed bool, r
 // currentInFlightSurge = count of Instances whose Operation.Step is
 // the surge step (Surge or SurgeDrain) — those are the Instances that
 // already have an extra pod alive from a prior wake-up.
-func CheckSurgeGate(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, inFlightDelta int32) (allowed bool, reason string) {
-	return ResolveGateContext(isvc, component).CheckSurge(inFlightDelta)
-}
-
-// CheckSurge is the GateContext-aware variant of CheckSurgeGate. See
-// GateContext / CheckRatio for the pre-resolve pattern the dispatcher
-// uses to pay the prelude once per per-Instance tick.
 func (ctx GateContext) CheckSurge(inFlightDelta int32) (allowed bool, reason string) {
 	if ctx.ShortCircuit {
 		return true, ctx.ShortReason

@@ -9,79 +9,22 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// Event reasons emitted by OMENative. Centralized so a `git grep` on
-// the constant catches every site that fires the same event class.
-// Each reason maps to one or two transition points in the OMENative
-// lifecycle state machine.
+// Event reasons emitted by the live OMENative-on-ISVC path. The bulk of
+// the lifecycle event reasons now live in workload/types/events.go and
+// are fired by the workload ops package; only the migration-validation
+// reasons below are still fired directly by omenative/ops/migrate.go,
+// which records them against the parent ISVC before delegating into the
+// workload layer. Centralized so a `git grep` on the constant catches
+// every site that fires the same event class.
 const (
-	// Create / scale up lifecycle.
-	EventReasonInstanceCreated = "InstanceCreated"
-	EventReasonInstanceReady   = "InstanceReady"
-
-	// In-place update lifecycle.
-	EventReasonInPlaceUpdateStarted     = "InPlaceUpdateStarted"
-	EventReasonInPlaceUpdateCompleted   = "InPlaceUpdateCompleted"
-	EventReasonInPlaceUpdateNotPossible = "InPlaceUpdateNotPossible"
-	EventReasonInPlaceTimeoutFallback   = "InPlaceTimeoutFallback"
-
-	// Recreate update lifecycle.
-	EventReasonRecreateUpdateStarted   = "RecreateUpdateStarted"
-	EventReasonRecreateUpdateCompleted = "RecreateUpdateCompleted"
-
-	// Restart-on-pod-loss lifecycle.
-	EventReasonRestartTriggered = "RestartTriggered"
-	EventReasonRestartCompleted = "RestartCompleted"
-
-	// Operation timeout / stuck.
-	EventReasonOperationDeadlineExceeded = "OperationDeadlineExceeded"
-
-	// EventReasonInstanceFailed fires when an Instance has been escalated
-	// from a transient phase (Creating / Updating / Restarting / Migrating)
-	// to Phase=Failed because its in-flight Operation exceeded its
-	// Deadline and the controller has given up trying to converge it.
-	// Operator intervention required.
-	EventReasonInstanceFailed = "InstanceFailed"
-
-	// Migration request lifecycle.
-	EventReasonMigrationRequestAccepted = "MigrationRequestAccepted"
+	// EventReasonMigrationRequestRejected fires when a migration request
+	// annotation is rejected at validation (malformed payload, missing
+	// required fields) before any workload-side migration is attempted.
 	EventReasonMigrationRequestRejected = "MigrationRequestRejected"
-	EventReasonMigrationCompleted       = "MigrationCompleted"
+
+	// EventReasonUnsupportedSchemaVersion fires when a migration request
+	// carries a schemaVersion the controller does not understand.
 	EventReasonUnsupportedSchemaVersion = "UnsupportedSchemaVersion"
-
-	// Migration capacity / validation rejections.
-	EventReasonRateLimited               = "RateLimited"
-	EventReasonMigrationFromNodeMismatch = "MigrationFromNodeMismatch"
-	EventReasonMigrationSurgeAbandoned   = "MigrationSurgeAbandoned"
-
-	// Surge NodeAffinity would collapse to "hostname=FromNode AND
-	// hostname!=FromNode" — rejected before rendering.
-	EventReasonMigrationNodeAffinityConflict = "MigrationNodeAffinityConflict"
-
-	// Fired when a pod under the OMENative selector lacks
-	// ome.io/instance-incarnation. The controller refuses to delete it.
-	EventReasonFoundOrphan = "FoundOrphan"
-
-	// Revision-collision (rare; salted retry succeeded).
-	EventReasonRevisionCollision = "RevisionCollision"
-
-	// EventReasonMaybeNoGangScheduler is a soft Warning fired the first
-	// time a multi-pod Instance's PodGroup is created under a pod
-	// template whose `spec.schedulerName` is unset OR equals the
-	// upstream default ("default-scheduler"). The PodGroup itself was
-	// created successfully — but a stock kube-scheduler does NOT read
-	// `scheduling.x-k8s.io/v1alpha1` PodGroup objects, so the gang
-	// contract degrades to per-pod scheduling silently. Operators must
-	// either install scheduler-plugins as a secondary scheduler and set
-	// `runtime.spec.schedulerName=scheduler-plugins-scheduler`, OR
-	// install it as a default-scheduler plugin (in which case the
-	// warning is a false positive — the controller cannot detect that
-	// arrangement from inside the cluster, so we err on the side of
-	// surfacing the heuristic). De-duplicated per (ISVC, Component)
-	// per controller process so reconciles do not spam the event log;
-	// see workload/gang.maybeWarnNoGangScheduler for the dedup map
-	// (the workload-extraction refactor moved the helper out of
-	// omenative/gang.go).
-	EventReasonMaybeNoGangScheduler = "MaybeNoGangScheduler"
 )
 
 // recordEventf emits a K8s Event against the parent InferenceService.

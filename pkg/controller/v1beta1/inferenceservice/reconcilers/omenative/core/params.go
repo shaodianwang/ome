@@ -6,7 +6,7 @@
 // ReconcileParams shim the legacy dispatch layer still passes around.
 //
 // The aliases let pre-extraction call sites
-// (omenative.{ComponentPlan,InstancePlan,...,BuildPlan,NewExpectations})
+// (omenative.{ComponentPlan,InstancePlan,...,NewExpectations})
 // keep compiling unchanged while the bodies live in workload/.
 // Adapter-aware callers should depend on workload directly; this
 // package will shrink to the per-Source projection helpers in future
@@ -14,15 +14,12 @@
 package core
 
 import (
-	"fmt"
-
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
@@ -45,94 +42,6 @@ var (
 	NewExpectations     = workload.NewExpectations
 	DefaultExpectations = workload.DefaultExpectations
 )
-
-// AllocateSurgeIndex is the ISVC-adapter-facing wrapper around
-// workload.AllocateSurgeIndex. It centralizes the
-// ISVC.Status.Components[c].Lifecycle.InstanceStatuses projection so
-// callers don't repeat the nil-guard dance. Converts at the boundary
-// via v1beta1convert.InstanceStatusSliceToWorkload — the
-// workload-extraction refactor moved workload.AllocateSurgeIndex to
-// take workload-owned types so the workload package itself stays free
-// of pkg/apis/ome/v1beta1.
-func AllocateSurgeIndex(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) int32 {
-	return workload.AllocateSurgeIndex(v1beta1convert.InstanceStatusSliceToWorkload(extractInstanceStatuses(isvc, component)))
-}
-
-// extractInstanceStatuses pulls the OMENative InstanceStatuses slice
-// from the ISVC for one Component. Returns nil when the parent map /
-// Component entry / OMENative subtree is missing — matches the
-// behavior callers relied on before the workload extraction.
-func extractInstanceStatuses(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) []v1beta1.OMENativeInstanceStatus {
-	if isvc == nil {
-		return nil
-	}
-	cs, ok := isvc.Status.Components[component]
-	if !ok || cs.Lifecycle == nil {
-		return nil
-	}
-	return cs.Lifecycle.InstanceStatuses
-}
-
-// BuildPlan is the ISVC-adapter-facing wrapper around
-// workload.BuildPlan. Projects ReconcileParams to the workload
-// (DesiredSpec, ObservedState) shape, then delegates.
-//
-// Adapter callers in future refactors will skip this wrapper and call
-// workload.BuildPlan directly with their own projection; this shim
-// keeps the legacy dispatch chain compiling during the extraction.
-func BuildPlan(p ReconcileParams) (ComponentPlan, error) {
-	if p.ComponentExt == nil {
-		return ComponentPlan{}, errNilComponentExt(p.Component)
-	}
-
-	desired := workload.WorkloadDesiredSpec{
-		Replicas: replicasFromComponentExt(p.ComponentExt),
-		MultiPod: p.MultiPod,
-		Runners:  runnersForDesired(p.MultiPod, int32(p.WorkerSize)),
-	}
-	if p.ComponentExt.Lifecycle != nil {
-		desired.Lifecycle = v1beta1convert.LifecycleSpecToWorkload(*p.ComponentExt.Lifecycle)
-	}
-
-	observed := workload.WorkloadObservedState{
-		InstanceStatuses: v1beta1convert.InstanceStatusSliceToWorkload(extractInstanceStatuses(p.ISVC, p.Component)),
-	}
-
-	return workload.BuildPlan(v1beta1convert.ComponentTypeToWorkload(p.Component), desired, observed)
-}
-
-// replicasFromComponentExt projects the ComponentExtensionSpec
-// MinReplicas pointer into the workload spec's Replicas int32. nil or
-// zero means "default to 1" — workload.BuildPlan handles the actual
-// defaulting, so any value <= 0 here turns into 0 (caller-clear
-// "unset") and the workload layer defaults.
-func replicasFromComponentExt(c *v1beta1.ComponentExtensionSpec) int32 {
-	if c == nil || c.MinReplicas == nil || *c.MinReplicas <= 0 {
-		return 0
-	}
-	return int32(*c.MinReplicas)
-}
-
-// runnersForDesired returns the workload.Runner set for the desired
-// shape. Single-pod: one default runner of size 1. Multi-pod:
-// leader+worker pair.
-func runnersForDesired(multiPod bool, workerSize int32) []workload.Runner {
-	if !multiPod {
-		return []workload.Runner{{Name: "default", Size: 1}}
-	}
-	return []workload.Runner{
-		{Name: "leader", Size: 1},
-		{Name: "worker", Size: workerSize},
-	}
-}
-
-// errNilComponentExt centralizes the nil-ComponentExt guard that
-// workload.BuildPlan no longer needs (its caller always projects a
-// non-nil Lifecycle from a non-nil ComponentExt). The ISVC adapter
-// raises the error before the workload call.
-func errNilComponentExt(component v1beta1.ComponentType) error {
-	return fmt.Errorf("nil ComponentExtensionSpec for component=%s", component)
-}
 
 // ReconcileParams is the input bag the OMENative reconciler reads on each
 // invocation. Constructed at the dispatch site in

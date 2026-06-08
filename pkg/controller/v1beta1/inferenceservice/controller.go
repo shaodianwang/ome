@@ -29,7 +29,6 @@ import (
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"knative.dev/pkg/network"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -913,16 +912,6 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// lets the ISVC status aggregator pick up IR-side counter
 		// updates without polling.
 		Owns(&v1beta1.InferenceReplica{}).
-		// OMENative Pod event handler that updates the per-controller
-		// Expectations cache before enqueueing the parent ISVC. The
-		// predicate restricts the watch to `ome.io/managed-by=OMENative`
-		// pods so non-OMENative deployment modes don't pay the per-event
-		// cost.
-		Watches(
-			&v1.Pod{},
-			omenative.NewPodEventHandler(r.Expectations),
-			builder.WithPredicates(omenative.ManagedByOMENativePredicate()),
-		).
 		// EndpointSlice events for OMENative headless Services enqueue
 		// the parent ISVC so drain checks (IsPodDrained / IsPodInRotation)
 		// react to kube-proxy convergence without waiting on the periodic

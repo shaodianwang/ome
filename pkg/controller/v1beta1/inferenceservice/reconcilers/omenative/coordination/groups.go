@@ -138,17 +138,6 @@ func MembershipFor(groups []ResolvedGroup, c v1beta1.ComponentType) (ResolvedGro
 	return ResolvedGroup{}, false
 }
 
-// IsCoordinated reports whether the Component participates in any
-// non-Independent group. Independent membership is treated as
-// uncoordinated for state-machine routing.
-func IsCoordinated(groups []ResolvedGroup, c v1beta1.ComponentType) bool {
-	g, ok := MembershipFor(groups, c)
-	if !ok {
-		return false
-	}
-	return g.Policy != v1beta1.CoordinationPolicyIndependent
-}
-
 // PeerComponents returns the Components in the same group as c, excluding
 // c itself. Empty slice when c is uncoordinated or alone in its group.
 func PeerComponents(groups []ResolvedGroup, c v1beta1.ComponentType) []v1beta1.ComponentType {
@@ -164,45 +153,6 @@ func PeerComponents(groups []ResolvedGroup, c v1beta1.ComponentType) []v1beta1.C
 		peers = append(peers, peer)
 	}
 	return peers
-}
-
-// SequentialPosition reports the 0-based position of c in a Sequential
-// group's Order. Returns (-1, false) when the group is not Sequential
-// or when c is not in the order. Order is treated as the ground truth
-// for Sequential — the webhook ensures order covers every Component in
-// components[].
-func SequentialPosition(g ResolvedGroup, c v1beta1.ComponentType) (int, bool) {
-	if g.Policy != v1beta1.CoordinationPolicySequential {
-		return -1, false
-	}
-	for i, oc := range g.Order {
-		if oc == c {
-			return i, true
-		}
-	}
-	return -1, false
-}
-
-// SequentialPredecessor returns the Component immediately preceding c in
-// a Sequential group's Order. Returns "" when c is at position 0 (no
-// predecessor) or when the lookup fails.
-func SequentialPredecessor(g ResolvedGroup, c v1beta1.ComponentType) v1beta1.ComponentType {
-	pos, ok := SequentialPosition(g, c)
-	if !ok || pos <= 0 {
-		return ""
-	}
-	return g.Order[pos-1]
-}
-
-// SequentialSuccessor returns the Component immediately following c in a
-// Sequential group's Order, or "" when c is the last entry / the lookup
-// fails.
-func SequentialSuccessor(g ResolvedGroup, c v1beta1.ComponentType) v1beta1.ComponentType {
-	pos, ok := SequentialPosition(g, c)
-	if !ok || pos < 0 || pos >= len(g.Order)-1 {
-		return ""
-	}
-	return g.Order[pos+1]
 }
 
 // ValidateGroupShape returns a non-nil error when g is internally
