@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // ResolvedGroup carries the spec-derived view of one coordination
@@ -87,7 +88,7 @@ func pacingWithDefaults(in *v1beta1.CoordinationPacing) v1beta1.CoordinationPaci
 		out.Type = v1beta1.CoordinationPacingPerComponent
 	}
 	if out.MaxSurge == nil {
-		out.MaxSurge = ptrIntOrStringFromString("25%")
+		out.MaxSurge = utils.PtrIntOrStringFromString("25%")
 	}
 	if out.MaxUnavailable == nil {
 		// 25% matches K8s Deployment convention. A default of 0
@@ -95,7 +96,7 @@ func pacingWithDefaults(in *v1beta1.CoordinationPacing) v1beta1.CoordinationPaci
 		// refuse to take the only pod offline; 25% gives at-least-1
 		// budget at any positive replica count via the floor-rounded
 		// MaxUnavailableBudget math.
-		out.MaxUnavailable = ptrIntOrStringFromString("25%")
+		out.MaxUnavailable = utils.PtrIntOrStringFromString("25%")
 	}
 	if out.Type == v1beta1.CoordinationPacingRatioBalanced && out.RatioTolerancePercent == nil {
 		t := int32(5)

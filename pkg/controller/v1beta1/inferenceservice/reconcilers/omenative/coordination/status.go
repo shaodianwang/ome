@@ -6,10 +6,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"knative.dev/pkg/apis"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // BuildGroupStatus produces a RolloutCoordinationGroupStatus snapshot
@@ -167,73 +167,24 @@ func ComputeCoordinationReady(groups []v1beta1.RolloutCoordinationGroupStatus) *
 // MaxSurgeBudget converts the group's pacing MaxSurge (IntOrString)
 // into the absolute pod count budget for one Component's surge
 // step, given its desired replica count. Strings are interpreted as
-// percentages of replicas, rounded up.
+// percentages of replicas, rounded up. A nil MaxSurge defaults to 25%
+// (the value pacingWithDefaults fills in; this fallback only matters for
+// callers that bypass it). Delegates the int/percent math to
+// utils.ScaledCountFromIntOrString.
 func MaxSurgeBudget(pacing v1beta1.CoordinationPacing, replicas int32) int32 {
 	if pacing.MaxSurge == nil {
-		return surgeFromPercent(25, replicas)
+		return utils.ScaledCountFromIntOrString(utils.PtrIntOrStringFromString("25%"), replicas, true)
 	}
-	if pacing.MaxSurge.Type == intstr.Int {
-		v := int32(pacing.MaxSurge.IntValue())
-		if v < 0 {
-			return 0
-		}
-		return v
-	}
-	pct := strPercent(pacing.MaxSurge.StrVal)
-	return surgeFromPercent(pct, replicas)
+	return utils.ScaledCountFromIntOrString(pacing.MaxSurge, replicas, true)
 }
 
 // MaxUnavailableBudget converts the group's pacing MaxUnavailable
 // (IntOrString) into the absolute pod count, given replicas. Mirror
-// of MaxSurgeBudget.
+// of MaxSurgeBudget except a nil MaxUnavailable yields 0 (no drain
+// headroom) rather than a 25% default. Percent strings round up.
 func MaxUnavailableBudget(pacing v1beta1.CoordinationPacing, replicas int32) int32 {
 	if pacing.MaxUnavailable == nil {
 		return 0
 	}
-	if pacing.MaxUnavailable.Type == intstr.Int {
-		v := int32(pacing.MaxUnavailable.IntValue())
-		if v < 0 {
-			return 0
-		}
-		return v
-	}
-	pct := strPercent(pacing.MaxUnavailable.StrVal)
-	return surgeFromPercent(pct, replicas)
-}
-
-// surgeFromPercent computes ceil(replicas * percent / 100). Percent
-// values outside [0, 100] are clamped; replicas == 0 returns 0.
-func surgeFromPercent(percent int, replicas int32) int32 {
-	if percent <= 0 || replicas <= 0 {
-		return 0
-	}
-	if percent > 100 {
-		percent = 100
-	}
-	num := int64(replicas) * int64(percent)
-	out := num / 100
-	if num%100 != 0 {
-		out++
-	}
-	if out > int64(replicas) {
-		out = int64(replicas)
-	}
-	return int32(out)
-}
-
-// strPercent parses "<n>%" to int n. Returns 0 on parse failure;
-// callers reading from the validated webhook payload won't see this
-// branch in practice.
-func strPercent(s string) int {
-	if len(s) == 0 || s[len(s)-1] != '%' {
-		return 0
-	}
-	out := 0
-	for _, ch := range s[:len(s)-1] {
-		if ch < '0' || ch > '9' {
-			return 0
-		}
-		out = out*10 + int(ch-'0')
-	}
-	return out
+	return utils.ScaledCountFromIntOrString(pacing.MaxUnavailable, replicas, true)
 }

@@ -37,7 +37,7 @@
 package workload
 
 import (
-	"k8s.io/apimachinery/pkg/util/intstr"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // BudgetNoLimit is returned by Per* budget helpers when the source
@@ -63,7 +63,7 @@ func PerComponentMaxSurgeBudget(ru *RollingUpdate, replicas int32) int32 {
 	if ru == nil || ru.MaxSurge == nil {
 		return BudgetNoLimit
 	}
-	return resolveIntOrPercentCeil(ru.MaxSurge, replicas)
+	return utils.ScaledCountFromIntOrString(ru.MaxSurge, replicas, true)
 }
 
 // PerComponentMaxUnavailableBudget is the unavailability dual of
@@ -76,7 +76,7 @@ func PerComponentMaxUnavailableBudget(ru *RollingUpdate, replicas int32) int32 {
 	if ru == nil || ru.MaxUnavailable == nil {
 		return BudgetNoLimit
 	}
-	return resolveIntOrPercentCeil(ru.MaxUnavailable, replicas)
+	return utils.ScaledCountFromIntOrString(ru.MaxUnavailable, replicas, true)
 }
 
 // HeldByPartition reports whether the Instance at `index` is held on the old
@@ -89,66 +89,6 @@ func HeldByPartition(ru *RollingUpdate, index int32) bool {
 		return false
 	}
 	return index < *ru.Partition
-}
-
-// resolveIntOrPercentCeil converts an IntOrString budget against a
-// total. Integers are clamped to >= 0; percent strings resolve via
-// ceil(total * pct / 100); the percent is clamped to [0, 100].
-// Malformed string inputs (no '%' suffix, non-numeric) return 0 to
-// match the conservative behavior in coordination/status.go's
-// MaxSurgeBudget — operators reading a validated webhook payload
-// never hit the malformed branch.
-func resolveIntOrPercentCeil(v *intstr.IntOrString, total int32) int32 {
-	if v == nil {
-		return 0
-	}
-	if v.Type == intstr.Int {
-		if v.IntValue() < 0 {
-			return 0
-		}
-		return int32(v.IntValue())
-	}
-	pct := parsePercentString(v.StrVal)
-	return ceilPercent(pct, total)
-}
-
-// parsePercentString accepts "<n>%" and returns n. Returns 0 on parse
-// failure — matches coordination/status.go's strPercent contract.
-func parsePercentString(s string) int {
-	if len(s) == 0 || s[len(s)-1] != '%' {
-		return 0
-	}
-	out := 0
-	for _, ch := range s[:len(s)-1] {
-		if ch < '0' || ch > '9' {
-			return 0
-		}
-		out = out*10 + int(ch-'0')
-	}
-	return out
-}
-
-// ceilPercent computes ceil(total * percent / 100). Percent values
-// outside [0, 100] are clamped; total <= 0 returns 0. The result is
-// capped at total so a 100% expression on N replicas returns N (not
-// over-allocation). Mirrors coordination/status.go's surgeFromPercent
-// so the per-Component and group-level layers agree on rounding.
-func ceilPercent(percent int, total int32) int32 {
-	if percent <= 0 || total <= 0 {
-		return 0
-	}
-	if percent > 100 {
-		percent = 100
-	}
-	num := int64(total) * int64(percent)
-	out := num / 100
-	if num%100 != 0 {
-		out++
-	}
-	if out > int64(total) {
-		out = int64(total)
-	}
-	return int32(out)
 }
 
 // CurrentSurgeInFlight counts InstanceStatuses participating in an

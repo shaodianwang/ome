@@ -208,9 +208,9 @@ func hasLifecycleAnnotation(annotations map[string]string) bool {
 }
 
 // pausedRolloutAnnotation is the operator-set ISVC annotation that
-// freezes coordination groups at their current phase. Duplicated from
-// coordination.PausedRolloutAnnotation to keep this package a leaf —
-// importing coordination here would close a cycle.
+// freezes coordination groups at their current phase
+// (constants.PausedRolloutAnnotation). Duplicated here as a literal —
+// like the canary verbs below — to keep this package a leaf.
 const pausedRolloutAnnotation = "ome.io/rollout-paused"
 
 // rolloutPromoteAnnotation and rolloutRollbackAnnotation are the canary

@@ -448,17 +448,11 @@ func buildGroupObservation(isvc *v1beta1.InferenceService, g ResolvedGroup, perR
 	for _, c := range g.Components {
 		obs.Components[c] = buildComponentObservation(isvc, c, perRevisionPods[c])
 	}
-	if isvc.Annotations[PausedRolloutAnnotation] == "true" {
+	if isvc.Annotations[constants.PausedRolloutAnnotation] == "true" {
 		obs.PausedGlobal = true
 	}
 	return obs
 }
-
-// PausedRolloutAnnotation is the ISVC annotation operators set to
-// "true" to freeze every coordination group at its current phase.
-// Declared inline rather than in pkg/constants to keep the
-// coordination subpackage's surface small.
-const PausedRolloutAnnotation = "ome.io/rollout-paused"
 
 // buildComponentObservation aggregates one Component's observation from
 // LifecycleStatus and per-revision pod counts.

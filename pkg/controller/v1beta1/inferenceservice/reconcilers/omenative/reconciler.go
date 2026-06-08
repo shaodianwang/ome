@@ -23,6 +23,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // Carrier types defined in core/ are re-exported here so the rest of
@@ -50,15 +51,6 @@ var (
 	BuildPlan       = core.BuildPlan
 	NewExpectations = core.NewExpectations
 )
-
-// derefInt32 is a small helper for event messages where we want to
-// print the value of an *int32 without an "<nil>" surprise.
-func derefInt32(p *int32) int32 {
-	if p == nil {
-		return 0
-	}
-	return *p
-}
 
 // ReconcileComponent is the per-Component reconcile entry point for
 // OMENative-managed Components. The InferenceService controller calls
@@ -212,7 +204,7 @@ func ensureRevisionWithCollisionRetry(ctx context.Context, p ReconcileParams, co
 	}
 	status.RecordWarning(p.Recorder, p.ISVC, status.EventReasonRevisionCollision,
 		"OMENative component=%s ControllerRevision hash collision; CollisionCount bumped to %d",
-		component, derefInt32(bumped))
+		component, utils.DerefInt32(bumped))
 	target, collision, err = core.EnsureControllerRevisionForISVCWithWorker(ctx, p.Client, p.Reader(), p.ISVC, component, p.PodSpec, workerSpec, &p.ObjectMeta, bumped)
 	if err != nil {
 		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)

@@ -68,6 +68,12 @@ var (
 	// revision drains after scaleDownDelaySeconds. Controller clears
 	// the annotation after consuming it.
 	RolloutRollbackAnnotation = OMEAPIGroupName + "/rollout-rollback"
+
+	// PausedRolloutAnnotation, set to "true" on the InferenceService,
+	// freezes every coordination group at its current phase (and the
+	// canary step machine) until the operator clears it. Read by the
+	// OMENative coordination reconciler each pass.
+	PausedRolloutAnnotation = OMEAPIGroupName + "/rollout-paused"
 )
 
 // Pass-through annotation prefixes.

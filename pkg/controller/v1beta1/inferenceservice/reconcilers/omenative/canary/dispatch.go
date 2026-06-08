@@ -14,6 +14,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // DispatchDeps is the controller-side input to the canary executor, mirroring
@@ -133,7 +134,7 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 	if ir.Spec.Pacing != nil {
 		cur = ir.Spec.Pacing.RollbackToRevision
 	}
-	if ptrStrEqual(cur, want) {
+	if utils.PtrStrEqual(cur, want) {
 		return nil
 	}
 	if ir.Spec.Pacing == nil {
@@ -141,13 +142,6 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 	}
 	ir.Spec.Pacing.RollbackToRevision = want
 	return c.Update(ctx, ir)
-}
-
-func ptrStrEqual(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
 }
 
 // configuredComponents lists every present Component in primary order

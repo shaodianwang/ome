@@ -41,6 +41,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/v1beta1convert"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferencereplicas,verbs=get;list;watch;create;update;patch;delete
@@ -398,7 +399,7 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 	if r.Recorder != nil {
 		r.Recorder.Eventf(ir, corev1.EventTypeWarning, "RevisionCollision",
 			"InferenceReplica %s/%s ControllerRevision hash collision; CollisionCount bumped to %d",
-			ir.Namespace, ir.Name, derefInt32(bumped))
+			ir.Namespace, ir.Name, utils.DerefInt32(bumped))
 	}
 
 	target, collision, err = revision.EnsureControllerRevisionWithWorker(
@@ -464,13 +465,4 @@ func (r *Reconciler) bumpCollisionCount(ctx context.Context, ir *v1beta1.Inferen
 	// value. Same mirror shape the ISVC adapter uses.
 	ir.Status.CollisionCount = &next
 	return &next, nil
-}
-
-// derefInt32 returns 0 for a nil pointer, *p otherwise. Used for event
-// messages where "<nil>" would be confusing.
-func derefInt32(p *int32) int32 {
-	if p == nil {
-		return 0
-	}
-	return *p
 }

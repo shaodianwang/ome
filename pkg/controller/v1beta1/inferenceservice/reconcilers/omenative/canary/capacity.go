@@ -2,7 +2,7 @@ package canary
 
 import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"k8s.io/apimachinery/pkg/util/intstr"
+	"github.com/ome-projects/ome/pkg/utils"
 )
 
 // resolveStepNewCount resolves a step's NewCapacity against the component's
@@ -13,7 +13,7 @@ import (
 // at admission to equal that complement (surge above desired is unsupported in
 // v1), so it does not feed the runtime count.
 func resolveStepNewCount(step v1beta1.RolloutStep, desired int32) int32 {
-	return clamp(scale(step.NewCapacity, desired), desired)
+	return utils.ClampInt32(utils.ScaledCountFromIntOrString(&step.NewCapacity, desired, true), 0, desired)
 }
 
 // partitionForNewCount maps a desired new-revision count to the StatefulSet-style
@@ -26,22 +26,4 @@ func partitionForNewCount(desired, newCount int32) int32 {
 		return 0
 	}
 	return p
-}
-
-func scale(v intstr.IntOrString, total int32) int32 {
-	n, err := intstr.GetScaledValueFromIntOrPercent(&v, int(total), true)
-	if err != nil || n < 0 {
-		return 0
-	}
-	return int32(n)
-}
-
-func clamp(v, max int32) int32 {
-	if v < 0 {
-		return 0
-	}
-	if v > max {
-		return max
-	}
-	return v
 }
