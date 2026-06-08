@@ -168,57 +168,40 @@ func (r *Router) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		return r.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &r.routerSpec.ComponentExtensionSpec, v1beta1.RouterComponent)
 	case constants.OMENative:
 		// OMENative-mode Components dispatch through the InferenceReplica
-		// path by default. Router is always single-pod (MultiPod=false;
-		// no Worker block) so the projector receives a nil WorkerPodSpec
-		// — matches the omenative ReconcileParams projection below.
-		// Fallback to the omenative direct path is gated on the
-		// cluster-wide --disable-ir-managed-omenative manager flag.
-		if irprojector.IsIRManagedComponent(r.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
-			// Resolve the authoritative ComponentAutoscaler from the
-			// ISVC → runtime → default chain. See engine dispatch for the
-			// full design — dispatches HPA / KEDA / external / none
-			// against the committed IR (autoscaler dispatch is always-on
-			// per Component).
-			resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(r.Runtime, isvc, v1beta1.RouterComponent)
-			ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
-				ISVC:               isvc,
-				Component:          v1beta1.RouterComponent,
-				ComponentExt:       &r.routerSpec.ComponentExtensionSpec,
-				ObjectMeta:         objectMeta,
-				PodSpec:            podSpec,
-				MultiPod:           false,
-				ResolvedAutoscaler: resolvedAS,
-				Client:             r.Client,
-			})
-			if err != nil {
-				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for router")
-			}
-			// Autoscaler dispatch is always-on per InferenceReplica.
-			// See engine dispatch for the full owner-ref + scaleTargetRef
-			// rationale.
-			if err := autoscaler.DispatchForIRComponent(ctx, autoscaler.IRDispatchInput{
-				Client:             r.Client,
-				Scheme:             r.Scheme,
-				IR:                 ir,
-				ResolvedAutoscaler: resolvedAS,
-				ComponentExt:       &r.routerSpec.ComponentExtensionSpec,
-			}); err != nil {
-				return ctrl.Result{}, errors.Wrap(err, "failed to dispatch autoscaler for router")
-			}
-			return ctrl.Result{}, nil
-		}
-		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
-			ISVC:                    isvc,
-			ObjectMeta:              objectMeta,
-			PodSpec:                 podSpec,
-			Component:               v1beta1.RouterComponent,
-			ComponentExt:            &r.routerSpec.ComponentExtensionSpec,
-			GangSchedulingAvailable: r.GangSchedulingAvailable,
-			Client:                  r.Client,
-			APIReader:               r.APIReader,
-			Expectations:            r.Expectations,
-			Recorder:                r.Recorder,
+		// path. Router is always single-pod (MultiPod=false; no Worker
+		// block) so the projector receives a nil WorkerPodSpec.
+		//
+		// Resolve the authoritative ComponentAutoscaler from the
+		// ISVC → runtime → default chain. See engine dispatch for the
+		// full design — dispatches HPA / KEDA / external / none against
+		// the committed IR (autoscaler dispatch is always-on per Component).
+		resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(r.Runtime, isvc, v1beta1.RouterComponent)
+		ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
+			ISVC:               isvc,
+			Component:          v1beta1.RouterComponent,
+			ComponentExt:       &r.routerSpec.ComponentExtensionSpec,
+			ObjectMeta:         objectMeta,
+			PodSpec:            podSpec,
+			MultiPod:           false,
+			ResolvedAutoscaler: resolvedAS,
+			Client:             r.Client,
 		})
+		if err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for router")
+		}
+		// Autoscaler dispatch is always-on per InferenceReplica.
+		// See engine dispatch for the full owner-ref + scaleTargetRef
+		// rationale.
+		if err := autoscaler.DispatchForIRComponent(ctx, autoscaler.IRDispatchInput{
+			Client:             r.Client,
+			Scheme:             r.Scheme,
+			IR:                 ir,
+			ResolvedAutoscaler: resolvedAS,
+			ComponentExt:       &r.routerSpec.ComponentExtensionSpec,
+		}); err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to dispatch autoscaler for router")
+		}
+		return ctrl.Result{}, nil
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for router")
 	}

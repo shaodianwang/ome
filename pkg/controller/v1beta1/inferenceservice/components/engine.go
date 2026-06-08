@@ -145,14 +145,11 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	}
 
 	// Per-Component stable Service + PodMonitor for OMENative. Inlined
-	// here (rather than driven from the omenative dispatch) so the same
-	// pair of supporting resources is emitted for BOTH OMENative
-	// sub-paths uniformly: the IR-managed path (default, which bypasses
-	// omenative.ReconcileComponent entirely) AND the legacy direct
-	// omenative path. The omenative package itself manages only pods +
-	// the per-Component headless Service (whose naming is tied to the
-	// per-Component pod template); every other top-level per-Component
-	// sub-resource is owned by the ISVC controller.
+	// here (rather than driven from the IR controller) because every
+	// top-level per-Component sub-resource is owned by the ISVC
+	// controller; the IR controller manages only pods + the per-Component
+	// headless Service (whose naming is tied to the per-Component pod
+	// template).
 	//
 	// Raw / MultiNode keep their dispatcher-side service+podmonitor calls
 	// because their selectors are mode-specific (Raw: nil → pod template
@@ -207,68 +204,47 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 		// the only valid multi-pod shape has both fields set.
 		multiPod := e.engineSpec.Leader != nil && e.engineSpec.Worker != nil
 		// OMENative-mode Components dispatch through the InferenceReplica
-		// path by default: the ISVC controller projects the desired
-		// per-Component spec onto an InferenceReplica object; the IR
-		// controller drives per-Instance lifecycle from there. The
-		// cluster-wide --disable-ir-managed-omenative manager flag is the
-		// operator escape hatch — when set, IsIRManagedComponent returns
-		// false and routing falls through to the omenative direct path
-		// below.
-		if irprojector.IsIRManagedComponent(e.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
-			// Resolve the authoritative ComponentAutoscaler from the
-			// ISVC → runtime → default chain. The resolved block is
-			// projected onto ir.Spec.Autoscaler by the projector and
-			// dispatched as HPA / KEDA / external / none against the
-			// committed IR (autoscaler dispatch is always-on per
-			// Component).
-			resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(e.Runtime, isvc, v1beta1.EngineComponent)
-			ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
-				ISVC:               isvc,
-				Component:          v1beta1.EngineComponent,
-				ComponentExt:       &e.engineSpec.ComponentExtensionSpec,
-				ObjectMeta:         objectMeta,
-				PodSpec:            podSpec,
-				WorkerPodSpec:      workerPodSpec,
-				WorkerSize:         workerSize,
-				MultiPod:           multiPod,
-				ResolvedAutoscaler: resolvedAS,
-				Client:             e.Client,
-			})
-			if err != nil {
-				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for engine")
-			}
-			// Autoscaler dispatch is always-on per InferenceReplica.
-			// Owner-ref the HPA / SO to the IR so foreground GC cascades
-			// when the IR is deleted; ScaleTargetRef points at the IR's
-			// /scale subresource. external + none are status-field twins —
-			// both fall through to the dispatch's "delete both" branch
-			// with no separate code path.
-			if err := autoscaler.DispatchForIRComponent(ctx, autoscaler.IRDispatchInput{
-				Client:             e.Client,
-				Scheme:             e.Scheme,
-				IR:                 ir,
-				ResolvedAutoscaler: resolvedAS,
-				ComponentExt:       &e.engineSpec.ComponentExtensionSpec,
-			}); err != nil {
-				return ctrl.Result{}, errors.Wrap(err, "failed to dispatch autoscaler for engine")
-			}
-			return ctrl.Result{}, nil
-		}
-		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
-			ISVC:                    isvc,
-			ObjectMeta:              objectMeta,
-			PodSpec:                 podSpec,
-			Component:               v1beta1.EngineComponent,
-			ComponentExt:            &e.engineSpec.ComponentExtensionSpec,
-			WorkerSize:              workerSize,
-			WorkerPodSpec:           workerPodSpec,
-			MultiPod:                multiPod,
-			GangSchedulingAvailable: e.GangSchedulingAvailable,
-			Client:                  e.Client,
-			APIReader:               e.APIReader,
-			Expectations:            e.Expectations,
-			Recorder:                e.Recorder,
+		// path: the ISVC controller projects the desired per-Component
+		// spec onto an InferenceReplica object; the IR controller drives
+		// per-Instance lifecycle from there.
+		//
+		// Resolve the authoritative ComponentAutoscaler from the
+		// ISVC → runtime → default chain. The resolved block is
+		// projected onto ir.Spec.Autoscaler by the projector and
+		// dispatched as HPA / KEDA / external / none against the
+		// committed IR (autoscaler dispatch is always-on per Component).
+		resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(e.Runtime, isvc, v1beta1.EngineComponent)
+		ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
+			ISVC:               isvc,
+			Component:          v1beta1.EngineComponent,
+			ComponentExt:       &e.engineSpec.ComponentExtensionSpec,
+			ObjectMeta:         objectMeta,
+			PodSpec:            podSpec,
+			WorkerPodSpec:      workerPodSpec,
+			WorkerSize:         workerSize,
+			MultiPod:           multiPod,
+			ResolvedAutoscaler: resolvedAS,
+			Client:             e.Client,
 		})
+		if err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for engine")
+		}
+		// Autoscaler dispatch is always-on per InferenceReplica.
+		// Owner-ref the HPA / SO to the IR so foreground GC cascades
+		// when the IR is deleted; ScaleTargetRef points at the IR's
+		// /scale subresource. external + none are status-field twins —
+		// both fall through to the dispatch's "delete both" branch
+		// with no separate code path.
+		if err := autoscaler.DispatchForIRComponent(ctx, autoscaler.IRDispatchInput{
+			Client:             e.Client,
+			Scheme:             e.Scheme,
+			IR:                 ir,
+			ResolvedAutoscaler: resolvedAS,
+			ComponentExt:       &e.engineSpec.ComponentExtensionSpec,
+		}); err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to dispatch autoscaler for engine")
+		}
+		return ctrl.Result{}, nil
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for engine")
 	}

@@ -653,12 +653,10 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// For every Component whose resolved deployment mode is OMENative
 	// (i.e. flows through the IR-managed path), read the live IR.Status
 	// and copy it onto ISVC.Status.Components[<component>].Lifecycle.
-	// The IR controller is the sole writer of IR.Status (no race with
-	// the omenative direct path — the predicate guarantees one writer
-	// per Component). Components on non-OMENative paths are not touched
-	// here; their status was already written by
-	// omenative.AggregateAndWriteStatus (or the equivalent for Raw /
-	// MultiNode) during the per-Component dispatcher pass above.
+	// The IR controller is the sole writer of IR.Status. Components on
+	// non-OMENative paths are not touched here; their status was already
+	// written by the Raw / MultiNode reconciler during the per-Component
+	// dispatcher pass above.
 	//
 	// Errors propagate so a transient apiserver read failure triggers
 	// a retry; first-reconcile NotFound is swallowed inside the

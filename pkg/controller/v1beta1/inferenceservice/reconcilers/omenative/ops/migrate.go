@@ -1,15 +1,12 @@
-// Dispatch shim for Migrate — the per-Instance Migrate surge state
-// machine itself lives in pkg/controller/v1beta1/workload/ops after the
-// workload-extraction refactor.
+// Migration-request detection for the omenative/ops package.
 //
-// The shim's only job is to build the workload.ReconcileInput +
-// workload.Deps pair from the legacy core.ReconcileParams (wiring the
-// ClearMigrationRequest callback to the local
-// clearMigrationRequestAnnotation helper) and delegate. The
-// dispatcher-facing entry points (Migrate, detectMigrationRequest,
-// nextInFlightFromLedger, clearMigrationRequestAnnotation,
-// migrateRequeueInterval) stay here because dispatch.go and
-// timeouts.go consume them directly without going through workload.
+// The per-Instance Migrate surge state machine lives in
+// pkg/controller/v1beta1/workload/ops; the IR-managed path drives it via
+// workload.Reconcile. What remains here are the two ISVC-shaped detection
+// helpers (detectMigrationRequest, nextInFlightFromLedger) the IR
+// controller reaches through irbridge.go: they read the user-facing
+// ISVC's migration-request annotation + the ISVC-owned audit ledger,
+// which are inherently v1beta1-typed and ISVC-scoped.
 package ops
 
 import (
@@ -21,94 +18,13 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/util/retry"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/internalsource"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/status"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 )
-
-// Migrate is the ISVC-adapter entry point. It projects the legacy
-// core.ReconcileParams onto workload.Deps + workload.ReconcileInput
-// (wiring the local clearMigrationRequestAnnotation helper into
-// ReconcileInput.ClearMigrationRequest) and delegates to
-// workloadops.Migrate — the source-agnostic body of the per-Instance
-// Migrate surge state machine.
-//
-// Returns (done, accepted, err) — see workloadops.Migrate for the
-// contract. The accepted bit signals the dispatcher whether Migrate
-// took ownership; done=false && accepted=false means the dispatcher
-// should fall through to other ops so an in-flight Update/Restart/
-// Create can converge (otherwise the dispatcher loops indefinitely
-// in the Migrate-defer branch — affinity-trigger-not-detected
-// deadlock).
-//
-// Wires deps.RenderHook to core.ISVCRenderHook(p.ISVC) so the surge
-// pod's Render path runs coordination.InjectPeerEnv — matches the
-// legacy core.RenderWithRevisionForISVC behavior used by the in-package
-// migrate body before the extraction.
-func Migrate(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan, sourceIdx int32, requestUUID string, req *audit.MigrationRequest) (bool, bool, error) {
-	deps := workload.Deps{
-		Client:       p.Client,
-		APIReader:    p.APIReader,
-		Recorder:     p.Recorder,
-		Expectations: p.ExpectationsCache(),
-		RenderHook:   core.ISVCRenderHook(p.ISVC),
-	}
-	input := internalsource.BuildReconcileInput(internalsource.BuildInputDeps{
-		ISVC:          p.ISVC,
-		Component:     p.Component,
-		ObjectMeta:    p.ObjectMeta,
-		PodSpec:       p.PodSpec,
-		WorkerPodSpec: p.WorkerPodSpec,
-		Client:        p.Client,
-		Expectations:  p.ExpectationsCache(),
-		ClearMigrationRequestAnnotation: func(ctx context.Context, uuid string) error {
-			return clearMigrationRequestAnnotation(ctx, p, uuid)
-		},
-	})
-	return workloadops.Migrate(ctx, deps, input, plan, sourceIdx, requestUUID, req)
-}
-
-// clearMigrationRequestAnnotation removes the
-// ome.io/migration-request-v1-<uuid> annotation. The requester contract
-// requires accept/reject within 30s by annotation removal; without this
-// they re-deliver the same UUID indefinitely. retry.RetryOnConflict so
-// concurrent reconcile-pass writes don't lose the removal.
-//
-// Kept in the omenative/ops package because timeouts.go (which has not
-// migrated to workload/ops yet) and the workload.Migrate
-// ClearMigrationRequest closure both call it. Once timeouts.go moves to
-// workload/ops the helper can shrink to a workload-side equivalent on
-// internalsource.
-func clearMigrationRequestAnnotation(ctx context.Context, p core.ReconcileParams, uuid string) error {
-	if p.Client == nil || p.ISVC == nil || uuid == "" {
-		return nil
-	}
-	key := audit.MigrationRequestAnnotationPrefix + uuid
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		fresh := &v1beta1.InferenceService{}
-		if err := p.Client.Get(ctx, client.ObjectKeyFromObject(p.ISVC), fresh); err != nil {
-			return fmt.Errorf("clearMigrationRequestAnnotation: get ISVC: %w", err)
-		}
-		if fresh.Annotations == nil {
-			return nil
-		}
-		if _, present := fresh.Annotations[key]; !present {
-			return nil
-		}
-		delete(fresh.Annotations, key)
-		if err := p.Client.Update(ctx, fresh); err != nil {
-			return fmt.Errorf("clearMigrationRequestAnnotation: update ISVC: %w", err)
-		}
-		return nil
-	})
-}
 
 // nextInFlightFromLedger returns the oldest Started ledger entry for the
 // given component whose UUID has no terminal counterpart. Returns empty

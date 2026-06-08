@@ -20,17 +20,15 @@ import (
 // IR-managed Component on the given ISVC and writes IR.Status into
 // ISVC.Status.Components[<component>].Lifecycle via Status().Update.
 //
-// The downstream status contract (kubectl, dashboards, status field
-// shapes) stays identical regardless of which path writes it — the IR
-// controller computes the same per-Component aggregate counters the
-// omenative direct path does; the projector just relays them.
+// The IR controller computes the per-Component aggregate counters and
+// the projector just relays them onto the parent ISVC, so the downstream
+// status contract (kubectl, dashboards, status field shapes) is stable.
 //
 // Called from the ISVC controller's reconcile loop AFTER the
-// per-Component dispatcher (irprojector.EnsureInferenceReplica for
-// IR-managed Components; omenative.ReconcileComponent for the
-// direct path) finishes. The dispatch path writes IR.Spec; the IR
-// controller reconciles + writes IR.Status; THIS function reads
-// IR.Status back onto the parent ISVC.
+// per-Component dispatcher (irprojector.EnsureInferenceReplica for the
+// IR-managed OMENative Components) finishes. The dispatch path writes
+// IR.Spec; the IR controller reconciles + writes IR.Status; THIS function
+// reads IR.Status back onto the parent ISVC.
 //
 // componentModes carries the resolved DeploymentModeType for each
 // declared Component on the ISVC (engine/decoder/router). The
@@ -45,20 +43,15 @@ import (
 // passed-in ISVC for the outer updateStatus to flush, because the
 // outer flush's retry.RetryOnConflict path re-Gets latest + merges
 // preserved.Lifecycle from latest — clobbering what we just wrote
-// would defeat the purpose. The omenative path mirrors this:
-// AggregateAndWriteStatus writes directly via Status().Update and
-// the outer updateStatus's mergeLifecycleStatus then
-// preserves it across retries.
+// would defeat the purpose.
 //
 // Mutates the in-memory ISVC after the write so subsequent code in
-// the same reconcile pass observes the post-write state (matches
-// the mirror pattern in mutate.go / status_aggregate.go).
+// the same reconcile pass observes the post-write state.
 //
 // Sequence per Component:
 //
 //  1. Skip Components whose resolved deployment mode is not
-//     OMENative — the omenative direct path (or RawDeployment /
-//     MultiNode path) already wrote
+//     OMENative — the RawDeployment / MultiNode path already wrote
 //     ISVC.Status.Components[c].Lifecycle in its own pass.
 //
 //  2. Fetch the IR by name. NotFound is non-fatal — the IR may not
@@ -69,8 +62,8 @@ import (
 //
 //  3. Status().Update under retry.RetryOnConflict to merge the
 //     IR-derived OMENative subtree onto the live ISVC. Re-read on
-//     conflict so concurrent writers (omenative direct path on a
-//     different Component) don't lose to us.
+//     conflict so concurrent writers (a different Component's
+//     reconcile) don't lose to us.
 //
 // Errors are wrapped with the offending IR namespace/name for grep-
 // ability in operator logs. A real read/write error (apiserver
@@ -84,22 +77,12 @@ func AggregateIRStatus(ctx context.Context, c client.Client, isvc *v1beta1.Infer
 		return fmt.Errorf("AggregateIRStatus: nil ISVC")
 	}
 
-	managerDisabled := IsManagerDisableFlagSet()
-	logger := log.FromContext(ctx).WithValues(
-		"isvc", client.ObjectKeyFromObject(isvc))
 	for _, comp := range allDeclaredComponents(isvc) {
 		mode := componentModes[comp]
-		if !IsIRManagedComponent(mode, managerDisabled) {
-			// A non-OMENative mode skip is routine. The interesting case
-			// is OMENative + managerDisabled — the kill switch has
-			// deflected this Component back to the omenative direct
-			// path. Surface that at V(1) so operators can grep for
-			// drifted Components when --disable-ir-managed-omenative is
-			// toggled mid-flight.
-			if managerDisabled && mode == constants.OMENative {
-				logger.V(1).Info("Kill switch active; routing Component via omenative direct path instead of IR",
-					"component", comp)
-			}
+		// Non-OMENative Components are reconciled by their own dispatch
+		// path (RawDeployment / MultiNode), which already wrote their
+		// status subtree; skip them here.
+		if !IsIRManagedComponent(mode) {
 			continue
 		}
 		if err := aggregateOneComponent(ctx, c, isvc, comp); err != nil {
@@ -111,8 +94,7 @@ func AggregateIRStatus(ctx context.Context, c client.Client, isvc *v1beta1.Infer
 
 // aggregateOneComponent fetches one IR, computes the desired
 // LifecycleStatus, and writes it to the live ISVC via
-// Status().Update under retry.RetryOnConflict. Mirrors the pattern
-// omenative.AggregateAndWriteStatus uses.
+// Status().Update under retry.RetryOnConflict.
 //
 // On apierrors.IsNotFound for the IR Get: returns nil so the outer
 // loop keeps going. The next reconcile picks up the IR's fresh
@@ -173,10 +155,7 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 		// the OMENative counters land but no EngineReady / DecoderReady /
 		// RouterReady ever flips True, so the aggregate Ready rollup and
 		// `kubectl wait --for=condition=Ready` see Status=Unknown
-		// indefinitely. Mirrors the legacy direct path's behavior
-		// (omenative/status_aggregate.go:140-143) — this was an oversight:
-		// the unit tests asserted on the subtree but not on the top-level
-		// condition rollup.
+		// indefinitely.
 		if topCond != nil {
 			fresh.Status.SetCondition(topCond.Type, topCond)
 		}
@@ -206,8 +185,7 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 	// Mirror the just-committed top-level condition onto the cached
 	// ISVC so the outer reconciler's updateStatus flush — which copies
 	// p.ISVC.Status onto a fresh re-read of the cluster — doesn't clobber
-	// it on the next pass. Same shape as the legacy direct path's mirror
-	// at omenative/status_aggregate.go:163.
+	// it on the next pass.
 	if topCond != nil {
 		isvc.Status.SetCondition(topCond.Type, topCond)
 	}
@@ -215,16 +193,13 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 }
 
 // IRStatusToComponentStatus projects the IR.Status fields onto a
-// fresh LifecycleStatus. 1:1 field mapping — the two types
-// were intentionally shaped identically so the dual-write window
-// (when both paths could be active in different clusters) can
-// byte-compare them via the shadow-mode diff harness.
+// fresh LifecycleStatus. 1:1 field mapping — IR.Status and the
+// per-Component LifecycleStatus were intentionally shaped identically.
 //
 // Returns a non-nil pointer even when every field is zero; the
 // presence of the pointer is itself a signal that the IR-managed
-// path is driving the Component, and downstream consumers
-// (status_aggregate.go in the omenative package + the controller's
-// preserveLifecycleStatus helper) treat the nil/non-nil
+// path is driving the Component, and downstream consumers (the
+// controller's preserveLifecycleStatus helper) treat the nil/non-nil
 // boundary as load-bearing.
 func IRStatusToComponentStatus(ir *v1beta1.InferenceReplica) *v1beta1.LifecycleStatus {
 	out := &v1beta1.LifecycleStatus{

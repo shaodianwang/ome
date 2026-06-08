@@ -40,13 +40,14 @@ func TestOMENativeCoordinationKindController(t *testing.T) {
 		BuildImages: kindfix.FakeServingImages(),
 		CRDPaths:    kindfix.OMECRDPaths(),
 		Scheme:      kindfix.OMEScheme(),
-		// Legacy omenative-direct path: the cross-Component coordination this
-		// suite exercises (Sequential / BlueGreen / RatioBalanced / soak) lives
-		// ONLY there; the IR-managed default leaves UpdateGate nil and does no
-		// coordination, so pods would never be created. Mirrors the production
-		// --disable-ir-managed-omenative escape hatch. (IR-managed-path
-		// coverage is irmanaged_kind.)
-		Setup: kindfix.StandardOMESetup(kindfix.SetupOpts{DisableIRManaged: true}),
+		// OMENative is driven exclusively through the IR-managed path now
+		// (the legacy omenative-direct path was retired). The cross-Component
+		// coordination this suite exercises (Sequential / BlueGreen /
+		// RatioBalanced / soak) runs on the IR path: the inferencereplica
+		// controller wires the same coordination.EvaluateUpdateGate decision
+		// site the direct path used. WireInferenceReplica starts that
+		// controller so projected InferenceReplica CRs turn into pods + status.
+		Setup: kindfix.StandardOMESetup(kindfix.SetupOpts{WireInferenceReplica: true}),
 	})
 
 	gomega.RegisterFailHandler(ginkgo.Fail)

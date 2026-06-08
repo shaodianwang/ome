@@ -21,7 +21,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	mcfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
 	inferencereplica "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -104,33 +103,27 @@ func GangCRDPaths() []string {
 	return append(OMECRDPaths(), "tests/integration/dep-crds/scheduler-plugins")
 }
 
-// SetupOpts parameterizes StandardOMESetup across the two in-process paths.
+// SetupOpts parameterizes StandardOMESetup across the in-process paths.
 type SetupOpts struct {
-	// DisableIRManaged routes OMENative Components through the legacy
-	// omenative-direct path (true) instead of the IR-managed projection
-	// (false, the production default). The toggle is a process-global atomic,
-	// so it is set explicitly every Setup to keep sibling suites isolated.
-	DisableIRManaged bool
-
 	// WireInferenceReplica also starts the inferencereplica controller — the
 	// second half of the IR-managed path that turns projected InferenceReplica
-	// CRs into pods + status. Only needed when DisableIRManaged is false.
+	// CRs into pods + status. Required for any OMENative coverage, since
+	// OMENative-mode Components are driven exclusively through the IR-managed
+	// path.
 	WireInferenceReplica bool
 }
 
 // StandardOMESetup returns the kindutil.ManagerSetup shared by the in-process
 // KIND suites: it seeds inferenceservice-config, installs a fake
 // (always-Reachable, llama-shape config.json) model-cache provider, and wires
-// the BaseModel + InferenceService reconcilers — plus the IR toggle and the
-// optional inferencereplica controller per opts. Same controller code as
-// production; only the cluster behind the manager differs.
+// the BaseModel + InferenceService reconcilers — plus the optional
+// inferencereplica controller per opts. Same controller code as production;
+// only the cluster behind the manager differs.
 //
-//	omenative_coordination_kind: StandardOMESetup(SetupOpts{DisableIRManaged: true})
-//	irmanaged_kind:    StandardOMESetup(SetupOpts{WireInferenceReplica: true})
+//	omenative_coordination_kind: StandardOMESetup(SetupOpts{WireInferenceReplica: true})
+//	irmanaged_kind:              StandardOMESetup(SetupOpts{WireInferenceReplica: true})
 func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 	return func(ctx context.Context, mgr ctrl.Manager) error {
-		irprojector.SetGlobalDisableIRManaged(opts.DisableIRManaged)
-
 		// Direct (uncached) client — the manager cache isn't started during
 		// Setup, so the seed must not go through mgr.GetClient().
 		directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})

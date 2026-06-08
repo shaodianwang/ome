@@ -618,7 +618,7 @@ func writeComponentAutoscalerStatus(b *BaseComponentFields, isvc *v1beta1.Infere
 	// the legacy component metadata Name. The writer matches that lookup
 	// pattern so the live mirror finds the right object.
 	objectName := objectMeta.Name
-	if irprojector.IsIRManagedComponent(b.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
+	if irprojector.IsIRManagedComponent(b.DeploymentMode) {
 		objectName = irprojector.InferenceReplicaName(isvc.Name, componentType)
 	}
 
@@ -655,7 +655,7 @@ func writeComponentAutoscalerStatus(b *BaseComponentFields, isvc *v1beta1.Infere
 // an all-empty ScaleTargetRef rather than emitting an obviously-broken
 // `{apiVersion:"",kind:"",name:""}` block).
 func canonicalScaleTargetRef(mode constants.DeploymentModeType, isvcName, componentMetaName string, componentType v1beta1.ComponentType) v1beta1.ScaleTargetRef {
-	if irprojector.IsIRManagedComponent(mode, irprojector.IsManagerDisableFlagSet()) {
+	if irprojector.IsIRManagedComponent(mode) {
 		return v1beta1.ScaleTargetRef{
 			APIVersion: v1beta1.SchemeGroupVersion.String(),
 			Kind:       "InferenceReplica",

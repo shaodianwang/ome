@@ -9,22 +9,15 @@ import (
 )
 
 // EvaluateUpdateGate runs the full coordination gate stack for a single
-// per-Instance Update decision. It is the SHARED decision site for both
-// OMENative reconcile paths:
-//
-//   - the ISVC-direct path  (omenative/ops.ReconcileComponentOps), and
-//   - the IR-managed path   (inferencereplica.Reconciler) — the default.
-//
-// Both wire it into workload.ReconcileInput.UpdateGate. Wiring it on only
-// one path silently disables coordination on the other: the IR-managed
-// path historically left UpdateGate nil (see the comment that used to
-// live in inferencereplica/convert.go), so on the default deployment
-// CheckSequential / CheckRatio / CheckSurge / CheckUnavailability were
-// all skipped. Both Components of a Sequential group then recreated
-// concurrently, and a group-wide MaxSurge never capped a Component whose
-// per-Component budget was larger. Keeping the gate body here — in the
-// coordination package both paths already depend on — means there is
-// exactly one tested implementation that every caller imports.
+// per-Instance Update decision. It is the decision site the IR-managed
+// OMENative path (inferencereplica.Reconciler) wires into
+// workload.ReconcileInput.UpdateGate. Leaving UpdateGate nil silently
+// disables coordination: CheckSequential / CheckRatio / CheckSurge /
+// CheckUnavailability are all skipped, both Components of a Sequential
+// group recreate concurrently, and a group-wide MaxSurge never caps a
+// Component whose per-Component budget is larger. Keeping the gate body
+// here — in the coordination package the IR path depends on — means
+// there is exactly one tested implementation.
 //
 // Gate order: ratio -> surge | unavailability -> sequential. First denial
 // wins; later gates short-circuit. The caller reads only the allowed bit;

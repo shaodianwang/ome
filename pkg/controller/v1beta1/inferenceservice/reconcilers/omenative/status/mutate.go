@@ -27,11 +27,10 @@ import (
 //
 // In-memory mirror: after a successful write MutateInstance mirrors the
 // post-write (component, idx) InstanceStatus onto the caller's `isvc`
-// snapshot. The dispatcher (ops.ReconcileComponentOps) drives multiple
-// per-Instance operations off a single in-memory ISVC bag
-// (ReconcileParams.ISVC) during one reconcile pass — without the mirror,
-// the second operation reads pre-write state for every field the first
-// operation just mutated. The user-visible symptom is the SurgeThenDrain
+// snapshot. The dispatcher drives multiple per-Instance operations off a
+// single in-memory ISVC bag during one reconcile pass — without the
+// mirror, the second operation reads pre-write state for every field the
+// first operation just mutated. The user-visible symptom is the SurgeThenDrain
 // multi-instance ord-0 resurrection: inst-0 promotes (Phase 3 advances
 // ActiveOrdinal to 1), Update returns done=true, dispatcher falls through
 // to Create on the same reconcile, and Create's

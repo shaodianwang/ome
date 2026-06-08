@@ -190,60 +190,41 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 		// the only valid multi-pod shape has both fields set.
 		multiPod := d.decoderSpec.Leader != nil && d.decoderSpec.Worker != nil
 		// OMENative-mode Components dispatch through the InferenceReplica
-		// path by default. See the comment on the engine dispatch for the
-		// full design — fallback to the omenative direct path is gated on
-		// the cluster-wide --disable-ir-managed-omenative manager flag.
-		if irprojector.IsIRManagedComponent(d.DeploymentMode, irprojector.IsManagerDisableFlagSet()) {
-			// Resolve the authoritative ComponentAutoscaler from the
-			// ISVC → runtime → default chain. See engine dispatch for the
-			// full design — dispatches HPA / KEDA / external / none
-			// against the committed IR (autoscaler dispatch is always-on
-			// per Component).
-			resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(d.Runtime, isvc, v1beta1.DecoderComponent)
-			ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
-				ISVC:               isvc,
-				Component:          v1beta1.DecoderComponent,
-				ComponentExt:       &d.decoderSpec.ComponentExtensionSpec,
-				ObjectMeta:         objectMeta,
-				PodSpec:            podSpec,
-				WorkerPodSpec:      workerPodSpec,
-				WorkerSize:         workerSize,
-				MultiPod:           multiPod,
-				ResolvedAutoscaler: resolvedAS,
-				Client:             d.Client,
-			})
-			if err != nil {
-				return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for decoder")
-			}
-			// Autoscaler dispatch is always-on per InferenceReplica.
-			// See engine dispatch for the full owner-ref + scaleTargetRef
-			// rationale.
-			if err := autoscaler.DispatchForIRComponent(ctx, autoscaler.IRDispatchInput{
-				Client:             d.Client,
-				Scheme:             d.Scheme,
-				IR:                 ir,
-				ResolvedAutoscaler: resolvedAS,
-				ComponentExt:       &d.decoderSpec.ComponentExtensionSpec,
-			}); err != nil {
-				return ctrl.Result{}, errors.Wrap(err, "failed to dispatch autoscaler for decoder")
-			}
-			return ctrl.Result{}, nil
-		}
-		return omenative.ReconcileComponent(ctx, omenative.ReconcileParams{
-			ISVC:                    isvc,
-			ObjectMeta:              objectMeta,
-			PodSpec:                 podSpec,
-			Component:               v1beta1.DecoderComponent,
-			ComponentExt:            &d.decoderSpec.ComponentExtensionSpec,
-			WorkerSize:              workerSize,
-			WorkerPodSpec:           workerPodSpec,
-			MultiPod:                multiPod,
-			GangSchedulingAvailable: d.GangSchedulingAvailable,
-			Client:                  d.Client,
-			APIReader:               d.APIReader,
-			Expectations:            d.Expectations,
-			Recorder:                d.Recorder,
+		// path. See the comment on the engine dispatch for the full design.
+		//
+		// Resolve the authoritative ComponentAutoscaler from the
+		// ISVC → runtime → default chain. See engine dispatch for the
+		// full design — dispatches HPA / KEDA / external / none against
+		// the committed IR (autoscaler dispatch is always-on per Component).
+		resolvedAS, _ := autoscaler.ResolveComponentAutoscaler(d.Runtime, isvc, v1beta1.DecoderComponent)
+		ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
+			ISVC:               isvc,
+			Component:          v1beta1.DecoderComponent,
+			ComponentExt:       &d.decoderSpec.ComponentExtensionSpec,
+			ObjectMeta:         objectMeta,
+			PodSpec:            podSpec,
+			WorkerPodSpec:      workerPodSpec,
+			WorkerSize:         workerSize,
+			MultiPod:           multiPod,
+			ResolvedAutoscaler: resolvedAS,
+			Client:             d.Client,
 		})
+		if err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to project InferenceReplica for decoder")
+		}
+		// Autoscaler dispatch is always-on per InferenceReplica.
+		// See engine dispatch for the full owner-ref + scaleTargetRef
+		// rationale.
+		if err := autoscaler.DispatchForIRComponent(ctx, autoscaler.IRDispatchInput{
+			Client:             d.Client,
+			Scheme:             d.Scheme,
+			IR:                 ir,
+			ResolvedAutoscaler: resolvedAS,
+			ComponentExt:       &d.decoderSpec.ComponentExtensionSpec,
+		}); err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to dispatch autoscaler for decoder")
+		}
+		return ctrl.Result{}, nil
 	default:
 		return ctrl.Result{}, errors.New("invalid deployment mode for decoder")
 	}

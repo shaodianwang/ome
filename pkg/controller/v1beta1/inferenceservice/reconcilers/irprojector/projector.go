@@ -2,11 +2,9 @@
 // decoder / router) into the per-(ISVC, Component) InferenceReplica
 // resource the IR controller reconciles.
 //
-// The projector is the bridge between the legacy "ISVC controller
-// directly reconciles per-Component pods" world and the IR-driven
-// world: when a Component's effective deployment mode is OMENative,
-// the ISVC controller stops calling omenative.ReconcileComponent and
-// instead hands the desired per-Component spec to
+// The projector is the bridge into the IR-driven world: when a
+// Component's effective deployment mode is OMENative, the ISVC
+// controller hands the desired per-Component spec to
 // ensureInferenceReplica. The IR controller then takes over the
 // per-Instance lifecycle — Create / Update / Restart / Migrate /
 // Delete — owning its own pods, ControllerRevisions, and per-Component
@@ -14,24 +12,21 @@
 //
 // The package is intentionally narrow:
 //
-//   - IsIRManagedComponent reads the resolved deployment mode and the
-//     manager-wide kill switch, returning the predicate the dispatch
-//     sites in components/{engine,decoder,router}.go branch on. The
-//     kill switch is a process-level boolean set in
-//     cmd/manager/main.go (see SetGlobalDisableIRManaged) and surfaced
-//     to callers via IsManagerDisableFlagSet.
+//   - IsIRManagedComponent reads the resolved deployment mode and
+//     returns the predicate the dispatch sites in
+//     components/{engine,decoder,router}.go branch on. OMENative-mode
+//     Components ALWAYS route through the IR-managed path.
 //
 //   - EnsureInferenceReplica is the CreateOrUpdate driver: build the
-//     desired IR Spec from the same inputs omenative.ReconcileParams
-//     would receive, owner-ref the IR back to the parent ISVC, stamp
-//     the controller-write annotation the IR webhook gates on, and
-//     persist.
+//     desired IR Spec from the rendered per-Component inputs, owner-ref
+//     the IR back to the parent ISVC, stamp the controller-write
+//     annotation the IR webhook gates on, and persist.
 //
 // The package does NOT:
 //   - reach into the IR controller's internals (writes Spec, reads
 //     Status only — see ReadInferenceReplica in status.go);
-//   - duplicate pod-spec rendering (the omenative dispatch path
-//     already computed the PodSpec; ensure passes it through verbatim);
+//   - duplicate pod-spec rendering (the dispatch site already computed
+//     the PodSpec; ensure passes it through verbatim);
 //   - manage IR deletion outside foreground GC (owner-ref cascade
 //     handles it on ISVC delete; explicit operator IR deletes are out
 //     of scope).
@@ -40,7 +35,6 @@ package irprojector
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -55,102 +49,33 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
-// disableIRManaged is the process-wide kill switch toggled from
-// cmd/manager/main.go via SetGlobalDisableIRManaged. When true,
-// IsIRManagedComponent always returns false regardless of the
-// resolved deployment mode — operators can flip the manager flag
-// `--disable-ir-managed-omenative=true` to immediately route every
-// OMENative Component back to the omenative direct path without
-// touching individual ISVCs.
-//
-// Stored as an atomic int32 (0=enabled, 1=disabled) so the
-// per-reconcile read is a single load. The flag is set once at
-// startup and never mutated after the controller starts; the atomic
-// is defensive against the test-suite ordering edge case where a
-// fixture sets/clears the flag between subtests.
-var disableIRManaged atomic.Int32
-
-// SetGlobalDisableIRManaged toggles the process-wide IR-managed
-// kill switch. Called once from cmd/manager/main.go after flag
-// parsing. Setting to true forces IsIRManagedComponent to return
-// false everywhere; setting to false (the default) re-enables the
-// IR-managed path for every OMENative Component.
-//
-// Idempotent and safe to call concurrently — the underlying atomic
-// store has the right memory ordering.
-//
-// Logs the post-flip value at Info so post-incident triage has a
-// breadcrumb that the manager actually flipped the kill switch (the
-// flag is otherwise invisible from the running controller's state).
-// Suppresses the log on idempotent re-sets so test-suite fixtures that
-// repeatedly assign the same value don't spam.
-func SetGlobalDisableIRManaged(disabled bool) {
-	var prev int32
-	if disabled {
-		prev = disableIRManaged.Swap(1)
-	} else {
-		prev = disableIRManaged.Swap(0)
-	}
-	wasDisabled := prev == 1
-	if wasDisabled == disabled {
-		return
-	}
-	log.Log.Info("IR-managed projection kill switch flipped",
-		"disabled", disabled,
-		"previousDisabled", wasDisabled)
-}
-
-// IsManagerDisableFlagSet returns the current value of the
-// process-wide kill switch (SetGlobalDisableIRManaged). Exposed so
-// dispatch sites + status aggregators can fetch the live value when
-// calling IsIRManagedComponent. Cheap atomic load — safe to call on
-// every reconcile.
-func IsManagerDisableFlagSet() bool {
-	return disableIRManaged.Load() == 1
-}
-
 // IsIRManagedComponent returns true when the given Component should be
-// driven through the InferenceReplica path. The predicate consults two
-// inputs:
+// driven through the InferenceReplica path. Only constants.OMENative
+// routes through the IR-managed path; every other mode (RawDeployment,
+// MultiNode, …) falls through to its own dispatch branch in
+// components/{engine,decoder,router}.go.
 //
-//   - managerDisableFlag — the process-wide kill switch
-//     (SetGlobalDisableIRManaged / IsManagerDisableFlagSet). When
-//     true, the predicate is false regardless of mode and the
-//     Component routes to the omenative direct path.
-//
-//   - deploymentMode — the resolved per-Component DeploymentModeType.
-//     Only constants.OMENative routes through the IR-managed path;
-//     every other mode (RawDeployment, MultiNode, …) falls through to
-//     its own dispatch branch in components/{engine,decoder,router}.go.
-//
-// The previous `ome.io/use-ir-managed` per-Component opt-in annotation
-// has been removed. OMENative-mode Components now ALWAYS route through
-// the IR-managed path by default; operators rely solely on the
-// cluster-wide --disable-ir-managed-omenative manager flag as the
-// escape hatch.
-func IsIRManagedComponent(deploymentMode constants.DeploymentModeType, managerDisableFlag bool) bool {
-	if managerDisableFlag {
-		return false
-	}
+// OMENative-mode Components ALWAYS route through the IR-managed path —
+// there is no per-Component opt-in and no cluster-wide opt-out. The IR
+// path is the sole OMENative implementation.
+func IsIRManagedComponent(deploymentMode constants.DeploymentModeType) bool {
 	return deploymentMode == constants.OMENative
 }
 
 // isvcGVK identifies the parent ISVC for owner-ref stamping on
-// emitted InferenceReplicas. Mirrors the value omenative.services.go
-// uses for its own owner refs; declared here so the package is
+// emitted InferenceReplicas. Declared here so the package is
 // self-contained and doesn't need a cross-package import.
 var isvcGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
 // Params is the input bag EnsureInferenceReplica reads to build the
-// desired IR Spec. Structured to mirror omenative.ReconcileParams so
-// the dispatch site in components/{engine,decoder,router}.go can fill
-// it from the same values the omenative branch already computes.
+// desired IR Spec. The dispatch site in
+// components/{engine,decoder,router}.go fills it from the rendered
+// per-Component values.
 //
-// Critical contract: PodSpec / WorkerPodSpec / ObjectMeta MUST be
-// the values the omenative path WOULD have used. The projector does
-// not re-render — it hands the IR controller the exact same per-pod
-// template the omenative direct path would have built. The shadow-mode
-// diff test (Piece 4) anchors this invariant.
+// Critical contract: PodSpec / WorkerPodSpec / ObjectMeta are the
+// rendered per-pod template values. The projector does not re-render —
+// it hands the IR controller the exact same per-pod template the
+// dispatch site computed.
 type Params struct {
 	// ISVC is the parent InferenceService. The projector reads
 	// ISVC.Name / Namespace / UID for IR naming + owner-ref, and
@@ -405,13 +330,9 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 
 // replicasFromComponentExt projects ComponentExtensionSpec.MinReplicas
 // into the IR Spec.Replicas pointer. Defaults to 1 when MinReplicas
-// is nil OR <= 0 — matches the omenative.ReconcileParams projection
-// (core/params.go: replicasFromComponentExt) so both paths produce
-// the same Instance count.
-//
-// The shadow-mode diff test pins this: same MinReplicas → same
-// pod count → same emitted pods. Drift here would surface as a
-// fixture diff and fail the shadow-mode test.
+// is nil OR <= 0 — matches the workload-side projection
+// (core/params.go: replicasFromComponentExt) so the rendered Instance
+// count is consistent regardless of which adapter built the IR.
 func replicasFromComponentExt(c *v1beta1.ComponentExtensionSpec) *int32 {
 	if c == nil || c.MinReplicas == nil || *c.MinReplicas <= 0 {
 		one := int32(1)

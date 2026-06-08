@@ -215,39 +215,6 @@ func TestAggregateIRStatus_OMENative_OnlyTouchesOMENativeComponents(t *testing.T
 		"decoder direct-path sentinel must survive the IR-managed engine aggregation")
 }
 
-// TestAggregateIRStatus_KillSwitch_NoOp pins the cluster-wide
-// escape hatch: when SetGlobalDisableIRManaged(true) is in effect,
-// even an OMENative-mode Component is treated as direct-path — the
-// aggregator skips it. Status sentinels survive.
-func TestAggregateIRStatus_KillSwitch_NoOp(t *testing.T) {
-	g := gomega.NewWithT(t)
-	isvc := baselineISVC("llama", "prod")
-	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.EngineComponent: {
-			Lifecycle: &v1beta1.LifecycleStatus{Replicas: 77},
-		},
-	}
-	ir := liveIR("llama", "prod", 5)
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
-		WithObjects(isvc, ir).
-		Build()
-
-	SetGlobalDisableIRManaged(true)
-	t.Cleanup(func() { SetGlobalDisableIRManaged(false) })
-
-	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
-
-	got := &v1beta1.InferenceService{}
-	g.Expect(c.Get(context.Background(),
-		types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, got)).To(gomega.Succeed())
-
-	// Sentinel survives even though an IR existed and the engine mode is OMENative.
-	g.Expect(got.Status.Components[v1beta1.EngineComponent].Lifecycle.Replicas).To(gomega.Equal(int32(77)),
-		"kill switch must skip aggregation even when an OMENative IR exists")
-}
-
 // TestAggregateIRStatus_NilClient_Rejected pins the validation
 // guard: nil client at the aggregator means the dispatch site
 // dropped r.Client.

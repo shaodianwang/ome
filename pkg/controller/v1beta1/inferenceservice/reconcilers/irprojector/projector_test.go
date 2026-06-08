@@ -101,7 +101,7 @@ func minimalParams(t *testing.T, isvc *v1beta1.InferenceService, c client.Client
 // IR-managed path automatically (no per-Component opt-in required).
 func TestIsIRManagedComponent_OMENativeMode_True(t *testing.T) {
 	g := gomega.NewWithT(t)
-	g.Expect(IsIRManagedComponent(constants.OMENative, false)).To(gomega.BeTrue(),
+	g.Expect(IsIRManagedComponent(constants.OMENative)).To(gomega.BeTrue(),
 		"OMENative-mode Component must route through the IR-managed path by default")
 }
 
@@ -118,45 +118,9 @@ func TestIsIRManagedComponent_NonOMENativeMode_False(t *testing.T) {
 		constants.VirtualDeployment,
 		constants.DeploymentModeType(""), // unresolved / unknown
 	} {
-		g.Expect(IsIRManagedComponent(mode, false)).To(gomega.BeFalse(),
+		g.Expect(IsIRManagedComponent(mode)).To(gomega.BeFalse(),
 			"non-OMENative mode %q must NOT route through the IR-managed path", mode)
 	}
-}
-
-// TestIsIRManagedComponent_GlobalKillSwitch_OverridesMode pins the
-// operator kill switch: even on an OMENative-mode Component,
-// passing managerDisableFlag=true forces the predicate false. The
-// flag is sourced from the process-wide atomic toggled by
-// SetGlobalDisableIRManaged; tests pass it explicitly so the
-// predicate stays pure.
-func TestIsIRManagedComponent_GlobalKillSwitch_OverridesMode(t *testing.T) {
-	g := gomega.NewWithT(t)
-	g.Expect(IsIRManagedComponent(constants.OMENative, false)).To(gomega.BeTrue(),
-		"sanity: OMENative routes through IR by default")
-	g.Expect(IsIRManagedComponent(constants.OMENative, true)).To(gomega.BeFalse(),
-		"managerDisableFlag must force the predicate false regardless of mode")
-}
-
-// TestIsManagerDisableFlagSet_ReflectsAtomic pins the live read of
-// the package-level atomic toggled by SetGlobalDisableIRManaged.
-// cmd/manager/main.go calls SetGlobalDisableIRManaged once at
-// startup; dispatch sites + status aggregators call
-// IsManagerDisableFlagSet on every reconcile to fetch the current
-// value. Cleanup at the end restores the default so subsequent
-// tests aren't surprised.
-func TestIsManagerDisableFlagSet_ReflectsAtomic(t *testing.T) {
-	g := gomega.NewWithT(t)
-	g.Expect(IsManagerDisableFlagSet()).To(gomega.BeFalse(),
-		"default state: kill switch is NOT set")
-
-	SetGlobalDisableIRManaged(true)
-	t.Cleanup(func() { SetGlobalDisableIRManaged(false) })
-	g.Expect(IsManagerDisableFlagSet()).To(gomega.BeTrue(),
-		"after SetGlobalDisableIRManaged(true), the helper must reflect the new state")
-
-	SetGlobalDisableIRManaged(false)
-	g.Expect(IsManagerDisableFlagSet()).To(gomega.BeFalse(),
-		"after SetGlobalDisableIRManaged(false), the helper must reflect the new state")
 }
 
 // TestEnsureInferenceReplica_Create_NewIR pins the create-from-scratch
