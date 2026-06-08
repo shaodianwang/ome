@@ -227,11 +227,12 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		priorSurgeInFlight := CurrentSurgeInFlight(input.ObservedState.InstanceStatuses)
 		priorUnavailInFlight := CurrentUnavailableInFlight(input.ObservedState.InstanceStatuses)
 		for _, inst := range plan.Instances {
-			// RollingUpdate.Partition (canary): hold Instances with index <
-			// Partition on the old revision — skip their update entirely. Surge
-			// Instances (index >= replicas >= Partition) are never held, so a
-			// rolling Instance's own surge still proceeds.
-			if HeldByPartition(rollingUpdate, inst.Index) {
+			// RollingUpdate.Partition (canary): normally hold Instances with index
+			// < Partition on the old revision (skip their update). skipAsHeld carves
+			// out the one exception — a held Instance ALREADY mid-surge must finish,
+			// not strand its surge pod (see skipAsHeld for the deadlock it avoids).
+			if skipAsHeld(rollingUpdate, inst.Index,
+				findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)) {
 				continue
 			}
 			needs, derr := workloadops.DetectUpdateTrigger(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec)
@@ -350,4 +351,25 @@ func findObservedInstanceStatus(observed []InstanceStatus, idx int32) *InstanceS
 		}
 	}
 	return nil
+}
+
+// skipAsHeld reports whether this pass should hold (skip) the Instance at index
+// because the canary RollingUpdate.Partition pins it to the old revision. A held
+// Instance that is ALREADY mid-surge (Phase == InstancePhaseUpdating) is NOT
+// skipped — it must finish.
+//
+// Why the exception: a canary stamps its partition dynamically (StampStepPartition,
+// from status.Canary). On the first post-bump reconcile an Instance can begin a
+// surge before it becomes held, then become held a step later. If we then skipped
+// it, its surge pod would strand — held Instances never run surgeUpdate, so the pod
+// is never promoted to serving (ome.io/serving stays unset → never Ready) AND it
+// permanently consumes the maxSurge budget, budget-blocking the real roll on the
+// non-held Instances → deadlock. Letting the in-flight surge finish promotes+drains
+// it and frees the budget; the only cost is that Instance rolls one step early.
+// Static partition-mode never reaches this (the partition predates any roll).
+func skipAsHeld(ru *RollingUpdate, index int32, observed *InstanceStatus) bool {
+	if !HeldByPartition(ru, index) {
+		return false
+	}
+	return observed == nil || observed.Phase != InstancePhaseUpdating
 }
