@@ -11,11 +11,12 @@
 // The package sits at the workload boundary by design: every caller is
 // an adapter (an ISVC-side or IR-side reconciler) that needs to map
 // CRD-shape values into workload-shape values (or vice versa) at a
-// single seam. Placing the converters under pkg/controller/v1beta1/workload/
-// (rather than under any specific reconciler tree) keeps the dependency
-// direction clean — owner-CRD adapters depend on the converters, the
-// converters depend on workload + v1beta1, and the workload package
-// itself stays free of v1beta1 imports.
+// single seam. Placing the converters under pkg/controller/v1beta1/
+// (a sibling of workload/, not inside the workload tree and not under
+// any specific reconciler tree) keeps the dependency direction clean —
+// owner-CRD adapters depend on the converters, the converters depend on
+// workload + v1beta1, and the workload package itself stays free of
+// v1beta1 imports.
 package v1beta1convert
 
 import (

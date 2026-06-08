@@ -3,7 +3,7 @@
 // onto the source-agnostic workload.ReconcileInput, plus the ISVC-typed
 // audit-ledger wrappers. Pure v1beta1 <-> workload type converters
 // (formerly hosted here) now live under
-// pkg/controller/v1beta1/workload/v1beta1convert so callers that have
+// pkg/controller/v1beta1/v1beta1convert so callers that have
 // no ISVC dependency (e.g. the InferenceReplica controller) can import
 // them without pulling in this directory.
 package internalsource
