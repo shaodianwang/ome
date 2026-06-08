@@ -1,0 +1,136 @@
+package core
+
+import (
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+)
+
+// coordinatedISVC builds a coordination-enabled, multi-component ISVC: a
+// single BlueGreen group binding engine + decoder. Used to exercise the
+// peer-env injection hook end-to-end.
+func coordinatedISVC() *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "prod"},
+		Spec: v1beta1.InferenceServiceSpec{
+			Rollout: &v1beta1.RolloutSpec{
+				Coordination: &v1beta1.RolloutCoordinationSpec{
+					Groups: []v1beta1.RolloutCoordinationGroup{
+						{
+							Components: []v1beta1.ComponentType{
+								v1beta1.EngineComponent,
+								v1beta1.DecoderComponent,
+							},
+							Policy: v1beta1.CoordinationPolicyBlueGreen,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// renderedPod mimics what workload/ops.Render produces: a pod stamped
+// with the canonical component label (constants.OMEComponentLabel, whose
+// value is "component") for the given component.
+func renderedPod(component v1beta1.ComponentType) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				constants.OMEComponentLabel: string(component),
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "main"},
+				{Name: "sidecar"},
+			},
+		},
+	}
+}
+
+// TestISVCRenderHook_InjectsPeerEnvForCoordinatedComponent is the
+// regression test for the peer-env injection bug. The hook used to read
+// the component off the wrong label key ("ome.io/component" instead of
+// constants.OMEComponentLabel == "component"), so the recovered component
+// was always "", SortedPeers returned empty, and InjectPeerEnv was never
+// called. This drives a rendered engine pod through the live hook and
+// asserts the decoder peer endpoint env actually lands on every container.
+func TestISVCRenderHook_InjectsPeerEnvForCoordinatedComponent(t *testing.T) {
+	isvc := coordinatedISVC()
+	hook := ISVCRenderHook(isvc)
+	if hook == nil {
+		t.Fatal("ISVCRenderHook returned nil for a coordination-enabled ISVC")
+	}
+
+	pod := renderedPod(v1beta1.EngineComponent)
+	hook(pod, "runner-0", 0, "rev-abc123")
+
+	for _, ctr := range pod.Spec.Containers {
+		if got := envValue(ctr.Env, "OME_DECODER_ENDPOINT"); got != "llama-decoder.prod.svc.cluster.local" {
+			t.Errorf("container %q: OME_DECODER_ENDPOINT = %q, want llama-decoder.prod.svc.cluster.local",
+				ctr.Name, got)
+		}
+		if got := envValue(ctr.Env, "OME_DECODER_REVISION_ENDPOINT"); got != "llama-decoder-rev-rev-abc123.prod.svc.cluster.local" {
+			t.Errorf("container %q: OME_DECODER_REVISION_ENDPOINT = %q, want llama-decoder-rev-rev-abc123.prod.svc.cluster.local",
+				ctr.Name, got)
+		}
+		// The engine never names itself as a peer.
+		if containsEnvNamed(ctr.Env, "OME_ENGINE_ENDPOINT") {
+			t.Errorf("container %q: pod should not carry its own component as a peer", ctr.Name)
+		}
+	}
+}
+
+// TestISVCRenderHook_NilForNonCoordinatedISVC confirms the hook is a
+// no-op (nil) when the ISVC declares no rollout coordination, so
+// single-component / non-coordinated boxes are unaffected by the wiring.
+func TestISVCRenderHook_NilForNonCoordinatedISVC(t *testing.T) {
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: "prod"}}
+	if ISVCRenderHook(isvc) != nil {
+		t.Error("ISVCRenderHook should return nil when the ISVC has no rolloutCoordination")
+	}
+	if ISVCRenderHook(nil) != nil {
+		t.Error("ISVCRenderHook(nil) should return nil")
+	}
+}
+
+// TestISVCRenderHook_RevisionAgnosticWhenNoHash confirms that when the
+// renderer supplies an empty revision hash, only the generic peer
+// endpoint is injected (no per-revision form), matching InjectPeerEnv's
+// contract.
+func TestISVCRenderHook_RevisionAgnosticWhenNoHash(t *testing.T) {
+	hook := ISVCRenderHook(coordinatedISVC())
+	pod := renderedPod(v1beta1.EngineComponent)
+	hook(pod, "runner-0", 0, "")
+
+	env := pod.Spec.Containers[0].Env
+	if got := envValue(env, "OME_DECODER_ENDPOINT"); got != "llama-decoder.prod.svc.cluster.local" {
+		t.Errorf("generic endpoint missing/wrong: %q", got)
+	}
+	if containsEnvNamed(env, "OME_DECODER_REVISION_ENDPOINT") {
+		t.Error("revision endpoint should be omitted when the renderer supplies no revision hash")
+	}
+}
+
+func containsEnvNamed(env []corev1.EnvVar, name string) bool {
+	for _, e := range env {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func envValue(env []corev1.EnvVar, name string) string {
+	for _, e := range env {
+		if e.Name == name {
+			return e.Value
+		}
+	}
+	return ""
+}

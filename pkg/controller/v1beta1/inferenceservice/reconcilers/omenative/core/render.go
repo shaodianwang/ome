@@ -87,8 +87,11 @@ func isvcRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
 	}
 	return func(pod *corev1.Pod, _ string, _ int32, revisionHash string) {
 		groups := coordination.ResolveGroups(coord)
-		// component is recoverable from the pod's ome.io/component label.
-		c := v1beta1.ComponentType(pod.Labels["ome.io/component"])
+		// component is recoverable from the pod's component label
+		// (constants.OMEComponentLabel, whose value is "component" — NOT
+		// "ome.io/component"; the latter never matches the stamped key and
+		// silently yields no peers, suppressing injection entirely).
+		c := v1beta1.ComponentType(pod.Labels[constants.OMEComponentLabel])
 		peers := coordination.SortedPeers(groups, c, nil)
 		if len(peers) == 0 {
 			return

@@ -35,6 +35,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	omenativecore "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/core"
 	omenativeops "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
@@ -214,8 +215,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		APIReader:    r.APIReader,
 		Recorder:     r.Recorder,
 		Expectations: r.Expectations,
-		// RenderHook stays nil for the IR adapter — peer-env injection
-		// lives on the parent ISVC controller for v1
+		// Wire OEP-0007.1 peer-env injection on the IR-managed (live) path.
+		// ISVCRenderHook overlays OME_<PEER>_ENDPOINT / _REVISION_ENDPOINT
+		// onto each rendered pod so PD components (engine <-> decoder) can
+		// address each other by stable DNS. It returns nil when the parent
+		// ISVC has no rolloutCoordination block, so single-component /
+		// non-coordinated boxes are unaffected. parent may be nil when the
+		// parent ISVC is unresolved (foreground-GC window) — the hook handles
+		// nil by returning nil.
+		RenderHook: omenativecore.ISVCRenderHook(parent),
 	}
 
 	// PodGroups must exist BEFORE the first pod of any multi-pod Instance is
