@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -533,5 +535,347 @@ func TestCheckSequentialGate_NoOrderBypasses(t *testing.T) {
 	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
 	if !allowed {
 		t.Errorf("Sequential without Order must not wedge dispatcher: %s", reason)
+	}
+}
+
+// emitSequentialDeferredEvent: when an operator bumps a later-in-Order
+// Component's spec while an earlier Component is still rolling,
+// Sequential semantics defer the later rollout and the controller
+// must emit SequentialNextSpecBumpDeferred so the operator understands
+// why the spec change isn't visible yet.
+
+func TestEmitSequentialDeferred_NotSequentialPolicy(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	isvc := &v1beta1.InferenceService{}
+	g := ResolvedGroup{
+		Policy: v1beta1.CoordinationPolicyBlueGreen,
+		Order:  []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+	}
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+			v1beta1.EngineComponent:  {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+		},
+	}
+	emitSequentialDeferredEvent(rec, isvc, g, obs, "")
+	if got := drainEvents(rec); len(got) != 0 {
+		t.Errorf("BlueGreen policy must not emit Sequential events; got %v", got)
+	}
+}
+
+func TestEmitSequentialDeferred_NoComponentRolling(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	isvc := &v1beta1.InferenceService{}
+	g := ResolvedGroup{
+		Policy: v1beta1.CoordinationPolicySequential,
+		Order:  []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+	}
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {RolloutInFlight: false},
+			v1beta1.EngineComponent:  {RolloutInFlight: false},
+		},
+	}
+	emitSequentialDeferredEvent(rec, isvc, g, obs, "")
+	if got := drainEvents(rec); len(got) != 0 {
+		t.Errorf("no active component → no deferred event; got %v", got)
+	}
+}
+
+func TestEmitSequentialDeferred_ActiveButNoLaterBump(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	isvc := &v1beta1.InferenceService{}
+	g := ResolvedGroup{
+		Policy: v1beta1.CoordinationPolicySequential,
+		Order:  []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+	}
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+			v1beta1.EngineComponent:  {RolloutInFlight: false, CurrentRevisionHash: "rev1"},
+		},
+	}
+	emitSequentialDeferredEvent(rec, isvc, g, obs, "")
+	if got := drainEvents(rec); len(got) != 0 {
+		t.Errorf("active decoder + idle engine → no deferred event; got %v", got)
+	}
+}
+
+func TestEmitSequentialDeferred_FiresWhenLaterComponentAlsoBumped(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	isvc := &v1beta1.InferenceService{}
+	g := ResolvedGroup{
+		Name:   "0",
+		Policy: v1beta1.CoordinationPolicySequential,
+		Order:  []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+	}
+	// Decoder is active (RolloutInFlight). Engine was ALSO bumped
+	// while decoder is rolling → Sequential defers engine. Expect one
+	// deferred event for engine.
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+			v1beta1.EngineComponent:  {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+		},
+	}
+	emitSequentialDeferredEvent(rec, isvc, g, obs, "")
+	got := drainEvents(rec)
+	if len(got) != 1 {
+		t.Fatalf("want exactly 1 deferred event; got %d: %v", len(got), got)
+	}
+	if !contains(got[0], EventReasonSequentialNextSpecBumpDeferred) {
+		t.Errorf("event reason mismatch: %s", got[0])
+	}
+	if !contains(got[0], "engine") {
+		t.Errorf("event should name later Component (engine): %s", got[0])
+	}
+	if !contains(got[0], "decoder") {
+		t.Errorf("event should name active Component (decoder): %s", got[0])
+	}
+}
+
+func TestEmitSequentialDeferred_MultipleLaterComponentsFireMultipleEvents(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	isvc := &v1beta1.InferenceService{}
+	g := ResolvedGroup{
+		Name:   "0",
+		Policy: v1beta1.CoordinationPolicySequential,
+		Order:  []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent, v1beta1.RouterComponent},
+	}
+	// Decoder active, both engine + router also bumped → 2 deferred events.
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+			v1beta1.EngineComponent:  {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+			v1beta1.RouterComponent:  {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+		},
+	}
+	emitSequentialDeferredEvent(rec, isvc, g, obs, "")
+	got := drainEvents(rec)
+	if len(got) != 2 {
+		t.Fatalf("want 2 deferred events (engine + router); got %d: %v", len(got), got)
+	}
+}
+
+func TestEmitSequentialDeferred_NilRecorder(t *testing.T) {
+	// Must not panic on nil recorder.
+	g := ResolvedGroup{
+		Policy: v1beta1.CoordinationPolicySequential,
+		Order:  []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+	}
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {RolloutInFlight: true},
+			v1beta1.EngineComponent:  {RolloutInFlight: true},
+		},
+	}
+	emitSequentialDeferredEvent(nil, &v1beta1.InferenceService{}, g, obs, "")
+}
+
+func TestEmitSequentialDeferred_EmptyOrder(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	isvc := &v1beta1.InferenceService{}
+	g := ResolvedGroup{
+		Policy: v1beta1.CoordinationPolicySequential,
+		Order:  nil,
+	}
+	emitSequentialDeferredEvent(rec, isvc, g, GroupObservation{Group: g}, "")
+	if got := drainEvents(rec); len(got) != 0 {
+		t.Errorf("empty Order → no events; got %v", got)
+	}
+}
+
+// =============================================================================
+// Test helpers
+// =============================================================================
+
+func drainEvents(rec *record.FakeRecorder) []string {
+	var out []string
+	for {
+		select {
+		case e := <-rec.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0)
+}
+
+func indexOf(s, sub string) int {
+	n := len(sub)
+	for i := 0; i+n <= len(s); i++ {
+		if s[i:i+n] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestEmitSequentialDeferred_DedupWhenActiveUnchanged(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	isvc := &v1beta1.InferenceService{}
+	g := ResolvedGroup{
+		Name:   "0",
+		Policy: v1beta1.CoordinationPolicySequential,
+		Order:  []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+	}
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+			v1beta1.EngineComponent:  {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+		},
+	}
+	// prevActive=decoder matches current activeComponent → dedup suppresses.
+	emitSequentialDeferredEvent(rec, isvc, g, obs, v1beta1.DecoderComponent)
+	if got := drainEvents(rec); len(got) != 0 {
+		t.Errorf("dedup: same active Component must suppress re-emit; got %v", got)
+	}
+}
+
+func TestEmitSequentialDeferred_FiresWhenActiveAdvances(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	isvc := &v1beta1.InferenceService{}
+	g := ResolvedGroup{
+		Name:   "0",
+		Policy: v1beta1.CoordinationPolicySequential,
+		Order:  []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent, v1beta1.RouterComponent},
+	}
+	// Decoder done; engine now active; router deferred.
+	obs := GroupObservation{
+		Group: g,
+		Components: map[v1beta1.ComponentType]ComponentObservation{
+			v1beta1.DecoderComponent: {RolloutInFlight: false, CurrentRevisionHash: "rev2"},
+			v1beta1.EngineComponent:  {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+			v1beta1.RouterComponent:  {RolloutInFlight: true, TargetRevisionHash: "rev2"},
+		},
+	}
+	// prevActive=decoder; now activeComponent=engine → dedup clears, emit.
+	emitSequentialDeferredEvent(rec, isvc, g, obs, v1beta1.DecoderComponent)
+	got := drainEvents(rec)
+	if len(got) != 1 {
+		t.Fatalf("active advanced (decoder→engine) → expect re-emit for router; got %d: %v", len(got), got)
+	}
+	if !contains(got[0], "router") {
+		t.Errorf("event should name router as deferred: %s", got[0])
+	}
+}
+
+// Force corev1 import (used indirectly via record).
+var _ = corev1.EventTypeWarning
+
+// ResolveGateContext is the once-per-tick prelude helper backing all
+// Check* gates. These tests pin the four short-circuit paths and the
+// resolved-group success path; the per-gate behavior is already covered
+// by the existing ratio_test.go / sequential_gate_test.go suites that
+// continue to exercise the public CheckRatioGate / CheckSurgeGate /
+// CheckUnavailabilityGate / CheckSequentialGate wrappers.
+
+func TestResolveGateContext_NilISVC(t *testing.T) {
+	ctx := ResolveGateContext(nil, v1beta1.EngineComponent)
+	if !ctx.ShortCircuit {
+		t.Fatalf("nil ISVC: want ShortCircuit=true, got %+v", ctx)
+	}
+	if ctx.ShortReason != "nil ISVC" {
+		t.Errorf("nil ISVC: want ShortReason=nil ISVC, got %q", ctx.ShortReason)
+	}
+}
+
+func TestResolveGateContext_NoCoordBlock(t *testing.T) {
+	isvc := &v1beta1.InferenceService{}
+	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)
+	if !ctx.ShortCircuit {
+		t.Fatalf("no coord block: want ShortCircuit=true, got %+v", ctx)
+	}
+	if ctx.ShortReason != "no coordination block" {
+		t.Errorf("no coord block: want ShortReason=no coordination block, got %q", ctx.ShortReason)
+	}
+}
+
+func TestResolveGateContext_ComponentNotInAnyGroup(t *testing.T) {
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{
+					{
+						Components: []v1beta1.ComponentType{v1beta1.DecoderComponent},
+						Policy:     v1beta1.CoordinationPolicyIndependent,
+					},
+				},
+			}},
+		},
+	}
+	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)
+	if !ctx.ShortCircuit {
+		t.Fatalf("not in any group: want ShortCircuit=true, got %+v", ctx)
+	}
+	if ctx.ShortReason != "component not in any coord group" {
+		t.Errorf("not in any group: want ShortReason=component not in any coord group, got %q", ctx.ShortReason)
+	}
+}
+
+func TestResolveGateContext_ResolvesGroup(t *testing.T) {
+	isvc := &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
+				Groups: []v1beta1.RolloutCoordinationGroup{
+					{
+						Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+						Policy:     v1beta1.CoordinationPolicyBlueGreen,
+					},
+				},
+			}},
+		},
+	}
+	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)
+	if ctx.ShortCircuit {
+		t.Fatalf("resolved group: want ShortCircuit=false, got %+v", ctx)
+	}
+	if ctx.Group.Policy != v1beta1.CoordinationPolicyBlueGreen {
+		t.Errorf("resolved group: want Policy=BlueGreen, got %q", ctx.Group.Policy)
+	}
+	if len(ctx.Group.Components) != 2 {
+		t.Errorf("resolved group: want 2 Components, got %d", len(ctx.Group.Components))
+	}
+	if ctx.ISVC != isvc {
+		t.Errorf("resolved group: ISVC pointer not threaded through")
+	}
+	if ctx.Component != v1beta1.EngineComponent {
+		t.Errorf("resolved group: Component not threaded through, got %q", ctx.Component)
+	}
+}
+
+// TestGateContextCheckRatio_ShortCircuitsAllowed pins the
+// short-circuit path on the GateContext-aware variant — the dispatcher
+// reads the (allowed=true, reason) tuple even when the ISVC has no
+// coord block. Behavior parity with CheckRatioGate's "nil ISVC" /
+// "no coordination block" / "component not in any coord group"
+// branches is what makes the wrapper safe to keep as a 1-liner.
+func TestGateContextCheckRatio_ShortCircuitsAllowed(t *testing.T) {
+	ctx := GateContext{
+		ShortCircuit: true,
+		ShortReason:  "no coordination block",
+	}
+	if allowed, reason := ctx.CheckRatio(0, -1); !allowed || reason != "no coordination block" {
+		t.Errorf("short-circuit: got (allowed=%v, reason=%q), want (true, no coordination block)", allowed, reason)
+	}
+	if allowed, reason := ctx.CheckSurge(0); !allowed || reason != "no coordination block" {
+		t.Errorf("short-circuit surge: got (allowed=%v, reason=%q)", allowed, reason)
+	}
+	if allowed, reason := ctx.CheckUnavailability(0); !allowed || reason != "no coordination block" {
+		t.Errorf("short-circuit unavail: got (allowed=%v, reason=%q)", allowed, reason)
+	}
+	if allowed, reason := ctx.CheckSequential(); !allowed || reason != "no coordination block" {
+		t.Errorf("short-circuit sequential: got (allowed=%v, reason=%q)", allowed, reason)
 	}
 }
