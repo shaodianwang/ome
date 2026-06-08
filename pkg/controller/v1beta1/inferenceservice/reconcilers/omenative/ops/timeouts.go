@@ -33,6 +33,17 @@ import (
 //
 // Called near the top of ReconcileComponent so timed-out ops reset before
 // the per-op detectors run.
+//
+// LATENT GAP (see .claude/specs/2026-06-08-omenative-workload-code-review.md §3):
+// this operation-deadline-expiry is legacy-path-only. The IR-managed
+// path (the production default, driven via workload.Reconcile) has NO
+// operation-deadline-expiry equivalent — stuck IRs are handled via
+// auto-migration only (DetectStuckInstancesForISVC, mirrored on the
+// ISVC-direct path by detectStuckInstancesForAutoMigration). If
+// stuck-operation expiry is meant to apply to IRs too, it is currently
+// missing.
+// Decision 2026-06-08: documented, not wired (low impact — nothing sets
+// these fields today).
 func ExpireOperationsIfDeadlinePassed(ctx context.Context, p core.ReconcileParams, plan core.ComponentPlan) error {
 	if p.Client == nil {
 		return fmt.Errorf("ExpireOperationsIfDeadlinePassed: nil client")

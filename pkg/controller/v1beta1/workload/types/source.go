@@ -19,6 +19,17 @@ type WorkloadDesiredSpec struct {
 
 	// MinReadySeconds is the minimum age (in seconds) for an Instance
 	// to count as Available after becoming Ready.
+	//
+	// LATENT BUG (see .claude/specs/2026-06-08-omenative-workload-code-review.md §3):
+	// this field is populated by the IR converter
+	// (inferencereplica/convert.go, from IR spec.minReadySeconds) but is
+	// NEVER read by the rollout engine. Availability is computed from
+	// EndpointSlice membership, not a readiness-age gate, so IR
+	// spec.minReadySeconds is currently NOT honored. The
+	// AvailablePodCount doc in types.go ("ready for at least
+	// MinReadySeconds") is aspirational on this account.
+	// Decision 2026-06-08: documented, not wired (low impact — nothing
+	// sets these fields today).
 	MinReadySeconds int32
 
 	// Runners enumerates the Runner roles (default | leader | worker)
@@ -108,16 +119,35 @@ type WorkloadAggregateStatus struct {
 	Traffic              []ComponentTrafficTarget
 }
 
-// WorkloadPacing is the projected rollout pacing the reconciler reads.
+// WorkloadPacing is the projected rollout pacing.
 // Adapters compute it once per reconcile.
+//
+// LATENT BUG (see .claude/specs/2026-06-08-omenative-workload-code-review.md §3):
+// despite the "the reconciler reads" framing, NOTHING in the rollout
+// engine reads Partition / MaxUnavailable / Decisions. The IR converter
+// (inferencereplica/convert.go) populates Partition and MaxUnavailable
+// from IR spec.pacing, but pacing actually flows through
+// RollingUpdate.Partition + the UpdateGate callback instead, and
+// availability is computed from EndpointSlice membership — so IR
+// spec.pacing.partition and spec.pacing.maxUnavailable are currently NOT
+// honored. (IR spec.pacing.rollbackToRevision IS live, handled in
+// inferencereplica/reconciler.go — only partition/maxUnavailable are
+// dead.) Decisions/PacingDecisions is likewise never constructed in
+// production.
+// Decision 2026-06-08: documented, not wired (low impact — nothing sets
+// these fields today).
 type WorkloadPacing struct {
 	// Partition holds back updates for Instances whose index is less
 	// than Partition. 0 (the default) updates all Instances. Used
 	// for canary holds.
+	//
+	// NOT READ by the engine — see the WorkloadPacing type note above.
 	Partition *int32
 
 	// MaxUnavailable caps in-rollout disruption. nil falls back to
 	// the reconciler default (25%).
+	//
+	// NOT READ by the engine — see the WorkloadPacing type note above.
 	MaxUnavailable *intstr.IntOrString
 
 	// Decisions is the projected per-gate allow/deny map for this
