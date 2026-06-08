@@ -116,18 +116,28 @@ func TestReconcile_AutoAdvance(t *testing.T) {
 		{NewCapacity: intstr.FromString("100%"), TrafficWeight: 100},
 	}
 	isvc := canaryISVC(steps, promPolicy(v1beta1.PromotionPolicyAuto), nil)
-	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, StepEnteredTime: &metav1.Time{Time: time.Unix(1000, 0)}}
+	// The pause is anchored to when the split FIRST serves, not to step entry. Seed
+	// StepEnteredTime 40 min in the past (> the 30 min pause) to mimic a slow capacity
+	// wait: the step was "entered" long ago, but traffic only shifts now — the soak
+	// must still run from now, so the canary must NOT advance immediately.
+	t0 := time.Unix(100000, 0)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, StepEnteredTime: &metav1.Time{Time: t0.Add(-40 * time.Minute)}}
 
 	in := baseInputs(isvc, map[string]int32{"new": 2})
-	in.Now = time.Unix(1000, 0).Add(10 * time.Minute) // before duration
+	in.Now = t0 // capacity met → split serves → pause re-anchored to t0, phase Paused
 	Reconcile(context.Background(), in)
 	if isvc.Status.Canary.CurrentStep != 0 {
-		t.Fatalf("auto must not advance before duration, step=%d", isvc.Status.Canary.CurrentStep)
+		t.Fatalf("pause must anchor to the split serving, not the 40-min-old step entry; advanced too early, step=%d", isvc.Status.Canary.CurrentStep)
 	}
-	in.Now = time.Unix(1000, 0).Add(31 * time.Minute) // after duration
+	in.Now = t0.Add(10 * time.Minute) // before the pause elapses (from t0)
+	Reconcile(context.Background(), in)
+	if isvc.Status.Canary.CurrentStep != 0 {
+		t.Fatalf("auto must not advance before the pause elapses, step=%d", isvc.Status.Canary.CurrentStep)
+	}
+	in.Now = t0.Add(31 * time.Minute) // after the pause elapses (from t0)
 	Reconcile(context.Background(), in)
 	if isvc.Status.Canary.CurrentStep != 1 {
-		t.Fatalf("auto must advance after duration, step=%d", isvc.Status.Canary.CurrentStep)
+		t.Fatalf("auto must advance after the pause elapses, step=%d", isvc.Status.Canary.CurrentStep)
 	}
 }
 

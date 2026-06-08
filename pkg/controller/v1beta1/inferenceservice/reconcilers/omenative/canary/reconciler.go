@@ -216,7 +216,16 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		return &Result{Active: true, Partition: 0, RequeueAfter: reconcileRequeue}, nil
 	}
 
-	// Intermediate step: serving a split. Honor the pause, else advance.
+	// Intermediate step: serving a split. Anchor the pause to the moment the split
+	// FIRST serves — re-stamp StepEnteredTime on entering the active phase (the gate
+	// just passed; the prior phase was Pending). On slow capacity the step is entered
+	// well before traffic moves, so measuring the pause from step entry would consume
+	// the soak before the split is even up (model-load can far exceed the pause in
+	// prod). Mirrors the final step's Promoting anchor above. Re-stamp once: skip when
+	// already Canarying/Paused.
+	if cur := in.ISVC.Status.Components[in.Component].RolloutPhase; cur != v1beta1.RolloutPhaseCanarying && cur != v1beta1.RolloutPhasePaused {
+		cs.StepEnteredTime = &metav1.Time{Time: in.Now}
+	}
 	setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseCanarying)
 	if step.Pause != nil && !shouldAdvance(in.ISVC, plan, cs, step, in.Now) {
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePaused)

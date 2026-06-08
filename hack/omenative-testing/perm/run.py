@@ -935,11 +935,16 @@ def _canary(case_id, yaml_file, desc, hdr):
         print(f"    [t={int(now - ctx['trigger_ts']):3d}s] phase={phase:<11} step={step} "
               f"canary={canary_hash} rejected={rejected} traffic[{wsteps}]")
 
-        # Converged: rollback cases settle at RolledBack (held on stable); normal
-        # canaries at Stable. status.canary persists (done sentinel / rolled-back
-        # marker), so convergence keys on the phase.
+        # Converged: rollback cases settle at RolledBack (drained to stable); normal
+        # canaries at Stable. We key on the phase AND on pod convergence: the
+        # controller flips Stable when traffic is 100% on Ready new pods, but the
+        # old-pod drain finishes asynchronously a few seconds later. Wait for the
+        # pods to actually settle (full roll, or 0 canary for a rollback) so we
+        # don't snapshot mid-drain.
         target_phase = "RolledBack" if do_rollback else "Stable"
-        if phase == target_phase:
+        cur_new, _ = _inst_rev_split(ctx, primary)
+        pods_settled = (cur_new == 0) if do_rollback else (cur_new == N[primary])
+        if phase == target_phase and pods_settled:
             stable = stable or now
             if now - stable >= STABILITY_S:
                 state = "CONVERGED"
@@ -981,10 +986,17 @@ def _canary(case_id, yaml_file, desc, hdr):
         good("RollingBack" in phases, "observed RollingBack (draining to stable)", "never observed RollingBack")
         return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
+    # Producer-side traffic: at convergence the canary revision must carry 100%.
+    # The per-step weights recorded during the roll are timing-unreliable (the
+    # status traffic-targets lag the step machine, and step 0 can momentarily read
+    # the pre-shift 100%-stable), so assert the CONVERGED end-state, not the
+    # intermediate sequence.
     weights = [traffic_by_step[k] for k in sorted(traffic_by_step)]
-    good(bool(weights) and weights[-1] == 100 and weights == sorted(weights),
-         f"canary traffic weight stepped to 100 (status): {weights}",
-         f"canary traffic weights not monotonic-to-100 (status): {weights}")
+    final_comp = (fetch_status(case_id).get("components", {}) or {}).get(primary, {}) or {}
+    canary_pct = next((t.get("percent", 0) for t in (final_comp.get("traffic") or []) if t.get("latestRevision")), 0)
+    good(canary_pct == 100,
+         f"canary revision carries 100% traffic at convergence (per-step: {weights})",
+         f"canary revision traffic at convergence is {canary_pct}% (want 100); per-step: {weights}")
     good(new == N[primary],
          f"{primary} fully rolled to canary revision ({new}/{N[primary]})",
          f"{primary} not fully on canary revision ({new}/{N[primary]})")
