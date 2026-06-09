@@ -574,14 +574,14 @@ coverage: ## Show coverage summary and enforce threshold
 		exit 1; \
 	fi
 .PHONY: dep-crds
-dep-crds: lws-crds keda-crds gateway-api-crds scheduler-plugins-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
+dep-crds: keda-crds gateway-api-crds scheduler-plugins-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
 
 DEP_CRDS_DIR := tests/integration/dep-crds
 
 # Each <bundle>-crds target: copies CRD YAMLs from the corresponding
 # go.mod module into tests/integration/dep-crds/<bundle>/. Tests point
 # at these directories (envtest via framework.OptionalCRDBundle, KIND via
-# kindfix CRDPaths). The module-vendored bundles (lws, keda, gateway-api,
+# kindfix CRDPaths). The module-vendored bundles (keda, gateway-api,
 # scheduler-plugins) are gitignored and regenerated here — NOT committed;
 # only the hand-vendored bundles (envoy-gateway, prometheus-operator) are
 # tracked, with a SOURCE file. `make integration-test` runs dep-crds as a
@@ -590,14 +590,6 @@ DEP_CRDS_DIR := tests/integration/dep-crds
 #
 # Pattern follows kueue/Makefile-deps.mk: locate via `go list -m
 # -mod=readonly`, copy via `cp -f`, never write to GOPATH.
-
-.PHONY: lws-crds
-lws-crds: ## Vendor sigs.k8s.io/lws CRDs (leaderworkerset.x-k8s.io)
-	@mkdir -p $(DEP_CRDS_DIR)/lws
-	@LWS_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" sigs.k8s.io/lws 2>/dev/null) ; \
-	if [ -z "$$LWS_DIR" ]; then echo "sigs.k8s.io/lws not in go.mod; skipping lws-crds" >&2; exit 0; fi ; \
-	cp -f "$$LWS_DIR/config/crd/bases/"*.yaml $(DEP_CRDS_DIR)/lws/ ; \
-	echo "✅ Vendored LWS CRDs to $(DEP_CRDS_DIR)/lws/"
 
 .PHONY: keda-crds
 keda-crds: ## Vendor github.com/kedacore/keda CRDs (keda.sh — ScaledObject, ScaledJob, TriggerAuthentication, ClusterTriggerAuthentication)

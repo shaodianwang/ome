@@ -52,7 +52,7 @@ import (
 // IsIRManagedComponent returns true when the given Component should be
 // driven through the InferenceReplica path. Only constants.OMENative
 // routes through the IR-managed path; every other mode (RawDeployment,
-// MultiNode, …) falls through to its own dispatch branch in
+// …) falls through to its own dispatch branch in
 // components/{engine,decoder,router}.go.
 //
 // OMENative-mode Components ALWAYS route through the IR-managed path —

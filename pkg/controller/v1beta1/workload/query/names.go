@@ -24,7 +24,7 @@ func HeadlessServiceName(isvc string, component workload.ComponentType) string {
 
 // StableServiceName returns the per-Component stable (non-headless,
 // non-revision-scoped) Service name — <isvc>-<comp>. Matches the
-// Service-name convention RawDeployment / MultiNode use (see
+// Service-name convention RawDeployment uses (see
 // constants.{Engine,Decoder,Router}ServiceName) so the existing ingress
 // strategies — which point HTTPRoute / Ingress backendRefs at
 // <isvc>-<comp> — work for OMENative without a per-mode strategy.

@@ -1743,13 +1743,13 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 					},
 					"leader": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Leader node configuration (only used for MultiNode deployment) Defines the pod and container spec for the leader node that coordinates distributed token generation in multi-node deployments.",
+							Description: "Leader node configuration (only used for multi-node deployment) Defines the pod and container spec for the leader node that coordinates distributed token generation in multi-node deployments.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec"),
 						},
 					},
 					"worker": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Worker nodes configuration (only used for MultiNode deployment) Defines the pod and container spec for worker nodes that perform distributed token generation tasks as directed by the leader.",
+							Description: "Worker nodes configuration (only used for multi-node deployment) Defines the pod and container spec for worker nodes that perform distributed token generation tasks as directed by the leader.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec"),
 						},
 					},
@@ -2469,13 +2469,13 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					},
 					"leader": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Leader node configuration (only used for MultiNode deployment) Defines the pod and container spec for the leader node that coordinates distributed inference in multi-node deployments.",
+							Description: "Leader node configuration (only used for multi-node deployment) Defines the pod and container spec for the leader node that coordinates distributed inference in multi-node deployments.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec"),
 						},
 					},
 					"worker": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Worker nodes configuration (only used for MultiNode deployment) Defines the pod and container spec for worker nodes that perform distributed processing tasks as directed by the leader.",
+							Description: "Worker nodes configuration (only used for multi-node deployment) Defines the pod and container spec for worker nodes that perform distributed processing tasks as directed by the leader.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec"),
 						},
 					},
@@ -3336,7 +3336,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 				Properties: map[string]spec.Schema{
 					"deploymentMode": {
 						SchemaProps: spec.SchemaProps{
-							Description: "DeploymentMode selects the dispatch backend that drives every Component on this InferenceService. When set, it propagates to the Engine, Decoder, and Router resolver at read-time without mutating per-Component annotations — `kubectl get -o yaml` stays clean. A per-Component `ome.io/deploymentMode` annotation still wins as an explicit override (the escape hatch is preserved for backward compat and mixed-mode experiments).\n\nValid values:\n  - \"OMENative\"     — OEP-0007 native lifecycle-managed pods\n  - \"RawDeployment\" — Kubernetes Deployment/HPA-backed dispatch\n\nMultiNode and PDDisaggregated are SHAPE descriptors derived from Leader/Worker presence and engine+decoder pairing respectively; they are not valid dispatch backends and are rejected by the CRD enum. VirtualDeployment is legacy and not supported here.",
+							Description: "DeploymentMode selects the dispatch backend that drives every Component on this InferenceService. When set, it propagates to the Engine, Decoder, and Router resolver at read-time without mutating per-Component annotations — `kubectl get -o yaml` stays clean. A per-Component `ome.io/deploymentMode` annotation still wins as an explicit override (the escape hatch is preserved for backward compat and mixed-mode experiments).\n\nValid values:\n  - \"OMENative\"     — OEP-0007 native lifecycle-managed pods (also\n    handles multi-node serving when Leader/Worker are present)\n  - \"RawDeployment\" — Kubernetes Deployment/HPA-backed dispatch\n\nPDDisaggregated is a SHAPE descriptor derived from engine+decoder pairing; it is not a valid dispatch backend and is rejected by the CRD enum. A component with Leader/Worker resolves to OMENative. VirtualDeployment is legacy and not supported here.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

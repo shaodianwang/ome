@@ -1501,21 +1501,21 @@ func TestDetermineEngineDeploymentMode(t *testing.T) {
 				Leader: &v1beta1.LeaderSpec{},
 				Worker: &v1beta1.WorkerSpec{},
 			},
-			expectedMode: constants.MultiNode,
+			expectedMode: constants.OMENative,
 		},
 		{
 			name: "multi-node with only leader",
 			engine: &v1beta1.EngineSpec{
 				Leader: &v1beta1.LeaderSpec{},
 			},
-			expectedMode: constants.MultiNode,
+			expectedMode: constants.OMENative,
 		},
 		{
 			name: "multi-node with only worker",
 			engine: &v1beta1.EngineSpec{
 				Worker: &v1beta1.WorkerSpec{},
 			},
-			expectedMode: constants.MultiNode,
+			expectedMode: constants.OMENative,
 		},
 		{
 			name: "raw deployment with min replicas > 0",
@@ -1544,16 +1544,16 @@ func TestDetermineEngineDeploymentMode(t *testing.T) {
 			expectedMode: constants.RawDeployment,
 		},
 		{
-			name: "annotation with MultiNode takes highest precedence",
+			name: "legacy MultiNode annotation resolves to OMENative (highest precedence)",
 			engine: &v1beta1.EngineSpec{
 				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
 					Annotations: map[string]string{
-						constants.DeploymentMode: string(constants.MultiNode),
+						constants.DeploymentMode: "MultiNode",
 					},
 					MinReplicas: intPtr(0),
 				},
 			},
-			expectedMode: constants.MultiNode,
+			expectedMode: constants.OMENative,
 		},
 		{
 			name: "invalid annotation is ignored, falls back to leader check",
@@ -1566,7 +1566,7 @@ func TestDetermineEngineDeploymentMode(t *testing.T) {
 				},
 				Leader: &v1beta1.LeaderSpec{},
 			},
-			expectedMode: constants.MultiNode,
+			expectedMode: constants.OMENative,
 		},
 		{
 			name: "empty annotations map, falls back to leader check",
@@ -1577,7 +1577,7 @@ func TestDetermineEngineDeploymentMode(t *testing.T) {
 				},
 				Leader: &v1beta1.LeaderSpec{},
 			},
-			expectedMode: constants.MultiNode,
+			expectedMode: constants.OMENative,
 		},
 		{
 			name: "annotation overrides leader and min replicas 0",

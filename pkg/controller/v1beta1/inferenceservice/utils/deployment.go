@@ -15,7 +15,7 @@ import (
 //  2. specMode — the typed top-level spec.deploymentMode field. When set,
 //     propagates to every Component without mutating per-Component
 //     annotations (kept clean for `kubectl get -o yaml`).
-//  3. Leader/Worker shape inference → MultiNode.
+//  3. Leader/Worker shape inference → OMENative (native multi-node).
 //  4. Default → RawDeployment.
 func DetermineEngineDeploymentMode(engine *v1beta1.EngineSpec, specMode *constants.DeploymentModeType) constants.DeploymentModeType {
 	if engine == nil {
@@ -30,9 +30,10 @@ func DetermineEngineDeploymentMode(engine *v1beta1.EngineSpec, specMode *constan
 		return mode
 	}
 
-	// Multi-node if leader and worker are defined
+	// Multi-node (leader/worker) resolves to OMENative, which handles
+	// multi-node serving natively.
 	if engine.Leader != nil || engine.Worker != nil {
-		return constants.MultiNode
+		return constants.OMENative
 	}
 
 	// Default to raw deployment
@@ -54,7 +55,7 @@ func DetermineDeploymentModes(engine *v1beta1.EngineSpec, decoder *v1beta1.Decod
 }
 
 // determineComponentDeploymentMode determines deployment mode for a generic component.
-// Per-Component annotation > spec.deploymentMode (specMode) > Leader/Worker shape (MultiNode) >
+// Per-Component annotation > spec.deploymentMode (specMode) > Leader/Worker shape (OMENative) >
 // RawDeployment default. Symmetric for Engine, Decoder, and Router so PD-disaggregated
 // ISVCs can opt each component into OMENative independently.
 func determineComponentDeploymentMode(spec interface{}, runtime *v1beta1.ServingRuntimeSpec, specMode *constants.DeploymentModeType) constants.DeploymentModeType {
@@ -72,7 +73,7 @@ func determineComponentDeploymentMode(spec interface{}, runtime *v1beta1.Serving
 			return mode
 		}
 		if s.Leader != nil || s.Worker != nil {
-			return constants.MultiNode
+			return constants.OMENative
 		}
 		return constants.RawDeployment
 	case *v1beta1.RouterSpec:

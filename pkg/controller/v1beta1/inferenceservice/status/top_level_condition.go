@@ -18,8 +18,7 @@ import (
 // Instance has all its pods ContainersReady. Mirrors the contract
 // PropagateRawStatus uses (Deployment.Available) so the ingress
 // reconciler, aggregate Ready rollup, and `kubectl wait
-// --for=condition=Ready` treat OMENative the same as RawDeployment /
-// MultiNode.
+// --for=condition=Ready` treat OMENative the same as RawDeployment.
 //
 // Lives in the neutral inferenceservice/status package rather than
 // either reconciler — both the legacy omenative direct path

@@ -46,7 +46,7 @@ var _ = ginkgo.Describe("InferenceService defaulter webhook", func() {
 	ginkgo.It("Engine only + no annotation → defaultDeploymentMode from inferenceservice-config (RawDeployment)", func() {
 		// SeedDefaultConfigMaps puts deploy.defaultDeploymentMode
 		// =RawDeployment in the CM (util/seed.go). Engine without
-		// Decoder and without the MultiNode signal must inherit
+		// Decoder and without the multi-node signal must inherit
 		// that default.
 		isvc := v1beta1testing.MakeInferenceService("def-engine-only", "isvc-defaulter").
 			Model("any-model").
@@ -78,11 +78,12 @@ var _ = ginkgo.Describe("InferenceService defaulter webhook", func() {
 		Expect(got.Annotations).To(HaveKeyWithValue(constants.DeploymentMode, string(constants.PDDisaggregated)))
 	})
 
-	ginkgo.It("Engine.Leader + Worker.Size>0 → DeploymentMode=MultiNode", func() {
+	ginkgo.It("Engine.Leader + Worker.Size>0 → DeploymentMode=OMENative", func() {
 		// Defaulter detects the multi-node signal: Leader+Worker
-		// present AND Worker.Size > 0. Without Worker.Size > 0 the
-		// branch falls through to the default-deployment-mode
-		// path (covered by the next spec).
+		// present AND Worker.Size > 0, which resolves to OMENative
+		// (native multi-node). Without Worker.Size > 0 the branch
+		// falls through to the default-deployment-mode path (covered
+		// by the next spec).
 		isvc := v1beta1testing.MakeInferenceService("def-multinode", "isvc-defaulter").
 			Model("any-model").
 			Engine(&v1beta1.EngineSpec{
@@ -99,11 +100,11 @@ var _ = ginkgo.Describe("InferenceService defaulter webhook", func() {
 
 		got := &v1beta1.InferenceService{}
 		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "def-multinode", Namespace: "isvc-defaulter"}, got)).To(Succeed())
-		Expect(got.Annotations).To(HaveKeyWithValue(constants.DeploymentMode, string(constants.MultiNode)))
+		Expect(got.Annotations).To(HaveKeyWithValue(constants.DeploymentMode, string(constants.OMENative)))
 	})
 
-	ginkgo.It("Engine.Leader + Worker.Size=0 → falls through to default mode (NOT MultiNode)", func() {
-		// Worker.Size=0 disables the MultiNode branch — the
+	ginkgo.It("Engine.Leader + Worker.Size=0 → falls through to default mode (NOT multi-node)", func() {
+		// Worker.Size=0 disables the multi-node branch — the
 		// defaulter must treat it as if the multi-node signal isn't
 		// present and apply the configured default. Catches a
 		// regression where the gate checks Worker.Size != nil
@@ -125,7 +126,7 @@ var _ = ginkgo.Describe("InferenceService defaulter webhook", func() {
 		got := &v1beta1.InferenceService{}
 		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "def-multinode-zero", Namespace: "isvc-defaulter"}, got)).To(Succeed())
 		// Falls through to the default deployment mode rather than
-		// being treated as MultiNode.
+		// being treated as multi-node.
 		Expect(got.Annotations).To(HaveKeyWithValue(constants.DeploymentMode, string(constants.RawDeployment)))
 	})
 

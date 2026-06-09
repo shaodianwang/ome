@@ -126,7 +126,7 @@ func TestDeploymentModeDetection(t *testing.T) {
 			expectedMode: string(constants.PDDisaggregated),
 		},
 		{
-			name: "engine with leader and worker should set MultiNode",
+			name: "engine with leader and worker should set OMENative",
 			isvc: &v1beta1.InferenceService{
 				Spec: v1beta1.InferenceServiceSpec{
 					Engine: &v1beta1.EngineSpec{
@@ -136,7 +136,7 @@ func TestDeploymentModeDetection(t *testing.T) {
 				},
 			},
 			deployConfig: nil,
-			expectedMode: string(constants.MultiNode),
+			expectedMode: string(constants.OMENative),
 		},
 		{
 			name: "engine without leader/worker should default to RawDeployment",
@@ -162,11 +162,15 @@ func TestDeploymentModeDetection(t *testing.T) {
 			expectedMode: string(constants.RawDeployment),
 		},
 		{
+			// A pre-existing annotation is preserved verbatim — even a
+			// legacy "MultiNode" value the defaulter no longer stamps.
+			// This pins the upgrade-safety contract: admission does not
+			// rewrite or reject persisted annotations.
 			name: "existing deployment mode should not be overridden",
 			isvc: &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						constants.DeploymentMode: string(constants.MultiNode),
+						constants.DeploymentMode: "MultiNode",
 					},
 				},
 				Spec: v1beta1.InferenceServiceSpec{
@@ -175,7 +179,7 @@ func TestDeploymentModeDetection(t *testing.T) {
 				},
 			},
 			deployConfig: nil,
-			expectedMode: string(constants.MultiNode),
+			expectedMode: "MultiNode",
 		},
 	}
 
@@ -311,7 +315,7 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 
 	t.Run("not OMENative — omenative block untouched", func(t *testing.T) {
 		ext := &v1beta1.ComponentExtensionSpec{
-			Annotations: map[string]string{constants.DeploymentMode: string(constants.MultiNode)},
+			Annotations: map[string]string{constants.DeploymentMode: string(constants.RawDeployment)},
 		}
 		defaultOMENativeComponent(ext, true, nil)
 		assert.Nil(t, ext.Lifecycle)

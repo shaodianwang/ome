@@ -51,7 +51,7 @@ import (
 // Sequence per Component:
 //
 //  1. Skip Components whose resolved deployment mode is not
-//     OMENative — the RawDeployment / MultiNode path already wrote
+//     OMENative — the RawDeployment path already wrote
 //     ISVC.Status.Components[c].Lifecycle in its own pass.
 //
 //  2. Fetch the IR by name. NotFound is non-fatal — the IR may not
@@ -80,8 +80,8 @@ func AggregateIRStatus(ctx context.Context, c client.Client, isvc *v1beta1.Infer
 	for _, comp := range allDeclaredComponents(isvc) {
 		mode := componentModes[comp]
 		// Non-OMENative Components are reconciled by their own dispatch
-		// path (RawDeployment / MultiNode), which already wrote their
-		// status subtree; skip them here.
+		// path (RawDeployment), which already wrote their status subtree;
+		// skip them here.
 		if !IsIRManagedComponent(mode) {
 			continue
 		}

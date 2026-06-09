@@ -126,7 +126,7 @@ func (w *ClusterServingRuntimeWrapper) EngineConfig(spec *v1beta1.EngineSpec) *C
 }
 
 // EngineLeaderRunner sets spec.engineConfig.leader.runner — required
-// for MultiNode-mode engines because the leader has its own pod spec /
+// for multi-node engines because the leader has its own pod spec /
 // runner (independent of engineConfig.runner). The canonical
 // production pattern is config/runtimes/srt/deepseek-rdma-rt.yaml,
 // where the engine container lives at engineConfig.leader.runner.

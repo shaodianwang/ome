@@ -87,7 +87,7 @@ func TestDetermineDeploymentModes_PerComponentAnnotations(t *testing.T) {
 			wantRouter:     constants.RawDeployment,
 		},
 		{
-			name: "Decoder with Leader/Worker but no annotation falls back to MultiNode",
+			name: "Decoder with Leader/Worker but no annotation falls back to OMENative",
 			engine: &v1beta1.EngineSpec{
 				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{Annotations: rawAnnot},
 			},
@@ -96,7 +96,7 @@ func TestDetermineDeploymentModes_PerComponentAnnotations(t *testing.T) {
 				Worker: &v1beta1.WorkerSpec{},
 			},
 			wantEngineMode: constants.RawDeployment,
-			wantDecoder:    constants.MultiNode,
+			wantDecoder:    constants.OMENative,
 			wantRouter:     constants.RawDeployment,
 		},
 		{
@@ -134,7 +134,7 @@ func TestDetermineDeploymentModes_NilEngineRejected(t *testing.T) {
 // TestDetermineDeploymentModes_SpecDeploymentModeField covers the
 // precedence chain that includes the new typed spec.deploymentMode
 // field: per-Component annotation > spec.deploymentMode > Leader/Worker
-// shape (MultiNode) > RawDeployment default.
+// shape (OMENative) > RawDeployment default.
 func TestDetermineDeploymentModes_SpecDeploymentModeField(t *testing.T) {
 	omeNativePtr := func() *constants.DeploymentModeType {
 		m := constants.OMENative
@@ -224,10 +224,10 @@ func TestDetermineDeploymentModes_SpecDeploymentModeField(t *testing.T) {
 			wantRouter:     constants.RawDeployment,
 		},
 		{
-			name:           "nil spec.deploymentMode → Leader/Worker shape still wins (MultiNode)",
+			name:           "nil spec.deploymentMode → Leader/Worker shape still wins (OMENative)",
 			engine:         &v1beta1.EngineSpec{Leader: &v1beta1.LeaderSpec{}},
 			specMode:       nil,
-			wantEngineMode: constants.MultiNode,
+			wantEngineMode: constants.OMENative,
 			wantDecoder:    constants.RawDeployment,
 			wantRouter:     constants.RawDeployment,
 		},

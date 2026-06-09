@@ -41,12 +41,11 @@ var _ = ginkgo.BeforeSuite(func() {
 	framework.SetupTestLogger()
 
 	// Optional bundles allow each deployment mode's spec to run in the
-	// same suite. Bundles are mode-orthogonal: installing LWS does not
+	// same suite. Bundles are mode-orthogonal: installing one does not
 	// change RawDeployment behavior (annotation + Leader/Worker presence
 	// are the controller-side mode triggers).
 	s, err := framework.NewSuite(&framework.Framework{
 		OptionalCRDs: []framework.OptionalCRDBundle{
-			framework.LWS,
 			framework.KEDA,
 			// EnvoyGateway gives the OEP-0011 traffic translator a
 			// real BackendTrafficPolicy CRD to write against. Tests

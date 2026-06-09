@@ -6,7 +6,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"knative.dev/pkg/apis"
-	lwsspec "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -52,24 +51,6 @@ func (sr *StatusReconciler) getDeploymentCondition(deployment *appsv1.Deployment
 	return &condition
 }
 
-// getLWSConditions extracts condition from LeaderWorkerSet
-func (sr *StatusReconciler) getLWSConditions(lws *lwsspec.LeaderWorkerSet, conditionType lwsspec.LeaderWorkerSetConditionType) *apis.Condition {
-	condition := apis.Condition{}
-	for _, con := range lws.Status.Conditions {
-		if lwsspec.LeaderWorkerSetConditionType(con.Type) == conditionType {
-			condition.Type = apis.ConditionType(conditionType)
-			condition.Status = v1.ConditionStatus(con.Status)
-			condition.Message = con.Message
-			condition.LastTransitionTime = apis.VolatileTime{
-				Inner: con.LastTransitionTime,
-			}
-			condition.Reason = con.Reason
-			break
-		}
-	}
-	return &condition
-}
-
 // setCondition sets a condition on the status
 func (sr *StatusReconciler) setCondition(status *v1beta1.InferenceServiceStatus, conditionType apis.ConditionType, condition *apis.Condition) {
 	if condition != nil {
@@ -78,7 +59,7 @@ func (sr *StatusReconciler) setCondition(status *v1beta1.InferenceServiceStatus,
 }
 
 // InitializeComponentCondition initializes a component ready condition if it doesn't exist
-// This is used for MultiNode deployments to ensure conditions are visible from the start
+// so the component's readiness is visible from the start of reconciliation.
 func (sr *StatusReconciler) InitializeComponentCondition(status *v1beta1.InferenceServiceStatus, component v1beta1.ComponentType) {
 	readyCondition := sr.getReadyConditionsMap()[component]
 

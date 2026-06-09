@@ -18,6 +18,14 @@ func GetDeploymentModeFromAnnotations(annotations map[string]string) (constants.
 		return "", false
 	}
 	if mode, exists := annotations[constants.DeploymentMode]; exists {
+		// Upgrade safety: the legacy "MultiNode" derived mode was retired
+		// when OMENative gained native multi-node support. ISVCs persisted
+		// before the removal may still carry ome.io/deploymentMode=MultiNode;
+		// resolve them to OMENative so they keep reconciling. (String literal
+		// because the MultiNode const no longer exists.)
+		if mode == "MultiNode" {
+			return constants.OMENative, true
+		}
 		deploymentMode := constants.DeploymentModeType(mode)
 		if deploymentMode.IsValid() {
 			return deploymentMode, true

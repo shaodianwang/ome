@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -87,9 +86,6 @@ import (
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets/finalizers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=scheduling.x-k8s.io,resources=podgroups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=podmonitors,verbs=get;list;watch;create;update;patch;delete
@@ -654,7 +650,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// and copy it onto ISVC.Status.Components[<component>].Lifecycle.
 	// The IR controller is the sole writer of IR.Status. Components on
 	// non-OMENative paths are not touched here; their status was already
-	// written by the Raw / MultiNode reconciler during the per-Component
+	// written by the RawDeployment reconciler during the per-Component
 	// dispatcher pass above.
 	//
 	// Errors propagate so a transient apiserver read failure triggers
@@ -865,11 +861,6 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	runtimeSelectorConfig.ModelCacheProvider = r.ModelCache.Name
 	r.RuntimeSelector = runtimeselector.NewWithConfig(runtimeSelectorConfig)
 
-	lwsFound, err := utils.IsCrdAvailable(r.ClientConfig, lws.SchemeGroupVersion.String(), constants.LWSKind)
-	if err != nil {
-		return err
-	}
-
 	// KEDA is a hard dependency, not an optional CRD probe.
 	// Owns(&kedav1.ScaledObject{}) is unconditional below; if KEDA is
 	// absent from the cluster the controller will fail fast on the first
@@ -930,12 +921,6 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		ctrlBuilder = ctrlBuilder.Owns(&monitoringv1.PodMonitor{})
 	} else {
 		r.Log.Info("The InferenceService controller won't watch monitoring.coreos.com/v1/PodMonitor resources because the CRD is not available.")
-	}
-
-	if lwsFound {
-		ctrlBuilder = ctrlBuilder.Owns(&lws.LeaderWorkerSet{})
-	} else {
-		r.Log.Info("The InferenceService controller won't watch leaderworkerset.x-k8s.io/v1/LeaderWorkerSet resources because the CRD is not available.")
 	}
 
 	if podGroupFound {

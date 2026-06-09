@@ -8,7 +8,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/apis"
-	lwsspec "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -218,89 +217,6 @@ func TestGetDeploymentCondition(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			manager := NewStatusReconciler()
 			result := manager.getDeploymentCondition(tt.deployment, tt.conditionType)
-
-			assert.Equal(t, tt.expected.Type, result.Type)
-			assert.Equal(t, tt.expected.Status, result.Status)
-			assert.Equal(t, tt.expected.Reason, result.Reason)
-			assert.Equal(t, tt.expected.Message, result.Message)
-		})
-	}
-}
-
-func TestGetLWSConditions(t *testing.T) {
-	tests := []struct {
-		name          string
-		lws           *lwsspec.LeaderWorkerSet
-		conditionType lwsspec.LeaderWorkerSetConditionType
-		expected      *apis.Condition
-	}{
-		{
-			name: "LWS with available condition",
-			lws: &lwsspec.LeaderWorkerSet{
-				Status: lwsspec.LeaderWorkerSetStatus{
-					Conditions: []metav1.Condition{
-						{
-							Type:    string(lwsspec.LeaderWorkerSetAvailable),
-							Status:  metav1.ConditionTrue,
-							Reason:  "AllReplicasReady",
-							Message: "All replicas are ready",
-						},
-					},
-				},
-			},
-			conditionType: lwsspec.LeaderWorkerSetAvailable,
-			expected: &apis.Condition{
-				Type:    apis.ConditionType(lwsspec.LeaderWorkerSetAvailable),
-				Status:  corev1.ConditionTrue,
-				Reason:  "AllReplicasReady",
-				Message: "All replicas are ready",
-			},
-		},
-		{
-			name: "LWS with progressing condition",
-			lws: &lwsspec.LeaderWorkerSet{
-				Status: lwsspec.LeaderWorkerSetStatus{
-					Conditions: []metav1.Condition{
-						{
-							Type:    "Progressing",
-							Status:  metav1.ConditionTrue,
-							Reason:  "ReplicaSetUpdated",
-							Message: "ReplicaSet is being updated",
-						},
-					},
-				},
-			},
-			conditionType: "Progressing",
-			expected: &apis.Condition{
-				Type:    apis.ConditionType("Progressing"),
-				Status:  corev1.ConditionTrue,
-				Reason:  "ReplicaSetUpdated",
-				Message: "ReplicaSet is being updated",
-			},
-		},
-		{
-			name: "LWS without requested condition",
-			lws: &lwsspec.LeaderWorkerSet{
-				Status: lwsspec.LeaderWorkerSetStatus{
-					Conditions: []metav1.Condition{
-						{
-							Type:   "Progressing",
-							Status: metav1.ConditionTrue,
-						},
-					},
-				},
-			},
-			conditionType: lwsspec.LeaderWorkerSetAvailable,
-			expected: &apis.Condition{
-				Type: "",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manager := NewStatusReconciler()
-			result := manager.getLWSConditions(tt.lws, tt.conditionType)
 
 			assert.Equal(t, tt.expected.Type, result.Type)
 			assert.Equal(t, tt.expected.Status, result.Status)

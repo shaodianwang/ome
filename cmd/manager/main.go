@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	kueuev1beta1 "sigs.k8s.io/kueue/apis/kueue/v1beta1"
-	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	schedulerpluginsv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 	volcanobatch "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	volcano "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -298,7 +297,6 @@ func main() {
 		kind         string
 		addToScheme  func(*runtime.Scheme) error
 	}{
-		{lws.SchemeGroupVersion, constants.LWSKind, lws.AddToScheme},
 		{volcano.SchemeGroupVersion, constants.VolcanoQueueKind, volcano.AddToScheme},
 		{volcanobatch.SchemeGroupVersion, constants.VolcanoJobKind, volcanobatch.AddToScheme},
 		{monitoringv1.SchemeGroupVersion, constants.PodMonitorKind, monitoringv1.AddToScheme},

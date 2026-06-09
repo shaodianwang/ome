@@ -151,10 +151,9 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 	// headless Service (whose naming is tied to the per-Component pod
 	// template).
 	//
-	// Raw / MultiNode keep their dispatcher-side service+podmonitor calls
-	// because their selectors are mode-specific (Raw: nil → pod template
-	// labels; MultiNode: worker-index=0 leader-only routing); hoisting
-	// them is queued as a separate follow-up.
+	// RawDeployment keeps its dispatcher-side service+podmonitor calls
+	// because its selector is mode-specific (nil → pod template labels);
+	// hoisting it is queued as a separate follow-up.
 	if e.DeploymentMode == constants.OMENative {
 		if err := e.reconcileOMENativeSubresources(ctx, isvc, objectMeta, podSpec); err != nil {
 			return ctrl.Result{}, errors.Wrap(err, "failed to reconcile engine OMENative sub-resources")
@@ -197,8 +196,6 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 	switch e.DeploymentMode {
 	case constants.RawDeployment:
 		return e.deploymentReconciler.ReconcileRawDeployment(isvc, objectMeta, podSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
-	case constants.MultiNode:
-		return e.deploymentReconciler.ReconcileMultiNodeDeployment(isvc, objectMeta, podSpec, workerSize, workerPodSpec, &e.engineSpec.ComponentExtensionSpec, v1beta1.EngineComponent)
 	case constants.OMENative:
 		// Admission rejects orphan Leader/Worker and Worker.Size <= 0, so
 		// the only valid multi-pod shape has both fields set.
@@ -258,10 +255,8 @@ func (e *Engine) updateEngineStatus(isvc *v1beta1.InferenceService, objectMeta m
 // reconcileObjectMeta creates the object metadata for the engine
 // component. Delegates the annotation / label merge to the shared
 // ReconcileComponentObjectMeta helper in base.go; the per-component
-// name resolution stays here because the fallback rules still differ
-// across components (Decoder gates the Service-existence lookup on
-// non-MultiNode mode; engine / router don't — see section 4 of the
-// components-dispatch review).
+// name resolution stays here for symmetry with the decoder / router
+// object-meta paths.
 func (e *Engine) reconcileObjectMeta(ctx context.Context, isvc *v1beta1.InferenceService) (metav1.ObjectMeta, error) {
 	engineName, err := e.determineEngineName(ctx, isvc)
 	if err != nil {
@@ -292,11 +287,11 @@ func (e *Engine) determineEngineName(ctx context.Context, isvc *v1beta1.Inferenc
 }
 
 // engineUsesLeaderTemplate reports whether the engine should source its
-// primary pod template from the Leader block (multi-pod shape — MultiNode
-// or multi-pod OMENative) rather than the top-level engine spec
-// (single-pod shape). It is a pure structural check on the spec; it
-// deliberately does NOT consult the deployment mode, so dispatch-mode
-// classification and template selection stay decoupled.
+// primary pod template from the Leader block (multi-pod OMENative shape)
+// rather than the top-level engine spec (single-pod shape). It is a pure
+// structural check on the spec; it deliberately does NOT consult the
+// deployment mode, so dispatch-mode classification and template selection
+// stay decoupled.
 func engineUsesLeaderTemplate(spec *v1beta1.EngineSpec) bool {
 	return spec != nil && spec.Leader != nil
 }
@@ -305,10 +300,9 @@ func engineUsesLeaderTemplate(spec *v1beta1.EngineSpec) bool {
 func (e *Engine) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *metav1.ObjectMeta) (*v1.PodSpec, error) {
 	// Template selection is keyed on the presence of a Leader block, NOT on
 	// the deployment mode. e.DeploymentMode is set authoritatively at
-	// construction time; calling isvcutils.DetermineEngineDeploymentMode
-	// here would re-infer it from the spec and disagree with the dispatch
-	// for OMENative-mode engines that also set Leader/Worker (the helper
-	// returns MultiNode; the dispatch is OMENative).
+	// construction time; re-inferring it from the spec here is unnecessary
+	// and template selection stays decoupled from dispatch-mode
+	// classification.
 	var basePodSpec v1beta1.PodSpec
 	var runnerSpec *v1beta1.RunnerSpec
 
@@ -317,8 +311,7 @@ func (e *Engine) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *me
 		runnerSpec = e.engineSpec.Leader.Runner
 	} else {
 		// Fallback to the top-level engine spec — covers single-pod
-		// OMENative, RawDeployment, and the malformed-but-tolerated
-		// MultiNode-without-Leader shape.
+		// OMENative and RawDeployment.
 		basePodSpec = e.engineSpec.PodSpec
 		runnerSpec = e.engineSpec.Runner
 	}

@@ -22,7 +22,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
-	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -47,7 +46,6 @@ func TestEngineReconcile(t *testing.T) {
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(appsv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
-	g.Expect(lws.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(kedav1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(autoscalingv2.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(policyv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
@@ -174,119 +172,6 @@ func TestEngineReconcile(t *testing.T) {
 					Namespace: "default",
 				}, service)
 				g.Expect(err).NotTo(gomega.HaveOccurred())
-			},
-		},
-		{
-			name:           "Multi-node deployment with leader and worker specs",
-			deploymentMode: constants.MultiNode,
-			baseModel: &v1beta1.BaseModelSpec{
-				ModelFormat: v1beta1.ModelFormat{
-					Name: "safetensors",
-				},
-				Storage: &v1beta1.StorageSpec{
-					Path: stringPtr("/mnt/models/model2"),
-				},
-			},
-			baseModelMeta: &metav1.ObjectMeta{
-				Name:      "base-model-2",
-				Namespace: "default",
-			},
-			engineSpec: &v1beta1.EngineSpec{
-				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					MinReplicas: intPtr(2),
-				},
-				Leader: &v1beta1.LeaderSpec{
-					PodSpec: v1beta1.PodSpec{
-						Containers: []v1.Container{
-							{
-								Name:  "leader-container",
-								Image: "leader:latest",
-							},
-						},
-					},
-					Runner: &v1beta1.RunnerSpec{
-						Container: v1.Container{
-							Name:  "leader-container",
-							Image: "runtime-leader:latest",
-						},
-					},
-				},
-				Worker: &v1beta1.WorkerSpec{
-					Size: intPtr(2),
-					PodSpec: v1beta1.PodSpec{
-						Containers: []v1.Container{
-							{
-								Name:  "worker-container",
-								Image: "worker:latest",
-							},
-						},
-					},
-				},
-			},
-			runtime: &v1beta1.ServingRuntimeSpec{
-				ServingRuntimePodSpec: v1beta1.ServingRuntimePodSpec{
-					Containers: []v1.Container{
-						{
-							Name:  "runtime-container",
-							Image: "runtime:latest",
-						},
-					},
-				},
-			},
-			runtimeName: "multi-node-runtime",
-			isvc: &v1beta1.InferenceService{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mn-isvc",
-					Namespace: "default",
-				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Model: &v1beta1.ModelRef{},
-				},
-			},
-			setupMocks: func(c client.Client, cs kubernetes.Interface) {
-				// Create inferenceservice config in both clients
-				cm := &v1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "inferenceservice-config",
-						Namespace: "ome",
-					},
-					Data: map[string]string{
-						"config": "{}",
-					},
-				}
-				// Create in controller-runtime client
-				err := c.Create(context.TODO(), cm)
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-
-				// Also create in clientset (if different)
-				_, err = cs.CoreV1().ConfigMaps("ome").Create(context.TODO(), cm, metav1.CreateOptions{})
-				if err != nil && !strings.Contains(err.Error(), "already exists") {
-					g.Expect(err).NotTo(gomega.HaveOccurred())
-				}
-			},
-			validate: func(t *testing.T, c client.Client, isvc *v1beta1.InferenceService) {
-				// Check LeaderWorkerSet was created
-				lwsList := &lws.LeaderWorkerSetList{}
-				err := c.List(context.TODO(), lwsList, client.InNamespace("default"))
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-				g.Expect(lwsList.Items).To(gomega.HaveLen(1))
-				g.Expect(lwsList.Items[0].Spec.Replicas).To(gomega.Equal(int32Ptr(2)))
-
-				// Check node selector was added for both leader and worker pods
-				leaderNodeSelector := lwsList.Items[0].Spec.LeaderWorkerTemplate.LeaderTemplate.Spec.NodeSelector
-				workerNodeSelector := lwsList.Items[0].Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.NodeSelector
-				g.Expect(leaderNodeSelector).NotTo(gomega.BeNil())
-				g.Expect(workerNodeSelector).NotTo(gomega.BeNil())
-
-				// Verify leader pod has model node selector
-				leaderValue, leaderFound := leaderNodeSelector["models.ome.io/default.basemodel.base-model-2"]
-				g.Expect(leaderFound).To(gomega.BeTrue(), "Leader model node selector not found")
-				g.Expect(leaderValue).To(gomega.Equal("Ready"))
-
-				// Verify worker pod has model node selector
-				workerValue, workerFound := workerNodeSelector["models.ome.io/default.basemodel.base-model-2"]
-				g.Expect(workerFound).To(gomega.BeTrue(), "Worker model node selector not found")
-				g.Expect(workerValue).To(gomega.Equal("Ready"))
 			},
 		},
 		{
@@ -865,15 +750,13 @@ func TestEngineWorkerPodSpec(t *testing.T) {
 }
 
 // TestEngineUsesLeaderTemplate pins the structural predicate that drives
-// pod-template selection in reconcilePodSpec. The earlier implementation
-// called isvcutils.DetermineEngineDeploymentMode(spec) and switched on the
-// result — which returned MultiNode for ANY spec with Leader/Worker set,
-// regardless of the authoritative DeploymentMode wired in at construction
-// time. For an OMENative-mode engine with Leader != nil the two disagreed
-// (helper said MultiNode; dispatch said OMENative); the bug was masked
-// only because the MultiNode branch happened to also use Leader.PodSpec.
-// Replacing the helper with engineUsesLeaderTemplate decouples template
-// selection from dispatch-mode classification.
+// pod-template selection in reconcilePodSpec. Template selection is a pure
+// structural check on the spec (Leader != nil), deliberately decoupled from
+// the authoritative DeploymentMode wired in at construction time — an
+// earlier implementation that re-inferred the mode from the spec risked
+// disagreeing with the dispatch for OMENative engines that set Leader/Worker.
+// engineUsesLeaderTemplate keeps template selection and dispatch-mode
+// classification independent.
 func TestEngineUsesLeaderTemplate(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
@@ -937,13 +820,10 @@ func TestEngineUsesLeaderTemplate(t *testing.T) {
 
 // TestEngineReconcilePodSpec_OMENativeWithLeader pins that the
 // OMENative-mode engine with Leader != nil picks the Leader pod template
-// (not the top-level engine spec template). This is the latent-bug
-// regression test for a bug where the code called
-// isvcutils.DetermineEngineDeploymentMode which would return MultiNode
-// for this shape, and the MultiNode branch happened to use Leader.PodSpec
-// — so today it accidentally works. Pin the behavior so a future refactor
-// of the MultiNode branch to do something MultiNode-specific does NOT
-// silently break the OMENative + Leader path.
+// (not the top-level engine spec template). Template selection is a pure
+// structural check (Leader != nil) decoupled from the dispatch mode, so
+// this pins the OMENative + Leader path independently of how the mode is
+// resolved.
 func TestEngineReconcilePodSpec_OMENativeWithLeader(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
@@ -981,8 +861,8 @@ func TestEngineReconcilePodSpec_OMENativeWithLeader(t *testing.T) {
 	clientset := fake.NewClientset()
 	c := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
 
-	// Construct with DeploymentMode=OMENative — distinct from what
-	// DetermineEngineDeploymentMode would return for this spec (MultiNode).
+	// Construct with DeploymentMode=OMENative wired in at construction;
+	// template selection keys on Leader != nil regardless of dispatch mode.
 	engine := NewEngine(
 		c, clientset,
 		nil, nil, nil, // apiReader, expectations, recorder

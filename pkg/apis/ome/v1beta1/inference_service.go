@@ -19,13 +19,14 @@ type InferenceServiceSpec struct {
 	// mixed-mode experiments).
 	//
 	// Valid values:
-	//   - "OMENative"     — OEP-0007 native lifecycle-managed pods
+	//   - "OMENative"     — OEP-0007 native lifecycle-managed pods (also
+	//     handles multi-node serving when Leader/Worker are present)
 	//   - "RawDeployment" — Kubernetes Deployment/HPA-backed dispatch
 	//
-	// MultiNode and PDDisaggregated are SHAPE descriptors derived from
-	// Leader/Worker presence and engine+decoder pairing respectively;
-	// they are not valid dispatch backends and are rejected by the CRD
-	// enum. VirtualDeployment is legacy and not supported here.
+	// PDDisaggregated is a SHAPE descriptor derived from engine+decoder
+	// pairing; it is not a valid dispatch backend and is rejected by the
+	// CRD enum. A component with Leader/Worker resolves to OMENative.
+	// VirtualDeployment is legacy and not supported here.
 	// +kubebuilder:validation:Enum=OMENative;RawDeployment
 	// +optional
 	DeploymentMode *constants.DeploymentModeType `json:"deploymentMode,omitempty"`
@@ -127,13 +128,13 @@ type EngineSpec struct {
 	// +optional
 	Runner *RunnerSpec `json:"runner,omitempty"`
 
-	// Leader node configuration (only used for MultiNode deployment)
+	// Leader node configuration (only used for multi-node deployment)
 	// Defines the pod and container spec for the leader node that coordinates
 	// distributed inference in multi-node deployments.
 	// +optional
 	Leader *LeaderSpec `json:"leader,omitempty"`
 
-	// Worker nodes configuration (only used for MultiNode deployment)
+	// Worker nodes configuration (only used for multi-node deployment)
 	// Defines the pod and container spec for worker nodes that perform
 	// distributed processing tasks as directed by the leader.
 	// +optional
@@ -162,13 +163,13 @@ type DecoderSpec struct {
 	// +optional
 	Runner *RunnerSpec `json:"runner,omitempty"`
 
-	// Leader node configuration (only used for MultiNode deployment)
+	// Leader node configuration (only used for multi-node deployment)
 	// Defines the pod and container spec for the leader node that coordinates
 	// distributed token generation in multi-node deployments.
 	// +optional
 	Leader *LeaderSpec `json:"leader,omitempty"`
 
-	// Worker nodes configuration (only used for MultiNode deployment)
+	// Worker nodes configuration (only used for multi-node deployment)
 	// Defines the pod and container spec for worker nodes that perform
 	// distributed token generation tasks as directed by the leader.
 	// +optional

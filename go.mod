@@ -38,7 +38,6 @@ require (
 	sigs.k8s.io/controller-runtime v0.19.7
 	sigs.k8s.io/gateway-api v1.2.1
 	sigs.k8s.io/kueue v0.10.6
-	sigs.k8s.io/lws v0.5.1
 	sigs.k8s.io/scheduler-plugins v0.30.12
 	sigs.k8s.io/yaml v1.4.0
 	volcano.sh/apis v1.9.0

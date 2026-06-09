@@ -21,17 +21,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
-	lws "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 )
-
-// Helper function for creating int32 pointers
-func int32Ptr(i int32) *int32 {
-	return &i
-}
 
 func TestDecoderReconcile(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
@@ -41,7 +35,6 @@ func TestDecoderReconcile(t *testing.T) {
 	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(appsv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
-	g.Expect(lws.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(kedav1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(autoscalingv2.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
 	g.Expect(policyv1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
@@ -143,94 +136,6 @@ func TestDecoderReconcile(t *testing.T) {
 					Namespace: "default",
 				}, service)
 				g.Expect(err).NotTo(gomega.HaveOccurred())
-			},
-		},
-		{
-			name:           "Multi-node decoder deployment",
-			deploymentMode: constants.MultiNode,
-			baseModel: &v1beta1.BaseModelSpec{
-				ModelFormat: v1beta1.ModelFormat{
-					Name: "safetensors",
-				},
-			},
-			baseModelMeta: &metav1.ObjectMeta{
-				Name:      "base-model-2",
-				Namespace: "default",
-			},
-			decoderSpec: &v1beta1.DecoderSpec{
-				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					MinReplicas: intPtr(2),
-				},
-				Leader: &v1beta1.LeaderSpec{
-					PodSpec: v1beta1.PodSpec{
-						Containers: []v1.Container{
-							{
-								Name:  "leader-container",
-								Image: "decoder-leader:latest",
-							},
-						},
-					},
-				},
-				Worker: &v1beta1.WorkerSpec{
-					Size: intPtr(2),
-					PodSpec: v1beta1.PodSpec{
-						Containers: []v1.Container{
-							{
-								Name:  "worker-container",
-								Image: "decoder-worker:latest",
-							},
-						},
-					},
-				},
-			},
-			runtime:     &v1beta1.ServingRuntimeSpec{},
-			runtimeName: "multi-node-decoder-runtime",
-			isvc: &v1beta1.InferenceService{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mn-decoder-isvc",
-					Namespace: "default",
-				},
-				Spec: v1beta1.InferenceServiceSpec{
-					Model: &v1beta1.ModelRef{},
-				},
-			},
-			setupMocks: func(c client.Client, cs kubernetes.Interface) {
-				// Create inferenceservice config
-				cm := &v1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "inferenceservice-config",
-						Namespace: "ome",
-					},
-					Data: map[string]string{
-						"config": "{}",
-					},
-				}
-				_, err := cs.CoreV1().ConfigMaps("ome").Create(context.TODO(), cm, metav1.CreateOptions{})
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-			},
-			validate: func(t *testing.T, c client.Client, isvc *v1beta1.InferenceService) {
-				// Check LeaderWorkerSet was created
-				lwsList := &lws.LeaderWorkerSetList{}
-				err := c.List(context.TODO(), lwsList, client.InNamespace("default"))
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-				g.Expect(lwsList.Items).To(gomega.HaveLen(1))
-				g.Expect(lwsList.Items[0].Spec.Replicas).To(gomega.Equal(int32Ptr(2)))
-
-				// Check node selector was added for both leader and worker pods
-				leaderNodeSelector := lwsList.Items[0].Spec.LeaderWorkerTemplate.LeaderTemplate.Spec.NodeSelector
-				workerNodeSelector := lwsList.Items[0].Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.NodeSelector
-
-				// Verify leader pod has model node selector
-				g.Expect(leaderNodeSelector).NotTo(gomega.BeNil())
-				leaderValue, leaderFound := leaderNodeSelector["models.ome.io/default.basemodel.base-model-2"]
-				g.Expect(leaderFound).To(gomega.BeTrue(), "Leader model node selector not found")
-				g.Expect(leaderValue).To(gomega.Equal("Ready"))
-
-				// Verify worker pod has model node selector
-				g.Expect(workerNodeSelector).NotTo(gomega.BeNil())
-				workerValue, workerFound := workerNodeSelector["models.ome.io/default.basemodel.base-model-2"]
-				g.Expect(workerFound).To(gomega.BeTrue(), "Worker model node selector not found")
-				g.Expect(workerValue).To(gomega.Equal("Ready"))
 			},
 		},
 		{
@@ -770,16 +675,15 @@ func TestDecoderSetupMocks(t *testing.T) {
 }
 
 // TestDecoderUsesLeaderTemplate pins the structural predicate that drives
-// pod-template selection in decoder.reconcilePodSpec. The earlier
-// implementation switched on d.DeploymentMode and only sourced the Leader
-// template under `case constants.MultiNode`. A multi-pod OMENative decoder
-// (Leader/Worker set, DeploymentMode == OMENative) fell to the default
-// branch and collapsed onto the empty top-level runner — reconcilePodSpec
-// then failed with "no containers found in pod spec and no runner spec
-// provided", which short-circuited the component loop and left the decoder
-// (and router) InferenceReplicas un-projected. decoderUsesLeaderTemplate
-// decouples template selection from dispatch-mode classification, matching
-// engineUsesLeaderTemplate.
+// pod-template selection in decoder.reconcilePodSpec. Template selection
+// keys on the presence of a Leader block, NOT on the dispatch mode: a
+// multi-pod OMENative decoder (Leader/Worker set) must source the Leader
+// template, otherwise reconcilePodSpec collapses onto the empty top-level
+// runner and fails with "no containers found in pod spec and no runner
+// spec provided", short-circuiting the component loop and leaving the
+// decoder (and router) InferenceReplicas un-projected.
+// decoderUsesLeaderTemplate decouples template selection from dispatch-mode
+// classification, matching engineUsesLeaderTemplate.
 func TestDecoderUsesLeaderTemplate(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 

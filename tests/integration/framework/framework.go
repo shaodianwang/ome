@@ -34,7 +34,7 @@ const defaultControlPlaneStopTimeout = 90 * time.Second
 
 // defaultControlPlaneStartTimeout overrides envtest's 20s default for
 // apiserver / etcd boot. CI runners have shown 3–4s per CRD Update and
-// the OME suite installs ~10 CRDs (OME + LWS/KEDA/etc) before
+// the OME suite installs ~10 CRDs (OME + KEDA/etc) before
 // BeforeSuite can return — 2m gives ample headroom without slowing
 // healthy local runs.
 const defaultControlPlaneStartTimeout = 2 * time.Minute
@@ -77,7 +77,7 @@ type Framework struct {
 
 	// scheme is the *client-side* runtime.Scheme assembled in
 	// SetupClient. Distinct from f.testEnv.Scheme (apiserver-side); the
-	// split lets us register controller-only types (e.g. LWS, KEDA)
+	// split lets us register controller-only types (e.g. KEDA)
 	// without polluting the apiserver scheme.
 	scheme *apiruntime.Scheme
 

@@ -55,7 +55,7 @@ func DefaultInferenceService(ctx context.Context, c client.Client, isvc *v1beta1
 
 	if _, modeExists := isvc.ObjectMeta.Annotations[constants.DeploymentMode]; !modeExists {
 		// Engine + Decoder ⇒ PDDisaggregated.
-		// Engine + Leader + Worker (size>0) ⇒ MultiNode.
+		// Engine + Leader + Worker (size>0) ⇒ OMENative (native multi-node).
 		// Otherwise fall back to deployConfig.DefaultDeploymentMode
 		// (only RawDeployment is honored — other modes require an
 		// explicit operator annotation).
@@ -66,7 +66,7 @@ func DefaultInferenceService(ctx context.Context, c client.Client, isvc *v1beta1
 				isvc.Spec.Engine.Worker != nil &&
 				isvc.Spec.Engine.Worker.Size != nil &&
 				*isvc.Spec.Engine.Worker.Size > 0 {
-				isvc.ObjectMeta.Annotations[constants.DeploymentMode] = string(constants.MultiNode)
+				isvc.ObjectMeta.Annotations[constants.DeploymentMode] = string(constants.OMENative)
 			} else if deployConfig != nil && deployConfig.DefaultDeploymentMode == string(constants.RawDeployment) {
 				isvc.ObjectMeta.Annotations[constants.DeploymentMode] = deployConfig.DefaultDeploymentMode
 			}

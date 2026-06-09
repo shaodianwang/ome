@@ -458,7 +458,6 @@ type DeploymentModeType string
 const (
 	RawDeployment     DeploymentModeType = "RawDeployment"
 	PDDisaggregated   DeploymentModeType = "PDDisaggregated"
-	MultiNode         DeploymentModeType = "MultiNode"
 	VirtualDeployment DeploymentModeType = "VirtualDeployment"
 	OMENative         DeploymentModeType = "OMENative"
 )
@@ -466,7 +465,7 @@ const (
 // IsValid checks if the deployment mode is valid
 func (d DeploymentModeType) IsValid() bool {
 	switch d {
-	case RawDeployment, MultiNode, VirtualDeployment, OMENative:
+	case RawDeployment, VirtualDeployment, OMENative:
 		return true
 	default:
 		return false
@@ -491,7 +490,6 @@ const (
 	VolcanoQueueKind     = "Queue"
 	KEDAScaledObjectKind = "ScaledObject"
 	VolcanoJobKind       = "Job"
-	LWSKind              = "LeaderWorkerSet"
 	GatewayKind          = "Gateway"
 	ServiceKind          = "Service"
 	PodMonitorKind       = "PodMonitor"
@@ -647,14 +645,6 @@ func ModelConfigName(isvcName string) string {
 		isvcName = isvcName[len(isvcName)-maxLen:]
 	}
 	return fmt.Sprintf("modelconfig-%s", isvcName)
-}
-
-func LWSName(isvcName string) string {
-	var maxLen = 50
-	if len(isvcName) > maxLen {
-		isvcName = isvcName[len(isvcName)-maxLen:]
-	}
-	return fmt.Sprintf("lws-%s", isvcName)
 }
 
 func InferenceServiceHostName(name string, namespace string, domain string) string {
