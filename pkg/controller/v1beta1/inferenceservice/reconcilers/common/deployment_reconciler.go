@@ -119,5 +119,16 @@ func (r *DeploymentReconciler) setMultiNodeReferences(isvc *v1beta1.InferenceSer
 	if err := controllerutil.SetControllerReference(isvc, mnr.Service.Service, r.Scheme); err != nil {
 		return errors.Wrapf(err, "failed to set service owner reference")
 	}
-	return controllerutil.SetControllerReference(isvc, mnr.PodMonitor.PodMonitor, r.Scheme)
+	if err := controllerutil.SetControllerReference(isvc, mnr.PodMonitor.PodMonitor, r.Scheme); err != nil {
+		return errors.Wrapf(err, "failed to set podmonitor owner reference")
+	}
+	// The Istio Sidecar is only built when sidecar injection is enabled; guard
+	// for nil so the disabled path stays a no-op. Without this ref the created
+	// Sidecar has no owner and leaks (is not garbage-collected) on ISVC delete.
+	if mnr.IstioSidecar != nil && mnr.IstioSidecar.Sidecar != nil {
+		if err := controllerutil.SetControllerReference(isvc, mnr.IstioSidecar.Sidecar, r.Scheme); err != nil {
+			return errors.Wrapf(err, "failed to set istio sidecar owner reference")
+		}
+	}
+	return nil
 }
