@@ -13,8 +13,10 @@ import (
 	zaplog "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -23,6 +25,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
@@ -203,8 +207,37 @@ func main() {
 		"metricsAddr", options.metricsAddr,
 		"webhookPort", options.webhookPort,
 		"leaderElection", options.enableLeaderElection)
+
+	// Scope the manager cache to OME-owned pods. With no Cache option,
+	// controller-runtime LIST+WATCHes every Pod cluster-wide and holds them
+	// in memory before any reconcile runs (gated by WaitForCacheSync) — on a
+	// 130k-pod cluster the Pod informer alone is multi-GB and OOMKills the
+	// manager regardless of how many InferenceServices exist. Every OME pod
+	// (RawDeployment, MultiNode, OMENative/IR, PD engine/decoder/router)
+	// carries the ome.io/inferenceservice label key, and every cached pod
+	// read filters within that set, so scoping by key-existence hides nothing
+	// the controllers read. Pods are the only cluster-scale type; the
+	// remaining informers are bounded by the DefaultTransform below.
+	omePodReq, err := labels.NewRequirement(constants.InferenceServicePodLabelKey, selection.Exists, nil)
+	if err != nil {
+		setupLog.Error(err, "Failed to build OME pod cache selector")
+		os.Exit(1)
+	}
+	omePodSelector := labels.NewSelector().Add(*omePodReq)
+
 	mgr, err := manager.New(cfg, manager.Options{
 		Scheme: scheme,
+		Cache: cache.Options{
+			// Strip managedFields from every cached object (Pods, Nodes,
+			// EndpointSlices, ConfigMaps, ...): typically a large fraction of
+			// each object's serialized size and never read by OME. The
+			// built-in transform handles non-metav1 objects safely, and a
+			// ByObject entry with only Label set inherits this default.
+			DefaultTransform: cache.TransformStripManagedFields(),
+			ByObject: map[client.Object]cache.ByObject{
+				&v1.Pod{}: {Label: omePodSelector},
+			},
+		},
 		Metrics: metricsserver.Options{
 			BindAddress:   options.metricsAddr,
 			TLSOpts:       tlsOpts,
