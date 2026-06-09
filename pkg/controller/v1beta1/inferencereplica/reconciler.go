@@ -254,6 +254,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			}
 			log.V(1).Error(serr, "Status write also failed; primary error preserved")
 		}
+		// ControllerRevision retention sweep. Runs AFTER the status write
+		// so CollectLiveRevisionNames reads the just-committed
+		// CurrentRevision / UpdateRevision (mirrored onto ir.Status above)
+		// and never sweeps a revision the controller just promoted.
+		// Best-effort: sweepRevisions logs + events on failure but never
+		// fails the reconcile — without this the IR path accumulated
+		// ControllerRevisions unbounded (the gap this fixes; retention was
+		// only ever wired on the now-retired OMENative direct path).
+		r.sweepRevisions(ctx, ir)
 		// State-transition logs: only fire when a real transition
 		// crossed in this reconcile (not on steady-state passes). The
 		// in-memory mirror in aggregateAndWriteStatus means ir.Status
@@ -336,6 +345,30 @@ func (r *Reconciler) resolveParent(ctx context.Context, ir *v1beta1.InferenceRep
 	return parent
 }
 
+// irRevisionKey is the per-(parent ISVC, Component) revision.Key the IR
+// path keys ControllerRevisions on. Defined in exactly one place so the
+// revision-ensure step (ensureRevisionWithCollisionRetry) and the
+// retention sweep (sweepRevisions, retention.go) can never drift apart —
+// a mismatched Key would either ensure CRs under one label set and sweep
+// under another (retention never fires) or, worse, sweep a foreign
+// workload's CRs. Lives here (not retention.go) so reconciler.go keeps
+// owning the constants/query imports it already uses.
+//
+// IR-scoped via the parent ISVC name + Component (NOT the IR's own name
+// or UID) so the labels match what the retired direct path stamped and
+// shadow-mode equivalence holds.
+func irRevisionKey(ir *v1beta1.InferenceReplica) revision.Key {
+	return revision.Key{
+		Namespace: ir.Namespace,
+		Name:      ir.Spec.ParentRef.Name + "-" + string(ir.Spec.Component),
+		Labels: map[string]string{
+			constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
+			constants.OMEComponentLabel:           string(ir.Spec.Component),
+			query.LabelManagedBy:                  query.ManagedByOMENative,
+		},
+	}
+}
+
 // ensureRevisionWithCollisionRetry computes the target
 // ControllerRevision for the IR's current PodSpec, honoring the
 // collision contract from workload/revision: on a same-name-different-
@@ -348,15 +381,7 @@ func (r *Reconciler) resolveParent(ctx context.Context, ir *v1beta1.InferenceRep
 // owner-ref shape (IR is owner), (c) collision-counter persistence
 // goes to IR.Status.CollisionCount instead of the per-Component status.
 func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v1beta1.InferenceReplica, input workload.ReconcileInput) (*appsv1.ControllerRevision, error) {
-	revKey := revision.Key{
-		Namespace: ir.Namespace,
-		Name:      ir.Spec.ParentRef.Name + "-" + string(ir.Spec.Component),
-		Labels: map[string]string{
-			constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
-			constants.OMEComponentLabel:           string(ir.Spec.Component),
-			query.LabelManagedBy:                  query.ManagedByOMENative,
-		},
-	}
+	revKey := irRevisionKey(ir)
 
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
