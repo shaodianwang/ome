@@ -778,6 +778,163 @@ func TestEnsureInferenceReplica_NilResolvedAutoscaler_NoRegression(t *testing.T)
 			"no spurious empty block")
 }
 
+// hpaAutoscalerBlock returns a minimal HPA-class ComponentAutoscaler for
+// the replica-preservation tests. The exact metric shape is irrelevant —
+// only Class drives the projector's "is this Component autoscaler-managed"
+// decision — so a bare {Class: HPA} is enough.
+func hpaAutoscalerBlock() *v1beta1.ComponentAutoscaler {
+	return &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}
+}
+
+// TestEnsureInferenceReplica_AutoscalerManaged_PreservesLiveReplicas pins
+// the core bugfix: when the Component is autoscaler-managed (HPA / KEDA /
+// External), a re-projection MUST NOT clobber the live ir.Spec.Replicas.
+//
+// The IR's /scale subresource (.spec.replicas) is the HPA / KEDA / external
+// scale target — the autoscaler is the authoritative writer of
+// spec.replicas. Before this fix the projector unconditionally re-stamped
+// MinReplicas on every reconcile, so the ISVC controller and the autoscaler
+// fought over the count: HPA scales engine from 2 -> 8, the next ISVC
+// reconcile slams it back to MinReplicas=2, HPA scales back up, ... forever.
+//
+// Failure shape (pre-fix): scaledReplicas (8) is overwritten with
+// MinReplicas (2) on the second EnsureInferenceReplica call.
+func TestEnsureInferenceReplica_AutoscalerManaged_PreservesLiveReplicas(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod") // MinReplicas = 2
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	// First projection (create) -- HPA-managed, so MinReplicas=2 lands as
+	// the initial desired count.
+	p := minimalParams(t, isvc, c)
+	p.ResolvedAutoscaler = hpaAutoscalerBlock()
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	created := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, created)).To(gomega.Succeed())
+	g.Expect(created.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*created.Spec.Replicas).To(gomega.Equal(int32(2)),
+		"create must stamp MinReplicas as the initial desired count")
+
+	// Simulate the autoscaler scaling the IR up via the /scale subresource:
+	// HPA writes spec.replicas = 8 directly on the live object.
+	const scaledReplicas int32 = 8
+	created.Spec.Replicas = ptr.To(scaledReplicas)
+	g.Expect(c.Update(context.Background(), created)).To(gomega.Succeed())
+
+	// Second projection (update) with the SAME autoscaler-managed params.
+	// This is the every-reconcile path -- it must NOT clobber the
+	// autoscaler-written value.
+	p2 := minimalParams(t, isvc, c)
+	p2.ResolvedAutoscaler = hpaAutoscalerBlock()
+	_, err = EnsureInferenceReplica(context.Background(), p2)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	after := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, after)).To(gomega.Succeed())
+	g.Expect(after.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*after.Spec.Replicas).To(gomega.Equal(scaledReplicas),
+		"autoscaler-managed Component must PRESERVE the live (autoscaler-written) "+
+			"spec.replicas across reconciles -- re-stamping MinReplicas clobbers HPA/KEDA")
+}
+
+// TestEnsureInferenceReplica_AutoscalingOff_AppliesMinReplicas pins the
+// other half of the bugfix: when autoscaling is OFF (resolved Class None),
+// the ISVC controller owns the count, so a re-projection re-applies
+// MinReplicas even if the live IR drifted to a different value. A drifted
+// spec.replicas with no autoscaler running must converge back to the spec.
+func TestEnsureInferenceReplica_AutoscalingOff_AppliesMinReplicas(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod") // MinReplicas = 2
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	// First projection (create) -- autoscaling OFF.
+	p := minimalParams(t, isvc, c)
+	p.ResolvedAutoscaler = &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone}
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	created := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, created)).To(gomega.Succeed())
+	g.Expect(*created.Spec.Replicas).To(gomega.Equal(int32(2)),
+		"create must stamp MinReplicas")
+
+	// Drift the live spec.replicas (no autoscaler running -- e.g. a stale
+	// manual edit). The next reconcile must pull it back to MinReplicas.
+	created.Spec.Replicas = ptr.To(int32(9))
+	g.Expect(c.Update(context.Background(), created)).To(gomega.Succeed())
+
+	p2 := minimalParams(t, isvc, c)
+	p2.ResolvedAutoscaler = &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerNone}
+	_, err = EnsureInferenceReplica(context.Background(), p2)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	after := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, after)).To(gomega.Succeed())
+	g.Expect(*after.Spec.Replicas).To(gomega.Equal(int32(2)),
+		"autoscaling-off Component must re-apply MinReplicas -- the ISVC controller "+
+			"owns the count when no autoscaler drives /scale")
+}
+
+// TestEnsureInferenceReplica_NilResolvedAutoscaler_AppliesMinReplicasOnUpdate
+// pins that a nil resolved block is treated as autoscaling-off: the ISVC
+// controller owns the count, so an update re-applies MinReplicas. (A nil
+// block also means no autoscaler is running to have written /scale, so
+// there is nothing to preserve.)
+func TestEnsureInferenceReplica_NilResolvedAutoscaler_AppliesMinReplicasOnUpdate(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod") // MinReplicas = 2
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	// Create with nil ResolvedAutoscaler.
+	_, err := EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	created := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, created)).To(gomega.Succeed())
+	created.Spec.Replicas = ptr.To(int32(5))
+	g.Expect(c.Update(context.Background(), created)).To(gomega.Succeed())
+
+	// Update with nil ResolvedAutoscaler -- must re-apply MinReplicas.
+	_, err = EnsureInferenceReplica(context.Background(), minimalParams(t, isvc, c))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	after := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, after)).To(gomega.Succeed())
+	g.Expect(*after.Spec.Replicas).To(gomega.Equal(int32(2)),
+		"nil ResolvedAutoscaler is autoscaling-off -- update must re-apply MinReplicas")
+}
+
+// TestEnsureInferenceReplica_AutoscalerManaged_CreateStampsMinReplicas pins
+// the create-path carve-out: even when the Component is autoscaler-managed,
+// the FIRST projection (no live IR yet) stamps MinReplicas as the initial
+// desired count. There is nothing for the autoscaler to have written before
+// the IR exists, so MinReplicas is correct on create regardless of class.
+func TestEnsureInferenceReplica_AutoscalerManaged_CreateStampsMinReplicas(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod") // MinReplicas = 2
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	p := minimalParams(t, isvc, c)
+	p.ResolvedAutoscaler = hpaAutoscalerBlock()
+
+	_, err := EnsureInferenceReplica(context.Background(), p)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: "llama-engine", Namespace: "prod"}, got)).To(gomega.Succeed())
+	g.Expect(got.Spec.Replicas).NotTo(gomega.BeNil())
+	g.Expect(*got.Spec.Replicas).To(gomega.Equal(int32(2)),
+		"autoscaler-managed create must still stamp MinReplicas as the initial count")
+}
+
 // TestEnsureInferenceReplica_AutoscalerProjection_DeepCopies pins the
 // memory-isolation guard: the IR's ir.Spec.Autoscaler MUST NOT alias
 // p.ResolvedAutoscaler. A downstream mutator (e.g., the IR controller

@@ -274,14 +274,22 @@ func newInferenceReplica(p Params, name string) *v1beta1.InferenceReplica {
 
 // applyDesiredSpec stamps the projected fields onto the IR. Split out
 // so the Create + Update branches in EnsureInferenceReplica produce
-// byte-identical Specs (the only difference between Create and
-// Update is whether the apiserver assigns a UID — Spec stays in sync).
+// the same Spec (the only difference between Create and Update is
+// whether the apiserver assigns a UID — and Spec.Replicas, which is
+// autoscaler-owned on Update; see desiredReplicas).
 //
 // Preserves Spec.Pacing and Spec.Paused on Update — those fields are
 // written by the ISVC controller's coordination layer in future PRs;
 // clobbering them every reconcile would fight the coordination writer.
 // (Today they're always nil/false; the preserve guard is defensive
 // against future PRs landing the coordination wire-in.)
+//
+// Preserves Spec.Replicas on Update when the Component is autoscaler-
+// managed — the IR's /scale subresource is the HPA / KEDA / external
+// scale target, so the autoscaler is the authoritative writer of
+// spec.replicas. Re-stamping MinReplicas every reconcile would clobber
+// the autoscaler's value and make the ISVC controller and the autoscaler
+// fight over the count. See desiredReplicas for the full decision.
 func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	// Force the metadata fields the projector owns. Annotations get
 	// the controller-write stamp; user-set annotations on the IR are
@@ -314,7 +322,7 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 		Name: p.ISVC.Name,
 	}
 	ir.Spec.Component = p.Component
-	ir.Spec.Replicas = replicasFromComponentExt(p.ComponentExt)
+	ir.Spec.Replicas = desiredReplicas(ir, p)
 	ir.Spec.Runners = runnersFromParams(p)
 	ir.Spec.Lifecycle = lifecycleFromComponentExt(p.ComponentExt)
 	// Project the resolved Autoscaler onto the IR. Whole-block replace
@@ -326,6 +334,72 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	// dispatch site that doesn't run the resolver (no spurious empty block
 	// lands on the IR).
 	ir.Spec.Autoscaler = p.ResolvedAutoscaler.DeepCopy()
+}
+
+// desiredReplicas decides the value to stamp on ir.Spec.Replicas,
+// mirroring the Raw path's "preserve existing replicas" approach
+// (reconcilers/deployment/deployment_reconciler.go: checkDeploymentExist
+// copies existingDeployment.Spec.Replicas onto the target so HPA's writes
+// survive the reconcile).
+//
+// The IR exposes a /scale subresource at .spec.replicas
+// (inferencereplica_types.go), so for an autoscaler-managed Component the
+// HPA / KEDA / external scaler is the authoritative writer of
+// spec.replicas. The decision:
+//
+//   - CREATE (no live IR yet — ir.ResourceVersion == ""): stamp
+//     MinReplicas. There is nothing for the autoscaler to have written
+//     yet; MinReplicas is the correct initial desired count regardless of
+//     autoscaler class.
+//
+//   - UPDATE + autoscaler-managed (resolved Class != None): PRESERVE the
+//     live ir.Spec.Replicas. Re-stamping MinReplicas would clobber the
+//     value HPA / KEDA / an external scaler wrote via /scale, making the
+//     ISVC controller and the autoscaler fight over the count every
+//     reconcile. Defensive fall-back to MinReplicas if the live value is
+//     somehow nil/<=0 (a well-formed IR always has it set from create, so
+//     this only guards against a hand-edited or partially-migrated IR —
+//     we never write a nil into a live scale target).
+//
+//   - UPDATE + autoscaling OFF (resolved Class == None / nil): the ISVC
+//     controller owns the count, so stamp MinReplicas. (Class None is the
+//     proportional-policy follower case where OME drives replicas directly;
+//     until that coordinator wires in, MinReplicas is the floor.)
+//
+// ir is the object applyDesiredSpec is mutating — on the Update path it is
+// the live IR fetched via Get (so ResourceVersion + the autoscaler-written
+// Spec.Replicas are populated); on the Create path it is a freshly built
+// object with an empty ResourceVersion.
+func desiredReplicas(ir *v1beta1.InferenceReplica, p Params) *int32 {
+	creating := ir.ResourceVersion == ""
+	if creating || !isAutoscalerManaged(p.ResolvedAutoscaler) {
+		return replicasFromComponentExt(p.ComponentExt)
+	}
+	// Update + autoscaler-managed: preserve the live (autoscaler-written)
+	// value. Guard against a malformed live IR carrying nil/<=0 — never
+	// write a nil into a live scale target.
+	if ir.Spec.Replicas != nil && *ir.Spec.Replicas > 0 {
+		return ir.Spec.Replicas
+	}
+	return replicasFromComponentExt(p.ComponentExt)
+}
+
+// isAutoscalerManaged reports whether the resolved Component autoscaler
+// drives the IR's /scale subresource — i.e. whether an autoscaler (not the
+// ISVC controller) is the authoritative writer of spec.replicas.
+//
+// Every class except None has an external writer of spec.replicas: HPA and
+// KEDA are OME-managed scalers that target the /scale subresource, and
+// External is an operator-owned scaler that writes /scale directly
+// (documented on InferenceReplicaSpec.Replicas / .Autoscaler). Only None
+// means "no autoscaler at all" — the ISVC controller (or the proportional
+// coordinator, also OME) owns the count. A nil resolved block is treated as
+// None (matches autoscaler.autoscalerClass / resolvedClass).
+func isAutoscalerManaged(a *v1beta1.ComponentAutoscaler) bool {
+	if a == nil {
+		return false
+	}
+	return a.Class != v1beta1.AutoscalerNone
 }
 
 // replicasFromComponentExt projects ComponentExtensionSpec.MinReplicas
