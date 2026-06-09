@@ -1482,3 +1482,216 @@ func TestValidateLegacyAutoscalerFieldsRaw(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateScaleToZero covers the MinReplicas=0 KEDA gate. The two
+// accept-paths are (a) the legacy whole-ISVC ome.io/autoscalerClass=keda
+// annotation and (b) the OEP-0013 typed per-Component
+// spec.<component>.autoscaler.class=KEDA block. The typed path is
+// evaluated PER Component: a zero-replica Component must itself be
+// KEDA-autoscaled — a KEDA block on a *different* Component does not
+// excuse it. Note the deliberate case mismatch: typed enum "KEDA" vs
+// legacy annotation value "keda".
+func TestValidateScaleToZero(t *testing.T) {
+	kedaAutoscaler := func() *v1beta1.ComponentAutoscaler {
+		return &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerKEDA}
+	}
+	hpaAutoscaler := func() *v1beta1.ComponentAutoscaler {
+		return &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}
+	}
+
+	tests := []struct {
+		name    string
+		isvc    *v1beta1.InferenceService
+		wantErr bool
+	}{
+		{
+			name: "no component sets MinReplicas=0 — accepted",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(1)},
+					},
+				},
+			},
+		},
+		{
+			name: "nil MinReplicas everywhere — accepted",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine:  &v1beta1.EngineSpec{},
+					Decoder: &v1beta1.DecoderSpec{},
+					Router:  &v1beta1.RouterSpec{},
+				},
+			},
+		},
+		{
+			name: "engine MinReplicas=0 with typed KEDA autoscaler — accepted (OEP-0013)",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: ptr.To(0),
+							Autoscaler:  kedaAutoscaler(),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "decoder MinReplicas=0 with typed KEDA autoscaler — accepted (OEP-0013)",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Decoder: &v1beta1.DecoderSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: ptr.To(0),
+							Autoscaler:  kedaAutoscaler(),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "router MinReplicas=0 with typed KEDA autoscaler — accepted (OEP-0013)",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Router: &v1beta1.RouterSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: ptr.To(0),
+							Autoscaler:  kedaAutoscaler(),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "engine MinReplicas=0 with NO KEDA (no annotation, no typed) — rejected",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(0)},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "engine MinReplicas=0 with typed HPA autoscaler (not KEDA) — rejected",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: ptr.To(0),
+							Autoscaler:  hpaAutoscaler(),
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "engine MinReplicas=0 with legacy keda annotation — accepted",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						constants.AutoscalerClass: string(constants.AutoscalerClassKEDA),
+					},
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(0)},
+					},
+				},
+			},
+		},
+		{
+			name: "legacy keda annotation covers every zero Component — accepted",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						constants.AutoscalerClass: string(constants.AutoscalerClassKEDA),
+					},
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(0)},
+					},
+					Decoder: &v1beta1.DecoderSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(0)},
+					},
+				},
+			},
+		},
+		{
+			name: "legacy hpa annotation does not satisfy the KEDA gate — rejected",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						constants.AutoscalerClass: string(constants.AutoscalerClassHPA),
+					},
+				},
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(0)},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "per-Component scoping: engine=0 typed-KEDA but decoder=0 without KEDA — rejected",
+			// A typed KEDA block on the engine must NOT excuse a separate
+			// zero-replica decoder that has no KEDA opt-in of its own.
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: ptr.To(0),
+							Autoscaler:  kedaAutoscaler(),
+						},
+					},
+					Decoder: &v1beta1.DecoderSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(0)},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "per-Component scoping: both zero Components carry typed KEDA — accepted",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{
+					Engine: &v1beta1.EngineSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: ptr.To(0),
+							Autoscaler:  kedaAutoscaler(),
+						},
+					},
+					Decoder: &v1beta1.DecoderSpec{
+						ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+							MinReplicas: ptr.To(0),
+							Autoscaler:  kedaAutoscaler(),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateScaleToZero(tc.isvc)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), "InvalidScaleToZero") {
+					t.Errorf("error %q missing InvalidScaleToZero reason", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

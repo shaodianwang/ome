@@ -409,37 +409,73 @@ func ValidateReplicaBounds(min, max *int) error {
 	return nil
 }
 
-// ValidateScaleToZero rejects InferenceServices that explicitly set any
-// Component's MinReplicas=0 unless autoscalerClass=keda is configured.
+// ValidateScaleToZero rejects InferenceServices that explicitly set a
+// Component's MinReplicas=0 unless that Component is KEDA-autoscaled.
 //
 // Before Serverless mode was removed, MinReplicas=0 auto-promoted the
 // engine to Knative-Serving (which natively supports scale-to-zero).
 // After removal, MinReplicas=0 falls through to RawDeployment and the
 // Deployment sits at zero replicas (broken). Operators needing
-// scale-to-zero must opt into KEDA's idleReplicaCount via the
-// autoscalerClass annotation.
+// scale-to-zero must opt into KEDA's idleReplicaCount.
+//
+// KEDA opt-in is accepted via either route:
+//
+//   - OEP-0013 typed per-Component field: spec.<component>.autoscaler.class
+//     == KEDA (v1beta1.AutoscalerKEDA, "KEDA"). This is the preferred
+//     surface and is evaluated PER Component — the specific Component that
+//     sets MinReplicas=0 must itself be KEDA-autoscaled.
+//   - Legacy top-level annotation: ome.io/autoscalerClass == "keda"
+//     (constants.AutoscalerClassKEDA). The annotation applies to the
+//     whole ISVC, so it satisfies the gate for every Component. Note the
+//     case mismatch is intentional: the typed enum is "KEDA" while the
+//     legacy annotation value is the lowercase "keda".
+//
+// A Component with MinReplicas=0 that is neither covered by the legacy
+// annotation nor carries a typed KEDA autoscaler block is rejected.
 func ValidateScaleToZero(isvc *v1beta1.InferenceService) error {
-	hasZero := false
-	if isvc.Spec.Engine != nil && isvc.Spec.Engine.MinReplicas != nil && *isvc.Spec.Engine.MinReplicas == 0 {
-		hasZero = true
-	}
-	if isvc.Spec.Decoder != nil && isvc.Spec.Decoder.MinReplicas != nil && *isvc.Spec.Decoder.MinReplicas == 0 {
-		hasZero = true
-	}
-	if isvc.Spec.Router != nil && isvc.Spec.Router.MinReplicas != nil && *isvc.Spec.Router.MinReplicas == 0 {
-		hasZero = true
-	}
-	if !hasZero {
-		return nil
-	}
 	annotations := isvc.ObjectMeta.Annotations
-	if constants.AutoscalerClassType(annotations[constants.AutoscalerClass]) == constants.AutoscalerClassKEDA {
-		return nil
+	legacyKEDA := constants.AutoscalerClassType(annotations[constants.AutoscalerClass]) == constants.AutoscalerClassKEDA
+
+	// Collect the (MinReplicas, Autoscaler) pair for each present
+	// Component. Engine/Decoder/Router all embed ComponentExtensionSpec,
+	// so MinReplicas and Autoscaler are promoted fields on each.
+	type scaleToZeroCheck struct {
+		name        string
+		minReplicas *int
+		autoscaler  *v1beta1.ComponentAutoscaler
 	}
-	return fmt.Errorf(
-		"InvalidScaleToZero: MinReplicas=0 requires %s=%s annotation (Serverless mode no longer auto-promotes scale-to-zero)",
-		constants.AutoscalerClass, constants.AutoscalerClassKEDA,
-	)
+	var checks []scaleToZeroCheck
+	if c := isvc.Spec.Engine; c != nil {
+		checks = append(checks, scaleToZeroCheck{"engine", c.MinReplicas, c.Autoscaler})
+	}
+	if c := isvc.Spec.Decoder; c != nil {
+		checks = append(checks, scaleToZeroCheck{"decoder", c.MinReplicas, c.Autoscaler})
+	}
+	if c := isvc.Spec.Router; c != nil {
+		checks = append(checks, scaleToZeroCheck{"router", c.MinReplicas, c.Autoscaler})
+	}
+	for _, c := range checks {
+		if c.minReplicas == nil || *c.minReplicas != 0 {
+			continue
+		}
+		// MinReplicas=0 on this Component. Accept when the whole-ISVC legacy
+		// annotation opts into KEDA, or when this Component carries a typed
+		// KEDA autoscaler block.
+		if legacyKEDA {
+			continue
+		}
+		if c.autoscaler != nil && c.autoscaler.Class == v1beta1.AutoscalerKEDA {
+			continue
+		}
+		return fmt.Errorf(
+			"InvalidScaleToZero: %s.minReplicas=0 requires KEDA autoscaling "+
+				"(set spec.%s.autoscaler.class=%s or the %s=%s annotation); "+
+				"Serverless mode no longer auto-promotes scale-to-zero",
+			c.name, c.name, v1beta1.AutoscalerKEDA,
+			constants.AutoscalerClass, constants.AutoscalerClassKEDA,
+		)
+	}
+	return nil
 }
 
 // ValidateMigrationPolicy validates each Component's lifecycle
