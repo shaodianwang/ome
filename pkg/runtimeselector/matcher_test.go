@@ -1035,6 +1035,188 @@ func TestGetFormatMismatchReason(t *testing.T) {
 	})
 }
 
+// TestModelSizeRangePartialBounds locks in the fix for the nil-deref that
+// occurred when a ServingRuntime's ModelSizeRange set only Min or only Max
+// (both are *string and +optional in the CRD). A missing Min must behave as
+// "no lower bound" and a missing Max as "no upper bound" — never a panic.
+// Each row is driven through all three call sites that previously dereferenced
+// both pointers unconditionally: GetCompatibilityDetails, checkModelSize (via
+// IsCompatible), and calculateSizeScore (via CompareRuntimes).
+func TestModelSizeRangePartialBounds(t *testing.T) {
+	tests := []struct {
+		name      string
+		sizeRange *v1beta1.ModelSizeRangeSpec
+		modelSize string
+		// want reports whether the model size should be considered in range
+		// (compatible) for the given runtime size range.
+		want bool
+	}{
+		{
+			name:      "only Min set, model above min",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Min: ptr("1B")},
+			modelSize: "7B",
+			want:      true,
+		},
+		{
+			name:      "only Min set, model below min",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Min: ptr("10B")},
+			modelSize: "7B",
+			want:      false,
+		},
+		{
+			name:      "only Min set, model at min boundary",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Min: ptr("7B")},
+			modelSize: "7B",
+			want:      true,
+		},
+		{
+			name:      "only Max set, model below max",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Max: ptr("13B")},
+			modelSize: "7B",
+			want:      true,
+		},
+		{
+			name:      "only Max set, model above max",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Max: ptr("3B")},
+			modelSize: "7B",
+			want:      false,
+		},
+		{
+			name:      "only Max set, model at max boundary",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Max: ptr("7B")},
+			modelSize: "7B",
+			want:      true,
+		},
+		{
+			name:      "both bounds set, model in range",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Min: ptr("1B"), Max: ptr("13B")},
+			modelSize: "7B",
+			want:      true,
+		},
+		{
+			name:      "both bounds set, model out of range",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Min: ptr("1B"), Max: ptr("5B")},
+			modelSize: "7B",
+			want:      false,
+		},
+		{
+			name:      "neither bound set, always in range",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{},
+			modelSize: "7B",
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matcher := NewDefaultRuntimeMatcher(NewConfig(nil))
+			scorer := NewDefaultRuntimeScorer(NewConfig(nil))
+			isvc := &v1beta1.InferenceService{}
+
+			model := &v1beta1.BaseModelSpec{
+				ModelFormat:        v1beta1.ModelFormat{Name: "pytorch"},
+				ModelParameterSize: ptr(tt.modelSize),
+			}
+			runtime := &v1beta1.ServingRuntimeSpec{
+				SupportedModelFormats: []v1beta1.SupportedModelFormat{
+					{
+						ModelFormat: &v1beta1.ModelFormat{Name: "pytorch"},
+						AutoSelect:  ptr(true),
+					},
+				},
+				ModelSizeRange: tt.sizeRange,
+			}
+
+			// Site 1: GetCompatibilityDetails (matcher.go ~80-81).
+			assert.NotPanics(t, func() {
+				report, err := matcher.GetCompatibilityDetails(runtime, model, isvc, "rt")
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, report.IsCompatible, "GetCompatibilityDetails IsCompatible")
+				assert.Equal(t, tt.want, report.MatchDetails.SizeMatch, "GetCompatibilityDetails SizeMatch")
+			})
+
+			// Site 2: checkModelSize, reached through IsCompatible (matcher.go ~470-471).
+			assert.NotPanics(t, func() {
+				ok, err := matcher.IsCompatible(runtime, model, isvc, "rt")
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, ok, "IsCompatible")
+			})
+
+			// Site 3: calculateSizeScore, reached through CompareRuntimes
+			// (scorer.go ~155-156). The actual ordering is irrelevant here;
+			// we only need it not to panic on a partial range.
+			assert.NotPanics(t, func() {
+				rm := RuntimeMatch{
+					RuntimeSelection: RuntimeSelection{Name: "rt", Spec: runtime, Score: 10},
+				}
+				other := RuntimeMatch{
+					RuntimeSelection: RuntimeSelection{
+						Name: "other",
+						Spec: &v1beta1.ServingRuntimeSpec{
+							ModelSizeRange: &v1beta1.ModelSizeRangeSpec{Min: ptr("1B"), Max: ptr("13B")},
+						},
+						Score: 10,
+					},
+				}
+				scorer.CompareRuntimes(rm, other, model)
+			})
+		})
+	}
+}
+
+// TestCalculateSizeScorePartialBounds checks the size-distance metric directly
+// for partial ranges: an unset bound contributes no distance.
+func TestCalculateSizeScorePartialBounds(t *testing.T) {
+	scorer := NewDefaultRuntimeScorer(NewConfig(nil)).(*DefaultRuntimeScorer)
+	model := &v1beta1.BaseModelSpec{
+		ModelFormat:        v1beta1.ModelFormat{Name: "pytorch"},
+		ModelParameterSize: ptr("7B"),
+	}
+
+	tests := []struct {
+		name      string
+		sizeRange *v1beta1.ModelSizeRangeSpec
+		want      float64
+	}{
+		{
+			name:      "only Min set",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Min: ptr("1B")},
+			want:      6e9, // |1B - 7B|
+		},
+		{
+			name:      "only Max set",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Max: ptr("13B")},
+			want:      6e9, // |13B - 7B|
+		},
+		{
+			name:      "both bounds set",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{Min: ptr("1B"), Max: ptr("13B")},
+			want:      12e9, // |1B - 7B| + |13B - 7B|
+		},
+		{
+			name:      "neither bound set",
+			sizeRange: &v1beta1.ModelSizeRangeSpec{},
+			want:      0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rm := RuntimeMatch{
+				RuntimeSelection: RuntimeSelection{
+					Name: "rt",
+					Spec: &v1beta1.ServingRuntimeSpec{ModelSizeRange: tt.sizeRange},
+				},
+			}
+			var got float64
+			assert.NotPanics(t, func() {
+				got = scorer.calculateSizeScore(rm, model)
+			})
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestGetCompatibilityDetails_DetailedFormatMismatch(t *testing.T) {
 	matcher := NewDefaultRuntimeMatcher(NewConfig(nil))
 

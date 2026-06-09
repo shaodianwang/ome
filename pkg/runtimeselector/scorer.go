@@ -146,16 +146,26 @@ func (s *DefaultRuntimeScorer) CalculateFormatScore(model *v1beta1.BaseModelSpec
 
 // calculateSizeScore is the sum-of-distances of the model size from each
 // boundary of the runtime's supported range — lower means a tighter fit.
+// Min and Max are each +optional in the CRD; an unset bound is treated as an
+// open (infinitely far) edge that contributes no distance, so a partial range
+// scores only on the bound it actually sets rather than dereferencing nil.
 func (s *DefaultRuntimeScorer) calculateSizeScore(runtime RuntimeMatch, model *v1beta1.BaseModelSpec) float64 {
 	if runtime.Spec == nil || runtime.Spec.ModelSizeRange == nil || model.ModelParameterSize == nil {
 		return 0
 	}
 
+	sizeRange := runtime.Spec.ModelSizeRange
 	modelSize := parseModelSize(*model.ModelParameterSize)
-	minSize := parseModelSize(*runtime.Spec.ModelSizeRange.Min)
-	maxSize := parseModelSize(*runtime.Spec.ModelSizeRange.Max)
 
-	return math.Abs(minSize-modelSize) + math.Abs(maxSize-modelSize)
+	var distance float64
+	if sizeRange.Min != nil {
+		distance += math.Abs(parseModelSize(*sizeRange.Min) - modelSize)
+	}
+	if sizeRange.Max != nil {
+		distance += math.Abs(parseModelSize(*sizeRange.Max) - modelSize)
+	}
+
+	return distance
 }
 
 func (s *DefaultRuntimeScorer) compareVersions(supportedFormat *v1beta1.ModelFormat, modelFormat *v1beta1.ModelFormat) bool {

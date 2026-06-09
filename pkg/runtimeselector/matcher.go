@@ -76,14 +76,10 @@ func (m *DefaultRuntimeMatcher) GetCompatibilityDetails(runtime *v1beta1.Serving
 	}
 
 	if model.ModelParameterSize != nil && runtime.ModelSizeRange != nil {
-		modelSize := parseModelSize(*model.ModelParameterSize)
-		minSize := parseModelSize(*runtime.ModelSizeRange.Min)
-		maxSize := parseModelSize(*runtime.ModelSizeRange.Max)
-
-		if modelSize < minSize || modelSize > maxSize {
+		if !modelSizeInRange(*model.ModelParameterSize, runtime.ModelSizeRange) {
 			report.IncompatibilityReasons = append(report.IncompatibilityReasons,
-				fmt.Sprintf("model size %s is outside supported range [%s, %s]",
-					*model.ModelParameterSize, *runtime.ModelSizeRange.Min, *runtime.ModelSizeRange.Max))
+				fmt.Sprintf("model size %s is outside supported range %s",
+					*model.ModelParameterSize, modelSizeRangeLabel(runtime.ModelSizeRange)))
 			report.MatchDetails.SizeMatch = false
 			return report, nil
 		}
@@ -466,20 +462,47 @@ func (m *DefaultRuntimeMatcher) checkModelSize(runtime *v1beta1.ServingRuntimeSp
 		return nil
 	}
 
-	modelSize := parseModelSize(*model.ModelParameterSize)
-	minSize := parseModelSize(*runtime.ModelSizeRange.Min)
-	maxSize := parseModelSize(*runtime.ModelSizeRange.Max)
-
-	if modelSize < minSize || modelSize > maxSize {
+	if !modelSizeInRange(*model.ModelParameterSize, runtime.ModelSizeRange) {
 		return &RuntimeCompatibilityError{
 			RuntimeName: runtimeName,
 			ModelFormat: model.ModelFormat.Name,
-			Reason: fmt.Sprintf("model size %s is outside supported range [%s, %s]",
-				*model.ModelParameterSize, *runtime.ModelSizeRange.Min, *runtime.ModelSizeRange.Max),
+			Reason: fmt.Sprintf("model size %s is outside supported range %s",
+				*model.ModelParameterSize, modelSizeRangeLabel(runtime.ModelSizeRange)),
 		}
 	}
 
 	return nil
+}
+
+// modelSizeInRange reports whether the parsed model size falls within the
+// runtime's ModelSizeRange. Min and Max are each +optional in the CRD: a nil
+// Min means "no lower bound" and a nil Max means "no upper bound", so a range
+// with only one bound set constrains only that side rather than panicking on a
+// nil dereference. Callers must guard against a nil sizeRange themselves.
+func modelSizeInRange(modelSizeStr string, sizeRange *v1beta1.ModelSizeRangeSpec) bool {
+	modelSize := parseModelSize(modelSizeStr)
+	if sizeRange.Min != nil && modelSize < parseModelSize(*sizeRange.Min) {
+		return false
+	}
+	if sizeRange.Max != nil && modelSize > parseModelSize(*sizeRange.Max) {
+		return false
+	}
+	return true
+}
+
+// modelSizeRangeLabel renders a ModelSizeRange for error messages, using an
+// open-interval bracket for whichever bound is unset, e.g. "[1B, 13B]",
+// "[1B, inf)", or "(-inf, 13B]". Safe to call with nil Min/Max.
+func modelSizeRangeLabel(sizeRange *v1beta1.ModelSizeRangeSpec) string {
+	lower := "(-inf"
+	if sizeRange.Min != nil {
+		lower = "[" + *sizeRange.Min
+	}
+	upper := "inf)"
+	if sizeRange.Max != nil {
+		upper = *sizeRange.Max + "]"
+	}
+	return fmt.Sprintf("%s, %s", lower, upper)
 }
 
 func runtimeHasAutoSelectFormat(runtime *v1beta1.ServingRuntimeSpec) bool {
