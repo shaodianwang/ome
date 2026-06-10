@@ -1,0 +1,179 @@
+# Tenant runtime — THIS is the file scientists edit. Inherits the platform base via
+# `ome.io/inherit-from` and adds the per-workload bits: image, sglang launch flags
+# (tp/ep, dtype, context, MULTI-NODE dist-init, and PD disaggregation), model path.
+#
+# This is PD-DISAGGREGATED + MULTI-NODE: engine=prefill, decoder=decode, and EACH is
+# a 1-leader + N-worker gang. So every engine/decoder command carries BOTH:
+#   - multi-node flags  (--nnodes / --node-rank / --dist-init-addr) for the gang's
+#     intra-component tp16 NVLink all-reduce, AND
+#   - PD flags          (--disaggregation-mode prefill|decode, transfer backend).
+# OME injects the per-pod gang-global rank/size/leader-address, so the command is
+# plain argv with $(VAR) substitution — no shell:
+#   OME_INSTANCE_POD_RANK  = gang-global node rank 0..N-1 (leader 0, workers 1..N-1)
+#   OME_INSTANCE_POD_COUNT = gang size (nnodes)
+#   OME_LEADER_ADDRESS     = peer-DNS FQDN of THIS component's leader pod
+# (each component — engine, decoder — gets its OWN leader address / gang.)
+#
+# Container name must be `ome-container` for engine/decoder and `router` for the
+# router — OME keys off those names.
+apiVersion: ome.io/v1beta1
+kind: ServingRuntime
+metadata:
+  name: srt-tier5-42b-bf16-pdmn
+  namespace: sandbox
+  annotations:
+    ome.io/inherit-from: srt-tier5-42b-bf16-pdmn-base
+spec:
+  # ===== ENGINE (prefill) — leader + worker share image/command/env (anchors) =====
+  engineConfig:
+    leader:
+      runner:
+        name: ome-container
+        image: &image 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-gb300:20260601-ba882a31  # TODO: pin your sglang build
+        command: &prefillCmd
+          - python3
+          - -m
+          - sglang_meta.launch_server
+          - --host
+          - "0.0.0.0"
+          - --port
+          - "30000"
+          - --model-path
+          - $(CC_MODEL_PATH)
+          # Fallback to the PVC-backed ClusterBaseModel; drop this pair once CC is stable.
+          - --fallback-model-path
+          - $(MODEL_PATH)
+          - --tp-size
+          - "16"
+          - --ep-size
+          - "16"
+          - --dtype
+          - bfloat16
+          - --kv-cache-dtype
+          - bfloat16
+          - --moe-runner-backend
+          - flashinfer_trtllm
+          - --context-length
+          - "131072"
+          # --- MULTI-NODE: OME injects these per pod (gang-global), no shell math ---
+          - --dist-init-addr
+          - $(OME_LEADER_ADDRESS):5000
+          - --nnodes
+          - $(OME_INSTANCE_POD_COUNT)
+          - --node-rank
+          - $(OME_INSTANCE_POD_RANK)
+          # --- PD: this gang is the PREFILL pool; it hosts the bootstrap endpoint ---
+          - --disaggregation-mode
+          - prefill
+          - --disaggregation-transfer-backend
+          - meta-p2p
+          - --disaggregation-bootstrap-port
+          - "8998"
+          - --log-requests
+          - --log-requests-level
+          - "1"
+          - --enable-request-time-stats-logging
+        env: &workloadEnv
+          - name: CC_MODEL_PATH
+            value: "manifold://fair_llms_prod/tree/vllm_test/consolidation_sv3_split_tier5_42b_128k-rsbvw4wb/checkpoint_0000150/checkpoint"
+          - name: CLUSTER_CACHE_HEADLESS_SERVICE
+            value: "cluster-cache-headless.clustercache.svc.cluster.local:10090"
+          # TODO: a CC tensor-hash verify tag must match a precomputed artifact for
+          # THIS model at tp16/ep16; omitted until one exists.
+          # - name: CLUSTER_CACHE_VERIFY_TENSOR_HASH_AGAINST
+          #   value: "@tp16ep16"
+          - { name: CLUSTER_CACHE_GPU_DIRECT, value: "1" }
+          - { name: CLUSTER_CACHE_BBOX, value: "1" }
+          - { name: CLUSTER_CACHE_BARRIER_TIMEOUT_S, value: "60" }
+          - { name: CLUSTER_CACHE_HTTP_BATCH_REQUEST_TIMEOUT_SECS, value: "60" }
+          - { name: CLUSTER_CACHE_OVERLOAD_RETRY_ATTEMPTS, value: "3" }
+          - { name: SGLANG_CLUSTER, value: cks }
+          - { name: SGLANG_EXTERNAL_MODEL_PACKAGE, value: sglang_meta.srt.models }
+          - { name: SGLANG_DISAGGREGATION_NIXL_BACKEND, value: UCX }
+    worker:
+      runner:
+        name: ome-container
+        image: *image
+        command: *prefillCmd    # same argv; OME injects this pod's own rank/leader
+        env: *workloadEnv
+
+  # ===== DECODER (decode) — same image/env; command differs only in PD mode =====
+  decoderConfig:
+    leader:
+      runner:
+        name: ome-container
+        image: *image
+        command: &decodeCmd
+          - python3
+          - -m
+          - sglang_meta.launch_server
+          - --host
+          - "0.0.0.0"
+          - --port
+          - "30000"
+          - --model-path
+          - $(CC_MODEL_PATH)
+          - --fallback-model-path
+          - $(MODEL_PATH)
+          - --tp-size
+          - "16"
+          - --ep-size
+          - "16"
+          - --dtype
+          - bfloat16
+          - --kv-cache-dtype
+          - bfloat16
+          - --moe-runner-backend
+          - flashinfer_trtllm
+          - --context-length
+          - "131072"
+          # MULTI-NODE: the decode gang has its OWN leader / dist rendezvous.
+          - --dist-init-addr
+          - $(OME_LEADER_ADDRESS):5000
+          - --nnodes
+          - $(OME_INSTANCE_POD_COUNT)
+          - --node-rank
+          - $(OME_INSTANCE_POD_RANK)
+          # PD: this gang is the DECODE pool — no bootstrap port (it dials the engine's).
+          - --disaggregation-mode
+          - decode
+          - --disaggregation-transfer-backend
+          - meta-p2p
+          - --log-requests
+          - --log-requests-level
+          - "1"
+          - --enable-request-time-stats-logging
+        env: *workloadEnv
+    worker:
+      runner:
+        name: ome-container
+        image: *image
+        command: *decodeCmd
+        env: *workloadEnv
+
+  # ===== ROUTER — single entrypoint; PD-aware, targets the gang LEADERS =====
+  routerConfig:
+    runner:
+      name: router
+      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/prod-inference-router:20260601-ba882a31  # TODO: pin your router build
+      args:
+        - --port
+        - "30080"
+        - --metrics-port
+        - "9090"
+        - --model-name
+        - tier5-42b-bf16
+        - --backend-timeout
+        - "300"
+        - --bootstrap-port
+        - "8998"
+        - --k8s-namespace
+        - $(NAMESPACE)
+        # Only the multi-node LEADER of each pool serves the OpenAI API + PD bootstrap,
+        # so both selectors pin ome.io/runner=leader (workers do distributed compute).
+        - --prefill-label-selector
+        - component=engine,ome.io/runner=leader,ome.io/inferenceservice=$(INFERENCESERVICE_NAME)
+        - --decode-label-selector
+        - component=decoder,ome.io/runner=leader,ome.io/inferenceservice=$(INFERENCESERVICE_NAME)
+        - --k8s-engine-port
+        - "30000"
