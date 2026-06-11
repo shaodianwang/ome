@@ -43,6 +43,15 @@ func (mutator *Mutator) Handle(ctx context.Context, req admission.Request) admis
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 
+	// Diff against the decoded pod, not the raw request. Decode drops any field this
+	// build's k8s.io/api doesn't know; a raw diff would then patch those fields away.
+	// Snapshot before the namespace backfill so that op stays in the patch.
+	original, err := json.Marshal(pod)
+	if err != nil {
+		log.Error(err, "Failed to marshal pod", "namespace", req.AdmissionRequest.Namespace, "name", getPodName(pod))
+		return admission.Errored(http.StatusInternalServerError, err)
+	}
+
 	// Pod namespace is empty in the admission body; backfill from the
 	// request so downstream injectors and the controller's pod-ownership
 	// queries see the right value.
@@ -58,7 +67,7 @@ func (mutator *Mutator) Handle(ctx context.Context, req admission.Request) admis
 		log.Error(err, "Failed to marshal pod", "namespace", pod.Namespace, "name", getPodName(pod))
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
-	return admission.PatchResponseFromRaw(req.AdmissionRequest.Object.Raw, patch)
+	return admission.PatchResponseFromRaw(original, patch)
 }
 
 func (mutator *Mutator) mutate(pod *v1.Pod, configMap *v1.ConfigMap) error {
