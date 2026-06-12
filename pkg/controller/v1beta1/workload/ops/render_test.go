@@ -622,6 +622,17 @@ func tpuPodSpec() *corev1.PodSpec {
 	return spec
 }
 
+// tpuPodSpecWithTopology is tpuPodSpec plus the GKE TPU-topology nodeSelector a
+// real multi-host TPU workload carries; the slice-affinity injector reads it to
+// derive the partition topologyKey.
+func tpuPodSpecWithTopology(topology string) *corev1.PodSpec {
+	spec := tpuPodSpec()
+	spec.NodeSelector = map[string]string{
+		"cloud.google.com/gke-tpu-topology": topology,
+	}
+	return spec
+}
+
 // TestRender_MultiPod_TPUTopologyEnv pins the native multi-host TPU env OMENative
 // supplies in place of GKE's LWS-only webhook: every pod gets the same ordered
 // peer host list (leader rank 0, then workers), its own TPU_WORKER_ID = gang
@@ -690,6 +701,190 @@ func TestRender_TPUTopologyEnv_GatedOnTPUAndMultiPod(t *testing.T) {
 	}
 	if v, ok := envByName(spod.Spec.Containers[0].Env)["TPU_WORKER_HOSTNAMES"]; ok {
 		t.Errorf("single-pod TPU must not set TPU_WORKER_HOSTNAMES; got %q", v)
+	}
+}
+
+// requiredPodAffinity is a small accessor for the rendered pod's required
+// podAffinity terms (nil-safe) used by the slice-affinity tests.
+func requiredPodAffinity(pod *corev1.Pod) []corev1.PodAffinityTerm {
+	if pod.Spec.Affinity == nil || pod.Spec.Affinity.PodAffinity == nil {
+		return nil
+	}
+	return pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+}
+
+// TestRender_MultiPod_TPUSliceAffinity pins the worker→leader slice co-location
+// OMENative injects in place of GKE's LWS-only webhook: a multi-host TPU gang
+// worker gets a REQUIRED podAffinity whose topologyKey is the per-topology
+// partition label and whose selector targets the SAME Instance's leader. Without
+// it the gang can split across two physical slices and the cross-host TPU
+// session never forms.
+func TestRender_MultiPod_TPUSliceAffinity(t *testing.T) {
+	plan, inst, runners := multiPodPlan(1) // 1 leader + 1 worker = 2-host slice
+	worker := runners[1]
+
+	pod, err := testRender(basicISVC(), tpuPodSpecWithTopology("2x2x2"), plan, inst, worker, 0)
+	if err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	terms := requiredPodAffinity(pod)
+	if len(terms) != 1 {
+		t.Fatalf("worker required podAffinity: got %d terms want 1: %+v", len(terms), terms)
+	}
+	if got := terms[0].TopologyKey; got != "cloud.google.com/gke-tpu-partition-2x2x2-id" {
+		t.Errorf("topologyKey: got %q want cloud.google.com/gke-tpu-partition-2x2x2-id", got)
+	}
+	wantSel := map[string]string{
+		constants.InferenceServicePodLabelKey: "llama-70b",
+		constants.OMEComponentLabel:           "engine",
+		query.LabelInstanceIdx:                "0",
+		query.LabelRunner:                     "leader",
+	}
+	if terms[0].LabelSelector == nil {
+		t.Fatalf("term has nil LabelSelector: %+v", terms[0])
+	}
+	if diff := cmp.Diff(wantSel, terms[0].LabelSelector.MatchLabels); diff != "" {
+		t.Errorf("leader selector mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestRender_TPUSliceAffinity_TopologyKeyDerivesFromNodeSelector pins that the
+// partition topologyKey tracks the workload's gke-tpu-topology, so the scheme
+// generalizes beyond 2x2x2.
+func TestRender_TPUSliceAffinity_TopologyKeyDerivesFromNodeSelector(t *testing.T) {
+	plan, inst, runners := multiPodPlan(1)
+	worker := runners[1]
+
+	pod, err := testRender(basicISVC(), tpuPodSpecWithTopology("2x2x1"), plan, inst, worker, 0)
+	if err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	terms := requiredPodAffinity(pod)
+	if len(terms) != 1 || terms[0].TopologyKey != "cloud.google.com/gke-tpu-partition-2x2x1-id" {
+		t.Errorf("topologyKey should derive from topology=2x2x1; got %+v", terms)
+	}
+}
+
+// TestRender_TPUSliceAffinity_InstanceScoped pins that each Instance's worker
+// follows its OWN leader: Instance 1's worker selector carries instance-index=1,
+// not 0. Cross-instance co-location would be a sharding bug.
+func TestRender_TPUSliceAffinity_InstanceScoped(t *testing.T) {
+	runners := []workload.RunnerPlan{
+		{Name: "leader", Size: 1},
+		{Name: "worker", Size: 1},
+	}
+	inst1 := workload.InstancePlan{Index: 1, Incarnation: 1, Runners: runners}
+	plan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  2,
+		Instances: []workload.InstancePlan{inst1},
+	}
+
+	pod, err := testRender(basicISVC(), tpuPodSpecWithTopology("2x2x2"), plan, inst1, runners[1], 0)
+	if err != nil {
+		t.Fatalf("inst1 worker: %v", err)
+	}
+	terms := requiredPodAffinity(pod)
+	if len(terms) != 1 {
+		t.Fatalf("got %d terms want 1", len(terms))
+	}
+	if got := terms[0].LabelSelector.MatchLabels[query.LabelInstanceIdx]; got != "1" {
+		t.Errorf("selector instance-index: got %q want 1", got)
+	}
+}
+
+// TestRender_TPUSliceAffinity_Negatives pins the gates: leader, single-pod TPU,
+// non-TPU multi-pod worker, and a TPU worker missing the topology nodeSelector
+// all get NO slice affinity.
+func TestRender_TPUSliceAffinity_Negatives(t *testing.T) {
+	// Leader gets nothing — it's the slice anchor, not a follower.
+	plan, inst, runners := multiPodPlan(1)
+	leaderPod, err := testRender(basicISVC(), tpuPodSpecWithTopology("2x2x2"), plan, inst, runners[0], 0)
+	if err != nil {
+		t.Fatalf("leader: %v", err)
+	}
+	if terms := requiredPodAffinity(leaderPod); len(terms) != 0 {
+		t.Errorf("leader must not get slice affinity; got %+v", terms)
+	}
+
+	// Single-pod TPU worker shape: "default" runner, no leader → nothing.
+	splan, sinst, srunner := singlePodPlan()
+	spod, err := testRender(basicISVC(), tpuPodSpecWithTopology("2x2x2"), splan, sinst, srunner, 0)
+	if err != nil {
+		t.Fatalf("single-pod tpu: %v", err)
+	}
+	if terms := requiredPodAffinity(spod); len(terms) != 0 {
+		t.Errorf("single-pod must not get slice affinity; got %+v", terms)
+	}
+
+	// Multi-pod worker but NOT a TPU pod → nothing.
+	nonTPU, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runners[1], 0)
+	if err != nil {
+		t.Fatalf("non-tpu worker: %v", err)
+	}
+	if terms := requiredPodAffinity(nonTPU); len(terms) != 0 {
+		t.Errorf("non-TPU worker must not get slice affinity; got %+v", terms)
+	}
+
+	// TPU multi-pod worker but missing the gke-tpu-topology nodeSelector →
+	// skip rather than emit a broken (empty-topology) affinity.
+	noTopo, err := testRender(basicISVC(), tpuPodSpec(), plan, inst, runners[1], 0)
+	if err != nil {
+		t.Fatalf("worker no-topology: %v", err)
+	}
+	if terms := requiredPodAffinity(noTopo); len(terms) != 0 {
+		t.Errorf("worker without topology nodeSelector must get no affinity; got %+v", terms)
+	}
+}
+
+// TestRender_TPUSliceAffinity_PreservesUserAffinity pins that the injected term
+// is APPENDED — a user-declared podAffinity term survives alongside it.
+func TestRender_TPUSliceAffinity_PreservesUserAffinity(t *testing.T) {
+	plan, inst, runners := multiPodPlan(1)
+	worker := runners[1]
+	ps := tpuPodSpecWithTopology("2x2x2")
+	userTerm := corev1.PodAffinityTerm{
+		TopologyKey: "kubernetes.io/hostname",
+		LabelSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{"app": "user-thing"},
+		},
+	}
+	ps.Affinity = &corev1.Affinity{
+		PodAffinity: &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{userTerm},
+		},
+	}
+
+	pod, err := testRender(basicISVC(), ps, plan, inst, worker, 0)
+	if err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	terms := requiredPodAffinity(pod)
+	if len(terms) != 2 {
+		t.Fatalf("expected user term + injected term = 2, got %d: %+v", len(terms), terms)
+	}
+	if terms[0].TopologyKey != "kubernetes.io/hostname" {
+		t.Errorf("user term clobbered or reordered: %+v", terms[0])
+	}
+	if terms[1].TopologyKey != "cloud.google.com/gke-tpu-partition-2x2x2-id" {
+		t.Errorf("injected term missing/wrong: %+v", terms[1])
+	}
+}
+
+// TestInjectTPUSliceAffinity_Idempotent pins that re-rendering (cache-lag retry)
+// does not duplicate the slice-affinity term — mirrors the migration-overlay
+// idempotency guard.
+func TestInjectTPUSliceAffinity_Idempotent(t *testing.T) {
+	plan, inst, runners := multiPodPlan(1)
+	worker := runners[1]
+	pod := &corev1.Pod{Spec: *tpuPodSpecWithTopology("2x2x2")}
+
+	injectTPUSliceAffinity(pod, plan, inst, worker, "llama-70b")
+	injectTPUSliceAffinity(pod, plan, inst, worker, "llama-70b")
+
+	terms := requiredPodAffinity(pod)
+	if len(terms) != 1 {
+		t.Fatalf("slice-affinity term should appear once after double render, got %d: %+v", len(terms), terms)
 	}
 }
 
