@@ -217,6 +217,11 @@ prometheus:
   # usage bounded.
   retention: 30m
   scrapeInterval: 15s
+  # Namespaces to discover InferenceService pods in. Empty = all namespaces
+  # (discovery is already server-side filtered to ome.io/inferenceservice pods,
+  # so it stays cheap even cluster-wide). Set a list to hard-scope discovery on
+  # very large multi-tenant clusters, e.g. [ome, team-a, team-b].
+  scrapeNamespaces: []
   image:
     repository: prom/prometheus
     tag: "v3.0.1"

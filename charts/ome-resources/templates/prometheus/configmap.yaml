@@ -28,6 +28,19 @@ data:
       - job_name: ome-inferenceservice-pods
         kubernetes_sd_configs:
           - role: pod
+            # Server-side informer filter: discover ONLY InferenceService pods.
+            # The keep-relabel below runs AFTER discovery, so without this filter
+            # the pod informer would cache every pod in the cluster and OOM the
+            # bundled Prometheus on large multi-tenant clusters.
+            selectors:
+              - role: pod
+                label: "ome.io/inferenceservice"
+            {{- with .Values.prometheus.scrapeNamespaces }}
+            # Optionally hard-scope discovery to specific namespaces.
+            namespaces:
+              names:
+                {{- toYaml . | nindent 16 }}
+            {{- end }}
         relabel_configs:
           # Only pods owned by an InferenceService.
           - source_labels: [__meta_kubernetes_pod_label_ome_io_inferenceservice]
@@ -71,6 +84,12 @@ data:
       - job_name: ome-control-plane
         kubernetes_sd_configs:
           - role: pod
+            # Control-plane pods are matched by annotation (which SD can't filter
+            # on), so scope discovery to this release's namespace -- where the
+            # controller-manager/model-agent run -- instead of all cluster pods.
+            namespaces:
+              names:
+                - {{ .Release.Namespace }}
         relabel_configs:
           # Opt-in via the standard prometheus.io/scrape annotation.
           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
