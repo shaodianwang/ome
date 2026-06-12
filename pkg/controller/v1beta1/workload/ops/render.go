@@ -2,6 +2,7 @@ package ops
 
 import (
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -381,6 +382,12 @@ func podLabels(isvc string, component workload.ComponentType, instanceIdx int32,
 // authoritative source for these names).
 func injectOMENativeEnv(pod *corev1.Pod, plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, ordinal int32, isvcName string) {
 	env := buildOMENativeEnv(plan, inst, runner, ordinal, isvcName)
+	// Multi-host TPU runtimes (JAX/libtpu) read the peer host list directly to
+	// build the cross-host device mesh. GKE injects it only for LWS pods, so
+	// OMENative supplies it for any TPU-requesting pod from the same peer info.
+	if podRequestsResource(pod, constants.GoogleTPUResourceType) {
+		env = append(env, buildTPUTopologyEnv(plan, inst, runner, ordinal, isvcName)...)
+	}
 	owned := make(map[string]bool, len(env))
 	for _, e := range env {
 		owned[e.Name] = true
@@ -480,4 +487,64 @@ func leaderAddressForInstance(isvcName string, component workload.ComponentType,
 		}
 	}
 	return ""
+}
+
+// tpuProcessPort is the inter-host port JAX/libtpu uses for the multi-host
+// device-mesh handshake (TPU_PROCESS_ADDRESSES / TPU_PROCESS_PORT), matching the
+// value GKE's LWS TPU webhook stamps for multislice pods.
+const tpuProcessPort = 8476
+
+// buildTPUTopologyEnv returns the multi-host TPU coordinator env for a multi-pod
+// Instance: the full ordered peer host list, this pod's worker id, and the
+// process-address list JAX/libtpu reads to form the cross-host device mesh.
+// Returns nil for single-pod Instances, where GKE's default single-host slice is
+// correct. Gated by the caller on the pod requesting google.com/tpu.
+func buildTPUTopologyEnv(plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, ordinal int32, isvcName string) []corev1.EnvVar {
+	hosts := instancePeerHostnames(isvcName, plan.Component, inst)
+	if len(hosts) < 2 {
+		return nil
+	}
+	addrs := make([]string, len(hosts))
+	for i, h := range hosts {
+		addrs[i] = fmt.Sprintf("%s:%d", h, tpuProcessPort)
+	}
+	return []corev1.EnvVar{
+		{Name: "TPU_WORKER_HOSTNAMES", Value: strings.Join(hosts, ",")},
+		{Name: "TPU_WORKER_ID", Value: fmt.Sprintf("%d", instancePodRank(inst, runner, ordinal))},
+		{Name: "TPU_PROCESS_ADDRESSES", Value: strings.Join(addrs, ",")},
+		{Name: "TPU_PROCESS_PORT", Value: fmt.Sprintf("%d", tpuProcessPort)},
+		{Name: "TPU_NAME", Value: query.InstanceSubdomain(isvcName, plan.Component, inst.Index)},
+	}
+}
+
+// instancePeerHostnames lists the short peer-DNS name of every pod in the
+// Instance in flat gang-rank order — runners in declared order, each runner's
+// ordinals 0..Size-1, the same order instancePodRank counts, so hosts[rank] is
+// the pod whose TPU_WORKER_ID is rank.
+func instancePeerHostnames(isvcName string, component workload.ComponentType, inst workload.InstancePlan) []string {
+	headless := query.HeadlessServiceName(isvcName, component)
+	var hosts []string
+	for _, r := range inst.Runners {
+		for o := int32(0); o < r.Size; o++ {
+			hosts = append(hosts, fmt.Sprintf("%s.%s",
+				query.PodName(isvcName, component, inst.Index, r.Name, o), headless))
+		}
+	}
+	return hosts
+}
+
+// podRequestsResource reports whether any container requests the named extended
+// resource (limits or requests) — e.g. google.com/tpu to detect TPU pods.
+func podRequestsResource(pod *corev1.Pod, name string) bool {
+	rn := corev1.ResourceName(name)
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		if _, ok := c.Resources.Limits[rn]; ok {
+			return true
+		}
+		if _, ok := c.Resources.Requests[rn]; ok {
+			return true
+		}
+	}
+	return false
 }

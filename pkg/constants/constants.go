@@ -274,6 +274,7 @@ var (
 // GPU/CPU resource constants
 const (
 	NvidiaGPUResourceType = "nvidia.com/gpu"
+	GoogleTPUResourceType = "google.com/tpu"
 )
 
 // InferenceService Environment Variables

@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -605,6 +606,90 @@ func TestRender_SinglePod_OmitsLeaderAddress(t *testing.T) {
 	got := envByName(pod.Spec.Containers[0].Env)
 	if _, present := got["OME_LEADER_ADDRESS"]; present {
 		t.Errorf("single-pod must not set OME_LEADER_ADDRESS; got %q", got["OME_LEADER_ADDRESS"])
+	}
+}
+
+// tpuPodSpec is basicPodSpec with a google.com/tpu request on the runner
+// container, so the render path detects a TPU pod and injects the multi-host
+// slice env.
+func tpuPodSpec() *corev1.PodSpec {
+	spec := basicPodSpec()
+	spec.Containers[0].Resources = corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceName(constants.GoogleTPUResourceType): resource.MustParse("4"),
+		},
+	}
+	return spec
+}
+
+// TestRender_MultiPod_TPUTopologyEnv pins the native multi-host TPU env OMENative
+// supplies in place of GKE's LWS-only webhook: every pod gets the same ordered
+// peer host list (leader rank 0, then workers), its own TPU_WORKER_ID = gang
+// rank, and the matching :port process-address list. JAX/libtpu reads these to
+// build the cross-host device mesh; without them each host comes up as a lone
+// single-host slice. Gated on the pod requesting google.com/tpu.
+func TestRender_MultiPod_TPUTopologyEnv(t *testing.T) {
+	plan, inst, runners := multiPodPlan(1) // 1 leader + 1 worker = 2-host slice
+	leader, worker := runners[0], runners[1]
+
+	wantHosts := "llama-70b-engine-0-leader-0.llama-70b-engine-headless," +
+		"llama-70b-engine-0-worker-0.llama-70b-engine-headless"
+	wantAddrs := "llama-70b-engine-0-leader-0.llama-70b-engine-headless:8476," +
+		"llama-70b-engine-0-worker-0.llama-70b-engine-headless:8476"
+
+	lpod, err := testRender(basicISVC(), tpuPodSpec(), plan, inst, leader, 0)
+	if err != nil {
+		t.Fatalf("leader: %v", err)
+	}
+	lenv := envByName(lpod.Spec.Containers[0].Env)
+	for k, want := range map[string]string{
+		"TPU_WORKER_HOSTNAMES":  wantHosts,
+		"TPU_WORKER_ID":         "0",
+		"TPU_PROCESS_ADDRESSES": wantAddrs,
+		"TPU_PROCESS_PORT":      "8476",
+		"TPU_NAME":              "llama-70b-engine-0",
+	} {
+		if lenv[k] != want {
+			t.Errorf("leader %s: got %q want %q", k, lenv[k], want)
+		}
+	}
+
+	// Worker shares the host list but reports its own gang rank (1).
+	wpod, err := testRender(basicISVC(), tpuPodSpec(), plan, inst, worker, 0)
+	if err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	wenv := envByName(wpod.Spec.Containers[0].Env)
+	if wenv["TPU_WORKER_HOSTNAMES"] != wantHosts {
+		t.Errorf("worker TPU_WORKER_HOSTNAMES: got %q want %q", wenv["TPU_WORKER_HOSTNAMES"], wantHosts)
+	}
+	if wenv["TPU_WORKER_ID"] != "1" {
+		t.Errorf("worker TPU_WORKER_ID: got %q want 1", wenv["TPU_WORKER_ID"])
+	}
+}
+
+// TestRender_TPUTopologyEnv_GatedOnTPUAndMultiPod pins the two negatives: a
+// multi-pod pod that does NOT request google.com/tpu gets no TPU env, and a
+// single-pod TPU pod gets none either (a lone host needs no peer mesh).
+func TestRender_TPUTopologyEnv_GatedOnTPUAndMultiPod(t *testing.T) {
+	// Multi-pod but no TPU request -> no TPU env.
+	plan, inst, runners := multiPodPlan(1)
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runners[0], 0)
+	if err != nil {
+		t.Fatalf("non-tpu multi-pod: %v", err)
+	}
+	if v, ok := envByName(pod.Spec.Containers[0].Env)["TPU_WORKER_HOSTNAMES"]; ok {
+		t.Errorf("non-TPU pod must not set TPU_WORKER_HOSTNAMES; got %q", v)
+	}
+
+	// Single-pod TPU request -> no multi-host env (single-host slice is correct).
+	splan, sinst, srunner := singlePodPlan()
+	spod, err := testRender(basicISVC(), tpuPodSpec(), splan, sinst, srunner, 0)
+	if err != nil {
+		t.Fatalf("single-pod tpu: %v", err)
+	}
+	if v, ok := envByName(spod.Spec.Containers[0].Env)["TPU_WORKER_HOSTNAMES"]; ok {
+		t.Errorf("single-pod TPU must not set TPU_WORKER_HOSTNAMES; got %q", v)
 	}
 }
 
