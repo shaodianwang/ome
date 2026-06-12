@@ -1,0 +1,77 @@
+# OMENative multi-host (multi-node) serving on GKE TPU.
+#
+# A leader + worker gang placed on one multi-host TPU slice (e.g. tpu7x
+# 2x2x2 = 2 hosts x 4 chips). OME co-schedules the gang and injects the
+# coordination env every pod needs, into every container of both pods:
+#
+#   gang:     OME_LEADER_ADDRESS, OME_INSTANCE_POD_RANK,
+#             OME_INSTANCE_POD_COUNT, OME_INSTANCE_SUBDOMAIN
+#   TPU mesh: TPU_WORKER_HOSTNAMES, TPU_WORKER_ID,
+#             TPU_PROCESS_ADDRESSES, TPU_PROCESS_PORT, TPU_NAME
+#
+# The TPU_* vars are what JAX/libtpu reads to build the cross-host device
+# mesh. OME injects them for any multi-pod Instance whose runner requests
+# google.com/tpu -- no LeaderWorkerSet, and no GKE TPU slice-selector label.
+#
+# Replace <tpu-serving-image> and the launch commands with your stack
+# (e.g. vLLM-on-TPU or MaxText), launched as a Ray multi-host cluster.
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: tpu-multinode-example
+spec:
+  disabled: false
+  protocolVersions: [openAI]
+  supportedModelFormats:
+    - modelFormat: {name: safetensors}
+      modelFramework: {name: transformers}
+      autoSelect: false
+  engineConfig:
+    leader:
+      nodeSelector: &tpuSel
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 2x2x2
+      tolerations: &tpuTol
+        - {key: google.com/tpu, operator: Exists, effect: NoSchedule}
+      runner:
+        name: ome-container
+        image: <tpu-serving-image>
+        command: [/bin/bash, -lc]
+        args:
+          - |
+            set -euo pipefail
+            # OME injected the TPU mesh (TPU_WORKER_HOSTNAMES / TPU_WORKER_ID /
+            # TPU_PROCESS_ADDRESSES) and the gang vars (OME_LEADER_ADDRESS /
+            # OME_INSTANCE_POD_COUNT). Start a Ray head sized to the gang, then
+            # serve, e.g.:
+            #   ray start --head --port 6379 --num-cpus 0
+            #   # wait for ${OME_INSTANCE_POD_COUNT} nodes, then:
+            #   vllm serve <model> --tensor-parallel-size <chips-per-gang>
+            env | grep -E '^(TPU|OME)_' | sort
+            sleep infinity
+        ports: [{containerPort: 8000, name: http, protocol: TCP}]
+        resources:
+          requests: {cpu: "8", memory: 64Gi, google.com/tpu: "4"}
+          limits:   {cpu: "8", memory: 64Gi, google.com/tpu: "4"}
+        readinessProbe:
+          httpGet: {path: /health, port: 8000}
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          failureThreshold: 1000        # generous: TPU cold-compile can be long
+    worker:
+      nodeSelector: *tpuSel
+      tolerations: *tpuTol
+      runner:
+        name: ome-container
+        image: <tpu-serving-image>
+        command: [/bin/bash, -lc]
+        args:
+          - |
+            set -euo pipefail
+            # Worker joins the leader's Ray head. OME provides OME_LEADER_ADDRESS:
+            #   ray start --address "${OME_LEADER_ADDRESS}:6379" --num-cpus 0 --block
+            env | grep -E '^(TPU|OME)_' | sort
+            sleep infinity
+        resources:
+          requests: {cpu: "8", memory: 64Gi, google.com/tpu: "4"}
+          limits:   {cpu: "8", memory: 64Gi, google.com/tpu: "4"}

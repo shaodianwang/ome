@@ -1,0 +1,25 @@
+# Multi-node engine: 1 leader + 1 worker = a 2-host gang = one 2x2x2 TPU slice.
+# deploymentMode OMENative drives the gang (co-schedule + per-pod coordination env).
+# Lean path: no spec.model -- the runtime image self-loads its weights. Add
+# spec.model (a BaseModel / ClusterBaseModel ref) to have OME stage them instead.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: tpu-multinode-example
+spec:
+  deploymentMode: OMENative
+  runtime:
+    name: tpu-multinode-example
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    leader:
+      runner:
+        name: ome-container
+    worker:
+      size: 1                    # leader + 1 worker = 2 hosts
+      runner:
+        name: ome-container
+    lifecycle:
+      updateStrategy:
+        type: RecreatePod        # small gang, no surge headroom
