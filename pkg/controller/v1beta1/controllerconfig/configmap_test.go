@@ -194,7 +194,8 @@ func TestNewIngressConfig(t *testing.T) {
 					"additionalIngressDomains": ["extra.example.com"],
 					"domainTemplate": "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}",
 					"urlScheme": "https",
-					"pathTemplate": "/{{ .Namespace }}/{{ .Name }}"
+					"pathTemplate": "/{{ .Namespace }}/{{ .Name }}",
+					"perISVCSubdomain": true
 				}`,
 			},
 			expectedError: false,
@@ -204,6 +205,7 @@ func TestNewIngressConfig(t *testing.T) {
 				assert.Equal(t, "example.com", cfg.IngressDomain)
 				assert.Equal(t, "nginx", *cfg.IngressClassName)
 				assert.Equal(t, "https", cfg.UrlScheme)
+				assert.True(t, cfg.PerISVCSubdomain)
 			},
 		},
 		{
@@ -234,6 +236,7 @@ func TestNewIngressConfig(t *testing.T) {
 				assert.Equal(t, DefaultDomainTemplate, cfg.DomainTemplate)
 				assert.Equal(t, DefaultIngressDomain, cfg.IngressDomain)
 				assert.Equal(t, DefaultUrlScheme, cfg.UrlScheme)
+				assert.False(t, cfg.PerISVCSubdomain, "perISVCSubdomain must default to false")
 			},
 		},
 	}

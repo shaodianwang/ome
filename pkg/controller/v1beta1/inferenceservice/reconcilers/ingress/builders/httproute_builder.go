@@ -108,12 +108,42 @@ func toGatewayAPIDuration(seconds int64) *gatewayapiv1.Duration {
 	return &duration
 }
 
-func (b *HTTPRouteBuilder) gatewayHostname() gatewayapiv1.Hostname {
-	return gatewayapiv1.Hostname("llm." + b.ingressConfig.IngressDomain)
+// gatewayHostname returns the HTTPRoute host. By default this is the shared
+// "llm.<IngressDomain>" host (all ISVCs share one host, disambiguated by the
+// path prefix). When PerISVCSubdomain is set, it returns this ISVC's own
+// subdomain by reusing the same domainService.GenerateDomainName the strategy
+// uses for status.url — so the route host and status.url can't drift.
+func (b *HTTPRouteBuilder) gatewayHostname(isvc *v1beta1.InferenceService) (gatewayapiv1.Hostname, error) {
+	if b.ingressConfig.PerISVCSubdomain {
+		host, err := b.domainService.GenerateDomainName(isvc.Name, isvc.ObjectMeta, b.ingressConfig)
+		if err != nil {
+			return "", err
+		}
+		return gatewayapiv1.Hostname(host), nil
+	}
+	return gatewayapiv1.Hostname("llm." + b.ingressConfig.IngressDomain), nil
 }
 
+// pathPrefix returns the route's PathPrefix match. By default this is
+// "/<namespace>/<service>/" (the shared host disambiguates ISVCs by path).
+// When PerISVCSubdomain is set, the host already identifies the ISVC, so the
+// route matches at root "/" and no prefix rewrite is needed.
 func (b *HTTPRouteBuilder) pathPrefix(isvc *v1beta1.InferenceService, serviceName string) string {
+	if b.ingressConfig.PerISVCSubdomain {
+		return "/"
+	}
 	return "/" + isvc.Namespace + "/" + serviceName + "/"
+}
+
+// componentFilters builds the per-route filters: ISVC headers plus, under the
+// default shared-host scheme, the urlRewrite that strips the path prefix. With
+// PerISVCSubdomain the match is already at root, so the rewrite is omitted.
+func (b *HTTPRouteBuilder) componentFilters(isvc *v1beta1.InferenceService) []gatewayapiv1.HTTPRouteFilter {
+	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace)}
+	if !b.ingressConfig.PerISVCSubdomain {
+		filters = append(filters, b.urlRewriteFilter())
+	}
+	return filters
 }
 
 func (b *HTTPRouteBuilder) createPathPrefixMatch(prefix string) gatewayapiv1.HTTPRouteMatch {
@@ -203,7 +233,7 @@ func (b *HTTPRouteBuilder) buildEngineHTTPRoute(ctx context.Context, isvc *v1bet
 	// even when a router is present.
 	engineName := constants.EngineServiceName(isvc.Name)
 	prefix := b.pathPrefix(isvc, engineName)
-	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace), b.urlRewriteFilter()}
+	filters := b.componentFilters(isvc)
 
 	timeout := DefaultTimeout
 	if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
@@ -216,8 +246,12 @@ func (b *HTTPRouteBuilder) buildEngineHTTPRoute(ctx context.Context, isvc *v1bet
 		b.createHTTPRouteRule(routeMatch, filters, engineName, isvc.Namespace, port, timeout),
 	}
 
+	host, err := b.gatewayHostname(isvc)
+	if err != nil {
+		return nil, err
+	}
 	return b.buildHTTPRouteResource(isvc, engineName,
-		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
+		[]gatewayapiv1.Hostname{host}, httpRouteRules), nil
 }
 
 func (b *HTTPRouteBuilder) buildRouterHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
@@ -232,7 +266,7 @@ func (b *HTTPRouteBuilder) buildRouterHTTPRoute(ctx context.Context, isvc *v1bet
 
 	routerName := constants.RouterServiceName(isvc.Name)
 	prefix := b.pathPrefix(isvc, routerName)
-	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace), b.urlRewriteFilter()}
+	filters := b.componentFilters(isvc)
 
 	timeout := DefaultTimeout
 	if isvc.Spec.Router.TimeoutSeconds != nil {
@@ -245,8 +279,12 @@ func (b *HTTPRouteBuilder) buildRouterHTTPRoute(ctx context.Context, isvc *v1bet
 		b.createHTTPRouteRule(routeMatch, filters, routerName, isvc.Namespace, port, timeout),
 	}
 
+	host, err := b.gatewayHostname(isvc)
+	if err != nil {
+		return nil, err
+	}
 	return b.buildHTTPRouteResource(isvc, constants.RouterServiceName(isvc.Name),
-		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
+		[]gatewayapiv1.Hostname{host}, httpRouteRules), nil
 }
 
 func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
@@ -261,7 +299,7 @@ func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(ctx context.Context, isvc *v1be
 
 	decoderName := constants.DecoderServiceName(isvc.Name)
 	prefix := b.pathPrefix(isvc, decoderName)
-	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace), b.urlRewriteFilter()}
+	filters := b.componentFilters(isvc)
 
 	timeout := DefaultTimeout
 	if isvc.Spec.Decoder.TimeoutSeconds != nil {
@@ -274,12 +312,16 @@ func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(ctx context.Context, isvc *v1be
 		b.createHTTPRouteRule(routeMatch, filters, decoderName, isvc.Namespace, port, timeout),
 	}
 
+	host, err := b.gatewayHostname(isvc)
+	if err != nil {
+		return nil, err
+	}
 	return b.buildHTTPRouteResource(isvc, constants.DecoderServiceName(isvc.Name),
-		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
+		[]gatewayapiv1.Hostname{host}, httpRouteRules), nil
 }
 
 func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
-	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace), b.urlRewriteFilter()}
+	filters := b.componentFilters(isvc)
 
 	var serviceName string
 	var port int32
@@ -320,8 +362,12 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(ctx context.Context, isvc *v1b
 		b.createHTTPRouteRule(routeMatch, filters, serviceName, isvc.Namespace, port, timeout),
 	}
 
+	host, err := b.gatewayHostname(isvc)
+	if err != nil {
+		return nil, err
+	}
 	return b.buildHTTPRouteResource(isvc, isvc.Name,
-		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
+		[]gatewayapiv1.Hostname{host}, httpRouteRules), nil
 }
 
 func (b *HTTPRouteBuilder) buildHTTPRouteResource(isvc *v1beta1.InferenceService, name string, allowedHosts []gatewayapiv1.Hostname, httpRouteRules []gatewayapiv1.HTTPRouteRule) *gatewayapiv1.HTTPRoute {

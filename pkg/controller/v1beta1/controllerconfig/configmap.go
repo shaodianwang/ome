@@ -55,6 +55,12 @@ type IngressConfig struct {
 	DisableIngressCreation   bool      `json:"disableIngressCreation,omitempty"`
 	EnableGatewayAPI         bool      `json:"enableGatewayAPI,omitempty"`
 	ConsistentHashHeaders    []string  `json:"consistentHashHeaders,omitempty"`
+	// PerISVCSubdomain opts into a per-ISVC subdomain ingress scheme:
+	// each ISVC is reached at its own host (matching status.url, rendered
+	// from DomainTemplate) with a root path, instead of the default shared
+	// "llm.<IngressDomain>" host plus a "/<namespace>/<service>/" path
+	// prefix. Default false preserves the shared-host scheme.
+	PerISVCSubdomain bool `json:"perISVCSubdomain,omitempty"`
 }
 
 // +kubebuilder:object:generate=false

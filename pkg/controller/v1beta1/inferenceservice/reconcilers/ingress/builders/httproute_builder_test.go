@@ -716,6 +716,176 @@ func TestHTTPRouteBuilder_BackendRefFallsBackToDefaultPort(t *testing.T) {
 	}
 }
 
+// ----- per-ISVC subdomain ingress scheme (opt-in) -----
+
+// TestHTTPRouteBuilder_SharedHostScheme_Default pins the default (flag OFF)
+// scheme: every component route uses the shared "llm.<IngressDomain>" host,
+// a "/<namespace>/<service>/" path prefix, and a urlRewrite that strips it.
+// This guards existing clusters from a silent change when PerISVCSubdomain
+// is unset.
+func TestHTTPRouteBuilder_SharedHostScheme_Default(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		component    string
+		setup        func(*v1beta1.InferenceService)
+		isvc         *v1beta1.InferenceService
+		expectedPath string
+	}{
+		{
+			name:         "engine",
+			component:    EngineComponent,
+			isvc:         createTestInferenceServiceHTTPRoute("test-isvc", "default"),
+			setup:        func(i *v1beta1.InferenceService) { setEngineReady(i) },
+			expectedPath: "/default/test-isvc-engine/",
+		},
+		{
+			name:      "router",
+			component: RouterComponent,
+			isvc:      createTestInferenceServiceWithRouterHTTPRoute("test-isvc", "default"),
+			setup: func(i *v1beta1.InferenceService) {
+				setEngineReady(i)
+				setRouterReady(i)
+			},
+			expectedPath: "/default/test-isvc-router/",
+		},
+		{
+			name:      "decoder",
+			component: DecoderComponent,
+			isvc:      createTestInferenceServiceWithDecoderHTTPRoute("test-isvc", "default"),
+			setup: func(i *v1beta1.InferenceService) {
+				setEngineReady(i)
+				setDecoderReady(i)
+			},
+			expectedPath: "/default/test-isvc-decoder/",
+		},
+		{
+			name:         "toplevel",
+			component:    TopLevelComponent,
+			isvc:         createTestInferenceServiceHTTPRoute("test-isvc", "default"),
+			setup:        func(i *v1beta1.InferenceService) { setEngineReady(i) },
+			expectedPath: "/default/test-isvc/",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(tc.isvc)
+			builder := createHTTPRouteBuilder()
+
+			result, err := builder.BuildHTTPRoute(context.Background(), tc.isvc, tc.component)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			route := result.(*gatewayapiv1.HTTPRoute)
+
+			require.Len(t, route.Spec.Hostnames, 1)
+			assert.Equal(t, gatewayapiv1.Hostname("llm.example.com"), route.Spec.Hostnames[0],
+				"default scheme must use the shared llm.<domain> host")
+
+			require.Len(t, route.Spec.Rules, 1)
+			require.Len(t, route.Spec.Rules[0].Matches, 1)
+			assert.Equal(t, tc.expectedPath, *route.Spec.Rules[0].Matches[0].Path.Value,
+				"default scheme must use the /<namespace>/<service>/ path prefix")
+			assert.True(t, hasURLRewriteFilter(route.Spec.Rules[0]),
+				"default scheme must strip the path prefix via urlRewrite")
+		})
+	}
+}
+
+// TestHTTPRouteBuilder_PerISVCSubdomainScheme verifies the opt-in (flag ON)
+// scheme for engine, router, decoder, and top-level routes: the route host
+// equals the ISVC's per-ISVC subdomain (the same host status.url advertises,
+// rendered from DomainTemplate), the match is at root "/", and there is no
+// urlRewrite filter (the host identifies the ISVC, so requests pass through).
+func TestHTTPRouteBuilder_PerISVCSubdomainScheme(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		component string
+		setup     func(*v1beta1.InferenceService)
+		isvc      *v1beta1.InferenceService
+	}{
+		{
+			name:      "engine",
+			component: EngineComponent,
+			isvc:      createTestInferenceServiceHTTPRoute("test-isvc", "default"),
+			setup:     func(i *v1beta1.InferenceService) { setEngineReady(i) },
+		},
+		{
+			name:      "router",
+			component: RouterComponent,
+			isvc:      createTestInferenceServiceWithRouterHTTPRoute("test-isvc", "default"),
+			setup: func(i *v1beta1.InferenceService) {
+				setEngineReady(i)
+				setRouterReady(i)
+			},
+		},
+		{
+			name:      "decoder",
+			component: DecoderComponent,
+			isvc:      createTestInferenceServiceWithDecoderHTTPRoute("test-isvc", "default"),
+			setup: func(i *v1beta1.InferenceService) {
+				setEngineReady(i)
+				setDecoderReady(i)
+			},
+		},
+		{
+			name:      "toplevel",
+			component: TopLevelComponent,
+			isvc:      createTestInferenceServiceHTTPRoute("test-isvc", "default"),
+			setup:     func(i *v1beta1.InferenceService) { setEngineReady(i) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(tc.isvc)
+			builder := createHTTPRouteBuilderPerISVC()
+
+			// The expected host is whatever the domainService renders for
+			// status.url — reuse the exact same call so the test can't drift
+			// from the builder either.
+			expectedHost, err := builder.domainService.GenerateDomainName(tc.isvc.Name, tc.isvc.ObjectMeta, builder.ingressConfig)
+			require.NoError(t, err)
+			require.Equal(t, "test-isvc.default.example.com", expectedHost)
+
+			result, err := builder.BuildHTTPRoute(context.Background(), tc.isvc, tc.component)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			route := result.(*gatewayapiv1.HTTPRoute)
+
+			require.Len(t, route.Spec.Hostnames, 1)
+			assert.Equal(t, gatewayapiv1.Hostname(expectedHost), route.Spec.Hostnames[0],
+				"per-ISVC host must equal the status.url host (domainService.GenerateDomainName)")
+
+			require.Len(t, route.Spec.Rules, 1)
+			require.Len(t, route.Spec.Rules[0].Matches, 1)
+			assert.Equal(t, "/", *route.Spec.Rules[0].Matches[0].Path.Value,
+				"per-ISVC scheme matches at root path")
+			assert.False(t, hasURLRewriteFilter(route.Spec.Rules[0]),
+				"per-ISVC scheme must not rewrite the path (no prefix to strip)")
+		})
+	}
+}
+
+// TestHTTPRouteBuilder_PerISVCSubdomain_KeepsBackendPortResolution confirms the
+// opt-in scheme still resolves the backendRef port from the live Service (the
+// #511 behavior), independent of host/path changes.
+func TestHTTPRouteBuilder_PerISVCSubdomain_KeepsBackendPortResolution(t *testing.T) {
+	const customPort int32 = 8000
+
+	isvc := createTestInferenceServiceHTTPRoute("test-isvc", "default")
+	setEngineReady(isvc)
+
+	c := fakeClientWithServices(t, newServicePort("test-isvc-engine", "default", customPort))
+	builder := createHTTPRouteBuilderWithClient(c)
+	builder.ingressConfig.PerISVCSubdomain = true
+
+	result, err := builder.BuildHTTPRoute(context.Background(), isvc, EngineComponent)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	route := result.(*gatewayapiv1.HTTPRoute)
+
+	require.Len(t, route.Spec.Rules, 1)
+	require.Len(t, route.Spec.Rules[0].BackendRefs, 1)
+	assert.Equal(t, customPort, int32(*route.Spec.Rules[0].BackendRefs[0].Port),
+		"per-ISVC scheme must keep resolving the backendRef port from the Service")
+}
+
 // Helper functions
 func createHTTPRouteBuilder() *HTTPRouteBuilder {
 	return &HTTPRouteBuilder{
@@ -734,6 +904,24 @@ func createHTTPRouteBuilderWithClient(c client.Client) *HTTPRouteBuilder {
 	b := createHTTPRouteBuilder()
 	b.client = c
 	return b
+}
+
+// createHTTPRouteBuilderPerISVC is createHTTPRouteBuilder with the opt-in
+// per-ISVC subdomain scheme enabled.
+func createHTTPRouteBuilderPerISVC() *HTTPRouteBuilder {
+	b := createHTTPRouteBuilder()
+	b.ingressConfig.PerISVCSubdomain = true
+	return b
+}
+
+// hasURLRewriteFilter reports whether the rule carries a urlRewrite filter.
+func hasURLRewriteFilter(rule gatewayapiv1.HTTPRouteRule) bool {
+	for _, f := range rule.Filters {
+		if f.Type == gatewayapiv1.HTTPRouteFilterURLRewrite {
+			return true
+		}
+	}
+	return false
 }
 
 func newServicePort(name, namespace string, port int32) *corev1.Service {

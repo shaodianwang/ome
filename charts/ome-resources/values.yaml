@@ -53,6 +53,9 @@ ome:
       pathTemplate: ""
       disableIngressCreation: true
       enableGatewayAPI: false
+      # Opt-in: serve each ISVC on its own subdomain (matching status.url)
+      # with a root path instead of the shared llm.<domain> host + path prefix.
+      perISVCSubdomain: false
     nodeSelector: {}
     tolerations: []
     topologySpreadConstraints: []
