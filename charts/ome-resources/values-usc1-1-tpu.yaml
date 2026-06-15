@@ -1,0 +1,45 @@
+# OME install overlay for msl-gcp-usc1-1-tpu (GKE; reuses the cluster's existing cert-manager).
+# Use: helm upgrade --install ome ./charts/ome-resources -n ome \
+#        -f charts/ome-resources/values-usc1-1-tpu.yaml
+# Untracked local file (recreated 2026-06-15 after the working tree was cleaned).
+#
+# Image: the tip-of-main build the dev cluster runs, from AWS ECR. usc1-1 runs
+# ecr-credential-refresher; if controller pods ImagePullBackOff, set global.imagePullSecrets.
+global:
+  hub: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra
+  imagePullSecrets: []          # e.g. [{name: <ecr-pull-secret>}] if image pull is denied in the ome ns
+
+ome:
+  controller:
+    tag: "f90a500d"             # ome-manager image tag (matches dev); has #495 env + #497 slice affinity
+    # Expose ISVCs via the cluster's Envoy Gateway (Gateway API) instead of the
+    # cluster-local default — OME renders an HTTPRoute per ISVC on this gateway.
+    ingressGateway:
+      domain: "ext-gw-https.msl-gcp-usc1-1.metahpc.gcp.metafb.cloud"   # -> <isvc>.<ns>.<domain>
+      urlScheme: "https"
+      disableIngressCreation: false
+      enableGatewayAPI: true
+      # omeIngressGateway is the gateway the HTTPRoute's parentRef attaches to
+      # (httproute_builder splits it on "/"); must be namespace/name, not empty.
+      omeIngressGateway: "envoy-gateway-system/meta-ai-ext-gw-https"
+      ingressGateway:
+        gateway: "envoy-gateway-system/meta-ai-ext-gw-https"
+        gatewayService: "envoy-envoy-gateway-system-meta-ai-ext-gw-https-c35b1bd3.envoy-gateway-system.svc.cluster.local"
+        className: "meta-ai-ext-gw-https"
+  omeAgent:
+    tag: "f90a500d"             # keep ome-agent on the same build
+  multiclusterAccess:
+    enabled: false              # standalone install — not driven by a control-plane operator
+
+# Operator only for now.
+modelAgent:
+  enabled: false
+
+# Bundled Prometheus for OME/KEDA metrics. Chart scopes SD to ISVC-labeled pods + the
+# release namespace (#493), so safe at this cluster's scale.
+prometheus:
+  enabled: true
+serviceMonitor:
+  enabled: true
+podMonitor:
+  enabled: true
