@@ -89,21 +89,11 @@ func RemovePodAnnotations(metadata *metav1.ObjectMeta, annotationsToRemove []str
 // ResolveIngressConfig creates an effective ingress configuration by merging
 // global defaults from configMap with per-service annotation overrides
 func ResolveIngressConfig(baseConfig *controllerconfig.IngressConfig, annotations map[string]string) *controllerconfig.IngressConfig {
-	// Start with a copy of the base config to avoid modifying the original
-	resolved := &controllerconfig.IngressConfig{
-		IngressGateway:           baseConfig.IngressGateway,
-		IngressServiceName:       baseConfig.IngressServiceName,
-		OmeIngressGateway:        baseConfig.OmeIngressGateway,
-		IngressDomain:            baseConfig.IngressDomain,
-		IngressClassName:         baseConfig.IngressClassName,
-		AdditionalIngressDomains: baseConfig.AdditionalIngressDomains,
-		DomainTemplate:           baseConfig.DomainTemplate,
-		UrlScheme:                baseConfig.UrlScheme,
-		PathTemplate:             baseConfig.PathTemplate,
-		DisableIngressCreation:   baseConfig.DisableIngressCreation,
-		EnableGatewayAPI:         baseConfig.EnableGatewayAPI,
-		ConsistentHashHeaders:    baseConfig.ConsistentHashHeaders,
-	}
+	// Copy all fields of the base config so the effective config can never
+	// silently drop a newly added one; the overrides below replace fields
+	// rather than mutate the original's shared slices/pointers.
+	resolvedCopy := *baseConfig
+	resolved := &resolvedCopy
 
 	// Override with annotation values if present
 	if domainTemplate, exists := annotations[constants.IngressDomainTemplate]; exists && domainTemplate != "" {

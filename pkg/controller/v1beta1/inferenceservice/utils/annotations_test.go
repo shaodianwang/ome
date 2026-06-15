@@ -148,6 +148,31 @@ func TestResolveIngressConfig(t *testing.T) {
 		result := ResolveIngressConfig(configWithHeaders, map[string]string{})
 		assert.Equal(t, []string{"x-routing-key", "X-SMG-Routing-Key"}, result.ConsistentHashHeaders)
 	})
+
+	// Guards against the resolver silently dropping a field: set every field,
+	// then a no-annotation resolve must return an equal config. This would have
+	// caught PerISVCSubdomain being omitted from the copy.
+	t.Run("every base-config field is carried", func(t *testing.T) {
+		className := "nginx"
+		full := &controllerconfig.IngressConfig{
+			IngressGateway:           "gw-ns/gw",
+			IngressServiceName:       "svc.ns.svc.cluster.local",
+			OmeIngressGateway:        "gw-ns/ome-gw",
+			IngressDomain:            "example.com",
+			IngressClassName:         &className,
+			AdditionalIngressDomains: &[]string{"alt.example.com"},
+			DomainTemplate:           "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}",
+			UrlScheme:                "https",
+			PathTemplate:             "/{{ .Namespace }}/{{ .Name }}",
+			DisableIngressCreation:   true,
+			EnableGatewayAPI:         true,
+			ConsistentHashHeaders:    []string{"x-key"},
+			PerISVCSubdomain:         true,
+		}
+		result := ResolveIngressConfig(full, map[string]string{})
+		assert.Equal(t, full, result, "ResolveIngressConfig must carry every base-config field")
+		assert.True(t, result.PerISVCSubdomain, "perISVCSubdomain must survive ResolveIngressConfig")
+	})
 }
 
 func TestGetDeploymentModeFromAnnotations(t *testing.T) {
