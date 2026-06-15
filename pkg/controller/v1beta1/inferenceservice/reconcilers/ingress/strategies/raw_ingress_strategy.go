@@ -36,7 +36,7 @@ type KubernetesIngressStrategy struct {
 
 // NewKubernetesIngressStrategy creates a new Kubernetes Ingress strategy
 func NewKubernetesIngressStrategy(opts interfaces.ReconcilerOptions, domainService interfaces.DomainService, pathService interfaces.PathService) interfaces.IngressStrategy {
-	builder := builders.NewIngressBuilder(opts.Scheme, opts.IngressConfig, opts.IsvcConfig, domainService, pathService)
+	builder := builders.NewIngressBuilder(opts.Client, opts.Scheme, opts.IngressConfig, opts.IsvcConfig, domainService, pathService)
 
 	return &KubernetesIngressStrategy{
 		client:        opts.Client,

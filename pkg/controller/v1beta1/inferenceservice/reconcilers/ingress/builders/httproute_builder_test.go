@@ -8,8 +8,12 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -590,6 +594,128 @@ func TestHTTPRouteBuilder_ToGatewayAPIDuration(t *testing.T) {
 	}
 }
 
+// ----- backendRef ports follow the component Service's real port -----
+
+// TestHTTPRouteBuilder_BackendRefUsesComponentServicePort verifies the
+// HTTPRoute backendRef targets each component Service's actual port (its
+// runner's containerPort) rather than the hardcoded default. A runtime on
+// a non-default port (e.g. 8000) previously produced a backendRef on the
+// default port -> the route matched no Service port -> no endpoints.
+func TestHTTPRouteBuilder_BackendRefUsesComponentServicePort(t *testing.T) {
+	const customPort int32 = 8000
+
+	isvc := createTestInferenceServiceWithRouterAndDecoderHTTPRoute("test-isvc", "default")
+	setEngineReady(isvc)
+	setRouterReady(isvc)
+	setDecoderReady(isvc)
+
+	c := fakeClientWithServices(t,
+		newServicePort("test-isvc-engine", "default", customPort),
+		newServicePort("test-isvc-router", "default", customPort),
+		newServicePort("test-isvc-decoder", "default", customPort),
+	)
+	builder := createHTTPRouteBuilderWithClient(c)
+
+	for _, tc := range []struct {
+		component string
+	}{
+		{EngineComponent},
+		{RouterComponent},
+		{DecoderComponent},
+		{TopLevelComponent}, // routes to router here; router Service is on customPort
+	} {
+		t.Run(tc.component, func(t *testing.T) {
+			result, err := builder.BuildHTTPRoute(context.Background(), isvc, tc.component)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			route := result.(*gatewayapiv1.HTTPRoute)
+
+			require.Len(t, route.Spec.Rules, 1)
+			require.Len(t, route.Spec.Rules[0].BackendRefs, 1)
+			assert.Equal(t, customPort, int32(*route.Spec.Rules[0].BackendRefs[0].Port),
+				"%s backendRef must use the component Service port, not the default", tc.component)
+		})
+	}
+}
+
+// TestHTTPRouteBuilder_TopLevelEngineFallbackUsesEngineServicePort covers
+// the no-router top-level route: its engine fallback backendRef must use
+// the engine Service's real port.
+func TestHTTPRouteBuilder_TopLevelEngineFallbackUsesEngineServicePort(t *testing.T) {
+	const customPort int32 = 8000
+
+	isvc := createTestInferenceServiceHTTPRoute("test-isvc", "default")
+	setEngineReady(isvc)
+
+	c := fakeClientWithServices(t, newServicePort("test-isvc-engine", "default", customPort))
+	builder := createHTTPRouteBuilderWithClient(c)
+
+	result, err := builder.BuildHTTPRoute(context.Background(), isvc, TopLevelComponent)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	route := result.(*gatewayapiv1.HTTPRoute)
+
+	require.Len(t, route.Spec.Rules, 1)
+	require.Len(t, route.Spec.Rules[0].BackendRefs, 1)
+	assert.Equal(t, customPort, int32(*route.Spec.Rules[0].BackendRefs[0].Port))
+}
+
+// TestHTTPRouteBuilder_BackendRefFallsBackToDefaultPort verifies that when
+// the component Service can't be resolved (nil client / missing Service),
+// the backendRef uses the default port consts (preserves prior behavior).
+func TestHTTPRouteBuilder_BackendRefFallsBackToDefaultPort(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		component   string
+		setup       func(*v1beta1.InferenceService)
+		isvc        *v1beta1.InferenceService
+		expportPort int32
+	}{
+		{
+			name:        "engine",
+			component:   EngineComponent,
+			isvc:        createTestInferenceServiceHTTPRoute("test-isvc", "default"),
+			setup:       func(i *v1beta1.InferenceService) { setEngineReady(i) },
+			expportPort: EngineDefaultPort,
+		},
+		{
+			name:      "router",
+			component: RouterComponent,
+			isvc:      createTestInferenceServiceWithRouterHTTPRoute("test-isvc", "default"),
+			setup: func(i *v1beta1.InferenceService) {
+				setEngineReady(i)
+				setRouterReady(i)
+			},
+			expportPort: RouterDefaultPort,
+		},
+		{
+			name:      "decoder",
+			component: DecoderComponent,
+			isvc:      createTestInferenceServiceWithDecoderHTTPRoute("test-isvc", "default"),
+			setup: func(i *v1beta1.InferenceService) {
+				setEngineReady(i)
+				setDecoderReady(i)
+			},
+			expportPort: DecoderDefaultPort,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(tc.isvc)
+			// nil-client builder -> port resolution falls back to defaults.
+			builder := createHTTPRouteBuilder()
+
+			result, err := builder.BuildHTTPRoute(context.Background(), tc.isvc, tc.component)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			route := result.(*gatewayapiv1.HTTPRoute)
+
+			require.Len(t, route.Spec.Rules, 1)
+			require.Len(t, route.Spec.Rules[0].BackendRefs, 1)
+			assert.Equal(t, tc.expportPort, int32(*route.Spec.Rules[0].BackendRefs[0].Port))
+		})
+	}
+}
+
 // Helper functions
 func createHTTPRouteBuilder() *HTTPRouteBuilder {
 	return &HTTPRouteBuilder{
@@ -602,6 +728,37 @@ func createHTTPRouteBuilder() *HTTPRouteBuilder {
 		domainService: services.NewDomainService(),
 		pathService:   services.NewPathService(),
 	}
+}
+
+func createHTTPRouteBuilderWithClient(c client.Client) *HTTPRouteBuilder {
+	b := createHTTPRouteBuilder()
+	b.client = c
+	return b
+}
+
+func newServicePort(name, namespace string, port int32) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{
+				Name:       "http",
+				Port:       port,
+				TargetPort: intstr.FromInt32(port),
+				Protocol:   corev1.ProtocolTCP,
+			}},
+		},
+	}
+}
+
+func fakeClientWithServices(t *testing.T, svcs ...*corev1.Service) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	objs := make([]client.Object, 0, len(svcs))
+	for _, s := range svcs {
+		objs = append(objs, s)
+	}
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }
 
 func createTestInferenceServiceHTTPRoute(name, namespace string) *v1beta1.InferenceService {

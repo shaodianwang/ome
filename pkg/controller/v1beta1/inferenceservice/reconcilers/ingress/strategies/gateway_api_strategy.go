@@ -46,7 +46,7 @@ type GatewayAPIStrategy struct {
 
 // NewGatewayAPIStrategy creates a new Gateway API strategy
 func NewGatewayAPIStrategy(opts interfaces.ReconcilerOptions, domainService interfaces.DomainService, pathService interfaces.PathService) interfaces.IngressStrategy {
-	httpRouteBuilder := builders.NewHTTPRouteBuilder(opts.IngressConfig, opts.IsvcConfig, domainService, pathService)
+	httpRouteBuilder := builders.NewHTTPRouteBuilder(opts.Client, opts.IngressConfig, opts.IsvcConfig, domainService, pathService)
 	trafficPolicyBuilder := builders.NewBackendTrafficPolicyBuilder(opts.IngressConfig)
 
 	return &GatewayAPIStrategy{

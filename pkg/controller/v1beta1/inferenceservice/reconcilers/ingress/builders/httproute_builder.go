@@ -16,6 +16,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/ingress/interfaces"
+	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -25,6 +26,9 @@ const (
 	DecoderComponent  = "decoder"
 	TopLevelComponent = "toplevel"
 
+	// Fallback backend ports used only when the component's Service can't
+	// be resolved (e.g. early reconcile before the Service exists). The
+	// authoritative port is the component Service's first port.
 	EngineDefaultPort  int32 = 30000
 	DecoderDefaultPort int32 = 30000
 	RouterDefaultPort  int32 = 30080
@@ -34,21 +38,32 @@ var DefaultTimeout = toGatewayAPIDuration(600)
 
 // HTTPRouteBuilder builds Gateway API HTTPRoute resources
 type HTTPRouteBuilder struct {
+	client        client.Client
 	ingressConfig *controllerconfig.IngressConfig
 	isvcConfig    *controllerconfig.InferenceServicesConfig
 	domainService interfaces.DomainService
 	pathService   interfaces.PathService
 }
 
-// NewHTTPRouteBuilder creates a new HTTPRoute builder
-func NewHTTPRouteBuilder(ingressConfig *controllerconfig.IngressConfig, isvcConfig *controllerconfig.InferenceServicesConfig,
+// NewHTTPRouteBuilder creates a new HTTPRoute builder. The client resolves
+// each component's real backend port from its Service; it may be nil, in
+// which case the default port consts are used.
+func NewHTTPRouteBuilder(c client.Client, ingressConfig *controllerconfig.IngressConfig, isvcConfig *controllerconfig.InferenceServicesConfig,
 	domainService interfaces.DomainService, pathService interfaces.PathService) interfaces.HTTPRouteBuilder {
 	return &HTTPRouteBuilder{
+		client:        c,
 		ingressConfig: ingressConfig,
 		isvcConfig:    isvcConfig,
 		domainService: domainService,
 		pathService:   pathService,
 	}
+}
+
+// resolveServicePort returns the named Service's first port, falling back
+// to defaultPort when the Service can't be resolved. This matches the
+// port OME sets on the component Service (its runner's containerPort).
+func (b *HTTPRouteBuilder) resolveServicePort(ctx context.Context, namespace, serviceName string, defaultPort int32) int32 {
+	return isvcutils.ResolveServicePort(ctx, b.client, namespace, serviceName, defaultPort)
 }
 
 func (b *HTTPRouteBuilder) GetResourceType() string {
@@ -64,13 +79,13 @@ func (b *HTTPRouteBuilder) BuildHTTPRoute(ctx context.Context, isvc *v1beta1.Inf
 	var err error
 	switch componentType {
 	case EngineComponent:
-		route, err = b.buildEngineHTTPRoute(isvc)
+		route, err = b.buildEngineHTTPRoute(ctx, isvc)
 	case RouterComponent:
-		route, err = b.buildRouterHTTPRoute(isvc)
+		route, err = b.buildRouterHTTPRoute(ctx, isvc)
 	case DecoderComponent:
-		route, err = b.buildDecoderHTTPRoute(isvc)
+		route, err = b.buildDecoderHTTPRoute(ctx, isvc)
 	case TopLevelComponent:
-		route, err = b.buildTopLevelHTTPRoute(isvc)
+		route, err = b.buildTopLevelHTTPRoute(ctx, isvc)
 	default:
 		return nil, fmt.Errorf("unsupported component type: %s", componentType)
 	}
@@ -168,7 +183,7 @@ func (b *HTTPRouteBuilder) createHTTPRouteRule(routeMatches []gatewayapiv1.HTTPR
 	}
 }
 
-func (b *HTTPRouteBuilder) buildEngineHTTPRoute(isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
+func (b *HTTPRouteBuilder) buildEngineHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
 	if !isvc.Status.IsConditionReady(v1beta1.EngineReady) {
 		isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
 			Type:   v1beta1.IngressReady,
@@ -195,16 +210,17 @@ func (b *HTTPRouteBuilder) buildEngineHTTPRoute(isvc *v1beta1.InferenceService) 
 		timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
 	}
 
+	port := b.resolveServicePort(ctx, isvc.Namespace, engineName, EngineDefaultPort)
 	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
-		b.createHTTPRouteRule(routeMatch, filters, engineName, isvc.Namespace, EngineDefaultPort, timeout),
+		b.createHTTPRouteRule(routeMatch, filters, engineName, isvc.Namespace, port, timeout),
 	}
 
 	return b.buildHTTPRouteResource(isvc, engineName,
 		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
 }
 
-func (b *HTTPRouteBuilder) buildRouterHTTPRoute(isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
+func (b *HTTPRouteBuilder) buildRouterHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
 	if !isvc.Status.IsConditionReady(v1beta1.RouterReady) {
 		isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
 			Type:   v1beta1.IngressReady,
@@ -223,16 +239,17 @@ func (b *HTTPRouteBuilder) buildRouterHTTPRoute(isvc *v1beta1.InferenceService) 
 		timeout = toGatewayAPIDuration(*isvc.Spec.Router.TimeoutSeconds)
 	}
 
+	port := b.resolveServicePort(ctx, isvc.Namespace, routerName, RouterDefaultPort)
 	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
-		b.createHTTPRouteRule(routeMatch, filters, routerName, isvc.Namespace, RouterDefaultPort, timeout),
+		b.createHTTPRouteRule(routeMatch, filters, routerName, isvc.Namespace, port, timeout),
 	}
 
 	return b.buildHTTPRouteResource(isvc, constants.RouterServiceName(isvc.Name),
 		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
 }
 
-func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
+func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
 	if !isvc.Status.IsConditionReady(v1beta1.DecoderReady) {
 		isvc.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
 			Type:   v1beta1.IngressReady,
@@ -251,16 +268,17 @@ func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(isvc *v1beta1.InferenceService)
 		timeout = toGatewayAPIDuration(*isvc.Spec.Decoder.TimeoutSeconds)
 	}
 
+	port := b.resolveServicePort(ctx, isvc.Namespace, decoderName, DecoderDefaultPort)
 	routeMatch := []gatewayapiv1.HTTPRouteMatch{b.createPathPrefixMatch(prefix)}
 	httpRouteRules := []gatewayapiv1.HTTPRouteRule{
-		b.createHTTPRouteRule(routeMatch, filters, decoderName, isvc.Namespace, DecoderDefaultPort, timeout),
+		b.createHTTPRouteRule(routeMatch, filters, decoderName, isvc.Namespace, port, timeout),
 	}
 
 	return b.buildHTTPRouteResource(isvc, constants.DecoderServiceName(isvc.Name),
 		[]gatewayapiv1.Hostname{b.gatewayHostname()}, httpRouteRules), nil
 }
 
-func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
+func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
 	filters := []gatewayapiv1.HTTPRouteFilter{b.addIsvcHeaders(isvc.Name, isvc.Namespace), b.urlRewriteFilter()}
 
 	var serviceName string
@@ -269,7 +287,7 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 
 	if isvc.Spec.Router != nil {
 		serviceName = constants.RouterServiceName(isvc.Name)
-		port = RouterDefaultPort
+		port = b.resolveServicePort(ctx, isvc.Namespace, serviceName, RouterDefaultPort)
 		timeout = DefaultTimeout
 		if isvc.Spec.Router.TimeoutSeconds != nil {
 			timeout = toGatewayAPIDuration(*isvc.Spec.Router.TimeoutSeconds)
@@ -289,7 +307,7 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(isvc *v1beta1.InferenceService
 		// path pointed at a backend Service that no longer exists in the
 		// Engine-architecture post-Predictor world.
 		serviceName = constants.EngineServiceName(isvc.Name)
-		port = EngineDefaultPort
+		port = b.resolveServicePort(ctx, isvc.Namespace, serviceName, EngineDefaultPort)
 		timeout = DefaultTimeout
 		if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
 			timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
