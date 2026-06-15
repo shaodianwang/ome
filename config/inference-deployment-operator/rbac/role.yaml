@@ -1,0 +1,39 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: inference-deployment-operator
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ome.io
+  resources:
+  - inferencedeployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ome.io
+  resources:
+  - inferencedeployments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ome.io
+  resources:
+  - inferencedeployments/status
+  verbs:
+  - get
+  - patch
+  - update

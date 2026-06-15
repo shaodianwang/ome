@@ -6,6 +6,7 @@ import (
 	fmt "fmt"
 	http "net/http"
 
+	omev1alpha1 "github.com/ome-projects/ome/pkg/client/clientset/versioned/typed/ome/v1alpha1"
 	omev1beta1 "github.com/ome-projects/ome/pkg/client/clientset/versioned/typed/ome/v1beta1"
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
@@ -14,13 +15,20 @@ import (
 
 type Interface interface {
 	Discovery() discovery.DiscoveryInterface
+	OmeV1alpha1() omev1alpha1.OmeV1alpha1Interface
 	OmeV1beta1() omev1beta1.OmeV1beta1Interface
 }
 
 // Clientset contains the clients for groups.
 type Clientset struct {
 	*discovery.DiscoveryClient
-	omeV1beta1 *omev1beta1.OmeV1beta1Client
+	omeV1alpha1 *omev1alpha1.OmeV1alpha1Client
+	omeV1beta1  *omev1beta1.OmeV1beta1Client
+}
+
+// OmeV1alpha1 retrieves the OmeV1alpha1Client
+func (c *Clientset) OmeV1alpha1() omev1alpha1.OmeV1alpha1Interface {
+	return c.omeV1alpha1
 }
 
 // OmeV1beta1 retrieves the OmeV1beta1Client
@@ -72,6 +80,10 @@ func NewForConfigAndClient(c *rest.Config, httpClient *http.Client) (*Clientset,
 
 	var cs Clientset
 	var err error
+	cs.omeV1alpha1, err = omev1alpha1.NewForConfigAndClient(&configShallowCopy, httpClient)
+	if err != nil {
+		return nil, err
+	}
 	cs.omeV1beta1, err = omev1beta1.NewForConfigAndClient(&configShallowCopy, httpClient)
 	if err != nil {
 		return nil, err
@@ -97,6 +109,7 @@ func NewForConfigOrDie(c *rest.Config) *Clientset {
 // New creates a new Clientset for the given RESTClient.
 func New(c rest.Interface) *Clientset {
 	var cs Clientset
+	cs.omeV1alpha1 = omev1alpha1.New(c)
 	cs.omeV1beta1 = omev1beta1.New(c)
 
 	cs.DiscoveryClient = discovery.NewDiscoveryClient(c)

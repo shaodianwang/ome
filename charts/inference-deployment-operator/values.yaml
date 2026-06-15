@@ -1,0 +1,18 @@
+image:
+  repository: 588845226011.dkr.ecr.us-east-2.amazonaws.com/msl_infra/inference-deployment-operator
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+clusterCredentialNamespace: ""
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

@@ -6,6 +6,7 @@ REGISTRY     ?= ghcr.io/moirai-internal
 TAG          ?= $(GIT_TAG)
 ARCH         ?= linux/amd64
 MANAGER_IMG  ?= $(REGISTRY)/ome-manager:$(TAG)
+INFERENCE_DEPLOYMENT_OPERATOR_IMG ?= $(REGISTRY)/inference-deployment-operator:$(TAG)
 
 # Git version and commit information for build
 version_pkg = github.com/ome-projects/ome/pkg/version
@@ -116,15 +117,15 @@ manifests: controller-gen yq ## 📄 Generate WebhookConfiguration, ClusterRole 
 	@echo "\n📦 Kubernetes Manifest Generation Starting..."
 
 	@echo "\n🔧 Step 1: Generating CRD manifests..."
-	@$(CONTROLLER_GEN) $(CRD_OPTIONS) paths=./pkg/apis/ome/... output:crd:dir=config/crd/full
+	@$(CONTROLLER_GEN) $(CRD_OPTIONS) paths=./pkg/apis/ome/v1beta1 output:crd:dir=config/crd/full
 	@echo "✅ CRD manifests generated"
 
 	@echo "\n🔑 Step 2: Generating RBAC manifests..."
-	@$(CONTROLLER_GEN) rbac:roleName=ome-manager-role paths=./pkg/controller/... output:rbac:artifacts:config=config/rbac
+	@$(CONTROLLER_GEN) rbac:roleName=ome-manager-role paths=./pkg/controller/v1beta1/... output:rbac:artifacts:config=config/rbac
 	@echo "✅ RBAC manifests generated"
 
 	@echo "\n📝 Step 3: Generating object boilerplate..."
-	@$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths=./pkg/apis/ome/v1beta1
+	@$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths=./pkg/apis/ome/...
 	@echo "✅ Object boilerplate generated"
 
 	@echo "\n🔄 Step 4: Applying CRD fixes and modifications..."
@@ -180,6 +181,14 @@ manifests: controller-gen yq ## 📄 Generate WebhookConfiguration, ClusterRole 
 	@echo "\n📁 Step 6: Copying manifests to Helm charts..."
 	@cp config/crd/full/ome* charts/ome-crd/templates/ && cp config/rbac/role.yaml charts/ome-resources/templates/ome-controller/rbac/role.yaml
 	@echo "✅ Manifests copied to Helm charts"
+
+	@echo "\n🌐 Step 7: Generating Inference Deployment Operator manifests..."
+	@mkdir -p config/inference-deployment-operator/crd config/inference-deployment-operator/rbac charts/inference-deployment-operator/crds
+	@rm -f config/inference-deployment-operator/crd/*.yaml charts/inference-deployment-operator/crds/*.yaml
+	@$(CONTROLLER_GEN) $(CRD_OPTIONS) paths=./pkg/apis/ome/v1alpha1 output:crd:dir=config/inference-deployment-operator/crd
+	@$(CONTROLLER_GEN) rbac:roleName=inference-deployment-operator paths=./pkg/controller/v1alpha1/inferencedeployment output:rbac:artifacts:config=config/inference-deployment-operator/rbac
+	@cp config/inference-deployment-operator/crd/*.yaml charts/inference-deployment-operator/crds/
+	@echo "✅ Inference Deployment Operator manifests generated"
 
 	@echo "\n🎉 Manifest generation completed successfully!\n"
 
@@ -311,6 +320,12 @@ ome-agent: xet-build ## 🔄 Build ome-agent binary.
 	$(GO_BUILD_ENV) $(GO_CMD) build -ldflags="$(LD_FLAGS)" -o bin/ome-agent ./cmd/ome-agent
 	@echo "✅ Build complete"
 
+.PHONY: inference-deployment-operator
+inference-deployment-operator: ## 🏗️  Build inference-deployment-operator binary.
+	@echo "🏗️  Building inference-deployment-operator..."
+	$(GO_BUILD_ENV) $(GO_CMD) build -ldflags="$(LD_FLAGS)" -o bin/inference-deployment-operator ./cmd/inference-deployment-operator
+	@echo "✅ Build complete"
+
 .PHONY: run-ome-manager
 run-ome-manager: manifests generate fmt vet ## Run ome-manager binary from local host against the configured Kubernetes cluster in ~/.kube/config or KUBECONFIG env.
 	@echo "🏃‍♂️ Running ome-manager..."
@@ -352,6 +367,16 @@ ome-agent-image: fmt vet xet-build ## Build ome-agent image.
 		. -f dockerfiles/ome-agent.Dockerfile -t $(REGISTRY)/ome-agent:$(TAG)
 	@echo "✅ Image built"
 
+.PHONY: inference-deployment-operator-image
+inference-deployment-operator-image: fmt vet ## Build inference-deployment-operator image.
+	@echo "🚀 Building inference-deployment-operator image..."
+	$(DOCKER_BUILD_CMD) build --platform=$(ARCH) \
+		--build-arg VERSION=$(GIT_TAG) \
+		--build-arg GIT_TAG=$(GIT_TAG) \
+		--build-arg GIT_COMMIT=$(shell git rev-parse HEAD) \
+		. -f dockerfiles/inference-deployment-operator.Dockerfile -t $(INFERENCE_DEPLOYMENT_OPERATOR_IMG)
+	@echo "✅ Image built"
+
 .PHONY: docker-buildx-setup
 docker-buildx-setup: ## 🔧 Setup Docker buildx for multi-arch builds
 	@echo "🔧 Setting up Docker buildx..."
@@ -364,6 +389,7 @@ build-all-images: fmt vet ## 🚀 Build all images for current architecture
 	@echo "🚀 Building all OME images for $(ARCH)..."
 	@$(MAKE) ome-image
 	@$(MAKE) ome-agent-image
+	@$(MAKE) inference-deployment-operator-image
 	@echo "✅ All images built successfully"
 
 .PHONY: build-all-images-multiarch
@@ -379,6 +405,11 @@ build-all-images-multiarch: fmt vet docker-buildx-setup ## 🌍 Build all images
 		--build-arg GIT_TAG=$(GIT_TAG) \
 		--build-arg GIT_COMMIT=$(shell git rev-parse HEAD) \
 		. -f dockerfiles/ome-agent.Dockerfile -t $(REGISTRY)/ome-agent:$(TAG) --push
+	$(DOCKER_BUILD_CMD) buildx build --platform=linux/amd64,linux/arm64 \
+		--build-arg VERSION=$(GIT_TAG) \
+		--build-arg GIT_TAG=$(GIT_TAG) \
+		--build-arg GIT_COMMIT=$(shell git rev-parse HEAD) \
+		. -f dockerfiles/inference-deployment-operator.Dockerfile -t $(INFERENCE_DEPLOYMENT_OPERATOR_IMG) --push
 	@echo "✅ All multi-arch images built and pushed"
 
 .PHONY: telepresence
@@ -475,6 +506,12 @@ push-manager-image: ome-image ## Push manager image to registry.
 push-ome-agent-image: ome-agent-image ## Push ome-agent image to registry.
 	@echo "🚀 Pushing ome-agent image to registry..."
 	$(DOCKER_BUILD_CMD) push $(REGISTRY)/ome-agent:$(TAG)
+	@echo "✅ Image pushed"
+
+.PHONY: push-inference-deployment-operator-image
+push-inference-deployment-operator-image: inference-deployment-operator-image ## Push inference-deployment-operator image to registry.
+	@echo "🚀 Pushing inference-deployment-operator image to registry..."
+	$(DOCKER_BUILD_CMD) push $(INFERENCE_DEPLOYMENT_OPERATOR_IMG)
 	@echo "✅ Image pushed"
 
 .PHONY: patch-manager-dev
