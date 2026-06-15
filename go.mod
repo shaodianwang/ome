@@ -27,10 +27,10 @@ require (
 	google.golang.org/protobuf v1.36.11
 	istio.io/api v1.19.4
 	istio.io/client-go v1.19.4
-	k8s.io/api v0.33.12
+	k8s.io/api v0.33.13
 	k8s.io/apiextensions-apiserver v0.32.13
-	k8s.io/apimachinery v0.33.12
-	k8s.io/client-go v0.33.12
+	k8s.io/apimachinery v0.33.13
+	k8s.io/client-go v0.33.13
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/kube-openapi v0.0.0-20250318190949-c8a335a9a2ff
 	k8s.io/utils v0.0.0-20241210054802-24370beab758
