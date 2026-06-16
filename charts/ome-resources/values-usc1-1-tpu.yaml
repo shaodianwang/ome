@@ -1,7 +1,6 @@
 # OME install overlay for msl-gcp-usc1-1-tpu (GKE; reuses the cluster's existing cert-manager).
 # Use: helm upgrade --install ome ./charts/ome-resources -n ome \
 #        -f charts/ome-resources/values-usc1-1-tpu.yaml
-# Untracked local file (recreated 2026-06-15 after the working tree was cleaned).
 #
 # Image: the tip-of-main build the dev cluster runs, from AWS ECR. usc1-1 runs
 # ecr-credential-refresher; if controller pods ImagePullBackOff, set global.imagePullSecrets.
@@ -11,7 +10,7 @@ global:
 
 ome:
   controller:
-    tag: "f90a500d"             # ome-manager image tag (matches dev); has #495 env + #497 slice affinity
+    tag: "7010c388"             # ome-manager; #495 env, #497 slice affinity, #511 port, #512 per-ISVC
     # Expose ISVCs via the cluster's Envoy Gateway (Gateway API) instead of the
     # cluster-local default — OME renders an HTTPRoute per ISVC on this gateway.
     ingressGateway:
@@ -19,6 +18,9 @@ ome:
       urlScheme: "https"
       disableIngressCreation: false
       enableGatewayAPI: true
+      # Per-ISVC subdomain routing (#512): host = <isvc>.<ns>.<domain> at root,
+      # matching status.url. With <ns>=meta-ai it resolves under *.meta-ai.<domain>.
+      perISVCSubdomain: true
       # omeIngressGateway is the gateway the HTTPRoute's parentRef attaches to
       # (httproute_builder splits it on "/"); must be namespace/name, not empty.
       omeIngressGateway: "envoy-gateway-system/meta-ai-ext-gw-https"
@@ -27,7 +29,7 @@ ome:
         gatewayService: "envoy-envoy-gateway-system-meta-ai-ext-gw-https-c35b1bd3.envoy-gateway-system.svc.cluster.local"
         className: "meta-ai-ext-gw-https"
   omeAgent:
-    tag: "f90a500d"             # keep ome-agent on the same build
+    tag: "7010c388"             # keep ome-agent on the same build
   multiclusterAccess:
     enabled: false              # standalone install — not driven by a control-plane operator
 
