@@ -33,11 +33,17 @@ kubectl apply -f clusterservingruntime.yaml
 kubectl apply -f inferenceservice.yaml
 ```
 
-Replace `<tpu-serving-image>` and the leader/worker launch commands in
-`clusterservingruntime.yaml` with your serving stack (vLLM-on-TPU, MaxText,
-…), launched as a Ray multi-host cluster sized to `OME_INSTANCE_POD_COUNT`,
-with workers joining `OME_LEADER_ADDRESS`. The placeholder command just prints
-the injected `TPU_*` / `OME_*` env so you can confirm the wiring.
+The leader/worker runners in `clusterservingruntime.yaml` carry a real
+vLLM-on-TPU launch **in the runtime itself** (no external launch ConfigMap):
+each forms a Ray multi-host cluster — head sized to `OME_INSTANCE_POD_COUNT`,
+workers joining `OME_LEADER_ADDRESS` — then the leader runs `vllm serve`. To
+adapt it, set `<tpu-serving-image>` to your vLLM-on-TPU image and the runner
+`env` (`CKPT`, `TENSOR_PARALLEL_SIZE` = chips per gang, the `VLLM_*` knobs).
+Enable **eagle3 speculative decoding** or **DP-attention sharding** by
+uncommenting the `SPECULATIVE_CONFIG` / `ADDITIONAL_CONFIG` env entries. For a
+different stack (MaxText, …) swap the runner `args`; the only contract is to
+form a Ray cluster sized to `OME_INSTANCE_POD_COUNT` with workers joining
+`OME_LEADER_ADDRESS`.
 
 ## Scaling
 

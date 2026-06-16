@@ -13,8 +13,12 @@
 # mesh. OME injects them for any multi-pod Instance whose runner requests
 # google.com/tpu -- no LeaderWorkerSet, and no GKE TPU slice-selector label.
 #
-# Replace <tpu-serving-image> and the launch commands with your stack
-# (e.g. vLLM-on-TPU or MaxText), launched as a Ray multi-host cluster.
+# The leader/worker runners below carry a real vLLM-on-TPU launch in the
+# runtime itself (no external launch ConfigMap): each forms a Ray multi-host
+# cluster -- head sized to OME_INSTANCE_POD_COUNT, workers join
+# OME_LEADER_ADDRESS -- then the leader runs `vllm serve`. Set
+# <tpu-serving-image> to your vLLM-on-TPU image and adjust the runner `env`
+# (CKPT, TENSOR_PARALLEL_SIZE = chips per gang, ...).
 apiVersion: ome.io/v1beta1
 kind: ClusterServingRuntime
 metadata:
@@ -35,20 +39,60 @@ spec:
         - {key: google.com/tpu, operator: Exists, effect: NoSchedule}
       runner:
         name: ome-container
-        image: <tpu-serving-image>
+        image: <tpu-serving-image>          # your vLLM-on-TPU image
         command: [/bin/bash, -lc]
         args:
           - |
             set -euo pipefail
             # OME injected the TPU mesh (TPU_WORKER_HOSTNAMES / TPU_WORKER_ID /
             # TPU_PROCESS_ADDRESSES) and the gang vars (OME_LEADER_ADDRESS /
-            # OME_INSTANCE_POD_COUNT). Start a Ray head sized to the gang, then
-            # serve, e.g.:
-            #   ray start --head --port 6379 --num-cpus 0
-            #   # wait for ${OME_INSTANCE_POD_COUNT} nodes, then:
-            #   vllm serve <model> --tensor-parallel-size <chips-per-gang>
-            env | grep -E '^(TPU|OME)_' | sort
-            sleep infinity
+            # OME_INSTANCE_POD_COUNT) into this container.
+            cd "${VLLM_DIR:-/workspace/vllm}"
+
+            # (optional) restore a prebuilt XLA compile cache to skip cold compile
+            export VLLM_XLA_CACHE_PATH="${VLLM_XLA_CACHE_PATH:-/tmp/xlacache}"
+            mkdir -p "$VLLM_XLA_CACHE_PATH"
+            if [ -n "${XLA_CACHE_TAR:-}" ] && [ -f "$XLA_CACHE_TAR" ]; then
+              tar xf "$XLA_CACHE_TAR" -C "$VLLM_XLA_CACHE_PATH" && echo "[xla] restored"
+            else
+              echo "[xla] cold compile"
+            fi
+
+            # form the Ray cluster as head, sized to the OME-injected gang
+            bash examples/ray_serving/multi-node-serving.sh \
+              leader --ray_cluster_size="${OME_INSTANCE_POD_COUNT}"
+            sleep 10; rm -f /tmp/libtpu_lockfile
+
+            # optional eagle3 speculative decoding + DP-attention sharding
+            # (enabled by the SPECULATIVE_CONFIG / ADDITIONAL_CONFIG env below)
+            SPEC=()
+            [ -n "${SPECULATIVE_CONFIG:-}" ] && SPEC+=(--speculative-config "$SPECULATIVE_CONFIG")
+            [ -n "${ADDITIONAL_CONFIG:-}" ]  && SPEC+=(--additional-config "$ADDITIONAL_CONFIG")
+
+            # add model-specific flags as needed (load-format, parsers,
+            # chat-template, multimodal, ...).
+            exec vllm serve "${CKPT:?set CKPT to your model path}" \
+              --tensor-parallel-size="${TENSOR_PARALLEL_SIZE}" --enable-expert-parallel \
+              --max-model-len="${VLLM_MAX_MODEL_LEN}" \
+              --max-num-batched-tokens="${VLLM_MAX_NUM_BATCHED_TOKENS}" \
+              --max-num-seqs="${VLLM_MAX_NUM_SEQS}" \
+              --kv-cache-dtype=fp8 --quantization="${VLLM_QUANTIZATION:-fp8}" \
+              --block-size=256 --async-scheduling \
+              --gpu-memory-utilization="${VLLM_GPU_MEMORY_UTILIZATION:-0.85}" \
+              "${SPEC[@]}" --host 0.0.0.0 --port "${PORT:-8000}"
+        env: &srvEnv
+          - {name: CKPT, value: "<model-path>"}              # weights dir the image can read
+          - {name: TENSOR_PARALLEL_SIZE, value: "8"}         # = total chips in the gang (2 pods x 4)
+          - {name: VLLM_MAX_MODEL_LEN, value: "131072"}
+          - {name: VLLM_MAX_NUM_BATCHED_TOKENS, value: "2048"}
+          - {name: VLLM_MAX_NUM_SEQS, value: "256"}
+          - {name: VLLM_GPU_MEMORY_UTILIZATION, value: "0.85"}
+          - {name: VLLM_DIR, value: "/workspace/vllm"}       # vLLM checkout (has examples/ray_serving)
+          # - {name: XLA_CACHE_TAR, value: "/path/to/xla_cache.tar.gz"}
+          # Optional eagle3 speculative decoding (draft model) -- big latency win:
+          # - {name: SPECULATIVE_CONFIG, value: '{"method":"eagle3","model":"<draft-path>","num_speculative_tokens":3}'}
+          # Optional DP-attention sharding across the gang:
+          # - {name: ADDITIONAL_CONFIG, value: '{"sharding":{"sharding_strategy":{"enable_dp_attention":true,"attention_data_parallelism":2}}}'}
         ports: [{containerPort: 8000, name: http, protocol: TCP}]
         resources:
           requests: {cpu: "8", memory: 64Gi, google.com/tpu: "4"}
@@ -68,10 +112,18 @@ spec:
         args:
           - |
             set -euo pipefail
-            # Worker joins the leader's Ray head. OME provides OME_LEADER_ADDRESS:
-            #   ray start --address "${OME_LEADER_ADDRESS}:6379" --num-cpus 0 --block
-            env | grep -E '^(TPU|OME)_' | sort
-            sleep infinity
+            cd "${VLLM_DIR:-/workspace/vllm}"
+            export VLLM_XLA_CACHE_PATH="${VLLM_XLA_CACHE_PATH:-/tmp/xlacache}"
+            mkdir -p "$VLLM_XLA_CACHE_PATH"
+            [ -n "${XLA_CACHE_TAR:-}" ] && [ -f "$XLA_CACHE_TAR" ] && \
+              tar xf "$XLA_CACHE_TAR" -C "$VLLM_XLA_CACHE_PATH" || true
+            # join the leader's Ray head (OME provides OME_LEADER_ADDRESS)
+            until bash examples/ray_serving/multi-node-serving.sh \
+                    worker --ray_address="${OME_LEADER_ADDRESS}"; do
+              echo "waiting for leader Ray head..."; sleep 10
+            done
+            echo "=== worker joined Ray ==="; sleep infinity
+        env: *srvEnv
         resources:
           requests: {cpu: "8", memory: 64Gi, google.com/tpu: "4"}
           limits:   {cpu: "8", memory: 64Gi, google.com/tpu: "4"}
