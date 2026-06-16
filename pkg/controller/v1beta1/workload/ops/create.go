@@ -34,6 +34,57 @@ const CreateRequeueInterval = 5 * time.Second
 // short-circuit. Without it, per-pod podMatchesTarget false-positives
 // against post-Render pod mutations and triggers a spurious recreate.
 func Create(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
+	return createFiltered(ctx, deps, input, plan, target, func(int32) bool { return true })
+}
+
+// CreateFreshIndices runs the Create pass for ONLY surge-free Instance
+// indices — those with no in-flight surge state the Update pass owns. It
+// lets a scale-up of brand-new gangs proceed even while a rollout is
+// mid-flight on another index, instead of starving scale-out behind the
+// rollout (a 20-40 min cold-compile on TPU).
+//
+// A surge-free index is immune to both corruption modes the dispatcher's
+// skip-Create-while-updating gate guards against: its ActiveOrdinal is a
+// genuine 0 (never existed, not a stale snapshot of a flipped ordinal),
+// and it has no RunningRevision to mis-stamp — its pods are created
+// carrying the target rev-hash, so existingPodsMatchTargetRevision
+// promotes correctly. See the surgeFreeIndex predicate.
+//
+// No-op (returns ctrl.Result{}, nil) when no index qualifies, so pure
+// rollouts are unaffected.
+func CreateFreshIndices(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
+	observed := input.ObservedState.InstanceStatuses
+	eligible := false
+	for _, inst := range plan.Instances {
+		if surgeFreeIndex(observed, inst.Index) {
+			eligible = true
+			break
+		}
+	}
+	if !eligible {
+		return ctrl.Result{}, nil
+	}
+	return createFiltered(ctx, deps, input, plan, target, func(idx int32) bool {
+		return surgeFreeIndex(observed, idx)
+	})
+}
+
+// surgeFreeIndex reports whether the Instance at idx has NO in-flight
+// surge state — i.e. its ObservedState entry is absent (never created)
+// or still Phase=Creating. Updating / Migrating carry an in-flight surge
+// (stale ActiveOrdinal / RunningRevision hazard); Ready-but-degraded is
+// Restart/Recreate territory. Such indices are excluded.
+func surgeFreeIndex(observed []workload.InstanceStatus, idx int32) bool {
+	s := findInstanceStatus(observed, idx)
+	return s == nil || s.Phase == workload.InstancePhaseCreating
+}
+
+// createFiltered is Create restricted to the Instance indices for which
+// keep returns true. Create delegates with an always-true keep;
+// CreateFreshIndices delegates with the surge-free predicate. Indices
+// that keep rejects are left entirely untouched this pass (not listed,
+// not promoted, not duplicated).
+func createFiltered(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision, keep func(idx int32) bool) (ctrl.Result, error) {
 	if deps.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("Create: nil client")
 	}
@@ -46,6 +97,9 @@ func Create(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 
 	allReady := true
 	for _, inst := range plan.Instances {
+		if !keep(inst.Index) {
+			continue
+		}
 		ready, err := reconcileInstance(ctx, deps, input, plan, inst, byInstance[inst.Index], target)
 		if err != nil {
 			return ctrl.Result{}, err

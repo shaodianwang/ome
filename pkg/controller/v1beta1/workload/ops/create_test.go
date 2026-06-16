@@ -853,3 +853,124 @@ func TestCreate_RecreateInstance_StillMaterializesFreshInstance(t *testing.T) {
 		t.Fatalf("RecreateInstance must still materialize a fresh gang Instance: got %d pod(s), want 2 (leader+worker)", len(pods.Items))
 	}
 }
+
+// seedInstanceStatuses stamps the ISVC status with the given engine
+// InstanceStatuses verbatim — lets a test set per-index Phase to model
+// a mid-rollout snapshot.
+func seedInstanceStatuses(isvc *v1beta1.InferenceService, statuses ...v1beta1.OMENativeInstanceStatus) {
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			Lifecycle: &v1beta1.LifecycleStatus{
+				InstanceStatuses: append([]v1beta1.OMENativeInstanceStatus(nil), statuses...),
+			},
+		},
+	}
+}
+
+// CreateFreshIndices must materialize brand-new (surge-free) indices
+// while leaving an index mid-update untouched: with index 0 Updating and
+// indices 1,2 absent, it creates pods for 1 and 2 only and never
+// duplicates index 0's in-flight pod.
+func TestCreateFreshIndices_CreatesAbsentSkipsUpdating(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 3)
+	// Index 0 is mid-surge (Phase=Updating); indices 1,2 have no status.
+	seedInstanceStatuses(isvc, v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Incarnation:     1,
+		Phase:           v1beta1.OMENativeInstanceUpdating,
+		RunningRevision: "llama-70b-engine-priorrev",
+	})
+	// Index 0's existing in-flight pod — present so we can assert it is
+	// neither touched nor duplicated.
+	pod0 := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	c := newFakeClient(t, isvc, pod0)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanSinglePodEngine(3)
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+
+	if _, err := ops.CreateFreshIndices(context.Background(), workload.Deps{Client: c}, input, plan, target); err != nil {
+		t.Fatalf("CreateFreshIndices: %v", err)
+	}
+
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	got := map[string]bool{}
+	for _, p := range pods.Items {
+		got[p.Name] = true
+	}
+	// Index 0: exactly the original pod, no duplicate at any ordinal.
+	if !got["llama-70b-engine-0-default-0"] {
+		t.Errorf("index 0's in-flight pod must remain; got %v", got)
+	}
+	if got["llama-70b-engine-0-default-1"] {
+		t.Errorf("index 0 must NOT be duplicated at ordinal 1; got %v", got)
+	}
+	// Indices 1,2: fresh pods created.
+	if !got["llama-70b-engine-1-default-0"] {
+		t.Errorf("fresh index 1 pod must be created; got %v", got)
+	}
+	if !got["llama-70b-engine-2-default-0"] {
+		t.Errorf("fresh index 2 pod must be created; got %v", got)
+	}
+	if len(pods.Items) != 3 {
+		t.Fatalf("expected 3 pods (index 0 in-flight + fresh 1,2), got %d: %v", len(pods.Items), got)
+	}
+
+	// Index 0's status MUST be left untouched at Phase=Updating —
+	// CreateFreshIndices never reconciles it.
+	s := findInstanceStatusInISVC(freshISVCFromClient(t, c, isvc), v1beta1.EngineComponent, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceUpdating {
+		t.Errorf("index 0 Phase must stay Updating (not reconciled by fresh pass); got %+v", s)
+	}
+}
+
+// CreateFreshIndices must be a no-op when the only Instance is mid-update
+// — pure rollouts must not trigger any create work.
+func TestCreateFreshIndices_NoOpWhenOnlyIndexUpdating(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	seedInstanceStatuses(isvc, v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Incarnation:     1,
+		Phase:           v1beta1.OMENativeInstanceUpdating,
+		RunningRevision: "llama-70b-engine-priorrev",
+	})
+	pod0 := podForInstance(isvc, 0, true, true)
+	c := newFakeClient(t, isvc, pod0)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanSinglePodEngine(1)
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+
+	res, err := ops.CreateFreshIndices(context.Background(), workload.Deps{Client: c}, input, plan, target)
+	if err != nil {
+		t.Fatalf("CreateFreshIndices: %v", err)
+	}
+	// No qualifying index → quick no-op result (no requeue scheduled).
+	if res.Requeue || res.RequeueAfter != 0 {
+		t.Errorf("expected no-op result for pure rollout, got %+v", res)
+	}
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("CreateFreshIndices must not create/duplicate anything for a pure rollout; got %d pods", len(pods.Items))
+	}
+}
+
+// freshISVCFromClient re-reads the ISVC for post-call status assertions.
+func freshISVCFromClient(t *testing.T, c client.Client, isvc *v1beta1.InferenceService) *v1beta1.InferenceService {
+	t.Helper()
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("get isvc: %v", err)
+	}
+	return fresh
+}

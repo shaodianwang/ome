@@ -296,6 +296,19 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 				anyUpdating = true
 			}
 		}
+		if anyUpdating || anyGated || anyUpdateRan {
+			// About to requeue without the full Create pass. Brand-new
+			// (surge-free) indices legitimately bypass the skip-Create
+			// gate above: they have a genuine ActiveOrdinal=0 and no
+			// RunningRevision to mis-stamp, so neither X-2 corruption
+			// mode applies — see ops.CreateFreshIndices. Materialize them
+			// now so a concurrent scale-up isn't starved behind the
+			// in-flight rollout. The full Create pass still owns
+			// surge-sensitive (touched) indices once the rollout drains.
+			if _, ferr := workloadops.CreateFreshIndices(ctx, deps, input, plan, target); ferr != nil {
+				return ctrl.Result{}, ferr
+			}
+		}
 		if anyUpdating {
 			return ctrl.Result{RequeueAfter: workloadops.UpdateRequeueInterval}, nil
 		}

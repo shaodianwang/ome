@@ -2,16 +2,21 @@ package workload_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // Reconcile is a thin dispatch layer over the workload/ops state
@@ -426,6 +431,99 @@ func TestReconcile_UpdateRan_RequeuesAndSkipsCreate(t *testing.T) {
 	}
 }
 
+// TestReconcile_ScaleUpDuringUpdate_CreatesFreshIndices pins the
+// scale-out-during-rollout fix: with instance-0 mid-update (Phase=
+// Updating) and the plan asking for indices [0,1,2], the dispatcher must
+// materialize the brand-new (surge-free) indices 1 and 2 THIS reconcile
+// — not starve them behind the in-flight rollout on index 0 — then
+// requeue. Index 0's status must remain Updating: the full Create-pass
+// promote does not run on it (CreateFreshIndices skips non-surge-free
+// indices, and the gated full Create pass at the bottom is bypassed).
+func TestReconcile_ScaleUpDuringUpdate_CreatesFreshIndices(t *testing.T) {
+	scheme := makeScheme(t)
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {
+					Lifecycle: &v1beta1.LifecycleStatus{
+						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{{
+							Index:           0,
+							Incarnation:     1,
+							Phase:           v1beta1.OMENativeInstanceUpdating,
+							RunningRevision: "llama-70b-engine-priorrev",
+						}},
+					},
+				},
+			},
+		},
+	}
+	// Index 0's existing in-flight pod, so the Update pass operates on a
+	// real pod and the fresh-pass create can't accidentally collide.
+	pod0 := enginePod(isvc.Name, isvc.Namespace, 0)
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(isvc, pod0).Build()
+	deps := workload.Deps{Client: c}
+
+	in := minimalInput(t)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseUpdating, RunningRevision: "llama-70b-engine-priorrev"},
+	}
+	in.MutateInstance = roundTripMutateInstance(c, isvc, workload.ComponentEngine)
+	// Plan asks for 3 single-pod instances. Index 0 is mid-update; 1,2 brand-new.
+	plan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  3,
+		Instances: []workload.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+		UpdateStrategy: workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain},
+	}
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+
+	result, err := workload.Reconcile(context.Background(), deps, in, plan, target)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	// Dispatcher must requeue (index 0 still updating) — it must NOT
+	// return Create's steady-state zero result.
+	if !result.Requeue && result.RequeueAfter == 0 {
+		t.Errorf("dispatcher must requeue while index 0 updates; got %+v", result)
+	}
+
+	// Load-bearing: the brand-new indices were materialized THIS reconcile.
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	got := map[string]bool{}
+	for _, p := range pods.Items {
+		got[p.Name] = true
+	}
+	if !got["llama-70b-engine-1-default-0"] {
+		t.Errorf("fresh index 1 must be created during the in-flight rollout; got %v", got)
+	}
+	if !got["llama-70b-engine-2-default-0"] {
+		t.Errorf("fresh index 2 must be created during the in-flight rollout; got %v", got)
+	}
+
+	// Index 0's status must still be Updating — the full Create promote
+	// did not run on it.
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("get isvc: %v", err)
+	}
+	s0 := instanceStatusByIndex(fresh, v1beta1.EngineComponent, 0)
+	if s0 == nil || s0.Phase != v1beta1.OMENativeInstanceUpdating {
+		t.Errorf("index 0 must remain Phase=Updating (Create promote must not run on it); got %+v", s0)
+	}
+}
+
 // TestHeldByPartition pins the RollingUpdate.Partition canary predicate that the
 // reconcile loop uses to skip held Instances: an Instance is held on the old
 // revision iff its index is below a positive Partition. A nil RollingUpdate,
@@ -455,4 +553,87 @@ func TestHeldByPartition(t *testing.T) {
 			}
 		})
 	}
+}
+
+// enginePod fabricates a single-pod "default" engine pod at ordinal 0
+// with the labels Render stamps (managed-by + instance-idx + ordinal +
+// component + isvc), so query selectors and instance-index filters
+// recognize it.
+func enginePod(isvc, ns string, idx int32) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      query.PodName(isvc, workload.ComponentEngine, idx, "default", 0),
+			Namespace: ns,
+			Labels: map[string]string{
+				constants.InferenceServicePodLabelKey: isvc,
+				constants.OMEComponentLabel:           string(workload.ComponentEngine),
+				query.LabelInstanceIdx:                fmt.Sprintf("%d", idx),
+				query.LabelInstanceIncarnation:        "1",
+				query.LabelRunner:                     "default",
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+				query.LabelPodOrdinal:                 "0",
+				query.LabelRevisionHash:               "priorrev",
+			},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}},
+	}
+}
+
+// roundTripMutateInstance returns a MutateInstance that persists through
+// the fake client's status subresource (appending a slot for an absent
+// index), so the dispatcher's per-index status writes survive for
+// post-reconcile assertions. Mirrors the production retry-wrapped
+// callback minus the conflict retry the fake client never needs.
+func roundTripMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) func(context.Context, int32, func(*workload.InstanceStatus) bool) error {
+	v1component := v1beta1.ComponentType(component)
+	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+		fresh := &v1beta1.InferenceService{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(isvc), fresh); err != nil {
+			return fmt.Errorf("get isvc: %w", err)
+		}
+		if fresh.Status.Components == nil {
+			fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+		}
+		cs := fresh.Status.Components[v1component]
+		if cs.Lifecycle == nil {
+			cs.Lifecycle = &v1beta1.LifecycleStatus{}
+		}
+		pos := -1
+		for i, s := range cs.Lifecycle.InstanceStatuses {
+			if s.Index == idx {
+				pos = i
+				break
+			}
+		}
+		slot := v1beta1.OMENativeInstanceStatus{Index: idx}
+		if pos != -1 {
+			slot = cs.Lifecycle.InstanceStatuses[pos]
+		}
+		w := v1beta1convert.InstanceStatusToWorkload(slot)
+		if !mutate(&w) {
+			return nil
+		}
+		updated := v1beta1convert.InstanceStatusFromWorkload(w)
+		if pos == -1 {
+			cs.Lifecycle.InstanceStatuses = append(cs.Lifecycle.InstanceStatuses, updated)
+		} else {
+			cs.Lifecycle.InstanceStatuses[pos] = updated
+		}
+		fresh.Status.Components[v1component] = cs
+		return c.Status().Update(ctx, fresh)
+	}
+}
+
+// instanceStatusByIndex looks up an InstanceStatus on the ISVC snapshot.
+func instanceStatusByIndex(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, idx int32) *v1beta1.OMENativeInstanceStatus {
+	cs, ok := isvc.Status.Components[component]
+	if !ok || cs.Lifecycle == nil {
+		return nil
+	}
+	for i := range cs.Lifecycle.InstanceStatuses {
+		if cs.Lifecycle.InstanceStatuses[i].Index == idx {
+			return &cs.Lifecycle.InstanceStatuses[i]
+		}
+	}
+	return nil
 }
