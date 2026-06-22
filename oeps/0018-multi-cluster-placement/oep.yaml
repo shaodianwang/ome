@@ -1,0 +1,24 @@
+title: "OME Multi-Cluster Support: placement by fan-out + race"
+oep-number: "0018"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-06-21
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Related surfaces (data locality, quota, autoscaling that this leans on):
+see-also:
+  - "/oeps/0009-ome-cluster-cache-integration" # model-weight locality per cluster
+  - "/oeps/0013-autoscaling"                    # per-cluster autoscaling interacts with per-cluster quota
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
