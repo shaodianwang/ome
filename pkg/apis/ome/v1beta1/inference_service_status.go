@@ -68,8 +68,8 @@ type InferenceServiceStatus struct {
 
 	// RolloutCoordination reports per-group cross-Component
 	// coordination state for the InferenceService. Populated only
-	// when spec.rolloutCoordination is declared. See
-	// RolloutCoordinationSpec.
+	// when spec.rollout declares blueGreen/rollingUpdate groups
+	// (canary groups report under status.canary instead).
 	// +optional
 	RolloutCoordination *RolloutCoordinationStatus `json:"rolloutCoordination,omitempty"`
 }

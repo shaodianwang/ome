@@ -1,0 +1,18 @@
+# p322: REJECT soak on a non-collapsing rollout (single blueGreen group)  expect=reject reason=SoakNotHonored Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p322 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+  rollout:
+    groups:
+        # one group does not collapse to Sequential (needs 2+ single-Component
+        # blueGreen groups), so the soak is dropped -> admission rejects.
+        - components: [engine]
+          blueGreen: {}
+          soak: 30s

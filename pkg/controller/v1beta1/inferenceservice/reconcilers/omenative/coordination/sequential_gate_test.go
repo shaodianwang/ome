@@ -78,19 +78,31 @@ func TestActiveSequentialComponent_RespectsOrderNotMapIteration(t *testing.T) {
 // Status.Components and Status.RolloutCoordination to model the
 // scenario under test.
 func mkSequentialFixture(name string, soak time.Duration) *v1beta1.InferenceService {
+	// v2: Sequential-across-Components is a RUN of single-Component
+	// blueGreen groups, one per Component, in list order. ResolveGroups
+	// collapses that run back into a single Sequential ResolvedGroup whose
+	// Order is the Components in list order (and whose Soak is the max of
+	// the per-group soaks).
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicySequential,
-					Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-				}},
-			}},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{
+					{
+						Components: []v1beta1.ComponentType{v1beta1.DecoderComponent},
+						BlueGreen:  &v1beta1.GroupBlueGreen{},
+					},
+					{
+						Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+						BlueGreen:  &v1beta1.GroupBlueGreen{},
+					},
+				},
+			},
 		},
 	}
 	if soak > 0 {
-		isvc.Spec.Rollout.Coordination.Groups[0].Soak = &metav1.Duration{Duration: soak}
+		// Inter-Component soak rides on the group(s); collapseSequential
+		// takes the max across the run.
+		isvc.Spec.Rollout.Groups[0].Soak = &metav1.Duration{Duration: soak}
 	}
 	isvc.Name = name
 	return isvc
@@ -180,12 +192,12 @@ func TestCheckSequentialGate_ComponentNotInAnyGroup(t *testing.T) {
 func TestCheckSequentialGate_NonSequentialGroupBypasses(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicyBlueGreen,
+					BlueGreen:  &v1beta1.GroupBlueGreen{},
 				}},
-			}},
+			},
 		},
 	}
 	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
@@ -518,23 +530,25 @@ func TestCheckSequentialGate_GenerationCaughtUpAndIdleBypasses(t *testing.T) {
 }
 
 func TestCheckSequentialGate_NoOrderBypasses(t *testing.T) {
-	// Defensive: Sequential without an Order is shape-invalid (the
-	// validator catches it), but the gate should not panic / wedge —
-	// bypass with a noisy reason.
+	// Defensive: a 2-Component group with no Order set resolves to a
+	// (non-Sequential) blueGreen group — the v2 spec can no longer express
+	// "Sequential without Order" (Sequential is a run of single-Component
+	// groups the controller collapses with a derived Order). The gate must
+	// still bypass cleanly without panic / wedge.
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicySequential,
+					BlueGreen:  &v1beta1.GroupBlueGreen{},
 					// Order intentionally empty.
 				}},
-			}},
+			},
 		},
 	}
 	allowed, reason := CheckSequentialGate(isvc, v1beta1.EngineComponent)
 	if !allowed {
-		t.Errorf("Sequential without Order must not wedge dispatcher: %s", reason)
+		t.Errorf("order-less group must not wedge dispatcher: %s", reason)
 	}
 }
 
@@ -797,22 +811,22 @@ func TestResolveGateContext_NoCoordBlock(t *testing.T) {
 	if !ctx.ShortCircuit {
 		t.Fatalf("no coord block: want ShortCircuit=true, got %+v", ctx)
 	}
-	if ctx.ShortReason != "no coordination block" {
-		t.Errorf("no coord block: want ShortReason=no coordination block, got %q", ctx.ShortReason)
+	if ctx.ShortReason != "no coordination groups" {
+		t.Errorf("no coord block: want ShortReason=no coordination groups, got %q", ctx.ShortReason)
 	}
 }
 
 func TestResolveGateContext_ComponentNotInAnyGroup(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{
 					{
 						Components: []v1beta1.ComponentType{v1beta1.DecoderComponent},
-						Policy:     v1beta1.CoordinationPolicyIndependent,
+						BlueGreen:  &v1beta1.GroupBlueGreen{},
 					},
 				},
-			}},
+			},
 		},
 	}
 	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)
@@ -827,14 +841,14 @@ func TestResolveGateContext_ComponentNotInAnyGroup(t *testing.T) {
 func TestResolveGateContext_ResolvesGroup(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{
 					{
 						Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-						Policy:     v1beta1.CoordinationPolicyBlueGreen,
+						BlueGreen:  &v1beta1.GroupBlueGreen{},
 					},
 				},
-			}},
+			},
 		},
 	}
 	ctx := ResolveGateContext(isvc, v1beta1.EngineComponent)

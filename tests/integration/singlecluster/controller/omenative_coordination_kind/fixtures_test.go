@@ -10,6 +10,86 @@ import (
 	"github.com/ome-projects/ome/tests/integration/kindfix"
 )
 
+// translateCoordGroupToV2 maps a single v1 RolloutCoordinationGroup (the
+// operator-facing shape the specs in this suite still author for readability)
+// into the OEP-0017 v2 RolloutGroup list the controller now consumes. The v1
+// types still exist as spec/status helpers, so the test literals keep
+// compiling; this is the one central seam that retargets them to
+// spec.rollout.groups[].
+//
+// The mapping is per-Policy and is intentionally lossy in exactly the ways
+// OEP-0017 prescribes:
+//   - BlueGreen     -> one v2 group with BlueGreen progression (Order, Soak carried).
+//   - RollingUpdate -> one v2 group with RollingUpdate progression; pacing MaxSurge/
+//     MaxUnavailable carry into GroupRollingUpdate, and RatioBalanced pacing becomes
+//     a MaintainRatio guard (Tolerance from RatioTolerancePercent, default 5).
+//   - Sequential    -> one single-Component v2 group per component in Order, each a
+//     BlueGreen progression. The controller collapses that fan-out back to Sequential
+//     semantics (group N completes before group N+1 begins).
+//   - Independent   -> NO v2 group. A Component in no group rolls independently, which
+//     is the v2 spelling of the old Independent policy.
+func translateCoordGroupToV2(g v1beta1.RolloutCoordinationGroup) []v1beta1.RolloutGroup {
+	switch g.Policy {
+	case v1beta1.CoordinationPolicyBlueGreen:
+		return []v1beta1.RolloutGroup{{
+			Components: g.Components,
+			BlueGreen:  &v1beta1.GroupBlueGreen{},
+			Order:      g.Order,
+			Soak:       g.Soak,
+		}}
+
+	case v1beta1.CoordinationPolicyRollingUpdate:
+		ru := &v1beta1.GroupRollingUpdate{}
+		var maintain *v1beta1.MaintainRatio
+		if g.Pacing != nil {
+			ru.MaxSurge = g.Pacing.MaxSurge
+			ru.MaxUnavailable = g.Pacing.MaxUnavailable
+			if g.Pacing.Type == v1beta1.CoordinationPacingRatioBalanced {
+				tol := int32(5)
+				if g.Pacing.RatioTolerancePercent != nil {
+					tol = *g.Pacing.RatioTolerancePercent
+				}
+				maintain = &v1beta1.MaintainRatio{Tolerance: tol}
+			}
+		}
+		return []v1beta1.RolloutGroup{{
+			Components:    g.Components,
+			RollingUpdate: ru,
+			Order:         g.Order,
+			Soak:          g.Soak,
+			MaintainRatio: maintain,
+		}}
+
+	case v1beta1.CoordinationPolicySequential:
+		// Fan out into one single-Component group per component, in Order.
+		// The controller collapses this back to Sequential semantics. Use
+		// Order when present (Sequential requires it); fall back to
+		// Components so a malformed-but-historically-accepted literal still
+		// produces deterministic groups.
+		order := g.Order
+		if len(order) == 0 {
+			order = g.Components
+		}
+		out := make([]v1beta1.RolloutGroup, 0, len(order))
+		for _, c := range order {
+			out = append(out, v1beta1.RolloutGroup{
+				Components: []v1beta1.ComponentType{c},
+				BlueGreen:  &v1beta1.GroupBlueGreen{},
+				Soak:       g.Soak,
+			})
+		}
+		return out
+
+	case v1beta1.CoordinationPolicyIndependent:
+		// Independent has no v2 equivalent: a Component in no group rolls
+		// independently. Emit nothing.
+		return nil
+
+	default:
+		return nil
+	}
+}
+
 // fixtureOptions is the functional-options shape for newCoordFixture.
 // Defaults are tuned to "minimum viable OMENative ISVC the controller
 // can reconcile to Ready" — single-replica engine + decoder, no router,
@@ -427,10 +507,17 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 
 	isvc := wrapper.Obj()
 	if len(o.coordGroups) > 0 {
-		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
-			Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: append([]v1beta1.RolloutCoordinationGroup(nil), o.coordGroups...),
-			},
+		// Translate the operator-facing v1 coordination groups the specs
+		// author into OEP-0017 v2 spec.rollout.groups[]. Independent groups
+		// translate to nothing (a Component in no group rolls independently),
+		// so the resulting v2 list may be shorter than coordGroups — or empty,
+		// in which case Spec.Rollout stays nil (no rollout block at all).
+		var v2Groups []v1beta1.RolloutGroup
+		for _, g := range o.coordGroups {
+			v2Groups = append(v2Groups, translateCoordGroupToV2(g)...)
+		}
+		if len(v2Groups) > 0 {
+			isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: v2Groups}
 		}
 	}
 

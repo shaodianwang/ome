@@ -5,7 +5,8 @@ Watcher-driven test runner for the OMENative rollout playground.
 
 Architecture:
   1. Apply the ISVC; read its (post-defaulting) spec: per-Component update
-     strategy + the spec.rollout.coordination group (policy / members / order / soak).
+     strategy + the spec.rollout.groups (OEP-0017 v2; the harness derives a
+     synthetic policy / members / order / soak from the group shapes).
   2. Start `kubectl get pod -w -o json --output-watch-events`; read events line-
      by-line, maintaining a per-pod state map (comp, alive, ready, hash, uid,
      newanno). Compute per-Component (alive, ready, updated) counts.
@@ -137,9 +138,11 @@ def parse_duration(v):
 
 
 def get_spec_info(case_id):
-    """Read coordination group + per-Component update strategy from the live ISVC.
+    """Read spec.rollout.groups + per-Component update strategy from the live ISVC.
 
-    Returns dict: {policy, members, order, soak, strat:{comp:type}}.
+    Returns dict: {policy, members, order, soak, pacing, ratio_tol, strat:{comp:type},
+    canary, ...}. The v2 group shapes are projected back onto the legacy synthetic
+    'policy'/'pacing' fields the verdict logic keys on (see the mapping below).
     """
     info = {"policy": None, "members": [], "order": [], "soak": 0, "strat": {},
             "pacing": None, "ratio_tol": None, "workers": {}, "max_unavail": {}, "partition": {},
@@ -169,24 +172,57 @@ def get_spec_info(case_id):
             info["max_unavail"][c] = mu if isinstance(mu, int) else 0
             pt = ru.get("partition", 0)
             info["partition"][c] = pt if isinstance(pt, int) else 0
-    # OEP-0015 (#426): coordination relocated to spec.rollout.coordination.
-    groups = spec.get("rollout", {}).get("coordination", {}).get("groups", []) or []
-    if groups:
-        g = groups[0]
-        info["policy"] = g.get("policy")
+    # OEP-0017 (v2): coordination + canary unified under spec.rollout.groups[].
+    # The harness verdict logic still keys on a synthetic 'policy' (+ pacing,
+    # ratio_tol, members, order, soak) and a separate 'canary' block, so derive
+    # those legacy fields from the v2 group shapes:
+    #   - a single .blueGreen group              -> policy "BlueGreen"
+    #   - .rollingUpdate group                   -> policy "RollingUpdate"
+    #       + .maintainRatio                     -> pacing "RatioBalanced" (ratio_tol = tolerance)
+    #   - .canary group                          -> info["canary"] (not a coordination policy)
+    #   - MULTIPLE single-Component blueGreen     -> policy "Sequential" (members/order = the chain)
+    #     groups, one per component, in list order  (the v2 spelling for Sequential)
+    groups = spec.get("rollout", {}).get("groups", []) or []
+    # Canary group first (canary lives on a group; it's not a coordination policy).
+    cg = next((g for g in groups if isinstance(g, dict) and isinstance(g.get("canary"), dict)), None)
+    if cg is not None:
+        can = cg["canary"]
+        info["canary"] = {
+            "policy": (str(can.get("promotion") or "").lower() or None),
+            "steps": can.get("steps", []) or [],
+        }
+        info["members"] = cg.get("components", []) or []
+        info["order"] = cg.get("order", []) or []
+    # Coordination groups (the non-canary ones).
+    coord_groups = [g for g in groups if isinstance(g, dict) and not isinstance(g.get("canary"), dict)]
+    bg_groups = [g for g in coord_groups if isinstance(g.get("blueGreen"), dict)]
+    single_bg = [g for g in bg_groups if len(g.get("components", []) or []) == 1]
+    if coord_groups and len(coord_groups) == len(single_bg) and len(single_bg) > 1:
+        # Multiple single-Component blueGreen groups in order == Sequential.
+        chain = [(g.get("components") or [None])[0] for g in single_bg]
+        info["policy"] = "Sequential"
+        info["members"] = [c for c in chain if c]
+        info["order"] = list(info["members"])
+        # Soak is carried on each step group; surface the first non-zero (the
+        # harness uses a single soak value for its handoff-gap check).
+        for g in single_bg:
+            s = parse_duration(g.get("soak"))
+            if s:
+                info["soak"] = s
+                break
+    elif coord_groups:
+        g = coord_groups[0]
         info["members"] = g.get("components", []) or []
         info["order"] = g.get("order", []) or []
         info["soak"] = parse_duration(g.get("soak"))
-        pacing = g.get("pacing", {}) or {}
-        info["pacing"] = pacing.get("type")
-        info["ratio_tol"] = pacing.get("ratioTolerancePercent")
-    # OEP-0015.1 canary plan (mutually exclusive with coordination).
-    canary = spec.get("rollout", {}).get("canary")
-    if isinstance(canary, dict):
-        info["canary"] = {
-            "policy": (str(canary.get("promotionPolicy") or "").lower() or None),
-            "steps": canary.get("steps", []) or [],
-        }
+        if isinstance(g.get("blueGreen"), dict):
+            info["policy"] = "BlueGreen"
+        elif isinstance(g.get("rollingUpdate"), dict) or "rollingUpdate" in g:
+            info["policy"] = "RollingUpdate"
+            mr = g.get("maintainRatio")
+            if isinstance(mr, dict):
+                info["pacing"] = "RatioBalanced"
+                info["ratio_tol"] = mr.get("tolerance")
     return info
 
 
@@ -843,8 +879,8 @@ def _canary_primary(ctx):
 
 
 def _canary(case_id, yaml_file, desc, hdr):
-    """Canary rollout (OEP-0015.1). The ISVC ships spec.rollout.canary in the
-    initial apply; once rev A is Ready we bump the primary component's revision to
+    """Canary rollout (OEP-0017 v2). The ISVC ships a spec.rollout.groups[] canary
+    group in the initial apply; once rev A is Ready we bump the primary component's revision to
     trigger the staged canary, then drive + observe the step machine:
 
         capacity gate (Pending) → traffic split (Canarying) → Pause →
@@ -1224,6 +1260,37 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     return 0
 
 
+def run_reject_case(case_id, yaml_file, desc, hdr):
+    """Negative case: the ISVC spec is INVALID and admission MUST reject the apply.
+    PASS  = kubectl apply is denied by the webhook (and, if header `reason=<code>`
+            is set, the denial message contains that reason code).
+    FAIL  = apply was accepted (the rule has no teeth on the live cluster).
+    This is the only end-to-end proof that the validation rules fire on the
+    deployed webhook — unit tests can't see it. No watcher / rollout phase."""
+    Ne, Nd, Nr = hdr.get("Ne", 0), hdr.get("Nd", 0), hdr.get("Nr", 0)
+    ce, cd, cr = hdr.get("ceil_e", Ne), hdr.get("ceil_d", Nd), hdr.get("ceil_r", Nr)
+    zero = {"engine": 0, "decoder": 0, "router": 0}
+    dash = {"engine": "-", "decoder": "-", "router": "-"}
+    want = hdr.get("reason")   # optional single-token substring the denial must contain
+    print(f"\n=== {case_id} [expect=reject] ===\n{desc}")
+    kubectl("apply", "-f", str(HERE / "runtime"), check=False)
+    r = kubectl("apply", "-n", NS, "-f", str(yaml_file))
+    msg = (r.stderr.strip().splitlines() or [""])[-1]
+    if r.returncode == 0:
+        kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")  # don't leak the wrongly-accepted ISVC
+        verdict, note = "FAIL", "apply ACCEPTED but admission rejection was expected"
+        print("  ✗ apply ACCEPTED — the rule did not fire")
+    elif want and want not in r.stderr:
+        verdict, note = "FAIL", f"rejected but message lacks reason '{want}': {msg[:160]}"
+        print(f"  ✗ rejected for the WRONG reason (want ~{want}): {msg[:160]}")
+    else:
+        verdict, note = "PASS", f"rejected as expected ({want or 'any reason'})"
+        print(f"  ✓ apply rejected as expected: {msg[:160]}")
+    write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, zero, dash,
+                 None, None, verdict, note, zero)
+    return 0
+
+
 def run_case(case_id):
     yaml_file = find_isvc(case_id)
     if yaml_file is None:
@@ -1231,6 +1298,10 @@ def run_case(case_id):
         return 1
 
     desc, hdr = parse_header(yaml_file)
+    # Negative cases (header `expect=reject`) assert the webhook denies the apply —
+    # handled before mode dispatch, since rejection happens at apply for any mode.
+    if hdr.get("expect") == "reject":
+        return run_reject_case(case_id, yaml_file, desc, hdr)
     mode = hdr.get("mode", "rollout")
     if mode != "rollout":
         return run_mode_case(case_id, yaml_file, desc, hdr, mode)

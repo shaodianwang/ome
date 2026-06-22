@@ -70,9 +70,9 @@ type InferenceServiceSpec struct {
 	Traffic *TrafficSpec `json:"traffic,omitempty"`
 
 	// Rollout is the single home for rollout configuration on this
-	// InferenceService: cross-Component coordination
-	// (spec.rollout.coordination), plus a reserved, not-yet-implemented
-	// progressive-traffic canary plan (spec.rollout.canary).
+	// InferenceService: an ordered list of rollout groups, each polymorphic in
+	// its progression (canary | blueGreen | rollingUpdate). Sequencing is the
+	// group list order; a group's Components roll together.
 	// +optional
 	Rollout *RolloutSpec `json:"rollout,omitempty"`
 
@@ -85,24 +85,29 @@ type InferenceServiceSpec struct {
 	ScalingPolicy *ScalingPolicy `json:"scalingPolicy,omitempty"`
 }
 
-// GetRolloutCoordination returns the cross-Component coordination spec
-// (spec.rollout.coordination), or nil if spec.rollout or its coordination is
-// unset. Nil-safe on a nil receiver so callers can drop their own guards.
-func (s *InferenceServiceSpec) GetRolloutCoordination() *RolloutCoordinationSpec {
+// GetRolloutGroups returns the ordered rollout groups (spec.rollout.groups), or
+// nil if spec.rollout is unset. Nil-safe on a nil receiver so callers can drop
+// their own guards.
+func (s *InferenceServiceSpec) GetRolloutGroups() []RolloutGroup {
 	if s == nil || s.Rollout == nil {
 		return nil
 	}
-	return s.Rollout.Coordination
+	return s.Rollout.Groups
 }
 
-// GetCanary returns the progressive canary plan (spec.rollout.canary), or nil
-// if spec.rollout or its canary is unset. Nil-safe on a nil receiver so callers
-// can drop their own guards.
-func (s *InferenceServiceSpec) GetCanary() *CanarySpec {
+// GetCanaryGroup returns the first rollout group whose progression is canary, or
+// nil if none. Admission rejects more than one canary group, so there is at most
+// one; a canary group may span multiple Components (primary-driven). Nil-safe.
+func (s *InferenceServiceSpec) GetCanaryGroup() *RolloutGroup {
 	if s == nil || s.Rollout == nil {
 		return nil
 	}
-	return s.Rollout.Canary
+	for i := range s.Rollout.Groups {
+		if s.Rollout.Groups[i].Canary != nil {
+			return &s.Rollout.Groups[i]
+		}
+	}
+	return nil
 }
 
 // EngineSpec defines the configuration for the Engine component (can be used for both single-node and multi-node deployments)

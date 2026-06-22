@@ -90,7 +90,7 @@ func revisionPeerDNS(isvc string, peer v1beta1.ComponentType, revisionHash, name
 // the steady revision hash or skip the per-revision form).
 //
 // The peers slice should be deduplicated and stable in order;
-// callers typically pass coordination.PeerComponents(...) sorted.
+// callers typically pass coordination.ServingPeers(...).
 func InjectPeerEnv(pod *corev1.Pod, isvc, namespace string, peers []v1beta1.ComponentType, revisionHashFor func(v1beta1.ComponentType) string) {
 	if pod == nil || len(peers) == 0 {
 		return
@@ -122,15 +122,35 @@ func InjectPeerEnv(pod *corev1.Pod, isvc, namespace string, peers []v1beta1.Comp
 	}
 }
 
-// SortedPeers returns the peer set for c with declaration order
-// preserved within a group, then deduplicated and sorted. Callers
-// that want stable env-var ordering across reconciles use this rather
-// than raw PeerComponents output.
-func SortedPeers(groups []ResolvedGroup, c v1beta1.ComponentType, fallbackPeers []v1beta1.ComponentType) []v1beta1.ComponentType {
-	if peers := PeerComponents(groups, c); len(peers) > 0 {
-		return sortedComponents(peers)
+// ServingPeers returns the other Components declared on the ISVC (the serving
+// topology: router/engine/decoder), excluding c, deduplicated and sorted.
+//
+// Peer endpoints are a SERVING concern — a PD engine needs the decoder's address
+// to serve regardless of how the rollout groups or sequences the Components — so
+// peer membership is the ISVC's declared Components, NOT rollout grouping. This
+// keeps a PD pair wired together whether they roll in one group, in separate
+// ordered groups, or via canary. Returns nil when c has no declared peer.
+func ServingPeers(isvc *v1beta1.InferenceService, c v1beta1.ComponentType) []v1beta1.ComponentType {
+	if isvc == nil {
+		return nil
 	}
-	return sortedComponents(fallbackPeers)
+	declared := make([]v1beta1.ComponentType, 0, 3)
+	if isvc.Spec.Router != nil {
+		declared = append(declared, v1beta1.RouterComponent)
+	}
+	if isvc.Spec.Engine != nil {
+		declared = append(declared, v1beta1.EngineComponent)
+	}
+	if isvc.Spec.Decoder != nil {
+		declared = append(declared, v1beta1.DecoderComponent)
+	}
+	peers := make([]v1beta1.ComponentType, 0, len(declared))
+	for _, d := range declared {
+		if d != c {
+			peers = append(peers, d)
+		}
+	}
+	return sortedComponents(peers)
 }
 
 // sortedComponents returns a deduplicated, lexicographically-sorted

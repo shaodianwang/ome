@@ -11,22 +11,30 @@ import (
 )
 
 // mkSequentialParent returns an ISVC named "llama" (the parent every
-// baselineIR points at) declaring one Sequential coordination group
-// [decoder, engine] with Order decoder→engine. Generation is 2; callers
-// stamp per-Component Status to model in-flight vs converged via
+// baselineIR points at) declaring a Sequential rollout over [decoder,
+// engine] in that order. In v2 (OEP-0017) Sequential is spelled as a run
+// of single-Component blueGreen groups, in list order; the controller's
+// collapseSequential folds them back into one Sequential group whose Order
+// is the list order (decoder→engine). Generation is 2; callers stamp
+// per-Component Status to model in-flight vs converged via
 // ObservedGeneration skew (gen < 2 ⇒ in flight, the moment-of-bump
 // signal observeSequentialComponentsForGate keys on).
 func mkSequentialParent() *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "default", Generation: 2},
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicySequential,
-					Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-				}},
-			}},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{
+					{
+						Components: []v1beta1.ComponentType{v1beta1.DecoderComponent},
+						BlueGreen:  &v1beta1.GroupBlueGreen{},
+					},
+					{
+						Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+						BlueGreen:  &v1beta1.GroupBlueGreen{},
+					},
+				},
+			},
 		},
 	}
 }
@@ -175,16 +183,15 @@ func TestBuildReconcileInput_GateUsesFreshIRStatus(t *testing.T) {
 	parent := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "default", Generation: 1},
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:                  v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerancePercent: &tol,
-					},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					// RatioBalanced pacing is spelled as MaintainRatio in v2;
+					// tolerance 25 preserves the original RatioTolerancePercent.
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
 				}},
-			}},
+			},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{

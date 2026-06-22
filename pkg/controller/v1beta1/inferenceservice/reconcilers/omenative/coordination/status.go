@@ -107,6 +107,27 @@ func SetRolloutCoordinationReady(isvc *v1beta1.InferenceService, groups []v1beta
 	isvc.Status.SetCondition(apis.ConditionType(v1beta1.RolloutCoordinationReady), cond)
 }
 
+// ClearRolloutCoordinationReady resolves the RolloutCoordinationReady condition
+// when an ISVC no longer has any coordination-style group — e.g. it switched to
+// a canary-only rollout or dropped the group. Without this, a condition left at
+// False/InProgress by a prior rollout stays stuck forever, because
+// SetRolloutCoordinationReady only runs when groups are present (and contradicts
+// a healthy canary). Acts only when the condition already exists, so an ISVC
+// that never coordinated does not gain a spurious condition.
+func ClearRolloutCoordinationReady(isvc *v1beta1.InferenceService) {
+	if isvc == nil {
+		return
+	}
+	if isvc.Status.GetCondition(apis.ConditionType(v1beta1.RolloutCoordinationReady)) == nil {
+		return
+	}
+	isvc.Status.SetCondition(apis.ConditionType(v1beta1.RolloutCoordinationReady), &apis.Condition{
+		Type:   apis.ConditionType(v1beta1.RolloutCoordinationReady),
+		Status: corev1.ConditionTrue,
+		Reason: "NoCoordinationGroups",
+	})
+}
+
 // ComputeCoordinationReady is the pure decision step used by
 // SetRolloutCoordinationReady. Returns nil when no condition write is
 // warranted (no groups declared).

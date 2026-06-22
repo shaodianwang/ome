@@ -15,11 +15,11 @@ import (
 // group, after defaults are applied and the group is indexed.
 type ResolvedGroup struct {
 	// Name is the stable identifier for the group, derived from the
-	// group's position in spec.rollout.coordination.groups[].
+	// group's position in spec.rollout.groups[].
 	Name string
 
 	// Index is the group's position in
-	// spec.rollout.coordination.groups[].
+	// spec.rollout.groups[].
 	Index int
 
 	// Components is the deduplicated, order-preserving Component set
@@ -44,35 +44,118 @@ type ResolvedGroup struct {
 	Soak time.Duration
 }
 
-// ResolveGroups turns spec.rollout.coordination into a slice of
-// ResolvedGroups in declaration order. Returns an empty slice when no
-// coordination block is declared.
-func ResolveGroups(spec *v1beta1.RolloutCoordinationSpec) []ResolvedGroup {
+// ResolveGroups turns spec.rollout into a slice of ResolvedGroups in declaration
+// order, for the COORDINATION-style progressions only (blueGreen / rollingUpdate).
+// Canary groups are driven by the canary engine, not coordination, so they are
+// skipped here. Returns nil when no rollout (or no coordination-style group) is
+// declared.
+func ResolveGroups(spec *v1beta1.RolloutSpec) []ResolvedGroup {
 	if spec == nil || len(spec.Groups) == 0 {
 		return nil
 	}
 	out := make([]ResolvedGroup, 0, len(spec.Groups))
 	for i := range spec.Groups {
-		out = append(out, resolveGroup(i, &spec.Groups[i]))
+		g := &spec.Groups[i]
+		if g.Canary != nil {
+			continue // canary groups are the canary engine's responsibility
+		}
+		out = append(out, resolveGroup(i, g))
+	}
+	// v2 ordered groups roll one at a time, in list order. When the rollout is a
+	// run of single-Component blueGreen groups, that is exactly v1 Sequential —
+	// collapse them into one Sequential ResolvedGroup so the proven Sequential
+	// state machine (per-Component blue-green surge, soak, hold-the-rest) drives
+	// them. (Mixed-progression / multi-Component ordered groups don't collapse and
+	// run independently for now — general cross-group ordering is a follow-on.)
+	if seq, ok := collapseSequential(out); ok {
+		return []ResolvedGroup{seq}
 	}
 	return out
 }
 
-// resolveGroup produces one ResolvedGroup from a spec group, applying
-// the pacing defaults if the webhook hasn't already filled them in.
-func resolveGroup(idx int, g *v1beta1.RolloutCoordinationGroup) ResolvedGroup {
+// collapseSequential turns a list of 2+ single-Component blueGreen ResolvedGroups
+// (the v2 spelling of v1 Sequential) into one Sequential ResolvedGroup whose Order
+// is the Components in list order. Returns (zero,false) when the list isn't a pure
+// single-Component-blueGreen sequence — those groups keep their own resolution.
+func collapseSequential(groups []ResolvedGroup) (ResolvedGroup, bool) {
+	if len(groups) < 2 {
+		return ResolvedGroup{}, false
+	}
+	order := make([]v1beta1.ComponentType, 0, len(groups))
+	var soak time.Duration
+	for i := range groups {
+		g := &groups[i]
+		if g.Policy != v1beta1.CoordinationPolicyBlueGreen || len(g.Components) != 1 {
+			return ResolvedGroup{}, false
+		}
+		order = append(order, g.Components[0])
+		// Soak is the wait AFTER a group before the next, so the LAST group's soak
+		// is ignored (nothing follows it). The engine carries one Soak between
+		// every Component, so the rest collapse to max().
+		if i < len(groups)-1 && g.Soak > soak {
+			soak = g.Soak
+		}
+	}
+	return ResolvedGroup{
+		Name:       strconv.Itoa(0),
+		Index:      0,
+		Components: append([]v1beta1.ComponentType(nil), order...),
+		Policy:     v1beta1.CoordinationPolicySequential,
+		Order:      order,
+		Pacing:     pacingWithDefaults(nil),
+		Soak:       soak,
+	}, true
+}
+
+// resolveGroup maps one v2 RolloutGroup (blueGreen | rollingUpdate) onto the
+// engine's internal ResolvedGroup. A v2 group rolls its Components together, so
+// the resolved policy is BlueGreen or RollingUpdate — Sequential-across-Components
+// is now expressed as separate ordered groups, not a policy. MaintainRatio maps to
+// RatioBalanced pacing.
+func resolveGroup(idx int, g *v1beta1.RolloutGroup) ResolvedGroup {
+	components := dedupComponents(g.Components)
 	out := ResolvedGroup{
 		Name:       strconv.Itoa(idx),
 		Index:      idx,
-		Components: dedupComponents(g.Components),
-		Policy:     g.Policy,
+		Components: components,
 		Order:      append([]v1beta1.ComponentType(nil), g.Order...),
-		Pacing:     pacingWithDefaults(g.Pacing),
 	}
 	if g.Soak != nil {
 		out.Soak = g.Soak.Duration
 	}
+	if g.RollingUpdate != nil {
+		out.Policy = v1beta1.CoordinationPolicyRollingUpdate
+	} else {
+		// blueGreen — either set explicitly, or the default when the group names no
+		// progression at all (the one-of is at-most-one). Canary groups were already
+		// skipped by the caller, so "no progression" and explicit blueGreen share
+		// this path. A single-Component no-progression group therefore resolves to
+		// BlueGreen, which is what lets collapseSequential fold a run of them into
+		// the Sequential state machine.
+		out.Policy = v1beta1.CoordinationPolicyBlueGreen
+	}
+	out.Pacing = groupPacing(g, len(components))
 	return out
+}
+
+// groupPacing builds the internal pacing for a v2 group: the surge/unavailable
+// budget from a rollingUpdate group, plus RatioBalanced when MaintainRatio is set
+// on a multi-Component group. MaintainRatio maps regardless of progression
+// (blueGreen included) because the engine's ratio guard keys on
+// Pacing.Type==RatioBalanced, not the policy — mapping it only for rollingUpdate
+// would leave a blueGreen group's guard inert. Ignored on single-Component groups.
+func groupPacing(g *v1beta1.RolloutGroup, componentCount int) v1beta1.CoordinationPacing {
+	in := &v1beta1.CoordinationPacing{}
+	if g.RollingUpdate != nil {
+		in.MaxSurge = g.RollingUpdate.MaxSurge
+		in.MaxUnavailable = g.RollingUpdate.MaxUnavailable
+	}
+	if g.MaintainRatio != nil && componentCount >= 2 {
+		in.Type = v1beta1.CoordinationPacingRatioBalanced
+		t := g.MaintainRatio.Tolerance
+		in.RatioTolerancePercent = &t
+	}
+	return pacingWithDefaults(in)
 }
 
 // pacingWithDefaults applies the pacing default fills (25% surge,
@@ -138,23 +221,6 @@ func MembershipFor(groups []ResolvedGroup, c v1beta1.ComponentType) (ResolvedGro
 	return ResolvedGroup{}, false
 }
 
-// PeerComponents returns the Components in the same group as c, excluding
-// c itself. Empty slice when c is uncoordinated or alone in its group.
-func PeerComponents(groups []ResolvedGroup, c v1beta1.ComponentType) []v1beta1.ComponentType {
-	g, ok := MembershipFor(groups, c)
-	if !ok {
-		return nil
-	}
-	peers := make([]v1beta1.ComponentType, 0, len(g.Components))
-	for _, peer := range g.Components {
-		if peer == c {
-			continue
-		}
-		peers = append(peers, peer)
-	}
-	return peers
-}
-
 // ValidateGroupShape returns a non-nil error when g is internally
 // inconsistent (Sequential without Order, Sequential single-Component,
 // etc.). This is the runtime safety net for the admission webhook —
@@ -175,9 +241,8 @@ func ValidateGroupShape(g ResolvedGroup) error {
 		return fmt.Errorf("group %s: empty components", g.Name)
 	}
 
-	if g.Policy == v1beta1.CoordinationPolicyRollingUpdate && len(g.Components) < 2 {
-		return fmt.Errorf("group %s: RollingUpdate requires at least 2 components", g.Name)
-	}
+	// Single-Component rollingUpdate is valid (admission accepts it; the engine
+	// drives one Component cleanly), so there is no min-Component check here.
 
 	if g.Policy == v1beta1.CoordinationPolicySequential {
 		if len(g.Components) < 2 {

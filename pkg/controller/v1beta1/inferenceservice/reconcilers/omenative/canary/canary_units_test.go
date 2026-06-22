@@ -16,15 +16,15 @@ import (
 func TestResolveStepNewCount(t *testing.T) {
 	cases := []struct {
 		name    string
-		step    v1beta1.RolloutStep
+		step    v1beta1.RolloutGroupStep
 		desired int32
 		wantNew int32
 	}{
-		{"10pct", v1beta1.RolloutStep{NewCapacity: intstr.FromString("10%")}, 10, 1},
-		{"100pct", v1beta1.RolloutStep{NewCapacity: intstr.FromString("100%")}, 4, 4},
-		{"absolute-new", v1beta1.RolloutStep{NewCapacity: intstr.FromInt(2)}, 10, 2},
-		{"25pct-ceil", v1beta1.RolloutStep{NewCapacity: intstr.FromString("25%")}, 4, 1},
-		{"10pct-of-4-ceils-to-1", v1beta1.RolloutStep{NewCapacity: intstr.FromString("10%")}, 4, 1},
+		{"10pct", v1beta1.RolloutGroupStep{Capacity: intstr.FromString("10%")}, 10, 1},
+		{"100pct", v1beta1.RolloutGroupStep{Capacity: intstr.FromString("100%")}, 4, 4},
+		{"absolute-new", v1beta1.RolloutGroupStep{Capacity: intstr.FromInt(2)}, 10, 2},
+		{"25pct-ceil", v1beta1.RolloutGroupStep{Capacity: intstr.FromString("25%")}, 4, 1},
+		{"10pct-of-4-ceils-to-1", v1beta1.RolloutGroupStep{Capacity: intstr.FromString("10%")}, 4, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,9 +104,12 @@ func TestApplyTraffic(t *testing.T) {
 }
 
 func TestEffectivePartition(t *testing.T) {
-	mk := func(steps ...v1beta1.RolloutStep) *v1beta1.InferenceService {
+	mk := func(steps ...v1beta1.RolloutGroupStep) *v1beta1.InferenceService {
 		return &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Canary: &v1beta1.CanarySpec{Steps: steps}}}}
+			Rollout: &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Canary:     &v1beta1.GroupCanary{Steps: steps},
+			}}}}}
 	}
 
 	// No canary → not active.
@@ -116,8 +119,8 @@ func TestEffectivePartition(t *testing.T) {
 
 	// Step 0 (no status yet) of a 50% step at N=4 → 2 new, partition = 4-2 = 2.
 	isvc := mk(
-		v1beta1.RolloutStep{NewCapacity: intstr.FromString("50%"), TrafficWeight: 50},
-		v1beta1.RolloutStep{NewCapacity: intstr.FromString("100%"), TrafficWeight: 100},
+		v1beta1.RolloutGroupStep{Capacity: intstr.FromString("50%"), Traffic: 50},
+		v1beta1.RolloutGroupStep{Capacity: intstr.FromString("100%"), Traffic: 100},
 	)
 	p, ok := EffectivePartition(isvc, v1beta1.EngineComponent, 4)
 	if !ok || p == nil || *p != 2 {
@@ -163,9 +166,12 @@ func TestEffectivePartition(t *testing.T) {
 func TestStampStepPartition(t *testing.T) {
 	n := 4
 	isvc := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{
-		Rollout: &v1beta1.RolloutSpec{Canary: &v1beta1.CanarySpec{Steps: []v1beta1.RolloutStep{
-			{NewCapacity: intstr.FromString("50%"), TrafficWeight: 50},
-			{NewCapacity: intstr.FromString("100%"), TrafficWeight: 100},
+		Rollout: &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+			Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+				{Capacity: intstr.FromString("50%"), Traffic: 50},
+				{Capacity: intstr.FromString("100%"), Traffic: 100},
+			}},
 		}}}}}
 	ext := &v1beta1.ComponentExtensionSpec{MinReplicas: &n, MaxReplicas: 4}
 	StampStepPartition(isvc, v1beta1.EngineComponent, ext)

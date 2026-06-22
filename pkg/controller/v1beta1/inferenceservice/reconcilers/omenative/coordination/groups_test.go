@@ -2,7 +2,9 @@ package coordination
 
 import (
 	"testing"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -15,17 +17,17 @@ func TestResolveGroups_NilSpecReturnsNil(t *testing.T) {
 }
 
 func TestResolveGroups_EmptyGroupsReturnsNil(t *testing.T) {
-	if got := ResolveGroups(&v1beta1.RolloutCoordinationSpec{}); got != nil {
+	if got := ResolveGroups(&v1beta1.RolloutSpec{}); got != nil {
 		t.Errorf("empty Groups: got %+v want nil", got)
 	}
 }
 
 func TestResolveGroups_AppliesPacingDefaults(t *testing.T) {
-	spec := &v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{
+	spec := &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyBlueGreen,
+				BlueGreen:  &v1beta1.GroupBlueGreen{},
 			},
 		},
 	}
@@ -48,37 +50,131 @@ func TestResolveGroups_AppliesPacingDefaults(t *testing.T) {
 	}
 }
 
-func TestResolveGroups_RatioBalancedDefaultsTolerance(t *testing.T) {
-	spec := &v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{
+func TestResolveGroups_NoProgressionDefaultsBlueGreen(t *testing.T) {
+	// A group that names no progression (no canary/blueGreen/rollingUpdate) is the
+	// ergonomic "just roll this" spelling; the resolve layer treats it as
+	// blueGreen. This is what makes `components: [engine]` with no progression a
+	// real rollout rather than a no-op.
+	spec := &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}},
+		},
+	}
+	groups := ResolveGroups(spec)
+	if len(groups) != 1 {
+		t.Fatalf("groups: got %d want 1", len(groups))
+	}
+	if groups[0].Policy != v1beta1.CoordinationPolicyBlueGreen {
+		t.Errorf("no-progression group Policy: got %q want BlueGreen", groups[0].Policy)
+	}
+}
+
+func TestResolveGroups_NoProgressionPairCollapsesSequential(t *testing.T) {
+	// The intuitive "roll decoder, then engine" spelling: two single-Component
+	// groups, neither naming a progression. Each defaults to blueGreen, so the run
+	// collapses into one Sequential group whose Order is the list order. Without
+	// the blueGreen default these would not collapse and would (wrongly) roll
+	// concurrently — so this locks the contract that the no-ceremony sequential
+	// spelling actually sequences.
+	spec := &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}},
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}},
+		},
+	}
+	groups := ResolveGroups(spec)
+	if len(groups) != 1 {
+		t.Fatalf("expected one collapsed group, got %d: %+v", len(groups), groups)
+	}
+	g := groups[0]
+	if g.Policy != v1beta1.CoordinationPolicySequential {
+		t.Fatalf("Policy: got %q want Sequential", g.Policy)
+	}
+	if len(g.Order) != 2 || g.Order[0] != v1beta1.DecoderComponent || g.Order[1] != v1beta1.EngineComponent {
+		t.Errorf("Order: got %v want [decoder engine]", g.Order)
+	}
+}
+
+func TestResolveGroups_RatioBalancedTolerancePropagates(t *testing.T) {
+	// v2: cross-Component ratio guarding is expressed via MaintainRatio on a
+	// multi-Component group; it maps to RatioBalanced pacing for both
+	// rollingUpdate (this test) and blueGreen (see
+	// TestResolveGroups_MaintainRatioOnBlueGreen). The admission-time default of
+	// 5 is applied by the CRD validation rule, not by resolveGroup, so the
+	// unit-level fixture sets the tolerance explicitly.
+	spec := &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
 			{
-				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicyBlueGreen,
-				Pacing: &v1beta1.CoordinationPacing{
-					Type: v1beta1.CoordinationPacingRatioBalanced,
-				},
+				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				RollingUpdate: &v1beta1.GroupRollingUpdate{},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 5},
 			},
 		},
 	}
 	g := ResolveGroups(spec)[0]
 	if g.Pacing.RatioTolerancePercent == nil {
-		t.Fatalf("RatioTolerancePercent default: got nil want 5")
+		t.Fatalf("RatioTolerancePercent: got nil want 5")
 	}
 	if *g.Pacing.RatioTolerancePercent != 5 {
-		t.Errorf("RatioTolerancePercent default: got %d want 5", *g.Pacing.RatioTolerancePercent)
+		t.Errorf("RatioTolerancePercent: got %d want 5", *g.Pacing.RatioTolerancePercent)
+	}
+}
+
+func TestResolveGroups_MaintainRatioOnBlueGreen(t *testing.T) {
+	// maintainRatio guards the cross-Component replica ratio on ANY
+	// multi-Component group regardless of progression — blueGreen included (the
+	// OEP's canonical PD example pairs blueGreen with maintainRatio). resolveGroup
+	// must map it to RatioBalanced pacing, not silently drop it: the engine's
+	// CheckRatio gate keys on Pacing.Type==RatioBalanced, so dropping it here
+	// leaves the ratio guard the operator declared completely inert.
+	spec := &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{
+				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				BlueGreen:     &v1beta1.GroupBlueGreen{},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 7},
+			},
+		},
+	}
+	g := ResolveGroups(spec)[0]
+	if g.Pacing.Type != v1beta1.CoordinationPacingRatioBalanced {
+		t.Fatalf("Pacing.Type: got %q want RatioBalanced", g.Pacing.Type)
+	}
+	if g.Pacing.RatioTolerancePercent == nil || *g.Pacing.RatioTolerancePercent != 7 {
+		t.Errorf("RatioTolerancePercent: got %v want 7", g.Pacing.RatioTolerancePercent)
+	}
+}
+
+func TestResolveGroups_MaintainRatioIgnoredOnSingleComponent(t *testing.T) {
+	// maintainRatio is meaningful only on multi-Component groups — there is no
+	// cross-Component ratio for one Component — so the field doc says it is
+	// ignored on single-Component groups and the resolved pacing stays
+	// PerComponent.
+	spec := &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{
+				Components:    []v1beta1.ComponentType{v1beta1.EngineComponent},
+				BlueGreen:     &v1beta1.GroupBlueGreen{},
+				MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 7},
+			},
+		},
+	}
+	g := ResolveGroups(spec)[0]
+	if g.Pacing.Type != v1beta1.CoordinationPacingPerComponent {
+		t.Errorf("single-Component maintainRatio: got %q want PerComponent (ignored)", g.Pacing.Type)
 	}
 }
 
 func TestResolveGroups_DedupComponentsWithinGroup(t *testing.T) {
-	spec := &v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{
+	spec := &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
 			{
 				Components: []v1beta1.ComponentType{
 					v1beta1.EngineComponent,
 					v1beta1.EngineComponent,
 					v1beta1.DecoderComponent,
 				},
-				Policy: v1beta1.CoordinationPolicyBlueGreen,
+				BlueGreen: &v1beta1.GroupBlueGreen{},
 			},
 		},
 	}
@@ -92,14 +188,17 @@ func TestResolveGroups_DedupComponentsWithinGroup(t *testing.T) {
 }
 
 func TestResolveGroups_PreservesUserSuppliedPacing(t *testing.T) {
+	// v2: the surge budget rides on a rollingUpdate group's MaxSurge. (v1's
+	// per-Component pacing on an Independent group is gone — Independent is
+	// no longer a policy; a Component left out of every group rolls
+	// independently with no resolved pacing to assert against. The
+	// surge-budget-flows-through intent is preserved on rollingUpdate.)
 	maxSurge := intstr.FromInt(5)
-	spec := &v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{
+	spec := &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-				Policy:     v1beta1.CoordinationPolicyIndependent,
-				Pacing: &v1beta1.CoordinationPacing{
-					Type:     v1beta1.CoordinationPacingPerComponent,
+				RollingUpdate: &v1beta1.GroupRollingUpdate{
 					MaxSurge: &maxSurge,
 				},
 			},
@@ -112,53 +211,32 @@ func TestResolveGroups_PreservesUserSuppliedPacing(t *testing.T) {
 }
 
 func TestMembershipFor_FindsComponentsAcrossGroups(t *testing.T) {
-	groups := ResolveGroups(&v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{
-			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
-			{Components: []v1beta1.ComponentType{v1beta1.RouterComponent}, Policy: v1beta1.CoordinationPolicyIndependent},
+	// v2: each group declares its own progression. The router's own
+	// single-Component blueGreen group is the v2 spelling of "router rolls
+	// on its own" (Independent is gone). The 2-Component engine+decoder
+	// group keeps the run from collapsing into a Sequential.
+	groups := ResolveGroups(&v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+			{Components: []v1beta1.ComponentType{v1beta1.RouterComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
 		},
 	})
 	if g, ok := MembershipFor(groups, v1beta1.EngineComponent); !ok || g.Policy != v1beta1.CoordinationPolicyBlueGreen {
 		t.Errorf("engine: got (%+v, %v) want BlueGreen", g, ok)
 	}
-	if g, ok := MembershipFor(groups, v1beta1.RouterComponent); !ok || g.Policy != v1beta1.CoordinationPolicyIndependent {
-		t.Errorf("router: got (%+v, %v) want Independent", g, ok)
+	if g, ok := MembershipFor(groups, v1beta1.RouterComponent); !ok || g.Policy != v1beta1.CoordinationPolicyBlueGreen {
+		t.Errorf("router: got (%+v, %v) want BlueGreen", g, ok)
 	}
 }
 
 func TestMembershipFor_UnknownComponentReturnsFalse(t *testing.T) {
-	groups := ResolveGroups(&v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{
-			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
+	groups := ResolveGroups(&v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
 		},
 	})
 	if _, ok := MembershipFor(groups, v1beta1.DecoderComponent); ok {
 		t.Errorf("decoder should not be a member")
-	}
-}
-
-func TestPeerComponents(t *testing.T) {
-	groups := ResolveGroups(&v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{
-			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent}, Policy: v1beta1.CoordinationPolicyBlueGreen},
-		},
-	})
-	peers := PeerComponents(groups, v1beta1.EngineComponent)
-	if len(peers) != 2 {
-		t.Fatalf("engine peers: got %d want 2", len(peers))
-	}
-	wantPeers := map[v1beta1.ComponentType]bool{v1beta1.DecoderComponent: true, v1beta1.RouterComponent: true}
-	for _, p := range peers {
-		if !wantPeers[p] {
-			t.Errorf("unexpected peer: %s", p)
-		}
-	}
-}
-
-func TestPeerComponents_Uncoordinated(t *testing.T) {
-	peers := PeerComponents(nil, v1beta1.EngineComponent)
-	if peers != nil {
-		t.Errorf("uncoordinated: got %v want nil", peers)
 	}
 }
 
@@ -183,14 +261,40 @@ func TestValidateGroupShape_RejectsEmptyComponents(t *testing.T) {
 	}
 }
 
-func TestValidateGroupShape_RollingUpdateNeedsAtLeastTwo(t *testing.T) {
+func TestValidateGroupShape_RollingUpdateSingleComponentAllowed(t *testing.T) {
+	// v2: rollingUpdate is a per-group progression that is meaningful for a
+	// single Component (gradual pod replacement, paced by the per-pod
+	// updateStrategy beneath it). The engine drives a one-Component rollingUpdate
+	// group cleanly (the surge/ratio gates short-circuit single-Component
+	// groups), so the shape is valid — and admission already accepts it, so the
+	// runtime net must agree rather than wedge every reconcile.
 	g := ResolvedGroup{
 		Name:       "0",
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 		Policy:     v1beta1.CoordinationPolicyRollingUpdate,
 	}
-	if err := ValidateGroupShape(g); err == nil {
-		t.Errorf("RollingUpdate single-Component: want error")
+	if err := ValidateGroupShape(g); err != nil {
+		t.Errorf("RollingUpdate single-Component: unexpected error: %v", err)
+	}
+}
+
+func TestCollapseSequential_LastGroupSoakIgnored(t *testing.T) {
+	// Soak is "the wait AFTER this group completes, before the next begins" and
+	// is ignored on the LAST group (nothing follows it). collapseSequential folds
+	// per-group soaks into one scalar via max(); it must exclude the last group so
+	// its soak can't inflate the inter-Component wait.
+	spec := &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}, Soak: &metav1.Duration{Duration: 30 * time.Second}},
+			{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}, Soak: &metav1.Duration{Duration: 10 * time.Minute}},
+		},
+	}
+	g := ResolveGroups(spec)
+	if len(g) != 1 || g[0].Policy != v1beta1.CoordinationPolicySequential {
+		t.Fatalf("expected one collapsed Sequential group, got %+v", g)
+	}
+	if g[0].Soak != 30*time.Second {
+		t.Errorf("Soak: got %v want 30s (the last group's 10m must be ignored)", g[0].Soak)
 	}
 }
 

@@ -16,7 +16,6 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                      schema_pkg_apis_ome_v1beta1_BaseModel(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":                  schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":                  schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanarySpec":                     schema_pkg_apis_ome_v1beta1_CanarySpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus":                   schema_pkg_apis_ome_v1beta1_CanaryStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":               schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":           schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
@@ -38,6 +37,9 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeight":                schema_pkg_apis_ome_v1beta1_FineTunedWeight(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightList":            schema_pkg_apis_ome_v1beta1_FineTunedWeightList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.FineTunedWeightSpec":            schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupBlueGreen":                 schema_pkg_apis_ome_v1beta1_GroupBlueGreen(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupCanary":                    schema_pkg_apis_ome_v1beta1_GroupCanary(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupRollingUpdate":             schema_pkg_apis_ome_v1beta1_GroupRollingUpdate(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HPAAutoscaler":                  schema_pkg_apis_ome_v1beta1_HPAAutoscaler(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashCookie":                     schema_pkg_apis_ome_v1beta1_HashCookie(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.HashHeader":                     schema_pkg_apis_ome_v1beta1_HashHeader(ref),
@@ -57,6 +59,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LeaderSpec":                     schema_pkg_apis_ome_v1beta1_LeaderSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec":                  schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleStatus":                schema_pkg_apis_ome_v1beta1_LifecycleStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MaintainRatio":                  schema_pkg_apis_ome_v1beta1_MaintainRatio(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationEvent":                 schema_pkg_apis_ome_v1beta1_MigrationEvent(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry":          schema_pkg_apis_ome_v1beta1_MigrationHistoryEntry(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationPolicy":                schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref),
@@ -83,9 +86,10 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationRatio":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationRatio(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec":        schema_pkg_apis_ome_v1beta1_RolloutCoordinationSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus":      schema_pkg_apis_ome_v1beta1_RolloutCoordinationStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroup":                   schema_pkg_apis_ome_v1beta1_RolloutGroup(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroupStep":               schema_pkg_apis_ome_v1beta1_RolloutGroupStep(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause":                   schema_pkg_apis_ome_v1beta1_RolloutPause(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                    schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
-		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep":                    schema_pkg_apis_ome_v1beta1_RolloutStep(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                     schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner":                         schema_pkg_apis_ome_v1beta1_Runner(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                     schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
@@ -435,54 +439,6 @@ func schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref common.ReferenceCallback) com
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DiffusionPipelineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFormat", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelFrameworkSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.StorageSpec", "k8s.io/apimachinery/pkg/runtime.RawExtension"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_CanarySpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "CanarySpec is a multi-step progressive rollout plan: a new revision is brought up at some pod capacity while a fraction of traffic shifts to it, advancing through steps.\n\nStep semantics:\n  - Each step specifies new-revision pod capacity (NewCapacity) independently\n    of traffic weight (TrafficWeight), so the new revision can run at higher\n    capacity than its traffic share before traffic shifts.\n  - The final step's TrafficWeight is 100 so the rollout completes.\n  - Each step's optional Pause holds the rollout (Manual: advance via\n    ome.io/rollout-promote; Auto: advance on Pause.Duration).",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"steps": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "atomic",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "Steps is the ordered list of rollout stages.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep"),
-									},
-								},
-							},
-						},
-					},
-					"promotionPolicy": {
-						SchemaProps: spec.SchemaProps{
-							Description: "PromotionPolicy controls how the rollout advances between paused steps.\n  - Manual: operator advances via the ome.io/rollout-promote annotation.\n  - Auto: controller advances based on each step's Pause.Duration.",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"scaleDownDelaySeconds": {
-						SchemaProps: spec.SchemaProps{
-							Description: "ScaleDownDelaySeconds is the wait between shifting traffic away from the old revision and scaling its pods down, to drain in-flight requests.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-				},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStep"},
 	}
 }
 
@@ -2727,6 +2683,92 @@ func schema_pkg_apis_ome_v1beta1_FineTunedWeightSpec(ref common.ReferenceCallbac
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_GroupBlueGreen(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "GroupBlueGreen surges the full new set alongside the old, waits for Ready, then flips traffic atomically. It is also the default progression a group falls back to when none of canary/blueGreen/rollingUpdate is set. It carries no traffic steps (the flip is all-or-nothing); surge sequencing across Components is the group-level Order field, not a blue-green-specific knob. Empty today, reserved for future blue-green-specific options (e.g. a pre-flip verification window).",
+				Type:        []string{"object"},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_GroupCanary(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "GroupCanary is the stepped progression: bring up new-revision capacity and shift service-level traffic through an ordered list of steps, gated by PromotionPolicy.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"steps": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Steps is the ordered progression of capacity + service-level traffic. The final step must reach 100% traffic for the rollout to complete.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroupStep"),
+									},
+								},
+							},
+						},
+					},
+					"promotion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Promotion controls how the rollout advances between paused steps.\n  - Manual: operator advances via the ome.io/rollout-promote annotation.\n  - Auto: the controller advances on each step's Pause.Duration.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"scaleDownDelaySeconds": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ScaleDownDelaySeconds is the wait between shifting traffic off the old revision and scaling its pods down, to drain in-flight requests.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroupStep"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_GroupRollingUpdate(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "GroupRollingUpdate replaces pods gradually, paced by the surge/unavailable budget. Mixed revisions are tolerated during the window.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"maxSurge": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxSurge is the maximum pods (fraction or absolute) above desired during the roll. Default 25%.",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+					"maxUnavailable": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxUnavailable is the maximum pods (fraction or absolute) that may be not-Ready at once during the roll. Default 25% (matches the Kubernetes Deployment convention; a default of 0 would deadlock single-replica rolls).",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_HPAAutoscaler(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -3379,7 +3421,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 					},
 					"rollout": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Rollout is the single home for rollout configuration on this InferenceService: cross-Component coordination (spec.rollout.coordination), plus a reserved, not-yet-implemented progressive-traffic canary plan (spec.rollout.canary).",
+							Description: "Rollout is the single home for rollout configuration on this InferenceService: an ordered list of rollout groups, each polymorphic in its progression (canary | blueGreen | rollingUpdate). Sequencing is the group list order; a group's Components roll together.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec"),
 						},
 					},
@@ -3550,7 +3592,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 					},
 					"rolloutCoordination": {
 						SchemaProps: spec.SchemaProps{
-							Description: "RolloutCoordination reports per-group cross-Component coordination state for the InferenceService. Populated only when spec.rolloutCoordination is declared. See RolloutCoordinationSpec.",
+							Description: "RolloutCoordination reports per-group cross-Component coordination state for the InferenceService. Populated only when spec.rollout declares blueGreen/rollingUpdate groups (canary groups report under status.canary instead).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus"),
 						},
 					},
@@ -4477,6 +4519,28 @@ func schema_pkg_apis_ome_v1beta1_LifecycleStatus(ref common.ReferenceCallback) c
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_MaintainRatio(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "MaintainRatio bounds how far a multi-Component group may drift from the cross-Component replica ratio observed at rollout start (e.g. prefill:decode).",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"tolerance": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Tolerance is the maximum percentage drift from the starting ratio. A roll step that would exceed it is paused until the pools rebalance. Default 5.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+				},
+				Required: []string{"tolerance"},
+			},
+		},
 	}
 }
 
@@ -6286,6 +6350,128 @@ func schema_pkg_apis_ome_v1beta1_RolloutCoordinationStatus(ref common.ReferenceC
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_RolloutGroup(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutGroup is a set of Components that roll together, advancing through at most one progression. The progression is a presence-based one-of: set Canary, BlueGreen, or RollingUpdate — or none, which defaults to BlueGreen. Omitting it is the ergonomic spelling for \"just roll this group\" and for a single-Component group in a sequence (`components: [decoder]` then `components: [engine]`), where the empty `blueGreen: {}` selector would be pure ceremony.\n\nFailure mode if mis-set: two progressions is ambiguous (which one drives traffic?) and is rejected by the rule below.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"components": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Components lists the Component names in this group (they roll together). Valid values: \"router\", \"engine\", \"decoder\".",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"order": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Order optionally pins the sequence in which this group's Components roll. It is honored today only when the group resolves to the internal Sequential path (a run of single-Component groups); on a multi-Component blueGreen, rollingUpdate, or canary group the Components currently advance together and Order is not yet applied as a surge sequence. Ignored on single-Component groups. Must reference only Components in this group.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"canary": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Canary advances the group through explicit capacity + service-level-traffic steps with optional gates. One-of progression.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupCanary"),
+						},
+					},
+					"blueGreen": {
+						SchemaProps: spec.SchemaProps{
+							Description: "BlueGreen surges the full new set, then flips traffic atomically. One-of progression.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupBlueGreen"),
+						},
+					},
+					"rollingUpdate": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RollingUpdate replaces pods gradually within the surge/unavailable budget, tolerating mixed revisions during the window. One-of progression.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupRollingUpdate"),
+						},
+					},
+					"soak": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Soak is the wait AFTER this group completes, before the next group begins. It is honored only when the rollout is a sequence of single-Component blueGreen groups (the run that collapses to the internal Sequential state machine); ignored on the last group. Admission rejects a soak the engine would silently drop — on a canary, multi-Component, or rollingUpdate group, or on a rollout that does not collapse to that sequence.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+					"maintainRatio": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaintainRatio guards the cross-Component replica ratio while this group rolls. Meaningful only on multi-Component blueGreen/rollingUpdate groups (e.g. a PD engine+decoder pair); ignored on single-Component groups and rejected by admission on canary groups (the canary engine does not enforce it).",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MaintainRatio"),
+						},
+					},
+				},
+				Required: []string{"components"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupBlueGreen", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupCanary", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.GroupRollingUpdate", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MaintainRatio", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RolloutGroupStep(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutGroupStep is one stage of a canary progression. Capacity and traffic are INDEPENDENT: capacity is the per-Component new-revision pod count; traffic is the service-level percentage of requests on the new revision. The independence allows \"capacity ahead of traffic\" (run 50% pods, send 10% traffic) for warm-up.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"capacity": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Capacity is the fraction of desired replicas to run on the new revision at this step. Percentage (\"25%\") or absolute (\"3\"). Per-Component.",
+							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
+						},
+					},
+					"traffic": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Traffic is the service-level percentage of requests routed to the new revision at this step (0-100). Not per-Component.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"pause": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Pause holds the rollout at this step. Absent advances immediately.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause"),
+						},
+					},
+				},
+				Required: []string{"capacity", "traffic"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_RolloutPause(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -6311,68 +6497,33 @@ func schema_pkg_apis_ome_v1beta1_RolloutSpec(ref common.ReferenceCallback) commo
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutSpec is the single rollout surface for an InferenceService.",
+				Description: "RolloutSpec is the single rollout surface for an InferenceService: an ordered list of rollout groups. There is no coordination-vs-canary fork — sequencing is the list order, and canary is one progression a group may choose.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"coordination": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Coordination declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently (the default).\n\nOnly meaningful when at least one referenced Component uses ome.io/deploymentMode=OMENative. The webhook rejects groups that reference non-OMENative Components.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec"),
+					"groups": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
 						},
-					},
-					"canary": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Canary is a step-based progressive-traffic-shift plan: a new revision is brought up at some pod capacity and a fraction of traffic shifts to it, advancing through steps. Executed by the canary controller; mutually exclusive with Coordination.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanarySpec"),
+							Description: "Groups is the ORDERED list of rollout groups. Sequence is the list position: group N reaches completion before group N+1 begins. Components listed together in one group roll together (a coupled unit); Components not listed in any group roll independently (the default). To roll Components one-at-a-time, put each in its own group, in order — a group needs only its components; the progression may be omitted and defaults to blueGreen.\n\nCross-group sequencing is currently enforced only for a run of single-Component blueGreen groups (the classic one-at-a-time shape); mixed progressions and multi-Component ordered groups roll concurrently on their disjoint Components today — the general group sequencer is a follow-on.\n\nOnly meaningful for OMENative-managed Components.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroup"),
+									},
+								},
+							},
 						},
 					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanarySpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationSpec"},
-	}
-}
-
-func schema_pkg_apis_ome_v1beta1_RolloutStep(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "RolloutStep specifies one stage of a progressive (canary) rollout.\n\nNewCapacity and TrafficWeight are independent dimensions. Common patterns:\n  - Symmetric canary: NewCapacity=10%, TrafficWeight=10\n  - Capacity ahead of traffic: NewCapacity=50%, TrafficWeight=10\n    (run more new pods than the traffic share, e.g. to warm up)\n  - Final cutover: NewCapacity=100%, TrafficWeight=100",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"newCapacity": {
-						SchemaProps: spec.SchemaProps{
-							Description: "NewCapacity is the fraction of desired replicas to run for the new revision at this step. Percentage (\"25%\") or absolute (\"3\").",
-							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
-						},
-					},
-					"oldCapacity": {
-						SchemaProps: spec.SchemaProps{
-							Description: "OldCapacity is reserved. In v1 the old revision always runs the complement of NewCapacity (100% - NewCapacity) via the StatefulSet-style partition, so the total pod count never exceeds desired replicas. An explicit OldCapacity must equal that complement; an independent old capacity or a surge above desired (e.g. NewCapacity=100%, OldCapacity=100%) is admission-rejected — capacity surge is not supported in v1.",
-							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
-						},
-					},
-					"trafficWeight": {
-						SchemaProps: spec.SchemaProps{
-							Description: "TrafficWeight is the percentage of traffic routed to the new revision at this step. The old revision receives (100 - TrafficWeight).",
-							Default:     0,
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
-					"pause": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Pause holds the rollout at this step. If absent, the controller advances immediately after the step's capacity, traffic, and drain operations.",
-							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause"),
-						},
-					},
-				},
-				Required: []string{"newCapacity", "trafficWeight"},
-			},
-		},
-		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroup"},
 	}
 }
 

@@ -14,21 +14,26 @@ import (
 func promPolicy(p v1beta1.PromotionPolicy) *v1beta1.PromotionPolicy { return &p }
 func i32(v int32) *int32                                            { return &v }
 
-func canaryISVC(steps []v1beta1.RolloutStep, policy *v1beta1.PromotionPolicy, scaleDownDelay *int32) *v1beta1.InferenceService {
+// canaryISVC builds an ISVC whose rollout canaries the single engine Component
+// (v2: one RolloutGroup with a canary progression over [engine]).
+func canaryISVC(steps []v1beta1.RolloutGroupStep, policy *v1beta1.PromotionPolicy, scaleDownDelay *int32) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc"},
-		Spec: v1beta1.InferenceServiceSpec{Rollout: &v1beta1.RolloutSpec{Canary: &v1beta1.CanarySpec{
-			Steps:                 steps,
-			PromotionPolicy:       policy,
-			ScaleDownDelaySeconds: scaleDownDelay,
-		}}},
+		Spec: v1beta1.InferenceServiceSpec{Rollout: &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+			Canary: &v1beta1.GroupCanary{
+				Steps:                 steps,
+				Promotion:             policy,
+				ScaleDownDelaySeconds: scaleDownDelay,
+			},
+		}}}},
 	}
 }
 
-func twoStep() []v1beta1.RolloutStep {
-	return []v1beta1.RolloutStep{
-		{NewCapacity: intstr.FromString("50%"), TrafficWeight: 50, Pause: &v1beta1.RolloutPause{}},
-		{NewCapacity: intstr.FromString("100%"), TrafficWeight: 100},
+func twoStep() []v1beta1.RolloutGroupStep {
+	return []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+		{Capacity: intstr.FromString("100%"), Traffic: 100},
 	}
 }
 
@@ -111,9 +116,9 @@ func TestReconcile_StalePromoteDoesNotAdvance(t *testing.T) {
 }
 
 func TestReconcile_AutoAdvance(t *testing.T) {
-	steps := []v1beta1.RolloutStep{
-		{NewCapacity: intstr.FromString("50%"), TrafficWeight: 50, Pause: &v1beta1.RolloutPause{Duration: &metav1.Duration{Duration: 30 * time.Minute}}},
-		{NewCapacity: intstr.FromString("100%"), TrafficWeight: 100},
+	steps := []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{Duration: &metav1.Duration{Duration: 30 * time.Minute}}},
+		{Capacity: intstr.FromString("100%"), Traffic: 100},
 	}
 	isvc := canaryISVC(steps, promPolicy(v1beta1.PromotionPolicyAuto), nil)
 	// The pause is anchored to when the split FIRST serves, not to step entry. Seed
@@ -142,7 +147,7 @@ func TestReconcile_AutoAdvance(t *testing.T) {
 }
 
 func TestReconcile_FinalStepCompletes(t *testing.T) {
-	isvc := canaryISVC([]v1beta1.RolloutStep{{NewCapacity: intstr.FromString("100%"), TrafficWeight: 100}}, nil, nil)
+	isvc := canaryISVC([]v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}}, nil, nil)
 	// Mid-rollout at the final step (canary already initialized): pods fully on
 	// the target, no drain delay → completes. Starting fresh with pods already
 	// converged is the "already done" case, not a completion (see
@@ -209,7 +214,7 @@ func TestReconcile_UnknownTargetNoStart(t *testing.T) {
 }
 
 func TestReconcile_FinalStepDrainWait(t *testing.T) {
-	isvc := canaryISVC([]v1beta1.RolloutStep{{NewCapacity: intstr.FromString("100%"), TrafficWeight: 100}}, nil, i32(60))
+	isvc := canaryISVC([]v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}}, nil, i32(60))
 	// StepEnteredTime here is the step-entry time; the drain window is anchored to
 	// the moment traffic shifts (the first capacity-met reconcile), NOT to this.
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, StepEnteredTime: &metav1.Time{Time: time.Unix(1000, 0)}}

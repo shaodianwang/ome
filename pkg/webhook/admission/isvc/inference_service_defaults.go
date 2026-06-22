@@ -6,7 +6,6 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -84,7 +83,8 @@ func DefaultInferenceService(ctx context.Context, c client.Client, isvc *v1beta1
 	if isvc.Spec.Router != nil {
 		defaultRouter(isvc.Spec.Router, isvc.Spec.DeploymentMode)
 	}
-	defaultRolloutCoordination(isvc.Spec.GetRolloutCoordination())
+	// Rollout pacing/structure defaults are applied at runtime by the resolve
+	// layer (coordination.ResolveGroups), not at admission — see OEP-0017.
 	return nil
 }
 
@@ -267,48 +267,6 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 	if spec.MigrationPolicy.ProgressDeadlineSeconds != nil && spec.MigrationPolicy.MaxAutoRetries == nil {
 		def := int32(3)
 		spec.MigrationPolicy.MaxAutoRetries = &def
-	}
-}
-
-// defaultRolloutCoordination fills in the documented pacing defaults
-// for every group that has a pacing block declared. Groups without a
-// pacing block keep their nil pacing — the runtime resolver supplies
-// the same defaults again so absence vs default-everything is
-// equivalent.
-//
-// Per-group defaults:
-//   - pacing.type:           PerComponent (when pacing is set without
-//     a type)
-//   - pacing.maxSurge:       "25%"
-//   - pacing.maxUnavailable: 0
-//   - pacing.ratioTolerancePercent: 5 (only for RatioBalanced)
-//
-// The defaulter never populates groups[]; coordination is opt-in via
-// explicit operator declaration.
-func defaultRolloutCoordination(spec *v1beta1.RolloutCoordinationSpec) {
-	if spec == nil {
-		return
-	}
-	for i := range spec.Groups {
-		g := &spec.Groups[i]
-		if g.Pacing == nil {
-			continue
-		}
-		if g.Pacing.Type == "" {
-			g.Pacing.Type = v1beta1.CoordinationPacingPerComponent
-		}
-		if g.Pacing.MaxSurge == nil {
-			ms := intstr.FromString("25%")
-			g.Pacing.MaxSurge = &ms
-		}
-		if g.Pacing.MaxUnavailable == nil {
-			mu := intstr.FromInt(0)
-			g.Pacing.MaxUnavailable = &mu
-		}
-		if g.Pacing.Type == v1beta1.CoordinationPacingRatioBalanced && g.Pacing.RatioTolerancePercent == nil {
-			tol := int32(5)
-			g.Pacing.RatioTolerancePercent = &tol
-		}
 	}
 }
 

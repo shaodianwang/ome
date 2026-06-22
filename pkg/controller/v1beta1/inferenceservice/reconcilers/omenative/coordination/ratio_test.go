@@ -266,15 +266,12 @@ func TestCheckRatioGate_NoCoordBlock(t *testing.T) {
 func TestCheckRatioGate_PerComponentPacingBypasses(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyBlueGreen,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type: v1beta1.CoordinationPacingPerComponent,
-					},
+					BlueGreen:  &v1beta1.GroupBlueGreen{},
 				}},
-			}},
+			},
 		},
 	}
 	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
@@ -289,16 +286,13 @@ func TestCheckRatioGate_FirstReconcileAllowed(t *testing.T) {
 	// next pass.
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyBlueGreen,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:                  v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerancePercent: int32Ptr(5),
-					},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 5},
 				}},
-			}},
+			},
 		},
 	}
 	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
@@ -397,18 +391,18 @@ func TestCheckRatioGate_PDScenarioWiderToleranceAllowsDrain(t *testing.T) {
 }
 
 func TestCheckRatioGate_SingleComponentGroupBypasses(t *testing.T) {
+	// A single-Component group has no peer to ratio-balance against, so the
+	// gate bypasses. (v2: single-Component groups can't carry MaintainRatio
+	// meaningfully — and rollingUpdate, the MaintainRatio carrier, requires
+	// 2+ Components — so a lone Component is a plain blueGreen group.)
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicyBlueGreen,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:                  v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerancePercent: int32Ptr(0),
-					},
+					BlueGreen:  &v1beta1.GroupBlueGreen{},
 				}},
-			}},
+			},
 		},
 	}
 	allowed, _ := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
@@ -421,15 +415,13 @@ func TestCheckRatioGate_ComponentNotInAnyGroup(t *testing.T) {
 	// router not in declared group → no gate, allowed.
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyBlueGreen,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type: v1beta1.CoordinationPacingRatioBalanced,
-					},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 5},
 				}},
-			}},
+			},
 		},
 	}
 	allowed, _ := CheckRatioGate(isvc, v1beta1.RouterComponent, 0)
@@ -451,16 +443,13 @@ func TestCheckRatioGate_InFlightProjectionTightensBand(t *testing.T) {
 	tol := int32(10)
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:                  v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerancePercent: &tol,
-					},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
 				}},
-			}},
+			},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
@@ -532,16 +521,13 @@ func TestCheckRatioGate_BlueGreenRatioBalancedDoesNotDeadlock(t *testing.T) {
 	tol := int32(25)
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyBlueGreen,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:                  v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerancePercent: &tol,
-					},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
 				}},
-			}},
+			},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
@@ -596,16 +582,13 @@ func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.
 	tol := int32(25)
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyBlueGreen,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:                  v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerancePercent: &tol,
-					},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
 				}},
-			}},
+			},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
@@ -655,19 +638,25 @@ func TestCheckRatioGate_BogusOnePerComponentAnchorReproducesDeadlock(t *testing.
 // mkPDFixture returns a coordinated ISVC with engine+decoder in one
 // RatioBalanced group + an ObservedRatio snapshot of 20:5 (4:1, decoder
 // = 25% of engine). Caller sets Status.Components.
+//
+// v2: cross-Component ratio guarding rides on MaintainRatio on a
+// multi-Component rollingUpdate group (resolveGroup only honors
+// MaintainRatio on rollingUpdate). A nil tolerance maps to the v1 default
+// of 5.
 func mkPDFixture(tolerance *int32) *v1beta1.InferenceService {
+	tol := int32(5)
+	if tolerance != nil {
+		tol = *tolerance
+	}
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyBlueGreen,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:                  v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerancePercent: tolerance,
-					},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
 				}},
-			}},
+			},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
@@ -711,11 +700,12 @@ func TestCheckUnavailabilityGate_NoCoordBlock(t *testing.T) {
 func TestCheckUnavailabilityGate_ComponentNotInAnyGroup(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+					BlueGreen:  &v1beta1.GroupBlueGreen{},
 				}},
-			}},
+			},
 		},
 	}
 	allowed, _ := CheckUnavailabilityGate(isvc, v1beta1.RouterComponent, 0)
@@ -875,21 +865,25 @@ func iosInt(v int) *intstr.IntOrString {
 }
 
 // mkUnavailFixture returns a coordinated ISVC with engine in one group
-// using PerComponent pacing + specified MaxUnavailable. Caller sets
+// carrying the specified MaxUnavailable budget. Caller sets
 // Status.Components.
+//
+// v2: the surge / unavailable budget rides on a rollingUpdate group (the
+// only v2 progression that carries MaxSurge / MaxUnavailable — blueGreen
+// drops them). The gate path reads the resolved pacing directly and does
+// not run ValidateGroupShape, so a single-Component rollingUpdate fixture
+// exercises the budget math (which is what these tests pin).
 func mkUnavailFixture(maxUnavail *intstr.IntOrString) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicyBlueGreen,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingPerComponent,
+					RollingUpdate: &v1beta1.GroupRollingUpdate{
 						MaxUnavailable: maxUnavail,
 					},
 				}},
-			}},
+			},
 		},
 	}
 }
@@ -900,21 +894,22 @@ func mkUnavailFixture(maxUnavail *intstr.IntOrString) *v1beta1.InferenceService 
 // than offline pods against the MaxUnavailable budget.
 // ----------------------------------------------------------------------
 
-// mkSurgeFixture is the surge analog of mkUnavailFixture: PerComponent
-// pacing + specified MaxSurge. Caller sets Status.Components.
+// mkSurgeFixture is the surge analog of mkUnavailFixture: a rollingUpdate
+// group carrying the specified MaxSurge budget. Caller sets
+// Status.Components. (v2: MaxSurge rides on rollingUpdate; see
+// mkUnavailFixture for why a single-Component rollingUpdate fixture is the
+// right gate-test shape.)
 func mkSurgeFixture(maxSurge *intstr.IntOrString) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
 					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicyBlueGreen,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:     v1beta1.CoordinationPacingPerComponent,
+					RollingUpdate: &v1beta1.GroupRollingUpdate{
 						MaxSurge: maxSurge,
 					},
 				}},
-			}},
+			},
 		},
 	}
 }
@@ -1055,16 +1050,13 @@ func TestCheckSurgeGate_PercentBudget(t *testing.T) {
 func mkSymmetricRatioFixture(tol int32) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:                  v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerancePercent: int32Ptr(tol),
-					},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
 				}},
-			}},
+			},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
@@ -1293,7 +1285,7 @@ func TestEvaluateSurge_DrainTiebreaker(t *testing.T) {
 func TestEvaluateUpdateGate_RecreatePodSymmetricCleared(t *testing.T) {
 	isvc := mkSymmetricRatioFixture(25)
 	mu := intstr.FromInt(3)
-	isvc.Spec.Rollout.Coordination.Groups[0].Pacing.MaxUnavailable = &mu
+	isvc.Spec.Rollout.Groups[0].RollingUpdate.MaxUnavailable = &mu
 
 	if allowed, reason := EvaluateUpdateGate(isvc, v1beta1.EngineComponent, nil,
 		workloadtypes.UpdateStrategyRecreatePod, 0, 0); !allowed {
@@ -1360,13 +1352,15 @@ func TestEvaluateSurge_DrainTiebreaker_InFlightOpBoundsAcrossWakeups(t *testing.
 // decoderSurgesInFlight controls how many decoder Instances are already on a
 // surge step (Surge/SurgeDrain) from a prior wake-up.
 func mkPDGroupSurge(pacingType v1beta1.CoordinationPacingType, decoderSurgesInFlight int) *v1beta1.InferenceService {
-	groupSurge := intstr.FromString("25%") // the webhook default when pacing.maxSurge is unset
-	pacing := &v1beta1.CoordinationPacing{
-		Type:     pacingType,
-		MaxSurge: &groupSurge,
+	groupSurge := intstr.FromString("25%") // the webhook default when maxSurge is unset
+	group := v1beta1.RolloutGroup{
+		Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		RollingUpdate: &v1beta1.GroupRollingUpdate{MaxSurge: &groupSurge},
 	}
+	// v2: RatioBalanced pacing is expressed as MaintainRatio on the
+	// rollingUpdate group; PerComponent is the absence of MaintainRatio.
 	if pacingType == v1beta1.CoordinationPacingRatioBalanced {
-		pacing.RatioTolerancePercent = int32Ptr(25)
+		group.MaintainRatio = &v1beta1.MaintainRatio{Tolerance: 25}
 	}
 
 	decoderInstances := make([]v1beta1.OMENativeInstanceStatus, 0, decoderSurgesInFlight)
@@ -1380,13 +1374,9 @@ func mkPDGroupSurge(pacingType v1beta1.CoordinationPacingType, decoderSurgesInFl
 
 	return &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
-			Rollout: &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
-					Pacing:     pacing,
-				}},
-			}},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{group},
+			},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{

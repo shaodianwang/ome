@@ -90,7 +90,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	groups := ResolveGroups(in.ISVC.Spec.GetRolloutCoordination())
+	groups := ResolveGroups(in.ISVC.Spec.Rollout)
 	result := &Result{}
 
 	// Bind a logger keyed to the ISVC so every downstream V(1)
@@ -113,8 +113,19 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// RolloutCoordinationReady condition, group events) remains
 	// opt-in — those only run when groups are declared.
 	componentsTouched := collectOMENativeComponents(in.ISVC)
+	// Drop Components owned by a canary group: canary.Dispatch is their
+	// authoritative per-revision Service + traffic producer (it sets the explicit
+	// step weight, decoupled from pod count). coordination runs unconditionally in
+	// v2, so without this its pod-proportional traffic writer would clobber the
+	// canary's weight every reconcile.
+	componentsTouched = dropCanaryOwned(componentsTouched, in.ISVC)
 	if len(componentsTouched) == 0 {
-		logger.V(1).Info("Reconcile entry; no OMENative Components on ISVC, nothing to coordinate")
+		// No coordination-owned Components (e.g. a canary-only ISVC): reconcile
+		// away any stale coordination status a prior rollout left behind, then
+		// stop — there is nothing to coordinate.
+		mergeAndPersistGroupStatuses(in.ISVC, nil)
+		ClearRolloutCoordinationReady(in.ISVC)
+		logger.V(1).Info("Reconcile entry; no coordination-owned OMENative Components on ISVC, nothing to coordinate")
 		return result, nil
 	}
 	logger.V(1).Info("Reconcile entry",
@@ -262,6 +273,10 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// have been observed at least once.
 	if len(result.GroupStatuses) > 0 {
 		SetRolloutCoordinationReady(in.ISVC, result.GroupStatuses, now)
+	} else {
+		// No coordination-style groups this pass — resolve any stale
+		// RolloutCoordinationReady the ISVC carried from a prior rollout.
+		ClearRolloutCoordinationReady(in.ISVC)
 	}
 
 	return result, nil
@@ -367,6 +382,31 @@ func podReadyAndServing(pod *corev1.Pod) bool {
 // updateTrafficStatus writes Status.Components.<c>.Traffic[] from
 // observed per-revision pod counts. Idempotent; no-op writes are
 // skipped to avoid bouncing the apiserver.
+// dropCanaryOwned removes Components driven by a canary group from comps. Those
+// Components belong to the canary engine (canary.Dispatch), which owns their
+// per-revision Services and traffic status; coordination must not touch them.
+func dropCanaryOwned(comps []v1beta1.ComponentType, isvc *v1beta1.InferenceService) []v1beta1.ComponentType {
+	owned := map[v1beta1.ComponentType]struct{}{}
+	for _, g := range isvc.Spec.GetRolloutGroups() {
+		if g.Canary == nil {
+			continue
+		}
+		for _, c := range g.Components {
+			owned[c] = struct{}{}
+		}
+	}
+	if len(owned) == 0 {
+		return comps
+	}
+	out := comps[:0]
+	for _, c := range comps {
+		if _, isCanary := owned[c]; !isCanary {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func updateTrafficStatus(isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, perRevisionPods map[v1beta1.ComponentType]map[string]int32) {
 	if isvc.Status.Components == nil {
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
@@ -850,6 +890,10 @@ func emitSequentialDeferredEvent(recorder record.EventRecorder, isvc *v1beta1.In
 // timestamps when the phase didn't change.
 func mergeAndPersistGroupStatuses(isvc *v1beta1.InferenceService, fresh []v1beta1.RolloutCoordinationGroupStatus) {
 	if len(fresh) == 0 {
+		// No coordination-style groups: reconcile the stale status away rather
+		// than leaving a prior rollout's group entry behind. Idempotent — this is
+		// already nil for an ISVC that never coordinated.
+		isvc.Status.RolloutCoordination = nil
 		return
 	}
 	merged := isvc.Status.RolloutCoordination

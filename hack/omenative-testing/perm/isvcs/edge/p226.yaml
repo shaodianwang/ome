@@ -1,4 +1,4 @@
-# p226: %-budget maxSurge=50% pd under ratio (decoder bumped, surges 1)  Ne=4 Nd=4 Nr=2 ceil_e=6 ceil_d=5 ceil_r=2 co=ratio topo=pd
+# p226: %-budget maxSurge=50% pd under ratio  Ne=4 Nd=4 Nr=2 ceil_e=6 ceil_d=4 ceil_r=2 co=ratio topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p226 }
@@ -21,8 +21,7 @@ spec:
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
-    coordination:
-      groups:
+    groups:
         - components: [engine, decoder]
-          policy: RollingUpdate
-          pacing: { type: "RatioBalanced", ratioTolerancePercent: 25 }
+          rollingUpdate: {}
+          maintainRatio: { tolerance: 25 }

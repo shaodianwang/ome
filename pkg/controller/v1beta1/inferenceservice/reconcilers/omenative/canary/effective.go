@@ -12,7 +12,7 @@ import "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 // spec→IR→plan→HeldByPartition path an operator-set partition takes. Returns
 // (nil, false) when no canary plan is set for the InferenceService.
 //
-//   - The current step's NewCapacity resolved against desired.
+//   - The current step's Capacity resolved against desired.
 //
 // Rollback (ome.io/rollout-rollback) is special-cased: when the status records
 // a rolled-back revision, this returns Partition 0 (hold nothing). Partition
@@ -22,10 +22,15 @@ import "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 // stable revision and rolls every instance back onto it). A non-zero partition
 // here would fight that revert, so it is forced to 0 for the duration.
 func EffectivePartition(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, desiredReplicas int32) (*int32, bool) {
-	plan := isvc.Spec.GetCanary()
-	if plan == nil || len(plan.Steps) == 0 {
+	g := isvc.Spec.GetCanaryGroup()
+	if g == nil || g.Canary == nil || len(g.Canary.Steps) == 0 {
 		return nil, false
 	}
+	// The canary partition applies only to the canary group's own Component(s).
+	if !groupHasComponent(g, component) {
+		return nil, false
+	}
+	plan := g.Canary
 	// Rolled back: hold NOTHING via partition (0). The component is driven back
 	// onto the stable revision by the IR's RollbackToRevision target, not by the
 	// partition; a non-zero partition here would fight that revert.
@@ -39,8 +44,8 @@ func EffectivePartition(isvc *v1beta1.InferenceService, component v1beta1.Compon
 	}
 	// Done sentinel (CurrentStep past the last step): the canary finished — hold
 	// NOTHING, the component runs entirely on the canary revision (partition 0).
-	// Don't clamp to the final step and recompute: if that step's NewCapacity were
-	// < 100% (admission allows it — only final TrafficWeight==100 is enforced),
+	// Don't clamp to the final step and recompute: if that step's Capacity were
+	// < 100% (admission allows it — only final Traffic==100 is enforced),
 	// the recompute would strand (desired-newCount) instances on the stable
 	// revision permanently after completion.
 	if int(idx) >= len(plan.Steps) {
@@ -79,4 +84,14 @@ func StampStepPartition(isvc *v1beta1.InferenceService, component v1beta1.Compon
 		ext.Lifecycle.UpdateStrategy.RollingUpdate = &v1beta1.RollingUpdate{}
 	}
 	ext.Lifecycle.UpdateStrategy.RollingUpdate.Partition = p
+}
+
+// groupHasComponent reports whether c is a member of the group.
+func groupHasComponent(g *v1beta1.RolloutGroup, c v1beta1.ComponentType) bool {
+	for _, gc := range g.Components {
+		if gc == c {
+			return true
+		}
+	}
+	return false
 }

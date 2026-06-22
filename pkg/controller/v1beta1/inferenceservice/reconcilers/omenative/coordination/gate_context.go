@@ -60,16 +60,16 @@ func ResolveGateContext(isvc *v1beta1.InferenceService, component v1beta1.Compon
 			ShortReason:  "nil ISVC",
 		}
 	}
-	coord := isvc.Spec.GetRolloutCoordination()
-	if coord == nil || len(coord.Groups) == 0 {
+	groups := ResolveGroups(isvc.Spec.Rollout)
+	if len(groups) == 0 {
 		return GateContext{
 			ISVC:         isvc,
 			Component:    component,
 			ShortCircuit: true,
-			ShortReason:  "no coordination block",
+			ShortReason:  "no coordination groups",
 		}
 	}
-	group, ok := MembershipFor(ResolveGroups(coord), component)
+	group, ok := MembershipFor(groups, component)
 	if !ok {
 		return GateContext{
 			ISVC:         isvc,

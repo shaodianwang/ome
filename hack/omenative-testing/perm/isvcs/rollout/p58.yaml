@@ -21,8 +21,10 @@ spec:
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
-    coordination:
-      groups:
-        - components: [router, decoder, engine]
-          policy: Sequential
-          order: [router, decoder, engine]
+    groups:
+        - components: [router]
+          blueGreen: {}
+        - components: [decoder]
+          blueGreen: {}
+        - components: [engine]
+          blueGreen: {}

@@ -194,30 +194,6 @@
         }
       }
     },
-    "v1beta1.CanarySpec": {
-      "description": "CanarySpec is a multi-step progressive rollout plan: a new revision is brought up at some pod capacity while a fraction of traffic shifts to it, advancing through steps.\n\nStep semantics:\n  - Each step specifies new-revision pod capacity (NewCapacity) independently\n    of traffic weight (TrafficWeight), so the new revision can run at higher\n    capacity than its traffic share before traffic shifts.\n  - The final step's TrafficWeight is 100 so the rollout completes.\n  - Each step's optional Pause holds the rollout (Manual: advance via\n    ome.io/rollout-promote; Auto: advance on Pause.Duration).",
-      "type": "object",
-      "properties": {
-        "promotionPolicy": {
-          "description": "PromotionPolicy controls how the rollout advances between paused steps.\n  - Manual: operator advances via the ome.io/rollout-promote annotation.\n  - Auto: controller advances based on each step's Pause.Duration.",
-          "type": "string"
-        },
-        "scaleDownDelaySeconds": {
-          "description": "ScaleDownDelaySeconds is the wait between shifting traffic away from the old revision and scaling its pods down, to drain in-flight requests.",
-          "type": "integer",
-          "format": "int32"
-        },
-        "steps": {
-          "description": "Steps is the ordered list of rollout stages.",
-          "type": "array",
-          "items": {
-            "default": {},
-            "$ref": "#/definitions/v1beta1.RolloutStep"
-          },
-          "x-kubernetes-list-type": "atomic"
-        }
-      }
-    },
     "v1beta1.CanaryStatus": {
       "description": "CanaryStatus tracks progress of a spec.rollout.canary rollout. It is the executor's persistent state machine: which step is active, when it was entered (Auto promotion measures Pause.Duration from here), and which revision is the canary. Absent when no canary is in progress.",
       "type": "object",
@@ -1511,6 +1487,48 @@
         }
       }
     },
+    "v1beta1.GroupBlueGreen": {
+      "description": "GroupBlueGreen surges the full new set alongside the old, waits for Ready, then flips traffic atomically. It is also the default progression a group falls back to when none of canary/blueGreen/rollingUpdate is set. It carries no traffic steps (the flip is all-or-nothing); surge sequencing across Components is the group-level Order field, not a blue-green-specific knob. Empty today, reserved for future blue-green-specific options (e.g. a pre-flip verification window).",
+      "type": "object"
+    },
+    "v1beta1.GroupCanary": {
+      "description": "GroupCanary is the stepped progression: bring up new-revision capacity and shift service-level traffic through an ordered list of steps, gated by PromotionPolicy.",
+      "type": "object",
+      "properties": {
+        "promotion": {
+          "description": "Promotion controls how the rollout advances between paused steps.\n  - Manual: operator advances via the ome.io/rollout-promote annotation.\n  - Auto: the controller advances on each step's Pause.Duration.",
+          "type": "string"
+        },
+        "scaleDownDelaySeconds": {
+          "description": "ScaleDownDelaySeconds is the wait between shifting traffic off the old revision and scaling its pods down, to drain in-flight requests.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "steps": {
+          "description": "Steps is the ordered progression of capacity + service-level traffic. The final step must reach 100% traffic for the rollout to complete.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.RolloutGroupStep"
+          },
+          "x-kubernetes-list-type": "atomic"
+        }
+      }
+    },
+    "v1beta1.GroupRollingUpdate": {
+      "description": "GroupRollingUpdate replaces pods gradually, paced by the surge/unavailable budget. Mixed revisions are tolerated during the window.",
+      "type": "object",
+      "properties": {
+        "maxSurge": {
+          "description": "MaxSurge is the maximum pods (fraction or absolute) above desired during the roll. Default 25%.",
+          "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
+        },
+        "maxUnavailable": {
+          "description": "MaxUnavailable is the maximum pods (fraction or absolute) that may be not-Ready at once during the roll. Default 25% (matches the Kubernetes Deployment convention; a default of 0 would deadlock single-replica rolls).",
+          "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
+        }
+      }
+    },
     "v1beta1.HPAAutoscaler": {
       "description": "HPAAutoscaler holds HorizontalPodAutoscaler configuration passed through verbatim. Alpha. The API may change without notice.",
       "type": "object",
@@ -1877,7 +1895,7 @@
           "$ref": "#/definitions/v1beta1.ModelRef"
         },
         "rollout": {
-          "description": "Rollout is the single home for rollout configuration on this InferenceService: cross-Component coordination (spec.rollout.coordination), plus a reserved, not-yet-implemented progressive-traffic canary plan (spec.rollout.canary).",
+          "description": "Rollout is the single home for rollout configuration on this InferenceService: an ordered list of rollout groups, each polymorphic in its progression (canary | blueGreen | rollingUpdate). Sequencing is the group list order; a group's Components roll together.",
           "$ref": "#/definitions/v1beta1.RolloutSpec"
         },
         "router": {
@@ -1976,7 +1994,7 @@
           "type": "string"
         },
         "rolloutCoordination": {
-          "description": "RolloutCoordination reports per-group cross-Component coordination state for the InferenceService. Populated only when spec.rolloutCoordination is declared. See RolloutCoordinationSpec.",
+          "description": "RolloutCoordination reports per-group cross-Component coordination state for the InferenceService. Populated only when spec.rollout declares blueGreen/rollingUpdate groups (canary groups report under status.canary instead).",
           "$ref": "#/definitions/v1beta1.RolloutCoordinationStatus"
         },
         "traffic": {
@@ -2524,6 +2542,21 @@
           "description": "UpdatedReplicas is the number of Instances on UpdateRevision.",
           "type": "integer",
           "format": "int32"
+        }
+      }
+    },
+    "v1beta1.MaintainRatio": {
+      "description": "MaintainRatio bounds how far a multi-Component group may drift from the cross-Component replica ratio observed at rollout start (e.g. prefill:decode).",
+      "type": "object",
+      "required": [
+        "tolerance"
+      ],
+      "properties": {
+        "tolerance": {
+          "description": "Tolerance is the maximum percentage drift from the starting ratio. A roll step that would exceed it is paused until the pools rebalance. Default 5.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
         }
       }
     },
@@ -3543,6 +3576,77 @@
         }
       }
     },
+    "v1beta1.RolloutGroup": {
+      "description": "RolloutGroup is a set of Components that roll together, advancing through at most one progression. The progression is a presence-based one-of: set Canary, BlueGreen, or RollingUpdate — or none, which defaults to BlueGreen. Omitting it is the ergonomic spelling for \"just roll this group\" and for a single-Component group in a sequence (`components: [decoder]` then `components: [engine]`), where the empty `blueGreen: {}` selector would be pure ceremony.\n\nFailure mode if mis-set: two progressions is ambiguous (which one drives traffic?) and is rejected by the rule below.",
+      "type": "object",
+      "required": [
+        "components"
+      ],
+      "properties": {
+        "blueGreen": {
+          "description": "BlueGreen surges the full new set, then flips traffic atomically. One-of progression.",
+          "$ref": "#/definitions/v1beta1.GroupBlueGreen"
+        },
+        "canary": {
+          "description": "Canary advances the group through explicit capacity + service-level-traffic steps with optional gates. One-of progression.",
+          "$ref": "#/definitions/v1beta1.GroupCanary"
+        },
+        "components": {
+          "description": "Components lists the Component names in this group (they roll together). Valid values: \"router\", \"engine\", \"decoder\".",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "maintainRatio": {
+          "description": "MaintainRatio guards the cross-Component replica ratio while this group rolls. Meaningful only on multi-Component blueGreen/rollingUpdate groups (e.g. a PD engine+decoder pair); ignored on single-Component groups and rejected by admission on canary groups (the canary engine does not enforce it).",
+          "$ref": "#/definitions/v1beta1.MaintainRatio"
+        },
+        "order": {
+          "description": "Order optionally pins the sequence in which this group's Components roll. It is honored today only when the group resolves to the internal Sequential path (a run of single-Component groups); on a multi-Component blueGreen, rollingUpdate, or canary group the Components currently advance together and Order is not yet applied as a surge sequence. Ignored on single-Component groups. Must reference only Components in this group.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "rollingUpdate": {
+          "description": "RollingUpdate replaces pods gradually within the surge/unavailable budget, tolerating mixed revisions during the window. One-of progression.",
+          "$ref": "#/definitions/v1beta1.GroupRollingUpdate"
+        },
+        "soak": {
+          "description": "Soak is the wait AFTER this group completes, before the next group begins. It is honored only when the rollout is a sequence of single-Component blueGreen groups (the run that collapses to the internal Sequential state machine); ignored on the last group. Admission rejects a soak the engine would silently drop — on a canary, multi-Component, or rollingUpdate group, or on a rollout that does not collapse to that sequence.",
+          "$ref": "#/definitions/v1.Duration"
+        }
+      }
+    },
+    "v1beta1.RolloutGroupStep": {
+      "description": "RolloutGroupStep is one stage of a canary progression. Capacity and traffic are INDEPENDENT: capacity is the per-Component new-revision pod count; traffic is the service-level percentage of requests on the new revision. The independence allows \"capacity ahead of traffic\" (run 50% pods, send 10% traffic) for warm-up.",
+      "type": "object",
+      "required": [
+        "capacity",
+        "traffic"
+      ],
+      "properties": {
+        "capacity": {
+          "description": "Capacity is the fraction of desired replicas to run on the new revision at this step. Percentage (\"25%\") or absolute (\"3\"). Per-Component.",
+          "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
+        },
+        "pause": {
+          "description": "Pause holds the rollout at this step. Absent advances immediately.",
+          "$ref": "#/definitions/v1beta1.RolloutPause"
+        },
+        "traffic": {
+          "description": "Traffic is the service-level percentage of requests routed to the new revision at this step (0-100). Not per-Component.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        }
+      }
+    },
     "v1beta1.RolloutPause": {
       "description": "RolloutPause holds a rollout at a step boundary.",
       "type": "object",
@@ -3554,44 +3658,17 @@
       }
     },
     "v1beta1.RolloutSpec": {
-      "description": "RolloutSpec is the single rollout surface for an InferenceService.",
+      "description": "RolloutSpec is the single rollout surface for an InferenceService: an ordered list of rollout groups. There is no coordination-vs-canary fork — sequencing is the list order, and canary is one progression a group may choose.",
       "type": "object",
       "properties": {
-        "canary": {
-          "description": "Canary is a step-based progressive-traffic-shift plan: a new revision is brought up at some pod capacity and a fraction of traffic shifts to it, advancing through steps. Executed by the canary controller; mutually exclusive with Coordination.",
-          "$ref": "#/definitions/v1beta1.CanarySpec"
-        },
-        "coordination": {
-          "description": "Coordination declares cross-Component rollout coupling for OMENative-managed Components. Each group lists the Components that roll together and the policy that governs their coordination. Components not listed in any group roll independently (the default).\n\nOnly meaningful when at least one referenced Component uses ome.io/deploymentMode=OMENative. The webhook rejects groups that reference non-OMENative Components.",
-          "$ref": "#/definitions/v1beta1.RolloutCoordinationSpec"
-        }
-      }
-    },
-    "v1beta1.RolloutStep": {
-      "description": "RolloutStep specifies one stage of a progressive (canary) rollout.\n\nNewCapacity and TrafficWeight are independent dimensions. Common patterns:\n  - Symmetric canary: NewCapacity=10%, TrafficWeight=10\n  - Capacity ahead of traffic: NewCapacity=50%, TrafficWeight=10\n    (run more new pods than the traffic share, e.g. to warm up)\n  - Final cutover: NewCapacity=100%, TrafficWeight=100",
-      "type": "object",
-      "required": [
-        "newCapacity",
-        "trafficWeight"
-      ],
-      "properties": {
-        "newCapacity": {
-          "description": "NewCapacity is the fraction of desired replicas to run for the new revision at this step. Percentage (\"25%\") or absolute (\"3\").",
-          "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
-        },
-        "oldCapacity": {
-          "description": "OldCapacity is reserved. In v1 the old revision always runs the complement of NewCapacity (100% - NewCapacity) via the StatefulSet-style partition, so the total pod count never exceeds desired replicas. An explicit OldCapacity must equal that complement; an independent old capacity or a surge above desired (e.g. NewCapacity=100%, OldCapacity=100%) is admission-rejected — capacity surge is not supported in v1.",
-          "$ref": "#/definitions/k8s.io.apimachinery.pkg.util.intstr.IntOrString"
-        },
-        "pause": {
-          "description": "Pause holds the rollout at this step. If absent, the controller advances immediately after the step's capacity, traffic, and drain operations.",
-          "$ref": "#/definitions/v1beta1.RolloutPause"
-        },
-        "trafficWeight": {
-          "description": "TrafficWeight is the percentage of traffic routed to the new revision at this step. The old revision receives (100 - TrafficWeight).",
-          "type": "integer",
-          "format": "int32",
-          "default": 0
+        "groups": {
+          "description": "Groups is the ORDERED list of rollout groups. Sequence is the list position: group N reaches completion before group N+1 begins. Components listed together in one group roll together (a coupled unit); Components not listed in any group roll independently (the default). To roll Components one-at-a-time, put each in its own group, in order — a group needs only its components; the progression may be omitted and defaults to blueGreen.\n\nCross-group sequencing is currently enforced only for a run of single-Component blueGreen groups (the classic one-at-a-time shape); mixed progressions and multi-Component ordered groups roll concurrently on their disjoint Components today — the general group sequencer is a follow-on.\n\nOnly meaningful for OMENative-managed Components.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.RolloutGroup"
+          },
+          "x-kubernetes-list-type": "atomic"
         }
       }
     },

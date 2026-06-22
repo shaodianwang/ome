@@ -21,7 +21,6 @@ spec:
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: RecreatePod, rollingUpdate: { maxSurge: 0, maxUnavailable: "100%" } } }
   rollout:
-    coordination:
-      groups:
+    groups:
         - components: [engine, decoder]
-          policy: BlueGreen
+          blueGreen: {}

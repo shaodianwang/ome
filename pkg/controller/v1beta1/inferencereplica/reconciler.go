@@ -219,8 +219,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// ISVCRenderHook overlays OME_<PEER>_ENDPOINT / _REVISION_ENDPOINT
 		// onto each rendered pod so PD components (engine <-> decoder) can
 		// address each other by stable DNS. It returns nil when the parent
-		// ISVC has no rolloutCoordination block, so single-component /
-		// non-coordinated boxes are unaffected. parent may be nil when the
+		// ISVC has no rollout groups, so single-component / non-rollout
+		// boxes are unaffected. parent may be nil when the
 		// parent ISVC is unresolved (foreground-GC window) — the hook handles
 		// nil by returning nil.
 		RenderHook: omenativecore.ISVCRenderHook(parent),

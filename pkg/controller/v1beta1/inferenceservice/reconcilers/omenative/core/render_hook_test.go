@@ -17,17 +17,38 @@ func coordinatedISVC() *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "prod"},
 		Spec: v1beta1.InferenceServiceSpec{
+			Engine:  &v1beta1.EngineSpec{},
+			Decoder: &v1beta1.DecoderSpec{},
 			Rollout: &v1beta1.RolloutSpec{
-				Coordination: &v1beta1.RolloutCoordinationSpec{
-					Groups: []v1beta1.RolloutCoordinationGroup{
-						{
-							Components: []v1beta1.ComponentType{
-								v1beta1.EngineComponent,
-								v1beta1.DecoderComponent,
-							},
-							Policy: v1beta1.CoordinationPolicyBlueGreen,
+				Groups: []v1beta1.RolloutGroup{
+					{
+						Components: []v1beta1.ComponentType{
+							v1beta1.EngineComponent,
+							v1beta1.DecoderComponent,
 						},
+						BlueGreen: &v1beta1.GroupBlueGreen{},
 					},
+				},
+			},
+		},
+	}
+}
+
+// decoupledISVC builds a PD ISVC whose engine and decoder are in SEPARATE
+// single-Component blueGreen groups — the v2 spelling of "roll engine, then
+// decoder, NOT as a coupled unit." They roll independently, but they are still
+// SERVING peers (a PD engine needs the decoder's address regardless of how the
+// rollout groups them), so peer-env must still be injected.
+func decoupledISVC() *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "prod"},
+		Spec: v1beta1.InferenceServiceSpec{
+			Engine:  &v1beta1.EngineSpec{},
+			Decoder: &v1beta1.DecoderSpec{},
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{
+					{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
+					{Components: []v1beta1.ComponentType{v1beta1.DecoderComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
 				},
 			},
 		},
@@ -57,8 +78,8 @@ func renderedPod(component v1beta1.ComponentType) *corev1.Pod {
 // regression test for the peer-env injection bug. The hook used to read
 // the component off the wrong label key ("ome.io/component" instead of
 // constants.OMEComponentLabel == "component"), so the recovered component
-// was always "", SortedPeers returned empty, and InjectPeerEnv was never
-// called. This drives a rendered engine pod through the live hook and
+// was always "", the peer lookup returned empty, and InjectPeerEnv was
+// never called. This drives a rendered engine pod through the live hook and
 // asserts the decoder peer endpoint env actually lands on every container.
 func TestISVCRenderHook_InjectsPeerEnvForCoordinatedComponent(t *testing.T) {
 	isvc := coordinatedISVC()
@@ -114,6 +135,25 @@ func TestISVCRenderHook_RevisionAgnosticWhenNoHash(t *testing.T) {
 	}
 	if containsEnvNamed(env, "OME_DECODER_REVISION_ENDPOINT") {
 		t.Error("revision endpoint should be omitted when the renderer supplies no revision hash")
+	}
+}
+
+// TestISVCRenderHook_SeparateGroupsStillServingPeers verifies that a PD pair
+// placed in SEPARATE rollout groups (rolled one-at-a-time) is STILL wired as
+// serving peers. Peer endpoints reflect serving topology — the ISVC's declared
+// Components — not rollout grouping, so the engine still gets the decoder's
+// endpoint regardless of how the rollout sequences them.
+func TestISVCRenderHook_SeparateGroupsStillServingPeers(t *testing.T) {
+	hook := ISVCRenderHook(decoupledISVC())
+	if hook == nil {
+		t.Fatal("hook nil for an ISVC with rollout groups")
+	}
+	pod := renderedPod(v1beta1.EngineComponent)
+	hook(pod, "runner-0", 0, "rev-abc123")
+	for _, ctr := range pod.Spec.Containers {
+		if got := envValue(ctr.Env, "OME_DECODER_ENDPOINT"); got != "llama-decoder.prod.svc.cluster.local" {
+			t.Errorf("container %q: OME_DECODER_ENDPOINT = %q, want the decoder serving peer (rollout grouping must not matter)", ctr.Name, got)
+		}
 	}
 }
 

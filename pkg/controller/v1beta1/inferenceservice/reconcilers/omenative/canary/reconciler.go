@@ -69,10 +69,11 @@ type Result struct {
 // performs capacity → traffic → pause, advancing on promotion; the final step
 // (TrafficWeight 100) drains and scales the stable revision down.
 func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
-	plan := in.ISVC.Spec.GetCanary()
-	if plan == nil || len(plan.Steps) == 0 {
+	g := in.ISVC.Spec.GetCanaryGroup()
+	if g == nil || g.Canary == nil || len(g.Canary.Steps) == 0 {
 		return &Result{Active: false}, nil
 	}
+	plan := g.Canary
 
 	cs := in.ISVC.Status.Canary
 
@@ -190,7 +191,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	}
 
 	// Capacity satisfied: program this step's external traffic weight.
-	applyTraffic(in.ISVC, in.Component, in.CanaryRevisionHash, in.StableRevisionHash, step.TrafficWeight)
+	applyTraffic(in.ISVC, in.Component, in.CanaryRevisionHash, in.StableRevisionHash, step.Traffic)
 
 	// Final step (TrafficWeight 100): drain the stable revision, then complete.
 	if int(cs.CurrentStep) == len(plan.Steps)-1 {
@@ -254,7 +255,7 @@ func reconcileRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus) *Result {
 
 // drainElapsed reports whether the ScaleDownDelaySeconds drain window has passed
 // since the final step was entered. A nil/zero delay completes immediately.
-func drainElapsed(cs *v1beta1.CanaryStatus, plan *v1beta1.CanarySpec, now time.Time) bool {
+func drainElapsed(cs *v1beta1.CanaryStatus, plan *v1beta1.GroupCanary, now time.Time) bool {
 	if plan.ScaleDownDelaySeconds == nil || *plan.ScaleDownDelaySeconds <= 0 {
 		return true
 	}

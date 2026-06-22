@@ -393,7 +393,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// RollingUpdate.Partition onto each merged Component before the Component
 	// reconcilers run, so the standard spec→IR→plan→HeldByPartition path holds
 	// the staged old/new split. The step machine + traffic run in Step 6a below.
-	if isvc.Spec.GetCanary() != nil {
+	if isvc.Spec.GetCanaryGroup() != nil {
 		if mergedEngine != nil {
 			canary.StampStepPartition(isvc, v1beta1.EngineComponent, &mergedEngine.ComponentExtensionSpec)
 		}
@@ -521,12 +521,16 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// any single Component reconciler so the ingress / traffic
 	// reconciliation downstream reads the freshest producer-side
 	// status.
-	if isvc.Spec.GetCanary() != nil {
-		// Canary owns the rollout for this ISVC (mutually exclusive with
-		// coordination, enforced at admission): observe per-revision pods,
-		// advance the step machine, and write Status.Components.<c>.Traffic +
-		// RolloutPhase. Per-Component capacity was stamped via
-		// StampStepPartition before the Component reconcilers ran.
+	// Rollout dispatch (v2 groups): a canary group drives the canary step machine;
+	// blueGreen/rollingUpdate groups drive the coordination engine. v2 groups
+	// partition the Components into disjoint sets, so both engines may run in one
+	// pass — each no-ops when its group type is absent (canary.Dispatch on no
+	// canary group; coordination.Reconcile on no coordination-style group). Both
+	// observe per-revision pods, ensure per-revision Services, and write
+	// Status.Components.<c>.Traffic + phase for their own Components. Cross-group
+	// ordering (the group sequencer) is a follow-on; today the groups run
+	// concurrently on their disjoint Components.
+	if isvc.Spec.GetCanaryGroup() != nil {
 		ra, err := canary.Dispatch(ctx, canary.DispatchDeps{
 			ISVC:     isvc,
 			Client:   r.Client,
@@ -540,7 +544,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if ra > pendingRequeue.RequeueAfter {
 			pendingRequeue.RequeueAfter = ra
 		}
-	} else if _, err := coordination.Reconcile(ctx, coordination.ReconcileInputs{
+	}
+	if _, err := coordination.Reconcile(ctx, coordination.ReconcileInputs{
 		ISVC:     isvc,
 		Client:   r.Client,
 		Reader:   r.APIReader,

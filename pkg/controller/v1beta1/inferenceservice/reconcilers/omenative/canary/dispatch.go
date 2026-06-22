@@ -19,7 +19,8 @@ import (
 
 // DispatchDeps is the controller-side input to the canary executor, mirroring
 // coordination.ReconcileInputs. The controller calls Dispatch once per reconcile
-// when spec.rollout.canary is set (mutually exclusive with coordination).
+// when a canary group is set (spec.rollout.groups[].canary); coordination runs in
+// the same pass on the non-canary Components.
 type DispatchDeps struct {
 	Client   client.Client
 	Reader   client.Reader
@@ -37,7 +38,7 @@ type DispatchDeps struct {
 //
 // No-op (requeue 0) when no canary plan is set.
 func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
-	if d.ISVC.Spec.GetCanary() == nil {
+	if d.ISVC.Spec.GetCanaryGroup() == nil {
 		return 0, nil
 	}
 	primary := primaryComponent(d.ISVC)
@@ -58,22 +59,26 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 
 	canaryHash := canaryTargetHash(ctx, d.Reader, d.ISVC, primary)
 
-	// Ensure the per-revision Services the canary's traffic status references for
-	// the primary, then GC orphans. The canary path skips coordination (the usual
-	// producer), so without this the status traffic weights point at Service names
-	// that are never created; the downstream weighted-route consumer targets these
-	// Services. Mirrors coordination's ensure+GC loop.
-	multiPod := isvcutils.IsMultiPodComponent(d.ISVC, primary)
-	for hash := range pods {
-		if hash == "" {
-			continue
+	// Ensure the per-revision Services the canary references, for EVERY Component
+	// in the canary group — not just the primary. The downstream weighted-route
+	// consumer and the peer-discovery revision endpoints (OME_<PEER>_REVISION_ENDPOINT)
+	// reference these by name, and coordination skips canary-owned Components, so
+	// the canary engine is their sole producer; ensuring only the primary's left a
+	// secondary's revision endpoint dangling. Mirrors coordination's per-Component
+	// ensure+GC loop.
+	for _, comp := range configuredComponents(d.ISVC) {
+		multiPod := isvcutils.IsMultiPodComponent(d.ISVC, comp)
+		for hash := range perRev[comp] {
+			if hash == "" {
+				continue
+			}
+			if _, err := coordination.EnsurePerRevisionServices(ctx, d.Client, d.ISVC, comp, hash, multiPod); err != nil {
+				return 0, err
+			}
 		}
-		if _, err := coordination.EnsurePerRevisionServices(ctx, d.Client, d.ISVC, primary, hash, multiPod); err != nil {
+		if err := coordination.GCOrphanedPerRevisionServices(ctx, d.Client, d.ISVC, comp, perRev[comp]); err != nil {
 			return 0, err
 		}
-	}
-	if err := coordination.GCOrphanedPerRevisionServices(ctx, d.Client, d.ISVC, primary, pods); err != nil {
-		return 0, err
 	}
 
 	now := d.Now
@@ -144,22 +149,17 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 	return c.Update(ctx, ir)
 }
 
-// configuredComponents lists every present Component in primary order
-// (router > engine > decoder). The canary stages capacity on all of them, so the
-// capacity gate observes all of them even though the step machine and traffic are
-// driven through the primary.
+// configuredComponents lists the Components the canary operates on — the canary
+// group's own Components. The step machine + traffic run through the primary
+// (router>engine>decoder); the capacity gate observes EVERY Component in the
+// group, so a PD pair stages capacity on engine+decoder together before traffic
+// shifts (the secondaryCapacityReady gate).
 func configuredComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentType {
-	var out []v1beta1.ComponentType
-	if isvc.Spec.Router != nil {
-		out = append(out, v1beta1.RouterComponent)
+	g := isvc.Spec.GetCanaryGroup()
+	if g == nil {
+		return nil
 	}
-	if isvc.Spec.Engine != nil {
-		out = append(out, v1beta1.EngineComponent)
-	}
-	if isvc.Spec.Decoder != nil {
-		out = append(out, v1beta1.DecoderComponent)
-	}
-	return out
+	return g.Components
 }
 
 // secondaryCapacityReady reports whether every NON-primary Component's canary
@@ -172,10 +172,11 @@ func configuredComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentTyp
 // readyPerRev must be the READY (serving) per-revision counts — not total — so a
 // secondary's pods that merely exist don't satisfy the gate prematurely.
 func secondaryCapacityReady(isvc *v1beta1.InferenceService, readyPerRev map[v1beta1.ComponentType]map[string]int32, canaryHash string, primary v1beta1.ComponentType) bool {
-	plan := isvc.Spec.GetCanary()
-	if plan == nil || len(plan.Steps) == 0 || canaryHash == "" {
+	g := isvc.Spec.GetCanaryGroup()
+	if g == nil || g.Canary == nil || len(g.Canary.Steps) == 0 || canaryHash == "" {
 		return true
 	}
+	plan := g.Canary
 	idx := int32(0)
 	if isvc.Status.Canary != nil {
 		idx = isvc.Status.Canary.CurrentStep
@@ -221,18 +222,21 @@ func canaryTargetHash(ctx context.Context, reads client.Reader, isvc *v1beta1.In
 	return coordination.LatestRevisionHash(isvc, c)
 }
 
-// primaryComponent is the externally-routed Component the canary drives its step
-// machine + traffic weight through: router (PD) > engine > decoder.
+// primaryComponent is the externally-routed Component the canary group drives its
+// step machine + traffic weight through: router > engine > decoder, among the
+// group's Components. Secondary Components (a PD pair's engine/decoder) stage
+// capacity and gate the step but don't carry the external traffic weight.
 func primaryComponent(isvc *v1beta1.InferenceService) v1beta1.ComponentType {
-	switch {
-	case isvc.Spec.Router != nil:
-		return v1beta1.RouterComponent
-	case isvc.Spec.Engine != nil:
-		return v1beta1.EngineComponent
-	case isvc.Spec.Decoder != nil:
-		return v1beta1.DecoderComponent
+	g := isvc.Spec.GetCanaryGroup()
+	if g == nil || len(g.Components) == 0 {
+		return ""
 	}
-	return ""
+	for _, c := range []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent} {
+		if groupHasComponent(g, c) {
+			return c
+		}
+	}
+	return g.Components[0]
 }
 
 // componentReplicas is the steady replica count for a Component (MinReplicas,

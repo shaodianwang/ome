@@ -24,7 +24,7 @@ func shouldAdvanceManual(isvc *v1beta1.InferenceService, canaryHash string) bool
 // shouldAdvanceAuto reports whether a paused step's Pause.Duration has elapsed
 // since the step was entered. A step with no Pause, or a Pause with no Duration,
 // advances immediately.
-func shouldAdvanceAuto(cs *v1beta1.CanaryStatus, step v1beta1.RolloutStep, now time.Time) bool {
+func shouldAdvanceAuto(cs *v1beta1.CanaryStatus, step v1beta1.RolloutGroupStep, now time.Time) bool {
 	if step.Pause == nil || step.Pause.Duration == nil {
 		return true
 	}
@@ -38,8 +38,8 @@ func shouldAdvanceAuto(cs *v1beta1.CanaryStatus, step v1beta1.RolloutStep, now t
 // promotion policy (Manual = promote annotation; Auto = timed). Defaults to
 // Manual when unset (the validator requires a policy when any step pauses, so
 // this is a safety default).
-func shouldAdvance(isvc *v1beta1.InferenceService, plan *v1beta1.CanarySpec, cs *v1beta1.CanaryStatus, step v1beta1.RolloutStep, now time.Time) bool {
-	if plan.PromotionPolicy != nil && *plan.PromotionPolicy == v1beta1.PromotionPolicyAuto {
+func shouldAdvance(isvc *v1beta1.InferenceService, plan *v1beta1.GroupCanary, cs *v1beta1.CanaryStatus, step v1beta1.RolloutGroupStep, now time.Time) bool {
+	if plan.Promotion != nil && *plan.Promotion == v1beta1.PromotionPolicyAuto {
 		return shouldAdvanceAuto(cs, step, now)
 	}
 	return shouldAdvanceManual(isvc, cs.CanaryRevisionHash)

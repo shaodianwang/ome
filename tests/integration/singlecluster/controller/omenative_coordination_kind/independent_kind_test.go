@@ -27,7 +27,15 @@ var _ = ginkgo.Describe("behavior — Independent coordination", ginkgo.Ordered,
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("Independent steady-state Idle; bump only walks Idle/Shifting", func() {
+	// OEP-0017: the Independent coordination policy has no v2 equivalent — a
+	// Component in no rollout group rolls independently, and the controller no
+	// longer populates status.rolloutCoordination for it. This spec is built
+	// entirely around an Independent GROUP that surfaces a non-nil
+	// status.rolloutCoordination with a Groups[0].Phase to inspect, which is
+	// the exact contract OEP-0017 removed. Skipped pending a rewrite that
+	// asserts independent-rollout behavior via per-Component status (Lifecycle
+	// phases) instead of the removed coordination-group status surface.
+	ginkgo.PIt("Independent steady-state Idle; bump only walks Idle/Shifting", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("indep-d4"),
 			WithCoordinationGroup(v1beta1.RolloutCoordinationGroup{

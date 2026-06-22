@@ -21,8 +21,10 @@ spec:
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
-    canary:
-      promotionPolicy: Manual
-      steps:
-        - { newCapacity: "50%", trafficWeight: 50, pause: {  } }
-        - { newCapacity: "100%", trafficWeight: 100 }
+    groups:
+        - components: [engine, decoder, router]
+          canary:
+            promotion: Manual
+            steps:
+              - { capacity: "50%", traffic: 50, pause: {  } }
+              - { capacity: "100%", traffic: 100 }

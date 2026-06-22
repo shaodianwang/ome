@@ -9,7 +9,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
+	"knative.dev/pkg/apis"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -50,7 +52,7 @@ func TestReconcile_NoOpForNonOMENativeISVC(t *testing.T) {
 
 func TestReconcile_EmitsPerRevisionServiceForOMENativeComponent(t *testing.T) {
 	isvc := testOMENativeISVC()
-	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: independentEngineGroup()}
+	isvc.Spec.Rollout = singleEngineGroup()
 	pods := []runtime.Object{
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 1),
@@ -109,7 +111,7 @@ func TestReconcile_DataPlaneRunsWithoutCoordinationGroup(t *testing.T) {
 
 func TestReconcile_WritesTrafficStatus(t *testing.T) {
 	isvc := testOMENativeISVC()
-	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: independentEngineGroup()}
+	isvc.Spec.Rollout = singleEngineGroup()
 	pods := []runtime.Object{
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 1),
@@ -147,6 +149,57 @@ func TestReconcile_WritesTrafficStatus(t *testing.T) {
 // flag as cosmetic, so an early reconcile that wrote LatestRevision=false
 // (UpdateRevision not yet observed from the IR Status) stranded the
 // stale value even after the rollout converged.
+func TestReconcile_DoesNotClobberCanaryTraffic(t *testing.T) {
+	isvc := testOMENativeISVC()
+	// Canary owns the engine; canary.Dispatch is the authoritative traffic
+	// producer for it (it sets the explicit step weight, decoupled from pod
+	// count). coordination.Reconcile runs unconditionally in v2 — it must NOT
+	// recompute the engine's traffic from pod proportions and clobber that weight.
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+					{Capacity: intstr.FromString("50%"), Traffic: 10},
+					{Capacity: intstr.FromString("100%"), Traffic: 100},
+				}},
+			},
+		},
+	}
+	// Canary set an explicit 10/90 split (the step weight), independent of pods.
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {Traffic: []v1beta1.ComponentTrafficTarget{
+			{RevisionName: "llama-engine-rev-canaryhash", Percent: 10},
+			{RevisionName: "llama-engine-rev-stablehash", Percent: 90},
+		}},
+	}
+	// Pods are 50/50 across the two revisions, so coordination's pod-proportional
+	// recompute (50/50) differs from the canary's 10/90 and would clobber it.
+	pods := []runtime.Object{
+		buildPod(isvc, v1beta1.EngineComponent, "canaryhash", 0),
+		buildPod(isvc, v1beta1.EngineComponent, "stablehash", 1),
+	}
+	c := testClient(pods...)
+	if _, err := Reconcile(context.Background(), ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now()}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := isvc.Status.Components[v1beta1.EngineComponent].Traffic
+	for _, target := range got {
+		var want int32
+		switch target.RevisionName {
+		case "llama-engine-rev-canaryhash":
+			want = 10
+		case "llama-engine-rev-stablehash":
+			want = 90
+		default:
+			t.Fatalf("coordination clobbered canary traffic with revision %q", target.RevisionName)
+		}
+		if target.Percent != want {
+			t.Errorf("%s: got %d%% want %d%% — coordination clobbered the canary step weight", target.RevisionName, target.Percent, want)
+		}
+	}
+}
+
 func TestReconcile_TrafficLatestRevisionIdenticalShapeAcrossComponents(t *testing.T) {
 	isvc := testOMENativeISVC()
 	// Add decoder + router as OMENative-mode Components.
@@ -270,15 +323,16 @@ func TestReconcile_TrafficLatestRevisionFlipPersists(t *testing.T) {
 	}
 }
 
-// independentEngineGroup returns a minimal RolloutCoordinationSpec
-// that opts the engine Component into the coordination layer without
-// changing rollout semantics (Independent matches today's defaults).
-func independentEngineGroup() *v1beta1.RolloutCoordinationSpec {
-	return &v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{
+// singleEngineGroup returns a minimal RolloutSpec that opts the engine
+// Component into a rollout group. (v1's Independent policy is gone in v2;
+// a lone single-Component blueGreen group is the minimal opt-in that
+// keeps the per-revision data plane + group status writing exercised.)
+func singleEngineGroup() *v1beta1.RolloutSpec {
+	return &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
 			{
 				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-				Policy:     v1beta1.CoordinationPolicyIndependent,
+				BlueGreen:  &v1beta1.GroupBlueGreen{},
 			},
 		},
 	}
@@ -286,11 +340,11 @@ func independentEngineGroup() *v1beta1.RolloutCoordinationSpec {
 
 func TestReconcile_WritesGroupStatus(t *testing.T) {
 	isvc := testOMENativeISVC()
-	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{
-			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyIndependent},
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, BlueGreen: &v1beta1.GroupBlueGreen{}},
 		},
-	}}
+	}
 	pods := []runtime.Object{buildPod(isvc, v1beta1.EngineComponent, "hash1", 0)}
 	c := testClient(pods...)
 	if _, err := Reconcile(context.Background(), ReconcileInputs{
@@ -315,22 +369,70 @@ func TestReconcile_WritesGroupStatus(t *testing.T) {
 
 func TestReconcile_InvalidGroupShapeErrors(t *testing.T) {
 	isvc := testOMENativeISVC()
-	// Sequential without order — Should be caught by webhook in
-	// production, but ValidateGroupShape is the runtime safety net.
-	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{
+	// A rollingUpdate group with maxSurge=0 AND maxUnavailable=0 is shape-invalid:
+	// no surge headroom and no drain headroom, so the roll can never make
+	// progress. The webhook rejects it in production; ValidateGroupShape is the
+	// runtime safety net the reconciler runs in case an object bypassed admission.
+	// (Single-Component rollingUpdate is NOT invalid in v2 — it's a valid
+	// progression; only the deadlock-budget shape is rejected here. v1's
+	// "Sequential without order" is likewise no longer expressible: Sequential is
+	// a run of single-Component blueGreen groups the controller collapses with a
+	// derived Order, so it can never be order-less.)
+	zero := intstr.FromInt(0)
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
 			{
-				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-				Policy:     v1beta1.CoordinationPolicySequential,
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				RollingUpdate: &v1beta1.GroupRollingUpdate{
+					MaxSurge:       &zero,
+					MaxUnavailable: &zero,
+				},
 			},
 		},
-	}}
+	}
 	c := testClient()
 	_, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
 	})
 	if err == nil {
-		t.Errorf("Sequential without order: want error")
+		t.Errorf("zero-budget pacing: want error")
+	}
+}
+
+func TestReconcile_ClearsStaleCoordinationStatusWhenGroupsGone(t *testing.T) {
+	isvc := testOMENativeISVC()
+	// Pre-seed status as if a prior blueGreen rollout ran and is mid-flight.
+	isvc.Status.RolloutCoordination = &v1beta1.RolloutCoordinationStatus{
+		Groups: []v1beta1.RolloutCoordinationGroupStatus{
+			{Name: "0", Policy: v1beta1.CoordinationPolicyBlueGreen, Phase: v1beta1.CoordinationPhaseSurging},
+		},
+	}
+	isvc.Status.SetCondition(apis.ConditionType(v1beta1.RolloutCoordinationReady), &apis.Condition{
+		Type:   apis.ConditionType(v1beta1.RolloutCoordinationReady),
+		Status: corev1.ConditionFalse,
+		Reason: "InProgress",
+	})
+	// The ISVC now has NO coordination-style group (switched to canary-only).
+	// coordination.Reconcile still runs (unconditional in v2) but ResolveGroups
+	// returns empty — it must reconcile the stale status away, not leave it.
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{
+			{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Canary:     &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}}},
+			},
+		},
+	}
+	c := testClient()
+	if _, err := Reconcile(context.Background(), ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now()}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if isvc.Status.RolloutCoordination != nil {
+		t.Errorf("stale RolloutCoordination not cleared: %+v", isvc.Status.RolloutCoordination)
+	}
+	cond := isvc.Status.GetCondition(apis.ConditionType(v1beta1.RolloutCoordinationReady))
+	if cond == nil || cond.Status != corev1.ConditionTrue {
+		t.Errorf("RolloutCoordinationReady should be resolved to True, got %+v", cond)
 	}
 }
 
@@ -457,12 +559,12 @@ func TestReconcile_ConsiderCoordinationGroupEventNotFiredWhenGroupDeclared(t *te
 			},
 		},
 	}
-	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Coordination: &v1beta1.RolloutCoordinationSpec{
-		Groups: []v1beta1.RolloutCoordinationGroup{{
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{
+		Groups: []v1beta1.RolloutGroup{{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-			Policy:     v1beta1.CoordinationPolicyBlueGreen,
+			BlueGreen:  &v1beta1.GroupBlueGreen{},
 		}},
-	}}
+	}
 	rec := record.NewFakeRecorder(10)
 	c := testClient()
 	_, err := Reconcile(context.Background(), ReconcileInputs{

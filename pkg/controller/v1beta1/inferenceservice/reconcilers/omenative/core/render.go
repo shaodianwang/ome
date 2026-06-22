@@ -62,10 +62,10 @@ func isvcRenderKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentTy
 }
 
 // ISVCRenderHook returns the workload.RenderHook the ISVC adapter
-// wires onto every Render call: coordination.InjectPeerEnv so
-// OME_<PEER>_ENDPOINT vars land on every container when the ISVC
-// has a rolloutCoordination block. Returns nil when the ISVC has no
-// coordination block (renderer skips the no-op call).
+// wires onto every Render call: coordination.InjectPeerEnv so the
+// OME_<PEER>_ENDPOINT serving-topology vars land on every container when
+// the ISVC declares a rollout. Returns nil when the ISVC has no rollout
+// groups (renderer skips the no-op call).
 //
 // Exposed for callers (e.g. the omenative ops dispatch shim) that
 // construct workload.Deps directly rather than going through the
@@ -81,18 +81,21 @@ func isvcRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
 	if isvc == nil {
 		return nil
 	}
-	coord := isvc.Spec.GetRolloutCoordination()
-	if coord == nil {
+	// Peer-env applies whenever the ISVC declares a rollout (any groups); skip
+	// the hook otherwise. Membership is serving topology (below), not grouping.
+	if isvc.Spec.Rollout == nil || len(isvc.Spec.Rollout.Groups) == 0 {
 		return nil
 	}
 	return func(pod *corev1.Pod, _ string, _ int32, revisionHash string) {
-		groups := coordination.ResolveGroups(coord)
 		// component is recoverable from the pod's component label
 		// (constants.OMEComponentLabel, whose value is "component" — NOT
 		// "ome.io/component"; the latter never matches the stamped key and
 		// silently yields no peers, suppressing injection entirely).
 		c := v1beta1.ComponentType(pod.Labels[constants.OMEComponentLabel])
-		peers := coordination.SortedPeers(groups, c, nil)
+		// Peers reflect SERVING topology (the ISVC's declared Components), not
+		// rollout grouping — a PD engine needs the decoder's address regardless of
+		// whether the rollout groups them together, separately, or via canary.
+		peers := coordination.ServingPeers(isvc, c)
 		if len(peers) == 0 {
 			return
 		}

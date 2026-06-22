@@ -46,13 +46,6 @@ const (
 	// guard in case the API surface evolves.
 	ReasonLeaderSizeMustBeOne = "LeaderSizeMustBeOne"
 
-	// ReasonSequentialMultiPodRequiresOrder rejects Sequential
-	// coordination groups containing a multi-pod Component without an
-	// Order pin. Order is REQUIRED for Sequential semantics per
-	// OEP-0007.1, but easy to forget for multi-pod variants where the
-	// operator might assume the controller picks an order.
-	ReasonSequentialMultiPodRequiresOrder = "SequentialMultiPodRequiresOrder"
-
 	// ReasonMultiPodLeanModelNeedsRunner rejects lean (no spec.model,
 	// no spec.runtime) ISVCs that declare a multi-pod Component
 	// without populating both leader.runner.image and
@@ -61,18 +54,6 @@ const (
 	// (no runtime) or model parsing (no model), so the operator must
 	// supply images explicitly.
 	ReasonMultiPodLeanModelNeedsRunner = "MultiPodLeanModelNeedsRunner"
-
-	// ReasonSequentialIncompatibleWithRatioBalanced rejects Sequential
-	// coordination groups that also declare RatioBalanced pacing. The
-	// two concepts are mutually exclusive: Sequential serializes the
-	// rollout so only one Component is in flight at a time, leaving the
-	// cross-Component ratio that RatioBalanced is supposed to enforce
-	// undefined. The runtime ValidateGroupShape catches it as a safety
-	// net (see pkg/.../coordination/groups.go:251), this webhook reason
-	// surfaces the conflict at admission so operators don't get silent
-	// pacing downgrades after the object lands. Reproduces W-1 in
-	// .claude/specs/2026-05-25-real-cluster-tests/README.md.
-	ReasonSequentialIncompatibleWithRatioBalanced = "SequentialIncompatibleWithRatioBalanced"
 
 	// ReasonZeroBudgetPacingUnstartable rejects PerComponent pacing
 	// blocks that set BOTH maxSurge=0 AND maxUnavailable=0. With both
@@ -192,51 +173,6 @@ func validateLeaderSize(component string, spec interface{}) error {
 	return nil
 }
 
-// ValidateSequentialMultiPodOrder enforces that any Sequential
-// coordination group containing a multi-pod Component declares an
-// explicit Order over its Components. OEP-0007.1 already mandates
-// Order for Sequential groups (covered by validateSequentialGroup in
-// coordination.go), but this validator adds a louder reason for the
-// multi-pod variant where the controller's gang semantics make the
-// missing Order especially dangerous: without it, the rollout would
-// have no deterministic boundary between gang rollouts.
-//
-// This is layered on top of (not in place of) the existing
-// SequentialRequiresOrder check — the latter already rejects the
-// missing-Order case; this validator surfaces the multi-pod-specific
-// reason so operators see the relevant OEP context in the error.
-//
-// Returns nil when:
-//   - spec.rollout.coordination is absent or has no groups
-//   - no Sequential group contains a multi-pod Component
-//   - every multi-pod-containing Sequential group has Order set
-func ValidateSequentialMultiPodOrder(spec *v1beta1.InferenceServiceSpec) error {
-	coord := spec.GetRolloutCoordination()
-	if coord == nil {
-		return nil
-	}
-	multiPod := multiPodComponents(spec)
-	for i, g := range coord.Groups {
-		if g.Policy != v1beta1.CoordinationPolicySequential {
-			continue
-		}
-		if len(g.Order) > 0 {
-			continue
-		}
-		// Sequential with no Order — flag if any member Component is multi-pod.
-		for _, c := range g.Components {
-			if _, ok := multiPod[c]; !ok {
-				continue
-			}
-			return fmt.Errorf(
-				"spec.rollout.coordination.groups[%d]: Sequential policy with multi-pod component %q requires explicit Order; the controller has no default gang-rollout sequencing for multi-pod components (%s)",
-				i, c, ReasonSequentialMultiPodRequiresOrder,
-			)
-		}
-	}
-	return nil
-}
-
 // ValidateMultiPodLeanRunner enforces that a lean (no spec.model AND
 // no spec.runtime) InferenceService declaring a multi-pod Component
 // (Engine or Decoder) populates both leader.runner.image and
@@ -328,25 +264,6 @@ func decoderWorker(d *v1beta1.DecoderSpec) *v1beta1.WorkerSpec {
 		return nil
 	}
 	return d.Worker
-}
-
-// multiPodComponents returns the set of Components declared as multi-pod
-// (leader + worker with worker.size > 0). Mirrors the controller-side
-// MultiPod detection in pkg/controller/v1beta1/inferenceservice/components.
-func multiPodComponents(spec *v1beta1.InferenceServiceSpec) map[v1beta1.ComponentType]struct{} {
-	out := map[v1beta1.ComponentType]struct{}{}
-	if spec == nil {
-		return out
-	}
-	if spec.Engine != nil && spec.Engine.Leader != nil && spec.Engine.Worker != nil &&
-		spec.Engine.Worker.Size != nil && *spec.Engine.Worker.Size > 0 {
-		out[v1beta1.EngineComponent] = struct{}{}
-	}
-	if spec.Decoder != nil && spec.Decoder.Leader != nil && spec.Decoder.Worker != nil &&
-		spec.Decoder.Worker.Size != nil && *spec.Decoder.Worker.Size > 0 {
-		out[v1beta1.DecoderComponent] = struct{}{}
-	}
-	return out
 }
 
 // ValidateEngineDecoderDeploymentMode enforces that when both Engine and

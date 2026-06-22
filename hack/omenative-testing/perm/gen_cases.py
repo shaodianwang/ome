@@ -93,17 +93,56 @@ def comp(name, n, w=0, life=None):
     return {"comp": name, "n": n, "w": w, "life": life if life is not None else lifecycle()}
 
 
-def coord_group(components, policy, pacing=None, order=None):
-    # OEP-0015 (#426): coordination moved from top-level spec.rolloutCoordination
-    # to spec.rollout.coordination — one extra nesting level, group internals unchanged.
-    lines = ["  rollout:", "    coordination:", "      groups:",
-             f"        - components: [{', '.join(components)}]",
-             f"          policy: {policy}"]
-    if order:                                  # Sequential requires an explicit order
+def _group(components, *, blue_green=False, rolling=None, maintain_ratio=None,
+           order=None, soak=None):
+    """Render one v2 rollout group. Exactly one progression
+    (blueGreen | rollingUpdate) is set; canary groups use _canary_group."""
+    lines = [f"        - components: [{', '.join(components)}]"]
+    if order:                                  # surge/roll order within the group
         lines.append(f"          order: [{', '.join(order)}]")
-    if pacing:
-        lines.append(f"          pacing: {flow(pacing)}")
-    return "\n".join(lines)
+    if blue_green:
+        lines.append("          blueGreen: {}")
+    if rolling is not None:
+        lines.append(f"          rollingUpdate: {flow(rolling)}" if rolling
+                     else "          rollingUpdate: {}")
+    if maintain_ratio is not None:
+        lines.append(f"          maintainRatio: {flow(maintain_ratio)}")
+    if soak is not None:
+        lines.append(f"          soak: {flow(soak)}")
+    return lines
+
+
+def groups_block(groups):
+    """Wrap rendered group line-lists into spec.rollout.groups (OEP-0017 v2)."""
+    out = ["  rollout:", "    groups:"]
+    for g in groups:
+        out += g
+    return "\n".join(out)
+
+
+# Back-compat helper for the single-group coordination shapes the emitters use.
+def coord_group(components, policy, pacing=None, order=None, soak=None):
+    # OEP-0017 (v2): coordination folded into spec.rollout.groups. Each former
+    # coordination policy maps onto a presence-based progression:
+    #   BlueGreen     -> one blueGreen group
+    #   RollingUpdate -> one rollingUpdate group (PerComponent pacing is the
+    #                    default — no extra knob); RatioBalanced adds maintainRatio
+    #   Sequential    -> one single-Component blueGreen group PER component in
+    #                    order (the controller collapses this back to Sequential)
+    cl = list(components)
+    if policy == "BlueGreen":
+        return groups_block([_group(cl, blue_green=True, order=order, soak=soak)])
+    if policy == "Sequential":
+        seq = order or cl
+        return groups_block([_group([c], blue_green=True, soak=soak) for c in seq])
+    if policy == "RollingUpdate":
+        ptype = (pacing or {}).get("type")
+        mr = None
+        if ptype == "RatioBalanced":
+            tol = (pacing or {}).get("ratioTolerancePercent", 5)
+            mr = {"tolerance": tol}
+        return groups_block([_group(cl, rolling={}, maintain_ratio=mr, soak=soak)])
+    raise ValueError(policy)
 
 
 COORD_KINDS = ["none", "rolling", "ratio", "percomp", "seq", "bluegreen"]
@@ -116,8 +155,10 @@ def coord_for(kind, comps=("engine", "decoder")):
     if kind == "rolling":
         return coord_group(cl, "RollingUpdate")
     if kind == "ratio":
+        # v1 ratioTolerancePercent=25 -> v2 maintainRatio.tolerance=25.
         return coord_group(cl, "RollingUpdate", {"type": "RatioBalanced", "ratioTolerancePercent": 25})
     if kind == "percomp":
+        # PerComponent pacing is the v2 default: a plain rollingUpdate group.
         return coord_group(cl, "RollingUpdate", {"type": "PerComponent"})
     if kind == "seq":
         return coord_group(cl, "Sequential", order=cl)
@@ -318,7 +359,7 @@ for topo in TOPOS:                            # X-2 re-bump (mode=rebump) across
       comps_for(topo, lifecycle()), mode="rebump", **nds(topo), **ceils(topo, N + 1), topo=topo, co="none")
 
 
-# ── canary/  (mode=canary; spec.rollout.canary staged rollout) ───────────────
+# ── canary/  (mode=canary; spec.rollout.groups[] canary group, staged rollout) ─
 # Permutation of the canary step machine across all topologies × promotion
 # policies, plus a multi-step (3-gate) plan, a capacity-ahead smoke step, and a
 # rollback probe (drain to stable + sticky hold). The externally-routed primary
@@ -327,13 +368,19 @@ for topo in TOPOS:                            # X-2 re-bump (mode=rebump) across
 CANARY_PAUSE = {"auto": {"duration": "20s"}, "manual": {}}
 
 
-def canary_block(policy, steps):
-    lines = ["  rollout:", "    canary:", f"      promotionPolicy: {policy}", "      steps:"]
+def canary_block(policy, steps, components=("engine",)):
+    # OEP-0017 (v2): canary is a per-group progression under spec.rollout.groups.
+    # newCapacity -> capacity, trafficWeight -> traffic, oldCapacity dropped,
+    # promotionPolicy -> promotion.
+    lines = ["  rollout:", "    groups:",
+             f"        - components: [{', '.join(components)}]",
+             "          canary:",
+             f"            promotion: {policy}", "            steps:"]
     for s in steps:
-        item = f'newCapacity: "{s["nc"]}", trafficWeight: {s["tw"]}'
+        item = f'capacity: "{s["nc"]}", traffic: {s["tw"]}'
         if "pause" in s:
             item += f', pause: {flow(s["pause"])}'
-        lines.append(f"        - {{ {item} }}")
+        lines.append(f"              - {{ {item} }}")
     return "\n".join(lines)
 
 
@@ -358,9 +405,13 @@ def canary_ceils(topo):
 
 
 def Ccanary(desc, topo, policy, steps, **extra):
+    comps = comps_for(topo, strat_life("SurgeThenDrain"))
+    # v2 canary is a group: its components are the canaried Component(s) — the
+    # whole topology (single engine, or router+engine+decoder for PD).
+    canary_comps = [c["comp"] for c in comps]
     C("canary", f"canary {topo} {policy} {desc}",
-      comps_for(topo, strat_life("SurgeThenDrain")),
-      coord=canary_block(policy.capitalize(), steps),
+      comps,
+      coord=canary_block(policy.capitalize(), steps, components=canary_comps),
       mode="canary", **nds(topo), **canary_ceils(topo),
       topo=topo, canary=policy, co="none", **extra)
 

@@ -546,44 +546,12 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 	})
 
 	ginkgo.It("multi-node phase 3: rejects Sequential coordination with multi-pod engine and no Order (SequentialMultiPodRequiresOrder)", func() {
-		// Sequential without Order is already rejected by the OEP-0007.1
-		// SequentialRequiresOrder check. This spec exists to confirm the
-		// multi-pod-specific reason name surfaces (operators grep for it).
-		size := 2
-		isvc := v1beta1testing.MakeInferenceService("phase3-seq-mp-no-order", "isvc-webhook").
-			Runtime("any-runtime").
-			Engine(&v1beta1.EngineSpec{
-				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
-				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
-				},
-				Leader: &v1beta1.LeaderSpec{},
-				Worker: &v1beta1.WorkerSpec{Size: &size},
-			}).
-			Decoder(&v1beta1.DecoderSpec{
-				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
-				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
-				},
-			}).Obj()
-		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
-			Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{
-					{
-						Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-						Policy:     v1beta1.CoordinationPolicySequential,
-						// Order intentionally absent.
-					},
-				},
-			},
-		}
-		err := k8sClient.Create(suiteCtx, isvc)
-		Expect(err).To(HaveOccurred())
-		// Either the generic SequentialRequiresOrder OR the multi-pod-specific
-		// reason satisfies — both checks fire in the wired-up pipeline; the
-		// generic check fires first. Match the umbrella prefix that operators
-		// scrape for.
-		Expect(err.Error()).To(ContainSubstring("Sequential"))
+		// OEP-0017: the Sequential coordination policy is removed. Cross-Component
+		// sequencing is now expressed as multiple single-Component groups in list
+		// order, so a "Sequential group without Order" is no longer expressible —
+		// there is no Order-on-Sequential rule. This rejection no longer fires;
+		// skip until/if a v2 multi-pod sequencing guard is reintroduced.
+		ginkgo.Skip("OEP-0017: Sequential policy removed; SequentialMultiPodRequiresOrder no longer applies")
 	})
 
 	ginkgo.It("multi-node phase 3: rejects lean multi-pod ISVC with no runner images (MultiPodLeanModelNeedsRunner)", func() {
@@ -672,44 +640,21 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 	// YAML at .claude/specs/2026-05-25-real-cluster-tests/yamls/
 	// w1-invalid-sequential-ratiobalanced.yaml.
 	ginkgo.It("task #36: rejects Sequential + RatioBalanced pacing (SequentialIncompatibleWithRatioBalanced / real-cluster W-1)", func() {
-		isvc := v1beta1testing.MakeInferenceService("task36-w1-seq-ratio", "isvc-webhook").
-			Runtime("any-runtime").
-			Engine(&v1beta1.EngineSpec{
-				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
-				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
-				},
-			}).
-			Decoder(&v1beta1.DecoderSpec{
-				PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{{Name: "ome-container", Image: "x"}}},
-				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
-					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
-				},
-			}).Obj()
-		tol := int32(10)
-		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
-			Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicySequential,
-					Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:                  v1beta1.CoordinationPacingRatioBalanced,
-						RatioTolerancePercent: &tol,
-					},
-				}},
-			},
-		}
-		err := k8sClient.Create(suiteCtx, isvc)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("SequentialIncompatibleWithRatioBalanced"))
+		// OEP-0017: Sequential policy and per-group Pacing are removed. A group
+		// no longer carries a (Sequential) policy, and RatioBalanced pacing
+		// became the group-level MaintainRatio guard — which is meaningful on any
+		// multi-Component group. The "Sequential is incompatible with
+		// RatioBalanced" combination is therefore not expressible in v2, and
+		// ReasonSequentialIncompatibleWithRatioBalanced is no longer returned by
+		// any validator. Skip until/if an equivalent v2 guard is introduced.
+		ginkgo.Skip("OEP-0017: Sequential policy + per-group Pacing removed; SequentialIncompatibleWithRatioBalanced no longer applies")
 	})
 
 	// real-cluster W-2: maxSurge=0 AND maxUnavailable=0 deadlocks any
 	// rollout — no surge headroom, no drain headroom. Mirror of the YAML
 	// at .claude/specs/2026-05-25-real-cluster-tests/yamls/
 	// w2-invalid-zero-budget.yaml.
-	ginkgo.It("task #36: rejects PerComponent pacing with maxSurge=0 and maxUnavailable=0 (ZeroBudgetPacingUnstartable / real-cluster W-2)", func() {
+	ginkgo.It("task #36: rejects RollingUpdate group with maxSurge=0 and maxUnavailable=0 (ZeroBudgetPacingUnstartable / real-cluster W-2)", func() {
 		zero := intstr.FromInt(0)
 		isvc := v1beta1testing.MakeInferenceService("task36-w2-zero-budget", "isvc-webhook").
 			Runtime("any-runtime").
@@ -726,27 +671,29 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 				},
 			}).Obj()
 		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
-			Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
-					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
-					Pacing: &v1beta1.CoordinationPacing{
-						Type:           v1beta1.CoordinationPacingPerComponent,
-						MaxSurge:       &zero,
-						MaxUnavailable: &zero,
-					},
-				}},
-			},
+			Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+				RollingUpdate: &v1beta1.GroupRollingUpdate{
+					MaxSurge:       &zero,
+					MaxUnavailable: &zero,
+				},
+			}},
 		}
 		err := k8sClient.Create(suiteCtx, isvc)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("ZeroBudgetPacingUnstartable"))
 	})
 
-	// Positive: Sequential + PerComponent pacing is the canonical
-	// combination and must be accepted (no over-rejection from the new
-	// pacing/policy compatibility check).
-	ginkgo.It("task #36: accepts Sequential + PerComponent pacing (no over-rejection)", func() {
+	// Positive: a well-formed multi-Component coordination group must be
+	// accepted (no over-rejection from the pacing/budget checks).
+	//
+	// OEP-0017: the old "Sequential + PerComponent pacing" combination is
+	// re-expressed as the canonical v2 multi-Component group — engine +
+	// decoder rolling together under BlueGreen. (Sequential cross-Component
+	// ordering would now be two single-Component groups; the over-rejection
+	// guard being exercised here is the pacing/budget path, which a coupled
+	// multi-Component group covers.)
+	ginkgo.It("task #36: accepts well-formed multi-Component coordination group (no over-rejection)", func() {
 		isvc := v1beta1testing.MakeInferenceService("task36-seq-ok", "isvc-webhook").
 			Runtime("any-runtime").
 			Engine(&v1beta1.EngineSpec{
@@ -762,16 +709,10 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 				},
 			}).Obj()
 		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
-			Coordination: &v1beta1.RolloutCoordinationSpec{
-				Groups: []v1beta1.RolloutCoordinationGroup{{
-					Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-					Policy:     v1beta1.CoordinationPolicySequential,
-					Order:      []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
-					Pacing: &v1beta1.CoordinationPacing{
-						Type: v1beta1.CoordinationPacingPerComponent,
-					},
-				}},
-			},
+			Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.DecoderComponent, v1beta1.EngineComponent},
+				BlueGreen:  &v1beta1.GroupBlueGreen{},
+			}},
 		}
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })

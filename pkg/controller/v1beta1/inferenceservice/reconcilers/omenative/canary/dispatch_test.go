@@ -19,20 +19,29 @@ import (
 
 func TestSecondaryCapacityReady(t *testing.T) {
 	n4 := 4
-	plan := &v1beta1.RolloutSpec{Canary: &v1beta1.CanarySpec{Steps: []v1beta1.RolloutStep{
-		{NewCapacity: intstr.FromString("50%"), TrafficWeight: 50},
-		{NewCapacity: intstr.FromString("100%"), TrafficWeight: 100},
+	steps := []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 50},
+		{Capacity: intstr.FromString("100%"), Traffic: 100},
+	}
+	// Single component (engine only) → no secondaries → always ready. The canary
+	// group covers just [engine].
+	engPlan := &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+		Canary:     &v1beta1.GroupCanary{Steps: steps},
 	}}}
-
-	// Single component (engine only) → no secondaries → always ready.
-	eng := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{Rollout: plan}}
+	eng := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{Rollout: engPlan}}
 	eng.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
 	if !secondaryCapacityReady(eng, map[v1beta1.ComponentType]map[string]int32{v1beta1.EngineComponent: {"new": 1}}, "new", v1beta1.EngineComponent) {
 		t.Fatal("single-component canary has no secondaries → must be ready")
 	}
 
-	// PD: router primary + engine secondary; step 0 newCount = 50% of 4 = 2.
-	pd := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{Rollout: plan}}
+	// PD: router primary + engine secondary; step 0 newCount = 50% of 4 = 2. The
+	// canary group couples [router, engine].
+	pdPlan := &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent},
+		Canary:     &v1beta1.GroupCanary{Steps: steps},
+	}}}
+	pd := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{Rollout: pdPlan}}
 	pd.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
 	pd.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
 	below := map[v1beta1.ComponentType]map[string]int32{v1beta1.RouterComponent: {"new": 2}, v1beta1.EngineComponent: {"new": 1}}
@@ -86,13 +95,16 @@ func TestDispatch_ServicesHashAndRollbackWarning(t *testing.T) {
 	n4 := 4
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "d1"}}
 	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
-	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Canary: &v1beta1.CanarySpec{
-		PromotionPolicy: promPolicy(v1beta1.PromotionPolicyManual),
-		Steps: []v1beta1.RolloutStep{
-			{NewCapacity: intstr.FromString("50%"), TrafficWeight: 50, Pause: &v1beta1.RolloutPause{}},
-			{NewCapacity: intstr.FromString("100%"), TrafficWeight: 100},
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+		Canary: &v1beta1.GroupCanary{
+			Promotion: promPolicy(v1beta1.PromotionPolicyManual),
+			Steps: []v1beta1.RolloutGroupStep{
+				{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+				{Capacity: intstr.FromString("100%"), Traffic: 100},
+			},
 		},
-	}}
+	}}}
 	// IR names the canary target (its UpdateRevision) — Dispatch must source the
 	// hash from here, not the (stale) ISVC aggregate.
 	ir := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "d1-engine"}}
@@ -150,31 +162,70 @@ func TestDispatch_ServicesHashAndRollbackWarning(t *testing.T) {
 	}
 }
 
+// TestDispatch_EnsuresPerRevisionServicesForSecondary pins that a multi-Component
+// canary ensures per-revision Services for EVERY group Component, not just the
+// primary. coordination skips canary-owned Components, so the canary engine is
+// their sole producer; ensuring only the primary's left the secondary's
+// peer-discovery revision endpoint (OME_<SECONDARY>_REVISION_ENDPOINT) pointing
+// at a Service nothing created.
+func TestDispatch_EnsuresPerRevisionServicesForSecondary(t *testing.T) {
+	ns := "default"
+	n4 := 4
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "pd1"}}
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Canary: &v1beta1.GroupCanary{
+			Promotion: promPolicy(v1beta1.PromotionPolicyManual),
+			Steps: []v1beta1.RolloutGroupStep{
+				{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+				{Capacity: intstr.FromString("100%"), Traffic: 100},
+			},
+		},
+	}}}
+	objs := []runtime.Object{isvc,
+		canaryPod(ns, "pd1", "engine", "newhash", "pd1-engine-0"),
+		canaryPod(ns, "pd1", "decoder", "newhash", "pd1-decoder-0"),
+	}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objs...).Build()
+	ctx := context.Background()
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
+		t.Fatalf("Dispatch error: %v", err)
+	}
+	svc := &corev1.Service{}
+	key := types.NamespacedName{Namespace: ns, Name: coordination.PerRevisionServiceName("pd1", v1beta1.DecoderComponent, "newhash")}
+	if err := c.Get(ctx, key, svc); err != nil {
+		t.Fatalf("per-revision Service for the decoder secondary should exist (else its peer revision endpoint dangles): %v", err)
+	}
+}
+
+// TestPrimaryComponent pins the router>engine>decoder priority for the externally-
+// routed Component that carries the canary's traffic weight. In v2 the primary is
+// chosen among the canary GROUP's Components (not the raw Spec.* presence), so the
+// fixture sets the group membership directly.
 func TestPrimaryComponent(t *testing.T) {
-	mk := func(eng, dec, rtr bool) *v1beta1.InferenceService {
+	mk := func(comps ...v1beta1.ComponentType) *v1beta1.InferenceService {
 		isvc := &v1beta1.InferenceService{}
-		if eng {
-			isvc.Spec.Engine = &v1beta1.EngineSpec{}
-		}
-		if dec {
-			isvc.Spec.Decoder = &v1beta1.DecoderSpec{}
-		}
-		if rtr {
-			isvc.Spec.Router = &v1beta1.RouterSpec{}
+		if len(comps) > 0 {
+			isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+				Components: comps,
+				Canary:     &v1beta1.GroupCanary{},
+			}}}
 		}
 		return isvc
 	}
-	if got := primaryComponent(mk(true, false, false)); got != v1beta1.EngineComponent {
+	if got := primaryComponent(mk(v1beta1.EngineComponent)); got != v1beta1.EngineComponent {
 		t.Fatalf("engine-only → engine, got %q", got)
 	}
-	if got := primaryComponent(mk(true, true, true)); got != v1beta1.RouterComponent {
+	if got := primaryComponent(mk(v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent)); got != v1beta1.RouterComponent {
 		t.Fatalf("PD with router → router, got %q", got)
 	}
-	if got := primaryComponent(mk(true, true, false)); got != v1beta1.EngineComponent {
+	if got := primaryComponent(mk(v1beta1.EngineComponent, v1beta1.DecoderComponent)); got != v1beta1.EngineComponent {
 		t.Fatalf("engine+decoder (no router) → engine, got %q", got)
 	}
-	if got := primaryComponent(mk(false, false, false)); got != "" {
-		t.Fatalf("no components → empty, got %q", got)
+	if got := primaryComponent(mk()); got != "" {
+		t.Fatalf("no canary group → empty, got %q", got)
 	}
 }
 

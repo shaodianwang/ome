@@ -189,15 +189,12 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	}
 
 	// Cross-Component rollout coordination: structural + RatioBalanced
-	// tolerance warning + Sequential-multi-pod loud rejection.
+	// tolerance warning.
 	if err := validation.ValidateCoordination(&isvc.Spec); err != nil {
 		return allWarnings, err
 	}
 	if warning := validation.CoordinationRatioToleranceWarning(&isvc.Spec); warning != "" {
 		allWarnings = append(allWarnings, warning)
-	}
-	if err := validation.ValidateSequentialMultiPodOrder(&isvc.Spec); err != nil {
-		return allWarnings, err
 	}
 
 	// Per-Component LifecycleSpec.UpdateStrategy.RollingUpdate semantic

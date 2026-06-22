@@ -10,101 +10,135 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// ReasonCanaryInvalid is the admission rejection reason for a malformed
-// spec.rollout.canary plan. Operators and the test plan reference it by name.
+// ReasonCanaryInvalid is the admission rejection reason for a malformed canary
+// progression on a spec.rollout.groups[] entry. Operators and tests reference it.
 const ReasonCanaryInvalid = "CanaryInvalid"
 
-// ReasonCanaryRequiresOMENative is the rejection reason for a canary plan on a
-// component that is not OMENative. Canary relies on per-revision pod selection,
+// ReasonCanaryRequiresOMENative is the rejection reason for a canary group whose
+// Component is not OMENative. Canary relies on per-revision pod selection,
 // partition staging, and the InferenceReplica object — all OMENative/IR-managed
 // constructs — so other deployment modes would silently wedge at Pending.
 const ReasonCanaryRequiresOMENative = "CanaryRequiresOMENative"
 
-// ValidateCanary checks a spec.rollout.canary plan. Returns nil when canary is
-// unset (nil-safe). Rules, each guarding a concrete failure:
-//   - Mutually exclusive with spec.rollout.coordination — an ISVC rolls either
-//     by coordination groups or by a canary plan, never both.
+// ReasonMultipleCanaryGroups is the rejection reason for a spec.rollout that
+// declares more than one canary group. The canary engine drives a single group
+// (the dispatcher resolves it via GetCanaryGroup, which returns the first);
+// additional canary groups are executed by neither engine and would roll
+// ungated. Sequenced multi-group canary (the OEP's Sequential×canary target)
+// needs the cross-group sequencer that does not exist yet, so admission rejects
+// the shape rather than silently mis-executing all but the first group.
+const ReasonMultipleCanaryGroups = "MultipleCanaryGroups"
+
+// ValidateCanary checks the canary progression on every spec.rollout.groups[]
+// entry that has one. Returns nil when no group canaries (nil-safe). The CRD CEL
+// rule enforces the one-of progression (canary may span multiple Components,
+// primary-driven); these are the value-level rules CEL can't express. Each
+// guards a concrete
+// failure:
 //   - Steps non-empty — an empty plan has nothing to execute.
-//   - Final step TrafficWeight == 100 — otherwise the rollout never reaches the
-//     new revision and hangs forever.
-//   - A step with TrafficWeight > 0 must have NewCapacity > 0 — you cannot route
-//     traffic to zero pods.
+//   - Every Component in the group is OMENative — other modes wedge at Pending.
+//   - Final step Traffic == 100 — otherwise the rollout never fully cuts over.
+//   - Final step Capacity == 100% — otherwise it completes on a partial fleet.
+//   - Promotion required once any step pauses — else an Auto-intending operator
+//     who omits it gets a rollout that waits forever for a promote annotation.
+//   - Traffic in [0,100], non-decreasing, and Traffic>0 requires Capacity>0.
 func ValidateCanary(spec *v1beta1.InferenceServiceSpec) error {
-	c := spec.GetCanary()
-	if c == nil {
-		return nil
-	}
-	if spec.Rollout.Coordination != nil {
-		return fmt.Errorf("spec.rollout.canary and spec.rollout.coordination are mutually exclusive (%s)", ReasonCanaryInvalid)
-	}
-	if len(c.Steps) == 0 {
-		return fmt.Errorf("spec.rollout.canary.steps must not be empty (%s)", ReasonCanaryInvalid)
-	}
-	// Canary runs only on the OMENative/IR-managed path; reject other modes at
-	// admission rather than letting the rollout wedge at Pending. Mirrors
-	// coordination's validateComponentsAreOMENative, but canary has no groups so
-	// every declared component must be OMENative.
-	for comp, mode := range omenativeDeploymentModeMap(spec) {
-		if mode != string(constants.OMENative) {
-			return fmt.Errorf("spec.rollout.canary: component %q has deploymentMode=%q; canary requires OMENative (%s)",
-				comp, mode, ReasonCanaryRequiresOMENative)
+	groups := spec.GetRolloutGroups()
+	modeFor := omenativeDeploymentModeMap(spec)
+	declared := declaredComponents(spec)
+	canaryGroups := 0
+	for gi := range groups {
+		if groups[gi].Canary != nil {
+			canaryGroups++
 		}
 	}
-	last := c.Steps[len(c.Steps)-1]
-	if last.TrafficWeight != 100 {
-		return fmt.Errorf("spec.rollout.canary final step trafficWeight must be 100, got %d (%s)", last.TrafficWeight, ReasonCanaryInvalid)
+	if canaryGroups > 1 {
+		return fmt.Errorf("spec.rollout.groups declares %d canary groups; only one is supported — the canary engine drives a single group and the others would roll ungated (%s)",
+			canaryGroups, ReasonMultipleCanaryGroups)
 	}
-	// The final step takes 100% traffic, so it must run at full capacity —
-	// otherwise the rollout completes with 100% traffic on a partial fleet. Only
-	// the percentage form is checkable at admission (absolute counts need the
-	// desired replica count); the done sentinel also forces partition 0.
-	if pct, ok := percentValue(last.NewCapacity); ok && pct != 100 {
-		return fmt.Errorf("spec.rollout.canary final step newCapacity must be 100%% (rollout completes at full capacity), got %q (%s)", last.NewCapacity.String(), ReasonCanaryInvalid)
-	}
-	// PromotionPolicy is required once any step pauses: shouldAdvance defaults an
-	// unset policy to Manual, so an Auto-intending operator who omits it would get
-	// a rollout that waits forever for a promote annotation.
-	if c.PromotionPolicy == nil {
-		for i, s := range c.Steps {
-			if s.Pause != nil {
-				return fmt.Errorf("spec.rollout.canary.steps[%d] has a pause but spec.rollout.canary.promotionPolicy is unset; set Auto or Manual (%s)", i, ReasonCanaryInvalid)
+	for gi := range groups {
+		g := &groups[gi]
+		if g.Canary == nil {
+			continue
+		}
+		c := g.Canary
+		if len(c.Steps) == 0 {
+			return fmt.Errorf("spec.rollout.groups[%d].canary.steps must not be empty (%s)", gi, ReasonCanaryInvalid)
+		}
+		for _, comp := range g.Components {
+			// A canary group's Components must be valid and declared on the ISVC:
+			// primaryComponent picks router>engine>decoder among them, so an invalid
+			// or undeclared member becomes a phantom primary that wedges the roll.
+			if _, ok := validComponents[comp]; !ok {
+				return fmt.Errorf("spec.rollout.groups[%d]: canary component %q is not one of router/engine/decoder (%s)",
+					gi, comp, ReasonCanaryInvalid)
+			}
+			if _, ok := declared[comp]; !ok {
+				return fmt.Errorf("spec.rollout.groups[%d]: canary component %q is not declared on the InferenceService (%s)",
+					gi, comp, ReasonCanaryInvalid)
+			}
+			if m, ok := modeFor[comp]; ok && m != string(constants.OMENative) {
+				return fmt.Errorf("spec.rollout.groups[%d]: component %q has deploymentMode=%q; canary requires OMENative (%s)",
+					gi, comp, m, ReasonCanaryRequiresOMENative)
 			}
 		}
-	}
-	var prevWeight int32
-	for i, s := range c.Steps {
-		if s.TrafficWeight < 0 || s.TrafficWeight > 100 {
-			return fmt.Errorf("spec.rollout.canary.steps[%d]: trafficWeight %d must be in [0,100] (%s)", i, s.TrafficWeight, ReasonCanaryInvalid)
+		// A canary group must contain the ISVC's external entrypoint (router if
+		// present, else engine). primaryComponent picks the entrypoint *within the
+		// group* and the engine writes the stepped traffic onto its Service, but
+		// external requests enter through the ISVC entrypoint. A canary group that
+		// omits it shifts traffic on an internal Service only, so the operator's
+		// steps never move real traffic.
+		entry := canaryEntrypoint(spec)
+		hasEntry := false
+		for _, comp := range g.Components {
+			if comp == entry {
+				hasEntry = true
+				break
+			}
 		}
-		if s.TrafficWeight < prevWeight {
-			return fmt.Errorf("spec.rollout.canary.steps[%d]: trafficWeight %d must be >= the previous step's %d (canary weights are non-decreasing) (%s)", i, s.TrafficWeight, prevWeight, ReasonCanaryInvalid)
+		if !hasEntry {
+			return fmt.Errorf("spec.rollout.groups[%d]: a canary group must include the entrypoint component %q — external traffic routes through it, so a group without it only shifts traffic on an internal Service (%s)",
+				gi, entry, ReasonCanaryInvalid)
 		}
-		prevWeight = s.TrafficWeight
-		if s.TrafficWeight > 0 && newCapacityIsZero(s.NewCapacity) {
-			return fmt.Errorf("spec.rollout.canary.steps[%d]: trafficWeight %d>0 requires newCapacity>0 (%s)", i, s.TrafficWeight, ReasonCanaryInvalid)
+		// MaintainRatio is silently ignored by the canary engine (it gates only
+		// coordination-style pacing). Reject rather than no-op so an operator is not
+		// misled into thinking the cross-Component ratio is guarded during the canary.
+		if g.MaintainRatio != nil {
+			return fmt.Errorf("spec.rollout.groups[%d]: maintainRatio is not honored on a canary group (the canary engine does not enforce it) — remove it, or use a blueGreen/rollingUpdate group for ratio-guarded rollout (%s)",
+				gi, ReasonCanaryInvalid)
 		}
-		if err := validateStepOldCapacity(i, s); err != nil {
-			return err
+		last := c.Steps[len(c.Steps)-1]
+		if last.Traffic != 100 {
+			return fmt.Errorf("spec.rollout.groups[%d].canary final step traffic must be 100, got %d (%s)", gi, last.Traffic, ReasonCanaryInvalid)
 		}
-	}
-	return nil
-}
-
-// validateStepOldCapacity rejects an explicit OldCapacity that is not the
-// complement of NewCapacity. v1 runs the old revision at (100% - NewCapacity) via
-// the StatefulSet-style partition; an independent old capacity (surge above
-// desired, or under-provisioning the old revision) is not expressible, so an
-// OldCapacity that disagrees with the complement would be silently ignored.
-// Reject it rather than mislead.
-func validateStepOldCapacity(i int, s v1beta1.RolloutStep) error {
-	if s.OldCapacity == nil {
-		return nil
-	}
-	newPct, okNew := percentValue(s.NewCapacity)
-	oldPct, okOld := percentValue(*s.OldCapacity)
-	if !okNew || !okOld || newPct+oldPct != 100 {
-		return fmt.Errorf("spec.rollout.canary.steps[%d]: oldCapacity must be a percentage equal to the complement of newCapacity (newCapacity %q + oldCapacity must total 100%%); independent old capacity / surge above desired is unsupported in v1 — omit oldCapacity to default to (100%%-newCapacity) (%s)",
-			i, s.NewCapacity.String(), ReasonCanaryInvalid)
+		// Only the percentage form is checkable at admission (absolute counts need
+		// the desired replica count); the done sentinel also forces partition 0.
+		if pct, ok := percentValue(last.Capacity); ok && pct != 100 {
+			return fmt.Errorf("spec.rollout.groups[%d].canary final step capacity must be 100%% (rollout completes at full capacity), got %q (%s)",
+				gi, last.Capacity.String(), ReasonCanaryInvalid)
+		}
+		if c.Promotion == nil {
+			for i, s := range c.Steps {
+				if s.Pause != nil {
+					return fmt.Errorf("spec.rollout.groups[%d].canary.steps[%d] has a pause but canary.promotion is unset; set Auto or Manual (%s)",
+						gi, i, ReasonCanaryInvalid)
+				}
+			}
+		}
+		var prevWeight int32
+		for i, s := range c.Steps {
+			if s.Traffic < 0 || s.Traffic > 100 {
+				return fmt.Errorf("spec.rollout.groups[%d].canary.steps[%d]: traffic %d must be in [0,100] (%s)", gi, i, s.Traffic, ReasonCanaryInvalid)
+			}
+			if s.Traffic < prevWeight {
+				return fmt.Errorf("spec.rollout.groups[%d].canary.steps[%d]: traffic %d must be >= the previous step's %d (canary weights are non-decreasing) (%s)",
+					gi, i, s.Traffic, prevWeight, ReasonCanaryInvalid)
+			}
+			prevWeight = s.Traffic
+			if s.Traffic > 0 && newCapacityIsZero(s.Capacity) {
+				return fmt.Errorf("spec.rollout.groups[%d].canary.steps[%d]: traffic %d>0 requires capacity>0 (%s)", gi, i, s.Traffic, ReasonCanaryInvalid)
+			}
+		}
 	}
 	return nil
 }
@@ -121,11 +155,22 @@ func percentValue(v intstr.IntOrString) (int, bool) {
 	return n, true
 }
 
-// newCapacityIsZero reports whether a step's NewCapacity resolves to zero pods
+// newCapacityIsZero reports whether a step's Capacity resolves to zero pods
 // regardless of how it is expressed (integer 0, "0", or "0%").
 func newCapacityIsZero(c intstr.IntOrString) bool {
 	if c.Type == intstr.Int {
 		return c.IntValue() == 0
 	}
 	return c.StrVal == "0" || c.StrVal == "0%"
+}
+
+// canaryEntrypoint returns the ISVC's external entrypoint Component, mirroring
+// DetermineEntrypointComponent: the router when declared, else the engine. The
+// canary group must contain it (see ValidateCanary) so the stepped traffic lands
+// on the Service that actually fronts external requests.
+func canaryEntrypoint(spec *v1beta1.InferenceServiceSpec) v1beta1.ComponentType {
+	if spec != nil && spec.Router != nil {
+		return v1beta1.RouterComponent
+	}
+	return v1beta1.EngineComponent
 }

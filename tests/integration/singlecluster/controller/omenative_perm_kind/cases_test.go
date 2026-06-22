@@ -7,6 +7,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -261,27 +262,63 @@ func buildPermISVC(ns string, pc permCase) *v1beta1.InferenceService {
 	if pc.rtr != nil {
 		isvc.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: ext(v1beta1.RouterComponent), PodSpec: pod()}
 	}
+	// OEP-0017: the v1 coordination-group knobs on permCase (policy/members/
+	// order/soak/pacing) are translated into the v2 spec.rollout groups model.
+	// The permCase fields stay as the test's source of truth (runner_test.go
+	// asserts directly off pc.policy / pc.pacingType / pc.order); only the spec
+	// CONSTRUCTION changes here.
 	if pc.policy != "" {
-		g := v1beta1.RolloutCoordinationGroup{
-			Components: pc.members,
-			Policy:     pc.policy,
-			Order:      pc.order,
-		}
+		var soak *metav1.Duration
 		if pc.soak != "" {
 			if d, err := parseDur(pc.soak); err == nil {
-				g.Soak = d
+				soak = d
 			}
 		}
-		if pc.pacingType != "" || pc.groupSurge != nil || pc.groupUnavail != nil {
-			g.Pacing = &v1beta1.CoordinationPacing{
-				Type:                  pc.pacingType,
-				MaxSurge:              pc.groupSurge,
-				MaxUnavailable:        pc.groupUnavail,
-				RatioTolerancePercent: pc.ratioTol,
+		var groups []v1beta1.RolloutGroup
+		switch pc.policy {
+		case v1beta1.CoordinationPolicyBlueGreen:
+			// BlueGreen -> one group with the BlueGreen progression.
+			groups = []v1beta1.RolloutGroup{{
+				Components: pc.members,
+				BlueGreen:  &v1beta1.GroupBlueGreen{},
+				Order:      pc.order,
+				Soak:       soak,
+			}}
+		case v1beta1.CoordinationPolicyRollingUpdate:
+			// RollingUpdate -> one group with the RollingUpdate progression,
+			// carrying the group pacing budget. RatioBalanced pacing becomes
+			// the group-level MaintainRatio guard.
+			g := v1beta1.RolloutGroup{
+				Components: pc.members,
+				RollingUpdate: &v1beta1.GroupRollingUpdate{
+					MaxSurge:       pc.groupSurge,
+					MaxUnavailable: pc.groupUnavail,
+				},
+				Soak: soak,
+			}
+			if pc.pacingType == v1beta1.CoordinationPacingRatioBalanced {
+				tol := int32(5) // v2 MaintainRatio default
+				if pc.ratioTol != nil {
+					tol = *pc.ratioTol
+				}
+				g.MaintainRatio = &v1beta1.MaintainRatio{Tolerance: tol}
+			}
+			groups = []v1beta1.RolloutGroup{g}
+		case v1beta1.CoordinationPolicySequential:
+			// Sequential -> one single-Component group per Component in Order
+			// (the v2 spelling the controller collapses back to Sequential).
+			// The group Soak is the inter-Component wait, so it goes on every
+			// group; the last group's Soak is ignored by the controller.
+			for _, c := range pc.order {
+				groups = append(groups, v1beta1.RolloutGroup{
+					Components: []v1beta1.ComponentType{c},
+					BlueGreen:  &v1beta1.GroupBlueGreen{},
+					Soak:       soak,
+				})
 			}
 		}
-		isvc.Spec.Rollout = &v1beta1.RolloutSpec{
-			Coordination: &v1beta1.RolloutCoordinationSpec{Groups: []v1beta1.RolloutCoordinationGroup{g}},
+		if len(groups) > 0 {
+			isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: groups}
 		}
 	}
 	return isvc

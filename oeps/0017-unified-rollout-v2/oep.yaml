@@ -1,0 +1,25 @@
+title: Unified InferenceService Rollout v2 (composable rollout groups)
+oep-number: "0017"
+authors:
+  - "@simo-lin"
+status: implementable
+creation-date: 2026-06-07
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Supersedes the rollout surface shaped by:
+see-also:
+  - "/oeps/0015-unified-rollout"                  # spec.rollout home; coordination relocation
+  - "/oeps/0015.1-canary-executor"               # the canary executor v2 would absorb
+  - "/oeps/0007.1-omenative-coordinated-rollout" # coordination groups origin
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"

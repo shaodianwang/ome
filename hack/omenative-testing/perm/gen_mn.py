@@ -51,21 +51,59 @@ def emit(cid, desc, comps, coord=None):
              f"  runtime: {{ apiGroup: ome.io, kind: ClusterServingRuntime, name: {RT}, autoSync: true }}"]
     lines += [_block(c) for c in comps]
     if coord:
-        lines += ["  rollout:", "    coordination:", "      groups:",   # OEP-0015 (#426)
-                  f"        - components: [{', '.join(coord['members'])}]",
-                  f"          policy: {coord['policy']}"]
-        if coord.get("order"):
-            lines.append(f"          order: [{', '.join(coord['order'])}]")
-        if coord.get("pacing"):
-            lines.append(f"          pacing: {coord['pacing']}")
+        lines += _coord_groups(coord)   # OEP-0017 (v2): spec.rollout.groups
     with open(os.path.join(HERE, "isvcs", "rollout", f"{cid}.yaml"), "w") as f:  # canonical location
         f.write("\n".join(lines) + "\n")
     print(f"  {cid}: {desc}")
 
 
-RB = "{ type: RatioBalanced, ratioTolerancePercent: 25, maxUnavailable: 1 }"
-RB10 = "{ type: RatioBalanced, ratioTolerancePercent: 10, maxUnavailable: 1 }"  # tight band (multi-node p53 analog)
-PC = "{ type: PerComponent, maxUnavailable: 1 }"
+def _coord_groups(coord):
+    """Render the v2 spec.rollout.groups for a multi-node coordination case.
+
+    Maps the former coordination policy onto a presence-based progression:
+      BlueGreen     -> one blueGreen group
+      RollingUpdate -> one rollingUpdate group; RatioBalanced pacing -> maintainRatio,
+                       PerComponent pacing is the v2 default (no extra knob)
+      Sequential    -> one single-Component blueGreen group PER member, in order
+                       (the controller collapses this back to Sequential)
+    """
+    members = coord["members"]
+    policy = coord["policy"]
+    pacing = coord.get("pacing") or {}
+    mu = pacing.get("maxUnavailable")
+    ru = {}
+    if mu is not None:
+        ru["maxUnavailable"] = mu
+    lines = ["  rollout:", "    groups:"]
+    if policy == "BlueGreen":
+        lines.append(f"        - components: [{', '.join(members)}]")
+        lines.append("          blueGreen: {}")
+        return lines
+    if policy == "Sequential":
+        for m in (coord.get("order") or members):
+            lines.append(f"        - components: [{m}]")
+            lines.append("          blueGreen: {}")
+        return lines
+    if policy == "RollingUpdate":
+        lines.append(f"        - components: [{', '.join(members)}]")
+        lines.append(f"          rollingUpdate: {_flow(ru)}" if ru
+                     else "          rollingUpdate: {}")
+        if pacing.get("type") == "RatioBalanced":
+            tol = pacing.get("ratioTolerancePercent", 5)
+            lines.append(f"          maintainRatio: {{ tolerance: {tol} }}")
+        return lines
+    raise ValueError(policy)
+
+
+def _flow(d):
+    return "{ " + ", ".join(f"{k}: {v}" for k, v in d.items()) + " }"
+
+
+# v1 pacing dicts; _coord_groups translates ratioTolerancePercent -> maintainRatio.tolerance
+# and folds maxUnavailable into rollingUpdate. PerComponent is the v2 default (no knob).
+RB = {"type": "RatioBalanced", "ratioTolerancePercent": 25, "maxUnavailable": 1}
+RB10 = {"type": "RatioBalanced", "ratioTolerancePercent": 10, "maxUnavailable": 1}  # tight band (multi-node p53 analog)
+PC = {"type": "PerComponent", "maxUnavailable": 1}
 RTR = C("router", 2, 2, 0, "SurgeThenDrain", 1, 0)   # router: single-pod control
 
 COMBOS = [

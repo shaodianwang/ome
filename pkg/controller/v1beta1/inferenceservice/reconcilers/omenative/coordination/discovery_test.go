@@ -115,33 +115,6 @@ func TestInjectPeerEnv_EmptyPeersNoOp(t *testing.T) {
 	}
 }
 
-func TestSortedPeers_GroupMembershipWins(t *testing.T) {
-	groups := []ResolvedGroup{
-		{
-			Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent},
-			Policy:     v1beta1.CoordinationPolicyBlueGreen,
-		},
-	}
-	peers := SortedPeers(groups, v1beta1.EngineComponent, nil)
-	if len(peers) != 2 {
-		t.Fatalf("peers: got %d want 2", len(peers))
-	}
-	if peers[0] != v1beta1.DecoderComponent || peers[1] != v1beta1.RouterComponent {
-		t.Errorf("sort order: got %v want [decoder router]", peers)
-	}
-}
-
-func TestSortedPeers_FallbackUsedWhenUngrouped(t *testing.T) {
-	fallback := []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.DecoderComponent, v1beta1.DecoderComponent}
-	peers := SortedPeers(nil, v1beta1.EngineComponent, fallback)
-	if len(peers) != 2 {
-		t.Fatalf("dedup: got %d want 2", len(peers))
-	}
-	if peers[0] != v1beta1.DecoderComponent || peers[1] != v1beta1.RouterComponent {
-		t.Errorf("sorted fallback: got %v", peers)
-	}
-}
-
 func containsEnvNamed(env []corev1.EnvVar, name string) bool {
 	for _, e := range env {
 		if e.Name == name {
