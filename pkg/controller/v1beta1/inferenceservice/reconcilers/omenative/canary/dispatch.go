@@ -94,7 +94,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		StableRevisionHash:     otherRevision(pods, canaryHash),
 		DesiredReplicas:        componentReplicas(d.ISVC, primary),
 		PerRevisionPods:        readyRev[primary],
-		SecondaryCapacityReady: secondaryCapacityReady(d.ISVC, readyRev, canaryHash, primary),
+		SecondaryCapacityReady: secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, primary),
 		Now:                    now,
 	})
 	if err != nil {
@@ -169,11 +169,19 @@ func configuredComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentTyp
 // can advance the step while the engine/decoder canary pods behind it are still
 // coming up. True when there are no secondaries (single-component canary). The
 // step index mirrors EffectivePartition so the gate matches the staged partition.
+//
+// Each secondary gates on ITS OWN canary target hash (revision hashes are
+// per-Component, so the primary's hash never names a secondary's pods). A
+// secondary that was not bumped has no distinct canary revision — its target hash
+// resolves to the only revision present — so there is nothing to stage and it is
+// treated as ready, rather than blocking the rollout forever.
+//
 // readyPerRev must be the READY (serving) per-revision counts — not total — so a
-// secondary's pods that merely exist don't satisfy the gate prematurely.
-func secondaryCapacityReady(isvc *v1beta1.InferenceService, readyPerRev map[v1beta1.ComponentType]map[string]int32, canaryHash string, primary v1beta1.ComponentType) bool {
+// secondary's pods that merely exist don't satisfy the gate prematurely. perRev
+// (total) is used only to detect whether a secondary has a roll in progress.
+func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, perRev, readyPerRev map[v1beta1.ComponentType]map[string]int32, primary v1beta1.ComponentType) bool {
 	g := isvc.Spec.GetCanaryGroup()
-	if g == nil || g.Canary == nil || len(g.Canary.Steps) == 0 || canaryHash == "" {
+	if g == nil || g.Canary == nil || len(g.Canary.Steps) == 0 {
 		return true
 	}
 	plan := g.Canary
@@ -189,7 +197,14 @@ func secondaryCapacityReady(isvc *v1beta1.InferenceService, readyPerRev map[v1be
 		if c == primary {
 			continue
 		}
-		if readyPerRev[c][canaryHash] < resolveStepNewCount(step, componentReplicas(isvc, c)) {
+		secHash := canaryTargetHash(ctx, reads, isvc, c)
+		// No canary revision distinct from the stable one → the secondary was not
+		// bumped; nothing to stage, so don't block. otherRevision is empty when the
+		// secondary has a single revision present (its canary hash == the only one).
+		if secHash == "" || otherRevision(perRev[c], secHash) == "" {
+			continue
+		}
+		if readyPerRev[c][secHash] < resolveStepNewCount(step, componentReplicas(isvc, c)) {
 			return false
 		}
 	}

@@ -17,40 +17,163 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
+// ir builds an InferenceReplica whose UpdateRevision names the per-Component
+// canary target (so canaryTargetHash resolves the right per-Component hash).
+func ir(ns, isvc string, comp v1beta1.ComponentType, hash string) *v1beta1.InferenceReplica {
+	r := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{
+		Namespace: ns, Name: isvc + "-" + string(comp),
+	}}
+	r.Status.UpdateRevision = isvc + "-" + string(comp) + "-" + hash
+	return r
+}
+
 func TestSecondaryCapacityReady(t *testing.T) {
+	ns := "default"
 	n4 := 4
 	steps := []v1beta1.RolloutGroupStep{
 		{Capacity: intstr.FromString("50%"), Traffic: 50},
 		{Capacity: intstr.FromString("100%"), Traffic: 100},
 	}
+	ctx := context.Background()
+
 	// Single component (engine only) → no secondaries → always ready. The canary
 	// group covers just [engine].
 	engPlan := &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 		Canary:     &v1beta1.GroupCanary{Steps: steps},
 	}}}
-	eng := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{Rollout: engPlan}}
+	eng := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "e1"}, Spec: v1beta1.InferenceServiceSpec{Rollout: engPlan}}
 	eng.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
-	if !secondaryCapacityReady(eng, map[v1beta1.ComponentType]map[string]int32{v1beta1.EngineComponent: {"new": 1}}, "new", v1beta1.EngineComponent) {
+	engRead := fake.NewClientBuilder().WithScheme(canaryScheme(t)).Build()
+	if !secondaryCapacityReady(ctx, engRead, eng,
+		map[v1beta1.ComponentType]map[string]int32{v1beta1.EngineComponent: {"eng": 1}},
+		map[v1beta1.ComponentType]map[string]int32{v1beta1.EngineComponent: {"eng": 1}},
+		v1beta1.EngineComponent) {
 		t.Fatal("single-component canary has no secondaries → must be ready")
 	}
 
 	// PD: router primary + engine secondary; step 0 newCount = 50% of 4 = 2. The
-	// canary group couples [router, engine].
+	// canary group couples [router, engine]. Revision hashes are PER-Component:
+	// router=rtr, engine=eng — distinct, as in production.
 	pdPlan := &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
 		Components: []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent},
 		Canary:     &v1beta1.GroupCanary{Steps: steps},
 	}}}
-	pd := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{Rollout: pdPlan}}
-	pd.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
-	pd.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
-	below := map[v1beta1.ComponentType]map[string]int32{v1beta1.RouterComponent: {"new": 2}, v1beta1.EngineComponent: {"new": 1}}
-	if secondaryCapacityReady(pd, below, "new", v1beta1.RouterComponent) {
+	mkPD := func() *v1beta1.InferenceService {
+		pd := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "pd"}, Spec: v1beta1.InferenceServiceSpec{Rollout: pdPlan}}
+		pd.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+		pd.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+		return pd
+	}
+	// IRs name the per-Component canary targets; engine has a stable revision
+	// "engOld" too, so a roll is genuinely in progress for the secondary.
+	pdReads := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(
+		ir(ns, "pd", v1beta1.RouterComponent, "rtr"),
+		ir(ns, "pd", v1beta1.EngineComponent, "eng"),
+	).Build()
+
+	below := map[v1beta1.ComponentType]map[string]int32{
+		v1beta1.RouterComponent: {"rtr": 2},
+		v1beta1.EngineComponent: {"eng": 1, "engOld": 3},
+	}
+	if secondaryCapacityReady(ctx, pdReads, mkPD(), below, below, v1beta1.RouterComponent) {
 		t.Fatal("engine secondary below its step newCount → not ready")
 	}
-	at := map[v1beta1.ComponentType]map[string]int32{v1beta1.RouterComponent: {"new": 2}, v1beta1.EngineComponent: {"new": 2}}
-	if !secondaryCapacityReady(pd, at, "new", v1beta1.RouterComponent) {
+	at := map[v1beta1.ComponentType]map[string]int32{
+		v1beta1.RouterComponent: {"rtr": 2},
+		v1beta1.EngineComponent: {"eng": 2, "engOld": 2},
+	}
+	if !secondaryCapacityReady(ctx, pdReads, mkPD(), at, at, v1beta1.RouterComponent) {
 		t.Fatal("engine secondary at its step newCount → ready")
+	}
+}
+
+// TestSecondaryCapacityReady_PerComponentHashes reproduces the PD-canary stall:
+// revision hashes are PER-Component, so gating a secondary on the PRIMARY's hash
+// (the old behavior) found 0 secondary canary pods and blocked Pending forever
+// even though the secondary's OWN canary capacity was fully up. The gate must
+// resolve each secondary's own target hash.
+func TestSecondaryCapacityReady_PerComponentHashes(t *testing.T) {
+	ns := "default"
+	n4 := 4
+	ctx := context.Background()
+	steps := []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 50},
+		{Capacity: intstr.FromString("100%"), Traffic: 100},
+	}
+	pd := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "p302"}}
+	pd.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	pd.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	pd.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	pd.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Canary:     &v1beta1.GroupCanary{Steps: steps},
+	}}}
+
+	reads := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(
+		ir(ns, "p302", v1beta1.RouterComponent, "53db7c07"),
+		ir(ns, "p302", v1beta1.EngineComponent, "73e1335d"),
+		ir(ns, "p302", v1beta1.DecoderComponent, "f8f90d6d"),
+	).Build()
+
+	// Every Component's OWN canary capacity is up (2 of 4 = step-0 50%), each on
+	// its own per-Component hash, with the stable revision still present.
+	ready := map[v1beta1.ComponentType]map[string]int32{
+		v1beta1.RouterComponent:  {"53db7c07": 2, "c6f33d7b": 2},
+		v1beta1.EngineComponent:  {"73e1335d": 2, "engOld": 2},
+		v1beta1.DecoderComponent: {"f8f90d6d": 2, "decOld": 2},
+	}
+	if !secondaryCapacityReady(ctx, reads, pd, ready, ready, v1beta1.RouterComponent) {
+		t.Fatal("secondaries at their own per-Component canary capacity → must be ready (was stuck Pending on the primary's hash)")
+	}
+
+	// A secondary still short on its own canary capacity must still gate.
+	short := map[v1beta1.ComponentType]map[string]int32{
+		v1beta1.RouterComponent:  {"53db7c07": 2, "c6f33d7b": 2},
+		v1beta1.EngineComponent:  {"73e1335d": 1, "engOld": 3},
+		v1beta1.DecoderComponent: {"f8f90d6d": 2, "decOld": 2},
+	}
+	if secondaryCapacityReady(ctx, reads, pd, short, short, v1beta1.RouterComponent) {
+		t.Fatal("engine secondary below its own step newCount → not ready")
+	}
+}
+
+// TestSecondaryCapacityReady_UnbumpedSecondary covers the primary-only-bumped PD
+// canary (p302's real trigger): only the router template changed, so engine and
+// decoder have no canary revision distinct from stable. Those secondaries have
+// nothing to stage and must NOT block the rollout.
+func TestSecondaryCapacityReady_UnbumpedSecondary(t *testing.T) {
+	ns := "default"
+	n4 := 4
+	ctx := context.Background()
+	steps := []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 50},
+		{Capacity: intstr.FromString("100%"), Traffic: 100},
+	}
+	pd := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "p302"}}
+	pd.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	pd.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	pd.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	pd.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Canary:     &v1beta1.GroupCanary{Steps: steps},
+	}}}
+
+	// Only the router was bumped: engine/decoder IRs name their stable revision as
+	// the (only) target, and only that one revision has pods.
+	reads := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(
+		ir(ns, "p302", v1beta1.RouterComponent, "53db7c07"),
+		ir(ns, "p302", v1beta1.EngineComponent, "engStable"),
+		ir(ns, "p302", v1beta1.DecoderComponent, "decStable"),
+	).Build()
+
+	pods := map[v1beta1.ComponentType]map[string]int32{
+		v1beta1.RouterComponent:  {"53db7c07": 2, "c6f33d7b": 2},
+		v1beta1.EngineComponent:  {"engStable": 4},
+		v1beta1.DecoderComponent: {"decStable": 4},
+	}
+	if !secondaryCapacityReady(ctx, reads, pd, pods, pods, v1beta1.RouterComponent) {
+		t.Fatal("unbumped secondaries have no canary revision to stage → must be ready (was stuck Pending forever)")
 	}
 }
 
