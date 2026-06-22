@@ -1577,6 +1577,109 @@ func TestUnavailableInFlight_GangSurgeTargetNotCountedUnavailable(t *testing.T) 
 	}
 }
 
+// mkGangSurgeDrainedFixture is mkGangSurgeFixture advanced one step: the
+// engine surge source (idx 0) has been DRAINED from serving (gangSurgeUpdate
+// flipped it serving=False before deletion), so engine ServingReplicas reads
+// the STEADY N=2 (idx1 serving + the surge target idx2 serving). The target
+// still carries its GangSurgeTarget marker — it isn't promoted/removed until a
+// later reconcile. Decoder is at steady N=2. This is the post-drain / pre-
+// promote window where there is NO peak left to net out.
+func mkGangSurgeDrainedFixture() *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 25},
+				}},
+			},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {
+					Lifecycle: &v1beta1.LifecycleStatus{
+						Replicas:        2,
+						ServingReplicas: 2, // source drained → steady N, NOT a peak
+						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+							// Source: drained from serving (0/2), delete pending.
+							{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating,
+								PodCount: 2, ServingPodCount: 0,
+								Operation: &v1beta1.InstanceOperation{
+									Type: v1beta1.InstanceOperationUpdate, Step: "Surge",
+									SurgeIndex: int32Ptr(2)}},
+							{Index: 1, Phase: v1beta1.OMENativeInstanceReady,
+								PodCount: 2, ServingPodCount: 2},
+							// Surge target still serving + still marked, but its
+							// source has drained → it IS the steady serving slot.
+							{Index: 2, Phase: v1beta1.OMENativeInstanceCreating,
+								PodCount: 2, ServingPodCount: 2,
+								Operation: &v1beta1.InstanceOperation{
+									Type: v1beta1.InstanceOperationUpdate,
+									Step: workloadtypes.UpdateStepGangSurgeTarget}},
+						},
+					},
+				},
+				v1beta1.DecoderComponent: {
+					Lifecycle: &v1beta1.LifecycleStatus{
+						Replicas:        2,
+						ServingReplicas: 2,
+					},
+				},
+			},
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name:       "0",
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
+						Original: map[v1beta1.ComponentType]int32{
+							v1beta1.EngineComponent:  2,
+							v1beta1.DecoderComponent: 2,
+						},
+					},
+				}},
+			},
+		},
+	}
+}
+
+// TestCheckRatioGate_DrainedGangSurgeNotANetTrough is the follow-up to #528.
+// #528 nets the gang-surge PEAK (replacement serving beside the not-yet-drained
+// source) out of the gate's serving view. But it netted UNCONDITIONALLY: it
+// still subtracted the target after gangSurgeUpdate drained the source from
+// serving (its own #528 change), so in the post-drain / pre-promote window the
+// gate saw N-1 — a phantom TROUGH — even though ServingReplicas had already
+// collapsed to the steady N. With engine and decoder gangs flipping at
+// staggered times, that N-1 read swings the live ratio to 2:1 / 1:2 — exactly
+// the violation traced on the cluster (p72: e_serv=2 d_serv=1 sustained, then
+// e_serv=1 d_serv=2).
+//
+// Here engine is in that window: source drained (0/2), target serving (2/2) →
+// engine's STEADY serving is N=2, equal to decoder. A DECODER drain would take
+// the true 2:2 to engine 2 : decoder 1 = ratio 2.0 vs the 1:1 anchor — past the
+// 25% band — and MUST be denied.
+//
+// Before the fix the gate netted the still-marked target out of engine's
+// serving, read engine=1, and a decoder -1 projected 1:1 (in band) → ALLOWED,
+// driving the very trough this proves. After the fix the target's source is no
+// longer serving, so nothing is netted, engine reads the steady 2, and the
+// decoder drain projects 2:1 (out of band) → DENIED.
+func TestCheckRatioGate_DrainedGangSurgeNotANetTrough(t *testing.T) {
+	isvc := mkGangSurgeDrainedFixture()
+	if got := servingSurgePeakInFlight(isvc.Status.Components[v1beta1.EngineComponent].Lifecycle.InstanceStatuses); got != 0 {
+		t.Fatalf("once the surge source is drained the target is the steady "+
+			"serving slot, not a peak: want servingSurgePeakInFlight=0, got %d", got)
+	}
+	allowed, reason := CheckRatioGate(isvc, v1beta1.DecoderComponent, 0)
+	if allowed {
+		t.Fatalf("a decoder drain against an engine at its STEADY N=2 (surge "+
+			"source already drained) projects 2:1 (ratio 2.0 vs 1:1 anchor, "+
+			">25%% band) and must be DENIED; the gate wrongly netted the still-"+
+			"marked surge target out of engine serving (phantom N-1 trough) and "+
+			"allowed it (reason=%q)", reason)
+	}
+}
+
 // CheckRatioGate, CheckUnavailabilityGate, and CheckSurgeGate are
 // test-only shims preserving the (isvc, component, inFlightDelta) call
 // shape the gate unit tests exercise. The production package-level

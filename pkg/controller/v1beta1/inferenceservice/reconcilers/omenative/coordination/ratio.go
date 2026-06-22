@@ -341,23 +341,43 @@ func unavailableInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
 }
 
 // servingSurgePeakInFlight counts a Component's in-flight gang-surge TARGET
-// Instances whose replacement gang is already serving — the transient PEAK
-// that inflates ServingReplicas above the steady N during a multi-node
-// SurgeThenDrain roll. A single-pod surge flips serving atomically within one
-// reconcile (old leaves rotation the instant the new joins), so its peak is
-// never observed across a status write; a gang's replacement lingers serving
-// beside the not-yet-drained source for the whole drain window. Netting this
-// out makes the ratio gate see a gang Component at its STEADY serving — the
-// same view it has of a single-pod Component — so the surge headroom is not
-// mistaken for durable capacity a drain may consume.
+// Instances whose replacement gang is serving WHILE its paired source gang is
+// also still serving — the transient PEAK that inflates ServingReplicas above
+// the steady N during a multi-node SurgeThenDrain roll. A single-pod surge
+// flips serving atomically within one reconcile (old leaves rotation the
+// instant the new joins), so its peak is never observed across a status write;
+// a gang's replacement lingers serving beside the not-yet-drained source.
+// Netting this out makes the ratio gate see a gang Component at its STEADY
+// serving — the same view it has of a single-pod Component — so the surge
+// headroom is not mistaken for durable capacity a drain may consume.
+//
+// The peak exists ONLY while BOTH gangs serve. Once the source is drained
+// (gangSurgeUpdate flips it serving=False before deletion) ServingReplicas
+// already collapses to the steady N, even though the target keeps its
+// GangSurgeTarget marker until promote. Netting the target out in that window
+// would manufacture a phantom N-1 TROUGH and swing the ratio the other way —
+// so only count a target whose source is still in rotation.
 func servingSurgePeakInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
+	// Target indices whose surge SOURCE gang is still fully serving — the
+	// signal that the peak is real. A source carries Op.SurgeIndex pointing
+	// at its target; once drained its ServingPodCount drops below PodCount.
+	sourceStillServing := make(map[int32]bool)
+	for _, s := range statuses {
+		if s.Operation == nil || s.Operation.SurgeIndex == nil {
+			continue
+		}
+		if s.PodCount > 0 && s.ServingPodCount >= s.PodCount {
+			sourceStillServing[*s.Operation.SurgeIndex] = true
+		}
+	}
 	var n int32
 	for _, s := range statuses {
 		if s.Operation == nil || s.Operation.Step != "GangSurgeTarget" {
 			continue
 		}
-		// Counted in ServingReplicas only once the whole gang is serving.
-		if s.PodCount > 0 && s.ServingPodCount >= s.PodCount {
+		// Counted in ServingReplicas only once the whole gang is serving,
+		// and only a TRUE peak (its source still serving beside it).
+		if s.PodCount > 0 && s.ServingPodCount >= s.PodCount && sourceStillServing[s.Index] {
 			n++
 		}
 	}
