@@ -1,6 +1,8 @@
 package types
 
 import (
+	"context"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,12 +42,29 @@ type Deps struct {
 	// The hook MUST be idempotent — Render may be invoked twice in
 	// the same reconcile (e.g., cache-lag retry after AlreadyExists).
 	RenderHook RenderHook
+
+	// EnsureGangPodGroup, when set, creates the scheduler-plugins
+	// PodGroup for one multi-pod surge Instance just before its pods are
+	// created. The gang-surge op needs PodGroup-before-pods to hold even
+	// in the window before the surge index lands in the plan the
+	// top-level EnsurePodGroups keys off (else a gang scheduler rejects
+	// the surge pods with "PodGroup not found"). The callback lives on
+	// Deps rather than as a direct call so the workload/ops package stays
+	// free of the workload/podgroup dependency (ops is imported by
+	// podgroup's test deps; a direct edge would close a cycle). The gang
+	// package wires it; nil callback / single-pod Instance / absent CRD
+	// all no-op. Idempotent.
+	EnsureGangPodGroup EnsureGangPodGroupFn
 }
 
 // RenderHook is the optional adapter-specific render-time mutator.
 // Receives the pod under construction; may mutate any field except
 // Name/Namespace/OwnerReferences (workload-controlled).
 type RenderHook func(pod *corev1.Pod, runnerName string, ordinal int32, revisionHash string)
+
+// EnsureGangPodGroupFn ensures the PodGroup for one multi-pod surge
+// Instance. See Deps.EnsureGangPodGroup.
+type EnsureGangPodGroupFn func(ctx context.Context, input ReconcileInput, plan ComponentPlan, inst InstancePlan) error
 
 // Reader returns the live API reader when APIReader is set, otherwise
 // the cached Client. Use for reads that must not observe a stale

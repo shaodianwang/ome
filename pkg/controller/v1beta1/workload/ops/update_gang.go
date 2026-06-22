@@ -25,8 +25,12 @@ import (
 //     marker on k. Both land k in instancePlanIndices' pinned set, so
 //     EnsurePodGroups creates k's PodGroup before any of its pods and
 //     the scale-down pass won't delete k mid-surge.
-//  2. Create k's gang (leader + workers) on the surge's PINNED revision
-//     (Op.TargetRevision), not the live `target` — see surgeTargetName.
+//  2. Ensure k's PodGroup, then create k's gang (leader + workers) on the
+//     surge's PINNED revision (Op.TargetRevision), not the live `target` —
+//     see surgeTargetName. The ensure here guards the window where k's
+//     GangSurgeTarget status hasn't yet round-tripped into the plan the
+//     top-level EnsurePodGroups keys off (gang scheduler would otherwise
+//     reject the pods with "PodGroup not found").
 //  3. Wait until every pod of k's gang is Ready, then mark them serving.
 //  4. Drain (delete) the source gang's pods.
 //  5. Promote k to Ready (RunningRevision = the pinned rev) and remove the
@@ -109,6 +113,20 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 	if len(missing) > 0 {
 		if !deps.ExpectationsCache().Satisfied(ns, owner, comp, surgeIdx) {
 			return false, nil
+		}
+		// Announce the surge gang's PodGroup before its pods. The top-level
+		// EnsurePodGroups pass keys off the plan, which only pins the surge
+		// index once its GangSurgeTarget status round-trips into ObservedState
+		// — a lag a gang-aware scheduler (mkube/coscheduler) turns into
+		// "PodGroup not found" on the freshly-created surge pods. Ensuring it
+		// here makes PodGroup-before-pods hold regardless of that timing. The
+		// callback is wired by the caller (gang package owns the podgroup dep,
+		// keeping ops free of it); nil callback / single-pod surge / absent
+		// CRD all no-op inside EnsureGangPodGroup.
+		if deps.EnsureGangPodGroup != nil {
+			if pgErr := deps.EnsureGangPodGroup(ctx, input, plan, surgeInst); pgErr != nil {
+				return false, fmt.Errorf("ensure surge gang PodGroup (instance=%d): %w", surgeIdx, pgErr)
+			}
 		}
 		// Stamp the pinned in-flight rev hash (NOT the latest target) so
 		// the gang's pods match the revision this surge committed to and

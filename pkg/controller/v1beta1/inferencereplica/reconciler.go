@@ -224,6 +224,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// parent ISVC is unresolved (foreground-GC window) — the hook handles
 		// nil by returning nil.
 		RenderHook: omenativecore.ISVCRenderHook(parent),
+		// Ensure a gang surge's PodGroup inline, just before its pods —
+		// closes the window where the surge index hasn't yet landed in the
+		// plan the top-level EnsurePodGroups keys off (a gang scheduler
+		// would otherwise reject the surge pods with "PodGroup not found").
+		EnsureGangPodGroup: workloadgang.EnsureSurgePodGroup(r.Client),
 	}
 
 	// PodGroups must exist BEFORE the first pod of any multi-pod Instance is

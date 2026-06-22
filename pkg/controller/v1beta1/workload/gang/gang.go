@@ -65,6 +65,26 @@ func extraPodGroupIndices(observed []workload.InstanceStatus, plan workload.Comp
 	return extras
 }
 
+// EnsureSurgePodGroup builds the Deps.EnsureGangPodGroup callback the
+// gang-surge op invokes to create a surge Instance's PodGroup inline,
+// just before its pods. Keeps the workload/ops package free of a
+// workload/podgroup import (which would close a cycle through podgroup's
+// test deps) while still guaranteeing PodGroup-before-pods for the surge
+// gang regardless of when the surge index lands in the plan the
+// top-level EnsurePodGroups keys off.
+//
+// No-op when the cluster lacks the PodGroup CRD
+// (DesiredSpec.GangSchedulingAvailable == false) or the Instance is
+// single-pod. Idempotent (CreateOrUpdate under the hood).
+func EnsureSurgePodGroup(c client.Client) workload.EnsureGangPodGroupFn {
+	return func(ctx context.Context, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan) error {
+		if c == nil || !input.DesiredSpec.GangSchedulingAvailable || !podgroup.IsMultiPodInstance(inst) {
+			return nil
+		}
+		return podgroup.EnsurePodGroup(ctx, c, input.OwnerObject, input.OwnerGVK, input.Key.OwnerName, plan, inst)
+	}
+}
+
 // EnsurePodGroups drives the per-Instance PodGroup lifecycle for one
 // Component reconcile. Wired into ReconcileComponent BEFORE the
 // per-Instance Create state machine so the gang is announced to the
