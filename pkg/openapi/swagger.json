@@ -282,6 +282,28 @@
         }
       }
     },
+    "v1beta1.ClusterConnectionSource": {
+      "description": "ClusterConnectionSource is a pluggable connection (modeled on Kueue's MultiKueueCluster.ClusterSource): exactly one of an in-cluster kubeconfig Secret or a SIG-Multicluster ClusterProfile reference.",
+      "type": "object",
+      "properties": {
+        "clusterProfileRef": {
+          "$ref": "#/definitions/v1beta1.ClusterProfileRef"
+        },
+        "kubeConfig": {
+          "$ref": "#/definitions/v1beta1.KubeConfigSource"
+        }
+      }
+    },
+    "v1beta1.ClusterProfileRef": {
+      "description": "ClusterProfileRef references a SIG-Multicluster cluster-inventory-api ClusterProfile. Phase 1 records the reference but does not yet resolve it.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
     "v1beta1.ClusterServingRuntime": {
       "description": "ClusterServingRuntime is the Schema for the servingruntimes API",
       "type": "object",
@@ -2156,6 +2178,24 @@
             "$ref": "#/definitions/github.com.kedacore.keda.v2.apis.keda.v1alpha1.ScaleTriggers"
           },
           "x-kubernetes-list-type": "atomic"
+        }
+      }
+    },
+    "v1beta1.KubeConfigSource": {
+      "description": "KubeConfigSource points at a Secret holding a kubeconfig for the cluster.",
+      "type": "object",
+      "required": [
+        "secretRef"
+      ],
+      "properties": {
+        "key": {
+          "description": "Key is the Secret data key holding the kubeconfig. Defaults to \"kubeconfig\".",
+          "type": "string"
+        },
+        "secretRef": {
+          "description": "SecretRef is the Secret holding the kubeconfig.",
+          "default": {},
+          "$ref": "#/definitions/v1.SecretReference"
         }
       }
     },
@@ -5073,6 +5113,91 @@
           "x-kubernetes-list-type": "map",
           "x-kubernetes-patch-merge-key": "name",
           "x-kubernetes-patch-strategy": "merge,retainKeys"
+        }
+      }
+    },
+    "v1beta1.WorkloadCluster": {
+      "description": "WorkloadCluster registers a workload cluster OME can place workloads onto (OEP-0018) — typically a GPU cluster. Cluster-scoped: it is fleet-level infrastructure, not a namespaced workload.",
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+          "type": "string"
+        },
+        "metadata": {
+          "default": {},
+          "$ref": "#/definitions/v1.ObjectMeta"
+        },
+        "spec": {
+          "default": {},
+          "$ref": "#/definitions/v1beta1.WorkloadClusterSpec"
+        },
+        "status": {
+          "default": {},
+          "$ref": "#/definitions/v1beta1.WorkloadClusterStatus"
+        }
+      }
+    },
+    "v1beta1.WorkloadClusterList": {
+      "type": "object",
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "apiVersion": {
+          "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.WorkloadCluster"
+          }
+        },
+        "kind": {
+          "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+          "type": "string"
+        },
+        "metadata": {
+          "default": {},
+          "$ref": "#/definitions/v1.ListMeta"
+        }
+      }
+    },
+    "v1beta1.WorkloadClusterSpec": {
+      "type": "object",
+      "required": [
+        "clusterSource"
+      ],
+      "properties": {
+        "clusterSource": {
+          "description": "ClusterSource is how the control plane connects to this cluster.",
+          "default": {},
+          "$ref": "#/definitions/v1beta1.ClusterConnectionSource"
+        }
+      }
+    },
+    "v1beta1.WorkloadClusterStatus": {
+      "type": "object",
+      "properties": {
+        "conditions": {
+          "description": "Conditions report connection health ONLY (the Ready condition). Never capacity, never Kueue/quota state.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1.Condition"
+          },
+          "x-kubernetes-list-map-keys": [
+            "type"
+          ],
+          "x-kubernetes-list-type": "map",
+          "x-kubernetes-patch-merge-key": "type",
+          "x-kubernetes-patch-strategy": "merge"
         }
       }
     }

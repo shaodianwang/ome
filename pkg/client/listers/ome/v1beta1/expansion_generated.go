@@ -45,3 +45,7 @@ type ServingRuntimeListerExpansion interface{}
 // ServingRuntimeNamespaceListerExpansion allows custom methods to be added to
 // ServingRuntimeNamespaceLister.
 type ServingRuntimeNamespaceListerExpansion interface{}
+
+// WorkloadClusterListerExpansion allows custom methods to be added to
+// WorkloadClusterLister.
+type WorkloadClusterListerExpansion interface{}

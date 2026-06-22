@@ -22,6 +22,7 @@ rules:
   - persistentvolumeclaims
   - persistentvolumes
   - pods
+  - secrets
   - serviceaccounts
   - services
   verbs:
@@ -46,16 +47,6 @@ rules:
   resources:
   - pods/status
   verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - delete
   - get
   - patch
   - update
@@ -226,6 +217,7 @@ rules:
   - inferenceservices/finalizers
   - servingruntimes
   - servingruntimes/finalizers
+  - workloadclusters
   verbs:
   - create
   - delete
@@ -245,6 +237,7 @@ rules:
   - inferencereplicas/status
   - inferenceservices/status
   - servingruntimes/status
+  - workloadclusters/status
   verbs:
   - get
   - patch

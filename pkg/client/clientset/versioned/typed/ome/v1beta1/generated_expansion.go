@@ -15,3 +15,5 @@ type InferenceReplicaExpansion interface{}
 type InferenceServiceExpansion interface{}
 
 type ServingRuntimeExpansion interface{}
+
+type WorkloadClusterExpansion interface{}

@@ -50,6 +50,7 @@ import (
 	trafficfactory "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/factory"
 	v1beta1runtimerevisioncontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/runtimerevision"
 	v1beta1servingruntimecontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/servingruntime"
+	workloadcluster "github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 	"github.com/ome-projects/ome/pkg/version"
@@ -114,6 +115,7 @@ type Options struct {
 	runtimeRevisionRetention   int
 	runtimeRevisionGracePeriod time.Duration
 	enableInferenceReplicaCtrl bool
+	enableMultiCluster         bool
 	zapOpts                    zap.Options
 }
 
@@ -136,6 +138,7 @@ func DefaultOptions() Options {
 		// project IRs). The flag exists so operators can disable the
 		// controller if a regression lands.
 		enableInferenceReplicaCtrl: true,
+		enableMultiCluster:         false,
 		zapOpts: zap.Options{
 			TimeEncoder: zapcore.RFC3339TimeEncoder,
 			ZapOpts:     []zaplog.Option{zaplog.AddCaller()},
@@ -165,6 +168,8 @@ func GetOptions() Options {
 		"How long an OME-owned ControllerRevision stays after first being observed unreferenced + over retention.")
 	flag.BoolVar(&opts.enableInferenceReplicaCtrl, "enable-inferencereplica-controller", opts.enableInferenceReplicaCtrl,
 		"Run the InferenceReplica controller. Defaults true; flip to false to disable if the per-IR lifecycle code ships a regression.")
+	flag.BoolVar(&opts.enableMultiCluster, "enable-multicluster", opts.enableMultiCluster,
+		"Enable the OEP-0018 multi-cluster controllers (WorkloadCluster registry). Alpha; default off.")
 	opts.zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	return opts
@@ -415,6 +420,18 @@ func main() {
 		}
 	} else {
 		setupLog.Info("InferenceReplica controller disabled via --enable-inferencereplica-controller=false")
+	}
+
+	if options.enableMultiCluster {
+		setupLog.Info("Setting up WorkloadCluster controller")
+		if err = (&workloadcluster.Reconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+			Log:    ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "WorkloadCluster")
+			os.Exit(1)
+		}
 	}
 
 	if options.enableWebhook {

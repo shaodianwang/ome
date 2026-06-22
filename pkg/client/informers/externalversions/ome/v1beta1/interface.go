@@ -22,6 +22,8 @@ type Interface interface {
 	InferenceServices() InferenceServiceInformer
 	// ServingRuntimes returns a ServingRuntimeInformer.
 	ServingRuntimes() ServingRuntimeInformer
+	// WorkloadClusters returns a WorkloadClusterInformer.
+	WorkloadClusters() WorkloadClusterInformer
 }
 
 type version struct {
@@ -68,4 +70,9 @@ func (v *version) InferenceServices() InferenceServiceInformer {
 // ServingRuntimes returns a ServingRuntimeInformer.
 func (v *version) ServingRuntimes() ServingRuntimeInformer {
 	return &servingRuntimeInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// WorkloadClusters returns a WorkloadClusterInformer.
+func (v *version) WorkloadClusters() WorkloadClusterInformer {
+	return &workloadClusterInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

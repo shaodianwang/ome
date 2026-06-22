@@ -1,0 +1,153 @@
+package workloadcluster
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+)
+
+func scheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(s))
+	require.NoError(t, clientgoscheme.AddToScheme(s))
+	return s
+}
+
+func wcWithSecret(name string) *v1beta1.WorkloadCluster {
+	return &v1beta1.WorkloadCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: v1beta1.WorkloadClusterSpec{ClusterSource: v1beta1.ClusterConnectionSource{
+			KubeConfig: &v1beta1.KubeConfigSource{SecretRef: corev1.SecretReference{Name: "kc", Namespace: "ome-system"}, Key: "kubeconfig"},
+		}},
+	}
+}
+
+// validKubeconfig is a minimal, parseable kubeconfig that also passes
+// validateRESTConfig (no exec/token-file/insecure) so a reconcile gets past the
+// BadKubeConfig gate and reaches the injected Probe.
+const validKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster:
+    server: https://example.com
+    certificate-authority-data: ZHVtbXk=
+contexts:
+- name: ctx
+  context: {cluster: c, user: u}
+current-context: ctx
+users:
+- name: u
+  user:
+    token: abc123
+`
+
+func kcSecret(data string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "kc", Namespace: "ome-system"},
+		Data:       map[string][]byte{"kubeconfig": []byte(data)},
+	}
+}
+
+func newReconciler(s *runtime.Scheme, probe func(context.Context, []byte) error, objs ...client.Object) (*Reconciler, client.Client) {
+	c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(&v1beta1.WorkloadCluster{}).Build()
+	return &Reconciler{Client: c, Scheme: s, Log: log.Log, Probe: probe}, c
+}
+
+func readyCond(c client.Client, name string) *metav1.Condition {
+	wc := &v1beta1.WorkloadCluster{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: name}, wc)
+	return apimeta.FindStatusCondition(wc.Status.Conditions, v1beta1.WorkloadClusterReady)
+}
+
+func TestReconcile_Reachable(t *testing.T) {
+	s := scheme(t)
+	wc := wcWithSecret("c1")
+	secret := kcSecret(validKubeconfig)
+	probe := func(context.Context, []byte) error { return nil }
+	r, c := newReconciler(s, probe, wc, secret)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+
+	cond := readyCond(c, "c1")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "Reachable", cond.Reason)
+}
+
+func TestReconcile_SecretNotFound(t *testing.T) {
+	s := scheme(t)
+	r, c := newReconciler(s, func(context.Context, []byte) error { return nil }, wcWithSecret("c1"))
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+	cond := readyCond(c, "c1")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "SecretNotFound", cond.Reason)
+}
+
+func TestReconcile_ConnectionFailed(t *testing.T) {
+	s := scheme(t)
+	wc := wcWithSecret("c1")
+	secret := kcSecret(validKubeconfig) // valid kubeconfig -> reaches the probe
+	probe := func(context.Context, []byte) error { return errors.New("dial tcp: timeout") }
+	r, c := newReconciler(s, probe, wc, secret)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+	cond := readyCond(c, "c1")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "ConnectionFailed", cond.Reason)
+}
+
+// TestReconcile_BadKubeConfig: a malformed kubeconfig is rejected BEFORE the
+// probe runs (the probe here would say "Reachable" but must never be reached),
+// keeping BadKubeConfig distinct from ConnectionFailed.
+func TestReconcile_BadKubeConfig(t *testing.T) {
+	s := scheme(t)
+	wc := wcWithSecret("c1")
+	secret := kcSecret("this is not a kubeconfig")
+	probeReached := false
+	probe := func(context.Context, []byte) error { probeReached = true; return nil }
+	r, c := newReconciler(s, probe, wc, secret)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+	cond := readyCond(c, "c1")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "BadKubeConfig", cond.Reason)
+	assert.False(t, probeReached, "probe must not run when the kubeconfig is malformed")
+}
+
+func TestReconcile_ClusterProfileUnsupported(t *testing.T) {
+	s := scheme(t)
+	wc := &v1beta1.WorkloadCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c1"},
+		Spec: v1beta1.WorkloadClusterSpec{ClusterSource: v1beta1.ClusterConnectionSource{
+			ClusterProfileRef: &v1beta1.ClusterProfileRef{Name: "cp1"}}},
+	}
+	r, c := newReconciler(s, func(context.Context, []byte) error { return nil }, wc)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+	cond := readyCond(c, "c1")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "ClusterProfileUnsupported", cond.Reason)
+}

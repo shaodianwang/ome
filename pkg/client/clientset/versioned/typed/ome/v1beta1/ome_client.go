@@ -19,6 +19,7 @@ type OmeV1beta1Interface interface {
 	InferenceReplicasGetter
 	InferenceServicesGetter
 	ServingRuntimesGetter
+	WorkloadClustersGetter
 }
 
 // OmeV1beta1Client is used to interact with features provided by the ome.io group.
@@ -52,6 +53,10 @@ func (c *OmeV1beta1Client) InferenceServices(namespace string) InferenceServiceI
 
 func (c *OmeV1beta1Client) ServingRuntimes(namespace string) ServingRuntimeInterface {
 	return newServingRuntimes(c, namespace)
+}
+
+func (c *OmeV1beta1Client) WorkloadClusters() WorkloadClusterInterface {
+	return newWorkloadClusters(c)
 }
 
 // NewForConfig creates a new OmeV1beta1Client for the given config.
