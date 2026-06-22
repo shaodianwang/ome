@@ -910,9 +910,15 @@ def _canary(case_id, yaml_file, desc, hdr):
     if not primary:
         return _write_fail(case_id, desc, hdr, "NO_PRIMARY", "no configured component to canary")
     N = ctx["N"]
-    print(f"  Phase 2: canary policy={policy} steps={nsteps} primary={primary}"
+    # Bump EVERY configured member of the canary group, not just the primary — a
+    # coupled multi-component canary (e.g. [engine, decoder, router]) must roll all
+    # members for the secondary-capacity gate to be genuinely exercised (mirrors
+    # the coordination trigger path, which bumps all group members). The primary
+    # stays the component whose status/traffic the step machine is observed on.
+    group = (set(ctx["info"].get("members") or []) & ctx["configured"]) or {primary}
+    print(f"  Phase 2: canary policy={policy} steps={nsteps} primary={primary} bump={sorted(group)}"
           + ("  +rollback" if do_rollback else ""))
-    if not _bump_rev(ctx, {primary}):
+    if not _bump_rev(ctx, group):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed")
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * N[primary] * ctx["pods_per_inst"][primary] + 120)
     print(f"  Phase 3: driving + observing the canary (≤{budget}s)")
@@ -1046,12 +1052,22 @@ def _canary(case_id, yaml_file, desc, hdr):
             good("Paused" in phases, "MANUAL rollout paused before promote", "MANUAL rollout never Paused")
             good(did_promote, "promote annotation accepted + consumed (advanced)", "never promoted")
     else:
-        # AUTO advances on the pause timer with no manual promote, so it must step
-        # through the intermediate traffic weights on its own (not cut straight to
-        # 100%). Reaching the terminal phase above already proves auto-completion.
-        good(len(traffic_by_step) >= 2,
-             "AUTO rollout stepped through intermediate traffic weights",
-             f"AUTO rollout did not step through intermediate weights (saw steps {sorted(traffic_by_step)})")
+        # AUTO advances on the pause timer with no manual promote. If the PLAN has
+        # ≥2 traffic-bearing steps it must step through the intermediate weights on
+        # its own (not cut straight to 100%). A capacity-ahead / smoke plan with a
+        # single non-zero-traffic step (e.g. warm 100% capacity at traffic:0, then
+        # cut to 100%) produces only the final weight, so skip that assertion —
+        # reaching the terminal phase + 100% canary traffic already proves
+        # auto-completion. (A traffic:0 step records no latest-revision weight.)
+        traffic_steps = sum(1 for s in (cinfo.get("steps") or [])
+                            if isinstance(s, dict) and (s.get("traffic") or 0) > 0)
+        if traffic_steps >= 2:
+            good(len(traffic_by_step) >= 2,
+                 "AUTO rollout stepped through intermediate traffic weights",
+                 f"AUTO rollout did not step through intermediate weights (saw steps {sorted(traffic_by_step)})")
+        else:
+            checks.append(f"  ✓ AUTO single-traffic-step plan ({traffic_steps} traffic-bearing step) "
+                          "auto-completed to terminal — no intermediate weight to assert")
 
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 

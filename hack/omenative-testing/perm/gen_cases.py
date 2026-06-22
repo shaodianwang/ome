@@ -208,9 +208,14 @@ def nds(topo, n=N, nd=None):
     return dict(Ne=n, Nd=(nd if is_pd(topo) else 0), Nr=(NR if is_pd(topo) else 0))
 
 
-def ceils(topo, ce, n=N, nd=None):
+def ceils(topo, ce, n=N, nd=None, surge_d=0, surge_r=0):
+    # ceil_e is surge-adjusted by the caller (passes N + surge). decoder/router
+    # only surge when they're rolled group members, so their headroom is opt-in
+    # per call (surge_d / surge_r) — steady count otherwise.
     nd = nd if nd is not None else n
-    return dict(ceil_e=ce, ceil_d=(nd if is_pd(topo) else 0), ceil_r=(NR if is_pd(topo) else 0))
+    return dict(ceil_e=ce,
+                ceil_d=(nd + surge_d if is_pd(topo) else 0),
+                ceil_r=(NR + surge_r if is_pd(topo) else 0))
 
 
 HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r", "to_e", "to_d", "to_r",
@@ -330,8 +335,10 @@ for topo in ["engine", "pd"]:
         C("edge", f"%-budget maxSurge={s} {topo} (surge {sr} -> peak {N + sr})",
           comps_for(topo, lifecycle(surge=s, unavail=0)), **nds(topo), **ceils(topo, N + sr), topo=topo, co="none")
 for ck in ["ratio", "percomp"]:               # %-surge under pacing
+    # group=[engine, decoder] → both roll. engine 50% surge → N+2; decoder is a
+    # rolled member at default maxSurge=1 → N+1 (surge_d=1). router not in group.
     C("edge", f"%-budget maxSurge=50% pd under {ck}", comps_for("pd", lifecycle(surge="50%", unavail=0)),
-      coord=coord_for(ck), **nds("pd"), **ceils("pd", N + 2), topo="pd", co=ck)
+      coord=coord_for(ck), **nds("pd"), **ceils("pd", N + 2, surge_d=1), topo="pd", co=ck)
 for topo in ["engine", "pd"]:
     for u in ["25%", "50%"]:
         C("edge", f"%-budget maxUnavailable={u} {topo} RecreatePod",
