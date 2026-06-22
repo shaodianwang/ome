@@ -425,9 +425,10 @@ func main() {
 	if options.enableMultiCluster {
 		setupLog.Info("Setting up WorkloadCluster controller")
 		if err = (&workloadcluster.Reconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-			Log:    ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
+			Client:  mgr.GetClient(),
+			Scheme:  mgr.GetScheme(),
+			Log:     ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
+			Manager: workloadcluster.NewManager(mgr.GetScheme()),
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "WorkloadCluster")
 			os.Exit(1)

@@ -151,3 +151,38 @@ func TestReconcile_ClusterProfileUnsupported(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "ClusterProfileUnsupported", cond.Reason)
 }
+
+func TestReconcile_ConnectsManagerWhenReachable(t *testing.T) {
+	s := scheme(t)
+	wc := wcWithSecret("c1")
+	secret := kcSecret(validKubeconfig)
+	mgr := NewManager(s)
+	mgr.newClient = func(_ context.Context, raw []byte, _ *runtime.Scheme) (SelectivelyCachingClient, context.CancelFunc, error) {
+		return &stubClient{id: "c1"}, func() {}, nil
+	}
+	r, _ := newReconciler(s, func(context.Context, []byte) error { return nil }, wc, secret)
+	r.Manager = mgr
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+
+	_, ok := mgr.ClientFor("c1")
+	assert.True(t, ok, "a Reachable cluster must be connected in the Manager")
+}
+
+func TestReconcile_DisconnectsManagerWhenDeleted(t *testing.T) {
+	s := scheme(t)
+	mgr := NewManager(s)
+	mgr.newClient = func(_ context.Context, raw []byte, _ *runtime.Scheme) (SelectivelyCachingClient, context.CancelFunc, error) {
+		return &stubClient{}, func() {}, nil
+	}
+	require.NoError(t, mgr.Connect(context.Background(), "gone", []byte("x")))
+	r, _ := newReconciler(s, func(context.Context, []byte) error { return nil }) // no objects -> NotFound
+	r.Manager = mgr
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "gone"}})
+	require.NoError(t, err)
+
+	_, ok := mgr.ClientFor("gone")
+	assert.False(t, ok, "a deleted WorkloadCluster must be disconnected")
+}

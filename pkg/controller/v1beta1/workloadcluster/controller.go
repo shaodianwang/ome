@@ -39,18 +39,25 @@ type Reconciler struct {
 	Probe func(ctx context.Context, kubeconfig []byte) error
 	// HealthInterval is the re-probe cadence; defaults to defaultHealthInterval.
 	HealthInterval time.Duration
+	// Manager holds the live per-cluster clients; the reconciler connects a
+	// cluster when it becomes Reachable and disconnects it on removal. Optional
+	// (nil-safe) so the health-only path keeps working without transport.
+	Manager *Manager
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	wc := &v1beta1.WorkloadCluster{}
 	if err := r.Get(ctx, req.NamespacedName, wc); err != nil {
 		if apierrors.IsNotFound(err) {
+			if r.Manager != nil {
+				r.Manager.Disconnect(req.Name)
+			}
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
-	status, reason, msg := r.assess(ctx, wc)
+	status, reason, msg, raw := r.assess(ctx, wc)
 	apimeta.SetStatusCondition(&wc.Status.Conditions, metav1.Condition{
 		Type:               v1beta1.WorkloadClusterReady,
 		Status:             status,
@@ -58,6 +65,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		Message:            msg,
 		ObservedGeneration: wc.Generation,
 	})
+	if r.Manager != nil {
+		if status == metav1.ConditionTrue {
+			if err := r.Manager.Connect(ctx, wc.Name, raw); err != nil {
+				apimeta.SetStatusCondition(&wc.Status.Conditions, metav1.Condition{
+					Type:               v1beta1.WorkloadClusterReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             "ConnectionFailed",
+					Message:            err.Error(),
+					ObservedGeneration: wc.Generation,
+				})
+			}
+		} else {
+			r.Manager.Disconnect(wc.Name)
+		}
+	}
 	if err := r.Status().Update(ctx, wc); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -69,11 +91,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 // assess resolves the connection and probes it, returning the Ready condition
 // fields. The Probe is injected so this is unit-testable without a real cluster.
-func (r *Reconciler) assess(ctx context.Context, wc *v1beta1.WorkloadCluster) (metav1.ConditionStatus, string, string) {
+func (r *Reconciler) assess(ctx context.Context, wc *v1beta1.WorkloadCluster) (status metav1.ConditionStatus, reason, msg string, kubeconfig []byte) {
 	src := wc.Spec.ClusterSource
 	if src.KubeConfig == nil {
 		return metav1.ConditionFalse, "ClusterProfileUnsupported",
-			"clusterProfileRef is not yet resolved (Phase 1 supports kubeConfig only)"
+			"clusterProfileRef is not yet resolved (Phase 1 supports kubeConfig only)", nil
 	}
 
 	key := src.KubeConfig.Key
@@ -85,26 +107,26 @@ func (r *Reconciler) assess(ctx context.Context, wc *v1beta1.WorkloadCluster) (m
 	if err := r.Get(ctx, nn, secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return metav1.ConditionFalse, "SecretNotFound",
-				fmt.Sprintf("kubeconfig Secret %s/%s not found", nn.Namespace, nn.Name)
+				fmt.Sprintf("kubeconfig Secret %s/%s not found", nn.Namespace, nn.Name), nil
 		}
-		return metav1.ConditionFalse, "SecretNotFound", err.Error()
+		return metav1.ConditionFalse, "SecretNotFound", err.Error(), nil
 	}
 	raw, ok := secret.Data[key]
 	if !ok || len(raw) == 0 {
 		return metav1.ConditionFalse, "BadKubeConfig",
-			fmt.Sprintf("Secret %s/%s has no %q key", nn.Namespace, nn.Name, key)
+			fmt.Sprintf("Secret %s/%s has no %q key", nn.Namespace, nn.Name, key), nil
 	}
 	// Validate the kubeconfig (parse + security: reject exec/token-file/insecure)
 	// BEFORE probing. This keeps "malformed/unsafe kubeconfig" (BadKubeConfig)
 	// distinct from "cluster unreachable" (ConnectionFailed), and ensures the
 	// security validation runs regardless of which probe is in use.
 	if _, err := RESTConfigFromKubeConfig(raw); err != nil {
-		return metav1.ConditionFalse, "BadKubeConfig", err.Error()
+		return metav1.ConditionFalse, "BadKubeConfig", err.Error(), nil
 	}
 	if err := r.Probe(ctx, raw); err != nil {
-		return metav1.ConditionFalse, "ConnectionFailed", err.Error()
+		return metav1.ConditionFalse, "ConnectionFailed", err.Error(), nil
 	}
-	return metav1.ConditionTrue, "Reachable", ""
+	return metav1.ConditionTrue, "Reachable", "", raw
 }
 
 func (r *Reconciler) healthInterval() time.Duration {
