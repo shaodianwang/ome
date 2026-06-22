@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -1225,6 +1226,83 @@ func TestGangSurgeUpdate_BumpDuringBump_PromotesPinnedRev(t *testing.T) {
 			"Stamping the latest target (%q) strands the pods on the intermediate rev — "+
 			"DetectUpdateTrigger's fast path short-circuits and the rollout never converges.",
 			promoted.RunningRevision, v2Name, v3Name)
+	}
+}
+
+// TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete pins the
+// multi-node RatioBalanced pacing fix: when the replacement gang is Ready +
+// serving and the drain step fires, the SOURCE gang's pods must be flipped
+// OUT of serving rotation (serving=False) in the SAME pass — not merely
+// Deleted. A Deleted-but-terminating pod keeps serving=True through its grace
+// window, so the source would linger in ServingReplicas beside the
+// replacement (the N+1 PEAK) for the multi-reconcile drain window, holding
+// the cross-Component serving ratio out of band. Single-pod surgeUpdate
+// already drains-then-deletes; this gives the gang path the same atomic flip.
+func TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := surgeISVCReady("llama-70b", "prod", 1)
+	plan := gangSurgePlan()
+
+	v1Name := "llama-70b-engine-rev-v1hash"
+	v2Name := "llama-70b-engine-rev-v2hash"
+	v1Hash := query.RevisionHashFromControllerRevisionName(v1Name)
+	v2Hash := query.RevisionHashFromControllerRevisionName(v2Name)
+
+	// In-flight gang surge: source idx=0 (Step=Surge → idx 1), target idx=1.
+	isvc.Status.Components = gangSurgeInFlightStatus(v1Name, v2Name)
+
+	c := legacyNewFakeClient(t, isvc)
+	makeCR(t, c, isvc, v2Name)
+
+	// Source gang (idx=0) still alive and SERVING — not yet drained.
+	for _, runner := range []string{"leader", "worker"} {
+		if err := c.Create(context.Background(), gangPodAt(isvc, 0, runner, v1Hash, true, true)); err != nil {
+			t.Fatalf("seed source gang pod (%s): %v", runner, err)
+		}
+	}
+	// Replacement gang (idx=1) Ready + serving → drain step is next.
+	for _, runner := range []string{"leader", "worker"} {
+		if err := c.Create(context.Background(), gangPodAt(isvc, 1, runner, v2Hash, true, true)); err != nil {
+			t.Fatalf("seed surge gang pod (%s): %v", runner, err)
+		}
+	}
+
+	input := gangInputWithRemove(isvc, c)
+	v2 := &appsv1.ControllerRevision{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: v2Name}, v2); err != nil {
+		t.Fatalf("get v2 CR: %v", err)
+	}
+
+	// Leave a delete-expectation outstanding on the source so the pass stops
+	// at the post-drain Satisfied() gate WITHOUT deleting — letting us observe
+	// the serving flip on the still-present source pods. The drain MUST run
+	// before that gate (the fix); the original code returned at the gate with
+	// the source still serving.
+	workload.DefaultExpectations.ExpectDeletes("prod", "llama-70b", workload.ComponentEngine, 0, 1)
+
+	if _, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], v2, nil); err != nil {
+		t.Fatalf("gang surge drain pass: %v", err)
+	}
+
+	// Every still-present source pod must now be drained from rotation.
+	srcPods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "llama-70b", workload.ComponentEngine, 0)
+	if err != nil {
+		t.Fatalf("list source gang pods: %v", err)
+	}
+	if len(srcPods) == 0 {
+		t.Fatalf("source gang pods were deleted; expected them held at the " +
+			"post-drain Satisfied() gate so the serving flip is observable")
+	}
+	for _, pod := range srcPods {
+		if pod.DeletionTimestamp != nil {
+			continue // already gone from rotation by deletion
+		}
+		if podreadiness.IsServing(pod) {
+			t.Errorf("source gang pod %s is still serving=True during the drain "+
+				"step — it must be flipped out of rotation atomically with the "+
+				"replacement joining, else the N+1 surge peak lingers and "+
+				"RatioBalanced pacing breaks for gangs", pod.Name)
+		}
 	}
 }
 

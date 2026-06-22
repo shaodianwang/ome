@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -11,6 +12,13 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
+
+// gangSurgeDrainKey is the serving-gate writer key for draining a gang
+// surge's SOURCE Instance. Stable per source index so the drain flip is
+// idempotent across the multi-pass drain window.
+func gangSurgeDrainKey(sourceIdx int32) string {
+	return "gang-surge-source-" + strconv.Itoa(int(sourceIdx))
+}
 
 // gangSurgeUpdate performs a SurgeThenDrain rollout for a multi-pod
 // (gang) Instance by surging a whole replacement gang at a freshly
@@ -158,6 +166,23 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		return false, fmt.Errorf("list source gang pods (instance=%d): %w", sourceIdx, err)
 	}
 	if len(sourcePods) > 0 {
+		// Flip the source gang OUT of serving rotation in the SAME pass the
+		// replacement gang joined it — mirroring single-pod surgeUpdate. A
+		// pod merely Deleted keeps serving=True (ContainersReady) through its
+		// whole termination grace, so the source would linger in
+		// ServingReplicas beside the replacement (the N+1 PEAK) for the
+		// drain window. For a gang that window spans reconciles, holding the
+		// live cross-Component serving ratio out of band under RatioBalanced.
+		// Draining first collapses serving back to N atomically.
+		for _, pod := range sourcePods {
+			if !podreadiness.IsServing(pod) {
+				continue
+			}
+			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, pod,
+				podreadiness.WriterUpdateSurgeDrain, gangSurgeDrainKey(sourceIdx)); err != nil {
+				return false, fmt.Errorf("drain source gang pod %s: %w", pod.Name, err)
+			}
+		}
 		if !deps.ExpectationsCache().Satisfied(ns, owner, comp, sourceIdx) {
 			return false, nil
 		}

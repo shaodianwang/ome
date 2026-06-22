@@ -1467,6 +1467,116 @@ func TestDecoderSurgeBudget_InWakeUpDeltaGatesSecondSurge(t *testing.T) {
 	}
 }
 
+// mkGangSurgeFixture builds a symmetric engine 2 : decoder 2 RatioBalanced
+// group (tol 25%, band [0.75, 1.25]) where ENGINE is mid multi-node (gang)
+// SurgeThenDrain: its surge-target Instance has a full, serving gang, so the
+// status aggregator counts it and engine ServingReplicas reads N+1=3 — the
+// transient surge PEAK. Decoder is at steady N=2.
+//
+// For a single-pod Component the surge flip is atomic within one reconcile,
+// so ServingReplicas never reports N+1 across a status write; for a gang the
+// surge gang lingers serving alongside the source, so the gate genuinely
+// observes the peak. The gate must treat that peak as the transient surge
+// headroom it is — NOT durable serving capacity a drain may eat into.
+func mkGangSurgeFixture() *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: 25},
+				}},
+			},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {
+					Lifecycle: &v1beta1.LifecycleStatus{
+						Replicas:        2,
+						ServingReplicas: 3, // N=2 source + 1 surge gang = peak
+						InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+							{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating,
+								PodCount: 2, ServingPodCount: 2,
+								Operation: &v1beta1.InstanceOperation{
+									Type: v1beta1.InstanceOperationUpdate, Step: "Surge",
+									SurgeIndex: int32Ptr(2)}},
+							{Index: 1, Phase: v1beta1.OMENativeInstanceReady,
+								PodCount: 2, ServingPodCount: 2},
+							// Surge-target gang: full pod set, all serving →
+							// counted in ServingReplicas (the N+1 peak).
+							{Index: 2, Phase: v1beta1.OMENativeInstanceCreating,
+								PodCount: 2, ServingPodCount: 2,
+								Operation: &v1beta1.InstanceOperation{
+									Type: v1beta1.InstanceOperationUpdate,
+									Step: workloadtypes.UpdateStepGangSurgeTarget}},
+						},
+					},
+				},
+				v1beta1.DecoderComponent: {
+					Lifecycle: &v1beta1.LifecycleStatus{
+						Replicas:        2,
+						ServingReplicas: 2,
+					},
+				},
+			},
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name:       "0",
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
+						Original: map[v1beta1.ComponentType]int32{
+							v1beta1.EngineComponent:  2,
+							v1beta1.DecoderComponent: 2,
+						},
+					},
+				}},
+			},
+		},
+	}
+}
+
+// TestCheckRatioGate_GangSurgePeakDoesNotAuthorizeDrain reproduces the
+// multi-node RatioBalanced mis-pacing found on the cluster (p72/78/79/80/81/
+// 83/87/95/96, all confirmed isolated). Engine is mid gang SurgeThenDrain so
+// its ServingReplicas reads the transient PEAK N+1=3 against decoder's steady
+// N=2. A drain of one engine Instance would, once the surge settles back to
+// N, leave engine at 1 : decoder 2 = ratio 2.0 vs the 1:1 anchor — far past
+// the 25% band. The gate must REJECT the drain.
+//
+// Before the fix the gate counted the surge peak as durable serving (3:2 → a
+// -1 drain projects 2:2, in band) and ALLOWED it. After the fix the gate
+// nets the in-flight gang-surge peak out, sees the steady 2:2, and a -1 drain
+// projects 1:2 (out of band) → DENIED. Single-pod is unaffected: it has no
+// GangSurgeTarget Instance, so nothing is netted.
+func TestCheckRatioGate_GangSurgePeakDoesNotAuthorizeDrain(t *testing.T) {
+	isvc := mkGangSurgeFixture()
+	allowed, reason := CheckRatioGate(isvc, v1beta1.EngineComponent, 0)
+	if allowed {
+		t.Fatalf("a drain on an engine whose serving is inflated by an in-flight "+
+			"gang surge (peak 3 over steady 2) must be DENIED — once the surge "+
+			"settles the drain leaves 1:2 (ratio 2.0 vs 1:1 anchor, >25%% band); "+
+			"got allowed (reason=%q)", reason)
+	}
+}
+
+// TestUnavailableInFlight_GangSurgeTargetNotCountedUnavailable pins that a
+// gang surge TARGET Instance (Step=GangSurgeTarget) is NOT counted as
+// unavailable-in-flight — it ADDS a replacement gang, it does not pull one
+// from rotation. Counting it would poison the drain-side tiebreaker's
+// "no pod already out of rotation" guard during every gang surge.
+func TestUnavailableInFlight_GangSurgeTargetNotCountedUnavailable(t *testing.T) {
+	statuses := []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Operation: &v1beta1.InstanceOperation{Step: "Surge"}},
+		{Index: 1, Operation: &v1beta1.InstanceOperation{Step: workloadtypes.UpdateStepGangSurgeTarget}},
+		{Index: 2, Operation: &v1beta1.InstanceOperation{Step: "Drain"}},
+	}
+	if got := unavailableInFlight(statuses); got != 1 {
+		t.Fatalf("only the Drain Instance is unavailable-in-flight; Surge and "+
+			"GangSurgeTarget add/keep capacity: want 1, got %d", got)
+	}
+}
+
 // CheckRatioGate, CheckUnavailabilityGate, and CheckSurgeGate are
 // test-only shims preserving the (isvc, component, inFlightDelta) call
 // shape the gate unit tests exercise. The production package-level

@@ -313,9 +313,10 @@ func SnapshotOriginal(replicas map[v1beta1.ComponentType]int32) map[v1beta1.Comp
 
 // unavailableInFlight counts a Component's Instances currently taken OUT
 // of serving rotation by an in-flight operation (Drain for recreate,
-// InPlace for in-place patch). Surge / SurgeDrain ADD a pod rather than
-// remove one, so they are excluded. Mirrors
-// workload.CurrentUnavailableInFlight on the v1beta1 status shape.
+// InPlace for in-place patch). Surge / SurgeDrain / GangSurgeTarget ADD a
+// pod (or a whole replacement gang) rather than remove one, so they are
+// excluded. Mirrors workload.CurrentUnavailableInFlight on the v1beta1
+// status shape.
 //
 // This is OPERATION-tracked (the dispatcher stamps Operation.Step
 // synchronously when it starts the op), so it is fresh even when the
@@ -329,9 +330,34 @@ func unavailableInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
 			continue
 		}
 		switch s.Operation.Step {
-		case "Surge", "SurgeDrain":
-			// surge adds a pod, it doesn't remove one
+		case "Surge", "SurgeDrain", "GangSurgeTarget":
+			// surge (single-pod or gang replacement) adds capacity, it
+			// doesn't remove a pod from rotation
 		default:
+			n++
+		}
+	}
+	return n
+}
+
+// servingSurgePeakInFlight counts a Component's in-flight gang-surge TARGET
+// Instances whose replacement gang is already serving — the transient PEAK
+// that inflates ServingReplicas above the steady N during a multi-node
+// SurgeThenDrain roll. A single-pod surge flips serving atomically within one
+// reconcile (old leaves rotation the instant the new joins), so its peak is
+// never observed across a status write; a gang's replacement lingers serving
+// beside the not-yet-drained source for the whole drain window. Netting this
+// out makes the ratio gate see a gang Component at its STEADY serving — the
+// same view it has of a single-pod Component — so the surge headroom is not
+// mistaken for durable capacity a drain may consume.
+func servingSurgePeakInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
+	var n int32
+	for _, s := range statuses {
+		if s.Operation == nil || s.Operation.Step != "GangSurgeTarget" {
+			continue
+		}
+		// Counted in ServingReplicas only once the whole gang is serving.
+		if s.PodCount > 0 && s.ServingPodCount >= s.PodCount {
 			n++
 		}
 	}
@@ -416,7 +442,17 @@ func (ctx GateContext) CheckRatio(inFlightDelta, projDelta int32) (allowed bool,
 			state.NewPods[c] = cs.Lifecycle.UpdatedReplicas
 			// Serving is what the band check projects against — live
 			// traffic capacity, not rollout progress.
-			state.Serving[c] = cs.Lifecycle.ServingReplicas
+			// Net out the transient gang-surge PEAK (replacement gang
+			// serving beside the not-yet-drained source) so a multi-node
+			// Component is gated at its STEADY serving, exactly like a
+			// single-pod Component whose surge flip is atomic. Without this
+			// a gang's N+1 peak is mistaken for durable capacity and the
+			// gate authorizes a drain that settles the ratio out of band.
+			serving := cs.Lifecycle.ServingReplicas - servingSurgePeakInFlight(cs.Lifecycle.InstanceStatuses)
+			if serving < 0 {
+				serving = 0
+			}
+			state.Serving[c] = serving
 			// Operation-tracked in-flight drains (fresh; see RatioState doc).
 			state.InFlightUnavail[c] = unavailableInFlight(cs.Lifecycle.InstanceStatuses)
 		}
