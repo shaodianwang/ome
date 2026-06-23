@@ -13,7 +13,11 @@ import (
 
 // Manager holds one live remote client per registered WorkloadCluster, keyed by
 // cluster name. It is the OEP-0018 cross-cluster transport: later phases create
-// and watch remote objects via ClientFor(name). Safe for concurrent use.
+// and watch remote objects via ClientFor(name).
+//
+// Safe for concurrent use across distinct cluster names; Connect/Disconnect for
+// the SAME name must be serialized by the caller (the WorkloadCluster reconciler
+// is single-worker per key, so this holds in practice).
 type Manager struct {
 	scheme *runtime.Scheme
 
@@ -125,6 +129,12 @@ func buildRemoteClient(ctx context.Context, raw []byte, scheme *runtime.Scheme) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("new watch client: %w", err)
 	}
-	_, cancel := context.WithCancel(ctx)
-	return NewNeverCachingClient(wc), cancel, nil
+	// The never-caching client has no background goroutines, so there is
+	// nothing to tear down: return a no-op cancel. Phase 5 will switch to a
+	// selective-caching client — when it does, this MUST derive a context via
+	// context.WithCancel(ctx), pass THAT context to NewSelectivelyCachingClient
+	// (which starts the cache informers on it), and return its cancel so
+	// Disconnect tears the cache down. (Returning a cancel from an unused
+	// derived context, as before, was a silent no-op that invited a leak.)
+	return NewNeverCachingClient(wc), func() {}, nil
 }

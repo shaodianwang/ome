@@ -520,7 +520,7 @@ func schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref common.ReferenceCallback
 					},
 					"phase": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Phase is the candidate's state: \"Placed\" (derived ISVC created, racing) or \"Admitted\" (this candidate won the race).",
+							Description: "Phase is the candidate's state.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -5627,7 +5627,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) c
 					},
 					"phase": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Phase is a coarse placement state: \"Pending\" (no candidate / none connected), \"Racing\" (fanned out, no winner yet), \"Placed\" (winner chosen), \"Failed\".",
+							Description: "Phase is a coarse placement state.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

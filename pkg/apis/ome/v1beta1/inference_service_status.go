@@ -420,6 +420,33 @@ func (ss *InferenceServiceStatus) SetCondition(conditionType apis.ConditionType,
 	}
 }
 
+// PlacementPhase is the coarse state of an InferenceService's OEP-0018
+// multi-cluster placement.
+// +kubebuilder:validation:Enum=Pending;Racing;Placed;Failed
+type PlacementPhase string
+
+const (
+	// PlacementPhasePending: no candidate cluster matched, or none connected yet.
+	PlacementPhasePending PlacementPhase = "Pending"
+	// PlacementPhaseRacing: fanned out to candidates; no cluster has admitted yet.
+	PlacementPhaseRacing PlacementPhase = "Racing"
+	// PlacementPhasePlaced: a candidate was admitted and won the race.
+	PlacementPhasePlaced PlacementPhase = "Placed"
+	// PlacementPhaseFailed: the winning placement failed terminally.
+	PlacementPhaseFailed PlacementPhase = "Failed"
+)
+
+// CandidatePlacementPhase is the per-cluster state of a fan-out candidate.
+// +kubebuilder:validation:Enum=Placed;Admitted
+type CandidatePlacementPhase string
+
+const (
+	// CandidatePhasePlaced: derived ISVC created on this candidate; racing.
+	CandidatePhasePlaced CandidatePlacementPhase = "Placed"
+	// CandidatePhaseAdmitted: this candidate's Kueue admitted the pods (won).
+	CandidatePhaseAdmitted CandidatePlacementPhase = "Admitted"
+)
+
 // PlacementStatus is the OEP-0018 multi-cluster placement status: which workload
 // cluster an InferenceService is placed on and a coarse phase.
 type PlacementStatus struct {
@@ -428,10 +455,9 @@ type PlacementStatus struct {
 	// +optional
 	Cluster string `json:"cluster,omitempty"`
 
-	// Phase is a coarse placement state: "Pending" (no candidate / none connected),
-	// "Racing" (fanned out, no winner yet), "Placed" (winner chosen), "Failed".
+	// Phase is a coarse placement state.
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase PlacementPhase `json:"phase,omitempty"`
 
 	// Candidates are the clusters this ISVC has been fanned out to during the
 	// OEP-0018 placement race. Populated by the control plane.
@@ -446,8 +472,7 @@ type PlacementStatus struct {
 type CandidatePlacement struct {
 	// Cluster is the WorkloadCluster name.
 	Cluster string `json:"cluster"`
-	// Phase is the candidate's state: "Placed" (derived ISVC created, racing)
-	// or "Admitted" (this candidate won the race).
+	// Phase is the candidate's state.
 	// +optional
-	Phase string `json:"phase,omitempty"`
+	Phase CandidatePlacementPhase `json:"phase,omitempty"`
 }

@@ -30558,6 +30558,9 @@ spec:
                           cluster:
                             type: string
                           phase:
+                            enum:
+                              - Placed
+                              - Admitted
                             type: string
                         required:
                           - cluster
@@ -30569,6 +30572,11 @@ spec:
                     cluster:
                       type: string
                     phase:
+                      enum:
+                        - Pending
+                        - Racing
+                        - Placed
+                        - Failed
                       type: string
                   type: object
                 rolloutCoordination:

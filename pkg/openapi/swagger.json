@@ -241,7 +241,7 @@
           "default": ""
         },
         "phase": {
-          "description": "Phase is the candidate's state: \"Placed\" (derived ISVC created, racing) or \"Admitted\" (this candidate won the race).",
+          "description": "Phase is the candidate's state.",
           "type": "string"
         }
       }
@@ -3189,7 +3189,7 @@
           "type": "string"
         },
         "phase": {
-          "description": "Phase is a coarse placement state: \"Pending\" (no candidate / none connected), \"Racing\" (fanned out, no winner yet), \"Placed\" (winner chosen), \"Failed\".",
+          "description": "Phase is a coarse placement state.",
           "type": "string"
         }
       }

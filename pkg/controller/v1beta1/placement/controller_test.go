@@ -2,6 +2,7 @@ package placement
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -129,7 +130,7 @@ func TestReconcile_NoCandidate(t *testing.T) {
 	require.NoError(t, err)
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
-	assert.Equal(t, PhasePending, p.Phase)
+	assert.Equal(t, v1beta1.PlacementPhasePending, p.Phase)
 }
 
 func TestReconcile_FansOutToAllCandidates(t *testing.T) {
@@ -149,7 +150,7 @@ func TestReconcile_FansOutToAllCandidates(t *testing.T) {
 	assert.True(t, hasDerived(t, wb), "derived on b")
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
-	assert.Equal(t, PhaseRacing, p.Phase)
+	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
 	assert.Empty(t, p.Cluster)
 	assert.Len(t, p.Candidates, 2)
 }
@@ -171,7 +172,7 @@ func TestReconcile_FirstAdmittedWinsAndDeletesLosers(t *testing.T) {
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
 	assert.Equal(t, "b", p.Cluster)
-	assert.Equal(t, PhasePlaced, p.Phase)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
 	assert.False(t, hasDerived(t, wa), "loser a's derived deleted")
 	assert.True(t, hasDerived(t, wb), "winner b's derived kept")
 }
@@ -187,8 +188,8 @@ func TestReconcile_StickyWinner(t *testing.T) {
 	isvc := srcISVC("gpu=gb300")
 	isvc.Finalizers = []string{PlacementFinalizer}
 	isvc.Status.Placement = &v1beta1.PlacementStatus{
-		Cluster: "b", Phase: PhasePlaced,
-		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: candidatePhaseAdmitted}},
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
 	}
 	r, cp := newPlacer(s, clusters, isvc,
 		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
@@ -199,7 +200,7 @@ func TestReconcile_StickyWinner(t *testing.T) {
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
 	assert.Equal(t, "b", p.Cluster)
-	assert.Equal(t, PhasePlaced, p.Phase)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
 	assert.False(t, hasDerived(t, wa), "sticky winner must NOT fan out to a")
 	assert.True(t, hasDerived(t, wb))
 }
@@ -214,8 +215,8 @@ func TestReconcile_ReplaceOnWinnerLost(t *testing.T) {
 	isvc := srcISVC("gpu=gb300")
 	isvc.Finalizers = []string{PlacementFinalizer}
 	isvc.Status.Placement = &v1beta1.PlacementStatus{
-		Cluster: "b", Phase: PhasePlaced,
-		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: candidatePhaseAdmitted}},
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
 	}
 	r, cp := newPlacer(s, clusters, isvc,
 		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
@@ -226,7 +227,7 @@ func TestReconcile_ReplaceOnWinnerLost(t *testing.T) {
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
 	assert.Empty(t, p.Cluster, "lost winner cleared")
-	assert.Equal(t, PhaseRacing, p.Phase)
+	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
 	assert.True(t, hasDerived(t, wa), "re-fanned out to a")
 	assert.True(t, hasDerived(t, wb), "re-fanned out to b")
 }
@@ -253,8 +254,8 @@ func TestReconcile_WinnerFailedSurfacesFailed(t *testing.T) {
 	isvc := srcISVC("gpu=gb300")
 	isvc.Finalizers = []string{PlacementFinalizer}
 	isvc.Status.Placement = &v1beta1.PlacementStatus{
-		Cluster: "b", Phase: PhasePlaced,
-		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: candidatePhaseAdmitted}},
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
 	}
 	r, cp := newPlacer(s, clusters, isvc, readyWC("b", map[string]string{"gpu": "gb300"}))
 
@@ -263,9 +264,39 @@ func TestReconcile_WinnerFailedSurfacesFailed(t *testing.T) {
 
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
-	assert.Equal(t, PhaseFailed, p.Phase, "placement escalated to Failed")
+	assert.Equal(t, v1beta1.PlacementPhaseFailed, p.Phase, "placement escalated to Failed")
 	assert.Equal(t, "b", p.Cluster, "failed cluster recorded")
 	assert.True(t, hasDerived(t, wb), "failed derived kept (not deleted)")
+}
+
+func TestReconcile_StickyWinnerSweepsStrayLoser(t *testing.T) {
+	s := testScheme(t)
+	// a is connected and carries a STRAY derived (origin-labeled), not in status.
+	wa := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(&v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", Labels: map[string]string{PlacementOriginLabel: "uid-1"}},
+	}).Build()
+	wb := workerWithAdmittedDerived(t, s) // winner b, admitted
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}}, // a is NOT listed
+	}
+	r, cp := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	assert.False(t, hasDerived(t, wa), "stray derived on non-winner cluster a must be swept even though it's not in status.Candidates")
+	assert.True(t, hasDerived(t, wb), "winner b kept")
+	p := cpPlacement(t, cp)
+	assert.Equal(t, "b", p.Cluster)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
 }
 
 func TestReconcile_DeleteRemovesDerivedEverywhere(t *testing.T) {
@@ -285,7 +316,7 @@ func TestReconcile_DeleteRemovesDerivedEverywhere(t *testing.T) {
 	isvc.Status.Placement = &v1beta1.PlacementStatus{
 		Cluster: "b",
 		Candidates: []v1beta1.CandidatePlacement{
-			{Cluster: "a", Phase: candidatePhasePlaced}, {Cluster: "b", Phase: candidatePhaseAdmitted},
+			{Cluster: "a", Phase: v1beta1.CandidatePhasePlaced}, {Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted},
 		},
 	}
 	r, cp := newPlacer(s, clusters, isvc)
@@ -300,4 +331,35 @@ func TestReconcile_DeleteRemovesDerivedEverywhere(t *testing.T) {
 	got := &v1beta1.InferenceService{}
 	err = cp.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got)
 	assert.True(t, apierrors.IsNotFound(err), "CP ISVC gone after finalizer cleared")
+}
+
+// createFailClient wraps a fake client but fails every Create (simulates a
+// cluster that rejects the derived ISVC).
+type createFailClient struct {
+	client.WithWatch
+}
+
+func (c createFailClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	return apierrors.NewInternalError(errors.New("create rejected"))
+}
+
+func TestReconcile_FanOutPartialFailureStillRaces(t *testing.T) {
+	s := testScheme(t)
+	// a rejects Create; b accepts.
+	wa := createFailClient{WithWatch: fakeclient.NewClientBuilder().WithScheme(s).Build()}
+	wb := emptyWorker(s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err, "one bad cluster must not fail the whole reconcile")
+
+	assert.True(t, hasDerived(t, wb), "healthy cluster b still got the derived")
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
 }
