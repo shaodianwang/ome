@@ -228,6 +228,24 @@
         }
       }
     },
+    "v1beta1.CandidatePlacement": {
+      "description": "CandidatePlacement is the per-cluster state of a fan-out candidate in the OEP-0018 placement race.",
+      "type": "object",
+      "required": [
+        "cluster"
+      ],
+      "properties": {
+        "cluster": {
+          "description": "Cluster is the WorkloadCluster name.",
+          "type": "string",
+          "default": ""
+        },
+        "phase": {
+          "description": "Phase is the candidate's state: \"Placed\" (derived ISVC created, racing) or \"Admitted\" (this candidate won the race).",
+          "type": "string"
+        }
+      }
+    },
     "v1beta1.ClusterBaseModel": {
       "description": "ClusterBaseModel is the Schema for the basemodels API",
       "type": "object",
@@ -3029,6 +3047,10 @@
           "type": "integer",
           "format": "int32"
         },
+        "admitted": {
+          "description": "Admitted is true when this Instance's pods have left the Kueue admission scheduling gate (quota granted): the Instance has pods and none are admission-gated. False while gated/queued or before pods exist. Used by the OEP-0018 control plane to decide the fan-out race winner.",
+          "type": "boolean"
+        },
         "availablePodCount": {
           "description": "AvailablePodCount is the number of pods ready for at least MinReadySeconds.",
           "type": "integer",
@@ -3138,12 +3160,24 @@
       "description": "PlacementStatus is the OEP-0018 multi-cluster placement status: which workload cluster an InferenceService is placed on and a coarse phase.",
       "type": "object",
       "properties": {
+        "candidates": {
+          "description": "Candidates are the clusters this ISVC has been fanned out to during the OEP-0018 placement race. Populated by the control plane.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.CandidatePlacement"
+          },
+          "x-kubernetes-list-map-keys": [
+            "cluster"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
         "cluster": {
           "description": "Cluster is the WorkloadCluster the ISVC is currently placed on. Empty while pending (no candidate yet, or transport not connected).",
           "type": "string"
         },
         "phase": {
-          "description": "Phase is a coarse placement state: \"Pending\" or \"Placed\".",
+          "description": "Phase is a coarse placement state: \"Pending\" (no candidate / none connected), \"Racing\" (fanned out, no winner yet), \"Placed\" (winner chosen), \"Failed\".",
           "type": "string"
         }
       }

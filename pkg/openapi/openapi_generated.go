@@ -17,6 +17,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":                  schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":                  schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus":                   schema_pkg_apis_ome_v1beta1_CanaryStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidatePlacement":             schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":               schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":           schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterConnectionSource":        schema_pkg_apis_ome_v1beta1_ClusterConnectionSource(ref),
@@ -499,6 +500,35 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 		},
 		Dependencies: []string{
 			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CandidatePlacement is the per-cluster state of a fan-out candidate in the OEP-0018 placement race.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"cluster": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Cluster is the WorkloadCluster name.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"phase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Phase is the candidate's state: \"Placed\" (derived ISVC created, racing) or \"Admitted\" (this candidate won the race).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"cluster"},
+			},
+		},
 	}
 }
 
@@ -5435,6 +5465,13 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 							Format:      "int32",
 						},
 					},
+					"admitted": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Admitted is true when this Instance's pods have left the Kueue admission scheduling gate (quota granted): the Instance has pods and none are admission-gated. False while gated/queued or before pods exist. Used by the OEP-0018 control plane to decide the fan-out race winner.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
 					"nodesOccupied": {
 						VendorExtensible: spec.VendorExtensible{
 							Extensions: spec.Extensions{
@@ -5569,14 +5606,38 @@ func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) c
 					},
 					"phase": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Phase is a coarse placement state: \"Pending\" or \"Placed\".",
+							Description: "Phase is a coarse placement state: \"Pending\" (no candidate / none connected), \"Racing\" (fanned out, no winner yet), \"Placed\" (winner chosen), \"Failed\".",
 							Type:        []string{"string"},
 							Format:      "",
+						},
+					},
+					"candidates": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"cluster",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Candidates are the clusters this ISVC has been fanned out to during the OEP-0018 placement race. Populated by the control plane.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidatePlacement"),
+									},
+								},
+							},
 						},
 					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidatePlacement"},
 	}
 }
 

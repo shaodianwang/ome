@@ -30128,6 +30128,8 @@ spec:
                                   maximum: 1
                                   minimum: 0
                                   type: integer
+                                admitted:
+                                  type: boolean
                                 availablePodCount:
                                   format: int32
                                   type: integer
@@ -30546,6 +30548,20 @@ spec:
                   type: string
                 placement:
                   properties:
+                    candidates:
+                      items:
+                        properties:
+                          cluster:
+                            type: string
+                          phase:
+                            type: string
+                        required:
+                          - cluster
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - cluster
+                      x-kubernetes-list-type: map
                     cluster:
                       type: string
                     phase:

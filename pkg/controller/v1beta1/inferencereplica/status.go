@@ -472,7 +472,19 @@ func populateInstancePodCounters(insts []v1beta1.OMENativeInstanceStatus, byInde
 		s.ScheduledPodCount = workload.CountScheduledPods(instPods)
 		s.AvailablePodCount = workload.CountAvailablePods(instPods, availableByPod)
 		s.NodesOccupied = workload.UniqueNodes(instPods)
+		s.Admitted = len(instPods) > 0 && !anyAdmissionGated(instPods)
 	}
+}
+
+// anyAdmissionGated reports whether any pod still carries an admission
+// scheduling gate (Kueue has not admitted the workload yet).
+func anyAdmissionGated(pods []*corev1.Pod) bool {
+	for _, p := range pods {
+		if workload.PodAdmissionGated(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasFailedInstance reports whether at least one Instance has been

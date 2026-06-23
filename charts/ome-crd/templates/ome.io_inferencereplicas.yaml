@@ -3681,6 +3681,8 @@ spec:
                         maximum: 1
                         minimum: 0
                         type: integer
+                      admitted:
+                        type: boolean
                       availablePodCount:
                         format: int32
                         type: integer

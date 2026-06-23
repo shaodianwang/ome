@@ -428,7 +428,26 @@ type PlacementStatus struct {
 	// +optional
 	Cluster string `json:"cluster,omitempty"`
 
-	// Phase is a coarse placement state: "Pending" or "Placed".
+	// Phase is a coarse placement state: "Pending" (no candidate / none connected),
+	// "Racing" (fanned out, no winner yet), "Placed" (winner chosen), "Failed".
+	// +optional
+	Phase string `json:"phase,omitempty"`
+
+	// Candidates are the clusters this ISVC has been fanned out to during the
+	// OEP-0018 placement race. Populated by the control plane.
+	// +optional
+	// +listType=map
+	// +listMapKey=cluster
+	Candidates []CandidatePlacement `json:"candidates,omitempty"`
+}
+
+// CandidatePlacement is the per-cluster state of a fan-out candidate in the
+// OEP-0018 placement race.
+type CandidatePlacement struct {
+	// Cluster is the WorkloadCluster name.
+	Cluster string `json:"cluster"`
+	// Phase is the candidate's state: "Placed" (derived ISVC created, racing)
+	// or "Admitted" (this candidate won the race).
 	// +optional
 	Phase string `json:"phase,omitempty"`
 }

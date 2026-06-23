@@ -94,6 +94,45 @@ func TestPopulateInstancePodCounters_EmptyPodSet(t *testing.T) {
 		"NodesOccupied must round-trip nil ↔ nil rather than nil ↔ empty-slice")
 }
 
+// TestPopulateInstancePodCounters_Admitted verifies the Admitted signal
+// is computed correctly: true when the Instance has pods and none carry
+// an admission scheduling gate (Kueue has granted quota), false while
+// gated/queued or before pods exist. Used by the OEP-0018 control plane
+// to decide the fan-out race winner.
+func TestPopulateInstancePodCounters_Admitted(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 3)
+
+	// Index 0 → one normal (ungated) running pod
+	pod0 := podForIR(ir, 0, "default", 0, true, true)
+
+	// Index 1 → one pod with Kueue admission gate still present (queued)
+	pod1 := podForIR(ir, 1, "default", 0, false, false)
+	pod1.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: "kueue.x-k8s.io/admission"}}
+
+	// Index 2 → no pods (empty instance)
+
+	insts := []v1beta1.OMENativeInstanceStatus{
+		{Index: 0},
+		{Index: 1},
+		{Index: 2},
+	}
+	byIndex := map[int32][]*corev1.Pod{
+		0: {pod0},
+		1: {pod1},
+		// 2: no entry (zero pods)
+	}
+
+	populateInstancePodCounters(insts, byIndex, nil)
+
+	g.Expect(insts[0].Admitted).To(gomega.BeTrue(),
+		"Instance 0 has a pod and it is not admission-gated → Admitted=true")
+	g.Expect(insts[1].Admitted).To(gomega.BeFalse(),
+		"Instance 1's pod still carries the Kueue admission gate → Admitted=false")
+	g.Expect(insts[2].Admitted).To(gomega.BeFalse(),
+		"Instance 2 has no pods yet → Admitted=false")
+}
+
 // TestAggregateStatus_AvailableReplicas_MatchesReadyWithEndpointSlices
 // pins the AvailableReplicas counter via the end-to-end Reconcile path.
 // With pods ContainersReady AND published as Ready in the per-Component

@@ -144,6 +144,13 @@ type OMENativeInstanceStatus struct {
 	// +optional
 	ScheduledPodCount int32 `json:"scheduledPodCount,omitempty"`
 
+	// Admitted is true when this Instance's pods have left the Kueue admission
+	// scheduling gate (quota granted): the Instance has pods and none are
+	// admission-gated. False while gated/queued or before pods exist. Used by
+	// the OEP-0018 control plane to decide the fan-out race winner.
+	// +optional
+	Admitted bool `json:"admitted,omitempty"`
+
 	// NodesOccupied is the set of node names hosting pods of this Instance.
 	// +optional
 	// +listType=set

@@ -60,6 +60,32 @@ func srcISVC(selector string) *v1beta1.InferenceService {
 	}
 }
 
+// emptyWorker is a fresh fake worker client (status subresource registered).
+func emptyWorker(s *runtime.Scheme) client.WithWatch {
+	return fakeclient.NewClientBuilder().WithScheme(s).WithStatusSubresource(&v1beta1.InferenceService{}).Build()
+}
+
+// workerWithAdmittedDerived returns a worker whose derived ISVC already reports
+// an admitted engine instance (it won the race).
+func workerWithAdmittedDerived(t *testing.T, s *runtime.Scheme) client.WithWatch {
+	t.Helper()
+	derived := isvcWithInstances(v1beta1.EngineComponent, true) // from admission_test.go
+	derived.Namespace = "prod"
+	derived.Name = "svc"
+	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	w := fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(derived).Build()
+	// Ensure the admitted status is stored (if the builder didn't persist it).
+	cur := &v1beta1.InferenceService{}
+	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
+	if !AnyInstanceAdmitted(cur) {
+		cur.Status = derived.Status
+		require.NoError(t, w.Status().Update(context.Background(), cur))
+	}
+	return w
+}
+
 func newPlacer(s *runtime.Scheme, clusters ClusterClients, objs ...client.Object) (*Reconciler, client.Client) {
 	c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(&v1beta1.InferenceService{}).Build()
 	return &Reconciler{Client: c, Scheme: s, Log: log.Log, Clusters: clusters, Requeue: time.Second}, c
@@ -69,68 +95,163 @@ func req() ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "prod", Name: "svc"}}
 }
 
-func TestReconcile_PlacesDerivedOnCandidate(t *testing.T) {
-	s := testScheme(t)
-	worker := fakeclient.NewClientBuilder().WithScheme(s).WithStatusSubresource(&v1beta1.InferenceService{}).Build()
-	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
-		"cw": workloadcluster.NewNeverCachingClient(worker),
-	}}
-	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"), readyWC("cw", map[string]string{"gpu": "gb300"}))
-
-	_, err := r.Reconcile(context.Background(), req())
+func hasDerived(t *testing.T, w client.Client) bool {
+	t.Helper()
+	o := &v1beta1.InferenceService{}
+	err := w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, o)
+	if apierrors.IsNotFound(err) {
+		return false
+	}
 	require.NoError(t, err)
+	return true
+}
 
-	derived := &v1beta1.InferenceService{}
-	require.NoError(t, worker.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, derived))
-	assert.NotEmpty(t, derived.Labels[PlacementOriginLabel])
-
-	got := &v1beta1.InferenceService{}
-	require.NoError(t, cp.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
-	require.NotNil(t, got.Status.Placement)
-	assert.Equal(t, "cw", got.Status.Placement.Cluster)
-	assert.Equal(t, PhasePlaced, got.Status.Placement.Phase)
+func cpPlacement(t *testing.T, cp client.Client) *v1beta1.PlacementStatus {
+	t.Helper()
+	o := &v1beta1.InferenceService{}
+	require.NoError(t, cp.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, o))
+	return o.Status.Placement
 }
 
 func TestReconcile_NoCandidate(t *testing.T) {
 	s := testScheme(t)
-	worker := fakeclient.NewClientBuilder().WithScheme(s).Build()
-	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{"cw": workloadcluster.NewNeverCachingClient(worker)}}
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{}}
 	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"), readyWC("cw", map[string]string{"gpu": "h100"}))
-
 	_, err := r.Reconcile(context.Background(), req())
 	require.NoError(t, err)
-
-	derived := &v1beta1.InferenceService{}
-	err = worker.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, derived)
-	assert.True(t, apierrors.IsNotFound(err))
-
-	got := &v1beta1.InferenceService{}
-	require.NoError(t, cp.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
-	require.NotNil(t, got.Status.Placement)
-	assert.Equal(t, PhasePending, got.Status.Placement.Phase)
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, PhasePending, p.Phase)
 }
 
-func TestReconcile_DeleteRemovesDerived(t *testing.T) {
+func TestReconcile_FansOutToAllCandidates(t *testing.T) {
 	s := testScheme(t)
-	worker := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(&v1beta1.InferenceService{
-		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", Labels: map[string]string{PlacementOriginLabel: "uid-1"}},
-	}).Build()
-	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{"cw": workloadcluster.NewNeverCachingClient(worker)}}
-
-	isvc := srcISVC("gpu=gb300")
-	isvc.Finalizers = []string{PlacementFinalizer}
-	isvc.Status.Placement = &v1beta1.PlacementStatus{Cluster: "cw", Phase: PhasePlaced}
-	r, cp := newPlacer(s, clusters, isvc)
-
-	require.NoError(t, cp.Delete(context.Background(), isvc)) // finalizer present -> sets DeletionTimestamp
+	wa, wb := emptyWorker(s), emptyWorker(s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
 
 	_, err := r.Reconcile(context.Background(), req())
 	require.NoError(t, err)
 
-	derived := &v1beta1.InferenceService{}
-	err = worker.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, derived)
-	assert.True(t, apierrors.IsNotFound(err), "derived must be deleted from the worker")
+	assert.True(t, hasDerived(t, wa), "derived on a")
+	assert.True(t, hasDerived(t, wb), "derived on b")
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, PhaseRacing, p.Phase)
+	assert.Empty(t, p.Cluster)
+	assert.Len(t, p.Candidates, 2)
+}
 
+func TestReconcile_FirstAdmittedWinsAndDeletesLosers(t *testing.T) {
+	s := testScheme(t)
+	wa := emptyWorker(s)
+	wb := workerWithAdmittedDerived(t, s) // b already admitted -> winner
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, "b", p.Cluster)
+	assert.Equal(t, PhasePlaced, p.Phase)
+	assert.False(t, hasDerived(t, wa), "loser a's derived deleted")
+	assert.True(t, hasDerived(t, wb), "winner b's derived kept")
+}
+
+func TestReconcile_StickyWinner(t *testing.T) {
+	s := testScheme(t)
+	wa := emptyWorker(s)
+	wb := workerWithAdmittedDerived(t, s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: PhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: candidatePhaseAdmitted}},
+	}
+	r, cp := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, "b", p.Cluster)
+	assert.Equal(t, PhasePlaced, p.Phase)
+	assert.False(t, hasDerived(t, wa), "sticky winner must NOT fan out to a")
+	assert.True(t, hasDerived(t, wb))
+}
+
+func TestReconcile_ReplaceOnWinnerLost(t *testing.T) {
+	s := testScheme(t)
+	wa, wb := emptyWorker(s), emptyWorker(s) // b's derived is GONE (winner lost)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: PhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: candidatePhaseAdmitted}},
+	}
+	r, cp := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Empty(t, p.Cluster, "lost winner cleared")
+	assert.Equal(t, PhaseRacing, p.Phase)
+	assert.True(t, hasDerived(t, wa), "re-fanned out to a")
+	assert.True(t, hasDerived(t, wb), "re-fanned out to b")
+}
+
+func TestReconcile_DeleteRemovesDerivedEverywhere(t *testing.T) {
+	s := testScheme(t)
+	wa := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(&v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", Labels: map[string]string{PlacementOriginLabel: "uid-1"}},
+	}).Build()
+	wb := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(&v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", Labels: map[string]string{PlacementOriginLabel: "uid-1"}},
+	}).Build()
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b",
+		Candidates: []v1beta1.CandidatePlacement{
+			{Cluster: "a", Phase: candidatePhasePlaced}, {Cluster: "b", Phase: candidatePhaseAdmitted},
+		},
+	}
+	r, cp := newPlacer(s, clusters, isvc)
+
+	require.NoError(t, cp.Delete(context.Background(), isvc)) // finalizer -> DeletionTimestamp
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	assert.False(t, hasDerived(t, wa), "derived removed from a")
+	assert.False(t, hasDerived(t, wb), "derived removed from b")
 	got := &v1beta1.InferenceService{}
 	err = cp.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got)
 	assert.True(t, apierrors.IsNotFound(err), "CP ISVC gone after finalizer cleared")
