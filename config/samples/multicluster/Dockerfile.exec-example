@@ -1,0 +1,26 @@
+# Sample overlay: add an exec credential plugin to the OME manager image so the
+# control plane can authenticate to workload clusters with short-lived cloud
+# tokens (OEP-0018 --allow-exec-credentials).
+#
+# OME's default manager image ships NO cloud CLIs (it stays cloud-agnostic).
+# Build your own image FROM it with the plugin(s) you need, and grant the
+# manager pod a cloud identity (EKS: IRSA on its ServiceAccount; GKE: Workload
+# Identity) so the plugin can mint tokens.
+#
+#   docker build -f Dockerfile.exec-example -t <your-registry>/ome-manager-eks:<tag> .
+#   # then set the chart's manager image to this, plus:
+#   #   --set ome.multicluster.enabled=true --set ome.multicluster.role=control-plane
+#   #   --set ome.multicluster.execCredentials.enabled=true
+#   #   --set ome.multicluster.execCredentials.allowedCommands=aws
+#
+ARG OME_MANAGER_IMAGE=ghcr.io/moirai-internal/ome-manager:latest
+FROM ${OME_MANAGER_IMAGE}
+
+# Example: AWS CLI v2 (provides `aws eks get-token`). Adjust for your base/distro.
+# This is illustrative — pin versions and verify checksums in real builds.
+USER 0
+RUN curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/awscliv2.zip /tmp/aws
+USER 65532:65532

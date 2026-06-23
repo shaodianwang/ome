@@ -25,6 +25,14 @@ ome:
   multicluster:
     enabled: false
     role: ""
+    # execCredentials lets WorkloadCluster kubeconfigs authenticate with an exec
+    # credential plugin (short-lived cloud tokens, e.g. EKS/GKE). REQUIRES the
+    # plugin binary baked into the manager image (BYO image) AND pod identity
+    # (IRSA / Workload Identity). SECURITY: an exec block runs a command in the
+    # controller pod — keep WorkloadCluster kubeconfig Secrets admin-only.
+    execCredentials:
+      enabled: false
+      allowedCommands: "aws,gke-gcloud-auth-plugin,kubelogin"
   # modelCache configures the optional cluster-wide model cache provider used
   # by BaseModel and ClusterBaseModel resources with spec.distribution: Sharded.
   # Leave provider empty to keep the default PerNode/model-agent behavior.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -108,6 +109,17 @@ func init() {
 	utilruntime.Must(kedav1.AddToScheme(scheme))
 }
 
+// splitAndTrim splits a comma-separated list, trims spaces, and drops empties.
+func splitAndTrim(csv string) []string {
+	var out []string
+	for _, p := range strings.Split(csv, ",") {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // Options defines the program-configurable options that may be passed on the command line.
 type Options struct {
 	metricsAddr                string
@@ -123,6 +135,8 @@ type Options struct {
 	enableInferenceReplicaCtrl bool
 	enableMultiCluster         bool
 	multiClusterRole           string
+	allowExecCredentials       bool
+	execCredentialAllowedCmds  string
 	zapOpts                    zap.Options
 }
 
@@ -147,6 +161,8 @@ func DefaultOptions() Options {
 		enableInferenceReplicaCtrl: true,
 		enableMultiCluster:         false,
 		multiClusterRole:           "",
+		allowExecCredentials:       false,
+		execCredentialAllowedCmds:  "aws,gke-gcloud-auth-plugin,kubelogin",
 		zapOpts: zap.Options{
 			TimeEncoder: zapcore.RFC3339TimeEncoder,
 			ZapOpts:     []zaplog.Option{zaplog.AddCaller()},
@@ -183,6 +199,13 @@ func GetOptions() Options {
 			"the placement controller (which clones InferenceServices onto workload clusters) and "+
 			"DISABLES the local InferenceService->pods reconcilers. Empty (default) is a normal "+
 			"single-cluster / workload-cluster manager. \"control-plane\" implies --enable-multicluster.")
+	flag.BoolVar(&opts.allowExecCredentials, "allow-exec-credentials", opts.allowExecCredentials,
+		"Allow WorkloadCluster kubeconfigs to use an exec credential plugin (e.g. aws, gke-gcloud-auth-plugin) "+
+			"for short-lived cloud tokens. Default false. The plugin command must also appear in "+
+			"--exec-credential-allowed-commands, and its binary must be present in the manager image. "+
+			"SECURITY: an exec block runs a command in the controller pod; keep WorkloadCluster kubeconfig Secrets admin-only.")
+	flag.StringVar(&opts.execCredentialAllowedCmds, "exec-credential-allowed-commands", opts.execCredentialAllowedCmds,
+		"Comma-separated allowlist of exec credential plugin command basenames permitted when --allow-exec-credentials is set.")
 	opts.zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	return opts
@@ -457,12 +480,18 @@ func main() {
 	// WorkloadCluster reconciler connects.
 	if options.enableMultiCluster || isControlPlane {
 		clusterManager := workloadcluster.NewManager(mgr.GetScheme())
+		execPolicy := workloadcluster.ExecCredentialPolicy{
+			Allowed:         options.allowExecCredentials,
+			AllowedCommands: splitAndTrim(options.execCredentialAllowedCmds),
+		}
+		clusterManager.SetExecCredentialPolicy(execPolicy)
 		setupLog.Info("Setting up WorkloadCluster controller")
 		if err = (&workloadcluster.Reconciler{
-			Client:  mgr.GetClient(),
-			Scheme:  mgr.GetScheme(),
-			Log:     ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
-			Manager: clusterManager,
+			Client:     mgr.GetClient(),
+			Scheme:     mgr.GetScheme(),
+			Log:        ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
+			Manager:    clusterManager,
+			ExecPolicy: execPolicy,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "WorkloadCluster")
 			os.Exit(1)

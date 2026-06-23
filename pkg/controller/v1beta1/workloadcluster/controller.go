@@ -43,6 +43,8 @@ type Reconciler struct {
 	// cluster when it becomes Reachable and disconnects it on removal. Optional
 	// (nil-safe) so the health-only path keeps working without transport.
 	Manager *Manager
+	// ExecPolicy is the exec credential policy applied during validation.
+	ExecPolicy ExecCredentialPolicy
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -120,7 +122,7 @@ func (r *Reconciler) assess(ctx context.Context, wc *v1beta1.WorkloadCluster) (s
 	// BEFORE probing. This keeps "malformed/unsafe kubeconfig" (BadKubeConfig)
 	// distinct from "cluster unreachable" (ConnectionFailed), and ensures the
 	// security validation runs regardless of which probe is in use.
-	if _, err := RESTConfigFromKubeConfig(raw); err != nil {
+	if _, err := RESTConfigFromKubeConfig(raw, r.ExecPolicy); err != nil {
 		return metav1.ConditionFalse, "BadKubeConfig", err.Error(), nil
 	}
 	if err := r.Probe(ctx, raw); err != nil {
@@ -140,7 +142,9 @@ func (r *Reconciler) healthInterval() time.Duration {
 // when a referenced kubeconfig Secret changes.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Probe == nil {
-		r.Probe = probeViaServerVersion
+		r.Probe = func(ctx context.Context, raw []byte) error {
+			return probeViaServerVersion(ctx, raw, r.ExecPolicy)
+		}
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.WorkloadCluster{}).

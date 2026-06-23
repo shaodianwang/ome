@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,21 +19,42 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// ExecCredentialPolicy controls whether a kubeconfig may use an exec credential
+// plugin to authenticate to a workload cluster, and which commands are allowed.
+// The zero value denies exec (the safe default).
+type ExecCredentialPolicy struct {
+	// Allowed turns exec credential plugins on. Default false.
+	Allowed bool
+	// AllowedCommands is the set of permitted plugin command basenames
+	// (e.g. "aws", "gke-gcloud-auth-plugin", "kubelogin"). Empty => none allowed.
+	AllowedCommands []string
+}
+
+func (p ExecCredentialPolicy) commandAllowed(cmd string) bool {
+	base := filepath.Base(cmd)
+	for _, a := range p.AllowedCommands {
+		if a == base || a == cmd {
+			return true
+		}
+	}
+	return false
+}
+
 // RESTConfigFromKubeConfig parses raw kubeconfig bytes into a *rest.Config and
 // rejects credential shapes that are unsafe to run from the control plane — a
 // stored kubeconfig is a cross-cluster blast radius (OEP-0018 security note).
 // It validates twice, mirroring Kueue's validateKubeconfig: once over the raw
 // kubeconfig (every cluster/user, before flattening) and once over the
 // flattened rest.Config.
-func RESTConfigFromKubeConfig(raw []byte) (*rest.Config, error) {
-	if err := validateKubeConfigBytes(raw); err != nil {
+func RESTConfigFromKubeConfig(raw []byte, exec ExecCredentialPolicy) (*rest.Config, error) {
+	if err := validateKubeConfigBytes(raw, exec); err != nil {
 		return nil, err
 	}
 	cfg, err := clientcmd.RESTConfigFromKubeConfig(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parse kubeconfig: %w", err)
 	}
-	if err := validateRESTConfig(cfg); err != nil {
+	if err := validateRESTConfig(cfg, exec); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -42,12 +64,15 @@ func RESTConfigFromKubeConfig(raw []byte) (*rest.Config, error) {
 // (across ALL clusters and users, not just the current context) and rejects:
 // per-user on-disk token files, per-cluster insecure TLS, CA file paths
 // (require inline certificate-authority-data), and a missing server URL.
-func validateKubeConfigBytes(raw []byte) error {
+func validateKubeConfigBytes(raw []byte, exec ExecCredentialPolicy) error {
 	cfg, err := clientcmd.Load(raw)
 	if err != nil {
 		return fmt.Errorf("parse kubeconfig: %w", err)
 	}
 	for name, authInfo := range cfg.AuthInfos {
+		if authInfo.Exec != nil && !exec.Allowed {
+			return fmt.Errorf("kubeconfig user %q uses an exec credential plugin, which is not allowed (enable --allow-exec-credentials)", name)
+		}
 		if authInfo.TokenFile != "" {
 			return fmt.Errorf("kubeconfig user %q references an on-disk token file, which is not allowed", name)
 		}
@@ -70,10 +95,15 @@ func validateKubeConfigBytes(raw []byte) error {
 // exec/auth-provider plugins, on-disk token files, basic auth, disabled TLS, a
 // CA file path, or an untrusted server endpoint. BearerToken (service-account
 // token) and inline CA data are allowed.
-func validateRESTConfig(cfg *rest.Config) error {
+func validateRESTConfig(cfg *rest.Config, exec ExecCredentialPolicy) error {
 	switch {
 	case cfg.ExecProvider != nil:
-		return errors.New("kubeconfig uses an exec credential plugin, which is not allowed")
+		if !exec.Allowed {
+			return errors.New("kubeconfig uses an exec credential plugin, which is not allowed (enable --allow-exec-credentials)")
+		}
+		if !exec.commandAllowed(cfg.ExecProvider.Command) {
+			return fmt.Errorf("exec credential plugin command %q is not in the allowed list", cfg.ExecProvider.Command)
+		}
 	case cfg.AuthProvider != nil:
 		return errors.New("kubeconfig uses an auth-provider plugin, which is not allowed")
 	case cfg.BearerTokenFile != "":
@@ -114,8 +144,8 @@ func isValidHostname(server string) bool {
 // probeViaServerVersion is the default reachability probe: build a discovery
 // client and fetch the remote /version. Cheap and needs no extra RBAC. It is
 // assigned to Reconciler.Probe by SetupWithManager and overridden in tests.
-func probeViaServerVersion(_ context.Context, raw []byte) error {
-	cfg, err := RESTConfigFromKubeConfig(raw)
+func probeViaServerVersion(_ context.Context, raw []byte, exec ExecCredentialPolicy) error {
+	cfg, err := RESTConfigFromKubeConfig(raw, exec)
 	if err != nil {
 		return err
 	}

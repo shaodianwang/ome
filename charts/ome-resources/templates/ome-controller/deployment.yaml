@@ -68,6 +68,10 @@ spec:
         {{- if .Values.ome.multicluster.role }}
         - "--multicluster-role={{ .Values.ome.multicluster.role }}"
         {{- end }}
+        {{- if .Values.ome.multicluster.execCredentials.enabled }}
+        - "--allow-exec-credentials"
+        - "--exec-credential-allowed-commands={{ .Values.ome.multicluster.execCredentials.allowedCommands }}"
+        {{- end }}
         {{- end }}
         env:
           - name: POD_NAMESPACE

@@ -11,20 +11,21 @@ func TestValidateRESTConfig(t *testing.T) {
 	cases := []struct {
 		name    string
 		cfg     *rest.Config
+		exec    ExecCredentialPolicy
 		wantErr bool
 	}{
-		{"clean", &rest.Config{Host: "https://h", BearerToken: "t", TLSClientConfig: rest.TLSClientConfig{CAData: []byte("ca")}}, false},
-		{"clean ip host", &rest.Config{Host: "https://10.0.0.1:6443", BearerToken: "t"}, false},
-		{"exec provider", &rest.Config{ExecProvider: &clientcmdapi.ExecConfig{Command: "aws"}}, true},
-		{"bearer token file", &rest.Config{BearerTokenFile: "/var/run/token"}, true},
-		{"insecure TLS", &rest.Config{TLSClientConfig: rest.TLSClientConfig{Insecure: true}}, true},
-		{"basic auth", &rest.Config{Host: "https://h", Username: "u", Password: "p"}, true},
-		{"ca file path", &rest.Config{Host: "https://h", TLSClientConfig: rest.TLSClientConfig{CAFile: "/etc/ca.crt"}}, true},
-		{"untrusted host", &rest.Config{Host: "https://bad_host"}, true},
+		{"clean", &rest.Config{Host: "https://h", BearerToken: "t", TLSClientConfig: rest.TLSClientConfig{CAData: []byte("ca")}}, ExecCredentialPolicy{}, false},
+		{"clean ip host", &rest.Config{Host: "https://10.0.0.1:6443", BearerToken: "t"}, ExecCredentialPolicy{}, false},
+		{"exec provider denied", &rest.Config{ExecProvider: &clientcmdapi.ExecConfig{Command: "aws"}}, ExecCredentialPolicy{}, true},
+		{"bearer token file", &rest.Config{BearerTokenFile: "/var/run/token"}, ExecCredentialPolicy{}, true},
+		{"insecure TLS", &rest.Config{TLSClientConfig: rest.TLSClientConfig{Insecure: true}}, ExecCredentialPolicy{}, true},
+		{"basic auth", &rest.Config{Host: "https://h", Username: "u", Password: "p"}, ExecCredentialPolicy{}, true},
+		{"ca file path", &rest.Config{Host: "https://h", TLSClientConfig: rest.TLSClientConfig{CAFile: "/etc/ca.crt"}}, ExecCredentialPolicy{}, true},
+		{"untrusted host", &rest.Config{Host: "https://bad_host"}, ExecCredentialPolicy{}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateRESTConfig(tc.cfg)
+			err := validateRESTConfig(tc.cfg, tc.exec)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("validateRESTConfig() err=%v wantErr=%v", err, tc.wantErr)
 			}
@@ -99,7 +100,7 @@ clusters:
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateKubeConfigBytes([]byte(tc.raw))
+			err := validateKubeConfigBytes([]byte(tc.raw), ExecCredentialPolicy{})
 			if (err != nil) != tc.wantErr {
 				t.Errorf("validateKubeConfigBytes() err=%v wantErr=%v", err, tc.wantErr)
 			}
@@ -108,7 +109,46 @@ clusters:
 }
 
 func TestRESTConfigFromKubeConfig_BadBytes(t *testing.T) {
-	if _, err := RESTConfigFromKubeConfig([]byte("not-a-kubeconfig")); err == nil {
+	if _, err := RESTConfigFromKubeConfig([]byte("not-a-kubeconfig"), ExecCredentialPolicy{}); err == nil {
 		t.Errorf("expected error for malformed kubeconfig, got nil")
+	}
+}
+
+func TestRESTConfig_ExecPolicy(t *testing.T) {
+	const execKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster:
+    server: https://example.com
+    certificate-authority-data: ZHVtbXk=
+contexts:
+- name: ctx
+  context: {cluster: c, user: u}
+current-context: ctx
+users:
+- name: u
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: aws
+      args: ["eks","get-token","--cluster-name","c"]
+`
+	cases := []struct {
+		name    string
+		exec    ExecCredentialPolicy
+		wantErr bool
+	}{
+		{"deny exec (zero policy)", ExecCredentialPolicy{}, true},
+		{"allow aws command", ExecCredentialPolicy{Allowed: true, AllowedCommands: []string{"aws"}}, false},
+		{"command not in allowlist", ExecCredentialPolicy{Allowed: true, AllowedCommands: []string{"kubelogin"}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := RESTConfigFromKubeConfig([]byte(execKubeconfig), tc.exec)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("RESTConfigFromKubeConfig() err=%v wantErr=%v", err, tc.wantErr)
+			}
+		})
 	}
 }

@@ -19,7 +19,8 @@ import (
 // the SAME name must be serialized by the caller (the WorkloadCluster reconciler
 // is single-worker per key, so this holds in practice).
 type Manager struct {
-	scheme *runtime.Scheme
+	scheme     *runtime.Scheme
+	execPolicy ExecCredentialPolicy
 
 	mu    sync.RWMutex
 	conns map[string]*remoteConn
@@ -40,11 +41,17 @@ type remoteConn struct {
 // controller-runtime client (never-caching for now; Phase 3 registers cached
 // kinds) from the validated kubeconfig.
 func NewManager(scheme *runtime.Scheme) *Manager {
-	return &Manager{
-		scheme:    scheme,
-		conns:     map[string]*remoteConn{},
-		newClient: buildRemoteClient,
+	m := &Manager{
+		scheme: scheme,
+		conns:  map[string]*remoteConn{},
 	}
+	m.newClient = m.buildRemoteClient
+	return m
+}
+
+// SetExecCredentialPolicy configures the exec credential policy for this manager.
+func (m *Manager) SetExecCredentialPolicy(p ExecCredentialPolicy) {
+	m.execPolicy = p
 }
 
 // ClientFor returns the live client for a cluster, or (nil, false) if none is
@@ -120,8 +127,8 @@ func hashBytes(b []byte) string {
 // controller-runtime client, and wrap it never-caching (Phase 3 will switch to
 // NewSelectivelyCachingClient with the kinds it watches). The returned cancel
 // tears down the (currently unused) watch context.
-func buildRemoteClient(ctx context.Context, raw []byte, scheme *runtime.Scheme) (SelectivelyCachingClient, context.CancelFunc, error) {
-	restConfig, err := RESTConfigFromKubeConfig(raw)
+func (m *Manager) buildRemoteClient(ctx context.Context, raw []byte, scheme *runtime.Scheme) (SelectivelyCachingClient, context.CancelFunc, error) {
+	restConfig, err := RESTConfigFromKubeConfig(raw, m.execPolicy)
 	if err != nil {
 		return nil, nil, err
 	}
