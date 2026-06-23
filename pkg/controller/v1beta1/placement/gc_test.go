@@ -47,7 +47,7 @@ func TestGCSweep_DeletesOrphansOnly(t *testing.T) {
 	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
 		"w": workloadcluster.NewNeverCachingClient(worker),
 	}}
-	gc := &GCReconciler{Client: cp, Log: log.Log, Clusters: clusters}
+	gc := &GCReconciler{APIReader: cp, Log: log.Log, Clusters: clusters}
 
 	require.NoError(t, gc.sweep(context.Background()))
 

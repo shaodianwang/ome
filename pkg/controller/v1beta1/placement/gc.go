@@ -20,9 +20,14 @@ const defaultGCInterval = 5 * time.Minute
 // was unreachable during deletion). Safety net on top of the finalizer cleanup
 // in the placement Reconciler.
 type GCReconciler struct {
-	client.Client // control-plane client
-	Log           logr.Logger
-	Clusters      ClusterClients
+	// APIReader reads control-plane InferenceServices UNCACHED. sweep() only
+	// reads the control plane (to build the live-UID set) and deletes on remote
+	// clusters — it never writes the control plane, so a Reader suffices. Using
+	// the uncached reader is a safety guarantee: a cold/empty informer cache must
+	// never make sweep classify every derived ISVC as an orphan and delete them.
+	APIReader client.Reader
+	Log       logr.Logger
+	Clusters  ClusterClients
 	// Interval is the sweep cadence; defaults to defaultGCInterval.
 	Interval time.Duration
 }
@@ -47,7 +52,7 @@ func OrphanedDeriveds(liveUIDs map[string]bool, derived []v1beta1.InferenceServi
 // origin-labeled derived ISVCs whose source is gone.
 func (g *GCReconciler) sweep(ctx context.Context) error {
 	cpList := &v1beta1.InferenceServiceList{}
-	if err := g.List(ctx, cpList); err != nil {
+	if err := g.APIReader.List(ctx, cpList); err != nil {
 		return fmt.Errorf("gc: list control-plane ISVCs: %w", err)
 	}
 	live := make(map[string]bool, len(cpList.Items))
@@ -83,6 +88,11 @@ func (g *GCReconciler) Start(ctx context.Context) error {
 	interval := g.Interval
 	if interval <= 0 {
 		interval = defaultGCInterval
+	}
+	// Sweep once on startup (APIReader is uncached, so this is safe immediately)
+	// rather than waiting a full interval to reap orphans after a restart.
+	if err := g.sweep(ctx); err != nil {
+		g.Log.Error(err, "gc: initial sweep failed")
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

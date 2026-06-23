@@ -479,9 +479,9 @@ func main() {
 				os.Exit(1)
 			}
 			if err = mgr.Add(&placement.GCReconciler{
-				Client:   mgr.GetClient(),
-				Log:      ctrl.Log.WithName("controllers").WithName("PlacementGC"),
-				Clusters: clusterManager,
+				APIReader: mgr.GetAPIReader(),
+				Log:       ctrl.Log.WithName("controllers").WithName("PlacementGC"),
+				Clusters:  clusterManager,
 			}); err != nil {
 				setupLog.Error(err, "unable to add placement GC runnable")
 				os.Exit(1)

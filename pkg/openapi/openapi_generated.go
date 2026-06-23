@@ -5635,8 +5635,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) c
 					"endpoint": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Endpoint is the externally-addressable URL of the winning cluster's placement, mirrored from the derived InferenceService's status.url once it is admitted AND addressable. Empty while pending/racing/failed or before the winner reports a URL. An external global LB/DNS consumes this to route traffic to the winning cluster (OEP-0018 keeps OME out of the data path).",
-							Type:        []string{"string"},
-							Format:      "",
+							Ref:         ref("knative.dev/pkg/apis.URL"),
 						},
 					},
 					"candidates": {
@@ -5665,7 +5664,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) c
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidatePlacement"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidatePlacement", "knative.dev/pkg/apis.URL"},
 	}
 }
 

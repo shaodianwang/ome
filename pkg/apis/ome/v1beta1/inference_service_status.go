@@ -465,7 +465,7 @@ type PlacementStatus struct {
 	// the winner reports a URL. An external global LB/DNS consumes this to route
 	// traffic to the winning cluster (OEP-0018 keeps OME out of the data path).
 	// +optional
-	Endpoint string `json:"endpoint,omitempty"`
+	Endpoint *apis.URL `json:"endpoint,omitempty"`
 
 	// Candidates are the clusters this ISVC has been fanned out to during the
 	// OEP-0018 placement race. Populated by the control plane.

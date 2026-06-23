@@ -32,8 +32,7 @@ type placementResult struct {
 	winner     string
 	phase      v1beta1.PlacementPhase
 	candidates []v1beta1.CandidatePlacement
-	endpoint   string    // winner's URL string, or "" when none
-	url        *apis.URL // mirrored to status.url, or nil
+	url        *apis.URL // published endpoint; mirrored to BOTH status.placement.endpoint and status.url
 }
 
 // ClusterClients is the subset of *workloadcluster.Manager the placer needs.
@@ -103,9 +102,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			if IsTerminallyFailed(derived) {
 				// The placement itself failed; surface it and stop. Do NOT
 				// re-place into a hot fail-loop — needs human/spec action.
+				u := endpointFor(derived)
+				if u == nil {
+					u = isvc.Status.URL
+				}
 				return r.writePlacement(ctx, isvc, placementResult{
 					winner: winner, phase: v1beta1.PlacementPhaseFailed,
 					candidates: []v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}},
+					url:        u,
 				})
 			}
 			// Re-apply on the winner and sweep any stray derived on other clusters.
@@ -117,12 +121,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			if err := r.deleteLosers(ctx, isvc, winner); err != nil {
 				return ctrl.Result{}, err
 			}
-			ep, u := endpointFor(derived)
-			return r.writePlacement(ctx, isvc, placementResult{
-				winner: winner, phase: v1beta1.PlacementPhasePlaced,
-				candidates: []v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}},
-				endpoint:   ep, url: u,
-			})
+			return r.writePlacement(ctx, isvc, placedResult(winner, derived, isvc))
 		}
 		// derived gone (deleted out from under us) -> fall through to re-race.
 	}
@@ -158,12 +157,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	ep, u := endpointFor(wd)
-	return r.writePlacement(ctx, isvc, placementResult{
-		winner: winner, phase: v1beta1.PlacementPhasePlaced,
-		candidates: []v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}},
-		endpoint:   ep, url: u,
-	})
+	return r.writePlacement(ctx, isvc, placedResult(winner, wd, isvc))
 }
 
 // fanOut ensures the derived ISVC exists on each connected candidate. A
@@ -303,7 +297,7 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 		cur.Status.Placement.Cluster = res.winner
 		cur.Status.Placement.Phase = res.phase
 		cur.Status.Placement.Candidates = res.candidates
-		cur.Status.Placement.Endpoint = res.endpoint
+		cur.Status.Placement.Endpoint = res.url
 		cur.Status.URL = res.url
 		return r.Status().Update(ctx, cur)
 	})
@@ -316,13 +310,29 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 	return ctrl.Result{RequeueAfter: r.requeue()}, nil
 }
 
-// endpointFor extracts the winner's externally-addressable endpoint from its
-// derived ISVC status. Returns ("", nil) until the worker reports a URL.
-func endpointFor(derived *v1beta1.InferenceService) (string, *apis.URL) {
-	if derived == nil || derived.Status.URL == nil {
-		return "", nil
+// endpointFor returns the winner's externally-addressable URL from its derived
+// ISVC status, or nil until the worker reports one.
+func endpointFor(derived *v1beta1.InferenceService) *apis.URL {
+	if derived == nil {
+		return nil
 	}
-	return derived.Status.URL.String(), derived.Status.URL
+	return derived.Status.URL
+}
+
+// placedResult builds the Placed status for winner. The endpoint is sticky: if
+// the winner's derived has no URL this pass (transient worker-status gap), the
+// last-published URL (from the in-memory isvc) is kept rather than cleared, so
+// an external LB watching status.url does not see a spurious deroute.
+func placedResult(winner string, derived, isvc *v1beta1.InferenceService) placementResult {
+	u := endpointFor(derived)
+	if u == nil {
+		u = isvc.Status.URL // keep last-known endpoint
+	}
+	return placementResult{
+		winner: winner, phase: v1beta1.PlacementPhasePlaced,
+		candidates: []v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}},
+		url:        u,
+	}
 }
 
 func winnerCluster(isvc *v1beta1.InferenceService) string {

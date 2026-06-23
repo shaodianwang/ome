@@ -407,7 +407,8 @@ func TestReconcile_PublishesEndpointWhenAdmitted(t *testing.T) {
 	require.NotNil(t, p)
 	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
 	assert.Equal(t, "b", p.Cluster)
-	assert.Equal(t, "https://svc.prod.b.example", p.Endpoint)
+	require.NotNil(t, p.Endpoint)
+	assert.Equal(t, "svc.prod.b.example", p.Endpoint.Host)
 	u := cpStatusURL(t, cp)
 	require.NotNil(t, u)
 	assert.Equal(t, "svc.prod.b.example", u.Host)
@@ -430,7 +431,7 @@ func TestReconcile_PlacedButNoEndpointYet(t *testing.T) {
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
 	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
-	assert.Empty(t, p.Endpoint)
+	assert.Nil(t, p.Endpoint)
 	assert.Nil(t, cpStatusURL(t, cp))
 }
 
@@ -443,11 +444,12 @@ func TestReconcile_ClearsEndpointOnWinnerLost(t *testing.T) {
 	}}
 	isvc := srcISVC("gpu=gb300")
 	isvc.Finalizers = []string{PlacementFinalizer}
+	oldURL := &apis.URL{Scheme: "https", Host: "old.example"}
 	isvc.Status.Placement = &v1beta1.PlacementStatus{
-		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced, Endpoint: "https://old.example",
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced, Endpoint: oldURL,
 		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
 	}
-	isvc.Status.URL = &apis.URL{Scheme: "https", Host: "old.example"}
+	isvc.Status.URL = oldURL
 	r, cp := newPlacer(s, clusters, isvc,
 		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
 
@@ -457,6 +459,82 @@ func TestReconcile_ClearsEndpointOnWinnerLost(t *testing.T) {
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
 	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
-	assert.Empty(t, p.Endpoint)
+	assert.Nil(t, p.Endpoint)
 	assert.Nil(t, cpStatusURL(t, cp))
+}
+
+func TestReconcile_StickyEndpointPersistsAcrossTransientGap(t *testing.T) {
+	s := testScheme(t)
+	wb := workerWithAdmittedDerived(t, s) // admitted, NO status.url this pass
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	prior := &apis.URL{Scheme: "https", Host: "svc.prod.b.example"}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced, Endpoint: prior,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	isvc.Status.URL = prior
+	r, cp := newPlacer(s, clusters, isvc, readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	// The newPlacer fake client should persist the initial status, but ensure it:
+	got := &v1beta1.InferenceService{}
+	require.NoError(t, cp.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
+	if got.Status.URL == nil || got.Status.Placement == nil {
+		got.Status = isvc.Status
+		require.NoError(t, cp.Status().Update(context.Background(), got))
+	}
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
+	require.NotNil(t, p.Endpoint, "sticky: endpoint must survive a transient worker-URL gap")
+	assert.Equal(t, "svc.prod.b.example", p.Endpoint.Host)
+	require.NotNil(t, cpStatusURL(t, cp))
+}
+
+func TestReconcile_EndpointPreservedOnFailed(t *testing.T) {
+	s := testScheme(t)
+	// derived: engine instance Failed, but a status.url is present.
+	derived := isvcWithPhases(v1beta1.EngineComponent, v1beta1.OMENativeInstanceFailed)
+	derived.Namespace, derived.Name = "prod", "svc"
+	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	derived.Status.URL = &apis.URL{Scheme: "https", Host: "svc.prod.b.example"}
+	wb := fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived).Build()
+	cur := &v1beta1.InferenceService{}
+	require.NoError(t, wb.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
+	if cur.Status.URL == nil || !IsTerminallyFailed(cur) {
+		cur.Status = derived.Status
+		require.NoError(t, wb.Status().Update(context.Background(), cur))
+	}
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	r, cp := newPlacer(s, clusters, isvc, readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhaseFailed, p.Phase)
+	require.NotNil(t, p.Endpoint, "Failed placement keeps routing to its still-addressable URL")
+	assert.Equal(t, "svc.prod.b.example", p.Endpoint.Host)
+}
+
+func TestEndpointFor_NilSafe(t *testing.T) {
+	assert.Nil(t, endpointFor(nil))
+	assert.Nil(t, endpointFor(&v1beta1.InferenceService{}))
 }
