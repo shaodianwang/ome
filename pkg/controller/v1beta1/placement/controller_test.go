@@ -39,6 +39,14 @@ func (f fakeClusters) ClientFor(name string) (workloadcluster.SelectivelyCaching
 	return c, ok
 }
 
+func (f fakeClusters) Connected() []string {
+	names := make([]string, 0, len(f.m))
+	for n := range f.m {
+		names = append(names, n)
+	}
+	return names
+}
+
 func readyWC(name string, labels map[string]string) *v1beta1.WorkloadCluster {
 	return &v1beta1.WorkloadCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
@@ -221,6 +229,43 @@ func TestReconcile_ReplaceOnWinnerLost(t *testing.T) {
 	assert.Equal(t, PhaseRacing, p.Phase)
 	assert.True(t, hasDerived(t, wa), "re-fanned out to a")
 	assert.True(t, hasDerived(t, wb), "re-fanned out to b")
+}
+
+func TestReconcile_WinnerFailedSurfacesFailed(t *testing.T) {
+	s := testScheme(t)
+	// b's derived ISVC reports an engine instance Phase=Failed.
+	derivedFailed := isvcWithPhases(v1beta1.EngineComponent, v1beta1.OMENativeInstanceFailed)
+	derivedFailed.Namespace = "prod"
+	derivedFailed.Name = "svc"
+	derivedFailed.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	wb := fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(derivedFailed).Build()
+	// Ensure the failed status is persisted.
+	cur := &v1beta1.InferenceService{}
+	require.NoError(t, wb.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
+	cur.Status = derivedFailed.Status
+	require.NoError(t, wb.Status().Update(context.Background(), cur))
+
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: PhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: candidatePhaseAdmitted}},
+	}
+	r, cp := newPlacer(s, clusters, isvc, readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, PhaseFailed, p.Phase, "placement escalated to Failed")
+	assert.Equal(t, "b", p.Cluster, "failed cluster recorded")
+	assert.True(t, hasDerived(t, wb), "failed derived kept (not deleted)")
 }
 
 func TestReconcile_DeleteRemovesDerivedEverywhere(t *testing.T) {

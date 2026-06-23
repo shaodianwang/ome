@@ -58,3 +58,17 @@ func TestManager_ClientForUnknown(t *testing.T) {
 	_, ok := m.ClientFor("nope")
 	assert.False(t, ok)
 }
+
+func TestManager_Connected(t *testing.T) {
+	m, _ := newTestManager()
+	require.NoError(t, m.Connect(context.Background(), "a", []byte("kubeconfigA")))
+	require.NoError(t, m.Connect(context.Background(), "b", []byte("kubeconfigB")))
+
+	names := m.Connected()
+	require.Len(t, names, 2)
+	assert.ElementsMatch(t, []string{"a", "b"}, names)
+
+	m.Disconnect("a")
+	names = m.Connected()
+	assert.Equal(t, []string{"b"}, names)
+}

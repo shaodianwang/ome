@@ -95,6 +95,17 @@ func (m *Manager) Disconnect(name string) {
 	}
 }
 
+// Connected returns the names of all currently-connected clusters.
+func (m *Manager) Connected() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names := make([]string, 0, len(m.conns))
+	for name := range m.conns {
+		names = append(names, name)
+	}
+	return names
+}
+
 func hashBytes(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])

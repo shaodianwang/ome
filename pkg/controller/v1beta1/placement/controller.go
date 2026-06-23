@@ -37,6 +37,7 @@ const (
 // *workloadcluster.Manager satisfies it; tests inject a fake.
 type ClusterClients interface {
 	ClientFor(name string) (workloadcluster.SelectivelyCachingClient, bool)
+	Connected() []string
 }
 
 // Reconciler is the OEP-0018 control-plane fan-out controller. It clones the
@@ -90,17 +91,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	// Sticky winner: keep the current winner while its derived ISVC still
 	// exists and it remains a candidate. Otherwise fall through to re-race.
 	if winner := winnerCluster(isvc); winner != "" && contains(candidates, winner) {
-		healthy, err := r.winnerHealthy(ctx, winner, isvc)
+		derived, exists, err := r.getDerived(ctx, winner, isvc)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if healthy {
+		if exists {
+			if IsTerminallyFailed(derived) {
+				// The placement itself failed; surface it and stop. Do NOT
+				// re-place into a hot fail-loop — needs human/spec action.
+				return r.writePlacement(ctx, isvc, winner, PhaseFailed,
+					[]v1beta1.CandidatePlacement{{Cluster: winner, Phase: candidatePhaseAdmitted}})
+			}
 			if err := r.ensureWinnerOnly(ctx, isvc, winner); err != nil {
 				return ctrl.Result{}, err
 			}
 			return r.writePlacement(ctx, isvc, winner, PhasePlaced,
 				[]v1beta1.CandidatePlacement{{Cluster: winner, Phase: candidatePhaseAdmitted}})
 		}
+		// derived gone (deleted out from under us) -> fall through to re-race.
 	}
 
 	// Fan out to all connected candidates.
@@ -169,13 +177,6 @@ func (r *Reconciler) findWinner(ctx context.Context, isvc *v1beta1.InferenceServ
 		}
 	}
 	return "", nil
-}
-
-// winnerHealthy reports whether the winner's derived ISVC still exists. (Phase
-// 3b treats "derived gone" as the loss signal; richer failure detection is 3c.)
-func (r *Reconciler) winnerHealthy(ctx context.Context, winner string, isvc *v1beta1.InferenceService) (bool, error) {
-	_, ok, err := r.getDerived(ctx, winner, isvc)
-	return ok, err
 }
 
 // ensureWinnerOnly re-applies the derived ISVC on the winner and deletes any

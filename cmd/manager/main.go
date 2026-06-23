@@ -478,6 +478,14 @@ func main() {
 				setupLog.Error(err, "unable to create controller", "controller", "Placement")
 				os.Exit(1)
 			}
+			if err = mgr.Add(&placement.GCReconciler{
+				Client:   mgr.GetClient(),
+				Log:      ctrl.Log.WithName("controllers").WithName("PlacementGC"),
+				Clusters: clusterManager,
+			}); err != nil {
+				setupLog.Error(err, "unable to add placement GC runnable")
+				os.Exit(1)
+			}
 		}
 	}
 
