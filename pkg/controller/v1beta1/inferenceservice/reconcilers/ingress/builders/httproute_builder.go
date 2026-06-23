@@ -34,7 +34,7 @@ const (
 	RouterDefaultPort  int32 = 30080
 )
 
-var DefaultTimeout = toGatewayAPIDuration(600)
+var DefaultTimeout = toGatewayAPIDuration(1800)
 
 // HTTPRouteBuilder builds Gateway API HTTPRoute resources
 type HTTPRouteBuilder struct {
