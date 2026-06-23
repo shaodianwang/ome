@@ -105,6 +105,7 @@ const (
 	EventReasonMigrationFromNodeMismatch     = types.EventReasonMigrationFromNodeMismatch
 	EventReasonMigrationNodeAffinityConflict = types.EventReasonMigrationNodeAffinityConflict
 	EventReasonMaybeNoGangScheduler          = types.EventReasonMaybeNoGangScheduler
+	EventReasonGangSplitRisk                 = types.EventReasonGangSplitRisk
 
 	ConditionGangSchedulingUnavailable = types.ConditionGangSchedulingUnavailable
 

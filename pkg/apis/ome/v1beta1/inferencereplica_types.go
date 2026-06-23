@@ -80,6 +80,17 @@ type InferenceReplicaSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	MinReadySeconds int32 `json:"minReadySeconds,omitempty"`
 
+	// TopologyKey is the resolved gang co-location node-label key for this
+	// Component, projected verbatim from the effective ISVC↔runtime
+	// component spec (spec.<component>.topologyKey, else the runtime
+	// component-config value). When set on a multi-node Component, the
+	// InferenceReplica controller auto-generates the per-Instance
+	// worker→leader podAffinity that co-locates every worker onto its
+	// gang's leader on a node sharing this label value. Nil means no
+	// auto-generated gang affinity.
+	// +optional
+	TopologyKey *string `json:"topologyKey,omitempty"`
+
 	// Runners is the fully-rendered set of pod templates per Instance.
 	// MUST be non-empty. Single-pod Instances have one Runner with
 	// Name="default" and Size=1; multi-node Instances typically have

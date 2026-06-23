@@ -53,4 +53,17 @@ const (
 	// can't detect from inside the cluster). Dedup'd per (owner,
 	// Component) per process.
 	EventReasonMaybeNoGangScheduler EventReason = "MaybeNoGangScheduler"
+
+	// EventReasonGangSplitRisk is a soft Warning fired the first time a
+	// multi-node gang WORKER pod is created with no co-location
+	// podAffinity at all — neither an OME-injected topologyKey term nor a
+	// user-declared one. Such a gang may schedule across separate
+	// network / NVLink / TPU topology domains, which breaks the
+	// tightly-coupled collectives a multi-node runtime needs (NCCL/RCCL/
+	// NIXL all-reduce, multi-host TPU sessions). The operator sets
+	// engine.topologyKey / decoder.topologyKey (e.g. a NVLink/RDMA domain
+	// label, or the GKE TPU topology label) or declares a worker
+	// podAffinity. Advisory only — never blocks the create. Dedup'd per
+	// (owner, Component) per process.
+	EventReasonGangSplitRisk EventReason = "GangSplitRisk"
 )

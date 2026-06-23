@@ -120,6 +120,14 @@ type Params struct {
 	// through this bag.
 	MultiPod bool
 
+	// TopologyKey is the resolved gang co-location node-label key for
+	// this Component (effective ISVC↔runtime value). Projected verbatim
+	// onto ir.Spec.TopologyKey so the IR controller can auto-generate the
+	// per-Instance worker→leader podAffinity. Set at the dispatch site
+	// since EngineSpec / DecoderSpec aren't carried through this bag. nil
+	// for single-pod Components or when unset on both ISVC and runtime.
+	TopologyKey *string
+
 	// ResolvedAutoscaler is the authoritative per-Component
 	// ComponentAutoscaler the autoscaler.ResolveComponentAutoscaler
 	// helper picked from the ISVC → runtime → default chain. The
@@ -325,6 +333,10 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	ir.Spec.Replicas = desiredReplicas(ir, p)
 	ir.Spec.Runners = runnersFromParams(p)
 	ir.Spec.Lifecycle = lifecycleFromComponentExt(p.ComponentExt)
+	// Project the resolved gang co-location key verbatim. The IR
+	// controller reads it to auto-generate the worker→leader podAffinity
+	// for multi-node Components; nil is a no-op there.
+	ir.Spec.TopologyKey = p.TopologyKey
 	// Project the resolved Autoscaler onto the IR. Whole-block replace
 	// semantics — operator-side changes to isvc.spec.<comp>.autoscaler
 	// always win over any drifted IR.spec.autoscaler. DeepCopy keeps the

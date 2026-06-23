@@ -144,6 +144,18 @@ type EngineSpec struct {
 	// distributed processing tasks as directed by the leader.
 	// +optional
 	Worker *WorkerSpec `json:"worker,omitempty"`
+
+	// TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label)
+	// used to co-locate all pods of one multi-node (leader+worker) gang
+	// into a single network / NVLink topology domain. When set on a
+	// multi-node component, OME auto-generates the per-instance
+	// worker→leader podAffinity that anchors every worker to its gang's
+	// leader on a node sharing this label value — so users no longer
+	// hand-write that affinity. Only meaningful for multi-node components;
+	// ignored for single-pod (no leader to anchor to). Unset means no
+	// auto-generated gang affinity.
+	// +optional
+	TopologyKey *string `json:"topologyKey,omitempty"`
 }
 
 // DecoderSpec defines the configuration for the Decoder component (token generation in PD-disaggregated deployment)
@@ -179,6 +191,18 @@ type DecoderSpec struct {
 	// distributed token generation tasks as directed by the leader.
 	// +optional
 	Worker *WorkerSpec `json:"worker,omitempty"`
+
+	// TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label)
+	// used to co-locate all pods of one multi-node (leader+worker) gang
+	// into a single network / NVLink topology domain. When set on a
+	// multi-node component, OME auto-generates the per-instance
+	// worker→leader podAffinity that anchors every worker to its gang's
+	// leader on a node sharing this label value — so users no longer
+	// hand-write that affinity. Only meaningful for multi-node components;
+	// ignored for single-pod (no leader to anchor to). Unset means no
+	// auto-generated gang affinity.
+	// +optional
+	TopologyKey *string `json:"topologyKey,omitempty"`
 }
 
 // LeaderSpec defines the configuration for a leader node in a multi-node component

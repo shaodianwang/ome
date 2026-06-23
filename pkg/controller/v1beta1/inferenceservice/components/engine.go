@@ -220,6 +220,7 @@ func (e *Engine) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferenc
 			WorkerPodSpec:      workerPodSpec,
 			WorkerSize:         workerSize,
 			MultiPod:           multiPod,
+			TopologyKey:        e.engineSpec.TopologyKey,
 			ResolvedAutoscaler: resolvedAS,
 			Client:             e.Client,
 		})

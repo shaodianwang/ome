@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"fmt"
 	"sort"
 	"testing"
 
@@ -83,6 +84,15 @@ func multiPodPlan(workerSize int32) (workload.ComponentPlan, workload.InstancePl
 		Replicas:  1,
 		Instances: []workload.InstancePlan{inst},
 	}
+	return plan, inst, runners
+}
+
+// multiPodPlanWithTopologyKey is multiPodPlan plus the resolved gang
+// topologyKey the injector reads to co-locate a non-TPU (generic / GPU)
+// gang's workers onto their Instance's leader.
+func multiPodPlanWithTopologyKey(workerSize int32, topologyKey string) (workload.ComponentPlan, workload.InstancePlan, []workload.RunnerPlan) {
+	plan, inst, runners := multiPodPlan(workerSize)
+	plan.TopologyKey = topologyKey
 	return plan, inst, runners
 }
 
@@ -879,12 +889,200 @@ func TestInjectTPUSliceAffinity_Idempotent(t *testing.T) {
 	worker := runners[1]
 	pod := &corev1.Pod{Spec: *tpuPodSpecWithTopology("2x2x2")}
 
-	injectTPUSliceAffinity(pod, plan, inst, worker, "llama-70b")
-	injectTPUSliceAffinity(pod, plan, inst, worker, "llama-70b")
+	injectGangDomainAffinity(pod, plan, inst, worker, "llama-70b")
+	injectGangDomainAffinity(pod, plan, inst, worker, "llama-70b")
 
 	terms := requiredPodAffinity(pod)
 	if len(terms) != 1 {
 		t.Fatalf("slice-affinity term should appear once after double render, got %d: %+v", len(terms), terms)
+	}
+}
+
+// TestRender_MultiPod_GangDomainAffinity pins the generic (non-TPU)
+// worker→leader gang co-location: a multi-node worker whose component
+// carries a resolved topologyKey gets a REQUIRED podAffinity whose
+// topologyKey is that key and whose selector targets the SAME Instance's
+// leader. This is the GPU / MNNVL analog of the TPU-slice term — derived
+// from a user-supplied node-label key instead of the GKE TPU topology.
+func TestRender_MultiPod_GangDomainAffinity(t *testing.T) {
+	plan, inst, runners := multiPodPlanWithTopologyKey(2, "network.meta.com/domain")
+	worker := runners[1]
+
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, worker, 0)
+	if err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	terms := requiredPodAffinity(pod)
+	if len(terms) != 1 {
+		t.Fatalf("worker required podAffinity: got %d terms want 1: %+v", len(terms), terms)
+	}
+	if got := terms[0].TopologyKey; got != "network.meta.com/domain" {
+		t.Errorf("topologyKey: got %q want network.meta.com/domain", got)
+	}
+	wantSel := map[string]string{
+		constants.InferenceServicePodLabelKey: "llama-70b",
+		constants.OMEComponentLabel:           "engine",
+		query.LabelInstanceIdx:                "0",
+		query.LabelRunner:                     "leader",
+	}
+	if terms[0].LabelSelector == nil {
+		t.Fatalf("term has nil LabelSelector: %+v", terms[0])
+	}
+	if diff := cmp.Diff(wantSel, terms[0].LabelSelector.MatchLabels); diff != "" {
+		t.Errorf("leader selector mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestRender_GangDomainAffinity_InstanceScoped pins that each Instance's
+// worker follows its OWN leader: the injected selector carries the
+// CONCRETE per-Instance index (0 for Instance 0, 1 for Instance 1), not
+// a shared key. OME knows the index at render time, so it stamps the
+// literal value — keeping the term portable to any k8s version (no
+// matchLabelKeys dependency). Cross-instance co-location would be a
+// sharding bug.
+func TestRender_GangDomainAffinity_InstanceScoped(t *testing.T) {
+	runners := []workload.RunnerPlan{
+		{Name: "leader", Size: 1},
+		{Name: "worker", Size: 1},
+	}
+	for _, idx := range []int32{0, 1} {
+		inst := workload.InstancePlan{Index: idx, Incarnation: 1, Runners: runners}
+		plan := workload.ComponentPlan{
+			Component:   workload.ComponentEngine,
+			Replicas:    2,
+			Instances:   []workload.InstancePlan{inst},
+			TopologyKey: "network.meta.com/domain",
+		}
+
+		pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runners[1], 0)
+		if err != nil {
+			t.Fatalf("inst%d worker: %v", idx, err)
+		}
+		terms := requiredPodAffinity(pod)
+		if len(terms) != 1 {
+			t.Fatalf("inst%d: got %d terms want 1", idx, len(terms))
+		}
+		want := fmt.Sprintf("%d", idx)
+		if got := terms[0].LabelSelector.MatchLabels[query.LabelInstanceIdx]; got != want {
+			t.Errorf("inst%d selector instance-index: got %q want %q", idx, got, want)
+		}
+	}
+}
+
+// TestRender_GangDomainAffinity_Negatives pins the gates: leader,
+// single-pod (default runner), and router get NO gang-domain affinity
+// even when a topologyKey is set — only multi-node workers anchor to a
+// leader.
+func TestRender_GangDomainAffinity_Negatives(t *testing.T) {
+	// Leader gets nothing — it's the domain anchor, not a follower.
+	plan, inst, runners := multiPodPlanWithTopologyKey(1, "network.meta.com/domain")
+	leaderPod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runners[0], 0)
+	if err != nil {
+		t.Fatalf("leader: %v", err)
+	}
+	if terms := requiredPodAffinity(leaderPod); len(terms) != 0 {
+		t.Errorf("leader must not get gang-domain affinity; got %+v", terms)
+	}
+
+	// Single-pod shape: "default" runner, no leader → nothing, even
+	// though the plan carries a topologyKey.
+	splan, sinst, srunner := singlePodPlan()
+	splan.TopologyKey = "network.meta.com/domain"
+	spod, err := testRender(basicISVC(), basicPodSpec(), splan, sinst, srunner, 0)
+	if err != nil {
+		t.Fatalf("single-pod: %v", err)
+	}
+	if terms := requiredPodAffinity(spod); len(terms) != 0 {
+		t.Errorf("single-pod must not get gang-domain affinity; got %+v", terms)
+	}
+
+	// Router (single-pod component) with a topologyKey set → nothing.
+	rplan := workload.ComponentPlan{
+		Component:   workload.ComponentRouter,
+		Replicas:    1,
+		Instances:   []workload.InstancePlan{sinst},
+		TopologyKey: "network.meta.com/domain",
+	}
+	rpod, err := testRender(basicISVC(), basicPodSpec(), rplan, sinst, srunner, 0)
+	if err != nil {
+		t.Fatalf("router: %v", err)
+	}
+	if terms := requiredPodAffinity(rpod); len(terms) != 0 {
+		t.Errorf("router must not get gang-domain affinity; got %+v", terms)
+	}
+}
+
+// TestRender_GangDomainAffinity_NoTopologyKey pins that a multi-node
+// worker WITHOUT a resolved topologyKey (the optional field unset) gets
+// no injection — the field is opt-in, nil is zero behavior change.
+func TestRender_GangDomainAffinity_NoTopologyKey(t *testing.T) {
+	plan, inst, runners := multiPodPlan(1) // no TopologyKey
+	pod, err := testRender(basicISVC(), basicPodSpec(), plan, inst, runners[1], 0)
+	if err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	if terms := requiredPodAffinity(pod); len(terms) != 0 {
+		t.Errorf("worker without topologyKey must get no affinity; got %+v", terms)
+	}
+}
+
+// TestRender_GangDomainAffinity_RespectsUserOverride pins the override
+// guard: if the user already hand-wrote a required podAffinity term on
+// the SAME topologyKey, OME does NOT inject a duplicate — it defers to
+// the user's affinity. A user term on a DIFFERENT key is left intact and
+// the OME term is still appended.
+func TestRender_GangDomainAffinity_RespectsUserOverride(t *testing.T) {
+	// User declared their own term on the gang topologyKey → no dup.
+	plan, inst, runners := multiPodPlanWithTopologyKey(1, "network.meta.com/domain")
+	worker := runners[1]
+	ps := basicPodSpec()
+	userTerm := corev1.PodAffinityTerm{
+		TopologyKey: "network.meta.com/domain",
+		LabelSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{"app": "user-hand-written"},
+		},
+	}
+	ps.Affinity = &corev1.Affinity{
+		PodAffinity: &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{userTerm},
+		},
+	}
+	pod, err := testRender(basicISVC(), ps, plan, inst, worker, 0)
+	if err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	terms := requiredPodAffinity(pod)
+	if len(terms) != 1 {
+		t.Fatalf("user already declared the topologyKey; expected no duplicate (1 term), got %d: %+v", len(terms), terms)
+	}
+	if diff := cmp.Diff(map[string]string{"app": "user-hand-written"}, terms[0].LabelSelector.MatchLabels); diff != "" {
+		t.Errorf("user term must be preserved verbatim (-want +got):\n%s", diff)
+	}
+
+	// User term on a DIFFERENT key → OME term still appended (preserve
+	// user affinity, add the gang term).
+	ps2 := basicPodSpec()
+	ps2.Affinity = &corev1.Affinity{
+		PodAffinity: &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				TopologyKey:   "kubernetes.io/hostname",
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "other"}},
+			}},
+		},
+	}
+	pod2, err := testRender(basicISVC(), ps2, plan, inst, worker, 0)
+	if err != nil {
+		t.Fatalf("worker different-key: %v", err)
+	}
+	terms2 := requiredPodAffinity(pod2)
+	if len(terms2) != 2 {
+		t.Fatalf("user term on a different key: expected user term + injected term = 2, got %d: %+v", len(terms2), terms2)
+	}
+	if terms2[0].TopologyKey != "kubernetes.io/hostname" {
+		t.Errorf("user term clobbered or reordered: %+v", terms2[0])
+	}
+	if terms2[1].TopologyKey != "network.meta.com/domain" {
+		t.Errorf("injected gang-domain term missing/wrong: %+v", terms2[1])
 	}
 }
 

@@ -213,6 +213,7 @@ func MergeEngineSpec(runtimeEngine, isvcEngine *v1beta1.EngineSpec) (*v1beta1.En
 		Runner:                 runtimeEngine.Runner,
 		Leader:                 runtimeEngine.Leader,
 		Worker:                 runtimeEngine.Worker,
+		TopologyKey:            runtimeEngine.TopologyKey,
 	}, *isvcEngine)
 	if err != nil {
 		return nil, err
@@ -246,6 +247,7 @@ func MergeDecoderSpec(runtimeDecoder, isvcDecoder *v1beta1.DecoderSpec) (*v1beta
 		Runner:                 runtimeDecoder.Runner,
 		Leader:                 runtimeDecoder.Leader,
 		Worker:                 runtimeDecoder.Worker,
+		TopologyKey:            runtimeDecoder.TopologyKey,
 	}, *isvcDecoder)
 	if err != nil {
 		return nil, err

@@ -203,6 +203,7 @@ func (d *Decoder) reconcileDeployment(ctx context.Context, isvc *v1beta1.Inferen
 			WorkerPodSpec:      workerPodSpec,
 			WorkerSize:         workerSize,
 			MultiPod:           multiPod,
+			TopologyKey:        d.decoderSpec.TopologyKey,
 			ResolvedAutoscaler: resolvedAS,
 			Client:             d.Client,
 		})

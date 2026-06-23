@@ -361,6 +361,12 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 			return created, fmt.Errorf("render pod %s: %w", t.Name, err)
 		}
 
+		// Advisory (non-blocking): a multi-node gang worker rendered with no
+		// co-location podAffinity — no resolved topologyKey and no
+		// operator-supplied term — may schedule across topology domains and
+		// break the runtime's collectives. Warn once per (owner, Component).
+		maybeWarnGangSplitRisk(deps.Recorder, input, plan, inst, t.Runner, pod)
+
 		// EXPECT-ORDER: expectation before RPC, rollback via ObservedCreate
 		// on error — a failed Create fires no watch event to decrement it.
 		deps.ExpectationsCache().ExpectCreates(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, idx, 1)

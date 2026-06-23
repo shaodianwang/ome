@@ -1792,6 +1792,13 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec"),
 						},
 					},
+					"topologyKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label) used to co-locate all pods of one multi-node (leader+worker) gang into a single network / NVLink topology domain. When set on a multi-node component, OME auto-generates the per-instance worker→leader podAffinity that anchors every worker to its gang's leader on a node sharing this label value — so users no longer hand-write that affinity. Only meaningful for multi-node components; ignored for single-pod (no leader to anchor to). Unset means no auto-generated gang affinity.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},
@@ -2518,6 +2525,13 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkerSpec"),
 						},
 					},
+					"topologyKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TopologyKey is the node-label key (e.g. an NVLink/RDMA fabric-domain label) used to co-locate all pods of one multi-node (leader+worker) gang into a single network / NVLink topology domain. When set on a multi-node component, OME auto-generates the per-instance worker→leader podAffinity that anchors every worker to its gang's leader on a node sharing this label value — so users no longer hand-write that affinity. Only meaningful for multi-node components; ignored for single-pod (no leader to anchor to). Unset means no auto-generated gang affinity.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},
@@ -3133,6 +3147,13 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 							Description: "MinReadySeconds is propagated from the ISVC spec.",
 							Type:        []string{"integer"},
 							Format:      "int32",
+						},
+					},
+					"topologyKey": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TopologyKey is the resolved gang co-location node-label key for this Component, projected verbatim from the effective ISVC↔runtime component spec (spec.<component>.topologyKey, else the runtime component-config value). When set on a multi-node Component, the InferenceReplica controller auto-generates the per-Instance worker→leader podAffinity that co-locates every worker onto its gang's leader on a node sharing this label value. Nil means no auto-generated gang affinity.",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 					"runners": {

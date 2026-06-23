@@ -254,6 +254,9 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadDesiredSpec {
 		Runners:         runnersFromIR(ir),
 		Paused:          ir.Spec.Paused,
 	}
+	if ir.Spec.TopologyKey != nil {
+		desired.TopologyKey = *ir.Spec.TopologyKey
+	}
 	if ir.Spec.Pacing != nil {
 		desired.Pacing = &workload.WorkloadPacing{
 			Partition:      ir.Spec.Pacing.Partition,

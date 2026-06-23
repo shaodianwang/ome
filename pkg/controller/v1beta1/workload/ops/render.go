@@ -160,7 +160,7 @@ func RenderWithRevision(
 	backfillEmptyContainerNames(&pod.Spec)
 
 	injectOMENativeEnv(pod, plan, inst, runner, ordinal, isvcName)
-	injectTPUSliceAffinity(pod, plan, inst, runner, isvcName)
+	injectGangDomainAffinity(pod, plan, inst, runner, isvcName)
 	applyMigrationOverlay(pod, inst.MigrationOverlay)
 
 	// Adapter-supplied hook: peer-env injection for the ISVC adapter,
@@ -546,40 +546,64 @@ const (
 	gkeTPUPartitionLabelSuffix    = "-id"
 )
 
-// injectTPUSliceAffinity co-locates a multi-host TPU gang's worker pods onto the
-// SAME physical TPU slice as their Instance's leader. Cross-host TPU runtimes
-// (JAX/libtpu START_SESSION) only form a session when every gang pod lands on
-// nodes sharing one slice partition; without this a gang can split across two
-// slices and crash-loop. GKE provides this for LWS pods via a webhook, so
-// OMENative supplies it natively for any TPU-requesting gang worker.
+// injectGangDomainAffinity co-locates a multi-node gang's worker pods onto the
+// SAME topology domain as their Instance's leader — a TPU slice for TPU
+// workloads, or any network / NVLink domain (e.g. GPU MNNVL) named by a
+// user-supplied node-label key. A multi-node gang only works when every pod
+// lands in one domain: cross-host TPU runtimes (JAX/libtpu START_SESSION) won't
+// form a session across two slices, and high-bandwidth GPU collectives degrade
+// or fail across domains. GKE provides the TPU case for LWS pods via a webhook;
+// OMENative supplies both cases natively for any multi-node gang worker.
+//
+// The domain topologyKey is resolved per pod:
+//   - TPU pods (request google.com/tpu) derive it from the GKE
+//     cloud.google.com/gke-tpu-topology nodeSelector — the per-topology slice
+//     partition label. Unchanged from the original TPU-only behavior.
+//   - Otherwise it's the Component's resolved spec topologyKey (plan.TopologyKey),
+//     the effective ISVC↔runtime value the user supplied.
+//
+// Empty resolved key → no-op (the field is opt-in for non-TPU gangs).
 //
 // Worker-follows-leader (not mutual affinity) by design: a required mutual
 // affinity would deadlock the gang since the first-scheduled pod has no peer to
 // satisfy it. Gang co-scheduling via the scheduling.x-k8s.io/pod-group label
 // admits all pods together; this required podAffinity then constrains WHICH
-// nodes the workers may take — the leader picks a slice, workers must follow.
-// Required (not preferred) because a split slice literally cannot run.
+// nodes the workers may take — the leader picks a domain, workers must follow.
+// Required (not preferred) because a split gang literally cannot run.
 //
-// Idempotent: a second render after a cache-lag retry won't duplicate the term.
-func injectTPUSliceAffinity(pod *corev1.Pod, plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, isvcName string) {
-	// Only multi-host TPU gang workers need this. Leader / single-pod /
-	// non-TPU get nothing (the leader is the slice anchor; single-pod runs on
-	// one host).
-	if runner.Name != "worker" || !instanceHasLeader(inst) || !podRequestsResource(pod, constants.GoogleTPUResourceType) {
+// Respects a hand-written affinity: if the user already declared a required
+// podAffinity term on the resolved topologyKey, OME defers to it and injects
+// nothing (no duplicate / conflicting term). This same check makes the inject
+// idempotent — a second render after a cache-lag retry won't duplicate the term.
+func injectGangDomainAffinity(pod *corev1.Pod, plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, isvcName string) {
+	// Only multi-node gang workers need this. Leader / single-pod get
+	// nothing (the leader is the domain anchor; single-pod runs on one host).
+	if runner.Name != "worker" || !instanceHasLeader(inst) {
 		return
 	}
-	// Derive the slice topologyKey from the pod's own TPU-topology nodeSelector.
-	// Absent it we can't name the right partition label, so skip rather than
-	// emit a broken affinity.
-	topology := pod.Spec.NodeSelector[gkeTPUTopologyNodeSelectorKey]
-	if topology == "" {
+
+	// Resolve the domain topologyKey. TPU pods derive it from their own
+	// TPU-topology nodeSelector; everything else uses the resolved spec key.
+	var topologyKey string
+	if podRequestsResource(pod, constants.GoogleTPUResourceType) {
+		// Absent the TPU-topology nodeSelector we can't name the right
+		// partition label, so skip rather than emit a broken affinity.
+		topology := pod.Spec.NodeSelector[gkeTPUTopologyNodeSelectorKey]
+		if topology == "" {
+			return
+		}
+		topologyKey = gkeTPUPartitionLabelPrefix + topology + gkeTPUPartitionLabelSuffix
+	} else {
+		topologyKey = plan.TopologyKey
+	}
+	if topologyKey == "" {
 		return
 	}
-	topologyKey := gkeTPUPartitionLabelPrefix + topology + gkeTPUPartitionLabelSuffix
 
 	// Select THIS Instance's leader pod. OME knows the concrete instance index
 	// at render time, so the selector is instance-scoped — something a static
-	// ISVC YAML can't express.
+	// ISVC YAML can't express. The literal index keeps the term portable to any
+	// k8s version (no matchLabelKeys dependency).
 	term := corev1.PodAffinityTerm{
 		TopologyKey: topologyKey,
 		LabelSelector: &metav1.LabelSelector{
@@ -599,7 +623,11 @@ func injectTPUSliceAffinity(pod *corev1.Pod, plan workload.ComponentPlan, inst w
 		pod.Spec.Affinity.PodAffinity = &corev1.PodAffinity{}
 	}
 	pa := pod.Spec.Affinity.PodAffinity
-	if hasTPUSliceAffinityTerm(pa.RequiredDuringSchedulingIgnoredDuringExecution, topologyKey, term.LabelSelector) {
+	// Skip when a required term on this topologyKey already exists — either a
+	// user-supplied override (respect it) or OME's own term from a prior render
+	// (idempotency). Keyed on topologyKey alone: a user override carries a
+	// different selector, so a full-term match would miss it.
+	if hasRequiredAffinityForTopologyKey(pa.RequiredDuringSchedulingIgnoredDuringExecution, topologyKey) {
 		return
 	}
 	// Append so user-provided podAffinity is preserved.
@@ -618,33 +646,19 @@ func instanceHasLeader(inst workload.InstancePlan) bool {
 	return false
 }
 
-// hasTPUSliceAffinityTerm is the idempotency check for injectTPUSliceAffinity:
-// reports whether an equivalent (same topologyKey + leader selector) required
-// podAffinity term already exists, so a re-render won't duplicate it.
-func hasTPUSliceAffinityTerm(terms []corev1.PodAffinityTerm, topologyKey string, sel *metav1.LabelSelector) bool {
+// hasRequiredAffinityForTopologyKey is the override + idempotency check for
+// injectGangDomainAffinity: reports whether ANY required podAffinity term
+// already targets topologyKey. Keyed on topologyKey alone (not the full term)
+// so it catches BOTH a user-supplied override (which carries its own selector)
+// and OME's own term from a prior render — in both cases OME must not add
+// another term on the same key.
+func hasRequiredAffinityForTopologyKey(terms []corev1.PodAffinityTerm, topologyKey string) bool {
 	for i := range terms {
-		if terms[i].TopologyKey == topologyKey && equalMatchLabels(terms[i].LabelSelector, sel) {
+		if terms[i].TopologyKey == topologyKey {
 			return true
 		}
 	}
 	return false
-}
-
-// equalMatchLabels compares two LabelSelectors by their MatchLabels maps only
-// (the slice-affinity term uses MatchLabels exclusively).
-func equalMatchLabels(a, b *metav1.LabelSelector) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if len(a.MatchLabels) != len(b.MatchLabels) {
-		return false
-	}
-	for k, v := range a.MatchLabels {
-		if b.MatchLabels[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 // podRequestsResource reports whether any container requests the named extended

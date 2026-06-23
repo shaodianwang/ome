@@ -54,6 +54,15 @@ type WorkloadDesiredSpec struct {
 	// (each Instance materializes more than one pod).
 	MultiPod bool
 
+	// TopologyKey is the resolved gang co-location node-label key for
+	// this Component (e.g. an NVLink/RDMA fabric-domain label). When non-empty on
+	// a multi-pod Component, the renderer auto-generates the per-Instance
+	// worker→leader podAffinity that co-locates every worker onto its
+	// gang's leader on a node sharing this label value. Empty means no
+	// auto-generated gang affinity. Adapters project it from the owner-CRD
+	// component spec at the boundary.
+	TopologyKey string
+
 	// Lifecycle holds RestartPolicy / UpdateStrategy / ReadyPolicy /
 	// InstanceReadyTimeout / MigrationPolicy as workload-owned mirror
 	// values; adapters project the CRD-shape lifecycle into this struct

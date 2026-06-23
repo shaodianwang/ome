@@ -3617,6 +3617,8 @@ spec:
                   x-kubernetes-list-map-keys:
                     - name
                   x-kubernetes-list-type: map
+                topologyKey:
+                  type: string
               required:
                 - component
                 - parentRef

@@ -39,6 +39,14 @@ type ComponentPlan struct {
 	// MigrationMode is the effective migration disposition (auto / surge /
 	// never).
 	MigrationMode MigrationMode
+
+	// TopologyKey is the resolved gang co-location node-label key for
+	// this Component (e.g. an NVLink/RDMA fabric-domain label). Empty for
+	// single-pod Components or when unset. When non-empty on a multi-pod
+	// Component, Render auto-generates the per-Instance worker→leader
+	// podAffinity that co-locates every worker onto its gang's leader on
+	// a node sharing this label value.
+	TopologyKey string
 }
 
 // InstancePlan is the desired state for one Instance — the atomic
