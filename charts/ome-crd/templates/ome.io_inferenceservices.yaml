@@ -30544,6 +30544,13 @@ spec:
                   type: integer
                 pinnedRevisionName:
                   type: string
+                placement:
+                  properties:
+                    cluster:
+                      type: string
+                    phase:
+                      type: string
+                  type: object
                 rolloutCoordination:
                   properties:
                     groups:

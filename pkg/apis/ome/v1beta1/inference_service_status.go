@@ -55,6 +55,12 @@ type InferenceServiceStatus struct {
 	// +optional
 	Canary *CanaryStatus `json:"canary,omitempty"`
 
+	// Placement reports OEP-0018 multi-cluster placement of this ISVC, set by
+	// the control-plane fan-out controller. Empty on workload clusters and on
+	// single-cluster deployments.
+	// +optional
+	Placement *PlacementStatus `json:"placement,omitempty"`
+
 	// PinnedRevisionName is the ControllerRevision (OME ns) driving
 	// pod specs. Empty when autoSync is true.
 	// +optional
@@ -412,4 +418,17 @@ func (ss *InferenceServiceStatus) SetCondition(conditionType apis.ConditionType,
 	case condition.Status == v1.ConditionFalse:
 		conditionSet.Manage(ss).MarkFalse(conditionType, condition.Reason, condition.Message)
 	}
+}
+
+// PlacementStatus is the OEP-0018 multi-cluster placement status: which workload
+// cluster an InferenceService is placed on and a coarse phase.
+type PlacementStatus struct {
+	// Cluster is the WorkloadCluster the ISVC is currently placed on. Empty
+	// while pending (no candidate yet, or transport not connected).
+	// +optional
+	Cluster string `json:"cluster,omitempty"`
+
+	// Phase is a coarse placement state: "Pending" or "Placed".
+	// +optional
+	Phase string `json:"phase,omitempty"`
 }

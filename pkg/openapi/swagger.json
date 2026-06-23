@@ -2015,6 +2015,10 @@
           "description": "PinnedRevisionName is the ControllerRevision (OME ns) driving pod specs. Empty when autoSync is true.",
           "type": "string"
         },
+        "placement": {
+          "description": "Placement reports OEP-0018 multi-cluster placement of this ISVC, set by the control-plane fan-out controller. Empty on workload clusters and on single-cluster deployments.",
+          "$ref": "#/definitions/v1beta1.PlacementStatus"
+        },
         "rolloutCoordination": {
           "description": "RolloutCoordination reports per-group cross-Component coordination state for the InferenceService. Populated only when spec.rollout declares blueGreen/rollingUpdate groups (canary groups report under status.canary instead).",
           "$ref": "#/definitions/v1beta1.RolloutCoordinationStatus"
@@ -3127,6 +3131,20 @@
           "description": "Name is the name of the parent InferenceService.",
           "type": "string",
           "default": ""
+        }
+      }
+    },
+    "v1beta1.PlacementStatus": {
+      "description": "PlacementStatus is the OEP-0018 multi-cluster placement status: which workload cluster an InferenceService is placed on and a coarse phase.",
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "description": "Cluster is the WorkloadCluster the ISVC is currently placed on. Empty while pending (no candidate yet, or transport not connected).",
+          "type": "string"
+        },
+        "phase": {
+          "description": "Phase is a coarse placement state: \"Pending\" or \"Placed\".",
+          "type": "string"
         }
       }
     },

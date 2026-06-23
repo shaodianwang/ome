@@ -81,6 +81,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.OMENativeInstanceStatus":        schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ObjectReference":                schema_pkg_apis_ome_v1beta1_ObjectReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                schema_pkg_apis_ome_v1beta1_ParentReference(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementStatus":                schema_pkg_apis_ome_v1beta1_PlacementStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                        schema_pkg_apis_ome_v1beta1_PodSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy":             schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate":                  schema_pkg_apis_ome_v1beta1_RollingUpdate(ref),
@@ -3628,6 +3629,12 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus"),
 						},
 					},
+					"placement": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Placement reports OEP-0018 multi-cluster placement of this ISVC, set by the control-plane fan-out controller. Empty on workload clusters and on single-cluster deployments.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementStatus"),
+						},
+					},
 					"pinnedRevisionName": {
 						SchemaProps: spec.SchemaProps{
 							Description: "PinnedRevisionName is the ControllerRevision (OME ns) driving pod specs. Empty when autoSync is true.",
@@ -3652,7 +3659,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus", "knative.dev/pkg/apis.Condition", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentStatusSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MigrationHistoryEntry", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.MountedOverlay", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationStatus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficStatus", "knative.dev/pkg/apis.Condition", "knative.dev/pkg/apis.URL", "knative.dev/pkg/apis/duck/v1.Addressable"},
 	}
 }
 
@@ -5536,6 +5543,33 @@ func schema_pkg_apis_ome_v1beta1_ParentReference(ref common.ReferenceCallback) c
 						SchemaProps: spec.SchemaProps{
 							Description: "Name is the name of the parent InferenceService.",
 							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PlacementStatus is the OEP-0018 multi-cluster placement status: which workload cluster an InferenceService is placed on and a coarse phase.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"cluster": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Cluster is the WorkloadCluster the ISVC is currently placed on. Empty while pending (no candidate yet, or transport not connected).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"phase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Phase is a coarse placement state: \"Pending\" or \"Placed\".",
 							Type:        []string{"string"},
 							Format:      "",
 						},

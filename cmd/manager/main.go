@@ -48,6 +48,7 @@ import (
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	trafficfactory "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/factory"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	v1beta1runtimerevisioncontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/runtimerevision"
 	v1beta1servingruntimecontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/servingruntime"
 	workloadcluster "github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
@@ -66,6 +67,11 @@ import (
 const (
 	LeaderLockName          = "ome-controller-manager-leader-lock"
 	LeaderElectionNamespace = "ome"
+
+	// multiClusterRoleControlPlane is the --multicluster-role value that makes
+	// this manager the OEP-0018 fan-out control plane: it runs the placement
+	// controller and disables the local InferenceService->pods reconcilers.
+	multiClusterRoleControlPlane = "control-plane"
 )
 
 var (
@@ -116,6 +122,7 @@ type Options struct {
 	runtimeRevisionGracePeriod time.Duration
 	enableInferenceReplicaCtrl bool
 	enableMultiCluster         bool
+	multiClusterRole           string
 	zapOpts                    zap.Options
 }
 
@@ -139,6 +146,7 @@ func DefaultOptions() Options {
 		// controller if a regression lands.
 		enableInferenceReplicaCtrl: true,
 		enableMultiCluster:         false,
+		multiClusterRole:           "",
 		zapOpts: zap.Options{
 			TimeEncoder: zapcore.RFC3339TimeEncoder,
 			ZapOpts:     []zaplog.Option{zaplog.AddCaller()},
@@ -170,6 +178,11 @@ func GetOptions() Options {
 		"Run the InferenceReplica controller. Defaults true; flip to false to disable if the per-IR lifecycle code ships a regression.")
 	flag.BoolVar(&opts.enableMultiCluster, "enable-multicluster", opts.enableMultiCluster,
 		"Enable the OEP-0018 multi-cluster controllers (WorkloadCluster registry). Alpha; default off.")
+	flag.StringVar(&opts.multiClusterRole, "multicluster-role", opts.multiClusterRole,
+		"OEP-0018 multi-cluster role. \"control-plane\" makes this the fan-out placer: it runs "+
+			"the placement controller (which clones InferenceServices onto workload clusters) and "+
+			"DISABLES the local InferenceService->pods reconcilers. Empty (default) is a normal "+
+			"single-cluster / workload-cluster manager. \"control-plane\" implies --enable-multicluster.")
 	opts.zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	return opts
@@ -337,20 +350,33 @@ func main() {
 
 	// Setup Event Broadcaster
 	setupLog.Info("Configuring event broadcaster")
-	eventBroadcaster := record.NewBroadcaster()
-	setupLog.Info("Setting up InferenceService controller")
-	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
-	if err = (&v1beta1isvccontroller.InferenceServiceReconciler{
-		Client:            mgr.GetClient(),
-		Clientset:         clientSet,
-		Log:               ctrl.Log.WithName("InferenceService"),
-		Scheme:            mgr.GetScheme(),
-		Recorder:          eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
-		ModelCache:        modelCacheProvider,
-		TrafficReconciler: trafficReconciler,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create InferenceService controller")
+	// OEP-0018 role resolution. On the control plane the placement (fan-out)
+	// controller owns InferenceServices — it clones them onto workload clusters
+	// — so the local ISVC->pods reconcilers must NOT run here.
+	isControlPlane := options.multiClusterRole == multiClusterRoleControlPlane
+	if options.multiClusterRole != "" && !isControlPlane {
+		setupLog.Error(fmt.Errorf("invalid --multicluster-role %q (want %q or empty)", options.multiClusterRole, multiClusterRoleControlPlane), "bad flag")
 		os.Exit(1)
+	}
+
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
+	if isControlPlane {
+		setupLog.Info("control-plane role: local InferenceService reconciler disabled; placement controller owns ISVCs")
+	} else {
+		setupLog.Info("Setting up InferenceService controller")
+		if err = (&v1beta1isvccontroller.InferenceServiceReconciler{
+			Client:            mgr.GetClient(),
+			Clientset:         clientSet,
+			Log:               ctrl.Log.WithName("InferenceService"),
+			Scheme:            mgr.GetScheme(),
+			Recorder:          eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+			ModelCache:        modelCacheProvider,
+			TrafficReconciler: trafficReconciler,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create InferenceService controller")
+			os.Exit(1)
+		}
 	}
 
 	setupLog.Info("Setting up BaseModel controller")
@@ -407,7 +433,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if options.enableInferenceReplicaCtrl {
+	if options.enableInferenceReplicaCtrl && !isControlPlane {
 		setupLog.Info("Setting up InferenceReplica controller")
 		if err = (&v1beta1inferencereplicacontroller.Reconciler{
 			Client:    mgr.GetClient(),
@@ -418,20 +444,40 @@ func main() {
 			setupLog.Error(err, "Failed to create InferenceReplica controller")
 			os.Exit(1)
 		}
+	} else if isControlPlane {
+		setupLog.Info("control-plane role: InferenceReplica controller disabled")
 	} else {
 		setupLog.Info("InferenceReplica controller disabled via --enable-inferencereplica-controller=false")
 	}
 
-	if options.enableMultiCluster {
+	// OEP-0018 multi-cluster. The WorkloadCluster registry/transport runs when
+	// multi-cluster is enabled OR this is the control plane (which requires it).
+	// The control plane additionally runs the placement (fan-out) controller,
+	// sharing the SAME Manager so it reads the live per-cluster clients the
+	// WorkloadCluster reconciler connects.
+	if options.enableMultiCluster || isControlPlane {
+		clusterManager := workloadcluster.NewManager(mgr.GetScheme())
 		setupLog.Info("Setting up WorkloadCluster controller")
 		if err = (&workloadcluster.Reconciler{
 			Client:  mgr.GetClient(),
 			Scheme:  mgr.GetScheme(),
 			Log:     ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
-			Manager: workloadcluster.NewManager(mgr.GetScheme()),
+			Manager: clusterManager,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "WorkloadCluster")
 			os.Exit(1)
+		}
+		if isControlPlane {
+			setupLog.Info("Setting up multi-cluster placement (fan-out) controller")
+			if err = (&placement.Reconciler{
+				Client:   mgr.GetClient(),
+				Scheme:   mgr.GetScheme(),
+				Log:      ctrl.Log.WithName("controllers").WithName("Placement"),
+				Clusters: clusterManager,
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "Placement")
+				os.Exit(1)
+			}
 		}
 	}
 
