@@ -6,9 +6,11 @@
 //
 // What this dispatcher does NOT own (the caller runs these around
 // Reconcile):
-//   - ExpireOperationsIfDeadlinePassed — v1beta1-typed; reads
-//     ISVC.Status.Components.Lifecycle.InstanceStatuses.Operation
-//     fields directly.
+//   - ExpireOperationsIfDeadlinePassed (deadline.go) — the broad
+//     InstanceReadyTimeout backstop. Workload-typed: walks
+//     []InstanceStatus and fails any whose Operation.Deadline elapsed.
+//     The IR caller runs it in its status aggregator tail, next to the
+//     stuck-pod escalator EscalateStuckPodFailures.
 //   - PodMonitor — handled by the top-level podmonitor reconciler.
 //   - ensureRevisionWithCollisionRetry — ISVC-shape collision-counter
 //     bookkeeping; the caller computes the target ControllerRevision

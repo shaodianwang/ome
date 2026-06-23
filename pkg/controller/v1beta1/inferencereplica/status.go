@@ -3,6 +3,7 @@ package inferencereplica
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -253,7 +254,31 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	// Phase stays at Surging indefinitely. Closes the bad_image_kind
 	// reproduction reported against the dev cluster after IR-managed
 	// became the default OMENative dispatch path.
-	return r.escalateStuckPodFailures(ctx, ir, parent, byIndex)
+	if err := r.escalateStuckPodFailures(ctx, ir, parent, byIndex); err != nil {
+		return err
+	}
+
+	// Broad backstop: any Instance still in a transient phase whose
+	// in-flight Operation.Deadline (StartedAt + InstanceReadyTimeout,
+	// default 30 min) has elapsed gets escalated to Phase=Failed. This is
+	// the consumer of the InstanceReadyTimeout field the per-op writers
+	// stamp onto Operation.Deadline — without it the timeout is inert and
+	// a gang that never reaches Ready for a reason the fast-path escalator
+	// doesn't catch (perpetually Pending, run-then-crash loop) sits at its
+	// transient phase forever. The two backstops converge on Phase=Failed
+	// and don't fight: whichever fires first wins, the other no-ops on the
+	// already-Failed Instance.
+	//
+	// First, park the InstanceReadyTimeout clock for any Instance whose
+	// pods are held by a scheduling gate (queued for admission, e.g. by
+	// Kueue): a gated workload is queued, not stuck, so the gated wait must
+	// not count against the deadline. Runs BEFORE the expiry backstop so the
+	// backstop reads the parked (zeroed) deadline and skips it; once the pods
+	// clear the gate the clock restarts from admission.
+	if err := r.reconcileGatedDeadlines(ctx, ir, parent, byIndex, plan.InstanceReadyTimeout); err != nil {
+		return err
+	}
+	return r.expireOperationsIfDeadlinePassed(ctx, ir, parent)
 }
 
 // escalateStuckPodFailures is the IR-side adapter that bridges the
@@ -276,24 +301,79 @@ func (r *Reconciler) escalateStuckPodFailures(ctx context.Context, ir *v1beta1.I
 	if ir == nil {
 		return nil
 	}
+	return workload.EscalateStuckPodFailures(ctx, r.buildEscalationInput(ir, parent), workload.EscalationParams{
+		Instances:           v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
+		PodsByIndex:         byIndex,
+		CurrentRevisionHash: query.RevisionHashFromControllerRevisionName(ir.Status.CurrentRevision),
+		RevisionHashLabel:   query.LabelRevisionHash,
+	})
+}
+
+// expireOperationsIfDeadlinePassed is the IR-side adapter that bridges
+// the IR aggregator tail to the workload-side
+// ExpireOperationsIfDeadlinePassed deadline backstop. Reuses the same
+// minimal escalation input the stuck-pod escalator builds (MutateInstance
+// + WarnInstanceFailed) and walks the caller's post-counters IR snapshot.
+//
+// This is the consumer of the per-Instance Operation.Deadline the
+// workload per-op writers stamp from InstanceReadyTimeout; runs right
+// after escalateStuckPodFailures so the fast-path escalation has first
+// crack and this only fails Instances the fast path didn't already catch.
+func (r *Reconciler) expireOperationsIfDeadlinePassed(ctx context.Context, ir *v1beta1.InferenceReplica, parent client.Object) error {
+	if ir == nil {
+		return nil
+	}
+	return workload.ExpireOperationsIfDeadlinePassed(ctx, r.buildEscalationInput(ir, parent),
+		v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses))
+}
+
+// reconcileGatedDeadlines is the IR-side adapter that pauses/restarts the
+// InstanceReadyTimeout clock around admission gating. It derives which
+// Instances have an admission-gated pod from the per-Instance pod buckets
+// the caller already computed (no re-list), then delegates to
+// workload.ReconcileGatedDeadlines. Runs immediately before the deadline
+// backstop so a queued (gated) workload is never failed by
+// InstanceReadyTimeout — the timeout is measured from admission, not from
+// operation start.
+func (r *Reconciler) reconcileGatedDeadlines(ctx context.Context, ir *v1beta1.InferenceReplica, parent client.Object, byIndex map[int32][]*corev1.Pod, timeout time.Duration) error {
+	if ir == nil {
+		return nil
+	}
+	gated := make(map[int32]bool, len(byIndex))
+	for idx, pods := range byIndex {
+		for _, p := range pods {
+			if workload.PodAdmissionGated(p) {
+				gated[idx] = true
+				break
+			}
+		}
+	}
+	return workload.ReconcileGatedDeadlines(ctx, r.buildEscalationInput(ir, parent),
+		v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses), gated, timeout)
+}
+
+// buildEscalationInput builds the minimal workload.ReconcileInput the
+// two terminal-failure backstops (EscalateStuckPodFailures,
+// ExpireOperationsIfDeadlinePassed) share. Only MutateInstance +
+// WarnInstanceFailed are actually exercised, but the panic-on-nil
+// contract requires every required callback to be non-nil — the
+// RemoveInstance / WriteAggregateCondition / ClearMigrationRequest stubs
+// satisfy it. Reuses buildMutateInstance so the escalation observes the
+// same retry + in-memory-mirror semantics dispatch-time writes get.
+//
+// EventTarget defers to the parent ISVC when available so user-facing
+// events stay coherent under `kubectl describe isvc`, matching the
+// EventTarget rule in buildReconcileInput.
+func (r *Reconciler) buildEscalationInput(ir *v1beta1.InferenceReplica, parent client.Object) workload.ReconcileInput {
 	eventTarget := client.Object(ir)
 	if parent != nil {
 		eventTarget = parent
 	}
-	// Minimal ReconcileInput: only MutateInstance + WarnInstanceFailed
-	// are actually called by EscalateStuckPodFailures, but the
-	// panic-on-nil contract requires every required callback to be
-	// non-nil. Reuse the same builders the dispatch-time input uses so
-	// the IR-path stuck-pod escalation observes the same retry +
-	// mirror semantics workload writes get on the dispatch path.
-	input := workload.ReconcileInput{
-		OwnerObject:    ir,
-		OwnerGVK:       irGVK,
-		EventTarget:    eventTarget,
-		MutateInstance: buildMutateInstance(r.Client, ir),
-		// RemoveInstance / WriteAggregateCondition /
-		// ClearMigrationRequest are not exercised by the escalator but
-		// satisfy the panic-on-nil contract.
+	return workload.ReconcileInput{
+		OwnerObject:             ir,
+		OwnerGVK:                irGVK,
+		EventTarget:             eventTarget,
+		MutateInstance:          buildMutateInstance(r.Client, ir),
 		RemoveInstance:          func(_ context.Context, _ int32) (bool, error) { return false, nil },
 		WriteAggregateCondition: func(_ context.Context, _ metav1.Condition) error { return nil },
 		ClearMigrationRequest:   func(_ context.Context, _ string) error { return nil },
@@ -307,17 +387,15 @@ func (r *Reconciler) escalateStuckPodFailures(ctx context.Context, ir *v1beta1.I
 			if r.Recorder == nil {
 				return
 			}
+			// podName is empty for the deadline backstop (no single pod to
+			// blame); reason carries the cause either way (kubelet
+			// waiting-state reason for the stuck-pod path, "DeadlineExceeded:
+			// <op>/<step> ..." for the deadline path).
 			r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, "InstanceFailed",
-				"InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed: pod %s stuck in %s (no kubelet self-recovery)",
+				"InferenceReplica %s/%s component=%s instance=%d escalated to Phase=Failed (pod=%q): %s",
 				ir.Namespace, ir.Name, ir.Spec.Component, idx, podName, reason)
 		},
 	}
-	return workload.EscalateStuckPodFailures(ctx, input, workload.EscalationParams{
-		Instances:           v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
-		PodsByIndex:         byIndex,
-		CurrentRevisionHash: query.RevisionHashFromControllerRevisionName(ir.Status.CurrentRevision),
-		RevisionHashLabel:   query.LabelRevisionHash,
-	})
 }
 
 // mirrorInstanceCounters copies the per-Instance pod counter fields

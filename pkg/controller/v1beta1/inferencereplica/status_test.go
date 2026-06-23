@@ -481,11 +481,11 @@ func withIRStuckPodGracePeriod(t *testing.T, d time.Duration) {
 // ImagePullBackOff past StuckPodFailureGracePeriod must escalate the
 // Instance Phase to Failed, the same way the omenative direct path does.
 // Without this fix, the production cluster observes the Instance stuck at
-// Phase=Updating for the full 30-minute InstanceReadyTimeout (and even
-// past it, because the IR controller doesn't wire
-// ExpireOperationsIfDeadlinePassed either), so the parent ISVC's
-// coordination layer never sees Component.Failed and the group sits at
-// Surging indefinitely.
+// Phase=Updating for the full 30-minute InstanceReadyTimeout before the
+// (now-wired) deadline backstop ExpireOperationsIfDeadlinePassed catches
+// it; the fast-path escalator under test fails it within the stuck-pod
+// grace window instead, so the parent ISVC's coordination layer sees
+// Component.Failed promptly rather than the group sitting at Surging.
 //
 // Setup mirrors the operator-reported real-cluster shape:
 //   - Instance idx=0 carries Phase=Updating with an in-flight
@@ -611,4 +611,164 @@ func TestAggregateStatus_StuckPodWithinGrace_NoEscalation(t *testing.T) {
 	g.Expect(got.Status.InstanceStatuses[0].Phase).
 		To(gomega.Equal(v1beta1.OMENativeInstanceUpdating),
 			"stuck pod still inside grace window must NOT escalate (debounce holds)")
+}
+
+// TestAggregateStatus_DeadlineExpired_EscalatesInstanceToFailed pins the
+// broad-backstop wire-in: an Instance stuck in a transient phase whose
+// in-flight Operation.Deadline (InstanceReadyTimeout) has elapsed must
+// flip to Phase=Failed via the IR aggregator's deadline backstop — even
+// when no pod is in a terminal kubelet waiting state, so the fast-path
+// stuck-pod escalator CANNOT be what fails it.
+//
+// This is the regression guard for the original bug: InstanceReadyTimeout
+// was stamped onto Operation.Deadline but its consumer
+// (ExpireOperationsIfDeadlinePassed) was never wired into the live IR
+// path, so the timeout was inert and a never-Ready gang sat at Phase=Updating
+// indefinitely.
+func TestAggregateStatus_DeadlineExpired_EscalatesInstanceToFailed(t *testing.T) {
+	g := gomega.NewWithT(t)
+	// Generous stuck-pod grace so the fast path can't fire — the ONLY
+	// thing that can fail this Instance is the deadline backstop under
+	// test.
+	withIRStuckPodGracePeriod(t, 60*time.Second)
+
+	ir := baselineIR("llama-engine", "prod", 1)
+	// Create-stuck Instance: Phase=Creating with an in-flight Create
+	// operation whose Deadline already elapsed. patchInstanceStatusCreating
+	// is idempotent (Phase=Creating + Op.Type=Create + Incarnation>0 → no
+	// re-stamp), so the dispatcher's Create pass leaves the expired
+	// Deadline intact for the backstop to read. A pod exists at the
+	// canonical ordinal but never went Ready — the never-converging gang
+	// the InstanceReadyTimeout is meant to bound.
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index:         0,
+			Incarnation:   1,
+			Phase:         v1beta1.OMENativeInstanceCreating,
+			ActiveOrdinal: 0,
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationCreate,
+				Step: "CreatePods",
+				// Deadline already in the past → the InstanceReadyTimeout
+				// backstop must escalate this Instance.
+				Deadline: metav1.NewTime(time.Now().Add(-1 * time.Minute)),
+			},
+		},
+	}
+	// Pod exists at the canonical ordinal but is not Ready (Pending) and
+	// has NO terminal kubelet waiting reason, so the stuck-pod escalator
+	// stays out of it.
+	pendingPod := podForIR(ir, 0, "default", 0, false /*ready*/, false /*serving*/)
+
+	r, c := newReconciler(t, ir, pendingPod)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+		got)).To(gomega.Succeed())
+
+	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(1))
+	g.Expect(got.Status.InstanceStatuses[0].Phase).
+		To(gomega.Equal(v1beta1.OMENativeInstanceFailed),
+			"IR aggregator must run the deadline backstop: an Operation.Deadline in the past must flip the Instance Phase to Failed")
+	// Operation preserved as the breadcrumb operators read.
+	g.Expect(got.Status.InstanceStatuses[0].Operation).NotTo(gomega.BeNil())
+	// LastFailure records the DeadlineExceeded cause.
+	g.Expect(got.Status.InstanceStatuses[0].LastFailure).NotTo(gomega.BeNil(),
+		"deadline escalation must record a LastFailure diagnostic")
+	g.Expect(got.Status.InstanceStatuses[0].LastFailure.Reason).
+		To(gomega.Equal(workload.DeadlineExceededReason))
+}
+
+// TestAggregateStatus_GatedInstance_DeadlineParked_NotEscalated pins the
+// admission-gating exemption: an Instance whose Operation.Deadline is in
+// the past but whose pod is held by a scheduling gate (queued for
+// admission, e.g. by Kueue) is NOT stuck — it is queued. The IR aggregator
+// must park its deadline (zero it) so the backstop never fails it. Without
+// this, every Kueue-gated OME workload would die at InstanceReadyTimeout.
+func TestAggregateStatus_GatedInstance_DeadlineParked_NotEscalated(t *testing.T) {
+	g := gomega.NewWithT(t)
+	withIRStuckPodGracePeriod(t, 60*time.Second)
+
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index:         0,
+			Incarnation:   1,
+			Phase:         v1beta1.OMENativeInstanceCreating,
+			ActiveOrdinal: 0,
+			Operation: &v1beta1.InstanceOperation{
+				Type: v1beta1.InstanceOperationCreate,
+				Step: "CreatePods",
+				// Past deadline: would be escalated WERE the pod not gated.
+				Deadline: metav1.NewTime(time.Now().Add(-1 * time.Minute)),
+			},
+		},
+	}
+	// Pod exists at the canonical ordinal but is held by a scheduling gate
+	// (queued for admission), not Ready and not stuck.
+	gatedPod := podForIR(ir, 0, "default", 0, false /*ready*/, false /*serving*/)
+	gatedPod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: "kueue.x-k8s.io/admission"}}
+
+	r, c := newReconciler(t, ir, gatedPod)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+		got)).To(gomega.Succeed())
+
+	g.Expect(got.Status.InstanceStatuses).To(gomega.HaveLen(1))
+	g.Expect(got.Status.InstanceStatuses[0].Phase).
+		NotTo(gomega.Equal(v1beta1.OMENativeInstanceFailed),
+			"a Kueue-gated Instance is queued, not stuck: the deadline backstop must NOT fail it")
+	g.Expect(got.Status.InstanceStatuses[0].Operation).NotTo(gomega.BeNil())
+	g.Expect(got.Status.InstanceStatuses[0].Operation.Deadline.IsZero()).
+		To(gomega.BeTrue(),
+			"a gated Instance's deadline must be parked (zeroed) so it never expires while queued")
+}
+
+// TestAggregateStatus_DeadlineFuture_NoEscalation pins the negative
+// case: a transient-phase Instance whose Operation.Deadline is still in
+// the future must NOT be escalated by the deadline backstop.
+func TestAggregateStatus_DeadlineFuture_NoEscalation(t *testing.T) {
+	g := gomega.NewWithT(t)
+	withIRStuckPodGracePeriod(t, 60*time.Second)
+
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{
+			Index:         0,
+			Incarnation:   1,
+			Phase:         v1beta1.OMENativeInstanceCreating,
+			ActiveOrdinal: 0,
+			Operation: &v1beta1.InstanceOperation{
+				Type:     v1beta1.InstanceOperationCreate,
+				Step:     "CreatePods",
+				Deadline: metav1.NewTime(time.Now().Add(30 * time.Minute)),
+			},
+		},
+	}
+	pendingPod := podForIR(ir, 0, "default", 0, false, false)
+
+	r, c := newReconciler(t, ir, pendingPod)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(),
+		types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+		got)).To(gomega.Succeed())
+	g.Expect(got.Status.InstanceStatuses[0].Phase).
+		To(gomega.Equal(v1beta1.OMENativeInstanceCreating),
+			"Operation.Deadline in the future must NOT escalate (backstop respects the timeout window)")
 }
