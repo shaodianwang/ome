@@ -30571,6 +30571,8 @@ spec:
                       x-kubernetes-list-type: map
                     cluster:
                       type: string
+                    endpoint:
+                      type: string
                     phase:
                       enum:
                         - Pending

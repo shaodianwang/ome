@@ -459,6 +459,14 @@ type PlacementStatus struct {
 	// +optional
 	Phase PlacementPhase `json:"phase,omitempty"`
 
+	// Endpoint is the externally-addressable URL of the winning cluster's
+	// placement, mirrored from the derived InferenceService's status.url once it
+	// is admitted AND addressable. Empty while pending/racing/failed or before
+	// the winner reports a URL. An external global LB/DNS consumes this to route
+	// traffic to the winning cluster (OEP-0018 keeps OME out of the data path).
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
 	// Candidates are the clusters this ISVC has been fanned out to during the
 	// OEP-0018 placement race. Populated by the control plane.
 	// +optional

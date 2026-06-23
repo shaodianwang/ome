@@ -17,6 +17,14 @@ ome:
   # cluster.
   multiclusterAccess:
     enabled: true
+  # multicluster enables the OEP-0018 control-plane fan-out placement controllers.
+  # Alpha; default off. On the CONTROL-PLANE cluster set enabled: true and
+  # role: control-plane (this disables the local InferenceService->pods reconciler
+  # and runs the placement + WorkloadCluster controllers). Leave default on
+  # workload clusters.
+  multicluster:
+    enabled: false
+    role: ""
   # modelCache configures the optional cluster-wide model cache provider used
   # by BaseModel and ClusterBaseModel resources with spec.distribution: Sharded.
   # Leave provider empty to keep the default PerNode/model-agent behavior.

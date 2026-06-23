@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -25,6 +26,15 @@ import (
 const (
 	defaultPlacementRequeue = 30 * time.Second
 )
+
+// placementResult is the status the reconciler writes for one pass.
+type placementResult struct {
+	winner     string
+	phase      v1beta1.PlacementPhase
+	candidates []v1beta1.CandidatePlacement
+	endpoint   string    // winner's URL string, or "" when none
+	url        *apis.URL // mirrored to status.url, or nil
+}
 
 // ClusterClients is the subset of *workloadcluster.Manager the placer needs.
 // *workloadcluster.Manager satisfies it; tests inject a fake.
@@ -79,7 +89,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	}
 	candidates, err := MatchingClusters(isvc.Annotations[ClusterSelectorAnnotation], clusters.Items)
 	if err != nil || len(candidates) == 0 {
-		return r.writePlacement(ctx, isvc, "", v1beta1.PlacementPhasePending, nil)
+		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
 	}
 
 	// Sticky winner: keep the current winner while its derived ISVC still
@@ -93,8 +103,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			if IsTerminallyFailed(derived) {
 				// The placement itself failed; surface it and stop. Do NOT
 				// re-place into a hot fail-loop — needs human/spec action.
-				return r.writePlacement(ctx, isvc, winner, v1beta1.PlacementPhaseFailed,
-					[]v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}})
+				return r.writePlacement(ctx, isvc, placementResult{
+					winner: winner, phase: v1beta1.PlacementPhaseFailed,
+					candidates: []v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}},
+				})
 			}
 			// Re-apply on the winner and sweep any stray derived on other clusters.
 			if cl, ok := r.Clusters.ClientFor(winner); ok {
@@ -105,8 +117,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			if err := r.deleteLosers(ctx, isvc, winner); err != nil {
 				return ctrl.Result{}, err
 			}
-			return r.writePlacement(ctx, isvc, winner, v1beta1.PlacementPhasePlaced,
-				[]v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}})
+			ep, u := endpointFor(derived)
+			return r.writePlacement(ctx, isvc, placementResult{
+				winner: winner, phase: v1beta1.PlacementPhasePlaced,
+				candidates: []v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}},
+				endpoint:   ep, url: u,
+			})
 		}
 		// derived gone (deleted out from under us) -> fall through to re-race.
 	}
@@ -117,7 +133,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if len(placed) == 0 {
-		return r.writePlacement(ctx, isvc, "", v1beta1.PlacementPhasePending, nil)
+		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
 	}
 
 	// Race: the first placed candidate whose derived ISVC reports an admitted
@@ -131,15 +147,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		for _, c := range placed {
 			cands = append(cands, v1beta1.CandidatePlacement{Cluster: c, Phase: v1beta1.CandidatePhasePlaced})
 		}
-		return r.writePlacement(ctx, isvc, "", v1beta1.PlacementPhaseRacing, cands)
+		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhaseRacing, candidates: cands})
 	}
 
 	// Winner: sweep the losers (every connected cluster except the winner).
 	if err := r.deleteLosers(ctx, isvc, winner); err != nil {
 		return ctrl.Result{}, err
 	}
-	return r.writePlacement(ctx, isvc, winner, v1beta1.PlacementPhasePlaced,
-		[]v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}})
+	wd, _, err := r.getDerived(ctx, winner, isvc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	ep, u := endpointFor(wd)
+	return r.writePlacement(ctx, isvc, placementResult{
+		winner: winner, phase: v1beta1.PlacementPhasePlaced,
+		candidates: []v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted}},
+		endpoint:   ep, url: u,
+	})
 }
 
 // fanOut ensures the derived ISVC exists on each connected candidate. A
@@ -263,10 +287,10 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, isvc *v1beta1.Inferenc
 	return ctrl.Result{}, nil
 }
 
-// writePlacement sets status.placement (retrying on conflict, since the local
-// object may have changed during the cross-cluster fan-out/race) and returns a
-// poll requeue.
-func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.InferenceService, winner string, phase v1beta1.PlacementPhase, candidates []v1beta1.CandidatePlacement) (ctrl.Result, error) {
+// writePlacement sets status.placement (+ the mirrored status.url) for one pass,
+// retrying on conflict since the local object may change during the
+// cross-cluster fan-out/race. Returns a poll requeue.
+func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.InferenceService, res placementResult) (ctrl.Result, error) {
 	key := client.ObjectKeyFromObject(isvc)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &v1beta1.InferenceService{}
@@ -276,18 +300,29 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 		if cur.Status.Placement == nil {
 			cur.Status.Placement = &v1beta1.PlacementStatus{}
 		}
-		cur.Status.Placement.Cluster = winner
-		cur.Status.Placement.Phase = phase
-		cur.Status.Placement.Candidates = candidates
+		cur.Status.Placement.Cluster = res.winner
+		cur.Status.Placement.Phase = res.phase
+		cur.Status.Placement.Candidates = res.candidates
+		cur.Status.Placement.Endpoint = res.endpoint
+		cur.Status.URL = res.url
 		return r.Status().Update(ctx, cur)
 	})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, nil // object deleted mid-reconcile; nothing to do
+			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: r.requeue()}, nil
+}
+
+// endpointFor extracts the winner's externally-addressable endpoint from its
+// derived ISVC status. Returns ("", nil) until the worker reports a URL.
+func endpointFor(derived *v1beta1.InferenceService) (string, *apis.URL) {
+	if derived == nil || derived.Status.URL == nil {
+		return "", nil
+	}
+	return derived.Status.URL.String(), derived.Status.URL
 }
 
 func winnerCluster(isvc *v1beta1.InferenceService) string {

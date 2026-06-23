@@ -63,6 +63,12 @@ spec:
         - "--leader-elect"
         - "--webhook"
         - "--zap-encoder=console"
+        {{- if .Values.ome.multicluster.enabled }}
+        - "--enable-multicluster"
+        {{- if .Values.ome.multicluster.role }}
+        - "--multicluster-role={{ .Values.ome.multicluster.role }}"
+        {{- end }}
+        {{- end }}
         env:
           - name: POD_NAMESPACE
             valueFrom:

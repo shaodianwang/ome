@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -120,6 +121,30 @@ func cpPlacement(t *testing.T, cp client.Client) *v1beta1.PlacementStatus {
 	o := &v1beta1.InferenceService{}
 	require.NoError(t, cp.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, o))
 	return o.Status.Placement
+}
+
+func workerWithAdmittedURL(t *testing.T, s *runtime.Scheme, host string) client.WithWatch {
+	t.Helper()
+	derived := isvcWithInstances(v1beta1.EngineComponent, true)
+	derived.Namespace, derived.Name = "prod", "svc"
+	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	derived.Status.URL = &apis.URL{Scheme: "https", Host: host}
+	w := fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived).Build()
+	cur := &v1beta1.InferenceService{}
+	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
+	if cur.Status.URL == nil || !AnyInstanceAdmitted(cur) {
+		cur.Status = derived.Status
+		require.NoError(t, w.Status().Update(context.Background(), cur))
+	}
+	return w
+}
+
+func cpStatusURL(t *testing.T, cp client.Client) *apis.URL {
+	t.Helper()
+	o := &v1beta1.InferenceService{}
+	require.NoError(t, cp.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, o))
+	return o.Status.URL
 }
 
 func TestReconcile_NoCandidate(t *testing.T) {
@@ -362,4 +387,76 @@ func TestReconcile_FanOutPartialFailureStillRaces(t *testing.T) {
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
 	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
+}
+
+func TestReconcile_PublishesEndpointWhenAdmitted(t *testing.T) {
+	s := testScheme(t)
+	wa := emptyWorker(s)
+	wb := workerWithAdmittedURL(t, s, "svc.prod.b.example")
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
+	assert.Equal(t, "b", p.Cluster)
+	assert.Equal(t, "https://svc.prod.b.example", p.Endpoint)
+	u := cpStatusURL(t, cp)
+	require.NotNil(t, u)
+	assert.Equal(t, "svc.prod.b.example", u.Host)
+}
+
+func TestReconcile_PlacedButNoEndpointYet(t *testing.T) {
+	s := testScheme(t)
+	wa := emptyWorker(s)
+	wb := workerWithAdmittedDerived(t, s) // admitted, but NO status.url
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
+	assert.Empty(t, p.Endpoint)
+	assert.Nil(t, cpStatusURL(t, cp))
+}
+
+func TestReconcile_ClearsEndpointOnWinnerLost(t *testing.T) {
+	s := testScheme(t)
+	wa, wb := emptyWorker(s), emptyWorker(s) // b's derived GONE
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced, Endpoint: "https://old.example",
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	isvc.Status.URL = &apis.URL{Scheme: "https", Host: "old.example"}
+	r, cp := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
+	assert.Empty(t, p.Endpoint)
+	assert.Nil(t, cpStatusURL(t, cp))
 }
