@@ -1,6 +1,8 @@
 package canary
 
 import (
+	"strconv"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 
@@ -8,6 +10,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
 )
 
 var (
@@ -35,10 +38,65 @@ var (
 		Name: "ome_canary_complete_total",
 		Help: "Count of canary rollouts that reached a terminal state (Stable after promote or rollback).",
 	}, []string{"isvc"})
+
+	// Metric-gated canary promotion observability.
+	canaryAnalysisEvaluations = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ome_canary_analysis_evaluations_total",
+		Help: "Count of canary analysis samples by outcome (pass|fail|inconclusive) per (isvc, component).",
+	}, []string{"isvc", "component", "result"})
+
+	canaryAnalysisMetricValue = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ome_canary_analysis_metric_value",
+		Help: "Last observed value of each canary analysis metric per (isvc, component, metric).",
+	}, []string{"isvc", "component", "metric"})
+
+	canaryAnalysisFailedChecks = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ome_canary_analysis_failed_checks",
+		Help: "Failing analysis samples accrued in the current step per (isvc, component); resets on advance.",
+	}, []string{"isvc", "component"})
+
+	canaryRollbackTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ome_canary_rollback_total",
+		Help: "Count of canary rollbacks by cause (analysis|manual) per (isvc, component).",
+	}, []string{"isvc", "component", "cause"})
 )
 
 func init() {
-	ctrlmetrics.Registry.MustRegister(canaryPhaseTotal, canaryStepTotal, canaryCurrentStep, canaryTrafficWeight, canaryCompleteTotal)
+	ctrlmetrics.Registry.MustRegister(
+		canaryPhaseTotal, canaryStepTotal, canaryCurrentStep, canaryTrafficWeight, canaryCompleteTotal,
+		canaryAnalysisEvaluations, canaryAnalysisMetricValue, canaryAnalysisFailedChecks, canaryRollbackTotal,
+	)
+}
+
+// recordAnalysisSample emits the per-sample analysis metrics: the evaluation
+// counter by outcome, the current failed-check gauge, and a value gauge per
+// numeric metric result. Called once per actual sample — the Interval throttle in
+// evaluateAnalysisStep guarantees that is at most once per Interval, so the
+// counter reflects real samples, not reconcile frequency.
+func recordAnalysisSample(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, res analysis.Result, failedChecks int32) {
+	canaryAnalysisEvaluations.WithLabelValues(isvc.Name, string(c), outcomeLabel(res.Outcome)).Inc()
+	canaryAnalysisFailedChecks.WithLabelValues(isvc.Name, string(c)).Set(float64(failedChecks))
+	for _, m := range res.Metrics {
+		if v, err := strconv.ParseFloat(m.Value, 64); err == nil {
+			canaryAnalysisMetricValue.WithLabelValues(isvc.Name, string(c), m.Name).Set(v)
+		}
+	}
+}
+
+// recordRollback emits the rollback counter with its cause (analysis|manual).
+func recordRollback(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, cause string) {
+	canaryRollbackTotal.WithLabelValues(isvc.Name, string(c), cause).Inc()
+}
+
+func outcomeLabel(o analysis.Outcome) string {
+	switch o {
+	case analysis.Pass:
+		return "pass"
+	case analysis.Fail:
+		return "fail"
+	default:
+		return "inconclusive"
+	}
 }
 
 // recordDispatch emits canary metrics + Events for one reconcile pass. The

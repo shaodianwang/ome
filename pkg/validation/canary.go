@@ -29,6 +29,14 @@ const ReasonCanaryRequiresOMENative = "CanaryRequiresOMENative"
 // the shape rather than silently mis-executing all but the first group.
 const ReasonMultipleCanaryGroups = "MultipleCanaryGroups"
 
+// ReasonAnalysisInvalid is the rejection reason for a malformed metric-gated step
+// (a step's analysis). It guards the spec-internal rules a pure validator can
+// check: every analysis step has a complete config — at least one metric, a
+// numeric threshold, a valid operator, a positive interval, and a failure limit
+// >= 1. The metrics source (GroupCanary.Prometheus) is environmental and is
+// resolved controller-side, not checked here.
+const ReasonAnalysisInvalid = "AnalysisInvalid"
+
 // ValidateCanary checks the canary progression on every spec.rollout.groups[]
 // entry that has one. Returns nil when no group canaries (nil-safe). The CRD CEL
 // rule enforces the one-of progression (canary may span multiple Components,
@@ -39,9 +47,9 @@ const ReasonMultipleCanaryGroups = "MultipleCanaryGroups"
 //   - Every Component in the group is OMENative — other modes wedge at Pending.
 //   - Final step Traffic == 100 — otherwise the rollout never fully cuts over.
 //   - Final step Capacity == 100% — otherwise it completes on a partial fleet.
-//   - Promotion required once any step pauses — else an Auto-intending operator
-//     who omits it gets a rollout that waits forever for a promote annotation.
 //   - Traffic in [0,100], non-decreasing, and Traffic>0 requires Capacity>0.
+//   - Each analysis step's config is complete and well-formed (delegated to
+//     validateCanaryAnalysis).
 func ValidateCanary(spec *v1beta1.InferenceServiceSpec) error {
 	groups := spec.GetRolloutGroups()
 	modeFor := omenativeDeploymentModeMap(spec)
@@ -64,6 +72,9 @@ func ValidateCanary(spec *v1beta1.InferenceServiceSpec) error {
 		c := g.Canary
 		if len(c.Steps) == 0 {
 			return fmt.Errorf("spec.rollout.groups[%d].canary.steps must not be empty (%s)", gi, ReasonCanaryInvalid)
+		}
+		if err := validateCanaryAnalysis(gi, c); err != nil {
+			return err
 		}
 		for _, comp := range g.Components {
 			// A canary group's Components must be valid and declared on the ISVC:
@@ -117,14 +128,6 @@ func ValidateCanary(spec *v1beta1.InferenceServiceSpec) error {
 			return fmt.Errorf("spec.rollout.groups[%d].canary final step capacity must be 100%% (rollout completes at full capacity), got %q (%s)",
 				gi, last.Capacity.String(), ReasonCanaryInvalid)
 		}
-		if c.Promotion == nil {
-			for i, s := range c.Steps {
-				if s.Pause != nil {
-					return fmt.Errorf("spec.rollout.groups[%d].canary.steps[%d] has a pause but canary.promotion is unset; set Auto or Manual (%s)",
-						gi, i, ReasonCanaryInvalid)
-				}
-			}
-		}
 		var prevWeight int32
 		for i, s := range c.Steps {
 			if s.Traffic < 0 || s.Traffic > 100 {
@@ -138,6 +141,66 @@ func ValidateCanary(spec *v1beta1.InferenceServiceSpec) error {
 			if s.Traffic > 0 && newCapacityIsZero(s.Capacity) {
 				return fmt.Errorf("spec.rollout.groups[%d].canary.steps[%d]: traffic %d>0 requires capacity>0 (%s)", gi, i, s.Traffic, ReasonCanaryInvalid)
 			}
+		}
+	}
+	return nil
+}
+
+// validateCanaryAnalysis enforces the spec-internal rules for each metric-gated
+// step: a positive interval, failureLimit >= 1, and at least one
+// well-formed metric. The metrics source (GroupCanary.Prometheus) is not checked
+// here — an unreachable source is surfaced controller-side as an inconclusive
+// sample, not an admission error.
+func validateCanaryAnalysis(gi int, c *v1beta1.GroupCanary) error {
+	for si := range c.Steps {
+		a := c.Steps[si].Analysis
+		if a == nil {
+			continue
+		}
+		if a.Interval.Duration <= 0 {
+			return fmt.Errorf("spec.rollout.groups[%d].canary.steps[%d].analysis: interval must be > 0 (%s)",
+				gi, si, ReasonAnalysisInvalid)
+		}
+		if a.FailureLimit < 1 {
+			return fmt.Errorf("spec.rollout.groups[%d].canary.steps[%d].analysis: failureLimit must be >= 1 (%s)",
+				gi, si, ReasonAnalysisInvalid)
+		}
+		if len(a.Metrics) == 0 {
+			return fmt.Errorf("spec.rollout.groups[%d].canary.steps[%d].analysis: at least one metric is required (%s)",
+				gi, si, ReasonAnalysisInvalid)
+		}
+		if err := validateAnalysisMetrics(gi, si, a.Metrics); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateAnalysisMetrics checks each metric is well-formed: unique non-empty
+// name, non-empty query, numeric threshold, valid operator. si < 0 addresses the
+// canary-level defaults; si >= 0 a step's effective metrics.
+func validateAnalysisMetrics(gi, si int, metrics []v1beta1.AnalysisMetric) error {
+	where := fmt.Sprintf("spec.rollout.groups[%d].canary.steps[%d].analysis", gi, si)
+	seen := make(map[string]struct{}, len(metrics))
+	for mi := range metrics {
+		m := &metrics[mi]
+		if m.Name == "" {
+			return fmt.Errorf("%s.metrics[%d].name must not be empty (%s)", where, mi, ReasonAnalysisInvalid)
+		}
+		if _, dup := seen[m.Name]; dup {
+			return fmt.Errorf("%s.metrics[%d]: duplicate metric name %q (%s)", where, mi, m.Name, ReasonAnalysisInvalid)
+		}
+		seen[m.Name] = struct{}{}
+		if strings.TrimSpace(m.Query) == "" {
+			return fmt.Errorf("%s.metrics[%d] (%q): query must not be empty (%s)", where, mi, m.Name, ReasonAnalysisInvalid)
+		}
+		if _, err := strconv.ParseFloat(m.Threshold, 64); err != nil {
+			return fmt.Errorf("%s.metrics[%d] (%q): threshold %q must be numeric (%s)", where, mi, m.Name, m.Threshold, ReasonAnalysisInvalid)
+		}
+		switch m.Operator {
+		case v1beta1.ComparisonLT, v1beta1.ComparisonLTE, v1beta1.ComparisonGT, v1beta1.ComparisonGTE:
+		default:
+			return fmt.Errorf("%s.metrics[%d] (%q): operator %q must be one of LT/LTE/GT/GTE (%s)", where, mi, m.Name, m.Operator, ReasonAnalysisInvalid)
 		}
 	}
 	return nil

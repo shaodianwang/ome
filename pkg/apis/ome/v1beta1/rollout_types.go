@@ -7,6 +7,7 @@
 package v1beta1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -98,8 +99,11 @@ type RolloutGroup struct {
 }
 
 // GroupCanary is the stepped progression: bring up new-revision capacity and
-// shift service-level traffic through an ordered list of steps, gated by
-// PromotionPolicy.
+// shift service-level traffic through an ordered list of steps. How the canary
+// advances is a PER-STEP property (see RolloutGroupStep): each step is
+// metric-gated (analysis), timed, manual, or immediate. Prometheus here is the
+// shared metrics SOURCE every analysis step queries — declared once, not on each
+// step.
 type GroupCanary struct {
 	// Steps is the ordered progression of capacity + service-level traffic. The
 	// final step must reach 100% traffic for the rollout to complete.
@@ -108,12 +112,13 @@ type GroupCanary struct {
 	// +kubebuilder:validation:MaxItems=20
 	Steps []RolloutGroupStep `json:"steps,omitempty"`
 
-	// Promotion controls how the rollout advances between paused steps.
-	//   - Manual: operator advances via the ome.io/rollout-promote annotation.
-	//   - Auto: the controller advances on each step's Pause.Duration.
-	// +kubebuilder:validation:Enum=Manual;Auto
+	// Prometheus is the metrics source (connection) shared by every analysis step
+	// in this canary: where to query and how to authenticate. When omitted, the
+	// controller targets the bundled Prometheus Service
+	// (http://ome-prometheus.<namespace>.svc:9090). It is only the source — WHAT to
+	// check is each step's analysis — and it gates nothing by itself.
 	// +optional
-	Promotion *PromotionPolicy `json:"promotion,omitempty"`
+	Prometheus *AnalysisPrometheus `json:"prometheus,omitempty"`
 
 	// ScaleDownDelaySeconds is the wait between shifting traffic off the old
 	// revision and scaling its pods down, to drain in-flight requests.
@@ -126,6 +131,13 @@ type GroupCanary struct {
 // is the service-level percentage of requests on the new revision. The
 // independence allows "capacity ahead of traffic" (run 50% pods, send 10%
 // traffic) for warm-up.
+//
+// How the step advances (its gate) is resolved in order:
+//   - Analysis set → metric-gated (queries GroupCanary.Prometheus); Pause.Duration,
+//     if any, is the minimum bake before a passing sample advances.
+//   - else Pause with Duration → timed: advance once Duration elapses.
+//   - else Pause → manual: hold for the ome.io/rollout-promote annotation.
+//   - else → advance as soon as capacity + traffic converge.
 type RolloutGroupStep struct {
 	// Capacity is the fraction of desired replicas to run on the new revision at
 	// this step. Percentage ("25%") or absolute ("3"). Per-Component.
@@ -138,9 +150,19 @@ type RolloutGroupStep struct {
 	// +kubebuilder:validation:Maximum=100
 	Traffic int32 `json:"traffic"`
 
-	// Pause holds the rollout at this step. Absent advances immediately.
+	// Pause holds the step: with a Duration it is a timed advance (or, when
+	// Analysis is set, the bake window); without one it is a manual hold for the
+	// ome.io/rollout-promote annotation. Absent (and no Analysis) advances
+	// immediately.
 	// +optional
 	Pause *RolloutPause `json:"pause,omitempty"`
+
+	// Analysis opts this step into metric-gated promotion: it carries the checks
+	// (metrics) and policy (interval, failureLimit, onInconclusive) for THIS step.
+	// The metrics source is GroupCanary.Prometheus, shared by all analysis steps.
+	// Absent leaves the step manual/timed/immediate per Pause.
+	// +optional
+	Analysis *RolloutAnalysis `json:"analysis,omitempty"`
 }
 
 // GroupBlueGreen surges the full new set alongside the old, waits for Ready, then
@@ -178,26 +200,133 @@ type MaintainRatio struct {
 	Tolerance int32 `json:"tolerance"`
 }
 
-// PromotionPolicy selects how a canary advances between steps that carry a Pause.
-type PromotionPolicy string
-
-const (
-	// PromotionPolicyManual requires explicit operator advancement via the
-	// ome.io/rollout-promote annotation.
-	PromotionPolicyManual PromotionPolicy = "Manual"
-	// PromotionPolicyAuto advances based on each step's Pause.Duration. A step
-	// with no Pause (or Pause.Duration unset) advances immediately.
-	PromotionPolicyAuto PromotionPolicy = "Auto"
-)
-
-// RolloutPause holds a rollout at a step boundary.
+// RolloutPause holds a rollout at a step boundary; its meaning depends on the
+// step's gate (see RolloutGroupStep):
+//   - manual step (Pause, no Duration): wait for the ome.io/rollout-promote
+//     annotation.
+//   - timed step (Pause with Duration, no Analysis): advance after Duration.
+//   - analysis step (Analysis set): Duration is the minimum bake time before a
+//     passing sample may advance.
 type RolloutPause struct {
-	// Duration to pause before auto-advancing.
-	//   - If unset and PromotionPolicy is Manual, the controller waits
-	//     indefinitely for the ome.io/rollout-promote annotation.
-	//   - If PromotionPolicy is Auto and Duration is unset, the controller
-	//     advances immediately (the Pause is a no-op).
-	//   - If both are set, the controller advances after Duration.
+	// Duration to pause at this step; see the type doc for how each gate uses it.
 	// +optional
 	Duration *metav1.Duration `json:"duration,omitempty"`
 }
+
+// RolloutAnalysis is a step's metric gate: the checks (metrics) and
+// policy (interval, failureLimit, onInconclusive, initialDelay) that decide
+// advance, hold, or rollback for the step it is set on. It does NOT carry the
+// metrics source — that is GroupCanary.Prometheus, shared by all analysis steps.
+type RolloutAnalysis struct {
+	// Interval is the sampling cadence — how often the controller re-evaluates the
+	// metrics while a step bakes. It also bounds the requeue while holding.
+	Interval metav1.Duration `json:"interval"`
+
+	// InitialDelay is a warm-up after a step's pods become Ready and traffic is
+	// applied, before the first sample. New pods need a moment before their metrics
+	// mean anything; sampling immediately would read cold-start noise.
+	// +optional
+	InitialDelay *metav1.Duration `json:"initialDelay,omitempty"`
+
+	// FailureLimit is the number of failing samples, counted PER STEP (reset on
+	// advance), that triggers auto-rollback. FailureLimit=1 rolls back on the first
+	// bad sample.
+	// +kubebuilder:validation:Minimum=1
+	FailureLimit int32 `json:"failureLimit"`
+
+	// OnInconclusive selects what to do when a sample cannot be completed
+	// (Prometheus unreachable, query error, or empty result) past the stall
+	// timeout — distinct from a metric breach.
+	//   - Hold (default): keep traffic at the current step and escalate to Failed
+	//     for an operator decision. A monitoring outage is not evidence the canary
+	//     is bad.
+	//   - Rollback: fail-safe — treat "can't tell" as "assume bad" and roll back.
+	// +kubebuilder:validation:Enum=Hold;Rollback
+	// +optional
+	OnInconclusive *OnInconclusive `json:"onInconclusive,omitempty"`
+
+	// Metrics are the success conditions. A sample passes only when EVERY metric
+	// passes (AND). At least one is required; an analysis with no metrics could
+	// never fail and would gate nothing.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=10
+	// +listType=map
+	// +listMapKey=name
+	Metrics []AnalysisMetric `json:"metrics"`
+}
+
+// AnalysisPrometheus locates and authenticates to the Prometheus the analysis
+// queries.
+type AnalysisPrometheus struct {
+	// ServerAddress is the base URL of the Prometheus HTTP API
+	// (e.g. http://prometheus.monitoring.svc:9090). Optional: defaults to the
+	// bundled Prometheus Service in the controller's namespace. Required by
+	// admission when the bundled Prometheus is disabled.
+	// +optional
+	ServerAddress string `json:"serverAddress,omitempty"`
+
+	// AuthRef points at a Secret key (in the InferenceService's namespace) holding
+	// a bearer token sent as "Authorization: Bearer <token>". Omit for an
+	// unauthenticated Prometheus (the bundled one). TLS/mTLS is not yet supported.
+	// +optional
+	AuthRef *corev1.SecretKeySelector `json:"authRef,omitempty"`
+
+	// Headers are extra HTTP headers sent on every Prometheus query — e.g.
+	// "X-Scope-OrgID" for a multi-tenant Cortex/Thanos/Mimir front-end that scopes
+	// queries by tenant. Without the tenant header such a backend returns no data,
+	// which the gate reads as a permanent stall. Plaintext (not secret); use
+	// AuthRef for the bearer token.
+	// +optional
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// AnalysisMetric is one success condition: a PromQL query whose scalar result is
+// compared against Threshold with Operator. A multi-series result is reduced by
+// max (the worst series) before comparison.
+type AnalysisMetric struct {
+	// Name identifies the metric in status and events; unique within Metrics.
+	Name string `json:"name"`
+
+	// Query is a PromQL expression, templated with the rollout's revision context
+	// before execution. Available variables: {{.Namespace}}, {{.ISVCName}},
+	// {{.Component}}, {{.CanaryService}}, {{.StableService}}, {{.CanaryRevision}},
+	// {{.StableRevision}}. The query must reduce to a single value.
+	Query string `json:"query"`
+
+	// Operator is the comparison applied as "result <Operator> Threshold" to
+	// decide whether this metric passes.
+	// +kubebuilder:validation:Enum=LT;LTE;GT;GTE
+	Operator ComparisonOperator `json:"operator"`
+
+	// Threshold is the bound the query result is compared against. Parsed as a
+	// float (e.g. "0.05", "200", "1.5"); admission rejects a non-numeric value.
+	Threshold string `json:"threshold"`
+}
+
+// ComparisonOperator is how an AnalysisMetric result is compared to its
+// Threshold. "result <op> threshold" being true means the metric is healthy.
+type ComparisonOperator string
+
+const (
+	// ComparisonLT passes when result < threshold.
+	ComparisonLT ComparisonOperator = "LT"
+	// ComparisonLTE passes when result <= threshold (e.g. error-rate <= 0.05).
+	ComparisonLTE ComparisonOperator = "LTE"
+	// ComparisonGT passes when result > threshold.
+	ComparisonGT ComparisonOperator = "GT"
+	// ComparisonGTE passes when result >= threshold (e.g. success-rate >= 0.99).
+	ComparisonGTE ComparisonOperator = "GTE"
+)
+
+// OnInconclusive selects the behavior when analysis cannot read health past the
+// stall timeout (NOT a metric breach).
+type OnInconclusive string
+
+const (
+	// OnInconclusiveHold keeps traffic at the current step and escalates to Failed
+	// for an operator decision. The conservative default: do not revert on a
+	// monitoring outage.
+	OnInconclusiveHold OnInconclusive = "Hold"
+	// OnInconclusiveRollback treats "can't tell" as "assume bad" and rolls back.
+	OnInconclusiveRollback OnInconclusive = "Rollback"
+)

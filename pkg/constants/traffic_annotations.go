@@ -56,7 +56,8 @@ var (
 	RevisionHistoryLimitAnnotation = OMEAPIGroupName + "/revision-history-limit"
 
 	// RolloutPromoteAnnotation is the operator verb that advances a paused
-	// canary step under PromotionPolicy=Manual. Value: the canary revision
+	// canary step under Manual promotion (canary with neither auto nor
+	// analysis set). Value: the canary revision
 	// hash (copied from status.canary.canaryRevisionHash) — the hash guards
 	// against promoting a stale revision; "full" is also accepted. The
 	// controller clears the annotation after consuming it. No-op when

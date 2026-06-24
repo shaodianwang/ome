@@ -43,6 +43,13 @@ type ReconcileInputs struct {
 	// capacity is checked via PerRevisionPods. Single-component canaries pass true.
 	SecondaryCapacityReady bool
 	Now                    time.Time
+	// Sample evaluates a step's analysis metrics for one sample. The controller
+	// wires PrometheusSample; tests inject a fake. Only called for analysis steps.
+	Sample AnalysisSampleFunc
+	// Prometheus is the canary-level metrics source (GroupCanary.Prometheus) shared
+	// by all analysis steps. Read by the sampler; nil falls back to the bundled
+	// Prometheus.
+	Prometheus *v1beta1.AnalysisPrometheus
 }
 
 // Result reports the executor's decision for one reconcile. Active=false means
@@ -105,6 +112,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			}
 		} else if isRollbackRequested(in.ISVC) && int(cs.CurrentStep) < len(plan.Steps) {
 			cs.RolledBackRevisionHash = cs.CanaryRevisionHash
+			recordRollback(in.ISVC, in.Component, "manual")
 			return reconcileRollback(in, cs), nil
 		}
 	}
@@ -205,6 +213,23 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			cs.StepEnteredTime = &metav1.Time{Time: in.Now}
 		}
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePromoting)
+		// Analysis also gates the final 100% step: validate at full traffic before
+		// committing. A breach within the drain window still rolls back; an
+		// inconclusive stall parks Failed. Manual/timed steps skip straight to the drain.
+		if stepIsAnalysis(step) {
+			switch evaluateStep(ctx, in, cs, step) {
+			case decRollback:
+				cs.RolledBackRevisionHash = cs.CanaryRevisionHash
+				return reconcileRollback(in, cs), nil
+			case decFailed:
+				setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseFailed)
+				return &Result{Active: true, Partition: 0, RequeueAfter: failedRequeue}, nil
+			case decHold:
+				return &Result{Active: true, Partition: 0, RequeueAfter: stepRequeue(step)}, nil
+			case decAdvance:
+				// passed at 100% — fall through to the drain window + completion.
+			}
+		}
 		if drainElapsed(cs, plan, in.Now) {
 			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
 			// Mark done (sentinel), don't clear: keeps EffectivePartition at
@@ -228,9 +253,20 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		cs.StepEnteredTime = &metav1.Time{Time: in.Now}
 	}
 	setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseCanarying)
-	if step.Pause != nil && !shouldAdvance(in.ISVC, plan, cs, step, in.Now) {
-		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePaused)
-		return &Result{Active: true, Partition: partition, RequeueAfter: reconcileRequeue}, nil
+	if stepGated(step) {
+		switch evaluateStep(ctx, in, cs, step) {
+		case decRollback:
+			cs.RolledBackRevisionHash = cs.CanaryRevisionHash
+			return reconcileRollback(in, cs), nil
+		case decFailed:
+			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseFailed)
+			return &Result{Active: true, Partition: partition, RequeueAfter: failedRequeue}, nil
+		case decHold:
+			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePaused)
+			return &Result{Active: true, Partition: partition, RequeueAfter: stepRequeue(step)}, nil
+		case decAdvance:
+			// fall through to advance.
+		}
 	}
 	advanceStep(in.ISVC, in.Now)
 	return &Result{Active: true, Stepped: true, Partition: partition, RequeueAfter: reconcileRequeue}, nil

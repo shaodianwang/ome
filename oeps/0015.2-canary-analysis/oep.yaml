@@ -1,0 +1,46 @@
+title: Metric-Gated Canary Promotion and Auto-Rollback
+oep-number: "0015.2"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-06-24
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follow-up to OEP-0015.1, which built the canary executor and deliberately left
+# promotion as a single decision point (the "Hook for OEP-0015.2"). This OEP adds
+# the third answer to that decision point: metric-gated advancement plus
+# auto-rollback, driven by a controller-side Prometheus query/evaluate path.
+#
+# Built on the OEP-0017 unified rollout types that are actually in tree today
+# (spec.rollout.groups[].canary -> GroupCanary/RolloutGroupStep), NOT the original
+# OEP-0015 reserved CanarySpec shape that 0015.1's README still references.
+see-also:
+  - "/oeps/0015.1-canary-executor"
+  - "/oeps/0017-unified-rollout-v2"
+  - "/oeps/0015-unified-rollout"
+  - "/oeps/0013-autoscaling"
+
+# The target maturity stage in the current dev cycle.
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# No feature gate: analysis runs only when a canary group sets
+# promotion: Analysis together with an analysis block. When unset, nothing in
+# this OEP executes and the executor behaves exactly as in OEP-0015.1.
+feature-gates: []
+disable-supported: true
+
+metrics:
+  - ome_canary_analysis_evaluations_total   # labels: isvc, component, result (pass|fail|inconclusive)
+  - ome_canary_analysis_metric_value        # labels: isvc, component, metric
+  - ome_canary_analysis_failed_checks       # labels: isvc, component (gauge: current count vs FailureLimit)
+  - ome_canary_rollback_total               # labels: isvc, component, cause (analysis|manual) — cause label ADDED by this OEP

@@ -221,7 +221,6 @@ func TestDispatch_ServicesHashAndRollbackWarning(t *testing.T) {
 	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 		Canary: &v1beta1.GroupCanary{
-			Promotion: promPolicy(v1beta1.PromotionPolicyManual),
 			Steps: []v1beta1.RolloutGroupStep{
 				{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
 				{Capacity: intstr.FromString("100%"), Traffic: 100},
@@ -300,7 +299,6 @@ func TestDispatch_EnsuresPerRevisionServicesForSecondary(t *testing.T) {
 	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 		Canary: &v1beta1.GroupCanary{
-			Promotion: promPolicy(v1beta1.PromotionPolicyManual),
 			Steps: []v1beta1.RolloutGroupStep{
 				{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
 				{Capacity: intstr.FromString("100%"), Traffic: 100},

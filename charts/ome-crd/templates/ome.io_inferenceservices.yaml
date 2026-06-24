@@ -25564,17 +25564,82 @@ spec:
                             type: object
                           canary:
                             properties:
-                              promotion:
-                                enum:
-                                  - Manual
-                                  - Auto
-                                type: string
+                              prometheus:
+                                properties:
+                                  authRef:
+                                    properties:
+                                      key:
+                                        type: string
+                                      name:
+                                        default: ""
+                                        type: string
+                                      optional:
+                                        type: boolean
+                                    required:
+                                      - key
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                  headers:
+                                    additionalProperties:
+                                      type: string
+                                    type: object
+                                  serverAddress:
+                                    type: string
+                                type: object
                               scaleDownDelaySeconds:
                                 format: int32
                                 type: integer
                               steps:
                                 items:
                                   properties:
+                                    analysis:
+                                      properties:
+                                        failureLimit:
+                                          format: int32
+                                          minimum: 1
+                                          type: integer
+                                        initialDelay:
+                                          type: string
+                                        interval:
+                                          type: string
+                                        metrics:
+                                          items:
+                                            properties:
+                                              name:
+                                                type: string
+                                              operator:
+                                                enum:
+                                                  - LT
+                                                  - LTE
+                                                  - GT
+                                                  - GTE
+                                                type: string
+                                              query:
+                                                type: string
+                                              threshold:
+                                                type: string
+                                            required:
+                                              - name
+                                              - operator
+                                              - query
+                                              - threshold
+                                            type: object
+                                          maxItems: 10
+                                          minItems: 1
+                                          type: array
+                                          x-kubernetes-list-map-keys:
+                                            - name
+                                          x-kubernetes-list-type: map
+                                        onInconclusive:
+                                          enum:
+                                            - Hold
+                                            - Rollback
+                                          type: string
+                                      required:
+                                        - failureLimit
+                                        - interval
+                                        - metrics
+                                      type: object
                                     capacity:
                                       anyOf:
                                         - type: integer
@@ -29969,11 +30034,46 @@ spec:
                   type: object
                 canary:
                   properties:
+                    analysisFailedChecks:
+                      format: int32
+                      type: integer
                     canaryRevisionHash:
                       type: string
                     currentStep:
                       format: int32
                       type: integer
+                    lastConclusiveEvaluationTime:
+                      format: date-time
+                      type: string
+                    lastEvaluationTime:
+                      format: date-time
+                      type: string
+                    metricResults:
+                      items:
+                        properties:
+                          message:
+                            type: string
+                          name:
+                            type: string
+                          operator:
+                            type: string
+                          passed:
+                            type: boolean
+                          threshold:
+                            type: string
+                          time:
+                            format: date-time
+                            type: string
+                          value:
+                            type: string
+                        required:
+                          - name
+                          - passed
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - name
+                      x-kubernetes-list-type: map
                     observedTrafficWeight:
                       format: int32
                       type: integer

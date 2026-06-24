@@ -3,9 +3,11 @@ package validation
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -35,14 +37,6 @@ func canarySpecMode(mode constants.DeploymentModeType, steps ...v1beta1.RolloutG
 	s.Engine = &v1beta1.EngineSpec{}
 	return s
 }
-
-// canaryGroup returns the canary group on a spec built by canarySpec — the
-// single home for the group's progression knobs (Promotion, etc.).
-func canaryGroup(spec *v1beta1.InferenceServiceSpec) *v1beta1.GroupCanary {
-	return spec.Rollout.Groups[0].Canary
-}
-
-func ptrPolicy(p v1beta1.PromotionPolicy) *v1beta1.PromotionPolicy { return &p }
 
 func TestValidateCanary_OK(t *testing.T) {
 	spec := canarySpec(
@@ -126,18 +120,63 @@ func TestValidateCanary_DecreasingWeight(t *testing.T) {
 	}
 }
 
-func TestValidateCanary_PolicyRequiredOnPause(t *testing.T) {
+func TestValidateCanary_BarePauseUnderManualOK(t *testing.T) {
+	// A bare pause (no duration) is a manual gate: "hold here for the promote
+	// annotation." Valid.
 	spec := canarySpec(
 		v1beta1.RolloutGroupStep{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
 		v1beta1.RolloutGroupStep{Capacity: intstr.FromString("100%"), Traffic: 100},
 	)
-	if err := ValidateCanary(spec); err == nil {
-		t.Fatal("a paused step without promotion must be rejected")
-	}
-	// With a policy set, the same plan is valid.
-	canaryGroup(spec).Promotion = ptrPolicy(v1beta1.PromotionPolicyAuto)
 	if err := ValidateCanary(spec); err != nil {
-		t.Fatalf("paused step with promotion must pass: %v", err)
+		t.Fatalf("bare pause (manual) must pass: %v", err)
+	}
+}
+
+func TestValidateCanary_TimedStepOK(t *testing.T) {
+	// A step with pause.duration and no analysis is a timed gate. Valid (the
+	// old "duration-under-manual" rejection is gone — the gate is per-step now).
+	spec := canarySpec(
+		v1beta1.RolloutGroupStep{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{Duration: &metav1.Duration{Duration: time.Minute}}},
+		v1beta1.RolloutGroupStep{Capacity: intstr.FromString("100%"), Traffic: 100},
+	)
+	if err := ValidateCanary(spec); err != nil {
+		t.Fatalf("timed step (pause.duration) must pass: %v", err)
+	}
+}
+
+func goodAnalysis() *v1beta1.RolloutAnalysis {
+	return &v1beta1.RolloutAnalysis{
+		Interval:     metav1.Duration{Duration: time.Minute},
+		FailureLimit: 3,
+		Metrics:      []v1beta1.AnalysisMetric{{Name: "err", Query: "rate(x[1m])", Operator: v1beta1.ComparisonLTE, Threshold: "0.05"}},
+	}
+}
+
+// analysisCanary builds a canary whose single (final) step carries the given
+// self-contained analysis.
+func analysisCanary(step *v1beta1.RolloutAnalysis) *v1beta1.InferenceServiceSpec {
+	return canarySpec(v1beta1.RolloutGroupStep{Capacity: intstr.FromString("100%"), Traffic: 100, Analysis: step})
+}
+
+func TestValidateCanary_AnalysisOK(t *testing.T) {
+	if err := ValidateCanary(analysisCanary(goodAnalysis())); err != nil {
+		t.Fatalf("valid analysis step rejected: %v", err)
+	}
+}
+
+func TestValidateCanary_AnalysisIncompleteRejected(t *testing.T) {
+	// interval + failureLimit set but no metrics — the step can never pass, rejected.
+	spec := analysisCanary(&v1beta1.RolloutAnalysis{Interval: metav1.Duration{Duration: time.Minute}, FailureLimit: 1})
+	if err := ValidateCanary(spec); err == nil || !strings.Contains(err.Error(), ReasonAnalysisInvalid) {
+		t.Fatalf("analysis step with no metrics must be rejected, got %v", err)
+	}
+}
+
+func TestValidateCanary_AnalysisBadThreshold(t *testing.T) {
+	a := goodAnalysis()
+	a.Metrics[0].Threshold = "notanumber"
+	if err := ValidateCanary(analysisCanary(a)); err == nil || !strings.Contains(err.Error(), ReasonAnalysisInvalid) {
+		t.Fatalf("non-numeric threshold must be rejected, got %v", err)
 	}
 }
 

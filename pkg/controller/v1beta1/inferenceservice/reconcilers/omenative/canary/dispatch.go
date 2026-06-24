@@ -96,6 +96,8 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		PerRevisionPods:        readyRev[primary],
 		SecondaryCapacityReady: secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, primary),
 		Now:                    now,
+		Sample:                 PrometheusSample,
+		Prometheus:             canaryPrometheus(d.ISVC),
 	})
 	if err != nil {
 		return 0, err
@@ -147,6 +149,17 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 	}
 	ir.Spec.Pacing.RollbackToRevision = want
 	return c.Update(ctx, ir)
+}
+
+// canaryPrometheus returns the canary group's shared metrics source (the
+// connection every analysis step queries), or nil when unset (the sampler then
+// falls back to the bundled Prometheus).
+func canaryPrometheus(isvc *v1beta1.InferenceService) *v1beta1.AnalysisPrometheus {
+	g := isvc.Spec.GetCanaryGroup()
+	if g == nil || g.Canary == nil {
+		return nil
+	}
+	return g.Canary.Prometheus
 }
 
 // configuredComponents lists the Components the canary operates on — the canary

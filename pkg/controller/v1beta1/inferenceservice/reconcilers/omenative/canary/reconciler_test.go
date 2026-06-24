@@ -11,19 +11,19 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-func promPolicy(p v1beta1.PromotionPolicy) *v1beta1.PromotionPolicy { return &p }
-func i32(v int32) *int32                                            { return &v }
+func i32(v int32) *int32 { return &v }
 
 // canaryISVC builds an ISVC whose rollout canaries the single engine Component
-// (v2: one RolloutGroup with a canary progression over [engine]).
-func canaryISVC(steps []v1beta1.RolloutGroupStep, policy *v1beta1.PromotionPolicy, scaleDownDelay *int32) *v1beta1.InferenceService {
+// (v2: one RolloutGroup with a canary progression over [engine]). Each step's own
+// Pause/Analysis decides its gate (manual = bare pause, timed = pause+duration,
+// metric-gated = analysis).
+func canaryISVC(steps []v1beta1.RolloutGroupStep, scaleDownDelay *int32) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc"},
 		Spec: v1beta1.InferenceServiceSpec{Rollout: &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
 			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 			Canary: &v1beta1.GroupCanary{
 				Steps:                 steps,
-				Promotion:             policy,
 				ScaleDownDelaySeconds: scaleDownDelay,
 			},
 		}}}},
@@ -66,7 +66,7 @@ func TestReconcile_NoCanaryIsNoop(t *testing.T) {
 }
 
 func TestReconcile_CapacityGatePending(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	res, _ := Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 0}))
 	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
 		t.Fatalf("expected Pending while canary pods not ready, got %q", phaseOf(isvc))
@@ -80,7 +80,7 @@ func TestReconcile_CapacityGatePending(t *testing.T) {
 }
 
 func TestReconcile_CanaryingPaused(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 2}))
 	if phaseOf(isvc) != v1beta1.RolloutPhasePaused {
 		t.Fatalf("expected Paused at a manual paused step, got %q", phaseOf(isvc))
@@ -95,7 +95,7 @@ func TestReconcile_CanaryingPaused(t *testing.T) {
 }
 
 func TestReconcile_ManualPromoteAdvances(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
 	Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 2}))
 	if isvc.Status.Canary.CurrentStep != 1 {
@@ -107,7 +107,7 @@ func TestReconcile_ManualPromoteAdvances(t *testing.T) {
 }
 
 func TestReconcile_StalePromoteDoesNotAdvance(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "someoldhash"}
 	Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 2}))
 	if isvc.Status.Canary.CurrentStep != 0 {
@@ -120,7 +120,7 @@ func TestReconcile_AutoAdvance(t *testing.T) {
 		{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{Duration: &metav1.Duration{Duration: 30 * time.Minute}}},
 		{Capacity: intstr.FromString("100%"), Traffic: 100},
 	}
-	isvc := canaryISVC(steps, promPolicy(v1beta1.PromotionPolicyAuto), nil)
+	isvc := canaryISVC(steps, nil)
 	// The pause is anchored to when the split FIRST serves, not to step entry. Seed
 	// StepEnteredTime 40 min in the past (> the 30 min pause) to mimic a slow capacity
 	// wait: the step was "entered" long ago, but traffic only shifts now — the soak
@@ -147,7 +147,7 @@ func TestReconcile_AutoAdvance(t *testing.T) {
 }
 
 func TestReconcile_FinalStepCompletes(t *testing.T) {
-	isvc := canaryISVC([]v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}}, nil, nil)
+	isvc := canaryISVC([]v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}}, nil)
 	// Mid-rollout at the final step (canary already initialized): pods fully on
 	// the target, no drain delay → completes. Starting fresh with pods already
 	// converged is the "already done" case, not a completion (see
@@ -184,7 +184,7 @@ func TestReconcile_FinalStepCompletes(t *testing.T) {
 // the rollout loops forever (verified on KIND). A canary only starts when there
 // is an actual revision change still to roll out.
 func TestReconcile_AlreadyConvergedNoRestart(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	res, _ := Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 4}))
 	if res.Active {
 		t.Fatalf("converged component must not (re)start a canary, got %+v", res)
@@ -201,7 +201,7 @@ func TestReconcile_AlreadyConvergedNoRestart(t *testing.T) {
 // known target hash yet (empty), the canary must wait rather than initialize a
 // state machine keyed on an empty revision.
 func TestReconcile_UnknownTargetNoStart(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	in := baseInputs(isvc, map[string]int32{"old": 4})
 	in.CanaryRevisionHash = ""
 	res, _ := Reconcile(context.Background(), in)
@@ -214,7 +214,7 @@ func TestReconcile_UnknownTargetNoStart(t *testing.T) {
 }
 
 func TestReconcile_FinalStepDrainWait(t *testing.T) {
-	isvc := canaryISVC([]v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}}, nil, i32(60))
+	isvc := canaryISVC([]v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}}, i32(60))
 	// StepEnteredTime here is the step-entry time; the drain window is anchored to
 	// the moment traffic shifts (the first capacity-met reconcile), NOT to this.
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, StepEnteredTime: &metav1.Time{Time: time.Unix(1000, 0)}}
@@ -243,7 +243,7 @@ func TestReconcile_FinalStepDrainWait(t *testing.T) {
 // revision, shift traffic to stable, RollingBack while the rejected pods drain →
 // RolledBack (held), and re-arm only when a different target appears.
 func TestReconcile_Rollback(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, ObservedTrafficWeight: 50}
 	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
 
@@ -288,7 +288,7 @@ func TestReconcile_Rollback(t *testing.T) {
 // own canary pods are up, no traffic shifts until every secondary component's
 // canary capacity is ready.
 func TestReconcile_SecondaryCapacityGate(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	in := baseInputs(isvc, map[string]int32{"new": 2}) // primary capacity met
 	in.SecondaryCapacityReady = false                  // a secondary's canary pods are not up
 	Reconcile(context.Background(), in)
@@ -304,7 +304,7 @@ func TestReconcile_SecondaryCapacityGate(t *testing.T) {
 // whose canary pods never become Ready parks in Failed (stable still serving)
 // after the ready-timeout instead of polling Pending forever.
 func TestReconcile_CapacityGateFailsAfterTimeout(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, StepEnteredTime: &metav1.Time{Time: time.Unix(1000, 0)}}
 	in := baseInputs(isvc, map[string]int32{"new": 0}) // canary pods never come up
 
@@ -331,7 +331,7 @@ func TestReconcile_CapacityGateFailsAfterTimeout(t *testing.T) {
 // done-sentinel branch: a finished canary that sees a NEW target hash restarts
 // the plan from step 0 against the new revision (a subsequent spec bump).
 func TestReconcile_DoneSentinelRestartsOnNewTarget(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	// Finished canary on the previous target (done sentinel: CurrentStep == 2).
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "old-canary", CurrentStep: 2, ObservedTrafficWeight: 100}
 	in := baseInputs(isvc, map[string]int32{"v3": 0}) // new target v3, its pods not up yet
@@ -348,7 +348,7 @@ func TestReconcile_DoneSentinelRestartsOnNewTarget(t *testing.T) {
 // TestReconcile_ReadyTimeoutAnnotationOverride pins that an operator-shortened
 // ready-timeout actually changes when Failed is entered.
 func TestReconcile_ReadyTimeoutAnnotationOverride(t *testing.T) {
-	isvc := canaryISVC(twoStep(), promPolicy(v1beta1.PromotionPolicyManual), nil)
+	isvc := canaryISVC(twoStep(), nil)
 	isvc.Annotations = map[string]string{constants.RolloutReadyTimeoutAnnotation: "2m"}
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, StepEnteredTime: &metav1.Time{Time: time.Unix(1000, 0)}}
 	in := baseInputs(isvc, map[string]int32{"new": 0}) // canary pods never come up

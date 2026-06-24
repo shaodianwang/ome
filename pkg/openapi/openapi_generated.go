@@ -12,6 +12,9 @@ import (
 
 func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenAPIDefinition {
 	return map[string]common.OpenAPIDefinition{
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetric":                 schema_pkg_apis_ome_v1beta1_AnalysisMetric(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetricResult":           schema_pkg_apis_ome_v1beta1_AnalysisMetricResult(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisPrometheus":             schema_pkg_apis_ome_v1beta1_AnalysisPrometheus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BackendPolicyRef":               schema_pkg_apis_ome_v1beta1_BackendPolicyRef(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                      schema_pkg_apis_ome_v1beta1_BaseModel(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":                  schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
@@ -86,6 +89,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                        schema_pkg_apis_ome_v1beta1_PodSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy":             schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate":                  schema_pkg_apis_ome_v1beta1_RollingUpdate(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutAnalysis":                schema_pkg_apis_ome_v1beta1_RolloutAnalysis(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroup":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationGroupStatus": schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroupStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutCoordinationRatio":       schema_pkg_apis_ome_v1beta1_RolloutCoordinationRatio(ref),
@@ -117,6 +121,162 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadClusterList":            schema_pkg_apis_ome_v1beta1_WorkloadClusterList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadClusterSpec":            schema_pkg_apis_ome_v1beta1_WorkloadClusterSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.WorkloadClusterStatus":          schema_pkg_apis_ome_v1beta1_WorkloadClusterStatus(ref),
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AnalysisMetric(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AnalysisMetric is one success condition: a PromQL query whose scalar result is compared against Threshold with Operator. A multi-series result is reduced by max (the worst series) before comparison.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name identifies the metric in status and events; unique within Metrics.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"query": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Query is a PromQL expression, templated with the rollout's revision context before execution. Available variables: {{.Namespace}}, {{.ISVCName}}, {{.Component}}, {{.CanaryService}}, {{.StableService}}, {{.CanaryRevision}}, {{.StableRevision}}. The query must reduce to a single value.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"operator": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Operator is the comparison applied as \"result <Operator> Threshold\" to decide whether this metric passes.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"threshold": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Threshold is the bound the query result is compared against. Parsed as a float (e.g. \"0.05\", \"200\", \"1.5\"); admission rejects a non-numeric value.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"name", "query", "operator", "threshold"},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AnalysisMetricResult(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AnalysisMetricResult is the last observed evaluation of one AnalysisMetric. Value is a string (not a float) because the Kubernetes API convention avoids floating-point fields; it is for display only.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name matches the AnalysisMetric.Name this result is for.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"value": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Value is the query result at the last sample, formatted for display (e.g. \"0.012\"). Empty when the sample was inconclusive.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"threshold": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Threshold echoes the bound that was applied, so the result is self-describing in status.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"operator": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Operator echoes the comparison that was applied.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"passed": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Passed is whether this metric satisfied its condition at the last sample.",
+							Default:     false,
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"message": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Message carries the reason when a metric did not pass or could not be evaluated (e.g. \"no data\", a query error).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"time": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Time is when this result was recorded.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+				},
+				Required: []string{"name", "passed"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_AnalysisPrometheus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AnalysisPrometheus locates and authenticates to the Prometheus the analysis queries.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"serverAddress": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ServerAddress is the base URL of the Prometheus HTTP API (e.g. http://prometheus.monitoring.svc:9090). Optional: defaults to the bundled Prometheus Service in the controller's namespace. Required by admission when the bundled Prometheus is disabled.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"authRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AuthRef points at a Secret key (in the InferenceService's namespace) holding a bearer token sent as \"Authorization: Bearer <token>\". Omit for an unauthenticated Prometheus (the bundled one). TLS/mTLS is not yet supported.",
+							Ref:         ref("k8s.io/api/core/v1.SecretKeySelector"),
+						},
+					},
+					"headers": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Headers are extra HTTP headers sent on every Prometheus query — e.g. \"X-Scope-OrgID\" for a multi-tenant Cortex/Thanos/Mimir front-end that scopes queries by tenant. Without the tenant header such a backend returns no data, which the gate reads as a permanent stall. Plaintext (not secret); use AuthRef for the bearer token.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/api/core/v1.SecretKeySelector"},
 	}
 }
 
@@ -494,12 +654,53 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 							Format:      "",
 						},
 					},
+					"analysisFailedChecks": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AnalysisFailedChecks counts failing analysis samples in the CURRENT step (reset to zero on each advance). Auto-rollback fires when it reaches Analysis.FailureLimit. Set only under Promotion=Analysis.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"lastEvaluationTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastEvaluationTime is when the analysis metrics were last sampled. The controller throttles sampling to at most once per Analysis.Interval using this timestamp, so a burst of unrelated reconciles cannot over-count failures. Set only under Promotion=Analysis.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"lastConclusiveEvaluationTime": {
+						SchemaProps: spec.SchemaProps{
+							Description: "LastConclusiveEvaluationTime is when analysis last produced a conclusive sample (pass or fail — i.e. Prometheus answered). The stall timeout is measured from here: a long run of inconclusive samples escalates to Failed. Set only under Promotion=Analysis.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"metricResults": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"name",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "MetricResults is the most recent per-metric evaluation, for observability (kubectl get isvc shows why a step held or rolled back). Set only under Promotion=Analysis.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetricResult"),
+									},
+								},
+							},
+						},
+					},
 				},
 				Required: []string{"currentStep", "observedTrafficWeight"},
 			},
 		},
 		Dependencies: []string{
-			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetricResult", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 
@@ -2795,7 +2996,7 @@ func schema_pkg_apis_ome_v1beta1_GroupCanary(ref common.ReferenceCallback) commo
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "GroupCanary is the stepped progression: bring up new-revision capacity and shift service-level traffic through an ordered list of steps, gated by PromotionPolicy.",
+				Description: "GroupCanary is the stepped progression: bring up new-revision capacity and shift service-level traffic through an ordered list of steps. How the canary advances is a PER-STEP property (see RolloutGroupStep): each step is metric-gated (analysis), timed, manual, or immediate. Prometheus here is the shared metrics SOURCE every analysis step queries — declared once, not on each step.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"steps": {
@@ -2817,11 +3018,10 @@ func schema_pkg_apis_ome_v1beta1_GroupCanary(ref common.ReferenceCallback) commo
 							},
 						},
 					},
-					"promotion": {
+					"prometheus": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Promotion controls how the rollout advances between paused steps.\n  - Manual: operator advances via the ome.io/rollout-promote annotation.\n  - Auto: the controller advances on each step's Pause.Duration.",
-							Type:        []string{"string"},
-							Format:      "",
+							Description: "Prometheus is the metrics source (connection) shared by every analysis step in this canary: where to query and how to authenticate. When omitted, the controller targets the bundled Prometheus Service (http://ome-prometheus.<namespace>.svc:9090). It is only the source — WHAT to check is each step's analysis — and it gates nothing by itself.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisPrometheus"),
 						},
 					},
 					"scaleDownDelaySeconds": {
@@ -2835,7 +3035,7 @@ func schema_pkg_apis_ome_v1beta1_GroupCanary(ref common.ReferenceCallback) commo
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroupStep"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisPrometheus", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutGroupStep"},
 	}
 }
 
@@ -6223,6 +6423,71 @@ func schema_pkg_apis_ome_v1beta1_RollingUpdate(ref common.ReferenceCallback) com
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_RolloutAnalysis(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RolloutAnalysis is a step's metric gate: the checks (metrics) and policy (interval, failureLimit, onInconclusive, initialDelay) that decide advance, hold, or rollback for the step it is set on. It does NOT carry the metrics source — that is GroupCanary.Prometheus, shared by all analysis steps.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"interval": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Interval is the sampling cadence — how often the controller re-evaluates the metrics while a step bakes. It also bounds the requeue while holding.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+					"initialDelay": {
+						SchemaProps: spec.SchemaProps{
+							Description: "InitialDelay is a warm-up after a step's pods become Ready and traffic is applied, before the first sample. New pods need a moment before their metrics mean anything; sampling immediately would read cold-start noise.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+					"failureLimit": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FailureLimit is the number of failing samples, counted PER STEP (reset on advance), that triggers auto-rollback. FailureLimit=1 rolls back on the first bad sample.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"onInconclusive": {
+						SchemaProps: spec.SchemaProps{
+							Description: "OnInconclusive selects what to do when a sample cannot be completed (Prometheus unreachable, query error, or empty result) past the stall timeout — distinct from a metric breach.\n  - Hold (default): keep traffic at the current step and escalate to Failed\n    for an operator decision. A monitoring outage is not evidence the canary\n    is bad.\n  - Rollback: fail-safe — treat \"can't tell\" as \"assume bad\" and roll back.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metrics": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"name",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Metrics are the success conditions. A sample passes only when EVERY metric passes (AND). At least one is required; an analysis with no metrics could never fail and would gate nothing.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetric"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"interval", "failureLimit", "metrics"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetric", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_RolloutCoordinationGroup(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -6644,7 +6909,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutGroupStep(ref common.ReferenceCallback) 
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutGroupStep is one stage of a canary progression. Capacity and traffic are INDEPENDENT: capacity is the per-Component new-revision pod count; traffic is the service-level percentage of requests on the new revision. The independence allows \"capacity ahead of traffic\" (run 50% pods, send 10% traffic) for warm-up.",
+				Description: "RolloutGroupStep is one stage of a canary progression. Capacity and traffic are INDEPENDENT: capacity is the per-Component new-revision pod count; traffic is the service-level percentage of requests on the new revision. The independence allows \"capacity ahead of traffic\" (run 50% pods, send 10% traffic) for warm-up.\n\nHow the step advances (its gate) is resolved in order:\n  - Analysis set → metric-gated (queries GroupCanary.Prometheus); Pause.Duration,\n    if any, is the minimum bake before a passing sample advances.\n  - else Pause with Duration → timed: advance once Duration elapses.\n  - else Pause → manual: hold for the ome.io/rollout-promote annotation.\n  - else → advance as soon as capacity + traffic converge.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"capacity": {
@@ -6663,8 +6928,14 @@ func schema_pkg_apis_ome_v1beta1_RolloutGroupStep(ref common.ReferenceCallback) 
 					},
 					"pause": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Pause holds the rollout at this step. Absent advances immediately.",
+							Description: "Pause holds the step: with a Duration it is a timed advance (or, when Analysis is set, the bake window); without one it is a manual hold for the ome.io/rollout-promote annotation. Absent (and no Analysis) advances immediately.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause"),
+						},
+					},
+					"analysis": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Analysis opts this step into metric-gated promotion: it carries the checks (metrics) and policy (interval, failureLimit, onInconclusive) for THIS step. The metrics source is GroupCanary.Prometheus, shared by all analysis steps. Absent leaves the step manual/timed/immediate per Pause.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutAnalysis"),
 						},
 					},
 				},
@@ -6672,7 +6943,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutGroupStep(ref common.ReferenceCallback) 
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutAnalysis", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutPause", "k8s.io/apimachinery/pkg/util/intstr.IntOrString"},
 	}
 }
 
@@ -6680,12 +6951,12 @@ func schema_pkg_apis_ome_v1beta1_RolloutPause(ref common.ReferenceCallback) comm
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutPause holds a rollout at a step boundary.",
+				Description: "RolloutPause holds a rollout at a step boundary; its meaning depends on the step's gate (see RolloutGroupStep):\n  - manual step (Pause, no Duration): wait for the ome.io/rollout-promote\n    annotation.\n  - timed step (Pause with Duration, no Analysis): advance after Duration.\n  - analysis step (Analysis set): Duration is the minimum bake time before a\n    passing sample may advance.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"duration": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Duration to pause before auto-advancing.\n  - If unset and PromotionPolicy is Manual, the controller waits\n    indefinitely for the ome.io/rollout-promote annotation.\n  - If PromotionPolicy is Auto and Duration is unset, the controller\n    advances immediately (the Pause is a no-op).\n  - If both are set, the controller advances after Duration.",
+							Description: "Duration to pause at this step; see the type doc for how each gate uses it.",
 							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
 						},
 					},
