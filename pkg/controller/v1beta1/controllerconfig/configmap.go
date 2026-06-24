@@ -68,6 +68,22 @@ type IngressConfig struct {
 	// host label is never a hardcoded magic string. Empty yields the bare
 	// IngressDomain (no prefix).
 	SharedHostPrefix string `json:"sharedHostPrefix,omitempty"`
+	// AdditionalIngressGateways attaches each generated HTTPRoute to extra
+	// gateways beyond the primary OmeIngressGateway — e.g. an external gateway
+	// alongside the internal one. Each entry contributes its own parentRef and a
+	// hostname rendered from its own IngressDomain. Empty preserves the
+	// single-gateway behavior.
+	AdditionalIngressGateways []IngressGatewaySpec `json:"additionalIngressGateways,omitempty"`
+}
+
+// IngressGatewaySpec identifies one gateway an HTTPRoute attaches to, plus the
+// domain used to build that gateway's hostname for the route.
+type IngressGatewaySpec struct {
+	// OmeIngressGateway is the gateway parentRef in "namespace/name" form.
+	OmeIngressGateway string `json:"omeIngressGateway"`
+	// IngressDomain is the domain used to render this gateway's route hostname
+	// (same scheme as the primary: per-ISVC subdomain or shared-host prefix).
+	IngressDomain string `json:"ingressDomain"`
 }
 
 // +kubebuilder:object:generate=false

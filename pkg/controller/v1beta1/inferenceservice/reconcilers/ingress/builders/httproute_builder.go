@@ -108,26 +108,60 @@ func toGatewayAPIDuration(seconds int64) *gatewayapiv1.Duration {
 	return &duration
 }
 
-// gatewayHostname returns the HTTPRoute host. By default this is the shared
-// "<SharedHostPrefix>.<IngressDomain>" host (all ISVCs share one host,
-// disambiguated by the path prefix); the prefix is config-supplied, not
-// hardcoded. When PerISVCSubdomain is set, it returns this ISVC's own subdomain
-// by reusing the same domainService.GenerateDomainName the strategy uses for
-// status.url — so the route host and status.url can't drift.
-func (b *HTTPRouteBuilder) gatewayHostname(isvc *v1beta1.InferenceService) (gatewayapiv1.Hostname, error) {
+// gatewayHostnameForDomain renders the HTTPRoute host for a given gateway domain.
+// In the shared-host scheme it is "<SharedHostPrefix>.<domain>" (the prefix is
+// config-supplied, not hardcoded; empty yields the bare domain). When
+// PerISVCSubdomain is set it returns this ISVC's own subdomain via the same
+// domainService.GenerateDomainName the strategy uses for status.url — so the
+// route host and status.url can't drift.
+func (b *HTTPRouteBuilder) gatewayHostnameForDomain(isvc *v1beta1.InferenceService, domain string) (gatewayapiv1.Hostname, error) {
 	if b.ingressConfig.PerISVCSubdomain {
-		host, err := b.domainService.GenerateDomainName(isvc.Name, isvc.ObjectMeta, b.ingressConfig)
+		// Render with this gateway's domain so each gateway's host follows the
+		// same template as status.url.
+		cfg := *b.ingressConfig
+		cfg.IngressDomain = domain
+		host, err := b.domainService.GenerateDomainName(isvc.Name, isvc.ObjectMeta, &cfg)
 		if err != nil {
 			return "", err
 		}
 		return gatewayapiv1.Hostname(host), nil
 	}
-	// Shared-host scheme: "<SharedHostPrefix>.<IngressDomain>". The prefix comes
-	// from config (no hardcoded value); an empty prefix yields the bare domain.
 	if b.ingressConfig.SharedHostPrefix != "" {
-		return gatewayapiv1.Hostname(b.ingressConfig.SharedHostPrefix + "." + b.ingressConfig.IngressDomain), nil
+		return gatewayapiv1.Hostname(b.ingressConfig.SharedHostPrefix + "." + domain), nil
 	}
-	return gatewayapiv1.Hostname(b.ingressConfig.IngressDomain), nil
+	return gatewayapiv1.Hostname(domain), nil
+}
+
+// gatewaysForRoute returns the parentRefs and hostnames a route attaches to: the
+// primary gateway (OmeIngressGateway + IngressDomain) plus every
+// AdditionalIngressGateways entry, each with a hostname rendered from its own
+// domain. This lets one route serve, e.g., both an internal and an external
+// gateway. The hostnames and parentRefs are index-aligned per gateway.
+func (b *HTTPRouteBuilder) gatewaysForRoute(isvc *v1beta1.InferenceService) ([]gatewayapiv1.ParentReference, []gatewayapiv1.Hostname, error) {
+	gateways := []controllerconfig.IngressGatewaySpec{
+		{OmeIngressGateway: b.ingressConfig.OmeIngressGateway, IngressDomain: b.ingressConfig.IngressDomain},
+	}
+	gateways = append(gateways, b.ingressConfig.AdditionalIngressGateways...)
+
+	parentRefs := make([]gatewayapiv1.ParentReference, 0, len(gateways))
+	hosts := make([]gatewayapiv1.Hostname, 0, len(gateways))
+	for _, gw := range gateways {
+		host, err := b.gatewayHostnameForDomain(isvc, gw.IngressDomain)
+		if err != nil {
+			return nil, nil, err
+		}
+		hosts = append(hosts, host)
+		slice := strings.Split(gw.OmeIngressGateway, "/")
+		ns := slice[0]
+		name := slice[len(slice)-1]
+		parentRefs = append(parentRefs, gatewayapiv1.ParentReference{
+			Group:     (*gatewayapiv1.Group)(&gatewayapiv1.GroupVersion.Group),
+			Kind:      (*gatewayapiv1.Kind)(ptr.To(constants.GatewayKind)),
+			Namespace: (*gatewayapiv1.Namespace)(&ns),
+			Name:      gatewayapiv1.ObjectName(name),
+		})
+	}
+	return parentRefs, hosts, nil
 }
 
 // pathPrefix returns the route's PathPrefix match. By default this is
@@ -252,12 +286,7 @@ func (b *HTTPRouteBuilder) buildEngineHTTPRoute(ctx context.Context, isvc *v1bet
 		b.createHTTPRouteRule(routeMatch, filters, engineName, isvc.Namespace, port, timeout),
 	}
 
-	host, err := b.gatewayHostname(isvc)
-	if err != nil {
-		return nil, err
-	}
-	return b.buildHTTPRouteResource(isvc, engineName,
-		[]gatewayapiv1.Hostname{host}, httpRouteRules), nil
+	return b.buildHTTPRouteResource(isvc, engineName, httpRouteRules)
 }
 
 func (b *HTTPRouteBuilder) buildRouterHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
@@ -285,12 +314,7 @@ func (b *HTTPRouteBuilder) buildRouterHTTPRoute(ctx context.Context, isvc *v1bet
 		b.createHTTPRouteRule(routeMatch, filters, routerName, isvc.Namespace, port, timeout),
 	}
 
-	host, err := b.gatewayHostname(isvc)
-	if err != nil {
-		return nil, err
-	}
-	return b.buildHTTPRouteResource(isvc, constants.RouterServiceName(isvc.Name),
-		[]gatewayapiv1.Hostname{host}, httpRouteRules), nil
+	return b.buildHTTPRouteResource(isvc, constants.RouterServiceName(isvc.Name), httpRouteRules)
 }
 
 func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
@@ -318,12 +342,7 @@ func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(ctx context.Context, isvc *v1be
 		b.createHTTPRouteRule(routeMatch, filters, decoderName, isvc.Namespace, port, timeout),
 	}
 
-	host, err := b.gatewayHostname(isvc)
-	if err != nil {
-		return nil, err
-	}
-	return b.buildHTTPRouteResource(isvc, constants.DecoderServiceName(isvc.Name),
-		[]gatewayapiv1.Hostname{host}, httpRouteRules), nil
+	return b.buildHTTPRouteResource(isvc, constants.DecoderServiceName(isvc.Name), httpRouteRules)
 }
 
 func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
@@ -368,15 +387,10 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(ctx context.Context, isvc *v1b
 		b.createHTTPRouteRule(routeMatch, filters, serviceName, isvc.Namespace, port, timeout),
 	}
 
-	host, err := b.gatewayHostname(isvc)
-	if err != nil {
-		return nil, err
-	}
-	return b.buildHTTPRouteResource(isvc, isvc.Name,
-		[]gatewayapiv1.Hostname{host}, httpRouteRules), nil
+	return b.buildHTTPRouteResource(isvc, isvc.Name, httpRouteRules)
 }
 
-func (b *HTTPRouteBuilder) buildHTTPRouteResource(isvc *v1beta1.InferenceService, name string, allowedHosts []gatewayapiv1.Hostname, httpRouteRules []gatewayapiv1.HTTPRouteRule) *gatewayapiv1.HTTPRoute {
+func (b *HTTPRouteBuilder) buildHTTPRouteResource(isvc *v1beta1.InferenceService, name string, httpRouteRules []gatewayapiv1.HTTPRouteRule) (*gatewayapiv1.HTTPRoute, error) {
 	annotations := utils.Filter(isvc.Annotations, func(key string) bool {
 		return !utils.Includes(constants.ServiceAnnotationDisallowedList, key)
 	})
@@ -384,7 +398,10 @@ func (b *HTTPRouteBuilder) buildHTTPRouteResource(isvc *v1beta1.InferenceService
 		return !utils.Includes(constants.RevisionTemplateLabelDisallowedList, key)
 	})
 
-	gatewaySlice := strings.Split(b.ingressConfig.OmeIngressGateway, "/")
+	parentRefs, hosts, err := b.gatewaysForRoute(isvc)
+	if err != nil {
+		return nil, err
+	}
 
 	return &gatewayapiv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
@@ -394,18 +411,11 @@ func (b *HTTPRouteBuilder) buildHTTPRouteResource(isvc *v1beta1.InferenceService
 			Labels:      labels,
 		},
 		Spec: gatewayapiv1.HTTPRouteSpec{
-			Hostnames: allowedHosts,
+			Hostnames: hosts,
 			Rules:     httpRouteRules,
 			CommonRouteSpec: gatewayapiv1.CommonRouteSpec{
-				ParentRefs: []gatewayapiv1.ParentReference{
-					{
-						Group:     (*gatewayapiv1.Group)(&gatewayapiv1.GroupVersion.Group),
-						Kind:      (*gatewayapiv1.Kind)(ptr.To(constants.GatewayKind)),
-						Namespace: (*gatewayapiv1.Namespace)(&gatewaySlice[0]),
-						Name:      gatewayapiv1.ObjectName(gatewaySlice[1]),
-					},
-				},
+				ParentRefs: parentRefs,
 			},
 		},
-	}
+	}, nil
 }

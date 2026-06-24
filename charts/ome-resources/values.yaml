@@ -77,6 +77,14 @@ ome:
       # this chart value is the source of truth. Override per-cluster (e.g. via
       # GitOps) as needed; empty string => bare <domain> (no prefix).
       sharedHostPrefix: "llm"
+      # Attach each generated HTTPRoute to extra gateways beyond the primary one
+      # (e.g. an external gateway alongside the internal). Each entry adds a
+      # parentRef + a hostname rendered from its own domain. Empty => single gateway.
+      # Example:
+      #   additionalIngressGateways:
+      #     - omeIngressGateway: "envoy-gateway-system/external-gateway"
+      #       ingressDomain: "external.example.com"
+      additionalIngressGateways: []
     nodeSelector: {}
     tolerations: []
     topologySpreadConstraints: []

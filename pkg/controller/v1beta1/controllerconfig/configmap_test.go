@@ -196,7 +196,10 @@ func TestNewIngressConfig(t *testing.T) {
 					"urlScheme": "https",
 					"pathTemplate": "/{{ .Namespace }}/{{ .Name }}",
 					"perISVCSubdomain": true,
-					"sharedHostPrefix": "serving"
+					"sharedHostPrefix": "serving",
+					"additionalIngressGateways": [
+						{"omeIngressGateway": "envoy-gateway-system/ext-gw", "ingressDomain": "ext.example.com"}
+					]
 				}`,
 			},
 			expectedError: false,
@@ -208,6 +211,9 @@ func TestNewIngressConfig(t *testing.T) {
 				assert.Equal(t, "https", cfg.UrlScheme)
 				assert.True(t, cfg.PerISVCSubdomain)
 				assert.Equal(t, "serving", cfg.SharedHostPrefix)
+				require.Len(t, cfg.AdditionalIngressGateways, 1)
+				assert.Equal(t, "envoy-gateway-system/ext-gw", cfg.AdditionalIngressGateways[0].OmeIngressGateway)
+				assert.Equal(t, "ext.example.com", cfg.AdditionalIngressGateways[0].IngressDomain)
 			},
 		},
 		{

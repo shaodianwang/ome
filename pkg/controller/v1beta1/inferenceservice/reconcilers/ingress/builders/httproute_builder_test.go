@@ -818,6 +818,34 @@ func TestHTTPRouteBuilder_SharedHostPrefix(t *testing.T) {
 	}
 }
 
+// TestHTTPRouteBuilder_AdditionalIngressGateways verifies a route attaches to the
+// primary gateway plus each additional gateway, with one parentRef and one
+// hostname per gateway (each host rendered from that gateway's own domain).
+func TestHTTPRouteBuilder_AdditionalIngressGateways(t *testing.T) {
+	isvc := createTestInferenceServiceHTTPRoute("test-isvc", "default")
+	setEngineReady(isvc)
+
+	builder := createHTTPRouteBuilder()
+	builder.ingressConfig.PerISVCSubdomain = true
+	builder.ingressConfig.OmeIngressGateway = "envoy-gateway-system/int-gw"
+	builder.ingressConfig.IngressDomain = "int.example.com"
+	builder.ingressConfig.AdditionalIngressGateways = []controllerconfig.IngressGatewaySpec{
+		{OmeIngressGateway: "envoy-gateway-system/ext-gw", IngressDomain: "ext.example.com"},
+	}
+
+	result, err := builder.BuildHTTPRoute(context.Background(), isvc, TopLevelComponent)
+	require.NoError(t, err)
+	route := result.(*gatewayapiv1.HTTPRoute)
+
+	// Two gateways => two parentRefs + two hostnames, index-aligned.
+	require.Len(t, route.Spec.ParentRefs, 2, "one parentRef per gateway")
+	require.Len(t, route.Spec.Hostnames, 2, "one hostname per gateway")
+	assert.Equal(t, gatewayapiv1.ObjectName("int-gw"), route.Spec.ParentRefs[0].Name)
+	assert.Equal(t, gatewayapiv1.ObjectName("ext-gw"), route.Spec.ParentRefs[1].Name)
+	assert.Equal(t, gatewayapiv1.Hostname("test-isvc.default.int.example.com"), route.Spec.Hostnames[0])
+	assert.Equal(t, gatewayapiv1.Hostname("test-isvc.default.ext.example.com"), route.Spec.Hostnames[1])
+}
+
 // TestHTTPRouteBuilder_PerISVCSubdomainScheme verifies the opt-in (flag ON)
 // scheme for engine, router, decoder, and top-level routes: the route host
 // equals the ISVC's per-ISVC subdomain (the same host status.url advertises,

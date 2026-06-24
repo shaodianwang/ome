@@ -18,7 +18,8 @@ data:
         "disableIngressCreation": {{ .Values.ome.controller.ingressGateway.disableIngressCreation | default false }},
         "enableGatewayAPI": {{ .Values.ome.controller.ingressGateway.enableGatewayAPI | default false }},
         "perISVCSubdomain": {{ .Values.ome.controller.ingressGateway.perISVCSubdomain | default false }},
-        "sharedHostPrefix": "{{ .Values.ome.controller.ingressGateway.sharedHostPrefix | default "" }}"
+        "sharedHostPrefix": "{{ .Values.ome.controller.ingressGateway.sharedHostPrefix | default "" }}",
+        "additionalIngressGateways": {{ .Values.ome.controller.ingressGateway.additionalIngressGateways | default list | toJson }}
     }
   deploy: |-
     {
