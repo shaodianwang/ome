@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"encoding/json"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -124,6 +125,32 @@ func ResolveIngressConfig(baseConfig *controllerconfig.IngressConfig, annotation
 	// Boolean overrides
 	if disableCreation, exists := annotations[constants.IngressDisableCreation]; exists {
 		resolved.DisableIngressCreation = disableCreation == "true"
+	}
+
+	// Gateway / host-scheme overrides — let a single ISVC target a different
+	// gateway or host scheme than the cluster default (e.g. expose just this
+	// ISVC on an external gateway, or use a per-ISVC subdomain).
+	if gateway, exists := annotations[constants.IngressGatewayOverride]; exists && gateway != "" {
+		resolved.OmeIngressGateway = gateway
+	}
+
+	if perISVC, exists := annotations[constants.IngressPerISVCSubdomain]; exists {
+		resolved.PerISVCSubdomain = perISVC == "true"
+	}
+
+	// SharedHostPrefix overrides on bare presence so an explicit empty value can
+	// mean "no prefix" (bare domain) for this ISVC.
+	if prefix, exists := annotations[constants.IngressSharedHostPrefix]; exists {
+		resolved.SharedHostPrefix = prefix
+	}
+
+	// AdditionalIngressGateways is a JSON array of {omeIngressGateway, ingressDomain}.
+	// A malformed value is ignored (keeps the base) — the webhook validates format.
+	if additionalGateways, exists := annotations[constants.IngressAdditionalGateways]; exists && additionalGateways != "" {
+		var gateways []controllerconfig.IngressGatewaySpec
+		if err := json.Unmarshal([]byte(additionalGateways), &gateways); err == nil {
+			resolved.AdditionalIngressGateways = gateways
+		}
 	}
 
 	return resolved

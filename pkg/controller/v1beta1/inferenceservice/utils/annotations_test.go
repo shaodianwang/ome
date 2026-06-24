@@ -175,6 +175,55 @@ func TestResolveIngressConfig(t *testing.T) {
 	})
 }
 
+// TestResolveIngressConfig_GatewayHostOverrides covers the per-ISVC gateway/host
+// annotation overrides so a single ISVC can differ from the cluster default.
+func TestResolveIngressConfig_GatewayHostOverrides(t *testing.T) {
+	base := &controllerconfig.IngressConfig{
+		OmeIngressGateway: "envoy-gateway-system/int-gw",
+		IngressDomain:     "int.example.com",
+		SharedHostPrefix:  "llm",
+		PerISVCSubdomain:  false,
+	}
+
+	t.Run("gateway + perISVCSubdomain + sharedHostPrefix overrides", func(t *testing.T) {
+		got := ResolveIngressConfig(base, map[string]string{
+			constants.IngressGatewayOverride:  "envoy-gateway-system/ext-gw",
+			constants.IngressPerISVCSubdomain: "true",
+			constants.IngressSharedHostPrefix: "serving",
+		})
+		assert.Equal(t, "envoy-gateway-system/ext-gw", got.OmeIngressGateway)
+		assert.True(t, got.PerISVCSubdomain)
+		assert.Equal(t, "serving", got.SharedHostPrefix)
+		// base must be untouched
+		assert.Equal(t, "envoy-gateway-system/int-gw", base.OmeIngressGateway)
+		assert.False(t, base.PerISVCSubdomain)
+	})
+
+	t.Run("empty sharedHostPrefix annotation means no prefix", func(t *testing.T) {
+		got := ResolveIngressConfig(base, map[string]string{
+			constants.IngressSharedHostPrefix: "",
+		})
+		assert.Equal(t, "", got.SharedHostPrefix)
+	})
+
+	t.Run("additionalIngressGateways parsed from JSON", func(t *testing.T) {
+		got := ResolveIngressConfig(base, map[string]string{
+			constants.IngressAdditionalGateways: `[{"omeIngressGateway":"envoy-gateway-system/ext-gw","ingressDomain":"ext.example.com"}]`,
+		})
+		if assert.Len(t, got.AdditionalIngressGateways, 1) {
+			assert.Equal(t, "envoy-gateway-system/ext-gw", got.AdditionalIngressGateways[0].OmeIngressGateway)
+			assert.Equal(t, "ext.example.com", got.AdditionalIngressGateways[0].IngressDomain)
+		}
+	})
+
+	t.Run("malformed additionalIngressGateways is ignored", func(t *testing.T) {
+		got := ResolveIngressConfig(base, map[string]string{
+			constants.IngressAdditionalGateways: "not-json",
+		})
+		assert.Nil(t, got.AdditionalIngressGateways)
+	})
+}
+
 func TestGetDeploymentModeFromAnnotations(t *testing.T) {
 	tests := []struct {
 		name          string
