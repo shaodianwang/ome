@@ -6,6 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 OME (Open Model Engine) is a Kubernetes operator for managing and serving Large Language Models. It automates model management, runtime selection, accelerator-aware scheduling, and deployment orchestration. The API group is `ome.io`, version `v1beta1`. Built with Go 1.25 and controller-runtime v0.19.7.
 
+## Design Constraints (HARD BLOCKERS)
+
+**No hardcoded magic values baked into the binary.** Behavioral or user-facing values — hostnames, host/subdomain prefixes, domains, ports, paths, URLs, timeouts, replica/limit defaults, image refs, feature toggles, etc. — MUST be config-driven (the `inferenceservice-config` ConfigMap / `IngressConfig`-style structs, Helm values, flags, or CRD fields), NOT literals in Go. The default belongs in config (Helm `values.yaml` / GitOps), not the code; absent config should degrade gracefully, not silently inject a magic string.
+
+This is a **blocker, not a preference**: any change that introduces (or preserves) a hardcoded value like this must be called out explicitly and justified before it is accepted — do not add it silently. When you encounter an existing hardcode while working nearby, flag it. The fix pattern: add a config field (no in-code default) + supply the value via the chart/GitOps (e.g. the `sharedHostPrefix` field replacing the old hardcoded `"llm."` host prefix). This applies everywhere in the repo.
+
 ## Common Commands
 
 ### Build

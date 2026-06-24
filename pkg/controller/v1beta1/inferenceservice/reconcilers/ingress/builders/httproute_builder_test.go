@@ -789,6 +789,35 @@ func TestHTTPRouteBuilder_SharedHostScheme_Default(t *testing.T) {
 	}
 }
 
+// TestHTTPRouteBuilder_SharedHostPrefix verifies the shared-host scheme honors
+// the config-supplied SharedHostPrefix (there is no hardcoded "llm"): a custom
+// prefix is used verbatim, and an empty prefix yields the bare IngressDomain.
+func TestHTTPRouteBuilder_SharedHostPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		prefix   string
+		wantHost gatewayapiv1.Hostname
+	}{
+		{name: "custom prefix", prefix: "serving", wantHost: "serving.example.com"},
+		{name: "default llm", prefix: "llm", wantHost: "llm.example.com"},
+		{name: "empty prefix yields bare domain", prefix: "", wantHost: "example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isvc := createTestInferenceServiceHTTPRoute("test-isvc", "default")
+			setEngineReady(isvc)
+			builder := createHTTPRouteBuilder()
+			builder.ingressConfig.SharedHostPrefix = tc.prefix
+
+			result, err := builder.BuildHTTPRoute(context.Background(), isvc, TopLevelComponent)
+			require.NoError(t, err)
+			route := result.(*gatewayapiv1.HTTPRoute)
+			require.Len(t, route.Spec.Hostnames, 1)
+			assert.Equal(t, tc.wantHost, route.Spec.Hostnames[0],
+				"shared-host scheme must use the config-supplied prefix, not a hardcoded value")
+		})
+	}
+}
+
 // TestHTTPRouteBuilder_PerISVCSubdomainScheme verifies the opt-in (flag ON)
 // scheme for engine, router, decoder, and top-level routes: the route host
 // equals the ISVC's per-ISVC subdomain (the same host status.url advertises,
@@ -893,6 +922,7 @@ func createHTTPRouteBuilder() *HTTPRouteBuilder {
 			IngressDomain:     "example.com",
 			DomainTemplate:    "{{.Name}}.{{.Namespace}}.{{.IngressDomain}}",
 			OmeIngressGateway: "istio-system/gateway",
+			SharedHostPrefix:  "llm",
 		},
 		isvcConfig:    &controllerconfig.InferenceServicesConfig{},
 		domainService: services.NewDomainService(),

@@ -70,8 +70,13 @@ ome:
       disableIngressCreation: true
       enableGatewayAPI: false
       # Opt-in: serve each ISVC on its own subdomain (matching status.url)
-      # with a root path instead of the shared llm.<domain> host + path prefix.
+      # with a root path instead of the shared <prefix>.<domain> host + path prefix.
       perISVCSubdomain: false
+      # Shared-host scheme (perISVCSubdomain=false) host label:
+      # "<sharedHostPrefix>.<domain>". The OME binary has NO built-in default —
+      # this chart value is the source of truth. Override per-cluster (e.g. via
+      # GitOps) as needed; empty string => bare <domain> (no prefix).
+      sharedHostPrefix: "llm"
     nodeSelector: {}
     tolerations: []
     topologySpreadConstraints: []

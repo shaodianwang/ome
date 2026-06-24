@@ -195,7 +195,8 @@ func TestNewIngressConfig(t *testing.T) {
 					"domainTemplate": "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}",
 					"urlScheme": "https",
 					"pathTemplate": "/{{ .Namespace }}/{{ .Name }}",
-					"perISVCSubdomain": true
+					"perISVCSubdomain": true,
+					"sharedHostPrefix": "serving"
 				}`,
 			},
 			expectedError: false,
@@ -206,6 +207,7 @@ func TestNewIngressConfig(t *testing.T) {
 				assert.Equal(t, "nginx", *cfg.IngressClassName)
 				assert.Equal(t, "https", cfg.UrlScheme)
 				assert.True(t, cfg.PerISVCSubdomain)
+				assert.Equal(t, "serving", cfg.SharedHostPrefix)
 			},
 		},
 		{
@@ -237,6 +239,7 @@ func TestNewIngressConfig(t *testing.T) {
 				assert.Equal(t, DefaultIngressDomain, cfg.IngressDomain)
 				assert.Equal(t, DefaultUrlScheme, cfg.UrlScheme)
 				assert.False(t, cfg.PerISVCSubdomain, "perISVCSubdomain must default to false")
+				assert.Empty(t, cfg.SharedHostPrefix, "sharedHostPrefix must have NO in-code default (supplied via config)")
 			},
 		},
 	}

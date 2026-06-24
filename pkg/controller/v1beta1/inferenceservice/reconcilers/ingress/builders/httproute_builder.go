@@ -109,10 +109,11 @@ func toGatewayAPIDuration(seconds int64) *gatewayapiv1.Duration {
 }
 
 // gatewayHostname returns the HTTPRoute host. By default this is the shared
-// "llm.<IngressDomain>" host (all ISVCs share one host, disambiguated by the
-// path prefix). When PerISVCSubdomain is set, it returns this ISVC's own
-// subdomain by reusing the same domainService.GenerateDomainName the strategy
-// uses for status.url — so the route host and status.url can't drift.
+// "<SharedHostPrefix>.<IngressDomain>" host (all ISVCs share one host,
+// disambiguated by the path prefix); the prefix is config-supplied, not
+// hardcoded. When PerISVCSubdomain is set, it returns this ISVC's own subdomain
+// by reusing the same domainService.GenerateDomainName the strategy uses for
+// status.url — so the route host and status.url can't drift.
 func (b *HTTPRouteBuilder) gatewayHostname(isvc *v1beta1.InferenceService) (gatewayapiv1.Hostname, error) {
 	if b.ingressConfig.PerISVCSubdomain {
 		host, err := b.domainService.GenerateDomainName(isvc.Name, isvc.ObjectMeta, b.ingressConfig)
@@ -121,7 +122,12 @@ func (b *HTTPRouteBuilder) gatewayHostname(isvc *v1beta1.InferenceService) (gate
 		}
 		return gatewayapiv1.Hostname(host), nil
 	}
-	return gatewayapiv1.Hostname("llm." + b.ingressConfig.IngressDomain), nil
+	// Shared-host scheme: "<SharedHostPrefix>.<IngressDomain>". The prefix comes
+	// from config (no hardcoded value); an empty prefix yields the bare domain.
+	if b.ingressConfig.SharedHostPrefix != "" {
+		return gatewayapiv1.Hostname(b.ingressConfig.SharedHostPrefix + "." + b.ingressConfig.IngressDomain), nil
+	}
+	return gatewayapiv1.Hostname(b.ingressConfig.IngressDomain), nil
 }
 
 // pathPrefix returns the route's PathPrefix match. By default this is

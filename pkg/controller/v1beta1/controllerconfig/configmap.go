@@ -58,9 +58,16 @@ type IngressConfig struct {
 	// PerISVCSubdomain opts into a per-ISVC subdomain ingress scheme:
 	// each ISVC is reached at its own host (matching status.url, rendered
 	// from DomainTemplate) with a root path, instead of the default shared
-	// "llm.<IngressDomain>" host plus a "/<namespace>/<service>/" path
-	// prefix. Default false preserves the shared-host scheme.
+	// "<SharedHostPrefix>.<IngressDomain>" host plus a "/<namespace>/<service>/"
+	// path prefix. Default false preserves the shared-host scheme.
 	PerISVCSubdomain bool `json:"perISVCSubdomain,omitempty"`
+	// SharedHostPrefix is the subdomain label prepended to IngressDomain in the
+	// shared-host scheme (PerISVCSubdomain=false): "<SharedHostPrefix>.<IngressDomain>".
+	// There is intentionally NO in-code default — the value is supplied via the
+	// inferenceservice-config ConfigMap (set by the Helm chart / GitOps), so the
+	// host label is never a hardcoded magic string. Empty yields the bare
+	// IngressDomain (no prefix).
+	SharedHostPrefix string `json:"sharedHostPrefix,omitempty"`
 }
 
 // +kubebuilder:object:generate=false
