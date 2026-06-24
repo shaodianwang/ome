@@ -3,7 +3,6 @@
 package scheme
 
 import (
-	omev1alpha1 "github.com/ome-projects/ome/pkg/apis/ome/v1alpha1"
 	omev1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -16,7 +15,6 @@ var Scheme = runtime.NewScheme()
 var Codecs = serializer.NewCodecFactory(Scheme)
 var ParameterCodec = runtime.NewParameterCodec(Scheme)
 var localSchemeBuilder = runtime.SchemeBuilder{
-	omev1alpha1.AddToScheme,
 	omev1beta1.AddToScheme,
 }
 

@@ -3,7 +3,6 @@
 package fake
 
 import (
-	omev1alpha1 "github.com/ome-projects/ome/pkg/apis/ome/v1alpha1"
 	omev1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -16,7 +15,6 @@ var scheme = runtime.NewScheme()
 var codecs = serializer.NewCodecFactory(scheme)
 
 var localSchemeBuilder = runtime.SchemeBuilder{
-	omev1alpha1.AddToScheme,
 	omev1beta1.AddToScheme,
 }
 

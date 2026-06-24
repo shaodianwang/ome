@@ -4,8 +4,6 @@ package fake
 
 import (
 	clientset "github.com/ome-projects/ome/pkg/client/clientset/versioned"
-	omev1alpha1 "github.com/ome-projects/ome/pkg/client/clientset/versioned/typed/ome/v1alpha1"
-	fakeomev1alpha1 "github.com/ome-projects/ome/pkg/client/clientset/versioned/typed/ome/v1alpha1/fake"
 	omev1beta1 "github.com/ome-projects/ome/pkg/client/clientset/versioned/typed/ome/v1beta1"
 	fakeomev1beta1 "github.com/ome-projects/ome/pkg/client/clientset/versioned/typed/ome/v1beta1/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -73,11 +71,6 @@ var (
 	_ clientset.Interface = &Clientset{}
 	_ testing.FakeClient  = &Clientset{}
 )
-
-// OmeV1alpha1 retrieves the OmeV1alpha1Client
-func (c *Clientset) OmeV1alpha1() omev1alpha1.OmeV1alpha1Interface {
-	return &fakeomev1alpha1.FakeOmeV1alpha1{Fake: &c.Fake}
-}
 
 // OmeV1beta1 retrieves the OmeV1beta1Client
 func (c *Clientset) OmeV1beta1() omev1beta1.OmeV1beta1Interface {
