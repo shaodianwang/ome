@@ -248,14 +248,15 @@ podMonitor:
   relabelings: []
   metricRelabelings: []
 
-# Optional single-replica Prometheus bundled by this chart so KEDA
-# autoscaling triggers (OEP-0013) have a metrics source out of the
-# box. Disable when your cluster already runs a Prometheus that
-# scrapes OME pods — point KEDA at that one instead. NOT intended
-# for long-term observability or alerting; retention is deliberately
-# short and storage is emptyDir.
+# Single-replica Prometheus bundled by this chart so KEDA autoscaling
+# triggers (OEP-0013) and canary metric-analysis (OEP-0015.2) have a metrics
+# source out of the box — it is the default source the canary analysis gate
+# queries (http://ome-prometheus.<ns>.svc:9090). Disable when your cluster
+# already runs a Prometheus that scrapes OME pods, and point the analysis
+# source / KEDA at that one instead. NOT intended for long-term observability
+# or alerting; retention is deliberately short and storage is emptyDir.
 prometheus:
-  enabled: false
+  enabled: true
   # Retention window. Short by design — this Prometheus exists for
   # autoscaling input, not long-term observability. Keeps emptyDir
   # usage bounded.

@@ -449,9 +449,14 @@ def _bumped(ctx):
     return members or ({"engine"} & ctx["configured"])
 
 
-def _bump_rev(ctx, bumped, val=TRIGGER_VAL):
-    patch = {"spec": {c: {"annotations": {TRIGGER_ANNO: val, "ome.io/deploymentMode": "OMENative"}}
-                      for c in sorted(bumped)}}
+def _bump_rev(ctx, bumped, val=TRIGGER_VAL, extra=None):
+    # extra: additional pod annotations set on the bumped components (analysis
+    # cases use it to carry the canary revision's health, e.g. perm.test/error-rate
+    # — one patch both rolls the revision AND flips the canary pods' emitted metric).
+    anns = {TRIGGER_ANNO: val, "ome.io/deploymentMode": "OMENative"}
+    if extra:
+        anns.update(extra)
+    patch = {"spec": {c: {"annotations": dict(anns)} for c in sorted(bumped)}}
     rr = kubectl("-n", NS, "patch", "isvc", ctx["case_id"], "--type=merge", "-p", json.dumps(patch))
     ctx["trigger_ts"] = time.time()
     return rr.returncode == 0
@@ -905,6 +910,32 @@ def _canary(case_id, yaml_file, desc, hdr):
     cinfo = ctx["info"].get("canary") or {}
     policy = str(hdr.get("canary") or cinfo.get("policy") or "auto").lower()
     do_rollback = bool(hdr.get("rollback"))
+    # Analysis (OEP-0015.2): the gate is a Prometheus query, not a timer/promote.
+    # `analysis=pass|breach|inconclusive` is the harness intent — we set the canary
+    # revision's health at the bump (stable stays healthy at 0.0). pass < 0.05
+    # threshold, breach >> it, inconclusive emits no metric (-> no data).
+    analysis_mode = str(hdr.get("analysis") or "").lower() or None
+    on_inconclusive = str(hdr.get("oninconclusive") or "hold").lower()
+    # health = what to set on the canary pods at the bump. Defaults to the analysis
+    # intent, but a case can decouple them (e.g. multi-metric AND: the pods are
+    # healthy yet a STRICT second threshold breaches, so health=pass but the
+    # expected terminal is RolledBack).
+    health = str(hdr.get("health") or analysis_mode or "").lower()
+    analysis_extra = {
+        "pass":         {"perm.test/error-rate": "0.01", "perm.test/emit": "true"},
+        "breach":       {"perm.test/error-rate": "0.9", "perm.test/emit": "true"},
+        "inconclusive": {"perm.test/error-rate": "0.0", "perm.test/emit": "false"},
+    }.get(health)
+    # Expected terminal phase. breach + inconclusive/Rollback drain to stable;
+    # inconclusive/Hold parks Failed (stable keeps serving); pass promotes.
+    if analysis_mode == "breach" or (analysis_mode == "inconclusive" and on_inconclusive == "rollback"):
+        expect = "RolledBack"
+    elif analysis_mode == "inconclusive":
+        expect = "Failed"
+    elif analysis_mode == "pass":
+        expect = "Stable"
+    else:
+        expect = "RolledBack" if do_rollback else "Stable"
     nsteps = len(cinfo.get("steps") or []) or 2
     primary = _canary_primary(ctx)
     if not primary:
@@ -918,13 +949,19 @@ def _canary(case_id, yaml_file, desc, hdr):
     group = (set(ctx["info"].get("members") or []) & ctx["configured"]) or {primary}
     print(f"  Phase 2: canary policy={policy} steps={nsteps} primary={primary} bump={sorted(group)}"
           + ("  +rollback" if do_rollback else ""))
-    if not _bump_rev(ctx, group):
+    if not _bump_rev(ctx, group, extra=analysis_extra):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed")
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * N[primary] * ctx["pods_per_inst"][primary] + 120)
+    if analysis_mode:
+        # Analysis is paced by the bundled Prometheus scrape (~15s) plus each
+        # step's initialDelay + failureLimit×interval (+ stall timeout for the
+        # Hold path). Give it generous extra headroom over the bare rollout.
+        budget = min(MAX_BUDGET_S, budget + 300)
     print(f"  Phase 3: driving + observing the canary (≤{budget}s)")
 
     phases, traffic_by_step = set(), {}
     canary_hash = None
+    saw_metrics = False   # analysis wrote status.canary.metricResults at least once
     rollback_set = did_promote = False
     promoted_step = -1  # highest step index already promoted (multi-step plans pause more than once)
     promote_rejected = None
@@ -944,6 +981,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         if phase:
             phases.add(phase)
         canary_hash = canary_hash or can.get("canaryRevisionHash") or None
+        if can.get("metricResults"):
+            saw_metrics = True
         step = can.get("currentStep")
         if step is not None:
             for t in (comp.get("traffic") or []):
@@ -983,10 +1022,14 @@ def _canary(case_id, yaml_file, desc, hdr):
         # old-pod drain finishes asynchronously a few seconds later. Wait for the
         # pods to actually settle (full roll, or 0 canary for a rollback) so we
         # don't snapshot mid-drain.
-        target_phase = "RolledBack" if do_rollback else "Stable"
         cur_new, _ = _inst_rev_split(ctx, primary)
-        pods_settled = (cur_new == 0) if do_rollback else (cur_new == N[primary])
-        if phase == target_phase and pods_settled:
+        if expect == "RolledBack":
+            pods_settled = (cur_new == 0)
+        elif expect == "Failed":
+            pods_settled = (phase == "Failed")   # parked at the failed step; pod count is whatever it reached
+        else:                                    # Stable
+            pods_settled = (cur_new == N[primary])
+        if phase == expect and pods_settled:
             stable = stable or now
             if now - stable >= STABILITY_S:
                 state = "CONVERGED"
@@ -1005,7 +1048,7 @@ def _canary(case_id, yaml_file, desc, hdr):
         else:
             verdict = "FAIL"; notes.append(msg_bad); checks.append(f"  ✗ {msg_bad}")
 
-    want = "RolledBack" if do_rollback else "Stable"
+    want = expect
     good(state == "CONVERGED",
          f"reached {want} in {ctx.get('converged_at')}s",
          f"did not reach {want} (state={state}, phases={sorted(phases)})")
@@ -1018,6 +1061,34 @@ def _canary(case_id, yaml_file, desc, hdr):
          "observed an active canary phase (Canarying/Paused)",
          f"never observed an active canary phase (jumped straight to terminal); saw {sorted(phases)}")
     new, _old = _inst_rev_split(ctx, primary)
+
+    if analysis_mode:
+        # Analysis verdict: the metric gate, not a timer/promote, drove the outcome.
+        # (A manual promote intentionally short-circuits sampling, so skip the
+        # "sampled" assertion there — reaching Stable despite a breaching canary is
+        # itself the proof the override won.)
+        if policy != "manual":
+            good(saw_metrics, "analysis sampled (status.canary.metricResults recorded)",
+                 "no metricResults ever recorded — analysis never sampled")
+        if expect == "Stable":
+            good(new == N[primary], f"{primary} promoted to canary after passing analysis ({new}/{N[primary]})",
+                 f"{primary} not fully on canary after analysis ({new}/{N[primary]})")
+            fc = (fetch_status(case_id).get("components", {}) or {}).get(primary, {}) or {}
+            canary_pct = next((t.get("percent", 0) for t in (fc.get("traffic") or []) if t.get("latestRevision")), 0)
+            good(canary_pct == 100, "canary revision carries 100% traffic after passing analysis",
+                 f"canary traffic at convergence is {canary_pct}% (want 100)")
+        elif expect == "RolledBack":
+            good(new == 0, f"{primary} drained to stable after analysis rollback (0 canary)",
+                 f"{primary} still has {new} canary Instances after rollback")
+            good(bool(rejected), f"rejected revision recorded ({rejected})", "rolledBackRevisionHash not recorded")
+            good(not rollback_set, "rollback was analysis-initiated (no manual rollback annotation)",
+                 "rollback annotation was set by the harness (not analysis-initiated)")
+        elif expect == "Failed":
+            good("Failed" in phases, "escalated to Failed on the inconclusive stall",
+                 f"never observed Failed; saw {sorted(phases)}")
+            good(not rejected, "did not roll back (inconclusive Hold parks Failed; stable keeps serving)",
+                 f"unexpectedly rolled back ({rejected})")
+        return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
     if do_rollback:
         # Rolled back: drained back to stable (0 canary Instances), the rejected

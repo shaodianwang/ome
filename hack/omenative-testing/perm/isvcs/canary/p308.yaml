@@ -14,7 +14,6 @@ spec:
     groups:
         - components: [engine]
           canary:
-            promotion: Auto
             steps:
               - { capacity: "25%", traffic: 25, pause: { duration: "20s" } }
               - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }

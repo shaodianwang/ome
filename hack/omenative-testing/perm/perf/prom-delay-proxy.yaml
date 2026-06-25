@@ -1,0 +1,41 @@
+# Delay-proxy in front of the bundled ome-prometheus, for perf/hung_prom.py.
+# Runs the canary-metrics image in proxy mode: forwards to ome-prometheus after a
+# 30s delay (>> the analysis QueryTimeout, default 5s), so every analysis query
+# against it times out. The async sampler must keep the single reconcile worker
+# free regardless. Apply with `-n $OME_TEST_NS`. Assumes OME (+ the bundled
+# prometheus) is installed in namespace "ome" (the chart default) — adjust
+# PROXY_TARGET otherwise.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prom-delay-proxy
+  labels: { ome-coordtest/managed: "true" }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: prom-delay-proxy } }
+  template:
+    metadata: { labels: { app: prom-delay-proxy } }
+    spec:
+      nodeSelector: { kubernetes.io/arch: amd64 }
+      containers:
+        - name: proxy
+          image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/canary-metrics:latest
+          env:
+            - { name: PROXY_TARGET,   value: "http://ome-prometheus.ome.svc:9090" }
+            - { name: PROXY_DELAY_MS, value: "30000" }
+            - { name: PORT,           value: "8080" }
+          ports: [ { containerPort: 8080 } ]
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits:   { cpu: 200m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prom-delay-proxy
+  labels: { ome-coordtest/managed: "true" }
+spec:
+  selector: { app: prom-delay-proxy }
+  # :9090 so a canary's prometheus.serverAddress
+  # (http://prom-delay-proxy.<ns>.svc:9090) looks like a normal Prometheus.
+  ports: [ { port: 9090, targetPort: 8080 } ]

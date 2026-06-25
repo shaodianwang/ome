@@ -1,0 +1,18 @@
+# p326: REJECT analysis failureLimit=0 (Minimum=1)  mode=canary expect=reject Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p326 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+  rollout:
+    groups:
+        # failureLimit below the CRD Minimum=1 -> denied.
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "100%", traffic: 100, analysis: { interval: "20s", failureLimit: 0, metrics: [ { name: m, query: "vector(1)", operator: LTE, threshold: "0.5" } ] } }

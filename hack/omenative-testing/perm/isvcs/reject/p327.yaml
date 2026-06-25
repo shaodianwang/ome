@@ -1,0 +1,18 @@
+# p327: REJECT analysis bad operator (enum)  mode=canary expect=reject Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p327 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+  rollout:
+    groups:
+        # operator outside the {LT,LTE,GT,GTE} enum -> CRD denies.
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "100%", traffic: 100, analysis: { interval: "20s", failureLimit: 1, metrics: [ { name: m, query: "vector(1)", operator: EQ, threshold: "0.5" } ] } }

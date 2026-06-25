@@ -10,6 +10,11 @@ scale behavior. Targets whatever cluster your kubeconfig points at — override 
 > `runtime/` applied to `$OME_TEST_NS` (`kubectl apply -f runtime/` — the noop
 > ClusterServingRuntime/ClusterBaseModel + PVC/seed Job the cases reference).
 > `batch.py` applies them idempotently on each run.
+>
+> **Canary-analysis cases (`analysis=…`) additionally need:** the bundled
+> `ome-prometheus` enabled in the cluster (chart `prometheus.enabled`, now the
+> default) scraping `$OME_TEST_NS`, and the `canary-metrics` image (built +
+> mirrored to prod ECR by the BuildKite pipeline) pullable by the cluster.
 
 The expansion roadmap (P1–P4, the feature taxonomy, deferred autoscaling) lives
 in [`../DESIGN.md`](../DESIGN.md). This file is the how-to-run reference.
@@ -24,6 +29,7 @@ perm/
 ├── runtime/
 │   ├── csr.yaml            — single-pod ClusterServingRuntime (nginx + a startup sleep)
 │   ├── csr-multinode.yaml  — gang ClusterServingRuntime (leader + N workers, LeaderWorkerSet)
+│   ├── csr-metrics.yaml    — metrics-emitting ClusterServingRuntime (canary-analysis cases; Downward-API health)
 │   ├── cbm.yaml            — ClusterBaseModel (noop format, PVC-backed)
 │   └── pvc-and-seed.yaml   — 1Mi PVC + seed Job (writes config.json so the CBM validates)
 ├── isvcs/                 — generated case YAMLs (committed; `topo=` in each header)
@@ -135,6 +141,47 @@ traffic weights stepping to 100 on the canary revision) and **per-revision pod
 capacity** (the primary fully rolls to the canary revision). Gateway data-plane
 weighting is a downstream consumer (per-revision Services + weighted HTTPRoute)
 and is intentionally out of scope here.
+
+### Canary analysis (`analysis=…`, OEP-0015.2)
+
+`isvcs/canary/` p330–p343 gate steps on a **Prometheus query** instead of a
+timer/promote. They run the metrics workload (`runtime/csr-metrics.yaml`, image
+`canary-metrics`) and use the bundled `ome-prometheus` as the analysis source.
+
+The harness sets each canary's health at the revision bump via Downward-API pod
+annotations (`perm.test/error-rate`, `perm.test/emit`), so one bump both rolls
+the revision and makes the canary pods PASS, BREACH, or read INCONCLUSIVE. The
+header `analysis=pass|breach|inconclusive` (+ `failurelimit`, `oninconclusive`)
+selects the intent and the expected terminal:
+
+| `analysis` | `oninconclusive` | expected terminal |
+|------------|------------------|-------------------|
+| pass | — | promote → Stable |
+| breach | — | auto-rollback → RolledBack (rejected revision recorded) |
+| inconclusive | Hold | escalate → Failed (stable keeps serving, no rollback) |
+| inconclusive | Rollback | auto-rollback → RolledBack |
+
+The query is `max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})`
+— MAX picks the worst (canary) pod, since the bundled Prometheus emits no
+revision label. Analysis-validation reject cases live in `isvcs/reject/`
+(p324–p328). Run them like any case: `python3 batch.py --conc 4 p330-p343`.
+
+### Scale & hung-Prometheus (`perf/`)
+
+Two real-cluster perf harnesses for the async sampler:
+
+- `perf/scale.py [K]` — launches K identical PASS analysis canaries at once and
+  reports how many converge + p50/p95/max convergence. Run escalating K
+  (10/20/30…) to find where the controller (`MaxConcurrentReconciles=1`) falls
+  behind — the async sampler should keep analysis canaries at parity with plain
+  rollouts. `python3 perf/scale.py 20`
+- `perf/hung_prom.py [N]` — deploys a 30s delay-proxy in front of Prometheus, N
+  analysis canaries pointed at it (each churns inconclusive, generating sustained
+  background queries), and one control canary on a normal source. Asserts the
+  control still reaches Stable within budget — i.e. the hung source did **not**
+  stall the reconcile worker. `python3 perf/hung_prom.py 5`
+
+Both assume OME (+ bundled prometheus) in ns `ome` (see `perf/prom-delay-proxy.yaml`).
 
 ### Negative cases (`expect=reject`)
 

@@ -28,7 +28,6 @@ spec:
     groups:
         - components: [engine, decoder, router]
           canary:
-            promotion: Auto
             steps:
               - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
               - { capacity: "100%", traffic: 100 }

@@ -66,6 +66,9 @@ COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
 IMAGES = [
     ("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile"),
     ("ome-agent", "ome-agent", "dockerfiles/ome-agent.Dockerfile"),
+    # CPU-only metrics workload for the OMENative canary-analysis e2e tests
+    # (hack/omenative-testing). Pulled by runtime/csr-metrics.yaml.
+    ("canary-metrics", "canary-metrics", "dockerfiles/canary-metrics.Dockerfile"),
 ]
 
 CHARTS = ["ome-crd", "ome-resources", "ome-isvc"]

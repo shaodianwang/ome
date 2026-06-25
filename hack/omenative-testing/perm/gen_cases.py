@@ -89,8 +89,10 @@ def strat_ceil(strat, n):
     return n + 1 if strat == "SurgeThenDrain" else n
 
 
-def comp(name, n, w=0, life=None):
-    return {"comp": name, "n": n, "w": w, "life": life if life is not None else lifecycle()}
+def comp(name, n, w=0, life=None, ann=None):
+    # ann: extra pod annotations merged after ome.io/deploymentMode (analysis
+    # cases use it for the Downward-API health knobs + prometheus.io/scrape).
+    return {"comp": name, "n": n, "w": w, "life": life if life is not None else lifecycle(), "ann": ann}
 
 
 def _group(components, *, blue_green=False, rolling=None, maintain_ratio=None,
@@ -167,15 +169,27 @@ def coord_for(kind, comps=("engine", "decoder")):
     raise ValueError(kind)
 
 
-def render(name, comps, coord=None):
-    runtime = CSR_MN if any(c["w"] > 0 for c in comps) else CSR
+def render(name, comps, coord=None, runtime=None, meta_ann=None):
+    if runtime is None:
+        runtime = CSR_MN if any(c["w"] > 0 for c in comps) else CSR
+    if meta_ann:
+        items = ", ".join(f"{k}: {flow(v)}" for k, v in meta_ann.items())
+        meta_line = f"metadata: {{ name: {name}, annotations: {{ {items} }} }}"
+    else:
+        meta_line = f"metadata: {{ name: {name} }}"
     out = ["apiVersion: ome.io/v1beta1", "kind: InferenceService",
-           f"metadata: {{ name: {name} }}", "spec:",
+           meta_line, "spec:",
            f"  model:   {{ apiGroup: ome.io, kind: ClusterBaseModel,      name: {CBM} }}",
            f"  runtime: {{ apiGroup: ome.io, kind: ClusterServingRuntime, name: {runtime}, autoSync: true }}"]
     for c in comps:
+        # Keep the default rendering byte-identical (no churn across existing cases);
+        # only merge extra annotations when a case sets them.
+        if c.get("ann"):
+            ann_str = flow({"ome.io/deploymentMode": "OMENative", **c["ann"]})
+        else:
+            ann_str = "{ ome.io/deploymentMode: OMENative }"
         out += [f"  {c['comp']}:", f"    minReplicas: {c['n']}", f"    maxReplicas: {c['n']}",
-                "    annotations: { ome.io/deploymentMode: OMENative }"]
+                f"    annotations: {ann_str}"]
         if c["w"] > 0:
             out += ["    leader: {}", f"    worker: {{ size: {c['w']} }}"]
         if c["life"]:
@@ -219,7 +233,9 @@ def ceils(topo, ce, n=N, nd=None, surge_d=0, surge_r=0):
 
 
 HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r", "to_e", "to_d", "to_r",
-             "partition", "mig", "restart", "kill", "inst", "canary", "rollback", "co", "topo", "infeasible"]
+             "partition", "mig", "restart", "kill", "inst", "canary", "rollback",
+             "analysis", "oninconclusive", "failurelimit", "expect", "reason",
+             "co", "topo", "infeasible"]
 
 
 def header(name, desc, kv):
@@ -232,7 +248,7 @@ CASES = []
 COUNTERS = {"migration": 100, "restart": 130, "partition": 160, "scale": 190, "edge": 220, "canary": 300}
 
 
-def C(folder, desc, comps, coord=None, **kv):
+def C(folder, desc, comps, coord=None, runtime=None, meta_ann=None, **kv):
     # RollingUpdate.Partition is plumbed through the CRD/conversion but NOT
     # enforced by the OMENative rollout engine (it never holds Instances < k) —
     # a known controller gap. Mark the whole folder notimpl so its FAILs record
@@ -242,7 +258,7 @@ def C(folder, desc, comps, coord=None, **kv):
         kv.setdefault("notimpl", 1)
     name = f"p{COUNTERS[folder]}"
     COUNTERS[folder] += 1
-    CASES.append((folder, name, desc, comps, coord, kv))
+    CASES.append((folder, name, desc, comps, coord, kv, {"runtime": runtime, "meta_ann": meta_ann}))
 
 
 RP = {"None": "None", "RecreateInstance": "RecreateInstanceOnPodRestart"}
@@ -375,19 +391,47 @@ for topo in TOPOS:                            # X-2 re-bump (mode=rebump) across
 CANARY_PAUSE = {"auto": {"duration": "20s"}, "manual": {}}
 
 
-def canary_block(policy, steps, components=("engine",)):
-    # OEP-0017 (v2): canary is a per-group progression under spec.rollout.groups.
-    # newCapacity -> capacity, trafficWeight -> traffic, oldCapacity dropped,
-    # promotionPolicy -> promotion.
-    lines = ["  rollout:", "    groups:",
-             f"        - components: [{', '.join(components)}]",
-             "          canary:",
-             f"            promotion: {policy}", "            steps:"]
-    for s in steps:
+def _render_canary_step(s, ind="              "):
+    """Render one step as YAML line(s). Simple steps stay flow ({...}); analysis
+    steps render block style — the analysis subtree + metrics list don't fit a
+    one-line flow mapping. Per-step gate is presence-based (the API dropped the
+    top-level promotion enum): pause+duration = timed, bare pause = manual,
+    analysis = metric-gated, neither = immediate."""
+    if "analysis" not in s:
         item = f'capacity: "{s["nc"]}", traffic: {s["tw"]}'
         if "pause" in s:
             item += f', pause: {flow(s["pause"])}'
-        lines.append(f"              - {{ {item} }}")
+        return [f"{ind}- {{ {item} }}"]
+    a = s["analysis"]
+    out = [f'{ind}- capacity: "{s["nc"]}"', f"{ind}  traffic: {s['tw']}"]
+    if "pause" in s:
+        out.append(f"{ind}  pause: {flow(s['pause'])}")
+    out.append(f"{ind}  analysis:")
+    ai = f"{ind}    "
+    out.append(f'{ai}interval: "{a["interval"]}"')
+    out.append(f"{ai}failureLimit: {a['failureLimit']}")
+    if a.get("initialDelay"):
+        out.append(f'{ai}initialDelay: "{a["initialDelay"]}"')
+    if a.get("onInconclusive"):
+        out.append(f"{ai}onInconclusive: {a['onInconclusive']}")
+    out.append(f"{ai}metrics:")
+    for m in a.get("metrics", []):
+        out.append(f"{ai}  - name: {m['name']}")
+        out.append(f"{ai}    query: '{m['query']}'")     # single-quoted: PromQL {} + {{.Tmpl}} stay literal
+        out.append(f"{ai}    operator: {m['operator']}")
+        out.append(f'{ai}    threshold: "{m["threshold"]}"')
+    return out
+
+
+def canary_block(steps, components=("engine",), prometheus=None):
+    lines = ["  rollout:", "    groups:",
+             f"        - components: [{', '.join(components)}]",
+             "          canary:"]
+    if prometheus is not None:
+        lines.append(f"            prometheus: {flow(prometheus)}")
+    lines.append("            steps:")
+    for s in steps:
+        lines += _render_canary_step(s)
     return "\n".join(lines)
 
 
@@ -418,7 +462,7 @@ def Ccanary(desc, topo, policy, steps, **extra):
     canary_comps = [c["comp"] for c in comps]
     C("canary", f"canary {topo} {policy} {desc}",
       comps,
-      coord=canary_block(policy.capitalize(), steps, components=canary_comps),
+      coord=canary_block(steps, components=canary_comps),
       mode="canary", **nds(topo), **canary_ceils(topo),
       topo=topo, canary=policy, co="none", **extra)
 
@@ -438,6 +482,163 @@ Ccanary("rollback to stable", "engine", "manual", canary_steps("manual", ("50%",
 Ccanary("rollback to stable", "pd", "manual", canary_steps("manual", ("50%", 50), ("100%", 100)), rollback=1)
 
 
+# Analysis cases live at p330+ to stay clear of the hand-written reject/ cases
+# (p320-323) — case-ids are globally unique across folders.
+COUNTERS["canary"] = 330
+
+# ── canary/ ANALYSIS (mode=canary + analysis=…; OEP-0015.2 metric gate) ────────
+# These run the metrics workload (csr-metrics) instead of nginx and gate steps on
+# a Prometheus query. run.py sets each canary's health at bump time via the
+# Downward-API annotations (perm.test/error-rate, perm.test/emit), so one bump
+# both rolls the revision and makes the canary pods PASS / BREACH / read
+# INCONCLUSIVE. The query reduces a vector to MAX (worst pod), so it catches the
+# canary pod even at a partial step; the bundled Prometheus emits no revision
+# label, hence inferenceservice+component scoping only.
+CSR_METRICS = "ome-coordtest-metrics"
+ERR_QUERY = 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+# Downward-API health knobs (stable starts healthy) + prometheus scrape opt-in.
+METRICS_ANN = {"perm.test/error-rate": "0.0", "perm.test/emit": "true",
+               "prometheus.io/scrape": "true", "prometheus.io/port": "8080",
+               "prometheus.io/path": "/metrics"}
+
+
+def err_metric(threshold="0.05", op="LTE", name="error_rate", query=None):
+    return {"name": name, "query": query or ERR_QUERY, "operator": op, "threshold": threshold}
+
+
+def analysis_spec(failure_limit=1, interval="20s", initial_delay="20s",
+                  on_inconclusive=None, metrics=None):
+    a = {"interval": interval, "failureLimit": failure_limit,
+         "metrics": metrics if metrics is not None else [err_metric()]}
+    if initial_delay:
+        a["initialDelay"] = initial_delay
+    if on_inconclusive:
+        a["onInconclusive"] = on_inconclusive
+    return a
+
+
+def astep(nc, tw, a=None, pause=None):
+    s = {"nc": nc, "tw": tw}
+    if pause is not None:
+        s["pause"] = pause
+    if a is not None:
+        s["analysis"] = a
+    return s
+
+
+def Canalysis(desc, topo, analysis_mode, steps, *, n=N, health=None, policy="auto",
+              prometheus=None, ready_timeout=None, decay=None, **extra):
+    """Emit a metric-gated canary case. analysis_mode (pass|breach|inconclusive|None)
+    is the EXPECTED-terminal intent — run.py asserts it. `health` decouples what the
+    canary pods emit (defaults to analysis_mode); analysis_mode=None makes it a
+    plain rollback/interaction case (no analysis= header). failurelimit/oninconclusive
+    are derived from the gating analysis step so the spec and harness stay in sync."""
+    comps = comps_for(topo, strat_life("SurgeThenDrain"), n=n)
+    ann = dict(METRICS_ANN)
+    if decay:
+        ann["perm.test/decay"] = decay
+    for c in comps:
+        c["ann"] = dict(ann)
+    canary_comps = [c["comp"] for c in comps]
+    cl = ceils(topo, n + 1)
+    if is_pd(topo):
+        cl["ceil_d"] = n + 1
+        cl["ceil_r"] = NR + 1
+    gate = next((s["analysis"] for s in reversed(steps) if "analysis" in s), {})
+    kv = dict(mode="canary", **nds(topo, n), **cl, topo=topo, canary=policy,
+              failurelimit=gate.get("failureLimit", 1), co="none", **extra)
+    if analysis_mode:
+        kv["analysis"] = analysis_mode
+    if health:
+        kv["health"] = health
+    if gate.get("onInconclusive"):
+        kv["oninconclusive"] = gate["onInconclusive"].lower()
+    meta_ann = {"ome.io/rollout-ready-timeout": ready_timeout} if ready_timeout else None
+    C("canary", f"canary-analysis {topo} {desc}", comps,
+      coord=canary_block(steps, components=canary_comps, prometheus=prometheus),
+      runtime=CSR_METRICS, meta_ann=meta_ann, **kv)
+
+
+def _gate2(a):
+    """2-step plan: validate the 50% canary via analysis a, then cut to 100%."""
+    return [astep("50%", 50, a), astep("100%", 100)]
+
+
+# A. Verdict core × topology --------------------------------------------------
+for topo in TOPOS:
+    Canalysis("pass->promote", topo, "pass", _gate2(analysis_spec(failure_limit=1)))
+for topo in ["engine", "pd"]:
+    Canalysis("breach->rollback fl=1", topo, "breach", _gate2(analysis_spec(failure_limit=1)))
+# Cumulative per-step budget: 3 breaching samples before rollback.
+Canalysis("breach->rollback fl=3", "engine", "breach", _gate2(analysis_spec(failure_limit=3)))
+# Inconclusive (canary emits no metric): Hold escalates to Failed past the
+# (shortened) stall timeout; Rollback fails safe immediately.
+Canalysis("inconclusive->Failed", "engine", "inconclusive",
+          _gate2(analysis_spec(failure_limit=1, on_inconclusive="Hold")), ready_timeout="60s")
+Canalysis("inconclusive->rollback", "engine", "inconclusive",
+          _gate2(analysis_spec(failure_limit=1, on_inconclusive="Rollback")))
+
+# B. Step-plan shapes (engine) ------------------------------------------------
+Canalysis("single-step gate 100", "engine", "pass", [astep("100%", 100, analysis_spec())])
+Canalysis("3-step analysis each", "engine", "pass",
+          [astep("25%", 25, analysis_spec()), astep("50%", 50, analysis_spec()), astep("100%", 100)])
+Canalysis("breach at step0 25%", "engine", "breach",
+          [astep("25%", 25, analysis_spec(failure_limit=1)), astep("50%", 50), astep("100%", 100)])
+Canalysis("capacity-ahead then gate", "engine", "pass",
+          [astep("100%", 0, analysis_spec()), astep("100%", 100)])
+Canalysis("mixed analysis+timed", "engine", "pass",
+          [astep("50%", 50, analysis_spec()), astep("75%", 75, pause={"duration": "15s"}), astep("100%", 100)])
+
+# C. Metric semantics ---------------------------------------------------------
+# Warm-up: a long initialDelay; healthy -> promote (no early sampling).
+Canalysis("initialDelay warmup", "engine", "pass", _gate2(analysis_spec(initial_delay="40s")))
+# Multi-metric AND: a strict second threshold fails even though the pods are
+# healthy (health=pass) -> the AND rolls back. Decoupled health vs terminal.
+Canalysis("multi-metric AND strict-fail", "engine", "breach", health="pass",
+          steps=_gate2(analysis_spec(failure_limit=1,
+                                     metrics=[err_metric(threshold="0.05"),
+                                              err_metric(name="strict", threshold="0.001")])))
+# Multi-metric AND: both lenient, healthy -> promote.
+Canalysis("multi-metric AND pass", "engine", "pass",
+          _gate2(analysis_spec(metrics=[err_metric(threshold="0.05"),
+                                        err_metric(name="loose", threshold="0.5")])))
+# GTE on a success-rate expression (higher is better): canary drops below 0.95.
+SUCC_QUERY = '1 - max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+Canalysis("operator GTE success breach", "engine", "breach",
+          _gate2(analysis_spec(failure_limit=1,
+                               metrics=[err_metric(name="success", query=SUCC_QUERY, op="GTE", threshold="0.95")])))
+Canalysis("operator GTE success pass", "engine", "pass",
+          _gate2(analysis_spec(metrics=[err_metric(name="success", query=SUCC_QUERY, op="GTE", threshold="0.95")])))
+# Transient breach then recovery: a few breaches (below the budget) then the
+# error-rate decays to 0 -> passes -> promote (budget non-exhaustion).
+Canalysis("transient breach recovers", "engine", "pass", health="breach", decay="45s",
+          steps=_gate2(analysis_spec(failure_limit=5, interval="15s")))
+# Manual promote overrides a pending (breaching) analysis bake -> promote.
+Canalysis("manual promote overrides analysis", "engine", "pass", health="breach", policy="manual",
+          steps=_gate2(analysis_spec(failure_limit=5)))
+
+# D. Source config ------------------------------------------------------------
+# Explicit serverAddress (assumes OME installed in ns "ome" — the chart default).
+Canalysis("explicit prometheus source", "engine", "pass",
+          _gate2(analysis_spec()), prometheus={"serverAddress": "http://ome-prometheus.ome.svc:9090"})
+# Custom headers on the default source (X-Scope-OrgID); the bundled prom ignores
+# it but the plumbing must not break -> promote.
+Canalysis("prometheus custom headers", "engine", "pass",
+          _gate2(analysis_spec()), prometheus={"headers": {"X-Scope-OrgID": "perm-test"}})
+
+# E. Interactions -------------------------------------------------------------
+# Manual rollback annotation wins over a healthy in-progress analysis canary.
+Canalysis("manual rollback during analysis", "engine", None, _gate2(analysis_spec()), rollback=1)
+
+# F. Fleet size ---------------------------------------------------------------
+# Large fleet: finer multi-step partitions + a bigger metric vector to MAX over.
+Canalysis("large fleet N=12 multi-step", "engine", "pass", n=12,
+          steps=[astep("25%", 25, analysis_spec()), astep("50%", 50, analysis_spec()),
+                 astep("75%", 75, analysis_spec()), astep("100%", 100)])
+Canalysis("large fleet N=12 breach", "engine", "breach", n=12, steps=_gate2(analysis_spec(failure_limit=1)))
+Canalysis("large fleet pd 8+8 breach", "pd", "breach", n=8, steps=_gate2(analysis_spec(failure_limit=1)))
+
+
 def main():
     # Idempotency: drop previously-generated 3-digit cases (p100+) in the feature
     # folders so renumbering never leaves stale duplicates (a duplicate case-id
@@ -448,10 +649,11 @@ def main():
         for f in (d.glob("p[0-9][0-9][0-9].yaml") if d.exists() else []):
             f.unlink()
     per_folder = {}
-    for folder, name, desc, comps, coord, kv in CASES:
+    for folder, name, desc, comps, coord, kv, opts in CASES:
         path = ISVCS / folder / f"{name}.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(header(name, desc, kv) + "\n" + render(name, comps, coord))
+        path.write_text(header(name, desc, kv) + "\n"
+                        + render(name, comps, coord, runtime=opts["runtime"], meta_ann=opts["meta_ann"]))
         per_folder.setdefault(folder, []).append(name)
     total = sum(len(v) for v in per_folder.values())
     print(f"generated {total} cases:")

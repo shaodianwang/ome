@@ -1,0 +1,19 @@
+# p325: REJECT analysis non-numeric threshold  mode=canary expect=reject reason=AnalysisInvalid Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p325 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+  rollout:
+    groups:
+        # threshold is a string the CRD can't validate numerically -> the webhook
+        # rejects it (AnalysisInvalid).
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "100%", traffic: 100, analysis: { interval: "20s", failureLimit: 1, metrics: [ { name: m, query: "vector(1)", operator: LTE, threshold: "not-a-number" } ] } }
