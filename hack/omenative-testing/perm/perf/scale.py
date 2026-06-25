@@ -73,8 +73,10 @@ def phase(name):
 
 
 def ready(name):
+    # OME stamps the plain `component` label (constants.OMEComponentLabel), not an
+    # ome.io/-prefixed one; only inferenceservice is ome.io/-prefixed.
     r = kubectl("-n", NS, "get", "pods", "-l",
-                f"ome.io/inferenceservice={name},ome.io/component=engine", "-o", "json")
+                f"ome.io/inferenceservice={name},component=engine", "-o", "json")
     if r.returncode:
         return 0
     n = 0
