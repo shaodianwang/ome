@@ -1,4 +1,4 @@
-# p353: canary-analysis engine manual rollback during analysis  mode=canary Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 canary=auto rollback=1 failurelimit=1 co=none topo=engine
+# p353: canary-analysis engine XL fleet N=16 breach  mode=canary Ne=16 Nd=0 Nr=0 ceil_e=17 ceil_d=0 ceil_r=0 canary=auto analysis=breach failurelimit=1 co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p353 }
@@ -6,8 +6,8 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 16
+    maxReplicas: 16
     annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:

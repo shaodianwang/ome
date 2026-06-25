@@ -926,6 +926,11 @@ def _canary(case_id, yaml_file, desc, hdr):
         "breach":       {"perm.test/error-rate": "0.9", "perm.test/emit": "true"},
         "inconclusive": {"perm.test/error-rate": "0.0", "perm.test/emit": "false"},
     }.get(health)
+    # errorrate header pins the canary's exact emitted error-rate (boundary /
+    # operator cases need a precise value, e.g. 0.05 == threshold), overriding the
+    # pass/breach default.
+    if hdr.get("errorrate") is not None and analysis_extra is not None:
+        analysis_extra = {**analysis_extra, "perm.test/error-rate": str(hdr.get("errorrate"))}
     # Expected terminal phase. breach + inconclusive/Rollback drain to stable;
     # inconclusive/Hold parks Failed (stable keeps serving); pass promotes.
     if analysis_mode == "breach" or (analysis_mode == "inconclusive" and on_inconclusive == "rollback"):

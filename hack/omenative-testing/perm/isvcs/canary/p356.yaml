@@ -1,4 +1,4 @@
-# p356: canary-analysis pd large fleet pd 8+8 breach  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto analysis=breach failurelimit=1 co=none topo=pd
+# p356: canary-analysis engine NaN metric -> inconclusive  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=inconclusive health=pass oninconclusive=rollback failurelimit=1 co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p356 }
@@ -6,23 +6,13 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics, autoSync: true }
   engine:
-    minReplicas: 8
-    maxReplicas: 8
-    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
-    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
-  decoder:
-    minReplicas: 8
-    maxReplicas: 8
-    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
-    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
-  router:
-    minReplicas: 2
-    maxReplicas: 2
+    minReplicas: 12
+    maxReplicas: 12
     annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
     groups:
-        - components: [engine, decoder, router]
+        - components: [engine]
           canary:
             steps:
               - capacity: "50%"
@@ -31,9 +21,10 @@ spec:
                   interval: "20s"
                   failureLimit: 1
                   initialDelay: "20s"
+                  onInconclusive: Rollback
                   metrics:
-                    - name: error_rate
-                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+                    - name: nan
+                      query: 'vector(0) / vector(0)'
                       operator: LTE
                       threshold: "0.05"
               - { capacity: "100%", traffic: 100 }

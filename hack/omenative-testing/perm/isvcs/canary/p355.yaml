@@ -1,4 +1,4 @@
-# p355: canary-analysis engine large fleet N=12 breach  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=breach failurelimit=1 co=none topo=engine
+# p355: canary-analysis engine query error -> inconclusive  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=inconclusive health=pass oninconclusive=rollback failurelimit=1 co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p355 }
@@ -21,9 +21,10 @@ spec:
                   interval: "20s"
                   failureLimit: 1
                   initialDelay: "20s"
+                  onInconclusive: Rollback
                   metrics:
-                    - name: error_rate
-                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+                    - name: bad
+                      query: 'not_a_function('
                       operator: LTE
                       threshold: "0.05"
               - { capacity: "100%", traffic: 100 }

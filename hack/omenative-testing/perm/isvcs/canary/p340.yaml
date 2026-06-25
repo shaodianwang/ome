@@ -1,4 +1,4 @@
-# p340: canary-analysis engine 3-step analysis each  mode=canary Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 canary=auto analysis=pass failurelimit=1 co=none topo=engine
+# p340: canary-analysis engine capacity-ahead then gate  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=pass failurelimit=1 co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p340 }
@@ -6,8 +6,8 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 12
+    maxReplicas: 12
     annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
@@ -15,19 +15,8 @@ spec:
         - components: [engine]
           canary:
             steps:
-              - capacity: "25%"
-                traffic: 25
-                analysis:
-                  interval: "20s"
-                  failureLimit: 1
-                  initialDelay: "20s"
-                  metrics:
-                    - name: error_rate
-                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
-                      operator: LTE
-                      threshold: "0.05"
-              - capacity: "50%"
-                traffic: 50
+              - capacity: "100%"
+                traffic: 0
                 analysis:
                   interval: "20s"
                   failureLimit: 1

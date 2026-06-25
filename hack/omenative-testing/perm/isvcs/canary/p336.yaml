@@ -1,4 +1,4 @@
-# p336: canary-analysis engine breach->rollback fl=3  mode=canary Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 canary=auto analysis=breach failurelimit=3 co=none topo=engine
+# p336: canary-analysis engine inconclusive->rollback  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=inconclusive oninconclusive=rollback failurelimit=1 co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p336 }
@@ -6,9 +6,9 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
-    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    minReplicas: 12
+    maxReplicas: 12
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "false", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
     groups:
@@ -19,8 +19,9 @@ spec:
                 traffic: 50
                 analysis:
                   interval: "20s"
-                  failureLimit: 3
+                  failureLimit: 1
                   initialDelay: "20s"
+                  onInconclusive: Rollback
                   metrics:
                     - name: error_rate
                       query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'

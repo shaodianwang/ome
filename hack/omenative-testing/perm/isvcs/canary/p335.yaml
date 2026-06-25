@@ -1,24 +1,24 @@
-# p335: canary-analysis pd breach->rollback fl=1  mode=canary Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=3 canary=auto analysis=breach failurelimit=1 co=none topo=pd
+# p335: canary-analysis pd inconclusive->Failed  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto analysis=inconclusive oninconclusive=hold failurelimit=1 co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
-metadata: { name: p335 }
+metadata: { name: p335, annotations: { ome.io/rollout-ready-timeout: "60s" } }
 spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
-    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "false", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   decoder:
-    minReplicas: 4
-    maxReplicas: 4
-    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "false", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   router:
     minReplicas: 2
     maxReplicas: 2
-    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "false", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
     groups:
@@ -31,6 +31,7 @@ spec:
                   interval: "20s"
                   failureLimit: 1
                   initialDelay: "20s"
+                  onInconclusive: Hold
                   metrics:
                     - name: error_rate
                       query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'

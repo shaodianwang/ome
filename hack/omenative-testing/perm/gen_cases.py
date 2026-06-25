@@ -234,7 +234,7 @@ def ceils(topo, ce, n=N, nd=None, surge_d=0, surge_r=0):
 
 HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r", "to_e", "to_d", "to_r",
              "partition", "mig", "restart", "kill", "inst", "canary", "rollback",
-             "analysis", "oninconclusive", "failurelimit", "expect", "reason",
+             "analysis", "health", "errorrate", "oninconclusive", "failurelimit", "expect", "reason",
              "co", "topo", "infeasible"]
 
 
@@ -526,7 +526,14 @@ def astep(nc, tw, a=None, pause=None):
     return s
 
 
-def Canalysis(desc, topo, analysis_mode, steps, *, n=N, health=None, policy="auto",
+# Analysis cases run on realistic fleets — a mix of PD + large engine: engine
+# cases default to BIG replicas (big metric vector, fine 25/50/75/100 partitions),
+# PD cases use PDN per component (engine+decoder+router, exercising the
+# secondary-capacity gate + per-revision Services across components).
+BIG, PDN = 12, 8
+
+
+def Canalysis(desc, topo, analysis_mode, steps, *, n=BIG, health=None, policy="auto",
               prometheus=None, ready_timeout=None, decay=None, **extra):
     """Emit a metric-gated canary case. analysis_mode (pass|breach|inconclusive|None)
     is the EXPECTED-terminal intent — run.py asserts it. `health` decouples what the
@@ -569,26 +576,26 @@ def _gate2(a):
     return [astep("50%", 50, a), astep("100%", 100)]
 
 
-# A. Verdict core × topology --------------------------------------------------
-for topo in TOPOS:
-    Canalysis("pass->promote", topo, "pass", _gate2(analysis_spec(failure_limit=1)))
-for topo in ["engine", "pd"]:
-    Canalysis("breach->rollback fl=1", topo, "breach", _gate2(analysis_spec(failure_limit=1)))
+# A. Verdict core (large engine + PD) ----------------------------------------
+Canalysis("pass->promote", "engine", "pass", _gate2(analysis_spec(failure_limit=1)))
+Canalysis("pass->promote", "pd", "pass", _gate2(analysis_spec(failure_limit=1)), n=PDN)
+Canalysis("breach->rollback fl=1", "engine", "breach", _gate2(analysis_spec(failure_limit=1)))
+Canalysis("breach->rollback fl=1", "pd", "breach", _gate2(analysis_spec(failure_limit=1)), n=PDN)
 # Cumulative per-step budget: 3 breaching samples before rollback.
 Canalysis("breach->rollback fl=3", "engine", "breach", _gate2(analysis_spec(failure_limit=3)))
 # Inconclusive (canary emits no metric): Hold escalates to Failed past the
 # (shortened) stall timeout; Rollback fails safe immediately.
-Canalysis("inconclusive->Failed", "engine", "inconclusive",
-          _gate2(analysis_spec(failure_limit=1, on_inconclusive="Hold")), ready_timeout="60s")
+Canalysis("inconclusive->Failed", "pd", "inconclusive",
+          _gate2(analysis_spec(failure_limit=1, on_inconclusive="Hold")), n=PDN, ready_timeout="60s")
 Canalysis("inconclusive->rollback", "engine", "inconclusive",
           _gate2(analysis_spec(failure_limit=1, on_inconclusive="Rollback")))
 
 # B. Step-plan shapes (engine) ------------------------------------------------
 Canalysis("single-step gate 100", "engine", "pass", [astep("100%", 100, analysis_spec())])
-Canalysis("3-step analysis each", "engine", "pass",
-          [astep("25%", 25, analysis_spec()), astep("50%", 50, analysis_spec()), astep("100%", 100)])
-Canalysis("breach at step0 25%", "engine", "breach",
-          [astep("25%", 25, analysis_spec(failure_limit=1)), astep("50%", 50), astep("100%", 100)])
+Canalysis("3-step analysis each", "pd", "pass", n=PDN,
+          steps=[astep("25%", 25, analysis_spec()), astep("50%", 50, analysis_spec()), astep("100%", 100)])
+Canalysis("breach at step0 25%", "pd", "breach", n=PDN,
+          steps=[astep("25%", 25, analysis_spec(failure_limit=1)), astep("50%", 50), astep("100%", 100)])
 Canalysis("capacity-ahead then gate", "engine", "pass",
           [astep("100%", 0, analysis_spec()), astep("100%", 100)])
 Canalysis("mixed analysis+timed", "engine", "pass",
@@ -637,16 +644,56 @@ Canalysis("prometheus custom headers", "engine", "pass",
           _gate2(analysis_spec()), prometheus={"headers": {"X-Scope-OrgID": "perm-test"}})
 
 # E. Interactions -------------------------------------------------------------
-# Manual rollback annotation wins over a healthy in-progress analysis canary.
-Canalysis("manual rollback during analysis", "engine", None, _gate2(analysis_spec()), rollback=1)
+# Manual rollback annotation wins over a healthy in-progress analysis canary (PD).
+Canalysis("manual rollback during analysis", "pd", None, _gate2(analysis_spec()), n=PDN, rollback=1)
 
-# F. Fleet size ---------------------------------------------------------------
-# Large fleet: finer multi-step partitions + a bigger metric vector to MAX over.
-Canalysis("large fleet N=12 multi-step", "engine", "pass", n=12,
+# F. XL fleet -----------------------------------------------------------------
+# A tier above the BIG/PDN default: even finer partitions + bigger vectors.
+Canalysis("XL fleet N=16 multi-step", "engine", "pass", n=16,
           steps=[astep("25%", 25, analysis_spec()), astep("50%", 50, analysis_spec()),
                  astep("75%", 75, analysis_spec()), astep("100%", 100)])
-Canalysis("large fleet N=12 breach", "engine", "breach", n=12, steps=_gate2(analysis_spec(failure_limit=1)))
-Canalysis("large fleet pd 8+8 breach", "pd", "breach", n=8, steps=_gate2(analysis_spec(failure_limit=1)))
+Canalysis("XL fleet N=16 breach", "engine", "breach", n=16, steps=_gate2(analysis_spec(failure_limit=1)))
+Canalysis("XL fleet pd 12+12 breach", "pd", "breach", n=12, steps=_gate2(analysis_spec(failure_limit=1)))
+
+
+# G2. Evaluator edge cases ----------------------------------------------------
+# The metric EXISTS (health=pass, emit=true) but the QUERY yields a non-usable
+# value or errors -> the sample must read Inconclusive (never a spurious
+# pass/breach) -> rollback (onInconclusive=Rollback). Exercises the reduce /
+# unusable (NaN, +Inf) / query-error paths.
+def _incl_rollback(metrics):
+    return _gate2(analysis_spec(on_inconclusive="Rollback", metrics=metrics))
+
+
+Canalysis("query error -> inconclusive", "engine", "inconclusive", health="pass",
+          steps=_incl_rollback([err_metric(name="bad", query="not_a_function(")]))
+Canalysis("NaN metric -> inconclusive", "engine", "inconclusive", health="pass",
+          steps=_incl_rollback([err_metric(name="nan", query="vector(0) / vector(0)")]))
+Canalysis("Inf metric -> inconclusive", "engine", "inconclusive", health="pass",
+          steps=_incl_rollback([err_metric(name="inf", query="vector(1) / vector(0)")]))
+# Multi-metric AND, MIXED outcomes: one healthy (pass) + one inconclusive -> the
+# sample is Inconclusive (Fail > Inconclusive > Pass) -> rollback.
+Canalysis("multi-metric mixed pass+inconclusive", "engine", "inconclusive", health="pass",
+          steps=_incl_rollback([err_metric(threshold="0.05"),
+                                err_metric(name="nan", query="vector(0) / vector(0)")]))
+
+# G3. Boundary + operators ----------------------------------------------------
+# Value EXACTLY at the threshold, per operator (errorrate pins the emitted value).
+Canalysis("boundary LTE value==threshold pass", "engine", "pass", errorrate="0.05",
+          steps=_gate2(analysis_spec(metrics=[err_metric(threshold="0.05", op="LTE")])))
+Canalysis("boundary LT value==threshold fail", "engine", "breach", errorrate="0.05",
+          steps=_gate2(analysis_spec(failure_limit=1, metrics=[err_metric(threshold="0.05", op="LT")])))
+# GT on a success-rate expr: success below the bar -> breach.
+Canalysis("operator GT success breach", "engine", "breach", errorrate="0.9",
+          steps=_gate2(analysis_spec(failure_limit=1,
+                                     metrics=[err_metric(name="success", query=SUCC_QUERY, op="GT", threshold="0.95")])))
+Canalysis("operator LT error pass", "engine", "pass", errorrate="0.01",
+          steps=_gate2(analysis_spec(metrics=[err_metric(threshold="0.05", op="LT")])))
+
+# G4. breach at the FINAL (100%) step -----------------------------------------
+# Single-step plan: analysis gates the 100% cutover; a breach there rolls back (PD).
+Canalysis("breach at final 100pct step", "pd", "breach", n=PDN,
+          steps=[astep("100%", 100, analysis_spec(failure_limit=1))])
 
 
 def main():

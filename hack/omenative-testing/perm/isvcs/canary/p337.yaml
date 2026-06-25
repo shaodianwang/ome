@@ -1,30 +1,28 @@
-# p337: canary-analysis engine inconclusive->Failed  mode=canary Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 canary=auto analysis=inconclusive oninconclusive=hold failurelimit=1 co=none topo=engine
+# p337: canary-analysis engine single-step gate 100  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=pass failurelimit=1 co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
-metadata: { name: p337, annotations: { ome.io/rollout-ready-timeout: "60s" } }
+metadata: { name: p337 }
 spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
-    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "false", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    minReplicas: 12
+    maxReplicas: 12
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
     groups:
         - components: [engine]
           canary:
             steps:
-              - capacity: "50%"
-                traffic: 50
+              - capacity: "100%"
+                traffic: 100
                 analysis:
                   interval: "20s"
                   failureLimit: 1
                   initialDelay: "20s"
-                  onInconclusive: Hold
                   metrics:
                     - name: error_rate
                       query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
                       operator: LTE
                       threshold: "0.05"
-              - { capacity: "100%", traffic: 100 }
