@@ -31,8 +31,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -137,6 +139,11 @@ type InferenceServiceReconciler struct {
 	// the controller stamps a `GangSchedulingUnavailable=True`
 	// Component condition.
 	GangSchedulingAvailable bool
+	// CanarySampler runs canary analysis Prometheus queries off the reconcile
+	// goroutine: reconcile reads cached results non-blocking, and a completion
+	// event re-reconciles the ISVC. Built once in SetupWithManager from the
+	// canaryAnalysis operator config; nil disables metric-gated steps (they hold).
+	CanarySampler *canary.Sampler
 }
 
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -531,11 +538,23 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// ordering (the group sequencer) is a follow-on; today the groups run
 	// concurrently on their disjoint Components.
 	if isvc.Spec.GetCanaryGroup() != nil {
+		// Resolve the metrics source + query timeout per-reconcile from the
+		// canaryAnalysis operator config (so ConfigMap edits take effect without a
+		// restart); the sampler's structural tuning is fixed at startup. Only
+		// analysis steps read these — non-analysis canaries ignore them.
+		analysisConfig, err := controllerconfig.NewCanaryAnalysisConfig(r.Clientset)
+		if err != nil {
+			log.Error(err, "Failed to load canaryAnalysis config")
+			return reconcile.Result{}, errors.Wrapf(err, "fails to load canaryAnalysis config")
+		}
 		ra, err := canary.Dispatch(ctx, canary.DispatchDeps{
-			ISVC:     isvc,
-			Client:   r.Client,
-			Reader:   r.APIReader,
-			Recorder: r.Recorder,
+			ISVC:                     isvc,
+			Client:                   r.Client,
+			Reader:                   r.APIReader,
+			Recorder:                 r.Recorder,
+			Sampler:                  r.CanarySampler,
+			BundledPrometheusAddress: analysisConfig.BundledPrometheusAddress,
+			QueryTimeout:             analysisConfig.QueryTimeoutDuration(),
 		})
 		if err != nil {
 			log.Error(err, "Failed to reconcile canary rollout")
@@ -912,6 +931,22 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	r.GangSchedulingAvailable = podGroupFound
 
+	// Build the canary analysis sampler once. Its concurrency cap and cache TTL are
+	// fixed for the controller's lifetime (the per-sample source + query timeout are
+	// resolved per reconcile from the same config). A missing/unreadable config
+	// falls back to the documented defaults so the sampler is always available — a
+	// genuinely broken ConfigMap surfaces per-reconcile when a canary needs it.
+	analysisConfig, err := controllerconfig.NewCanaryAnalysisConfig(r.Clientset)
+	if err != nil {
+		r.Log.Info("canaryAnalysis config unavailable at startup; using sampler defaults", "error", err.Error())
+		analysisConfig = &controllerconfig.CanaryAnalysisConfig{MaxConcurrency: controllerconfig.DefaultAnalysisMaxConcurrency}
+	}
+	// The wake-up channel buffer is sized to the query concurrency: at most that
+	// many queries finish near-simultaneously, and a full buffer harmlessly drops a
+	// wake-up (the reconcile requeue is the backstop), so it never blocks a query.
+	analysisEvents := make(chan event.GenericEvent, analysisConfig.MaxConcurrency)
+	r.CanarySampler = canary.NewPrometheusSampler(analysisEvents, int(analysisConfig.MaxConcurrency), analysisConfig.CacheTTLDuration())
+
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.InferenceService{}).
 		Owns(&appsv1.Deployment{}).
@@ -985,6 +1020,12 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.pinnedISVCsReferencingRuntime)).
 		Watches(&v1beta1.ClusterServingRuntime{},
 			handler.EnqueueRequestsFromMapFunc(r.pinnedISVCsReferencingRuntime))
+
+	// Re-reconcile an ISVC when its canary analysis sample lands, so the executor
+	// consumes the result immediately instead of waiting on the periodic requeue.
+	// The sampler emits a GenericEvent carrying the ISVC's namespace/name.
+	ctrlBuilder = ctrlBuilder.WatchesRawSource(
+		source.Channel(analysisEvents, &handler.EnqueueRequestForObject{}))
 
 	return ctrlBuilder.Complete(r)
 }

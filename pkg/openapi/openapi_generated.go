@@ -245,7 +245,7 @@ func schema_pkg_apis_ome_v1beta1_AnalysisPrometheus(ref common.ReferenceCallback
 				Properties: map[string]spec.Schema{
 					"serverAddress": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ServerAddress is the base URL of the Prometheus HTTP API (e.g. http://prometheus.monitoring.svc:9090). Optional: defaults to the bundled Prometheus Service in the controller's namespace. Required by admission when the bundled Prometheus is disabled.",
+							Description: "ServerAddress is the base URL of the Prometheus HTTP API (e.g. http://prometheus.monitoring.svc:9090). Optional: when empty, the operator-configured default source (canaryAnalysis.bundledPrometheusAddress) is used; if that is also unset the analysis has no source and its samples read inconclusive. Admission does not check the source — an unreachable or missing source surfaces controller-side as an inconclusive sample, not a rejection.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

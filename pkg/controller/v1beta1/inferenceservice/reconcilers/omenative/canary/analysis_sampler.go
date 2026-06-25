@@ -3,7 +3,7 @@ package canary
 import (
 	"context"
 	"fmt"
-	"time"
+	"maps"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,60 +15,58 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 )
 
-// analysisQueryTimeout bounds one analysis sampling pass (all metric queries).
-// It is deliberately short: the query runs SYNCHRONOUSLY inside Reconcile and the
-// InferenceService controller runs at MaxConcurrentReconciles=1, so a hung
-// Prometheus would otherwise stall EVERY InferenceService's reconcile for the
-// whole timeout, not just this canary's. An exceeded timeout surfaces as an
-// inconclusive sample (hold), never a failure. A deeper fix — raising reconcile
-// concurrency or moving sampling off the reconcile goroutine — is tracked
-// separately.
-const analysisQueryTimeout = 5 * time.Second
-
-// AnalysisSampleFunc evaluates the canary's analysis metrics once. The controller
-// wires PrometheusSample; tests inject a fake to keep Reconcile hermetic. It is
-// nil under Manual/Auto promotion and never called there.
-type AnalysisSampleFunc func(ctx context.Context, in ReconcileInputs, a *v1beta1.RolloutAnalysis) analysis.Result
-
-// PrometheusSample is the production AnalysisSampleFunc. It resolves the
-// Prometheus address (explicit ServerAddress, else the bundled Service in the
-// ISVC namespace) and an optional bearer token, builds a Querier, and evaluates
-// the metrics against the rollout's revision context. Any setup failure (missing
-// secret, bad client) becomes an INCONCLUSIVE result so the caller holds rather
-// than mistaking a wiring problem for a metric breach.
-func PrometheusSample(ctx context.Context, in ReconcileInputs, a *v1beta1.RolloutAnalysis) analysis.Result {
-	addr := analysis.DefaultBundledServerAddress(in.ISVC.Namespace)
+// buildSampleRequest snapshots everything the background eval needs to query one
+// step's analysis WITHOUT touching the live InferenceService — the reconcile owns
+// it, so a goroutine reading it would race. It resolves the source address, bearer
+// token, headers, and template context up front; the eval then only performs the
+// HTTP query. The address is the canary's own ServerAddress when set, else the
+// operator-configured bundled address; an empty address means "no source" and the
+// eval's query reads inconclusive.
+func buildSampleRequest(ctx context.Context, in ReconcileInputs, a *v1beta1.RolloutAnalysis, step int32) (SampleRequest, error) {
+	addr := in.BundledPrometheusAddress
 	var token string
 	var headers map[string]string
 	if src := in.Prometheus; src != nil { // canary-level shared source
 		if src.ServerAddress != "" {
 			addr = src.ServerAddress
 		}
-		headers = src.Headers
+		// Clone the map: src.Headers points into the live ISVC spec, and the result
+		// is read by the background eval goroutine. A reference copy would hand a
+		// spec-owned map to another goroutine, breaking the snapshot invariant.
+		headers = maps.Clone(src.Headers)
 		if src.AuthRef != nil {
 			t, err := resolveBearerToken(ctx, in.Client, in.ISVC.Namespace, src.AuthRef)
 			if err != nil {
-				return inconclusiveResult("auth", fmt.Sprintf("resolve bearer token: %v", err))
+				return SampleRequest{}, fmt.Errorf("resolve bearer token: %w", err)
 			}
 			token = t
 		}
 	}
-	q, err := analysis.NewQuerier(addr, token, headers)
-	if err != nil {
-		return inconclusiveResult("prometheus", fmt.Sprintf("build client for %q: %v", addr, err))
-	}
-	tc := analysis.TemplateContext{
-		Namespace:      in.ISVC.Namespace,
-		ISVCName:       in.ISVC.Name,
-		Component:      string(in.Component),
-		CanaryService:  coordination.PerRevisionServiceName(in.ISVC.Name, in.Component, in.CanaryRevisionHash),
-		StableService:  coordination.PerRevisionServiceName(in.ISVC.Name, in.Component, in.StableRevisionHash),
-		CanaryRevision: in.CanaryRevisionHash,
-		StableRevision: in.StableRevisionHash,
-	}
-	qctx, cancel := context.WithTimeout(ctx, analysisQueryTimeout)
-	defer cancel()
-	return analysis.Evaluate(qctx, q, a, tc)
+	return SampleRequest{
+		Key: SampleKey{
+			Namespace: in.ISVC.Namespace,
+			ISVCName:  in.ISVC.Name,
+			Component: string(in.Component),
+			Revision:  in.CanaryRevisionHash,
+			Step:      step,
+		},
+		ServerAddress: addr,
+		BearerToken:   token,
+		Headers:       headers,
+		TemplateContext: analysis.TemplateContext{
+			Namespace:      in.ISVC.Namespace,
+			ISVCName:       in.ISVC.Name,
+			Component:      string(in.Component),
+			CanaryService:  coordination.PerRevisionServiceName(in.ISVC.Name, in.Component, in.CanaryRevisionHash),
+			StableService:  coordination.PerRevisionServiceName(in.ISVC.Name, in.Component, in.StableRevisionHash),
+			CanaryRevision: in.CanaryRevisionHash,
+			StableRevision: in.StableRevisionHash,
+		},
+		// DeepCopy so the background eval never reads through a pointer into the live
+		// spec (the reconcile owns it).
+		Analysis:     a.DeepCopy(),
+		QueryTimeout: in.QueryTimeout,
+	}, nil
 }
 
 // resolveBearerToken reads the token value from the referenced Secret key in the

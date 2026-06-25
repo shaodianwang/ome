@@ -28,13 +28,6 @@ type Querier interface {
 	Query(ctx context.Context, promQL string) (float64, error)
 }
 
-// DefaultBundledServerAddress is the in-cluster URL of the bundled Prometheus
-// Service (chart: ome-prometheus on :9090) in the given namespace. Used as the
-// default when AnalysisPrometheus.ServerAddress is empty.
-func DefaultBundledServerAddress(namespace string) string {
-	return fmt.Sprintf("http://ome-prometheus.%s.svc:9090", namespace)
-}
-
 // NewQuerier builds a Querier against serverAddress. A non-empty bearerToken is
 // sent as "Authorization: Bearer <token>"; headers are sent verbatim on every
 // request (e.g. "X-Scope-OrgID" for a multi-tenant Cortex/Thanos/Mimir

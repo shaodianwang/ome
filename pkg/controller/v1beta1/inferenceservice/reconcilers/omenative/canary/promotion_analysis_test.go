@@ -15,19 +15,18 @@ import (
 
 func onInconclusivePtr(v v1beta1.OnInconclusive) *v1beta1.OnInconclusive { return &v }
 
-// countingSample records how many times it was invoked and returns a fixed
-// outcome — so a test can assert that warm-up and throttle short-circuit BEFORE
-// any query runs.
+// countingSample is a fake stepSampler that records how many times it was read
+// and returns a fixed outcome as an already-available (ok=true) sample — so a test
+// can assert that warm-up, throttle, and promote short-circuit BEFORE any sampling.
 type countingSample struct {
 	outcome analysis.Outcome
+	at      time.Time
 	calls   int
 }
 
-func (c *countingSample) fn() AnalysisSampleFunc {
-	return func(_ context.Context, _ ReconcileInputs, _ *v1beta1.RolloutAnalysis) analysis.Result {
-		c.calls++
-		return analysis.Result{Outcome: c.outcome, Metrics: []analysis.MetricResult{{Name: "err"}}}
-	}
+func (c *countingSample) Get(_ SampleRequest, _ time.Time) (analysis.Result, time.Time, bool) {
+	c.calls++
+	return analysis.Result{Outcome: c.outcome, Metrics: []analysis.MetricResult{{Name: "err"}}}, c.at, true
 }
 
 func TestEvaluateAnalysisStep(t *testing.T) {
@@ -160,13 +159,13 @@ func TestEvaluateAnalysisStep(t *testing.T) {
 			}
 			isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "ns", Annotations: tt.annotations}}
 			isvc.Status.Canary = tt.cs
-			cnt := &countingSample{outcome: tt.outcome}
+			cnt := &countingSample{outcome: tt.outcome, at: now}
 			in := ReconcileInputs{
 				ISVC:               isvc,
 				Component:          v1beta1.EngineComponent,
 				CanaryRevisionHash: canaryHash,
 				Now:                now,
-				Sample:             cnt.fn(),
+				Sampler:            cnt,
 			}
 			got := evaluateAnalysisStep(context.Background(), in, a, tt.cs, tt.step)
 			if got != tt.wantDec {

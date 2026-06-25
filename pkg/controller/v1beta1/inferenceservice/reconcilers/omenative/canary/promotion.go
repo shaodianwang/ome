@@ -95,11 +95,11 @@ func evaluateStep(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanarySta
 }
 
 // evaluateAnalysisStep runs the metric gate for one reconcile: warm up, throttle
-// to one sample per Interval, sample, then decide. A breach accrues toward
-// FailureLimit (cumulative per step) and rolls back at the limit; a passing
-// sample advances once the bake window (Pause.Duration) elapses; an inconclusive
-// sample holds (or, per OnInconclusive, rolls back) and escalates to Failed past
-// the stall timeout. A matching promote annotation overrides the gate.
+// to one evaluation per Interval, read a sample, then decide. Sampling is
+// non-blocking — a miss kicks a bounded background query (the slow Prometheus
+// call never runs on the reconcile goroutine) and holds; the sampler's completion
+// event, or the step requeue, re-reconciles to consume the result. A matching
+// promote annotation overrides the gate.
 func evaluateAnalysisStep(ctx context.Context, in ReconcileInputs, a *v1beta1.RolloutAnalysis, cs *v1beta1.CanaryStatus, step v1beta1.RolloutGroupStep) stepDecision {
 	// Operator override: a matching promote annotation force-advances mid-bake.
 	if shouldAdvanceManual(in.ISVC, cs.CanaryRevisionHash) {
@@ -111,28 +111,58 @@ func evaluateAnalysisStep(ctx context.Context, in ReconcileInputs, a *v1beta1.Ro
 		in.Now.Before(cs.StepEnteredTime.Time.Add(a.InitialDelay.Duration)) {
 		return decHold
 	}
-	// Throttle: at most one sample per Interval, so a burst of unrelated reconciles
-	// cannot over-count failures into a spurious rollback.
+	// Throttle: at most one evaluation per Interval. This both bounds failure
+	// accrual (one count per interval, so a burst of reconciles can't spuriously
+	// roll back) and paces the background query — an unrelated reconcile mid-interval
+	// won't kick a fresh one.
 	if cs.LastEvaluationTime != nil && in.Now.Before(cs.LastEvaluationTime.Time.Add(a.Interval.Duration)) {
 		return decHold
 	}
-	if in.Sample == nil {
+	if in.Sampler == nil {
 		// Misconfigured (no sampler wired): hold rather than advance ungated.
 		return decHold
 	}
-	res := in.Sample(ctx, in, a)
-	cs.LastEvaluationTime = &metav1.Time{Time: in.Now}
-	cs.MetricResults = toStatusMetricResults(res.Metrics, in.Now)
+	req, err := buildSampleRequest(ctx, in, a, cs.CurrentStep)
+	if err != nil {
+		// Source wiring failure (e.g. an unreadable auth secret) before any query:
+		// treat as inconclusive — hold, or roll back per OnInconclusive — never read
+		// it as a metric breach.
+		return consumeSample(in, cs, step, a, inconclusiveResult("auth", err.Error()), in.Now)
+	}
+	// `since` is the last consumed sample's produced time, so Get returns only a
+	// genuinely newer sample (and never re-counts one already consumed).
+	var since time.Time
+	if cs.LastEvaluationTime != nil {
+		since = cs.LastEvaluationTime.Time
+	}
+	res, producedAt, ok := in.Sampler.Get(req, since)
+	if !ok {
+		// No fresh sample yet — a background query was kicked (or is already in
+		// flight). Hold; a completion event or the step requeue re-reconciles.
+		return decHold
+	}
+	return consumeSample(in, cs, step, a, res, producedAt)
+}
+
+// consumeSample records one analysis sample into status and decides the step's
+// fate: a breach accrues toward FailureLimit (cumulative per step, rollback at the
+// limit); a pass advances once the bake window (Pause.Duration) elapses; an
+// inconclusive sample holds, rolls back per OnInconclusive, or escalates to Failed
+// past the stall timeout. `at` is the sample's produced time (or now for a wiring
+// failure) and stamps the evaluation timestamps.
+func consumeSample(in ReconcileInputs, cs *v1beta1.CanaryStatus, step v1beta1.RolloutGroupStep, a *v1beta1.RolloutAnalysis, res analysis.Result, at time.Time) stepDecision {
+	cs.LastEvaluationTime = &metav1.Time{Time: at}
+	cs.MetricResults = toStatusMetricResults(res.Metrics, at)
 	dec := decHold
 	switch res.Outcome {
 	case analysis.Fail:
-		cs.LastConclusiveEvaluationTime = &metav1.Time{Time: in.Now}
+		cs.LastConclusiveEvaluationTime = &metav1.Time{Time: at}
 		cs.AnalysisFailedChecks++
 		if cs.AnalysisFailedChecks >= a.FailureLimit {
 			dec = decRollback
 		}
 	case analysis.Pass:
-		cs.LastConclusiveEvaluationTime = &metav1.Time{Time: in.Now}
+		cs.LastConclusiveEvaluationTime = &metav1.Time{Time: at}
 		if shouldAdvanceAuto(cs, step, in.Now) { // bake window (Pause.Duration) elapsed
 			dec = decAdvance
 		}

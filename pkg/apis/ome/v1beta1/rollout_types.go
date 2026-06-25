@@ -259,9 +259,11 @@ type RolloutAnalysis struct {
 // queries.
 type AnalysisPrometheus struct {
 	// ServerAddress is the base URL of the Prometheus HTTP API
-	// (e.g. http://prometheus.monitoring.svc:9090). Optional: defaults to the
-	// bundled Prometheus Service in the controller's namespace. Required by
-	// admission when the bundled Prometheus is disabled.
+	// (e.g. http://prometheus.monitoring.svc:9090). Optional: when empty, the
+	// operator-configured default source (canaryAnalysis.bundledPrometheusAddress)
+	// is used; if that is also unset the analysis has no source and its samples read
+	// inconclusive. Admission does not check the source — an unreachable or missing
+	// source surfaces controller-side as an inconclusive sample, not a rejection.
 	// +optional
 	ServerAddress string `json:"serverAddress,omitempty"`
 

@@ -26,6 +26,14 @@ data:
       "defaultDeploymentMode": "{{ .Values.ome.controller.deploymentMode }}"
     }
 
+  canaryAnalysis: |-
+    {
+      "bundledPrometheusAddress": "{{ .Values.ome.controller.canaryAnalysis.bundledPrometheusAddress | default (printf "http://ome-prometheus.%s.svc:9090" .Release.Namespace) }}",
+      "queryTimeout": "{{ .Values.ome.controller.canaryAnalysis.queryTimeout | default "5s" }}",
+      "maxConcurrency": {{ .Values.ome.controller.canaryAnalysis.maxConcurrency | default 8 }},
+      "cacheTTL": "{{ .Values.ome.controller.canaryAnalysis.cacheTTL | default "2m" }}"
+    }
+
   metricsAggregator: |-
     {
       "enableMetricAggregation": "{{ .Values.ome.metricsaggregator.enableMetricAggregation }}",

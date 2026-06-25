@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"text/template"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,15 +16,25 @@ import (
 )
 
 const (
-	IngressConfigKeyName = "ingress"
-	DeployConfigName     = "deploy"
-	OmeAgentConfigName   = "omeAgent"
-	ModelCacheConfigName = "modelCache"
+	IngressConfigKeyName     = "ingress"
+	DeployConfigName         = "deploy"
+	OmeAgentConfigName       = "omeAgent"
+	ModelCacheConfigName     = "modelCache"
+	CanaryAnalysisConfigName = "canaryAnalysis"
 
 	DefaultDomainTemplate = "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"
 	DefaultIngressDomain  = "example.com"
 
 	DefaultUrlScheme = "http"
+
+	// Operational fallbacks for the canary metric-analysis sampler, applied by the
+	// loader only when the ConfigMap omits them (the chart sets the real values).
+	// These tune the sampler, not deployment identity, so an in-loader fallback is
+	// appropriate (mirroring DefaultDomainTemplate); the source address has no such
+	// fallback (see CanaryAnalysisConfig.BundledPrometheusAddress).
+	DefaultAnalysisQueryTimeout   = "5s"
+	DefaultAnalysisCacheTTL       = "2m"
+	DefaultAnalysisMaxConcurrency = 8
 )
 
 var DefaultConsistentHashHeaders = []string{"x-routing-key", "X-SMG-Routing-Key"}
@@ -89,6 +100,30 @@ type IngressGatewaySpec struct {
 // +kubebuilder:object:generate=false
 type DeployConfig struct {
 	DefaultDeploymentMode string `json:"defaultDeploymentMode,omitempty"`
+}
+
+// +kubebuilder:object:generate=false
+// CanaryAnalysisConfig holds operator-level defaults for metric-gated canary
+// promotion: the default Prometheus source and the sampler's tuning. A per-CR
+// spec.rollout.canary.prometheus.serverAddress overrides BundledPrometheusAddress.
+type CanaryAnalysisConfig struct {
+	// BundledPrometheusAddress is the metrics source queried when a canary does not
+	// set its own spec.rollout.canary.prometheus.serverAddress. There is
+	// intentionally NO in-code default — the value is supplied via the
+	// inferenceservice-config ConfigMap (set by the Helm chart / GitOps), so the
+	// address is never a hardcoded magic string. Empty means a canary with no
+	// per-CR source has no source, and its samples read as inconclusive — it does
+	// not silently fall back to a baked-in address.
+	BundledPrometheusAddress string `json:"bundledPrometheusAddress,omitempty"`
+	// QueryTimeout bounds one sampling pass (all of a step's metric queries). A
+	// duration string (e.g. "5s"); the loader falls back to DefaultAnalysisQueryTimeout.
+	QueryTimeout string `json:"queryTimeout,omitempty"`
+	// MaxConcurrency caps how many analysis queries run in the background at once,
+	// across all canaries. The loader falls back to DefaultAnalysisMaxConcurrency.
+	MaxConcurrency int32 `json:"maxConcurrency,omitempty"`
+	// CacheTTL is how long a sampled result stays usable before the sampler evicts
+	// it. A duration string; the loader falls back to DefaultAnalysisCacheTTL.
+	CacheTTL string `json:"cacheTTL,omitempty"`
 }
 
 // +kubebuilder:object:generate=false
@@ -248,4 +283,57 @@ func NewModelCacheConfig(clientset kubernetes.Interface) (*sharded.ProviderConfi
 		}
 	}
 	return modelCacheConfig, nil
+}
+
+// NewCanaryAnalysisConfig loads the canary metric-analysis defaults from the
+// inferenceservice-config ConfigMap, applying operational fallbacks for the
+// sampler tunables. BundledPrometheusAddress has no fallback (the chart is the
+// source of truth); empty leaves canaries without a default metrics source.
+func NewCanaryAnalysisConfig(clientset kubernetes.Interface) (*CanaryAnalysisConfig, error) {
+	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	cfg := &CanaryAnalysisConfig{}
+	if err := getComponentConfig(CanaryAnalysisConfigName, configMap, cfg); err != nil {
+		return nil, fmt.Errorf("unable to parse canaryAnalysis config json: %w", err)
+	}
+	if cfg.QueryTimeout == "" {
+		cfg.QueryTimeout = DefaultAnalysisQueryTimeout
+	}
+	if cfg.MaxConcurrency <= 0 {
+		cfg.MaxConcurrency = DefaultAnalysisMaxConcurrency
+	}
+	if cfg.CacheTTL == "" {
+		cfg.CacheTTL = DefaultAnalysisCacheTTL
+	}
+	return cfg, nil
+}
+
+// QueryTimeoutDuration parses QueryTimeout, falling back to the known-good
+// DefaultAnalysisQueryTimeout when an operator wrote an unparseable or
+// non-positive value. The timeout MUST be positive: a zero/negative value would
+// leave a background analysis query unbounded, so a hung Prometheus could park a
+// sampler goroutine indefinitely.
+func (c *CanaryAnalysisConfig) QueryTimeoutDuration() time.Duration {
+	return parseDurationOr(c.QueryTimeout, DefaultAnalysisQueryTimeout)
+}
+
+// CacheTTLDuration parses CacheTTL, falling back to the known-good
+// DefaultAnalysisCacheTTL when an operator wrote an unparseable or non-positive
+// value. The TTL MUST be positive: a zero/negative value disables cache eviction
+// (unbounded growth).
+func (c *CanaryAnalysisConfig) CacheTTLDuration() time.Duration {
+	return parseDurationOr(c.CacheTTL, DefaultAnalysisCacheTTL)
+}
+
+// parseDurationOr parses s, returning the parse of fallback (a compile-time
+// constant known to parse) when s is empty, malformed, or non-positive — callers
+// rely on a strictly positive result.
+func parseDurationOr(s, fallback string) time.Duration {
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return d
+	}
+	d, _ := time.ParseDuration(fallback)
+	return d
 }

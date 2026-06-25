@@ -27,6 +27,14 @@ type DispatchDeps struct {
 	Recorder record.EventRecorder
 	ISVC     *v1beta1.InferenceService
 	Now      time.Time
+	// Sampler is the controller's shared async analysis sampler (built once at
+	// startup). nil disables metric-gated steps (they hold), which keeps a
+	// controller without a configured sampler from advancing analysis steps ungated.
+	Sampler *Sampler
+	// BundledPrometheusAddress and QueryTimeout come from the canaryAnalysis operator
+	// config (fetched per-reconcile by the controller), threaded to the sampler.
+	BundledPrometheusAddress string
+	QueryTimeout             time.Duration
 }
 
 // Dispatch runs the canary step machine for an InferenceService, mutating
@@ -87,17 +95,19 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	}
 
 	res, err := Reconcile(ctx, ReconcileInputs{
-		Client:                 d.Client,
-		ISVC:                   d.ISVC,
-		Component:              primary,
-		CanaryRevisionHash:     canaryHash,
-		StableRevisionHash:     otherRevision(pods, canaryHash),
-		DesiredReplicas:        componentReplicas(d.ISVC, primary),
-		PerRevisionPods:        readyRev[primary],
-		SecondaryCapacityReady: secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, primary),
-		Now:                    now,
-		Sample:                 PrometheusSample,
-		Prometheus:             canaryPrometheus(d.ISVC),
+		Client:                   d.Client,
+		ISVC:                     d.ISVC,
+		Component:                primary,
+		CanaryRevisionHash:       canaryHash,
+		StableRevisionHash:       otherRevision(pods, canaryHash),
+		DesiredReplicas:          componentReplicas(d.ISVC, primary),
+		PerRevisionPods:          readyRev[primary],
+		SecondaryCapacityReady:   secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, primary),
+		Now:                      now,
+		Sampler:                  samplerOrNil(d.Sampler),
+		Prometheus:               canaryPrometheus(d.ISVC),
+		BundledPrometheusAddress: d.BundledPrometheusAddress,
+		QueryTimeout:             d.QueryTimeout,
 	})
 	if err != nil {
 		return 0, err
@@ -149,6 +159,16 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 	}
 	ir.Spec.Pacing.RollbackToRevision = want
 	return c.Update(ctx, ir)
+}
+
+// samplerOrNil converts a possibly-nil *Sampler into the stepSampler interface,
+// returning a true nil interface (not a non-nil interface wrapping a nil pointer)
+// so the executor's `Sampler == nil` guard works and never dereferences nil.
+func samplerOrNil(s *Sampler) stepSampler {
+	if s == nil {
+		return nil
+	}
+	return s
 }
 
 // canaryPrometheus returns the canary group's shared metrics source (the

@@ -6,6 +6,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -43,13 +44,27 @@ type ReconcileInputs struct {
 	// capacity is checked via PerRevisionPods. Single-component canaries pass true.
 	SecondaryCapacityReady bool
 	Now                    time.Time
-	// Sample evaluates a step's analysis metrics for one sample. The controller
-	// wires PrometheusSample; tests inject a fake. Only called for analysis steps.
-	Sample AnalysisSampleFunc
+	// Sampler reads analysis metric results without blocking the reconcile: a miss
+	// kicks a bounded background query and an event re-reconciles when it lands.
+	// The controller wires *Sampler; tests inject a fake. Only used by analysis steps.
+	Sampler stepSampler
 	// Prometheus is the canary-level metrics source (GroupCanary.Prometheus) shared
-	// by all analysis steps. Read by the sampler; nil falls back to the bundled
-	// Prometheus.
+	// by all analysis steps. Its ServerAddress overrides BundledPrometheusAddress;
+	// nil falls back to it.
 	Prometheus *v1beta1.AnalysisPrometheus
+	// BundledPrometheusAddress is the operator-configured default source
+	// (controllerconfig canaryAnalysis), used when Prometheus is nil or sets no
+	// ServerAddress. Empty means no default source — samples read inconclusive.
+	BundledPrometheusAddress string
+	// QueryTimeout bounds one background sampling pass (controllerconfig canaryAnalysis).
+	QueryTimeout time.Duration
+}
+
+// stepSampler is the analysis-sampling seam the executor calls. Production wires
+// the async *Sampler; tests inject a fake returning canned results so the step
+// logic stays hermetic. Get is non-blocking: see Sampler.Get.
+type stepSampler interface {
+	Get(req SampleRequest, since time.Time) (analysis.Result, time.Time, bool)
 }
 
 // Result reports the executor's decision for one reconcile. Active=false means

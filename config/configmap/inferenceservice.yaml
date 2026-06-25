@@ -24,6 +24,14 @@ data:
       "defaultDeploymentMode": "RawDeployment"
     }
 
+  canaryAnalysis: |-
+    {
+      "bundledPrometheusAddress": "http://ome-prometheus.ome.svc:9090",
+      "queryTimeout": "5s",
+      "maxConcurrency": 8,
+      "cacheTTL": "2m"
+    }
+
   metricsAggregator: |-
     {
       "enableMetricAggregation": "false",

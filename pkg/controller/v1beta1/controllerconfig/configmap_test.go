@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -462,6 +463,37 @@ func TestGetComponentConfig(t *testing.T) {
 			}
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedData, result)
+		})
+	}
+}
+
+// TestCanaryAnalysisDurationAccessors verifies the query-timeout and cache-TTL
+// accessors fall back to the documented defaults for empty, malformed, zero, or
+// negative values. The zero/negative cases matter: a non-positive query timeout
+// would leave a background sampler query unbounded, and a non-positive TTL would
+// disable cache eviction.
+func TestCanaryAnalysisDurationAccessors(t *testing.T) {
+	defQuery, _ := time.ParseDuration(DefaultAnalysisQueryTimeout)
+	defTTL, _ := time.ParseDuration(DefaultAnalysisCacheTTL)
+
+	tests := []struct {
+		name      string
+		query     string
+		ttl       string
+		wantQuery time.Duration
+		wantTTL   time.Duration
+	}{
+		{"valid values pass through", "9s", "3m", 9 * time.Second, 3 * time.Minute},
+		{"empty falls back", "", "", defQuery, defTTL},
+		{"malformed falls back", "nope", "huh", defQuery, defTTL},
+		{"zero falls back", "0s", "0s", defQuery, defTTL},
+		{"negative falls back", "-5s", "-1m", defQuery, defTTL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &CanaryAnalysisConfig{QueryTimeout: tt.query, CacheTTL: tt.ttl}
+			assert.Equal(t, tt.wantQuery, c.QueryTimeoutDuration())
+			assert.Equal(t, tt.wantTTL, c.CacheTTLDuration())
 		})
 	}
 }

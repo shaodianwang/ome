@@ -56,6 +56,18 @@ ome:
     #     fb_metric_schema: ome_controller
     podAnnotations: {}
     deploymentMode: "RawDeployment"
+    # canaryAnalysis tunes metric-gated canary promotion (spec.rollout.canary).
+    canaryAnalysis:
+      # Default Prometheus the analysis queries when a canary does not set its own
+      # spec.rollout.canary.prometheus.serverAddress. Empty -> the bundled
+      # ome-prometheus Service (computed http://ome-prometheus.<namespace>.svc:9090
+      # by the ConfigMap template). Set to your own Prometheus/Thanos for prod.
+      bundledPrometheusAddress: ""
+      # Per-sample query timeout, max background query concurrency, and how long a
+      # sampled result stays usable in the controller's cache.
+      queryTimeout: "5s"
+      maxConcurrency: 8
+      cacheTTL: "2m"
     ingressGateway:
       domain: svc.cluster.local
       domainTemplate: "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"
