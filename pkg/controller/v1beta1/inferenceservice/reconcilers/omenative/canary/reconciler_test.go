@@ -7,6 +7,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -362,5 +363,123 @@ func TestReconcile_ReadyTimeoutAnnotationOverride(t *testing.T) {
 	Reconcile(context.Background(), in)
 	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
 		t.Fatalf("after the 2m override → Failed, got %q", phaseOf(isvc))
+	}
+}
+
+// TestReconcile_AnalysisFailedIsSticky pins the parked-terminal contract for the
+// analysis path: once a step escalates to Failed (analysis stalled inconclusive
+// past the ready-timeout), it stays Failed across reconciles — it does NOT
+// oscillate back to Paused. The hold must not re-stamp StepEnteredTime (that
+// would reset the stall clock the next pass reads as "not stalled," flipping to
+// Paused, then re-failing a timeout later) nor re-sample. It re-arms only when a
+// genuinely new target revision appears.
+func TestReconcile_AnalysisFailedIsSticky(t *testing.T) {
+	analysisStep := v1beta1.RolloutGroupStep{
+		Capacity: intstr.FromString("50%"), Traffic: 50,
+		Analysis: &v1beta1.RolloutAnalysis{
+			Interval:     metav1.Duration{Duration: time.Minute},
+			FailureLimit: 3,
+			Metrics:      []v1beta1.AnalysisMetric{{Name: "err", Query: "q", Operator: v1beta1.ComparisonLTE, Threshold: "0.05"}},
+		},
+	}
+	isvc := canaryISVC([]v1beta1.RolloutGroupStep{analysisStep, {Capacity: intstr.FromString("100%"), Traffic: 100}}, nil)
+
+	t0 := time.Unix(100000, 0)
+	// Seed the step already Canarying with both anchors 20 min in the past (> the
+	// 15 min default ready-timeout) so the next inconclusive sample is past the
+	// stall and escalates to Failed on this reconcile. Phase Canarying makes the
+	// intermediate-step anchor skip its re-stamp, so the past anchors survive.
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:           "new",
+		CurrentStep:                  0,
+		StepEnteredTime:              &metav1.Time{Time: t0.Add(-20 * time.Minute)},
+		LastConclusiveEvaluationTime: &metav1.Time{Time: t0.Add(-20 * time.Minute)},
+	}
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhaseCanarying)
+
+	// First reconcile: inconclusive sample past the stall → Failed.
+	in := baseInputs(isvc, map[string]int32{"new": 2, "old": 2})
+	in.Now = t0
+	inconclusive := &countingSample{outcome: analysis.Inconclusive, at: t0}
+	in.Sampler = inconclusive
+	res, _ := Reconcile(context.Background(), in)
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("analysis stalled past the ready-timeout must escalate to Failed, got %q", phaseOf(isvc))
+	}
+	if res.RequeueAfter != failedRequeue {
+		t.Fatalf("Failed should slow-requeue at %v, got %v", failedRequeue, res.RequeueAfter)
+	}
+	enteredAtFailure := isvc.Status.Canary.StepEnteredTime.Time
+
+	// Second reconcile: same (unchanged) target, a later clock, and a sampler that
+	// would PASS — under the oscillation bug the re-stamp + re-evaluate would flip
+	// this to Paused (or advance). Sticky Failed must hold without re-sampling and
+	// without re-stamping StepEnteredTime.
+	in.Now = t0.Add(13 * time.Minute) // ready-timeout + stall would fire again at 778s-style cadence
+	passing := &countingSample{outcome: analysis.Pass, at: in.Now}
+	in.Sampler = passing
+	res, _ = Reconcile(context.Background(), in)
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("Failed must be sticky, not oscillate to %q", phaseOf(isvc))
+	}
+	if res.RequeueAfter != failedRequeue {
+		t.Fatalf("held Failed should keep the slow heartbeat %v, got %v", failedRequeue, res.RequeueAfter)
+	}
+	if !isvc.Status.Canary.StepEnteredTime.Time.Equal(enteredAtFailure) {
+		t.Fatalf("StepEnteredTime must not be re-stamped while held Failed: was %v, now %v", enteredAtFailure, isvc.Status.Canary.StepEnteredTime.Time)
+	}
+	if passing.calls != 0 {
+		t.Fatalf("held Failed must not re-sample analysis, got %d calls", passing.calls)
+	}
+	if isvc.Status.Canary.CurrentStep != 0 {
+		t.Fatalf("held Failed must not advance the step, got %d", isvc.Status.Canary.CurrentStep)
+	}
+
+	// A NEW target re-arms a fresh canary (step 0, new hash) and leaves the parked
+	// Failed phase behind.
+	in.Now = t0.Add(20 * time.Minute)
+	in.CanaryRevisionHash = "v3"
+	in.PerRevisionPods = map[string]int32{"old": 4} // new target's pods not up yet
+	in.Sampler = &countingSample{outcome: analysis.Pass, at: in.Now}
+	Reconcile(context.Background(), in)
+	if isvc.Status.Canary.CanaryRevisionHash != "v3" || isvc.Status.Canary.CurrentStep != 0 {
+		t.Fatalf("a new target must re-arm a fresh canary toward v3, got %+v", isvc.Status.Canary)
+	}
+	if phaseOf(isvc) == v1beta1.RolloutPhaseFailed {
+		t.Fatal("re-armed canary must leave the parked Failed phase, still Failed")
+	}
+}
+
+// TestReconcile_CapacityGateFailedIsSticky pins the same parked-terminal contract
+// for the capacity-gate Failed path: a step whose canary pods never become Ready
+// escalates to Failed after the ready-timeout and then STAYS Failed. The capacity
+// gate anchors on StepEnteredTime and never re-stamps it (it returns before the
+// intermediate-step anchor), so this path was already sticky — this guards that
+// the sticky-Failed hold preserves that (same slow heartbeat, no re-stamp, no
+// re-arm) rather than regressing it.
+func TestReconcile_CapacityGateFailedIsSticky(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", CurrentStep: 0, StepEnteredTime: &metav1.Time{Time: time.Unix(1000, 0)}}
+	in := baseInputs(isvc, map[string]int32{"new": 0}) // canary pods never come up
+
+	in.Now = time.Unix(1000, 0).Add(16 * time.Minute) // past the 15m default
+	Reconcile(context.Background(), in)
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("capacity gate past the ready-timeout → Failed, got %q", phaseOf(isvc))
+	}
+	enteredAtFailure := isvc.Status.Canary.StepEnteredTime.Time
+
+	// Later reconcile, same target, pods still down: must stay Failed, not flip to
+	// Pending, and must not re-stamp the entry time.
+	in.Now = time.Unix(1000, 0).Add(40 * time.Minute)
+	res, _ := Reconcile(context.Background(), in)
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("capacity-gate Failed must be sticky, not oscillate to %q", phaseOf(isvc))
+	}
+	if res.RequeueAfter != failedRequeue {
+		t.Fatalf("held Failed should keep the slow heartbeat %v, got %v", failedRequeue, res.RequeueAfter)
+	}
+	if !isvc.Status.Canary.StepEnteredTime.Time.Equal(enteredAtFailure) {
+		t.Fatalf("StepEnteredTime must not be re-stamped while held Failed: was %v, now %v", enteredAtFailure, isvc.Status.Canary.StepEnteredTime.Time)
 	}
 }

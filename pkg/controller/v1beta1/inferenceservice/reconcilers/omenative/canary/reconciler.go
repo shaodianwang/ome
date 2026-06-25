@@ -132,6 +132,30 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		}
 	}
 
+	// Failed is a parked terminal: a step escalated to Failed (capacity gate timed
+	// out before the canary pods were Ready, or analysis stalled inconclusive past
+	// the ready-timeout) is HELD there — stable keeps serving until the operator
+	// decides. Like the rolled-back hold above, re-arm only when a genuinely NEW
+	// target appears; otherwise return without re-stamping StepEnteredTime or
+	// re-evaluating. Re-stamping would reset the stall/ready-timeout clock anchored
+	// on it, so the next pass would read "not stalled," flip back to Paused/Pending,
+	// then re-fail a timeout later — oscillating instead of staying Failed. The
+	// failed revision is cs.CanaryRevisionHash; exclude it and the stable revision
+	// (the observed target reports stable while no canary pods remain).
+	if cs != nil && in.ISVC.Status.Components[in.Component].RolloutPhase == v1beta1.RolloutPhaseFailed {
+		stableHash := otherRevision(in.PerRevisionPods, cs.CanaryRevisionHash)
+		if in.CanaryRevisionHash != "" && in.CanaryRevisionHash != cs.CanaryRevisionHash && in.CanaryRevisionHash != stableHash {
+			*cs = v1beta1.CanaryStatus{
+				CanaryRevisionHash: in.CanaryRevisionHash,
+				CurrentStep:        0,
+				StepEnteredTime:    &metav1.Time{Time: in.Now},
+			}
+			// fall through: start a fresh canary toward the new target.
+		} else {
+			return &Result{Active: true, RequeueAfter: failedRequeue}, nil
+		}
+	}
+
 	// Done sentinel: a finished canary KEEPS its status with CurrentStep ==
 	// len(steps) rather than clearing it. EffectivePartition maps that to the
 	// final 100% step (partition 0, all instances on the canary revision); a nil
