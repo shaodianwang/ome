@@ -1056,18 +1056,27 @@ def _canary(case_id, yaml_file, desc, hdr):
     # supersedes it with "Paused" in the same reconcile for any step that pauses,
     # so it never persists for paused steps. Assert the canary entered an ACTIVE
     # split phase (Canarying OR Paused) instead of jumping straight to terminal;
-    # do not assert Canarying alone (it false-fails every paused step).
-    good(("Canarying" in phases) or ("Paused" in phases),
-         "observed an active canary phase (Canarying/Paused)",
-         f"never observed an active canary phase (jumped straight to terminal); saw {sorted(phases)}")
+    # do not assert Canarying alone (it false-fails every paused step). A
+    # single-step plan (e.g. a 100%-only analysis gate) has no intermediate split —
+    # it serves the canary via Promoting — so assert that instead.
+    if nsteps > 1:
+        good(("Canarying" in phases) or ("Paused" in phases),
+             "observed an active canary phase (Canarying/Paused)",
+             f"never observed an active canary phase (jumped straight to terminal); saw {sorted(phases)}")
+    else:
+        good("Promoting" in phases,
+             "observed Promoting (single-step gate served the canary)",
+             f"never observed Promoting on the single-step plan; saw {sorted(phases)}")
     new, _old = _inst_rev_split(ctx, primary)
 
     if analysis_mode:
         # Analysis verdict: the metric gate, not a timer/promote, drove the outcome.
-        # (A manual promote intentionally short-circuits sampling, so skip the
-        # "sampled" assertion there — reaching Stable despite a breaching canary is
-        # itself the proof the override won.)
-        if policy != "manual":
+        # metricResults is cleared on step-advance, so a fast-passing analysis step
+        # can clear it between the harness's 2s polls — reaching the gated terminal
+        # is itself proof it sampled. Only assert it where the result persists: a
+        # breach holds it, an inconclusive keeps rewriting it. (manual promote also
+        # short-circuits sampling.)
+        if policy != "manual" and expect != "Stable":
             good(saw_metrics, "analysis sampled (status.canary.metricResults recorded)",
                  "no metricResults ever recorded — analysis never sampled")
         if expect == "Stable":
