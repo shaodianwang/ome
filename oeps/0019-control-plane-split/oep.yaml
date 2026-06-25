@@ -1,0 +1,27 @@
+title: "Control-plane process split: webhook / serving / model"
+oep-number: "0019"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-06-24
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# This split is shaped by the controllers/webhooks these OEPs introduced, and by
+# the existing --multicluster-role precedent for running a controller subset.
+see-also:
+  - "/oeps/0018-multi-cluster-placement" # --multicluster-role precedent; WorkloadCluster + placement land in the serving plane
+  - "/oeps/0014-runtime-revisions"       # runtime-revision GC -> model/catalog plane
+  - "/oeps/0012-generic-runtimes"        # ServingRuntime inheritance -> model/catalog plane
+  - "/oeps/0013-autoscaling"             # KEDA ScaledObject / HPA ownership stays in the serving plane
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
