@@ -78,7 +78,10 @@ data:
             target_label: pod
           - source_labels: [__meta_kubernetes_pod_label_ome_io_inferenceservice]
             target_label: inferenceservice
-          - source_labels: [__meta_kubernetes_pod_label_ome_io_component]
+          # OME stamps the PLAIN `component` pod label
+          # (constants.OMEComponentLabel = "component"), not an
+          # ome.io/-prefixed one -- so source the unprefixed label.
+          - source_labels: [__meta_kubernetes_pod_label_component]
             target_label: component
 
       - job_name: ome-control-plane
