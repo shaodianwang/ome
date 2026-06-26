@@ -1,0 +1,34 @@
+title: "Multi-Cluster Horizontal Scale-Out via Fractional Admission"
+oep-number: "0018.1"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-06-26
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follow-up to OEP-0018: this OEP generalizes 0018's binary fan-out + race
+# (single-active: first cluster to admit the whole ISVC wins; delete the losers)
+# into FRACTIONAL admission (keep every cluster that admitted >0 replicas; sum
+# admitted replicas across clusters; load-balance the global endpoint weighted
+# by ready replicas). It lifts 0018's explicit non-goal "multi-cluster
+# load-balanced serving".
+see-also:
+  - "/oeps/0018-multi-cluster-placement" # the single-active base this builds on
+  - "/oeps/0009-ome-cluster-cache-integration" # model-weight locality per cluster (pre-staging assumption holds)
+  - "/oeps/0013-autoscaling" # per-cluster autoscaling must now be apportioned across homes
+
+replaces: []
+# This is additive to 0018, not a supersession: 0018's single-active path is the
+# degenerate N=1-home case of this OEP. 0018 stays the baseline; this extends it.
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
