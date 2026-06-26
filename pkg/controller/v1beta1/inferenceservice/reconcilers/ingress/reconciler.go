@@ -91,7 +91,7 @@ func (r *IngressReconciler) ReconcileWithDeploymentMode(ctx context.Context, isv
 		return fmt.Errorf("failed to get ingress strategy for deployment mode %s: %w", deploymentMode, err)
 	}
 
-	mainLog.Info("Using ingress strategy",
+	mainLog.V(1).Info("Using ingress strategy",
 		"strategy", strategy.GetName(),
 		"isvc", isvc.Name)
 

@@ -198,7 +198,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// For backward compatibility with predictor-based architecture
 	deploymentMode := isvcutils.GetDeploymentMode(annotations, deployConfig)
-	log.Info("InferenceService deployment mode resolved", "deploymentMode", deploymentMode)
+	log.V(1).Info("InferenceService deployment mode resolved", "deploymentMode", deploymentMode)
 
 	// name of our custom finalizer
 	finalizerName := "inferenceservice.finalizers"
@@ -262,7 +262,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// objects fetched via the typed cache, so isvc.APIVersion is always
 	// empty here. Use v1beta1.SchemeGroupVersion.String() if a callable
 	// API version is needed downstream.
-	log.Info("Reconciling inference service")
+	log.V(1).Info("Reconciling inference service")
 	isvcConfig, err := controllerconfig.NewInferenceServicesConfigCached(r.ConfigCache, r.Clientset)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to create InferenceServicesConfig")

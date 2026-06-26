@@ -122,7 +122,7 @@ func semanticPDBEquals(desired, existing *policyv1.PodDisruptionBudget) bool {
 // Reconcile ...
 func (r *PDBReconciler) Reconcile() (*policyv1.PodDisruptionBudget, error) {
 	checkResult, existingPDB, err := r.checkPDBExist(r.client)
-	log.Info("service reconcile", "checkResult", checkResult, "err", err)
+	log.V(1).Info("PDB reconcile", "checkResult", checkResult, "err", err)
 	if err != nil {
 		return nil, err
 	}

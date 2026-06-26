@@ -48,7 +48,7 @@ func NewRBACReconciler(
 
 // Reconcile ensures the RBAC resources are created and configured correctly
 func (r *RBACReconciler) Reconcile() error {
-	r.Log.Info("Reconciling RBAC resources", "name", r.objectMeta.Name, "namespace", r.objectMeta.Namespace, "component", r.componentType)
+	r.Log.V(1).Info("Reconciling RBAC resources", "name", r.objectMeta.Name, "namespace", r.objectMeta.Namespace, "component", r.componentType)
 
 	serviceAccountName := r.GetServiceAccountName()
 
@@ -138,7 +138,7 @@ func (r *RBACReconciler) Reconcile() error {
 		}
 	}
 
-	r.Log.Info("Successfully reconciled RBAC resources", "name", r.objectMeta.Name, "namespace", r.objectMeta.Namespace)
+	r.Log.V(1).Info("Successfully reconciled RBAC resources", "name", r.objectMeta.Name, "namespace", r.objectMeta.Namespace)
 	return nil
 }
 

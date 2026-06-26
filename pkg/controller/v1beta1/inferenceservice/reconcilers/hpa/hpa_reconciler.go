@@ -288,7 +288,7 @@ func shouldCreateHPA(desired *autoscalingv2.HorizontalPodAutoscaler) bool {
 
 func (r *HPAReconciler) Reconcile() error {
 	checkResult, _, err := r.checkHPAExist()
-	log.Info("Reconciling HPA", "namespace", r.HPA.Namespace, "name", r.HPA.Name, "checkResult", checkResult.String())
+	log.V(1).Info("Reconciling HPA", "namespace", r.HPA.Namespace, "name", r.HPA.Name, "checkResult", checkResult.String())
 	if err != nil {
 		return err
 	}
