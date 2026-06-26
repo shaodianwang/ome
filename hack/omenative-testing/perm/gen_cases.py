@@ -584,9 +584,12 @@ Canalysis("breach->rollback fl=1", "pd", "breach", _gate2(analysis_spec(failure_
 # Cumulative per-step budget: 3 breaching samples before rollback.
 Canalysis("breach->rollback fl=3", "engine", "breach", _gate2(analysis_spec(failure_limit=3)))
 # Inconclusive (canary emits no metric): Hold escalates to Failed past the
-# (shortened) stall timeout; Rollback fails safe immediately.
+# (shortened) stall timeout; Rollback fails safe immediately. ready_timeout gates
+# BOTH the capacity gate and the analysis stall, so it must outlast a PD fleet's
+# capacity ramp (8 pods) — 60s was too short (it tripped capacity-Failed before
+# analysis ever sampled); 120s leaves room for capacity, then the stall fires.
 Canalysis("inconclusive->Failed", "pd", "inconclusive",
-          _gate2(analysis_spec(failure_limit=1, on_inconclusive="Hold")), n=PDN, ready_timeout="60s")
+          _gate2(analysis_spec(failure_limit=1, on_inconclusive="Hold")), n=PDN, ready_timeout="120s")
 Canalysis("inconclusive->rollback", "engine", "inconclusive",
           _gate2(analysis_spec(failure_limit=1, on_inconclusive="Rollback")))
 
