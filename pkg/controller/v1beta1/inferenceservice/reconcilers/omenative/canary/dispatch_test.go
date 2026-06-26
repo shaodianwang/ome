@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -183,10 +184,33 @@ func canaryScheme(t *testing.T) *runtime.Scheme {
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
+	if err := appsv1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
 	if err := v1beta1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// canaryControllerRevision builds a ControllerRevision carrying the OMENative
+// revision label set the rollback-target lookup selects on, named like a real
+// per-(ISVC, Component) CR (`<isvc>-<component>-<hash>`) with a monotonic
+// .Revision. Seeded directly into the fake client so the rollback signal has
+// revision history to resolve the stable target from.
+func canaryControllerRevision(ns, isvc, comp, hash string, rev int64) *appsv1.ControllerRevision {
+	return &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      isvc + "-" + comp + "-" + hash,
+			Labels: map[string]string{
+				constants.InferenceServicePodLabelKey: isvc,
+				constants.OMEComponentLabel:           comp,
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+			},
+		},
+		Revision: rev,
+	}
 }
 
 // canaryPod builds a Running + Ready (serving) OMENative pod. The canary capacity
@@ -238,6 +262,9 @@ func TestDispatch_ServicesHashAndRollbackWarning(t *testing.T) {
 		canaryPod(ns, "d1", "engine", "newhash", "d1-engine-3"),
 		canaryPod(ns, "d1", "engine", "stable0", "d1-engine-0"),
 		canaryPod(ns, "d1", "engine", "stable0", "d1-engine-1"),
+		// Revision history the rollback signal resolves the stable target from.
+		canaryControllerRevision(ns, "d1", "engine", "stable0", 1),
+		canaryControllerRevision(ns, "d1", "engine", "newhash", 2),
 	}
 	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objs...).Build()
 	ctx := context.Background()
@@ -281,6 +308,93 @@ func TestDispatch_ServicesHashAndRollbackWarning(t *testing.T) {
 	if gotIR.Spec.Pacing == nil || gotIR.Spec.Pacing.RollbackToRevision == nil ||
 		*gotIR.Spec.Pacing.RollbackToRevision != "d1-engine-stable0" {
 		t.Fatalf("IR should be signaled to roll back to the stable revision, got pacing=%+v", gotIR.Spec.Pacing)
+	}
+}
+
+// TestDispatch_PDRouterRollbackTargetsStable is the PD-canary rollback regression:
+// the router (the PD primary, often a 1-replica proxy) fully rolls forward to its
+// canary revision before the rollback fires — so the router IR's CurrentRevision is
+// PROMOTED to the canary hash (RolloutComplete: all Instances on target). The
+// rollback signal must NOT echo CurrentRevision back as the roll target (that would
+// "roll back" the router to the revision it is already on — a no-op — so the canary
+// pods never drain and the rollout wedges in RollingBack forever). It must resolve
+// the STABLE pre-canary revision from the IR's ControllerRevision history instead.
+func TestDispatch_PDRouterRollbackTargetsStable(t *testing.T) {
+	ns := "default"
+	n1 := 1
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "pd"}}
+	// Router is the PD primary (router > engine > decoder). 1 replica is the common
+	// router shape: a 50% step rounds its newCount up to 1, partition 0 — so the
+	// single router pod rolls fully to canary at EVERY step.
+	isvc.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n1}}
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n1}}
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n1}}
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+			{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+			{Capacity: intstr.FromString("100%"), Traffic: 100},
+		}},
+	}}}
+	// Canary in progress at the final step (breach about to roll back). The router
+	// has shifted 100% traffic to its canary.
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "rtrNew", CurrentStep: 1, ObservedTrafficWeight: 100}
+	// Router IR fully rolled to canary: CurrentRevision == UpdateRevision == canary CR.
+	rtrIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "pd-router"}}
+	rtrIR.Status.UpdateRevision = "pd-router-rtrNew"
+	rtrIR.Status.CurrentRevision = "pd-router-rtrNew"
+	engIR := ir(ns, "pd", v1beta1.EngineComponent, "engNew")
+	decIR := ir(ns, "pd", v1beta1.DecoderComponent, "decNew")
+
+	// Engine/decoder IRs also fully rolled to their own per-Component canary.
+	engIR.Status.CurrentRevision = "pd-engine-engNew"
+	decIR.Status.CurrentRevision = "pd-decoder-decNew"
+
+	objs := []runtime.Object{isvc, rtrIR, engIR, decIR,
+		// Every Component fully on its canary revision — no stable pods remain.
+		canaryPod(ns, "pd", "router", "rtrNew", "pd-router-0"),
+		canaryPod(ns, "pd", "engine", "engNew", "pd-engine-0"),
+		canaryPod(ns, "pd", "decoder", "decNew", "pd-decoder-0"),
+		// Revision history per Component: the canary CR (newest) plus the stable
+		// pre-canary CR each rolled away from. The stable CR persists in history
+		// (retention) even though no stable pods are live. Hashes are per-Component.
+		canaryControllerRevision(ns, "pd", "router", "rtrStable", 1),
+		canaryControllerRevision(ns, "pd", "router", "rtrNew", 2),
+		canaryControllerRevision(ns, "pd", "engine", "engStable", 1),
+		canaryControllerRevision(ns, "pd", "engine", "engNew", 2),
+		canaryControllerRevision(ns, "pd", "decoder", "decStable", 1),
+		canaryControllerRevision(ns, "pd", "decoder", "decNew", 2),
+	}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objs...).Build()
+	ctx := context.Background()
+
+	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
+		t.Fatalf("Dispatch (rollback) error: %v", err)
+	}
+	if got := isvc.Status.Components[v1beta1.RouterComponent].RolloutPhase; got != v1beta1.RolloutPhaseRollingBack {
+		t.Fatalf("router still has canary pods → RollingBack, got %q", got)
+	}
+	// Every group Component's IR must be signaled to roll back to its OWN stable
+	// pre-canary revision — never to the canary it is already on (a no-op that
+	// would wedge the drain). A PD rollback that signals only the router leaves
+	// the engine/decoder serving the rejected revision behind the rolled-back router.
+	for comp, want := range map[v1beta1.ComponentType]string{
+		v1beta1.RouterComponent:  "pd-router-rtrStable",
+		v1beta1.EngineComponent:  "pd-engine-engStable",
+		v1beta1.DecoderComponent: "pd-decoder-decStable",
+	} {
+		got := &v1beta1.InferenceReplica{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: "pd-" + string(comp)}, got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Pacing == nil || got.Spec.Pacing.RollbackToRevision == nil {
+			t.Fatalf("%s IR must be signaled to roll back, got pacing=%+v", comp, got.Spec.Pacing)
+		}
+		if *got.Spec.Pacing.RollbackToRevision != want {
+			t.Fatalf("%s rollback target must be its stable revision %q (not the canary no-op), got %q",
+				comp, want, *got.Spec.Pacing.RollbackToRevision)
+		}
 	}
 }
 

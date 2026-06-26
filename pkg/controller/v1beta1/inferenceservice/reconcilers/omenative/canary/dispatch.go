@@ -4,12 +4,15 @@ import (
 	"context"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
@@ -130,23 +133,38 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		return 0, err
 	}
 
-	// Rollback signal: when the executor is rolling back, point the primary's IR
-	// at the stable ControllerRevision so it rolls every Instance back to stable;
-	// otherwise clear the signal. (Reconcile shifted traffic + set the phase; this
-	// drives the actual pod revert.)
-	if err := reconcileRollbackSignal(ctx, d.Client, d.Reader, d.ISVC, primary, res.RolledBack); err != nil {
-		return 0, err
+	// Rollback signal: when the executor is rolling back, point EVERY group
+	// Component's IR at its own stable ControllerRevision so it rolls every
+	// Instance back to stable; otherwise clear the signal. (Reconcile shifted
+	// traffic + set the phase; this drives the actual pod revert.) The canary
+	// stages capacity on all group Components, so a PD rollback must revert all of
+	// them — signaling only the primary leaves the engine/decoder serving the
+	// rejected revision behind the rolled-back router.
+	for _, comp := range configuredComponents(d.ISVC) {
+		if err := reconcileRollbackSignal(ctx, d.Client, d.Reader, d.ISVC, comp, res.RolledBack); err != nil {
+			return 0, err
+		}
 	}
 
 	recordDispatch(d.Recorder, d.ISVC, primary, res)
 	return res.RequeueAfter, nil
 }
 
-// reconcileRollbackSignal sets (rolledBack) or clears the primary IR's
-// Spec.Pacing.RollbackToRevision. When rolling back it points at the IR's
-// CurrentRevision (the stable, pre-canary revision) so the IR reconciler
-// overrides its desired template with that revision and rolls every Instance
-// back to it. Idempotent — only writes on a change.
+// reconcileRollbackSignal sets (rolledBack) or clears one Component IR's
+// Spec.Pacing.RollbackToRevision. When rolling back it points at the STABLE
+// pre-canary ControllerRevision so the IR reconciler overrides its desired
+// template with that revision and rolls every Instance back to it. Idempotent —
+// only writes on a change.
+//
+// The target is resolved from the IR's ControllerRevision history, NOT from
+// ir.Status.CurrentRevision: CurrentRevision is promoted to the canary revision
+// as soon as the Component fully rolls forward onto it (every Instance Ready on
+// target). The primary always reaches that state — the router (the PD primary)
+// is typically a 1-replica proxy whose every step rounds the new-pod count up to
+// its full replica count (partition 0), so it rolls fully onto the canary at the
+// FIRST step. Echoing CurrentRevision back would then tell the IR to "roll back"
+// to the canary revision it is already on — a no-op — so the canary pods never
+// drain and the rollback wedges in RollingBack forever.
 func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, rolledBack bool) error {
 	if c == nil || reads == nil {
 		return nil
@@ -160,9 +178,22 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 		return err
 	}
 	var want *string
-	if rolledBack && ir.Status.CurrentRevision != "" {
-		w := ir.Status.CurrentRevision
-		want = &w
+	if rolledBack {
+		// The rejected revision is this Component's OWN canary target (revision
+		// hashes are per-Component, so the primary's rejected hash never names a
+		// secondary's revision). canaryTargetHash reads the IR's UpdateRevision,
+		// which keeps naming the canary (spec) target throughout the rollback.
+		stable, err := stableRevisionName(ctx, reads, isvc, comp, canaryTargetHash(ctx, reads, isvc, comp))
+		if err != nil {
+			return err
+		}
+		// Only signal a real stable target. An empty result (the stable CR was
+		// GC'd, or only the canary revision exists) must NOT fall back to the
+		// canary revision — that would be a no-op roll. Leaving the signal unset
+		// lets the IR reconciler's NotFound path degrade gracefully.
+		if stable != "" {
+			want = &stable
+		}
 	}
 	var cur *string
 	if ir.Spec.Pacing != nil {
@@ -176,6 +207,46 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 	}
 	ir.Spec.Pacing.RollbackToRevision = want
 	return c.Update(ctx, ir)
+}
+
+// stableRevisionName resolves the ControllerRevision name of the stable,
+// pre-canary revision for a Component: the highest-numbered ControllerRevision
+// in the Component's history whose revision hash is NOT the rejected (canary)
+// hash. The canary is the latest spec target so it owns the highest .Revision;
+// the stable revision the canary rolled away from is the next-highest. Returns
+// "" when no non-canary revision is in history (nothing to roll back to).
+//
+// Reading the history is what makes the rollback target survive the canary's
+// forward roll — once every Instance is on the canary revision, neither the IR
+// status nor the live pod set still names the stable revision, but its
+// ControllerRevision is retained.
+func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, rejectedHash string) (string, error) {
+	// Without a known rejected (canary) hash we can't tell the stable revision
+	// apart from the canary, so don't guess — better no signal than the wrong one.
+	if rejectedHash == "" {
+		return "", nil
+	}
+	list := &appsv1.ControllerRevisionList{}
+	sel := labels.SelectorFromSet(labels.Set{
+		constants.InferenceServicePodLabelKey: isvc.Name,
+		constants.OMEComponentLabel:           string(comp),
+		query.LabelManagedBy:                  query.ManagedByOMENative,
+	})
+	if err := reads.List(ctx, list, client.InNamespace(isvc.Namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
+		return "", err
+	}
+	bestName := ""
+	var bestRev int64
+	for i := range list.Items {
+		cr := &list.Items[i]
+		if query.RevisionHashFromControllerRevisionName(cr.Name) == rejectedHash {
+			continue
+		}
+		if bestName == "" || cr.Revision > bestRev {
+			bestName, bestRev = cr.Name, cr.Revision
+		}
+	}
+	return bestName, nil
 }
 
 // samplerOrNil converts a possibly-nil *Sampler into the stepSampler interface,
