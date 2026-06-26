@@ -139,10 +139,15 @@ ome:
       # Cluster-default Gateway API request timeout (seconds) applied to every
       # generated HTTPRoute whose ISVC doesn't set spec.<component>.timeoutSeconds.
       # The OME binary has NO built-in default — this chart value is the source of
-      # truth (override per-cluster via GitOps). Generous by default because LLM
-      # generations/streams can run long; lower it if your traffic skews short.
-      # null/0 => OME imposes no route timeout (the gateway's own default applies).
-      defaultRouteTimeoutSeconds: 3600
+      # truth (override per-cluster via GitOps).
+      #   0    => emit "0s" = explicitly DISABLE the overall request timeout
+      #           (recommended for inference: generations/streams run long; the
+      #           gateway's idle timeout still reaps dead streams).
+      #   >0   => that many seconds.
+      #   null => field omitted, which falls back to Envoy's built-in 15s route
+      #           default (truncates long requests) — avoid; prefer 0 or a value.
+      # A per-ISVC spec.<component>.timeoutSeconds still overrides this.
+      defaultRouteTimeoutSeconds: 0
     nodeSelector: {}
     tolerations: []
     topologySpreadConstraints: []

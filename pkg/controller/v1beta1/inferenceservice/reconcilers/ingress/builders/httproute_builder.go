@@ -107,12 +107,17 @@ func toGatewayAPIDuration(seconds int64) *gatewayapiv1.Duration {
 }
 
 // defaultTimeout returns the cluster-default HTTPRoute request timeout from
-// IngressConfig.DefaultRouteTimeoutSeconds, or nil when unset/non-positive — in
-// which case OME imposes no route timeout and the gateway's own default applies.
-// The default is config-driven (inferenceservice-config ConfigMap / chart), never
-// a hardcoded literal. A per-ISVC spec.<component>.timeoutSeconds still overrides.
+// IngressConfig.DefaultRouteTimeoutSeconds. A configured value of 0 yields "0s",
+// which Gateway API / Envoy Gateway treat as an explicit DISABLE of the request
+// timeout (verified live). This distinction matters: an *omitted* timeout is NOT
+// "unbounded" — Envoy falls back to its built-in 15s route default, which would
+// truncate long-running inference. So 0 must emit "0s", not be dropped. When the
+// value is nil (unset) or negative we return nil (timeout left unset → Envoy's
+// 15s default applies). The value is config-driven (inferenceservice-config
+// ConfigMap / chart), never a hardcoded literal. A per-ISVC
+// spec.<component>.timeoutSeconds still overrides.
 func (b *HTTPRouteBuilder) defaultTimeout() *gatewayapiv1.Duration {
-	if b.ingressConfig != nil && b.ingressConfig.DefaultRouteTimeoutSeconds != nil && *b.ingressConfig.DefaultRouteTimeoutSeconds > 0 {
+	if b.ingressConfig != nil && b.ingressConfig.DefaultRouteTimeoutSeconds != nil && *b.ingressConfig.DefaultRouteTimeoutSeconds >= 0 {
 		return toGatewayAPIDuration(*b.ingressConfig.DefaultRouteTimeoutSeconds)
 	}
 	return nil
@@ -259,9 +264,10 @@ func (b *HTTPRouteBuilder) createHTTPRouteRule(routeMatches []gatewayapiv1.HTTPR
 		BackendRefs: backendRefs,
 	}
 	// Only set a request timeout when one is configured (cluster default via
-	// IngressConfig.DefaultRouteTimeoutSeconds, or a per-ISVC override). A nil
-	// timeout leaves Timeouts unset so the gateway's own default governs —
-	// OME never imposes a hardcoded timeout.
+	// IngressConfig.DefaultRouteTimeoutSeconds, or a per-ISVC override). A "0s"
+	// timeout explicitly DISABLES it (Gateway API). A nil timeout leaves Timeouts
+	// unset — note that means Envoy's built-in 15s route default applies, NOT
+	// "unbounded". OME never imposes a hardcoded timeout value.
 	if timeout != nil {
 		rule.Timeouts = &gatewayapiv1.HTTPRouteTimeouts{Request: timeout}
 	}

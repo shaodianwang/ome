@@ -964,10 +964,12 @@ func TestHTTPRouteBuilder_NoDefaultTimeout_OmitsRouteTimeout(t *testing.T) {
 	assert.Nil(t, httpRoute.Spec.Rules[0].Timeouts, "no default configured => no route timeout imposed by OME")
 }
 
-// TestHTTPRouteBuilder_NonPositiveDefaultTimeout_OmitsRouteTimeout verifies a
-// 0/negative configured value is treated as "no timeout" rather than emitting
-// an invalid "0s"/"-Ns" duration.
-func TestHTTPRouteBuilder_NonPositiveDefaultTimeout_OmitsRouteTimeout(t *testing.T) {
+// TestHTTPRouteBuilder_ZeroDefaultTimeout_DisablesRouteTimeout verifies a
+// configured value of 0 emits an explicit "0s", which Gateway API / Envoy treat
+// as DISABLING the request timeout. Omitting the timeout instead would fall back
+// to Envoy's built-in 15s route default (verified live), which truncates
+// long-running inference — so 0 must produce "0s", not be dropped.
+func TestHTTPRouteBuilder_ZeroDefaultTimeout_DisablesRouteTimeout(t *testing.T) {
 	builder := createHTTPRouteBuilder()
 	builder.ingressConfig.DefaultRouteTimeoutSeconds = ptr.To(int64(0))
 
@@ -978,7 +980,10 @@ func TestHTTPRouteBuilder_NonPositiveDefaultTimeout_OmitsRouteTimeout(t *testing
 	require.NoError(t, err)
 	httpRoute := result.(*gatewayapiv1.HTTPRoute)
 	require.Len(t, httpRoute.Spec.Rules, 1)
-	assert.Nil(t, httpRoute.Spec.Rules[0].Timeouts, "non-positive default => no route timeout")
+	require.NotNil(t, httpRoute.Spec.Rules[0].Timeouts)
+	require.NotNil(t, httpRoute.Spec.Rules[0].Timeouts.Request)
+	assert.Equal(t, gatewayapiv1.Duration("0s"), *httpRoute.Spec.Rules[0].Timeouts.Request,
+		"0 => explicit \"0s\" (Gateway API: disable request timeout)")
 }
 
 func createHTTPRouteBuilder() *HTTPRouteBuilder {
