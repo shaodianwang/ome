@@ -956,7 +956,12 @@ def _canary(case_id, yaml_file, desc, hdr):
           + ("  +rollback" if do_rollback else ""))
     if not _bump_rev(ctx, group, extra=analysis_extra):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed")
-    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * N[primary] * ctx["pods_per_inst"][primary] + 120)
+    # Budget tracks the whole bumped group, not just the primary: a rollback (or a
+    # full roll) drains every member, and the primary is merely where status/traffic
+    # is observed. For PD primary=router (2 pods) but the drain covers engine+decoder
+    # too (18-26 pods), and the router's own readiness-gated SurgeThenDrain back to
+    # stable runs ~100-300s — sizing on the primary alone starves the drain window.
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ctx["pods_per_inst"][c] for c in group) + 120)
     if analysis_mode:
         # Analysis is paced by the bundled Prometheus scrape (~15s) plus each
         # step's initialDelay + failureLimit×interval (+ stall timeout for the
