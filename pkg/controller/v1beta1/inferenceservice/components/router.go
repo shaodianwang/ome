@@ -90,7 +90,7 @@ func NewRouter(
 
 // Reconcile implements the Component interface for Router
 func (r *Router) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {
-	r.Log.Info("Reconciling router component", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
+	r.Log.V(1).Info("Reconciling router component", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
 
 	// Validate router spec
 	if r.routerSpec == nil {
@@ -248,7 +248,7 @@ func (r *Router) determineRouterName(ctx context.Context, isvc *v1beta1.Inferenc
 func (r *Router) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *metav1.ObjectMeta) (*v1.PodSpec, error) {
 	if r.routerSpec.Runner != nil {
 		if r.routerSpec.Config != nil {
-			r.Log.Info("Adding config to router env", "inference service", isvc.Name, "namespace", isvc.Namespace)
+			r.Log.V(2).Info("Adding config to router env", "inference service", isvc.Name, "namespace", isvc.Namespace)
 			for k, v := range r.routerSpec.Config {
 				r.routerSpec.Runner.Env = append(r.routerSpec.Runner.Env, v1.EnvVar{Name: k, Value: v})
 			}
@@ -262,7 +262,7 @@ func (r *Router) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *me
 
 	UpdatePodSpecVolumes(&r.BaseComponentFields, isvc, podSpec, objectMeta)
 
-	r.Log.Info("Router PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
+	r.Log.V(1).Info("Router PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return podSpec, nil
 }
 

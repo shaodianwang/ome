@@ -97,7 +97,7 @@ func NewEngine(
 
 // Reconcile implements the Component interface for Engine
 func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {
-	e.Log.Info("Reconciling engine component", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
+	e.Log.V(1).Info("Reconciling engine component", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
 
 	// Validate engine spec
 	if e.engineSpec == nil {
@@ -331,7 +331,7 @@ func (e *Engine) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *me
 	UpdatePodSpecVolumes(&e.BaseComponentFields, isvc, podSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&e.BaseComponentFields, isvc, podSpec, v1beta1.EngineComponent)
 
-	e.Log.Info("Engine PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
+	e.Log.V(1).Info("Engine PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return podSpec, nil
 }
 
@@ -361,14 +361,14 @@ func (e *Engine) reconcileWorkerPodSpec(isvc *v1beta1.InferenceService, objectMe
 	}
 	UpdatePodSpecVolumes(&e.BaseComponentFields, isvc, workerPodSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&e.BaseComponentFields, isvc, workerPodSpec, v1beta1.EngineComponent)
-	e.Log.Info("Engine Worker PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
+	e.Log.V(1).Info("Engine Worker PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return workerPodSpec, nil
 }
 
 // setParallelismEnvVarForEngine calculates and sets the PARALLELISM_SIZE environment variable for the engine's container.
 func (e *Engine) setParallelismEnvVarForEngine(container *v1.Container, workerReplicas int) {
 	if container == nil || e.engineSpec == nil {
-		e.Log.Info("Cannot set parallelism: container or engineSpec is nil")
+		e.Log.V(2).Info("Cannot set parallelism: container or engineSpec is nil")
 		return
 	}
 
@@ -382,12 +382,12 @@ func (e *Engine) setParallelismEnvVarForEngine(container *v1.Container, workerRe
 		if parallelismSize > 0 {
 			envVar := v1.EnvVar{Name: constants.ParallelismSizeEnvVarKey, Value: strconv.FormatInt(parallelismSize, 10)}
 			isvcutils.UpdateEnvVars(container, &envVar)
-			e.Log.Info("Added parallelism env variable to engine container", "value", parallelismSize, "containerName", container.Name)
+			e.Log.V(2).Info("Added parallelism env variable to engine container", "value", parallelismSize, "containerName", container.Name)
 		} else {
-			e.Log.Info("Calculated parallelism is zero, not adding env var", "containerName", container.Name)
+			e.Log.V(2).Info("Calculated parallelism is zero, not adding env var", "containerName", container.Name)
 		}
 	} else {
-		e.Log.Info("Conditions not met for parallelism (no GPUs or no leaders/workers)", "containerName", container.Name, "gpus", numGPUsPerPod, "leaders", numLeaders, "workers", numWorkers)
+		e.Log.V(2).Info("Conditions not met for parallelism (no GPUs or no leaders/workers)", "containerName", container.Name, "gpus", numGPUsPerPod, "leaders", numLeaders, "workers", numWorkers)
 	}
 }
 

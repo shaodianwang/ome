@@ -191,7 +191,7 @@ func UpdateEnvVariables(b *BaseComponentFields, isvc *v1beta1.InferenceService, 
 	if !b.FineTunedServing {
 		// Base model serving - add MODEL_PATH env variable if necessary
 		if modelPath, ok := modelPathEnvValue(b, objectMeta); ok {
-			b.Log.Info("Base model serving - adding MODEL_PATH env variable if not provided", "inference service", isvc.Name, "namespace", isvc.Namespace)
+			b.Log.V(1).Info("Base model serving - adding MODEL_PATH env variable if not provided", "inference service", isvc.Name, "namespace", isvc.Namespace)
 			isvcutils.AppendEnvVarsIfNotExist(container, &[]corev1.EnvVar{
 				{Name: constants.ModelPathEnvVarKey, Value: modelPath},
 			})
@@ -245,7 +245,7 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 	// Skip node selector for fine-tuned serving with merged weights
 	// as they don't need the base model on the node
 	if b.FineTunedServingWithMergedWeights {
-		b.Log.Info("Skipping node selector for fine-tuned serving with merged weights",
+		b.Log.V(2).Info("Skipping node selector for fine-tuned serving with merged weights",
 			"inferenceService", isvc.Name, "namespace", isvc.Namespace)
 		return
 	}
@@ -254,7 +254,7 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 	// label nodes for PVC storage (PVCs aren't tied to specific nodes), so
 	// the K8s scheduler handles placement based on PVC accessibility.
 	if isPVCBaseModel(b) {
-		b.Log.Info("Skipping model node selector for PVC-backed BaseModel",
+		b.Log.V(2).Info("Skipping model node selector for PVC-backed BaseModel",
 			"inferenceService", isvc.Name, "namespace", isvc.Namespace)
 		mergedNodeSelector := isvcutils.MergeNodeSelector(b.Runtime, isvc, componentType)
 		if len(mergedNodeSelector) > 0 {
@@ -270,7 +270,7 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 
 	// Add preferred node affinity for model readiness using the shared utility function
 	if isShardedModel(b.BaseModel) {
-		b.Log.Info("Skipping per-node model readiness selector for sharded model",
+		b.Log.V(2).Info("Skipping per-node model readiness selector for sharded model",
 			"modelName", b.BaseModelMeta.Name,
 			"namespace", b.BaseModelMeta.Namespace,
 			"inferenceService", isvc.Name)
@@ -290,7 +290,7 @@ func UpdatePodSpecNodeSelector(b *BaseComponentFields, isvc *v1beta1.InferenceSe
 	}
 
 	if !isShardedModel(b.BaseModel) {
-		b.Log.Info("Added preferred node affinity for model scheduling",
+		b.Log.V(1).Info("Added preferred node affinity for model scheduling",
 			"modelName", b.BaseModelMeta.Name,
 			"namespace", b.BaseModelMeta.Namespace,
 			"inferenceService", isvc.Name)
@@ -438,7 +438,7 @@ func MergeEngineResources(b *BaseComponentFields, isvc *v1beta1.InferenceService
 	if isvc.Spec.Engine != nil &&
 		(isvc.Spec.Engine.Runner == nil ||
 			isResourcesUnspecified(isvc.Spec.Engine.Runner.Container.Resources)) {
-		b.Log.Info("Merging resources for engine container as user did not specify resources in InferenceService")
+		b.Log.V(1).Info("Merging resources for engine container as user did not specify resources in InferenceService")
 		isvcutils.MergeResource(container, b.Runtime)
 	}
 }
@@ -450,7 +450,7 @@ func MergeDecoderResources(b *BaseComponentFields, isvc *v1beta1.InferenceServic
 	if isvc.Spec.Decoder != nil &&
 		(isvc.Spec.Decoder.Runner == nil ||
 			isResourcesUnspecified(isvc.Spec.Decoder.Runner.Container.Resources)) {
-		b.Log.Info("Merging resources for decoder container as user did not specify resources in InferenceService")
+		b.Log.V(1).Info("Merging resources for decoder container as user did not specify resources in InferenceService")
 		isvcutils.MergeResource(container, b.Runtime)
 	}
 }
@@ -472,7 +472,7 @@ func ProcessBaseAnnotations(b *BaseComponentFields, isvc *v1beta1.InferenceServi
 	}
 
 	if b.FineTunedServingWithMergedWeights {
-		b.Log.Info("Fine-tuned serving with merged weights", "namespace", isvc.Namespace)
+		b.Log.V(1).Info("Fine-tuned serving with merged weights", "namespace", isvc.Namespace)
 		annotations[constants.FTServingWithMergedWeightsAnnotationKey] = "true"
 	}
 

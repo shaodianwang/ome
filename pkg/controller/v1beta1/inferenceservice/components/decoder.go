@@ -90,7 +90,7 @@ func NewDecoder(
 
 // Reconcile implements the Component interface for Decoder
 func (d *Decoder) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {
-	d.Log.Info("Reconciling decoder component", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
+	d.Log.V(1).Info("Reconciling decoder component", "inferenceService", isvc.Name, "namespace", isvc.Namespace)
 
 	// Validate decoder spec
 	if d.decoderSpec == nil {
@@ -308,7 +308,7 @@ func (d *Decoder) reconcilePodSpec(isvc *v1beta1.InferenceService, objectMeta *m
 	UpdatePodSpecVolumes(&d.BaseComponentFields, isvc, podSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&d.BaseComponentFields, isvc, podSpec, v1beta1.DecoderComponent)
 
-	d.Log.Info("Decoder PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
+	d.Log.V(1).Info("Decoder PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return podSpec, nil
 }
 
@@ -339,14 +339,14 @@ func (d *Decoder) reconcileWorkerPodSpec(isvc *v1beta1.InferenceService, objectM
 	UpdatePodSpecVolumes(&d.BaseComponentFields, isvc, workerPodSpec, objectMeta)
 	UpdatePodSpecNodeSelector(&d.BaseComponentFields, isvc, workerPodSpec, v1beta1.DecoderComponent)
 
-	d.Log.Info("Decoder Worker PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
+	d.Log.V(1).Info("Decoder Worker PodSpec updated", "inference service", isvc.Name, "namespace", isvc.Namespace)
 	return workerPodSpec, nil
 }
 
 // setParallelismEnvVarForDecoder calculates and sets the PARALLELISM_SIZE environment variable for the decoder's container.
 func (d *Decoder) setParallelismEnvVarForDecoder(container *v1.Container, workerReplicas int) {
 	if container == nil || d.decoderSpec == nil {
-		d.Log.Info("Cannot set parallelism: container or decoderSpec is nil")
+		d.Log.V(2).Info("Cannot set parallelism: container or decoderSpec is nil")
 		return
 	}
 
@@ -367,12 +367,12 @@ func (d *Decoder) setParallelismEnvVarForDecoder(container *v1.Container, worker
 		if parallelismSize > 0 {
 			envVar := v1.EnvVar{Name: constants.ParallelismSizeEnvVarKey, Value: strconv.FormatInt(parallelismSize, 10)}
 			isvcutils.UpdateEnvVars(container, &envVar)
-			d.Log.Info("Added parallelism env variable to decoder container", "value", parallelismSize, "containerName", container.Name)
+			d.Log.V(2).Info("Added parallelism env variable to decoder container", "value", parallelismSize, "containerName", container.Name)
 		} else {
-			d.Log.Info("Calculated parallelism is zero, not adding env var", "containerName", container.Name)
+			d.Log.V(2).Info("Calculated parallelism is zero, not adding env var", "containerName", container.Name)
 		}
 	} else {
-		d.Log.Info("Conditions not met for parallelism (no GPUs or no leaders/workers)", "containerName", container.Name, "gpus", numGPUsPerPod, "leaders", numLeaders, "workers", numWorkers)
+		d.Log.V(2).Info("Conditions not met for parallelism (no GPUs or no leaders/workers)", "containerName", container.Name, "gpus", numGPUsPerPod, "leaders", numLeaders, "workers", numWorkers)
 	}
 }
 
