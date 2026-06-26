@@ -108,9 +108,12 @@ capacity engine.
   keeps fresh, each home's per-ingress backend plus a weight tracking its *ready*
   replicas — the exact data a global load balancer needs to split traffic across
   homes in proportion to ready capacity (not round-robin, not single-home-resolve).
-  Programming an actual backend from that contract is the companion **global
-  weighted endpoint OEP** (a shared dependency, also required by single-active
-  0018) — this OEP owns the contract + a pluggable publisher seam, not the backend.
+  Actually balancing traffic from that contract is done by a global-traffic
+  *consumer* — most likely the **existing front-tier** (the api_proxy / SGL-router
+  fleet) pointed at `homes[]`, or client-side LB. OME natively programming a
+  GSLB/Gateway/mesh is an **optional** follow-up OEP, not something this OEP builds
+  or blocks on. This OEP owns the contract + a pluggable publisher seam (default
+  no-op), not the backend.
 - **Kueue stays the only capacity signal.** Each cluster's Kueue still decides
   how many replicas fit, by admitting that many pods. OME reads no capacity, runs
   no scoring, no quota math. Fractional = per-replica race; same self-correcting
@@ -139,10 +142,11 @@ capacity engine.
   locality across homes, and PD-disaggregated cross-cluster KV transfer are out.
 - **Replacing single-active.** 0018's single-active is the degenerate
   one-home case of this design and stays the default. Scale-out is opt-in.
-- **Building the global-traffic backend.** This OEP produces the weighted-home
-  routing *contract* and a pluggable publisher seam; choosing and programming the
-  concrete backend (GSLB / multi-cluster Gateway / mesh / front-tier) is a separate
-  proposal — the global weighted endpoint OEP — shared with single-active 0018. See
+- **Building / natively programming the global-traffic backend.** This OEP produces
+  the weighted-home routing *contract* and a pluggable publisher seam; the contract
+  is consumed by the existing front-tier (or client-side LB). Having OME *natively*
+  program a GSLB / multi-cluster Gateway / mesh is an **optional** follow-up OEP,
+  not required for 0018.1. See
   [the weighted endpoint](#the-weighted-global-load-balanced-endpoint).
 - **Automatic global autoscaling.** Computing/driving desired N from an aggregated
   cross-home load signal, and home consolidation on load decline. Desired N is set
@@ -273,9 +277,9 @@ New in this OEP:
 - **Spec opt-in + per-cluster knobs:** `spec.placement.scaleOut`,
   `minReplicasPerCluster`, `maxReplicasPerCluster`, `spread`.
 - **The weighted-home routing contract + a pluggable `EndpointPublisher` seam** —
-  per-home backend + ready-replica weight in `status.placement`. The concrete
-  weighted backend is deferred to the companion global weighted endpoint OEP (a
-  shared dependency, also needed by 0018), not built here.
+  per-home backend + ready-replica weight in `status.placement`. The balancing is
+  done by a consumer (the existing front-tier, or client-side LB); OME natively
+  programming a backend is an optional follow-up OEP, not built or blocked-on here.
 - **Global replica accounting + apportioned (clamped) autoscaling:** one *external*
   desired N (spec / operator / schedule) fanned to per-cluster targets; per-cluster
   HPA/KEDA (OEP-0013) clamped to their apportioned share against per-cluster quota.
@@ -389,9 +393,10 @@ Reuses 0018's four components; two are extended:
 4. **Endpoint publisher** — *a pluggable seam, not a backend*. Publishes the
    `homes[]` contract (per-home ingress + ready-replica weight) through an
    `EndpointPublisher` interface whose default is a no-op / manual publisher
-   (writes status, programs nothing). The concrete weighted multi-home backend is
-   deferred to the global weighted endpoint OEP — a shared dependency of 0018 and
-   this OEP (see [the weighted endpoint](#the-weighted-global-load-balanced-endpoint)).
+   (writes status, programs nothing). A global-traffic consumer (the existing
+   front-tier programmed from `homes[]`, or client-side LB) does the balancing;
+   OME natively programming a backend is an optional follow-up OEP (see
+   [the weighted endpoint](#the-weighted-global-load-balanced-endpoint)).
 
 ### The fractional fan-out algorithm
 
@@ -536,18 +541,25 @@ Gateway with weighted `backendRefs`, GSLB / weighted DNS, a service mesh, or an
 existing front-tier router fleet — are the global-endpoint OEP's deliverables, each
 weighed against invariants 1–4.
 
-**Why a separate OEP, not a subsection here.** The backend choice is gated on what
-the fleet's global-traffic system actually exposes across GKE + CoreWeave + MKS and
-across regions — there is **no Gateway API object that spans them**, so the answer
-lives *above* k8s networking (GSLB / global LB / mesh / front-tier). That decision
-is large, orthogonal to fractional admission, and **shared with single-active
-0018** (which needs even the single-home version). Folding it in would bloat this
-OEP and couple it to an unmade infra decision.
+**Who consumes the contract — and why it's not a blocker.** `homes[]` is data; some
+global-traffic layer reads it and balances. That consumer is **most likely the
+front-tier we already run** (the api_proxy / forked SGL-router fleet) — point its
+backend pool at the per-home ingresses with the published weights. Client-side LB
+(clients read `homes[]`) is an alternative. Neither is a new OEP — they're
+integrations against the contract. So **this OEP does not block on building
+anything new**: it ships the contract + a no-op publisher, and you wire it to the
+traffic layer you have.
 
-**Consequence, stated plainly.** This OEP is shippable as a *control-plane layer* —
-it produces correct weighted-home placement and the contract above — but is **not
-end-to-end useful until the global weighted endpoint OEP lands.** That dependency is
-explicit, not hidden.
+**The optional follow-up.** If you later want OME to *natively* program a global
+backend (a multi-cluster Gateway / GSLB / mesh) instead of leaning on the
+front-tier, that's a separate, **optional** OEP — worth doing eventually (it also
+gives single-active 0018 a stable cluster-independent name), but not required for
+0018.1 to function. The backend choice is gated on what the fleet's global-traffic
+system exposes across GKE + CoreWeave + MKS (there's no Gateway API object spanning
+them), which is why it's its own proposal rather than a subsection here.
+
+**Consequence, stated plainly.** 0018.1 is fully functional with the existing
+front-tier consuming `homes[]`. The native-LB OEP is an enhancement, not a gate.
 
 ### Re-sharding on cluster loss / capacity shift
 
@@ -636,11 +648,13 @@ below.
   (`ResourceFlavor`/`ClusterQueue`/`LocalQueue`); the `InstanceReadyTimeout`
   gated-deadline pause (so gated remainders don't time out); the connection
   manager.
-- **The global weighted endpoint OEP (new, TBD number)** — a HARD dependency for
-  end-to-end serving. This OEP produces the weighted-home contract but programs no
-  backend; until that OEP lands, scale-out is a control-plane layer only (placement
-  converges and status reflects it, but traffic is not split across homes). Shared
-  with single-active 0018, whose own endpoint publisher is likewise unbuilt.
+- **A global-traffic consumer for `homes[]`** — NOT a hard dependency on new OME
+  code. This OEP produces the weighted-home contract; something must consume it to
+  balance traffic. The expected consumer is the **existing front-tier**
+  (api_proxy / SGL-router) programmed from `homes[]`, or client-side LB — an
+  integration, not a new subsystem. OME natively programming a GSLB/Gateway/mesh is
+  an **optional** future OEP (also benefits single-active 0018's stable naming), not
+  a gate on 0018.1.
 - **OEP-0013 (per-cluster autoscaling)**, now load-bearing: per-home HPA/KEDA must
   be clampable to an apportioned ceiling the control plane writes (autoscaling
   section, point 2). If 0013's scalers can't be externally bounded, fractional
@@ -706,12 +720,14 @@ roughly this priority:
    entirely on detecting admission loss** — without this, preemption (a named
    failure mode) silently degrades capacity with no re-shard. **Blocker** for
    the re-shard subsystem.
-7. **Endpoint publisher is not implemented (High gap).** It only mirrors the
-   derived's `status.URL` into `status.placement.endpoint` and flaps to nil on
-   every racing pass. The base stub must be replaced by the **global weighted
-   endpoint OEP** (the companion proposal that owns the backend); this OEP only
-   produces the contract it consumes. **Blocker** for any serving — single-home or
-   multi-home.
+7. **Endpoint publisher is a stub (Medium gap, NOT a serving blocker).** It only
+   mirrors the derived's `status.URL` into `status.placement.endpoint` (which *is*
+   the winning home's reachable ingress URL) and flaps to nil on non-Placed passes.
+   So a service is reachable today at its home URL; what's missing is a *stable,
+   cluster-independent* name (single-active) and *weighted balancing across homes*
+   (multi-home). Both are delivered by consuming the `homes[]` contract from the
+   front-tier (or the optional native-LB OEP) — not by code this OEP must ship. Fix
+   the nil-flap (cosmetic) regardless.
 8. **Cross-cluster RBAC is wrong (High).** The token ClusterRole grants ISVC/CSR
    write but **no Pod/PodGroup read** (needed for admission watches) and is
    cluster-wide-broad (blast radius). Fractional placement reads admission state
@@ -796,9 +812,11 @@ the fractional/multi-home/re-shard surface.
   apportioned share and trimming the overshoot means briefly running more
   replicas than desired. Bounded by `maxReplicasPerCluster`, trimmed gated-first,
   but non-zero GPU waste during convergence.
-- **The weighted endpoint is now a hard dependency, not a nicety.** Fractional
-  placement that can't load-balance across homes is just stranded capacity. We
-  inherit 0018's "largest unknown" and make it blocking.
+- **Multi-home value requires a traffic consumer.** Fractional placement that
+  nothing balances across is stranded capacity — so the `homes[]` contract must be
+  consumed (existing front-tier, or client-side LB). That's an integration, not a
+  new subsystem this OEP builds; but it *is* a wiring step without which spreading
+  buys nothing.
 - **Operational complexity jumps.** `status.placement` is now a list, debugging
   spans N homes, and "why is my service degraded" can mean any of N clusters'
   Kueue declining. Single-active was one cluster to look at; this is N.
@@ -849,12 +867,12 @@ Presented as a menu with each option's cost, then the pick.
 
 ## Open Questions
 
-- **Weighted-endpoint backend — moved out of this OEP** to the global weighted
-  endpoint OEP (new, TBD number). This OEP owns only the contract, invariants 1–4,
-  and the pluggable publisher seam (default no-op); the backend choice (Gateway
-  weighted routes vs GSLB vs mesh vs front-tier) and its reweight latency are that
-  OEP's open questions. The dependency is explicit (see Dependencies). Owner of the
-  new OEP: TBD.
+- **Weighted-endpoint consumer — integration, not a blocker.** v1 expects the
+  existing front-tier (api_proxy / SGL-router) to consume `homes[]` and balance;
+  this OEP owns only the contract, invariants 1–4, and the pluggable publisher seam
+  (default no-op). Whether to *also* have OME natively program a global backend
+  (Gateway weighted routes vs GSLB vs mesh) — and its reweight latency — is an
+  **optional** follow-up OEP, not a gate on 0018.1. Owner of any follow-up: TBD.
 - **Automatic global autoscaling — deferred (now a Non-Goal), not an open question
   for v1.** v1 takes desired N externally (spec/operator/schedule); the in-scope
   contract (controller owns N, locals clamped to share) is firm. The follow-up
