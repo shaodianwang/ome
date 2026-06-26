@@ -32,7 +32,7 @@ func TestDeriveISVC(t *testing.T) {
 		},
 	}
 
-	d := DeriveISVC(src)
+	d := DeriveISVC(src, "cp-east")
 
 	// identity preserved (worker addresses it by the same name/ns).
 	assert.Equal(t, "svc", d.Name)
@@ -44,6 +44,8 @@ func TestDeriveISVC(t *testing.T) {
 	// origin markers.
 	assert.NotEmpty(t, d.Labels[PlacementOriginLabel])
 	assert.Equal(t, "uid-123", d.Annotations[PlacementOriginUIDAnnotation])
+	// control-plane identity stamped from the supplied id.
+	assert.Equal(t, "cp-east", d.Labels[PlacementControlPlaneLabel])
 	// Kueue stamps on the engine component pod metadata.
 	require.NotNil(t, d.Spec.Engine)
 	assert.Equal(t, "serving-lq", d.Spec.Engine.ComponentExtensionSpec.Labels[constants.KueueQueueLabelKey])
@@ -58,8 +60,11 @@ func TestDeriveISVC(t *testing.T) {
 	// queue defaulting: no LocalQueueAnnotation -> DefaultLocalQueue.
 	src2 := src.DeepCopy()
 	delete(src2.Annotations, LocalQueueAnnotation)
-	d2 := DeriveISVC(src2)
+	d2 := DeriveISVC(src2, "")
 	assert.Equal(t, DefaultLocalQueue, d2.Spec.Engine.ComponentExtensionSpec.Labels[constants.KueueQueueLabelKey])
+	// empty control-plane id leaves the identity label unset (single-CP behavior).
+	_, hasCP := d2.Labels[PlacementControlPlaneLabel]
+	assert.False(t, hasCP)
 
 	// source must not be mutated (deep copy).
 	assert.Nil(t, src.Spec.Engine.ComponentExtensionSpec.Labels, "source ISVC must be untouched")

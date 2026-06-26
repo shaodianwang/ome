@@ -18,6 +18,15 @@ const (
 	PlacementOriginLabel = "ome.io/placement-origin"
 	// PlacementOriginUIDAnnotation records the source ISVC UID on the derived ISVC.
 	PlacementOriginUIDAnnotation = "ome.io/placement-origin-uid"
+	// PlacementControlPlaneLabel records WHICH control plane created a derived
+	// ISVC. Its value is the operator-supplied control-plane identity
+	// (config-driven via --placement-control-plane-id / the chart, no in-code
+	// default). When multiple control planes share a workload cluster, the GC
+	// sweep filters on this label so each control plane only reaps its OWN
+	// deriveds and never another's. Empty identity degrades gracefully: nothing
+	// is stamped and the GC keeps its single-control-plane (origin-UID-only)
+	// behavior.
+	PlacementControlPlaneLabel = "ome.io/placement-control-plane"
 
 	// KueueServingAnnotation is stamped on the derived pod templates so the
 	// target cluster's Kueue gates + holds quota for the serving pods. (Kueue

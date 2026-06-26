@@ -41,6 +41,12 @@ ome:
     placementRequeueInterval: ""
     # placementGCInterval: orphan-sweep cadence for the placement GC runnable.
     placementGCInterval: ""
+    # placementControlPlaneID: this control plane's identity, stamped on every
+    # derived InferenceService it creates so its GC only reaps its OWN deriveds.
+    # REQUIRED (set to a unique value per control plane) when multiple control
+    # planes share a workload cluster; otherwise one control plane's GC would
+    # delete another's deriveds. Leave empty for a single control plane.
+    placementControlPlaneID: ""
   # modelCache configures the optional cluster-wide model cache provider used
   # by BaseModel and ClusterBaseModel resources with spec.distribution: Sharded.
   # Leave provider empty to keep the default PerNode/model-agent behavior.

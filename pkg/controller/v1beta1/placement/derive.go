@@ -9,12 +9,14 @@ import (
 
 // DeriveISVC builds a derived InferenceService from a control-plane source
 // ISVC. The derived object is suitable for placement onto a workload cluster:
-// - Identity (name/ns) preserved so the worker cluster can address it.
-// - Server-side fields cleared (UID, ResourceVersion, generation, etc.).
-// - Origin markers added (PlacementOriginLabel, PlacementOriginUIDAnnotation).
-// - Kueue gating stamps added to component pod metadata (queue label + serving annotation).
-// - Control-plane directives (cluster-selector annotation) removed.
-func DeriveISVC(src *v1beta1.InferenceService) *v1beta1.InferenceService {
+//   - Identity (name/ns) preserved so the worker cluster can address it.
+//   - Server-side fields cleared (UID, ResourceVersion, generation, etc.).
+//   - Origin markers added (PlacementOriginLabel, PlacementOriginUIDAnnotation).
+//   - Control-plane identity stamped (PlacementControlPlaneLabel) when controlPlaneID
+//     is non-empty, so the GC sweep only reaps deriveds THIS control plane created.
+//   - Kueue gating stamps added to component pod metadata (queue label + serving annotation).
+//   - Control-plane directives (cluster-selector annotation) removed.
+func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID string) *v1beta1.InferenceService {
 	d := src.DeepCopy()
 
 	// Clear server-side / control-plane state.
@@ -39,6 +41,12 @@ func DeriveISVC(src *v1beta1.InferenceService) *v1beta1.InferenceService {
 		d.Labels = make(map[string]string)
 	}
 	d.Labels[PlacementOriginLabel] = string(src.UID)
+	// Stamp the control-plane identity so GC across shared workload clusters can
+	// tell our deriveds apart from another control plane's. Config-driven, no
+	// in-code default: an empty id leaves the label unset (single-CP behavior).
+	if controlPlaneID != "" {
+		d.Labels[PlacementControlPlaneLabel] = controlPlaneID
+	}
 	if d.Annotations == nil {
 		d.Annotations = make(map[string]string)
 	}

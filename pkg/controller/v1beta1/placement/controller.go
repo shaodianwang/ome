@@ -64,6 +64,11 @@ type Reconciler struct {
 	Clusters ClusterClients
 	// Requeue is the status-refresh poll cadence; defaults to DefaultPlacementRequeue.
 	Requeue time.Duration
+	// ControlPlaneID is this control plane's identity, stamped onto every derived
+	// ISVC (PlacementControlPlaneLabel) so the GC sweep only reaps deriveds THIS
+	// control plane created. Config-driven (manager flag / chart); empty leaves
+	// the stamp off and keeps single-control-plane behavior.
+	ControlPlaneID string
 }
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch;update;patch
@@ -262,7 +267,7 @@ func (r *Reconciler) getDerived(ctx context.Context, cluster string, isvc *v1bet
 // replacing them wholesale — preserving worker-side reconciler state across the
 // poll-driven re-apply.
 func (r *Reconciler) placeOn(ctx context.Context, cl client.Client, src *v1beta1.InferenceService) error {
-	desired := DeriveISVC(src)
+	desired := DeriveISVC(src, r.ControlPlaneID)
 	target := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, cl, target, func() error {
 		target.Labels = mergeOwnedKeys(target.Labels, desired.Labels)

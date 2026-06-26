@@ -49,17 +49,34 @@ type GCReconciler struct {
 	// PageSize bounds the per-request item count for the paginated control-plane
 	// list; defaults to defaultGCPageSize.
 	PageSize int64
+	// ControlPlaneID scopes the sweep to deriveds THIS control plane created
+	// (those stamped PlacementControlPlaneLabel==ControlPlaneID). When several
+	// control planes share a workload cluster, this stops one control plane from
+	// reaping another's deriveds. Config-driven (manager flag / chart); empty
+	// keeps the single-control-plane behavior (no control-plane filtering, all
+	// origin-labeled deriveds are in scope).
+	ControlPlaneID string
 }
 
 // OrphanedDeriveds returns the derived ISVCs whose origin-UID is not in the set
 // of live control-plane ISVC UIDs. Operates on metadata only — orphan
-// classification and deletion need just the annotations and name/namespace.
-func OrphanedDeriveds(liveUIDs map[string]bool, derived []metav1.PartialObjectMetadata) []metav1.PartialObjectMetadata {
+// classification and deletion need just the labels/annotations and name/namespace.
+//
+// controlPlaneID scopes ownership: when non-empty, a derived is only a candidate
+// for reaping if its PlacementControlPlaneLabel equals controlPlaneID — so a
+// control plane never classifies ANOTHER control plane's derived (sharing the
+// same workload cluster) as an orphan. An empty controlPlaneID disables the
+// filter (single-control-plane behavior).
+func OrphanedDeriveds(liveUIDs map[string]bool, controlPlaneID string, derived []metav1.PartialObjectMetadata) []metav1.PartialObjectMetadata {
 	var orphans []metav1.PartialObjectMetadata
 	for i := range derived {
 		uid := derived[i].Annotations[PlacementOriginUIDAnnotation]
 		if uid == "" {
 			continue // not a placement-derived object we own
+		}
+		// Ownership scoping: never reap a derived this control plane did not create.
+		if controlPlaneID != "" && derived[i].Labels[PlacementControlPlaneLabel] != controlPlaneID {
+			continue
 		}
 		if !liveUIDs[uid] {
 			orphans = append(orphans, derived[i])
@@ -92,17 +109,36 @@ func (g *GCReconciler) sweep(ctx context.Context) error {
 		}
 	}
 
+	// Safety guard: an empty live-UID set is treated as suspect and the
+	// destructive sweep is skipped. A successful-but-empty List (a transient
+	// apiserver/etcd hiccup, an RBAC/scope regression, or a genuinely-empty
+	// control plane) is indistinguishable here, and reaping every derived on
+	// that signal is unrecoverable. Real source deletions are still cleaned up
+	// by the placement finalizer; this safety net only ever needs to run when
+	// at least one source survives, so requiring a non-empty authoritative list
+	// costs no legitimate cleanup.
+	if len(live) == 0 {
+		g.Log.Info("gc: control-plane ISVC list empty; skipping sweep (suspect/transient)")
+		return nil
+	}
+
 	for _, cluster := range g.Clusters.Connected() {
 		cl, ok := g.Clusters.ClientFor(cluster)
 		if !ok {
 			continue
 		}
 		derivedList := isvcMetadataList()
-		if err := cl.List(ctx, derivedList, client.HasLabels{PlacementOriginLabel}); err != nil {
+		// Scope the list to deriveds created by THIS control plane when an
+		// identity is configured; otherwise list all origin-labeled deriveds.
+		listOpts := []client.ListOption{client.HasLabels{PlacementOriginLabel}}
+		if g.ControlPlaneID != "" {
+			listOpts = append(listOpts, client.MatchingLabels{PlacementControlPlaneLabel: g.ControlPlaneID})
+		}
+		if err := cl.List(ctx, derivedList, listOpts...); err != nil {
 			g.Log.Error(err, "gc: list derived ISVCs", "cluster", cluster)
 			continue
 		}
-		for _, orphan := range OrphanedDeriveds(live, derivedList.Items) {
+		for _, orphan := range OrphanedDeriveds(live, g.ControlPlaneID, derivedList.Items) {
 			o := orphan
 			o.SetGroupVersionKind(v1beta1.SchemeGroupVersion.WithKind("InferenceService"))
 			if err := cl.Delete(ctx, &o); err != nil && !apierrors.IsNotFound(err) {

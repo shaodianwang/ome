@@ -145,6 +145,7 @@ type Options struct {
 	clusterConnectionGrace      time.Duration
 	placementRequeueInterval    time.Duration
 	placementGCInterval         time.Duration
+	placementControlPlaneID     string
 	configCacheTTL              time.Duration
 	zapOpts                     zap.Options
 }
@@ -239,6 +240,11 @@ func GetOptions() Options {
 		"OEP-0018: status-refresh poll cadence for the placement (fan-out) controller.")
 	flag.DurationVar(&opts.placementGCInterval, "placement-gc-interval", opts.placementGCInterval,
 		"OEP-0018: orphan-sweep cadence for the placement GC runnable.")
+	flag.StringVar(&opts.placementControlPlaneID, "placement-control-plane-id", opts.placementControlPlaneID,
+		"OEP-0018: identity stamped on every derived InferenceService this control plane creates. "+
+			"Required when multiple control planes share a workload cluster so each control plane's GC "+
+			"only reaps its OWN deriveds; the chart supplies a per-control-plane value. Empty (default) "+
+			"keeps single-control-plane behavior (no identity stamping or GC scoping).")
 	flag.DurationVar(&opts.configCacheTTL, "config-cache-ttl", opts.configCacheTTL,
 		"TTL for the in-memory cache of the inferenceservice-config ConfigMap on the InferenceService reconcile path. "+
 			"Collapses the per-reconcile config loads onto one apiserver GET per window; kept short so ConfigMap edits "+
@@ -565,20 +571,22 @@ func main() {
 		if isControlPlane {
 			setupLog.Info("Setting up multi-cluster placement (fan-out) controller")
 			if err = (&placement.Reconciler{
-				Client:   mgr.GetClient(),
-				Scheme:   mgr.GetScheme(),
-				Log:      ctrl.Log.WithName("controllers").WithName("Placement"),
-				Clusters: clusterManager,
-				Requeue:  options.placementRequeueInterval,
+				Client:         mgr.GetClient(),
+				Scheme:         mgr.GetScheme(),
+				Log:            ctrl.Log.WithName("controllers").WithName("Placement"),
+				Clusters:       clusterManager,
+				Requeue:        options.placementRequeueInterval,
+				ControlPlaneID: options.placementControlPlaneID,
 			}).SetupWithManager(mgr); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "Placement")
 				os.Exit(1)
 			}
 			if err = mgr.Add(&placement.GCReconciler{
-				APIReader: mgr.GetAPIReader(),
-				Log:       ctrl.Log.WithName("controllers").WithName("PlacementGC"),
-				Clusters:  clusterManager,
-				Interval:  options.placementGCInterval,
+				APIReader:      mgr.GetAPIReader(),
+				Log:            ctrl.Log.WithName("controllers").WithName("PlacementGC"),
+				Clusters:       clusterManager,
+				Interval:       options.placementGCInterval,
+				ControlPlaneID: options.placementControlPlaneID,
 			}); err != nil {
 				setupLog.Error(err, "unable to add placement GC runnable")
 				os.Exit(1)
