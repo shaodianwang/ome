@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"text/template"
 	"time"
 
@@ -160,11 +161,79 @@ type OmeAgentConfig struct {
 	PriorityClassName string            `json:"priorityClassName,omitempty"`
 }
 
+// getInferenceServiceConfigMap fetches the inferenceservice-config ConfigMap
+// directly from the apiserver via the clientset. This is the single point all
+// config constructors below resolve through; a ConfigCache (see below) wraps it
+// with a short TTL so a single reconcile pass does not issue one uncached GET
+// per config block.
+func getInferenceServiceConfigMap(clientset kubernetes.Interface) (*v1.ConfigMap, error) {
+	return clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
+}
+
+// ConfigCache caches the inferenceservice-config ConfigMap for a configurable
+// TTL so the per-reconcile config constructors share one apiserver GET instead
+// of issuing one each. The TTL is supplied by the caller (flag/chart-driven —
+// no in-code behavioral default); a short TTL preserves the property that a
+// ConfigMap edit takes effect without a controller restart, since the entry is
+// re-fetched once the TTL elapses.
+//
+// A zero (or negative) TTL disables caching: every call falls through to the
+// apiserver, exactly reproducing the pre-cache behavior.
+//
+// +kubebuilder:object:generate=false
+type ConfigCache struct {
+	ttl time.Duration
+	now func() time.Time
+
+	mu        sync.Mutex
+	cm        *v1.ConfigMap
+	fetchedAt time.Time
+}
+
+// NewConfigCache returns a ConfigCache with the given TTL.
+func NewConfigCache(ttl time.Duration) *ConfigCache {
+	return &ConfigCache{ttl: ttl, now: time.Now}
+}
+
+// get returns the cached ConfigMap when the entry is fresh, otherwise fetches
+// it from the apiserver and refreshes the entry. A non-positive TTL never
+// caches. The returned ConfigMap is shared (read-only): the config constructors
+// only read .Data, never mutate it.
+func (c *ConfigCache) get(clientset kubernetes.Interface) (*v1.ConfigMap, error) {
+	if c == nil || c.ttl <= 0 {
+		return getInferenceServiceConfigMap(clientset)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cm != nil && c.now().Sub(c.fetchedAt) < c.ttl {
+		return c.cm, nil
+	}
+	cm, err := getInferenceServiceConfigMap(clientset)
+	if err != nil {
+		// On error, drop any stale entry so the next call retries rather than
+		// serving a config that may no longer exist.
+		c.cm = nil
+		return nil, err
+	}
+	c.cm = cm
+	c.fetchedAt = c.now()
+	return cm, nil
+}
+
 // NewInferenceServicesConfig verifies that the inferenceservice ConfigMap
 // exists (callers fail fast otherwise) and returns an empty config struct.
 // ModelCache is loaded separately via NewModelCacheConfig.
 func NewInferenceServicesConfig(clientset kubernetes.Interface) (*InferenceServicesConfig, error) {
-	if _, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{}); err != nil {
+	if _, err := getInferenceServiceConfigMap(clientset); err != nil {
+		return nil, err
+	}
+	return &InferenceServicesConfig{}, nil
+}
+
+// NewInferenceServicesConfigCached is the ConfigCache-backed variant of
+// NewInferenceServicesConfig used on the reconcile hot path.
+func NewInferenceServicesConfigCached(cache *ConfigCache, clientset kubernetes.Interface) (*InferenceServicesConfig, error) {
+	if _, err := cache.get(clientset); err != nil {
 		return nil, err
 	}
 	return &InferenceServicesConfig{}, nil
@@ -189,10 +258,24 @@ func NewOmeAgentConfig(clientset kubernetes.Interface) (*OmeAgentConfig, error) 
 }
 
 func NewIngressConfig(clientset kubernetes.Interface) (*IngressConfig, error) {
-	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
+	configMap, err := getInferenceServiceConfigMap(clientset)
 	if err != nil {
 		return nil, err
 	}
+	return parseIngressConfig(configMap)
+}
+
+// NewIngressConfigCached is the ConfigCache-backed variant of NewIngressConfig
+// used on the reconcile hot path.
+func NewIngressConfigCached(cache *ConfigCache, clientset kubernetes.Interface) (*IngressConfig, error) {
+	configMap, err := cache.get(clientset)
+	if err != nil {
+		return nil, err
+	}
+	return parseIngressConfig(configMap)
+}
+
+func parseIngressConfig(configMap *v1.ConfigMap) (*IngressConfig, error) {
 	ingressConfig := &IngressConfig{}
 	if ingress, ok := configMap.Data[IngressConfigKeyName]; ok {
 		err := json.Unmarshal([]byte(ingress), &ingressConfig)
@@ -248,10 +331,24 @@ func getComponentConfig(key string, configMap *v1.ConfigMap, componentConfig int
 }
 
 func NewDeployConfig(clientset kubernetes.Interface) (*DeployConfig, error) {
-	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
+	configMap, err := getInferenceServiceConfigMap(clientset)
 	if err != nil {
 		return nil, err
 	}
+	return parseDeployConfig(configMap)
+}
+
+// NewDeployConfigCached is the ConfigCache-backed variant of NewDeployConfig
+// used on the reconcile hot path.
+func NewDeployConfigCached(cache *ConfigCache, clientset kubernetes.Interface) (*DeployConfig, error) {
+	configMap, err := cache.get(clientset)
+	if err != nil {
+		return nil, err
+	}
+	return parseDeployConfig(configMap)
+}
+
+func parseDeployConfig(configMap *v1.ConfigMap) (*DeployConfig, error) {
 	deployConfig := &DeployConfig{}
 	if deploy, ok := configMap.Data[DeployConfigName]; ok {
 		err := json.Unmarshal([]byte(deploy), &deployConfig)
@@ -271,7 +368,7 @@ func NewDeployConfig(clientset kubernetes.Interface) (*DeployConfig, error) {
 }
 
 func NewModelCacheConfig(clientset kubernetes.Interface) (*sharded.ProviderConfig, error) {
-	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
+	configMap, err := getInferenceServiceConfigMap(clientset)
 	if err != nil {
 		return nil, err
 	}
@@ -290,10 +387,24 @@ func NewModelCacheConfig(clientset kubernetes.Interface) (*sharded.ProviderConfi
 // sampler tunables. BundledPrometheusAddress has no fallback (the chart is the
 // source of truth); empty leaves canaries without a default metrics source.
 func NewCanaryAnalysisConfig(clientset kubernetes.Interface) (*CanaryAnalysisConfig, error) {
-	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
+	configMap, err := getInferenceServiceConfigMap(clientset)
 	if err != nil {
 		return nil, err
 	}
+	return parseCanaryAnalysisConfig(configMap)
+}
+
+// NewCanaryAnalysisConfigCached is the ConfigCache-backed variant of
+// NewCanaryAnalysisConfig used on the reconcile hot path.
+func NewCanaryAnalysisConfigCached(cache *ConfigCache, clientset kubernetes.Interface) (*CanaryAnalysisConfig, error) {
+	configMap, err := cache.get(clientset)
+	if err != nil {
+		return nil, err
+	}
+	return parseCanaryAnalysisConfig(configMap)
+}
+
+func parseCanaryAnalysisConfig(configMap *v1.ConfigMap) (*CanaryAnalysisConfig, error) {
 	cfg := &CanaryAnalysisConfig{}
 	if err := getComponentConfig(CanaryAnalysisConfigName, configMap, cfg); err != nil {
 		return nil, fmt.Errorf("unable to parse canaryAnalysis config json: %w", err)

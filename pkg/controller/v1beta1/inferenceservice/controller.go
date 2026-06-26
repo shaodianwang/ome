@@ -144,6 +144,19 @@ type InferenceServiceReconciler struct {
 	// event re-reconciles the ISVC. Built once in SetupWithManager from the
 	// canaryAnalysis operator config; nil disables metric-gated steps (they hold).
 	CanarySampler *canary.Sampler
+	// ConfigCache memoizes the inferenceservice-config ConfigMap for a short,
+	// flag-driven TTL so a single reconcile pass shares one apiserver GET across
+	// the Deploy / InferenceServices / Ingress / CanaryAnalysis config loads
+	// instead of issuing one uncached Clientset GET each. A nil cache (or a
+	// non-positive TTL) falls through to the apiserver every call, preserving the
+	// pre-cache behavior; the short TTL keeps "ConfigMap edits apply without a
+	// restart" intact. Initialized in SetupWithManager.
+	ConfigCache *controllerconfig.ConfigCache
+	// ConfigCacheTTL is the TTL applied to ConfigCache. Flag-driven (no in-code
+	// behavioral default — supplied by the manager's --config-cache-ttl flag /
+	// chart value); a non-positive value disables caching (always reads the
+	// apiserver).
+	ConfigCacheTTL time.Duration
 }
 
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -170,7 +183,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return !utils.Includes(constants.ServiceAnnotationDisallowedList, key)
 	})
 
-	deployConfig, err := controllerconfig.NewDeployConfig(r.Clientset)
+	deployConfig, err := controllerconfig.NewDeployConfigCached(r.ConfigCache, r.Clientset)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to create DeployConfig")
 	}
@@ -236,7 +249,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// empty here. Use v1beta1.SchemeGroupVersion.String() if a callable
 	// API version is needed downstream.
 	log.Info("Reconciling inference service")
-	isvcConfig, err := controllerconfig.NewInferenceServicesConfig(r.Clientset)
+	isvcConfig, err := controllerconfig.NewInferenceServicesConfigCached(r.ConfigCache, r.Clientset)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to create InferenceServicesConfig")
 	}
@@ -542,7 +555,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// canaryAnalysis operator config (so ConfigMap edits take effect without a
 		// restart); the sampler's structural tuning is fixed at startup. Only
 		// analysis steps read these — non-analysis canaries ignore them.
-		analysisConfig, err := controllerconfig.NewCanaryAnalysisConfig(r.Clientset)
+		analysisConfig, err := controllerconfig.NewCanaryAnalysisConfigCached(r.ConfigCache, r.Clientset)
 		if err != nil {
 			log.Error(err, "Failed to load canaryAnalysis config")
 			return reconcile.Result{}, errors.Wrapf(err, "fails to load canaryAnalysis config")
@@ -594,7 +607,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// Now reconcile ingress and external service after components have created their services
-	ingressConfig, err := controllerconfig.NewIngressConfig(r.Clientset)
+	ingressConfig, err := controllerconfig.NewIngressConfigCached(r.ConfigCache, r.Clientset)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to create IngressConfig")
 	}
@@ -903,6 +916,13 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.APIReader = mgr.GetAPIReader()
 	if r.Expectations == nil {
 		r.Expectations = omenative.NewExpectations()
+	}
+	// Short-TTL cache for the inferenceservice-config ConfigMap so a reconcile
+	// pass shares one apiserver GET across the per-pass config loads. TTL is
+	// flag-driven; a non-positive TTL disables caching (reads the apiserver every
+	// call), preserving the pre-cache behavior.
+	if r.ConfigCache == nil {
+		r.ConfigCache = controllerconfig.NewConfigCache(r.ConfigCacheTTL)
 	}
 
 	// Initialize RuntimeSelector

@@ -56,17 +56,89 @@ func IsPodDrained(ctx context.Context, reader client.Reader, namespace, serviceN
 		return drainedWhenSliceListEmpty(ctx, reader, namespace, serviceName)
 	}
 
+	return podDrainedInSlices(slices, pod), nil
+}
+
+// Batcher amortizes the per-service EndpointSlice LIST across a whole
+// gang/drain loop. IsPodDrained on the bare reader does one LIST per
+// pod (N+1); when a Delete / Restart-Phase-A / recreate pass walks
+// every pod in an Instance, those pods share at most a handful of
+// per-revision Service names, so the slice set can be listed once per
+// service name and reused. Mirrors AvailablePodSet's single-list
+// approach in status_aggregate.go.
+//
+// Semantics are identical to IsPodDrained, including the empty-slice
+// disambiguation (Service-exists Get): only the redundant repeat LISTs
+// for the same serviceName are elided.
+//
+// Not safe for concurrent use; scoped to one reconcile pass.
+type Batcher struct {
+	reader    client.Reader
+	namespace string
+	// slicesByService memoizes EndpointSlicesForService per serviceName.
+	slicesByService map[string][]discoveryv1.EndpointSlice
+}
+
+// NewBatcher returns a Batcher bound to reader + namespace. Callers
+// invoke IsPodDrained per pod; the underlying LIST runs at most once
+// per distinct serviceName.
+func NewBatcher(reader client.Reader, namespace string) *Batcher {
+	return &Batcher{
+		reader:          reader,
+		namespace:       namespace,
+		slicesByService: map[string][]discoveryv1.EndpointSlice{},
+	}
+}
+
+// slicesFor returns the (memoized) EndpointSlices for serviceName.
+func (b *Batcher) slicesFor(ctx context.Context, serviceName string) ([]discoveryv1.EndpointSlice, error) {
+	if slices, ok := b.slicesByService[serviceName]; ok {
+		return slices, nil
+	}
+	slices, err := EndpointSlicesForService(ctx, b.reader, b.namespace, serviceName)
+	if err != nil {
+		return nil, err
+	}
+	b.slicesByService[serviceName] = slices
+	return slices, nil
+}
+
+// IsPodDrained reports whether pod is no longer routable through
+// serviceName, reusing the memoized slice list. Identical semantics to
+// the package-level IsPodDrained.
+func (b *Batcher) IsPodDrained(ctx context.Context, serviceName string, pod *corev1.Pod) (bool, error) {
+	if pod == nil {
+		return false, fmt.Errorf("IsPodDrained: nil pod")
+	}
+	if serviceName == "" {
+		return false, fmt.Errorf("IsPodDrained: empty serviceName")
+	}
+	slices, err := b.slicesFor(ctx, serviceName)
+	if err != nil {
+		return false, err
+	}
+	if len(slices) == 0 {
+		return drainedWhenSliceListEmpty(ctx, b.reader, b.namespace, serviceName)
+	}
+	return podDrainedInSlices(slices, pod), nil
+}
+
+// podDrainedInSlices is the pure slice-walk shared by IsPodDrained and
+// Batcher.IsPodDrained: a pod is drained when no endpoint targeting it
+// across slices reports Ready. Assumes slices is non-empty — the
+// empty-list disambiguation is the caller's responsibility.
+func podDrainedInSlices(slices []discoveryv1.EndpointSlice, pod *corev1.Pod) bool {
 	for _, slice := range slices {
 		for _, ep := range slice.Endpoints {
 			if !endpointTargetsPod(ep, pod) {
 				continue
 			}
 			if endpointIsReady(ep) {
-				return false, nil
+				return false
 			}
 		}
 	}
-	return true, nil
+	return true
 }
 
 // drainedWhenSliceListEmpty resolves the ambiguous "no slices"

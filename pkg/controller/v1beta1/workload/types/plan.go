@@ -73,6 +73,15 @@ type InstancePlan struct {
 	// and preferred affinity to hint target nodes. Nil for non-migration
 	// paths.
 	MigrationOverlay *MigrationOverlay
+
+	// PeerHostnames is an optional render-time cache of the Instance's
+	// ordered peer-DNS host list (one entry per pod, flat gang-rank
+	// order). The list is identical for every pod in the gang, so the
+	// gang-render loop computes it once and stashes it here to avoid the
+	// O(gangsize^2) per-pod recompute. Nil when unset; Render then
+	// derives the list from Runners as before. Transient render scratch,
+	// not part of the desired state and never persisted.
+	PeerHostnames []string
 }
 
 // MigrationOverlay records the per-Instance placement constraints a

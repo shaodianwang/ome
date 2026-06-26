@@ -379,6 +379,132 @@ func TestIsPodDrained_TargetRefKindNotPod_Rejected(t *testing.T) {
 	}
 }
 
+// --- Batcher: single LIST per serviceName, identical semantics ---
+
+// countingReader wraps a client.Reader and counts EndpointSlice LIST calls.
+type countingReader struct {
+	client.Reader
+	sliceLists int
+}
+
+func (r *countingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*discoveryv1.EndpointSliceList); ok {
+		r.sliceLists++
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+func TestBatcher_OneListPerServiceNameAcrossPods(t *testing.T) {
+	// Two pods of the same gang routed through the same per-revision
+	// Service — the Batcher must LIST that Service's slices exactly once.
+	p1 := testPod("ns", "p1")
+	p2 := testPod("ns", "p2")
+	slice := sliceForService("ns", "svc-1", "svc",
+		endpointSpec{podName: "p1", address: "10.0.0.1", ready: ptr.To(false)},
+		endpointSpec{podName: "p2", address: "10.0.0.2", ready: ptr.To(false)},
+	)
+	cr := &countingReader{Reader: newDrainTestClient(t, slice)}
+	b := NewBatcher(cr, "ns")
+
+	for _, pod := range []*corev1.Pod{p1, p2} {
+		drained, err := b.IsPodDrained(context.Background(), "svc", pod)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !drained {
+			t.Fatalf("expected drained=true for %s (endpoint Ready=false)", pod.Name)
+		}
+	}
+	if cr.sliceLists != 1 {
+		t.Fatalf("expected exactly 1 EndpointSlice LIST across 2 pods, got %d", cr.sliceLists)
+	}
+}
+
+func TestBatcher_ListsPerDistinctServiceName(t *testing.T) {
+	// Pods on different per-revision Services each trigger their own LIST,
+	// but only once per distinct serviceName.
+	pA := testPod("ns", "pA")
+	pB := testPod("ns", "pB")
+	sA := sliceForService("ns", "svcA-1", "svcA", endpointSpec{podName: "pA", address: "10.0.0.1", ready: ptr.To(false)})
+	sB := sliceForService("ns", "svcB-1", "svcB", endpointSpec{podName: "pB", address: "10.0.0.2", ready: ptr.To(false)})
+	cr := &countingReader{Reader: newDrainTestClient(t, sA, sB)}
+	b := NewBatcher(cr, "ns")
+
+	if _, err := b.IsPodDrained(context.Background(), "svcA", pA); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := b.IsPodDrained(context.Background(), "svcB", pB); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Re-check pA — must reuse the memoized svcA list, no new LIST.
+	if _, err := b.IsPodDrained(context.Background(), "svcA", pA); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cr.sliceLists != 2 {
+		t.Fatalf("expected 2 LISTs (one per distinct service), got %d", cr.sliceLists)
+	}
+}
+
+func TestBatcher_MatchesIsPodDrainedSemantics(t *testing.T) {
+	// The Batcher path must produce the same answer as the package-level
+	// IsPodDrained across the key cases: ready (not drained), not-ready
+	// (drained), Service-exists-no-slices (not drained), and no-service
+	// (drained).
+	cases := []struct {
+		name string
+		objs []client.Object
+		want bool
+	}{
+		{
+			name: "ready endpoint -> not drained",
+			objs: []client.Object{sliceForService("ns", "s", "svc", endpointSpec{podName: "p1", address: "10.0.0.1", ready: ptr.To(true)})},
+			want: false,
+		},
+		{
+			name: "not-ready endpoint -> drained",
+			objs: []client.Object{sliceForService("ns", "s", "svc", endpointSpec{podName: "p1", address: "10.0.0.1", ready: ptr.To(false)})},
+			want: true,
+		},
+		{
+			name: "service exists, no slices -> not drained",
+			objs: []client.Object{&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "ns"}}},
+			want: false,
+		},
+		{
+			name: "no service, no slices -> drained",
+			objs: nil,
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := testPod("ns", "p1")
+			c := newDrainTestClient(t, tc.objs...)
+			direct, err := IsPodDrained(context.Background(), c, "ns", "svc", pod)
+			if err != nil {
+				t.Fatalf("IsPodDrained error: %v", err)
+			}
+			batched, err := NewBatcher(c, "ns").IsPodDrained(context.Background(), "svc", pod)
+			if err != nil {
+				t.Fatalf("Batcher.IsPodDrained error: %v", err)
+			}
+			if direct != tc.want || batched != tc.want {
+				t.Fatalf("want %v; IsPodDrained=%v Batcher=%v", tc.want, direct, batched)
+			}
+		})
+	}
+}
+
+func TestBatcher_NilPodAndEmptyServiceRejected(t *testing.T) {
+	b := NewBatcher(newDrainTestClient(t), "ns")
+	if _, err := b.IsPodDrained(context.Background(), "svc", nil); err == nil {
+		t.Fatal("expected error for nil pod")
+	}
+	if _, err := b.IsPodDrained(context.Background(), "", testPod("ns", "p1")); err == nil {
+		t.Fatal("expected error for empty service name")
+	}
+}
+
 // --- EndpointAvailable tri-state ---
 
 func TestEndpointAvailable_ReadyTrueTerminatingFalseIsAvailable(t *testing.T) {

@@ -338,6 +338,14 @@ func findInstanceStatus(observed []workload.InstanceStatus, idx int32) *workload
 // Services can select it.
 func createMissingPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, idx int32, targets []podTarget, revisionHash string) (int, error) {
 	created := 0
+	// Prime the gang's peer-DNS host list once. It's identical for every
+	// pod in the Instance, so caching it here turns the per-pod O(gangsize)
+	// rebuild inside Render into O(gangsize) total per gang. inst is a value
+	// copy, so this mutation stays loop-local. Single-pod Instances get no
+	// peer list (Render's len<2 gate makes it a no-op anyway).
+	if inst.PeerHostnames == nil && inst.TotalPods() > 1 {
+		inst.PeerHostnames = buildInstancePeerHostnames(input.Key.OwnerName, plan.Component, inst)
+	}
 	for _, t := range targets {
 		template := input.DesiredSpec.PodSpec
 		if t.Runner.Name == "worker" && input.DesiredSpec.WorkerPodSpec != nil {

@@ -40,6 +40,7 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -172,6 +173,26 @@ func EnsurePodGroup(ctx context.Context, c client.Client, owner client.Object, o
 		return fmt.Errorf("EnsurePodGroup: build desired: %w", err)
 	}
 
+	// Steady-state fast path: the PodGroup spec is a pure function of
+	// (owner, component, index, MinMember, timeout) and never changes
+	// at runtime. Read the cached copy first and skip the
+	// CreateOrUpdate (its DeepCopy + mutate + DeepEqual) when the
+	// reconciled fields already match — at ~O(gangs) per reconcile
+	// across thousands of pods this trims the per-gang work to a single
+	// cache Get on the common no-drift path. CreateOrUpdate still owns
+	// every actual write, so correctness is unchanged: cache miss or
+	// any drift falls through to it below.
+	existing := &schedulingv1alpha1.PodGroup{}
+	getErr := c.Get(ctx, client.ObjectKeyFromObject(desired), existing)
+	switch {
+	case getErr == nil:
+		if podGroupMatches(existing, desired) {
+			return nil
+		}
+	case !apierrors.IsNotFound(getErr):
+		return fmt.Errorf("EnsurePodGroup: get %s/%s: %w", desired.Namespace, desired.Name, getErr)
+	}
+
 	target := &schedulingv1alpha1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      desired.Name,
@@ -189,6 +210,26 @@ func EnsurePodGroup(ctx context.Context, c client.Client, owner client.Object, o
 		return fmt.Errorf("EnsurePodGroup: CreateOrUpdate %s/%s: %w", target.Namespace, target.Name, err)
 	}
 	return nil
+}
+
+// podGroupMatches reports whether the cached PodGroup already carries
+// the exact fields the EnsurePodGroup mutate closure reconciles —
+// Labels, OwnerReferences, Spec.MinMember, Spec.ScheduleTimeoutSeconds.
+// Returning true lets EnsurePodGroup skip the CreateOrUpdate on the
+// no-drift steady-state path. Must stay in lockstep with the mutate
+// closure: any field that closure writes must be compared here, or a
+// drift on it would be silently dropped.
+func podGroupMatches(existing, desired *schedulingv1alpha1.PodGroup) bool {
+	if existing.Spec.MinMember != desired.Spec.MinMember {
+		return false
+	}
+	if !equality.Semantic.DeepEqual(existing.Spec.ScheduleTimeoutSeconds, desired.Spec.ScheduleTimeoutSeconds) {
+		return false
+	}
+	if !equality.Semantic.DeepEqual(existing.Labels, desired.Labels) {
+		return false
+	}
+	return equality.Semantic.DeepEqual(existing.OwnerReferences, desired.OwnerReferences)
 }
 
 // DeletePodGroup removes the PodGroup for an Instance that has been

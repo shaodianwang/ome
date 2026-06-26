@@ -80,12 +80,15 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 			}
 		}
 		// Live reader on drain check so kube-proxy isn't still routing.
+		// Batcher lists each per-revision Service's EndpointSlices once
+		// and reuses them across the gang, avoiding the N+1 per-pod LIST.
+		drainer := drain.NewBatcher(deps.Reader(), input.Key.Namespace)
 		for _, pod := range oldPods {
 			serviceName := drainServiceForPod(input, plan, pod)
 			if serviceName == "" {
 				continue
 			}
-			drained, err := drain.IsPodDrained(ctx, deps.Reader(), input.Key.Namespace, serviceName, pod)
+			drained, err := drainer.IsPodDrained(ctx, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}

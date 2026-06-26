@@ -3,6 +3,7 @@ package ops
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -686,6 +687,65 @@ func TestRender_MultiPod_TPUTopologyEnv(t *testing.T) {
 	}
 	if wenv["TPU_WORKER_ID"] != "1" {
 		t.Errorf("worker TPU_WORKER_ID: got %q want 1", wenv["TPU_WORKER_ID"])
+	}
+}
+
+// TestRender_TPUTopologyEnv_PrimedPeerHostnamesMatchUncached pins the perf
+// optimization that hoists the per-gang peer-host list out of the O(gangsize^2)
+// per-pod rebuild: when the gang-render loop primes inst.PeerHostnames once,
+// Render must produce byte-identical TPU env to the uncached path — same shared
+// host/address list, same per-pod TPU_WORKER_ID.
+func TestRender_TPUTopologyEnv_PrimedPeerHostnamesMatchUncached(t *testing.T) {
+	plan, inst, runners := multiPodPlan(2) // 1 leader + 2 workers = 3-host slice
+
+	// Prime the cache exactly as createMissingPods does, once per gang.
+	primed := inst
+	primed.PeerHostnames = buildInstancePeerHostnames(basicISVC().Name, plan.Component, inst)
+
+	// Sanity: priming must not change the computed list — it's the same
+	// derivation, just hoisted.
+	if got, want := strings.Join(primed.PeerHostnames, ","),
+		strings.Join(buildInstancePeerHostnames(basicISVC().Name, plan.Component, inst), ","); got != want {
+		t.Fatalf("primed list diverged from derivation: got %q want %q", got, want)
+	}
+
+	tpuKeys := []string{"TPU_WORKER_HOSTNAMES", "TPU_WORKER_ID", "TPU_PROCESS_ADDRESSES", "TPU_PROCESS_PORT", "TPU_NAME"}
+	// leader(0) + worker ordinals 0..1 → gang ranks 0,1,2.
+	cases := []struct {
+		runner  workload.RunnerPlan
+		ordinal int32
+	}{
+		{runners[0], 0},
+		{runners[1], 0},
+		{runners[1], 1},
+	}
+	for _, c := range cases {
+		uncached, err := testRender(basicISVC(), tpuPodSpec(), plan, inst, c.runner, c.ordinal)
+		if err != nil {
+			t.Fatalf("uncached render %s/%d: %v", c.runner.Name, c.ordinal, err)
+		}
+		cached, err := testRender(basicISVC(), tpuPodSpec(), plan, primed, c.runner, c.ordinal)
+		if err != nil {
+			t.Fatalf("cached render %s/%d: %v", c.runner.Name, c.ordinal, err)
+		}
+		ue, ce := envByName(uncached.Spec.Containers[0].Env), envByName(cached.Spec.Containers[0].Env)
+		for _, k := range tpuKeys {
+			if ue[k] != ce[k] {
+				t.Errorf("%s/%d %s: cached %q != uncached %q", c.runner.Name, c.ordinal, k, ce[k], ue[k])
+			}
+		}
+	}
+
+	// The shared list is constant across the gang, but TPU_WORKER_ID is not.
+	wid := func(r workload.RunnerPlan, o int32) string {
+		pod, err := testRender(basicISVC(), tpuPodSpec(), plan, primed, r, o)
+		if err != nil {
+			t.Fatalf("render %s/%d: %v", r.Name, o, err)
+		}
+		return envByName(pod.Spec.Containers[0].Env)["TPU_WORKER_ID"]
+	}
+	if got := []string{wid(runners[0], 0), wid(runners[1], 0), wid(runners[1], 1)}; got[0] != "0" || got[1] != "1" || got[2] != "2" {
+		t.Errorf("per-pod TPU_WORKER_ID with primed cache: got %v want [0 1 2]", got)
 	}
 }
 

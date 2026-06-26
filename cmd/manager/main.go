@@ -137,6 +137,7 @@ type Options struct {
 	multiClusterRole           string
 	allowExecCredentials       bool
 	execCredentialAllowedCmds  string
+	configCacheTTL             time.Duration
 	zapOpts                    zap.Options
 }
 
@@ -163,6 +164,12 @@ func DefaultOptions() Options {
 		multiClusterRole:           "",
 		allowExecCredentials:       false,
 		execCredentialAllowedCmds:  "aws,gke-gcloud-auth-plugin,kubelogin",
+		// Short TTL for the inferenceservice-config ConfigMap read on the ISVC
+		// reconcile hot path. Collapses the per-pass Deploy/InferenceServices/
+		// Ingress/CanaryAnalysis loads onto one apiserver GET per TTL window
+		// while staying short enough that a ConfigMap edit applies without a
+		// restart. Override via --config-cache-ttl (0 disables caching).
+		configCacheTTL: 30 * time.Second,
 		zapOpts: zap.Options{
 			TimeEncoder: zapcore.RFC3339TimeEncoder,
 			ZapOpts:     []zaplog.Option{zaplog.AddCaller()},
@@ -206,6 +213,10 @@ func GetOptions() Options {
 			"SECURITY: an exec block runs a command in the controller pod; keep WorkloadCluster kubeconfig Secrets admin-only.")
 	flag.StringVar(&opts.execCredentialAllowedCmds, "exec-credential-allowed-commands", opts.execCredentialAllowedCmds,
 		"Comma-separated allowlist of exec credential plugin command basenames permitted when --allow-exec-credentials is set.")
+	flag.DurationVar(&opts.configCacheTTL, "config-cache-ttl", opts.configCacheTTL,
+		"TTL for the in-memory cache of the inferenceservice-config ConfigMap on the InferenceService reconcile path. "+
+			"Collapses the per-reconcile config loads onto one apiserver GET per window; kept short so ConfigMap edits "+
+			"apply without a restart. Set to 0 to disable caching (read the apiserver on every load).")
 	opts.zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	return opts
@@ -396,6 +407,7 @@ func main() {
 			Recorder:          eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
 			ModelCache:        modelCacheProvider,
 			TrafficReconciler: trafficReconciler,
+			ConfigCacheTTL:    options.configCacheTTL,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create InferenceService controller")
 			os.Exit(1)

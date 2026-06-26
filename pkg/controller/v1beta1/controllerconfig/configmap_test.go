@@ -3,6 +3,7 @@ package controllerconfig
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,7 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
@@ -496,4 +499,147 @@ func TestCanaryAnalysisDurationAccessors(t *testing.T) {
 			assert.Equal(t, tt.wantTTL, c.CacheTTLDuration())
 		})
 	}
+}
+
+// countingClientset returns a fake clientset plus an atomic counter that is
+// incremented on every GET against the inferenceservice-config ConfigMap, so a
+// test can assert exactly how many apiserver round-trips a ConfigCache issues.
+func countingClientset(t *testing.T, data map[string]string) (*fake.Clientset, *int64) {
+	t.Helper()
+	clientset := fake.NewSimpleClientset(&v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      constants.InferenceServiceConfigMapName,
+			Namespace: constants.OMENamespace,
+		},
+		Data: data,
+	})
+	var gets int64
+	clientset.PrependReactor("get", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.(k8stesting.GetAction).GetName() == constants.InferenceServiceConfigMapName {
+			atomic.AddInt64(&gets, 1)
+		}
+		// Fall through to the default tracker so the object is actually returned.
+		return false, nil, nil
+	})
+	return clientset, &gets
+}
+
+// TestConfigCache exercises the hit / expiry / disabled / error behaviors of
+// ConfigCache: within the TTL the constructors share one apiserver GET, after
+// the TTL the entry is re-fetched (so ConfigMap edits apply without a restart),
+// a non-positive TTL disables caching, and a GET error is surfaced (not served
+// from a stale entry).
+func TestConfigCache(t *testing.T) {
+	deployData := map[string]string{
+		DeployConfigName: `{"defaultDeploymentMode":"RawDeployment"}`,
+		IngressConfigKeyName: `{
+			"ingressGateway":"istio-ingress",
+			"ingressService":"istio-ingress",
+			"ingressDomain":"example.com"
+		}`,
+	}
+
+	t.Run("hit: four cached loads share one GET within TTL", func(t *testing.T) {
+		clientset, gets := countingClientset(t, deployData)
+		fakeNow := time.Unix(0, 0)
+		cache := &ConfigCache{ttl: 30 * time.Second, now: func() time.Time { return fakeNow }}
+
+		// Mirror the reconcile hot path: four config loads in one pass.
+		_, err := NewDeployConfigCached(cache, clientset)
+		require.NoError(t, err)
+		_, err = NewInferenceServicesConfigCached(cache, clientset)
+		require.NoError(t, err)
+		ing, err := NewIngressConfigCached(cache, clientset)
+		require.NoError(t, err)
+		_, err = NewCanaryAnalysisConfigCached(cache, clientset)
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(1), atomic.LoadInt64(gets), "all four loads must share one apiserver GET")
+		// Parsed values must be identical to the uncached path.
+		assert.Equal(t, "example.com", ing.IngressDomain)
+	})
+
+	t.Run("expiry: re-fetches after TTL elapses", func(t *testing.T) {
+		clientset, gets := countingClientset(t, deployData)
+		fakeNow := time.Unix(0, 0)
+		cache := &ConfigCache{ttl: 30 * time.Second, now: func() time.Time { return fakeNow }}
+
+		_, err := NewDeployConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), atomic.LoadInt64(gets))
+
+		// Still within TTL: served from cache.
+		fakeNow = fakeNow.Add(29 * time.Second)
+		_, err = NewDeployConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), atomic.LoadInt64(gets))
+
+		// Past TTL: re-fetched.
+		fakeNow = fakeNow.Add(2 * time.Second)
+		_, err = NewDeployConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), atomic.LoadInt64(gets))
+	})
+
+	t.Run("expiry picks up a ConfigMap edit without restart", func(t *testing.T) {
+		clientset, _ := countingClientset(t, map[string]string{
+			DeployConfigName: `{"defaultDeploymentMode":"RawDeployment"}`,
+		})
+		fakeNow := time.Unix(0, 0)
+		cache := &ConfigCache{ttl: 30 * time.Second, now: func() time.Time { return fakeNow }}
+
+		cfg, err := NewDeployConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Equal(t, "RawDeployment", cfg.DefaultDeploymentMode)
+
+		// Edit the ConfigMap to clear the deploy block.
+		_, err = clientset.CoreV1().ConfigMaps(constants.OMENamespace).Update(context.TODO(), &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.InferenceServiceConfigMapName,
+				Namespace: constants.OMENamespace,
+			},
+			Data: map[string]string{},
+		}, metav1.UpdateOptions{})
+		require.NoError(t, err)
+
+		// Within TTL the edit is not yet visible.
+		cfg, err = NewDeployConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Equal(t, "RawDeployment", cfg.DefaultDeploymentMode)
+
+		// After TTL the edit applies.
+		fakeNow = fakeNow.Add(31 * time.Second)
+		cfg, err = NewDeployConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Empty(t, cfg.DefaultDeploymentMode)
+	})
+
+	t.Run("disabled: non-positive TTL reads apiserver every call", func(t *testing.T) {
+		clientset, gets := countingClientset(t, deployData)
+		cache := NewConfigCache(0)
+
+		for i := 0; i < 3; i++ {
+			_, err := NewDeployConfigCached(cache, clientset)
+			require.NoError(t, err)
+		}
+		assert.Equal(t, int64(3), atomic.LoadInt64(gets), "TTL<=0 must not cache")
+	})
+
+	t.Run("nil cache reads apiserver every call", func(t *testing.T) {
+		clientset, gets := countingClientset(t, deployData)
+
+		for i := 0; i < 2; i++ {
+			_, err := NewDeployConfigCached(nil, clientset)
+			require.NoError(t, err)
+		}
+		assert.Equal(t, int64(2), atomic.LoadInt64(gets))
+	})
+
+	t.Run("error: GET failure is surfaced, not served stale", func(t *testing.T) {
+		clientset := fake.NewSimpleClientset() // no ConfigMap
+		cache := NewConfigCache(30 * time.Second)
+
+		_, err := NewDeployConfigCached(cache, clientset)
+		assert.Error(t, err, "missing ConfigMap must surface as an error")
+	})
 }

@@ -84,6 +84,9 @@ func Delete(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 	}
 
 	// Drain check needs live reader so kube-proxy isn't still routing.
+	// Batcher lists each per-revision Service's EndpointSlices once and
+	// reuses them across the gang, avoiding the N+1 per-pod LIST.
+	drainer := drain.NewBatcher(deps.Reader(), input.Key.Namespace)
 	for _, pod := range pods {
 		// drain target is the per-revision *routed* Service. Read from
 		// the pod's ome.io/revision-hash label (stamped by Render). The
@@ -95,7 +98,7 @@ func Delete(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 			continue
 		}
 		serviceName := query.PerRevisionServiceName(input.Key.OwnerName, plan.Component, hash)
-		drained, err := drain.IsPodDrained(ctx, deps.Reader(), input.Key.Namespace, serviceName, pod)
+		drained, err := drainer.IsPodDrained(ctx, serviceName, pod)
 		if err != nil {
 			return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", idx, pod.Name, err)
 		}

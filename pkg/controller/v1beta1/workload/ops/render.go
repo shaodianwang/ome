@@ -522,7 +522,23 @@ func buildTPUTopologyEnv(plan workload.ComponentPlan, inst workload.InstancePlan
 // Instance in flat gang-rank order — runners in declared order, each runner's
 // ordinals 0..Size-1, the same order instancePodRank counts, so hosts[rank] is
 // the pod whose TPU_WORKER_ID is rank.
+//
+// The list depends only on (isvcName, component, inst) — identical for every
+// pod in the gang — so the gang-render loop precomputes it once into
+// inst.PeerHostnames and Render reuses it here, avoiding the O(gangsize^2)
+// per-pod rebuild. When the cache is unset (single-pod paths, direct Render
+// callers, tests) it falls back to deriving the list from Runners.
 func instancePeerHostnames(isvcName string, component workload.ComponentType, inst workload.InstancePlan) []string {
+	if inst.PeerHostnames != nil {
+		return inst.PeerHostnames
+	}
+	return buildInstancePeerHostnames(isvcName, component, inst)
+}
+
+// buildInstancePeerHostnames computes the Instance's ordered peer-DNS host
+// list from its Runners (the uncached path). Exported within the package so
+// the gang-render loop can prime inst.PeerHostnames once per gang.
+func buildInstancePeerHostnames(isvcName string, component workload.ComponentType, inst workload.InstancePlan) []string {
 	headless := query.HeadlessServiceName(isvcName, component)
 	var hosts []string
 	for _, r := range inst.Runners {

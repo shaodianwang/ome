@@ -168,13 +168,17 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// per-Component headless Service publishes not-ready endpoints
 		// so peer-discovery DNS resolves during gang init — using it
 		// here would make IsPodDrained wait forever.
+		//
+		// Batcher lists each per-revision Service's EndpointSlices once
+		// and reuses them across the gang, avoiding the N+1 per-pod LIST.
+		drainer := drain.NewBatcher(deps.Reader(), input.Key.Namespace)
 		for _, pod := range oldPods {
 			hash := pod.Labels[query.LabelRevisionHash]
 			if hash == "" {
 				continue
 			}
 			serviceName := query.PerRevisionServiceName(input.Key.OwnerName, plan.Component, hash)
-			drained, err := drain.IsPodDrained(ctx, deps.Reader(), input.Key.Namespace, serviceName, pod)
+			drained, err := drainer.IsPodDrained(ctx, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}

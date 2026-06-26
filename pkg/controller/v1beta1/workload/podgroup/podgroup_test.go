@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -342,6 +343,101 @@ func TestEnsurePodGroup_Idempotent(t *testing.T) {
 	}
 }
 
+// TestEnsurePodGroup_FastPathReadsBeforeWriteAndSkipsNoDrift pins the
+// steady-state fast path: EnsurePodGroup must do its own cache Get up
+// front and, on the no-drift re-ensure, return after that Get without
+// touching CreateOrUpdate (no Create/Update/Patch).
+//
+// A ResourceVersion / counting-Update-only assertion is NOT enough to
+// guard the fast path: the fallback CreateOrUpdate is itself a no-op on
+// a matching object (Get -> DeepEqual match -> OperationResultNone, no
+// Update), so it never bumps RV or issues an Update either. The signal
+// that the fast path actually runs is the extra pre-check Get on the
+// write path: with the fast path, the create-from-absent ensure issues
+// TWO Gets (the fast-path probe that returns NotFound, then
+// CreateOrUpdate's own Get); without it, only CreateOrUpdate's single
+// Get. Reverting gang.go/podgroup.go collapses that to one Get and
+// fails this test.
+func TestEnsurePodGroup_FastPathReadsBeforeWriteAndSkipsNoDrift(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	cc := newCountingClient(newPodGroupClient(t, isvc))
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 2}}}
+
+	// First ensure: object absent -> must be created. The fast path runs
+	// its NotFound probe Get BEFORE handing off to CreateOrUpdate, so we
+	// expect 2 Gets and exactly 1 Create. Reverted code does a single
+	// Get (CreateOrUpdate's) -> getsCreate == 1, which fails the check
+	// below.
+	cc.reset()
+	if err := EnsurePodGroup(context.Background(), cc, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
+		t.Fatalf("EnsurePodGroup (create): %v", err)
+	}
+	if cc.creates != 1 {
+		t.Errorf("create ensure: Create count = %d, want 1", cc.creates)
+	}
+	if cc.gets != 2 {
+		t.Errorf("create ensure: Get count = %d, want 2 (fast-path pre-check probe + CreateOrUpdate's Get). "+
+			"A count of 1 means the fast-path Get was removed — fast path reverted.", cc.gets)
+	}
+
+	// Second ensure: object now matches desired -> the fast path must
+	// short-circuit after a single Get with NO write.
+	cc.reset()
+	if err := EnsurePodGroup(context.Background(), cc, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
+		t.Fatalf("EnsurePodGroup (no-drift): %v", err)
+	}
+	if cc.creates != 0 || cc.updates != 0 || cc.patches != 0 {
+		t.Errorf("no-drift ensure issued a write: creates=%d updates=%d patches=%d, want all 0",
+			cc.creates, cc.updates, cc.patches)
+	}
+	if cc.gets != 1 {
+		t.Errorf("no-drift ensure: Get count = %d, want 1 (fast-path probe only, no CreateOrUpdate)", cc.gets)
+	}
+
+	// Sanity: the PodGroup that survives the no-drift pass still carries
+	// the reconciled shape.
+	got := &schedulingv1alpha1.PodGroup{}
+	if err := cc.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "llama-engine-0"}, got); err != nil {
+		t.Fatalf("get after no-drift ensure: %v", err)
+	}
+	if got.Spec.MinMember != 3 {
+		t.Errorf("MinMember after no-drift ensure: got %d want 3", got.Spec.MinMember)
+	}
+}
+
+// TestEnsurePodGroup_DriftStillWritesViaCreateOrUpdate is the
+// counterpart to the fast-path skip: when the cached object drifts from
+// desired, podGroupMatches must return false and EnsurePodGroup must
+// fall through to CreateOrUpdate and issue exactly one write. Pins that
+// the fast path never swallows a real drift.
+func TestEnsurePodGroup_DriftStillWritesViaCreateOrUpdate(t *testing.T) {
+	isvc := newPodGroupISVC("prod", "llama")
+	stale := &schedulingv1alpha1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "llama-engine-0",
+			Namespace: "prod",
+			Labels:    map[string]string{"stale": "true"},
+		},
+		Spec: schedulingv1alpha1.PodGroupSpec{
+			MinMember:              99, // drift vs. desired (3)
+			ScheduleTimeoutSeconds: int32Ptr(9999),
+		},
+	}
+	cc := newCountingClient(newPodGroupClient(t, isvc, stale))
+	plan := core.ComponentPlan{Component: workload.ComponentEngine, InstanceReadyTimeout: 5 * time.Minute}
+	inst := core.InstancePlan{Index: 0, Runners: []core.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 2}}}
+
+	cc.reset()
+	if err := EnsurePodGroup(context.Background(), cc, isvc, testPodGroupOwnerGVK, isvc.GetName(), plan, inst); err != nil {
+		t.Fatalf("EnsurePodGroup (drift): %v", err)
+	}
+	if cc.updates+cc.patches+cc.creates == 0 {
+		t.Errorf("drift ensure issued no write (creates=%d updates=%d patches=%d): fast path swallowed a real drift",
+			cc.creates, cc.updates, cc.patches)
+	}
+}
+
 // ---------------------------------------------------------------------
 // DeletePodGroup — explicit removal path (scale-down / migration).
 // ---------------------------------------------------------------------
@@ -393,6 +489,41 @@ func newPodGroupISVC(ns, name string) *v1beta1.InferenceService {
 		},
 	}
 }
+
+// countingClient wraps a client.Client (via an interceptor) and tallies
+// the Get / Create / Update / Patch calls EnsurePodGroup makes, so a
+// test can prove the steady-state fast path reads before writing and
+// skips CreateOrUpdate entirely on the no-drift path. reset() zeroes the
+// counters between phases of a single test.
+type countingClient struct {
+	client.Client
+	gets, creates, updates, patches int
+}
+
+func newCountingClient(base client.Client) *countingClient {
+	cc := &countingClient{}
+	cc.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			cc.gets++
+			return c.Get(ctx, key, obj, opts...)
+		},
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			cc.creates++
+			return c.Create(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			cc.updates++
+			return c.Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			cc.patches++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	return cc
+}
+
+func (cc *countingClient) reset() { cc.gets, cc.creates, cc.updates, cc.patches = 0, 0, 0, 0 }
 
 func newPodGroupClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()

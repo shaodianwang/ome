@@ -56,6 +56,12 @@ ome:
     #     fb_metric_schema: ome_controller
     podAnnotations: {}
     deploymentMode: "RawDeployment"
+    # TTL for the in-memory cache of the inferenceservice-config ConfigMap on the
+    # InferenceService reconcile path. Collapses the per-reconcile config loads
+    # (deploy/inferenceservice/ingress/canaryAnalysis) onto one apiserver GET per
+    # window; kept short so ConfigMap edits apply without a restart. Set to "0" to
+    # disable caching (read the apiserver on every load).
+    configCacheTTL: "30s"
     # canaryAnalysis tunes metric-gated canary promotion (spec.rollout.canary).
     canaryAnalysis:
       # Default Prometheus the analysis queries when a canary does not set its own
