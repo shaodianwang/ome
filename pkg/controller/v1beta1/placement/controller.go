@@ -99,8 +99,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if err := r.List(ctx, clusters); err != nil {
 		return ctrl.Result{}, err
 	}
-	candidates, err := MatchingClusters(isvc.Annotations[ClusterSelectorAnnotation], clusters.Items)
+	candidates, reason, err := MatchCandidates(isvc, clusters.Items)
 	if err != nil || len(candidates) == 0 {
+		// Surface WHY there are no candidates (malformed selector / no
+		// requirements declared / no Ready clusters / no match) so the empty
+		// set is diagnosable instead of an indistinguishable Pending.
+		r.Log.Info("no placement candidates", "isvc", isvc.Namespace+"/"+isvc.Name,
+			"reason", reason, "error", err)
 		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
 	}
 

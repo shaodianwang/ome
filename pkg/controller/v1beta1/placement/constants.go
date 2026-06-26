@@ -2,10 +2,23 @@
 // it places an InferenceService onto a workload cluster and mirrors its status.
 package placement
 
+import "github.com/ome-projects/ome/pkg/constants"
+
 const (
-	// ClusterSelectorAnnotation holds a label-selector string (e.g.
-	// "gpu=gb300,provider=cw") matched against WorkloadCluster labels to pick
-	// candidate clusters. Empty/absent -> all Ready clusters are candidates.
+	// AcceleratorRequirementsAnnotation holds a label-selector string of the
+	// accelerator/capability labels a candidate WorkloadCluster MUST satisfy
+	// for this ISVC (e.g. "gpu=gb300"). Per OEP-0018, candidate clusters are
+	// those whose labels satisfy the ISVC's accelerator requirements; an ISVC
+	// that declares no requirement (neither this nor ClusterSelectorAnnotation)
+	// is NOT fanned out fleet-wide. The value is user/GitOps-supplied — there is
+	// no in-code default (eventually the control plane resolves it from
+	// spec.model + selected runtime; until then it is expressed here).
+	AcceleratorRequirementsAnnotation = "ome.io/accelerator-requirements"
+
+	// ClusterSelectorAnnotation holds an optional extra label-selector string
+	// (e.g. "provider=cw") AND-ed onto the accelerator requirements to further
+	// narrow candidate clusters (operator-imposed routing). It does NOT, on its
+	// own, make an ISVC eligible for fleet-wide fan-out.
 	ClusterSelectorAnnotation = "ome.io/cluster-selector"
 
 	// LocalQueueAnnotation names the Kueue LocalQueue the derived workload's
@@ -28,13 +41,21 @@ const (
 	// behavior.
 	PlacementControlPlaneLabel = "ome.io/placement-control-plane"
 
-	// KueueServingAnnotation is stamped on the derived pod templates so the
-	// target cluster's Kueue gates + holds quota for the serving pods. (Kueue
-	// vocabulary stays out of the user-facing API; the control plane sets
-	// these on the derived object.)
-	KueueServingAnnotation = "kueue.x-k8s.io/pod-group-serving"
-
 	// PlacementFinalizer lets the controller delete the derived ISVC before the
 	// source ISVC is removed.
 	PlacementFinalizer = "ome.io/placement"
 )
+
+// controlPlaneOnlyAnnotations are ome.io directives that drive the CONTROL
+// plane's placement decision and must NOT ride along onto the derived ISVC,
+// where the worker cluster's reconciler would (re)interpret them: the
+// placement selectors (candidate selection is the control plane's job) and the
+// rollout operator-verbs (promote/rollback advance one shared rollout, owned by
+// the control plane — a copy on every candidate would each consume the verb).
+// Stripped by DeriveISVC.
+var controlPlaneOnlyAnnotations = []string{
+	AcceleratorRequirementsAnnotation,
+	ClusterSelectorAnnotation,
+	constants.RolloutPromoteAnnotation,
+	constants.RolloutRollbackAnnotation,
+}

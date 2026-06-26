@@ -9,24 +9,86 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// MatchingClusters returns the names (sorted) of Ready WorkloadClusters whose
-// labels satisfy the selector string. An empty selector matches every Ready
-// cluster. Returns an error if the selector string is malformed.
-func MatchingClusters(selector string, clusters []v1beta1.WorkloadCluster) ([]string, error) {
-	sel, err := labels.Parse(selector)
-	if err != nil {
-		return nil, err
+// MatchReason explains why MatchCandidates produced an empty candidate set, so
+// the caller can surface an actionable status instead of an indistinguishable
+// nil. It is "" when at least one candidate matched.
+type MatchReason string
+
+const (
+	// MatchReasonNoRequirements: the ISVC declared no accelerator/capability
+	// requirements at all. Per OEP-0018, candidates are the clusters whose
+	// labels SATISFY the ISVC's requirements; with no requirements there is
+	// nothing to satisfy, so we deliberately match NOTHING rather than fan out
+	// to every Ready cluster (the unsafe default this guards against).
+	MatchReasonNoRequirements MatchReason = "NoRequirements"
+	// MatchReasonMalformedSelector: a requirement selector failed to parse.
+	MatchReasonMalformedSelector MatchReason = "MalformedSelector"
+	// MatchReasonNoReadyClusters: requirements were declared but no Ready
+	// WorkloadCluster exists at all.
+	MatchReasonNoReadyClusters MatchReason = "NoReadyClusters"
+	// MatchReasonNoMatch: Ready clusters exist but none satisfy the requirements.
+	MatchReasonNoMatch MatchReason = "NoMatch"
+)
+
+// requirementSelector builds the AND-combined label selector an ISVC's candidate
+// clusters must satisfy: the accelerator/capability requirements
+// (AcceleratorRequirementsAnnotation) intersected with the optional
+// operator-imposed cluster-selector (ClusterSelectorAnnotation). hasReq reports
+// whether the ISVC expressed ANY requirement; an ISVC with no requirement is NOT
+// fanned out fleet-wide (see MatchReasonNoRequirements).
+func requirementSelector(isvc *v1beta1.InferenceService) (sel labels.Selector, hasReq bool, err error) {
+	sel = labels.Everything()
+	for _, key := range []string{AcceleratorRequirementsAnnotation, ClusterSelectorAnnotation} {
+		raw := isvc.Annotations[key]
+		if raw == "" {
+			continue
+		}
+		parsed, perr := labels.Parse(raw)
+		if perr != nil {
+			return nil, false, perr
+		}
+		reqs, _ := parsed.Requirements()
+		sel = sel.Add(reqs...)
+		hasReq = true
 	}
+	return sel, hasReq, nil
+}
+
+// MatchCandidates returns the names (sorted) of Ready WorkloadClusters whose
+// capability labels satisfy the ISVC's accelerator/capability requirements
+// (OEP-0018 candidate selection). The requirements are the AND of the ISVC's
+// accelerator-requirements annotation and the optional cluster-selector
+// annotation. An ISVC that declares NO requirement matches NO cluster (it is not
+// fanned out fleet-wide). When the result is empty, the returned MatchReason
+// explains why; err is non-nil only for a malformed selector.
+func MatchCandidates(isvc *v1beta1.InferenceService, clusters []v1beta1.WorkloadCluster) ([]string, MatchReason, error) {
+	sel, hasReq, err := requirementSelector(isvc)
+	if err != nil {
+		return nil, MatchReasonMalformedSelector, err
+	}
+	if !hasReq {
+		return nil, MatchReasonNoRequirements, nil
+	}
+
+	var ready int
 	var out []string
 	for i := range clusters {
 		c := &clusters[i]
 		if !apimeta.IsStatusConditionTrue(c.Status.Conditions, v1beta1.WorkloadClusterReady) {
 			continue
 		}
+		ready++
 		if sel.Matches(labels.Set(c.Labels)) {
 			out = append(out, c.Name)
 		}
 	}
 	sort.Strings(out)
-	return out, nil
+	switch {
+	case len(out) > 0:
+		return out, "", nil
+	case ready == 0:
+		return nil, MatchReasonNoReadyClusters, nil
+	default:
+		return nil, MatchReasonNoMatch, nil
+	}
 }

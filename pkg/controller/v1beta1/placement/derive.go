@@ -14,8 +14,9 @@ import (
 //   - Origin markers added (PlacementOriginLabel, PlacementOriginUIDAnnotation).
 //   - Control-plane identity stamped (PlacementControlPlaneLabel) when controlPlaneID
 //     is non-empty, so the GC sweep only reaps deriveds THIS control plane created.
-//   - Kueue gating stamps added to component pod metadata (queue label + serving annotation).
-//   - Control-plane directives (cluster-selector annotation) removed.
+//   - Kueue gating stamped on component pod metadata (the queue-name label).
+//   - Control-plane-only directives removed (placement selectors + rollout verbs)
+//     so the worker reconciler does not (re)act on the control plane's decisions.
 func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID string) *v1beta1.InferenceService {
 	d := src.DeepCopy()
 
@@ -51,8 +52,11 @@ func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID string) *v1beta1.I
 		d.Annotations = make(map[string]string)
 	}
 	d.Annotations[PlacementOriginUIDAnnotation] = string(src.UID)
-	// Remove control-plane directives.
-	delete(d.Annotations, ClusterSelectorAnnotation)
+	// Strip control-plane-only directives so they do not ride along to the
+	// worker (placement selectors + rollout operator verbs).
+	for _, k := range controlPlaneOnlyAnnotations {
+		delete(d.Annotations, k)
+	}
 
 	// Stamp Kueue gating on each component.
 	if d.Spec.Engine != nil {
@@ -68,14 +72,12 @@ func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID string) *v1beta1.I
 	return d
 }
 
-// stampQueue adds Kueue gating metadata to a component's pod metadata.
+// stampQueue adds the Kueue queue-name label to a component's pod metadata.
+// That label is what Kueue's pod integration keys on to gate the pods; it is the
+// sole Kueue stamp the derived ISVC needs.
 func stampQueue(comp *v1beta1.ComponentExtensionSpec, queue string) {
 	if comp.Labels == nil {
 		comp.Labels = make(map[string]string)
 	}
 	comp.Labels[constants.KueueQueueLabelKey] = queue
-	if comp.Annotations == nil {
-		comp.Annotations = make(map[string]string)
-	}
-	comp.Annotations[KueueServingAnnotation] = "true"
 }

@@ -18,8 +18,12 @@ func TestDeriveISVC(t *testing.T) {
 			Name: "svc", Namespace: "prod", UID: "uid-123",
 			ResourceVersion: "999",
 			Annotations: map[string]string{
-				LocalQueueAnnotation:      "serving-lq",
-				ClusterSelectorAnnotation: "gpu=gb300",
+				LocalQueueAnnotation:                "serving-lq",
+				AcceleratorRequirementsAnnotation:   "gpu=gb300",
+				ClusterSelectorAnnotation:           "provider=cw",
+				constants.RolloutPromoteAnnotation:  "full",
+				constants.RolloutRollbackAnnotation: "true",
+				constants.NetworkVisibility:         "cluster-local", // an ingress override that SHOULD ride along
 			},
 		},
 		Spec: v1beta1.InferenceServiceSpec{
@@ -46,16 +50,25 @@ func TestDeriveISVC(t *testing.T) {
 	assert.Equal(t, "uid-123", d.Annotations[PlacementOriginUIDAnnotation])
 	// control-plane identity stamped from the supplied id.
 	assert.Equal(t, "cp-east", d.Labels[PlacementControlPlaneLabel])
-	// Kueue stamps on the engine component pod metadata.
+	// Kueue queue-name label stamped on the engine component pod metadata
+	// (the sole Kueue stamp; the inert "serving" annotation was removed).
 	require.NotNil(t, d.Spec.Engine)
 	assert.Equal(t, "serving-lq", d.Spec.Engine.ComponentExtensionSpec.Labels[constants.KueueQueueLabelKey])
-	assert.Equal(t, "true", d.Spec.Engine.ComponentExtensionSpec.Annotations[KueueServingAnnotation])
 	// ...and on the decoder component too.
 	require.NotNil(t, d.Spec.Decoder)
 	assert.Equal(t, "serving-lq", d.Spec.Decoder.ComponentExtensionSpec.Labels[constants.KueueQueueLabelKey])
-	// the cluster-selector annotation is a control-plane directive, dropped on the derived object.
-	_, has := d.Annotations[ClusterSelectorAnnotation]
-	assert.False(t, has)
+	// control-plane-only directives are dropped on the derived object: the
+	// placement selectors and the rollout operator verbs.
+	for _, k := range []string{
+		AcceleratorRequirementsAnnotation, ClusterSelectorAnnotation,
+		constants.RolloutPromoteAnnotation, constants.RolloutRollbackAnnotation,
+	} {
+		_, has := d.Annotations[k]
+		assert.Falsef(t, has, "control-plane-only annotation %q must be stripped", k)
+	}
+	// ...but a legitimate worker-side serving directive (ingress visibility)
+	// rides along untouched.
+	assert.Equal(t, "cluster-local", d.Annotations[constants.NetworkVisibility])
 
 	// queue defaulting: no LocalQueueAnnotation -> DefaultLocalQueue.
 	src2 := src.DeepCopy()
