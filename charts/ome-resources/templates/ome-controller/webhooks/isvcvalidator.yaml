@@ -1,3 +1,11 @@
+{{- /*
+  OEP-0018: the InferenceService validator runtime-selects against the local
+  cluster's runtime/model catalog. On the control plane that catalog is empty,
+  so the manager does not register this webhook handler there. Installing the
+  config (failurePolicy: Fail) would then 404 and reject every user ISVC, so
+  skip the config entirely under the control-plane role.
+*/ -}}
+{{- if ne .Values.ome.multicluster.role "control-plane" }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -31,3 +39,4 @@ webhooks:
           - UPDATE
         resources:
           - inferenceservices
+{{- end }}

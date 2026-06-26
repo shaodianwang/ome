@@ -445,58 +445,66 @@ func main() {
 		}
 	}
 
-	setupLog.Info("Setting up BaseModel controller")
-	if err = (&v1beta1basemodelcontroller.BaseModelReconciler{
-		Client:         mgr.GetClient(),
-		Log:            ctrl.Log.WithName("BaseModel"),
-		Scheme:         mgr.GetScheme(),
-		ModelCache:     modelCacheProvider,
-		OmeAgentConfig: omeAgentConfig,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create BaseModel controller")
-		os.Exit(1)
-	}
+	// OEP-0018: the control plane owns no workloads, models, or runtimes —
+	// those live on the workload clusters. Running the model/runtime lifecycle
+	// controllers here would reconcile against an empty local catalog (no-op
+	// at best, churn at worst), so gate them off under the control-plane role.
+	if isControlPlane {
+		setupLog.Info("control-plane role: BaseModel/ClusterBaseModel/ServingRuntime/RuntimeRevisionGC controllers disabled")
+	} else {
+		setupLog.Info("Setting up BaseModel controller")
+		if err = (&v1beta1basemodelcontroller.BaseModelReconciler{
+			Client:         mgr.GetClient(),
+			Log:            ctrl.Log.WithName("BaseModel"),
+			Scheme:         mgr.GetScheme(),
+			ModelCache:     modelCacheProvider,
+			OmeAgentConfig: omeAgentConfig,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create BaseModel controller")
+			os.Exit(1)
+		}
 
-	setupLog.Info("Setting up ClusterBaseModel controller")
-	if err = (&v1beta1basemodelcontroller.ClusterBaseModelReconciler{
-		Client:         mgr.GetClient(),
-		Log:            ctrl.Log.WithName("ClusterBaseModel"),
-		Scheme:         mgr.GetScheme(),
-		ModelCache:     modelCacheProvider,
-		OmeAgentConfig: omeAgentConfig,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create ClusterBaseModel controller")
-		os.Exit(1)
-	}
+		setupLog.Info("Setting up ClusterBaseModel controller")
+		if err = (&v1beta1basemodelcontroller.ClusterBaseModelReconciler{
+			Client:         mgr.GetClient(),
+			Log:            ctrl.Log.WithName("ClusterBaseModel"),
+			Scheme:         mgr.GetScheme(),
+			ModelCache:     modelCacheProvider,
+			OmeAgentConfig: omeAgentConfig,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create ClusterBaseModel controller")
+			os.Exit(1)
+		}
 
-	// OEP-0012: single inheritance reconciler that handles both CSR and
-	// SR via one source per GVK. Reconcile branches on req.Namespace.
-	servingRuntimeEventBroadcaster := record.NewBroadcaster()
-	servingRuntimeEventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
-	setupLog.Info("Setting up ServingRuntime inheritance controller")
-	if err = (&v1beta1servingruntimecontroller.InheritanceReconciler{
-		Client:   mgr.GetClient(),
-		Log:      ctrl.Log.WithName("ServingRuntimeInheritance"),
-		Scheme:   mgr.GetScheme(),
-		Recorder: servingRuntimeEventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create ServingRuntime inheritance controller")
-		os.Exit(1)
-	}
+		// OEP-0012: single inheritance reconciler that handles both CSR and
+		// SR via one source per GVK. Reconcile branches on req.Namespace.
+		servingRuntimeEventBroadcaster := record.NewBroadcaster()
+		servingRuntimeEventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
+		setupLog.Info("Setting up ServingRuntime inheritance controller")
+		if err = (&v1beta1servingruntimecontroller.InheritanceReconciler{
+			Client:   mgr.GetClient(),
+			Log:      ctrl.Log.WithName("ServingRuntimeInheritance"),
+			Scheme:   mgr.GetScheme(),
+			Recorder: servingRuntimeEventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create ServingRuntime inheritance controller")
+			os.Exit(1)
+		}
 
-	setupLog.Info("Setting up runtime-revision GC controller",
-		"retention", options.runtimeRevisionRetention,
-		"gracePeriod", options.runtimeRevisionGracePeriod)
-	if err = (&v1beta1runtimerevisioncontroller.GCReconciler{
-		Client:              mgr.GetClient(),
-		Log:                 ctrl.Log.WithName("RuntimeRevisionGC"),
-		Scheme:              mgr.GetScheme(),
-		OMENamespace:        constants.OMENamespace,
-		RetentionPerRuntime: options.runtimeRevisionRetention,
-		GracePeriod:         options.runtimeRevisionGracePeriod,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create runtime-revision GC controller")
-		os.Exit(1)
+		setupLog.Info("Setting up runtime-revision GC controller",
+			"retention", options.runtimeRevisionRetention,
+			"gracePeriod", options.runtimeRevisionGracePeriod)
+		if err = (&v1beta1runtimerevisioncontroller.GCReconciler{
+			Client:              mgr.GetClient(),
+			Log:                 ctrl.Log.WithName("RuntimeRevisionGC"),
+			Scheme:              mgr.GetScheme(),
+			OMENamespace:        constants.OMENamespace,
+			RetentionPerRuntime: options.runtimeRevisionRetention,
+			GracePeriod:         options.runtimeRevisionGracePeriod,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create runtime-revision GC controller")
+			os.Exit(1)
+		}
 	}
 
 	if options.enableInferenceReplicaCtrl && !isControlPlane {
@@ -612,28 +620,39 @@ func main() {
 			Handler: &inferencereplicawebhook.Validator{Decoder: admission.NewDecoder(mgr.GetScheme())},
 		})
 
-		runtimeSelectorConfig := runtimeselector.NewConfig(mgr.GetClient())
-		runtimeSelectorConfig.ModelCacheProvider = modelCacheProvider.Name
-		runtimeSelector := runtimeselector.NewWithConfig(runtimeSelectorConfig)
+		// OEP-0018: the InferenceService defaulter/validator runtime-selects
+		// against the LOCAL cluster's runtime/model catalog. On the control
+		// plane that catalog is empty (runtimes/models live on the workload
+		// clusters), so running this webhook here would reject or mis-default
+		// every user-authored ISVC. The placement controller derives and fans
+		// the ISVC out to workload clusters, where their own webhook validates
+		// it against the real catalog. Skip the ISVC webhook on the control plane.
+		if isControlPlane {
+			setupLog.Info("control-plane role: InferenceService defaulter/validator webhook disabled (runtime selection runs on workload clusters)")
+		} else {
+			runtimeSelectorConfig := runtimeselector.NewConfig(mgr.GetClient())
+			runtimeSelectorConfig.ModelCacheProvider = modelCacheProvider.Name
+			runtimeSelector := runtimeselector.NewWithConfig(runtimeSelectorConfig)
 
-		if err = ctrl.NewWebhookManagedBy(mgr).
-			For(&v1beta1.InferenceService{}).
-			WithDefaulter(&isvc.InferenceServiceDefaulter{
-				Client:    mgr.GetClient(),
-				ClientSet: clientSet,
-			}).
-			WithValidator(&isvc.InferenceServiceValidator{
-				Client:          mgr.GetClient(),
-				RuntimeSelector: runtimeSelector,
-				// Reject ome.io/btp.* (Envoy Gateway) when the active
-				// translator is Istio or Noop, and vice versa, at
-				// admission. Sourced from the same translator the
-				// reconciler uses so the two stay in sync.
-				KnownPassthroughPrefixes: trafficTranslator.SupportedPassthroughPrefixes(),
-			}).
-			Complete(); err != nil {
-			setupLog.Error(err, "Failed to create InferenceService webhook", "webhook", "v1beta1")
-			os.Exit(1)
+			if err = ctrl.NewWebhookManagedBy(mgr).
+				For(&v1beta1.InferenceService{}).
+				WithDefaulter(&isvc.InferenceServiceDefaulter{
+					Client:    mgr.GetClient(),
+					ClientSet: clientSet,
+				}).
+				WithValidator(&isvc.InferenceServiceValidator{
+					Client:          mgr.GetClient(),
+					RuntimeSelector: runtimeSelector,
+					// Reject ome.io/btp.* (Envoy Gateway) when the active
+					// translator is Istio or Noop, and vice versa, at
+					// admission. Sourced from the same translator the
+					// reconciler uses so the two stay in sync.
+					KnownPassthroughPrefixes: trafficTranslator.SupportedPassthroughPrefixes(),
+				}).
+				Complete(); err != nil {
+				setupLog.Error(err, "Failed to create InferenceService webhook", "webhook", "v1beta1")
+				os.Exit(1)
+			}
 		}
 	}
 

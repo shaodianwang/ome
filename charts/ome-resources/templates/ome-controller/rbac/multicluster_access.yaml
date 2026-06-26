@@ -37,10 +37,11 @@ metadata:
     app.kubernetes.io/part-of: ome
     ome.io/component: multicluster-access
 rules:
+# Derived InferenceServices: the control plane fans these out onto the
+# workload cluster, observes their admission status, and reaps losers.
 - apiGroups:
   - ome.io
   resources:
-  - clusterservingruntimes
   - inferenceservices
   verbs:
   - create
@@ -49,6 +50,39 @@ rules:
   - list
   - patch
   - update
+  - watch
+# ClusterServingRuntimes: read-only. The control plane never writes runtimes
+# on workload clusters (those are managed per-cluster via GitOps); it only
+# reads them for runtime context. Write verbs were over-broad blast radius.
+- apiGroups:
+  - ome.io
+  resources:
+  - clusterservingruntimes
+  verbs:
+  - get
+  - list
+  - watch
+# Pods: read-only, needed so the placement controller can observe admission
+# on the workload cluster directly (pods released from / held by a scheduling
+# gate) instead of only trusting the mirrored derived-ISVC status.
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+# PodGroups (scheduler-plugins coscheduling): read-only, for gang-admission
+# observation. Optional CRD — absent on clusters without scheduler-plugins,
+# where this rule is simply inert.
+- apiGroups:
+  - scheduling.x-k8s.io
+  resources:
+  - podgroups
+  verbs:
+  - get
+  - list
   - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
