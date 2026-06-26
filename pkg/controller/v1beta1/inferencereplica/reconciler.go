@@ -21,6 +21,7 @@ package inferencereplica
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -83,6 +84,40 @@ type Reconciler struct {
 	// multi-node renders the gang reference on pods but never creates the
 	// PodGroup object, leaving the gang stuck Pending ("PodGroup not found").
 	GangSchedulingAvailable bool
+
+	// MaxConcurrentReconciles caps parallel IR reconciles (distinct objects
+	// only — controller-runtime serializes per object key, so independent IRs
+	// reconcile in parallel safely). Sourced from a flag/chart value; no in-code
+	// default. Zero (unset) preserves controller-runtime's single-worker default.
+	MaxConcurrentReconciles int
+
+	// revisionHashMu guards revisionHashCache. The same IR key is never
+	// reconciled concurrently by controller-runtime, but the cache is
+	// shared across keys, so the map itself needs a lock if concurrency is
+	// ever raised above the default of one.
+	revisionHashMu sync.Mutex
+	// revisionHashCache memoizes the revision (hash, raw) per IR so the
+	// full-PodSpec json.Marshal + FNV in revision.HashWithWorker is skipped
+	// when the rendered pod template is provably unchanged. The template is
+	// a pure projection of the IR spec, so it only changes on a generation
+	// bump or a collision-count bump (both observable without re-marshaling);
+	// the scope UID partitions per-parent identity. Keyed by the IR's
+	// NamespacedName (so the NotFound branch can evict without the UID) with
+	// the IR UID folded into the entry so a delete-and-recreate of the same
+	// name misses the stale entry.
+	revisionHashCache map[types.NamespacedName]revisionHashEntry
+}
+
+// revisionHashEntry is one memoized revision hash plus the inputs that
+// invalidate it. raw is the canonical serialized payload stored in
+// ControllerRevision.Data.Raw; it is treated as immutable once cached.
+type revisionHashEntry struct {
+	uid            types.UID
+	generation     int64
+	collisionCount int32
+	scopeUID       types.UID
+	hash           string
+	raw            []byte
 }
 
 // Reconcile loads the InferenceReplica, projects (Spec, Status) onto a
@@ -117,6 +152,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		if apierrors.IsNotFound(err) {
 			// IR deleted between enqueue and reconcile. Owner-ref
 			// cascade GC handles the children (pods, ControllerRevisions).
+			// Drop the memoized revision hash so the cache doesn't retain
+			// entries for IRs that no longer exist.
+			r.forgetRevisionHash(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		log.Error(err, "Failed to get InferenceReplica")
@@ -415,13 +453,13 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 			ir.Namespace, ir.Name)
 	}
 
-	target, collision, err := revision.EnsureControllerRevisionWithWorker(
+	hash, raw, err := r.revisionHash(ir, input, ir.Status.CollisionCount, scopeUID)
+	if err != nil {
+		return nil, err
+	}
+	target, collision, err := revision.EnsureControllerRevisionFromHash(
 		ctx, r.Client, reader,
-		ir, irGVK, revKey,
-		input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec,
-		input.DesiredSpec.PodTemplateObjectMeta,
-		ir.Status.CollisionCount,
-		scopeUID,
+		ir, irGVK, revKey, hash, raw,
 	)
 	if err != nil {
 		return nil, err
@@ -440,13 +478,13 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 			ir.Namespace, ir.Name, utils.DerefInt32(bumped))
 	}
 
-	target, collision, err = revision.EnsureControllerRevisionWithWorker(
+	hash, raw, err = r.revisionHash(ir, input, bumped, scopeUID)
+	if err != nil {
+		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)
+	}
+	target, collision, err = revision.EnsureControllerRevisionFromHash(
 		ctx, r.Client, reader,
-		ir, irGVK, revKey,
-		input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec,
-		input.DesiredSpec.PodTemplateObjectMeta,
-		bumped,
-		scopeUID,
+		ir, irGVK, revKey, hash, raw,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("retry after CollisionCount bump: %w", err)
@@ -455,6 +493,65 @@ func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v
 		return nil, fmt.Errorf("revision still collides after CollisionCount bump (count=%d)", *bumped)
 	}
 	return target, nil
+}
+
+// revisionHash returns the revision (hash, raw) for the IR's rendered pod
+// template, reusing the memoized result when neither the generation, the
+// collision count, nor the scope UID has changed since the last compute.
+//
+// The rendered template (input.DesiredSpec.{PodSpec,WorkerPodSpec,
+// PodTemplateObjectMeta}) is a pure projection of the IR spec, so it only
+// changes on a spec edit (generation bump). collisionCount and scopeUID
+// are the remaining hash inputs folded by revision.HashWithWorker, so they
+// complete the cache key. On a miss it recomputes via the same
+// HashWithWorker call EnsureControllerRevisionWithWorker would have made,
+// so the (hash, raw) is byte-identical to the unmemoized path.
+//
+// raw is returned by reference (immutable once cached). EnsureController-
+// RevisionFromHash only reads it (Get short-circuit, bytes.Equal, and
+// Data.Raw assignment on Create), never mutates it.
+func (r *Reconciler) revisionHash(ir *v1beta1.InferenceReplica, input workload.ReconcileInput, collisionCount *int32, scopeUID types.UID) (string, []byte, error) {
+	cc := utils.DerefInt32(collisionCount)
+	cacheKey := client.ObjectKeyFromObject(ir)
+
+	r.revisionHashMu.Lock()
+	defer r.revisionHashMu.Unlock()
+	if entry, ok := r.revisionHashCache[cacheKey]; ok &&
+		entry.uid == ir.UID &&
+		entry.generation == ir.Generation &&
+		entry.collisionCount == cc &&
+		entry.scopeUID == scopeUID {
+		return entry.hash, entry.raw, nil
+	}
+
+	hash, raw, err := revision.HashWithWorker(
+		input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec,
+		input.DesiredSpec.PodTemplateObjectMeta,
+		collisionCount, scopeUID,
+	)
+	if err != nil {
+		return "", nil, err
+	}
+	if r.revisionHashCache == nil {
+		r.revisionHashCache = make(map[types.NamespacedName]revisionHashEntry)
+	}
+	r.revisionHashCache[cacheKey] = revisionHashEntry{
+		uid:            ir.UID,
+		generation:     ir.Generation,
+		collisionCount: cc,
+		scopeUID:       scopeUID,
+		hash:           hash,
+		raw:            raw,
+	}
+	return hash, raw, nil
+}
+
+// forgetRevisionHash evicts the memoized revision hash for a deleted IR so
+// the cache doesn't retain entries for IRs that no longer exist.
+func (r *Reconciler) forgetRevisionHash(key types.NamespacedName) {
+	r.revisionHashMu.Lock()
+	defer r.revisionHashMu.Unlock()
+	delete(r.revisionHashCache, key)
 }
 
 // bumpCollisionCount increments IR.Status.CollisionCount (initializing

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -25,10 +27,123 @@ const irKind = "InferenceReplica"
 // managedByOMENativePredicate keeps the pod watch to OMENative-managed
 // pods only (`ome.io/managed-by=OMENative`), so non-OMENative pod churn
 // in shared namespaces doesn't wake the handler.
+//
+// On Update it ADDITIONALLY drops events that don't touch any field the
+// IR reconcile reacts to. At ~6000 pods/cluster the kubelet emits a
+// continuous stream of status heartbeats (timestamps, observedGeneration,
+// resource metrics) whose only effect is bumping ResourceVersion;
+// forwarding those produced a self-sustaining reconcile flood after the
+// outage. ResourceVersionChangedPredicate can't help — RV always changes
+// — so podReconcileRelevantChanged does a real field comparison.
+// Create / Delete still always enqueue (they move the expectations
+// counter and must reach the handler).
 func managedByOMENativePredicate() predicate.Predicate {
-	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
+	managed := func(obj client.Object) bool {
 		return obj.GetLabels()[query.LabelManagedBy] == query.ManagedByOMENative
-	})
+	}
+	return predicate.Funcs{
+		CreateFunc:  func(e event.CreateEvent) bool { return managed(e.Object) },
+		DeleteFunc:  func(e event.DeleteEvent) bool { return managed(e.Object) },
+		GenericFunc: func(e event.GenericEvent) bool { return managed(e.Object) },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			// Honor the managed-by gate on the new object first; if the
+			// label was just stripped (old managed, new not) we still want
+			// the transition to reach the handler so it can react.
+			if !managed(e.ObjectNew) && !managed(e.ObjectOld) {
+				return false
+			}
+			oldPod, ok1 := e.ObjectOld.(*corev1.Pod)
+			newPod, ok2 := e.ObjectNew.(*corev1.Pod)
+			if !ok1 || !ok2 {
+				// Not a Pod pair (shouldn't happen on a Pod watch) — fail
+				// open and enqueue rather than silently swallow.
+				return true
+			}
+			return podReconcileRelevantChanged(oldPod, newPod)
+		},
+	}
+}
+
+// podReconcileRelevantChanged reports whether an old→new Pod transition
+// touched any field the IR reconcile / workload dispatcher actually reads:
+//
+//   - Status.Phase — Instance phase aggregation.
+//   - ContainersReady condition — CountReadyPods / AllPodsRuntimeReady.
+//   - ome.io/serving condition — CountServingPods / RatioBalanced gate.
+//   - ContainerStatuses / InitContainerStatuses — terminal-failure
+//     detection (CrashLoopBackOff / ImagePullBackOff escalation).
+//   - DeletionTimestamp — drain / recreate ordering.
+//   - Spec.SchedulingGates (via workload.PodAdmissionGated) — drives the
+//     edge-triggered InstanceReadyTimeout park/restart on Kueue gate-exit
+//     (a gate-removal update changes only SchedulingGates, Phase stays
+//     Pending, so without this it would be dropped).
+//   - Spec.NodeName — feeds CountScheduledPods / UniqueNodes →
+//     Status.ScheduledPodCount / NodesOccupied (a scheduler bind sets
+//     NodeName with Phase still Pending).
+//   - OwnerReferences — enqueueOwner target.
+//   - The OMENative routing labels (managed-by, isvc, component,
+//     instance-index, revision-hash) the handler keys the expectations
+//     cache and per-revision convergence on.
+//
+// Heartbeat-only updates (timestamps, hostIP/podIP refresh, resource
+// metrics, observedGeneration) leave all of these untouched and are
+// dropped. A miss only ever delays a reconcile until the next genuine
+// change or the periodic resync, never drops state permanently.
+func podReconcileRelevantChanged(oldPod, newPod *corev1.Pod) bool {
+	if oldPod == nil || newPod == nil {
+		return true
+	}
+	if oldPod.Status.Phase != newPod.Status.Phase {
+		return true
+	}
+	if (oldPod.DeletionTimestamp == nil) != (newPod.DeletionTimestamp == nil) {
+		return true
+	}
+	if workload.PodAdmissionGated(oldPod) != workload.PodAdmissionGated(newPod) {
+		return true
+	}
+	if oldPod.Spec.NodeName != newPod.Spec.NodeName {
+		return true
+	}
+	if podreadiness.IsContainersReady(oldPod) != podreadiness.IsContainersReady(newPod) {
+		return true
+	}
+	if podreadiness.IsServing(oldPod) != podreadiness.IsServing(newPod) {
+		return true
+	}
+	if !equality.Semantic.DeepEqual(oldPod.Status.ContainerStatuses, newPod.Status.ContainerStatuses) {
+		return true
+	}
+	if !equality.Semantic.DeepEqual(oldPod.Status.InitContainerStatuses, newPod.Status.InitContainerStatuses) {
+		return true
+	}
+	if !equality.Semantic.DeepEqual(oldPod.OwnerReferences, newPod.OwnerReferences) {
+		return true
+	}
+	return routingLabelsChanged(oldPod, newPod)
+}
+
+// routingLabelsChanged compares only the OMENative labels the handler
+// routes / keys on. Comparing the full label map would re-flood on
+// orthogonal label churn (e.g. a node-selector relabel) the reconcile
+// doesn't care about.
+func routingLabelsChanged(oldPod, newPod *corev1.Pod) bool {
+	for _, k := range routingLabelKeys {
+		if oldPod.Labels[k] != newPod.Labels[k] {
+			return true
+		}
+	}
+	return false
+}
+
+// routingLabelKeys are the labels podReconcileRelevantChanged diffs — the
+// tuple workloadKeyFromPod / enqueueOwner / per-revision convergence read.
+var routingLabelKeys = []string{
+	query.LabelManagedBy,
+	constants.InferenceServicePodLabelKey,
+	constants.OMEComponentLabel,
+	query.LabelInstanceIdx,
+	query.LabelRevisionHash,
 }
 
 // newPodEventHandler returns an EventHandler that updates the

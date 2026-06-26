@@ -63,6 +63,12 @@ spec:
         - "--leader-elect"
         - "--webhook"
         - "--zap-encoder=console"
+        {{- if .Values.ome.controller.inferenceServiceMaxConcurrentReconciles }}
+        - "--inferenceservice-max-concurrent-reconciles={{ .Values.ome.controller.inferenceServiceMaxConcurrentReconciles }}"
+        {{- end }}
+        {{- if .Values.ome.controller.inferenceReplicaMaxConcurrentReconciles }}
+        - "--inferencereplica-max-concurrent-reconciles={{ .Values.ome.controller.inferenceReplicaMaxConcurrentReconciles }}"
+        {{- end }}
         {{- if .Values.ome.controller.configCacheTTL }}
         - "--config-cache-ttl={{ .Values.ome.controller.configCacheTTL }}"
         {{- end }}

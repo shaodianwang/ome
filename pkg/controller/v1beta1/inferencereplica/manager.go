@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -68,6 +69,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	r.GangSchedulingAvailable = podGroupFound
 	return ctrl.NewControllerManagedBy(mgr).
+		// MaxConcurrentReconciles parallelizes reconciles for distinct IRs;
+		// zero (unset) falls back to controller-runtime's single-worker default.
+		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		For(&v1beta1.InferenceReplica{}).
 		Owns(&appsv1.ControllerRevision{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).

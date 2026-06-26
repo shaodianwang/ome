@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -126,6 +127,16 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			return fmt.Errorf("aggregateAndWriteStatus: re-read IR: %w", err)
 		}
 
+		// Snapshot the live status before recomputation so a no-op
+		// reconcile (computed == live) skips the Status().Update below.
+		// Every status write re-triggers this controller AND the
+		// irprojector rollup onto the parent ISVC, so at steady state the
+		// unconditional write amplified idle reconciles into a write
+		// storm. apimeta.SetStatusCondition preserves LastTransitionTime
+		// when the condition value is unchanged, so an unchanged status
+		// DeepEquals its prior snapshot.
+		before := fresh.Status.DeepCopy()
+
 		// Per-Instance pod counters from the live pod buckets. Same
 		// shape the omenative direct path uses (status_aggregate.go
 		// lines 83-93). Without this step the downstream
@@ -190,6 +201,15 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		//                  short-circuit mid-rollout.
 		apimeta.SetStatusCondition(&fresh.Status.Conditions, computeReadyCondition(&fresh.Status))
 
+		// Skip the write when the recomputed status matches what's
+		// already live: a no-op reconcile must perform ZERO writes so it
+		// triggers nothing downstream. The in-memory mirror below still
+		// runs so callers in this pass observe the fresh counters.
+		if equality.Semantic.DeepEqual(*before, fresh.Status) {
+			mirrorBack(ir, fresh)
+			return nil
+		}
+
 		if err := r.Client.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
@@ -198,40 +218,11 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			return fmt.Errorf("aggregateAndWriteStatus: update IR status: %w", err)
 		}
 
-		// Mirror the just-committed Component-level fields onto the
-		// caller's in-memory IR snapshot so downstream callers in the
-		// same reconcile pass observe the post-write state. Matches the
-		// mirror pattern in mirrorInstanceStatus / mirrorComponentRevisionFields
-		// on the ISVC side.
-		ir.Status.Replicas = fresh.Status.Replicas
-		ir.Status.ReadyReplicas = fresh.Status.ReadyReplicas
-		ir.Status.ServingReplicas = fresh.Status.ServingReplicas
-		ir.Status.AvailableReplicas = fresh.Status.AvailableReplicas
-		ir.Status.UpdatedReplicas = fresh.Status.UpdatedReplicas
-		ir.Status.UpdatedReadyReplicas = fresh.Status.UpdatedReadyReplicas
-		ir.Status.UpdateRevision = fresh.Status.UpdateRevision
-		ir.Status.CurrentRevision = fresh.Status.CurrentRevision
-		ir.Status.ObservedGeneration = fresh.Status.ObservedGeneration
-		ir.Status.LabelSelector = fresh.Status.LabelSelector
-		// Mirror the per-Instance pod counters too so downstream callers
-		// reading ir.Status.InstanceStatuses observe the fresh per-pod
-		// state, not the stale snapshot from when the reconcile started.
-		// Per-pod counter freshness flows through the irprojector rollup
-		// onto ISVC.status.components[X].omenative.instanceStatuses, so
-		// `kubectl describe isvc` shows the same per-Instance numbers
-		// the IR controller just observed.
-		mirrorInstanceCounters(&ir.Status, fresh.Status.InstanceStatuses)
-		// Conditions: deep-copy the just-committed slice so callers reading
-		// IR.Status.Conditions in the same reconcile pass observe the
-		// post-write set. The fresh.Status.Conditions slice is owned by
-		// the apiserver after Update; copying preserves the standard
-		// "no shared backing array" contract.
-		if len(fresh.Status.Conditions) > 0 {
-			ir.Status.Conditions = make([]metav1.Condition, len(fresh.Status.Conditions))
-			copy(ir.Status.Conditions, fresh.Status.Conditions)
-		} else {
-			ir.Status.Conditions = nil
-		}
+		// Mirror the just-committed Component-level fields, per-Instance
+		// counters, and Conditions onto the caller's in-memory IR snapshot
+		// so downstream callers in the same reconcile pass observe the
+		// post-write state.
+		mirrorBack(ir, fresh)
 		obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultSuccess)
 		return nil
 	}); err != nil {
@@ -291,6 +282,44 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		return err
 	}
 	return r.expireOperationsIfDeadlinePassed(ctx, ir, parent)
+}
+
+// mirrorBack copies the just-computed Component-level fields and
+// per-Instance pod counters from `fresh` onto the caller's in-memory IR
+// snapshot so downstream callers in the same reconcile pass observe the
+// post-compute state — regardless of whether a Status().Update was
+// actually issued. Matches the mirror pattern in mirrorInstanceStatus /
+// mirrorComponentRevisionFields on the ISVC side. The lifecycle fields
+// (Phase, Operation, Incarnation, RunningRevision, TargetRevision) stay
+// owned by the workload per-op writers and are left untouched.
+func mirrorBack(ir, fresh *v1beta1.InferenceReplica) {
+	ir.Status.Replicas = fresh.Status.Replicas
+	ir.Status.ReadyReplicas = fresh.Status.ReadyReplicas
+	ir.Status.ServingReplicas = fresh.Status.ServingReplicas
+	ir.Status.AvailableReplicas = fresh.Status.AvailableReplicas
+	ir.Status.UpdatedReplicas = fresh.Status.UpdatedReplicas
+	ir.Status.UpdatedReadyReplicas = fresh.Status.UpdatedReadyReplicas
+	ir.Status.UpdateRevision = fresh.Status.UpdateRevision
+	ir.Status.CurrentRevision = fresh.Status.CurrentRevision
+	ir.Status.ObservedGeneration = fresh.Status.ObservedGeneration
+	ir.Status.LabelSelector = fresh.Status.LabelSelector
+	// Mirror the per-Instance pod counters too so downstream callers
+	// reading ir.Status.InstanceStatuses observe the fresh per-pod
+	// state, not the stale snapshot from when the reconcile started.
+	// Per-pod counter freshness flows through the irprojector rollup
+	// onto ISVC.status.components[X].omenative.instanceStatuses, so
+	// `kubectl describe isvc` shows the same per-Instance numbers
+	// the IR controller just observed.
+	mirrorInstanceCounters(&ir.Status, fresh.Status.InstanceStatuses)
+	// Conditions: deep-copy the just-computed slice so callers reading
+	// IR.Status.Conditions in the same reconcile pass observe the
+	// post-compute set without sharing a backing array.
+	if len(fresh.Status.Conditions) > 0 {
+		ir.Status.Conditions = make([]metav1.Condition, len(fresh.Status.Conditions))
+		copy(ir.Status.Conditions, fresh.Status.Conditions)
+	} else {
+		ir.Status.Conditions = nil
+	}
 }
 
 // escalateStuckPodFailures is the IR-side adapter that bridges the

@@ -124,26 +124,28 @@ func splitAndTrim(csv string) []string {
 
 // Options defines the program-configurable options that may be passed on the command line.
 type Options struct {
-	metricsAddr                string
-	secureMetrics              bool
-	enableHTTP2                bool
-	webhookPort                int
-	enableLeaderElection       bool
-	enableWebhook              bool
-	probeAddr                  string
-	leaderElectionNamespace    string
-	runtimeRevisionRetention   int
-	runtimeRevisionGracePeriod time.Duration
-	enableInferenceReplicaCtrl bool
-	enableMultiCluster         bool
-	multiClusterRole           string
-	allowExecCredentials       bool
-	execCredentialAllowedCmds  string
-	clusterHealthInterval      time.Duration
-	placementRequeueInterval   time.Duration
-	placementGCInterval        time.Duration
-	configCacheTTL             time.Duration
-	zapOpts                    zap.Options
+	metricsAddr                 string
+	secureMetrics               bool
+	enableHTTP2                 bool
+	webhookPort                 int
+	enableLeaderElection        bool
+	enableWebhook               bool
+	probeAddr                   string
+	leaderElectionNamespace     string
+	runtimeRevisionRetention    int
+	runtimeRevisionGracePeriod  time.Duration
+	isvcMaxConcurrentReconciles int
+	irMaxConcurrentReconciles   int
+	enableInferenceReplicaCtrl  bool
+	enableMultiCluster          bool
+	multiClusterRole            string
+	allowExecCredentials        bool
+	execCredentialAllowedCmds   string
+	clusterHealthInterval       time.Duration
+	placementRequeueInterval    time.Duration
+	placementGCInterval         time.Duration
+	configCacheTTL              time.Duration
+	zapOpts                     zap.Options
 }
 
 // DefaultOptions returns the default values for the program options.
@@ -205,6 +207,12 @@ func GetOptions() Options {
 		"Max OME-owned ControllerRevisions to keep per source runtime (older ones GC after the grace period if unreferenced).")
 	flag.DurationVar(&opts.runtimeRevisionGracePeriod, "runtime-revision-grace-period", opts.runtimeRevisionGracePeriod,
 		"How long an OME-owned ControllerRevision stays after first being observed unreferenced + over retention.")
+	flag.IntVar(&opts.isvcMaxConcurrentReconciles, "inferenceservice-max-concurrent-reconciles", opts.isvcMaxConcurrentReconciles,
+		"Max InferenceService reconciles running in parallel (distinct objects only). No in-code default; "+
+			"the chart supplies the value. Zero/unset falls back to controller-runtime's single-worker default.")
+	flag.IntVar(&opts.irMaxConcurrentReconciles, "inferencereplica-max-concurrent-reconciles", opts.irMaxConcurrentReconciles,
+		"Max InferenceReplica reconciles running in parallel (distinct objects only). No in-code default; "+
+			"the chart supplies the value. Zero/unset falls back to controller-runtime's single-worker default.")
 	flag.BoolVar(&opts.enableInferenceReplicaCtrl, "enable-inferencereplica-controller", opts.enableInferenceReplicaCtrl,
 		"Run the InferenceReplica controller. Defaults true; flip to false to disable if the per-IR lifecycle code ships a regression.")
 	flag.BoolVar(&opts.enableMultiCluster, "enable-multicluster", opts.enableMultiCluster,
@@ -422,14 +430,15 @@ func main() {
 	} else {
 		setupLog.Info("Setting up InferenceService controller")
 		if err = (&v1beta1isvccontroller.InferenceServiceReconciler{
-			Client:            mgr.GetClient(),
-			Clientset:         clientSet,
-			Log:               ctrl.Log.WithName("InferenceService"),
-			Scheme:            mgr.GetScheme(),
-			Recorder:          eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
-			ModelCache:        modelCacheProvider,
-			TrafficReconciler: trafficReconciler,
-			ConfigCacheTTL:    options.configCacheTTL,
+			Client:                  mgr.GetClient(),
+			Clientset:               clientSet,
+			Log:                     ctrl.Log.WithName("InferenceService"),
+			Scheme:                  mgr.GetScheme(),
+			Recorder:                eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+			ModelCache:              modelCacheProvider,
+			TrafficReconciler:       trafficReconciler,
+			MaxConcurrentReconciles: options.isvcMaxConcurrentReconciles,
+			ConfigCacheTTL:          options.configCacheTTL,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create InferenceService controller")
 			os.Exit(1)
@@ -493,10 +502,11 @@ func main() {
 	if options.enableInferenceReplicaCtrl && !isControlPlane {
 		setupLog.Info("Setting up InferenceReplica controller")
 		if err = (&v1beta1inferencereplicacontroller.Reconciler{
-			Client:    mgr.GetClient(),
-			Log:       ctrl.Log.WithName("InferenceReplica"),
-			APIReader: mgr.GetAPIReader(),
-			Recorder:  eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+			Client:                  mgr.GetClient(),
+			Log:                     ctrl.Log.WithName("InferenceReplica"),
+			APIReader:               mgr.GetAPIReader(),
+			Recorder:                eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
+			MaxConcurrentReconciles: options.irMaxConcurrentReconciles,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create InferenceReplica controller")
 			os.Exit(1)

@@ -64,6 +64,14 @@ ome:
     #     fb_metric_schema: ome_controller
     podAnnotations: {}
     deploymentMode: "RawDeployment"
+    # Max reconciles each controller runs in parallel (distinct objects only —
+    # controller-runtime serializes per object key, so independent objects
+    # reconcile concurrently). Source of truth for these values (the OME binary
+    # has NO built-in default; 0/unset falls back to controller-runtime's
+    # single-worker default). Raise on large clusters (thousands of ISVCs) where
+    # a single worker can't keep up with the reconcile backlog.
+    inferenceServiceMaxConcurrentReconciles: 4
+    inferenceReplicaMaxConcurrentReconciles: 4
     # TTL for the in-memory cache of the inferenceservice-config ConfigMap on the
     # InferenceService reconcile path. Collapses the per-reconcile config loads
     # (deploy/inferenceservice/ingress/canaryAnalysis) onto one apiserver GET per

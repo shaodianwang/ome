@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -147,6 +148,14 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 		if fresh.Status.Components == nil {
 			fresh.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 		}
+		// Snapshot the live status before mutation so a no-op rollup
+		// (IR.Status unchanged since the last pass) skips the
+		// Status().Update below. Each ISVC status write re-triggers the
+		// ISVC reconciler, so at steady state the unconditional write
+		// amplified idle reconciles. SetCondition (knative conditionSet)
+		// preserves LastTransitionTime when the condition value is
+		// unchanged, so an unchanged status DeepEquals its prior snapshot.
+		before := fresh.Status.DeepCopy()
 		cs := fresh.Status.Components[component]
 		cs.Lifecycle = desired.DeepCopy()
 		fresh.Status.Components[component] = cs
@@ -158,6 +167,13 @@ func aggregateOneComponent(ctx context.Context, c client.Client, isvc *v1beta1.I
 		// indefinitely.
 		if topCond != nil {
 			fresh.Status.SetCondition(topCond.Type, topCond)
+		}
+		// Skip the write when the recomputed status matches what's already
+		// live: a no-op rollup must perform ZERO writes so it triggers
+		// nothing downstream. The in-memory mirror after the retry loop
+		// still runs so callers in this pass observe the fresh subtree.
+		if equality.Semantic.DeepEqual(*before, fresh.Status) {
+			return nil
 		}
 		if err := c.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {

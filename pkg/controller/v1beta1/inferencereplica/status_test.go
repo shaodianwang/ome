@@ -13,6 +13,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
@@ -502,6 +503,56 @@ func TestAggregateStatus_ReadyCondition_PersistedToInformerCache(t *testing.T) {
 	// the condition is first inserted.
 	g.Expect(cond.LastTransitionTime.IsZero()).To(gomega.BeFalse(),
 		"LastTransitionTime must be set by SetStatusCondition")
+}
+
+// TestAggregateAndWriteStatus_NoWriteWhenUnchanged pins the no-op
+// short-circuit: once an IR's status has converged, a second
+// aggregateAndWriteStatus pass that recomputes the identical status must
+// perform ZERO Status().Update writes. Each IR status write re-triggers
+// this controller AND the irprojector rollup onto the parent ISVC, so at
+// ~6000 pods the prior unconditional write amplified idle reconciles into
+// a write storm.
+//
+// Verified via ResourceVersion: the fake client bumps RV on every
+// Status().Update. The first pass changes status (RV bumps); the second
+// pass over an already-converged IR must leave RV untouched. The knative
+// SetCondition / apimeta.SetStatusCondition LastTransitionTime-preserving
+// semantics are what make the second-pass status DeepEqual the first.
+func TestAggregateAndWriteStatus_NoWriteWhenUnchanged(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+			PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, ActiveOrdinal: 0},
+	}
+	pod0 := podForIR(ir, 0, "default", 0, true, true)
+	slice0 := sliceForIRPod(ir, pod0, true)
+	r, c := newReconciler(t, ir, pod0, slice0)
+
+	plan := workload.ComponentPlan{
+		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
+		Replicas:  1,
+		Instances: []workload.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+	}
+	key := types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}
+
+	// First pass: status changes (per-Instance counters, conditions,
+	// LabelSelector, ObservedGeneration all get stamped) → a write lands.
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), ir, nil, plan, nil)).To(gomega.Succeed())
+	afterFirst := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, afterFirst)).To(gomega.Succeed())
+	rvAfterFirst := afterFirst.ResourceVersion
+
+	// Second pass over the now-converged IR: recomputed status equals
+	// live status → the DeepEqual guard must skip Status().Update, so the
+	// ResourceVersion is unchanged.
+	g.Expect(r.aggregateAndWriteStatus(context.Background(), afterFirst.DeepCopy(), nil, plan, nil)).To(gomega.Succeed())
+	afterSecond := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, afterSecond)).To(gomega.Succeed())
+	g.Expect(afterSecond.ResourceVersion).To(gomega.Equal(rvAfterFirst),
+		"a no-op aggregateAndWriteStatus pass must perform ZERO writes (ResourceVersion unchanged)")
 }
 
 // withIRStuckPodGracePeriod swaps in a short grace window for the

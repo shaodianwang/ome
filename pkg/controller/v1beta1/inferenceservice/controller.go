@@ -30,6 +30,7 @@ import (
 	"knative.dev/pkg/network"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -145,6 +146,11 @@ type InferenceServiceReconciler struct {
 	// event re-reconciles the ISVC. Built once in SetupWithManager from the
 	// canaryAnalysis operator config; nil disables metric-gated steps (they hold).
 	CanarySampler *canary.Sampler
+	// MaxConcurrentReconciles caps parallel ISVC reconciles (distinct objects
+	// only — controller-runtime serializes per object key, so independent ISVCs
+	// reconcile in parallel safely). Sourced from a flag/chart value; no in-code
+	// default. Zero (unset) preserves controller-runtime's single-worker default.
+	MaxConcurrentReconciles int
 	// ConfigCache memoizes the inferenceservice-config ConfigMap for a short,
 	// flag-driven TTL so a single reconcile pass shares one apiserver GET across
 	// the Deploy / InferenceServices / Ingress / CanaryAnalysis config loads
@@ -995,6 +1001,9 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.CanarySampler = canary.NewPrometheusSampler(analysisEvents, int(analysisConfig.MaxConcurrency), analysisConfig.CacheTTLDuration())
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
+		// MaxConcurrentReconciles parallelizes reconciles for distinct ISVCs;
+		// zero (unset) falls back to controller-runtime's single-worker default.
+		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		For(&v1beta1.InferenceService{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&v1.Service{}).

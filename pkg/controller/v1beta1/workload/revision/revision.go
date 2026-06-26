@@ -356,6 +356,41 @@ func EnsureControllerRevisionWithWorker(
 	if err != nil {
 		return nil, false, err
 	}
+	return EnsureControllerRevisionFromHash(ctx, c, reads, owner, ownerGVK, key, hash, raw)
+}
+
+// EnsureControllerRevisionFromHash is the create-or-reuse half of
+// EnsureControllerRevisionWithWorker with the (hash, raw) precomputed by
+// the caller. It exists so a caller that can cheaply detect an unchanged
+// pod template (e.g. an unchanged generation + collisionCount) can skip
+// the per-reconcile json.Marshal + FNV in HashWithWorker and still reuse
+// the exact same create / reuse / collision logic. hash + raw MUST be the
+// byte-identical output of HashWithWorker for the same inputs — the
+// deterministic-name Get and the bytes.Equal collision check both depend
+// on it.
+//
+// All ownership / collision / race-on-Create semantics are identical to
+// EnsureControllerRevisionWithWorker; see that function for the rationale.
+func EnsureControllerRevisionFromHash(
+	ctx context.Context,
+	c client.Client,
+	reads client.Reader,
+	owner client.Object,
+	ownerGVK schema.GroupVersionKind,
+	key Key,
+	hash string,
+	raw []byte,
+) (cr *appsv1.ControllerRevision, collision bool, err error) {
+	if owner == nil {
+		return nil, false, fmt.Errorf("EnsureControllerRevision: nil owner")
+	}
+	if c == nil {
+		return nil, false, fmt.Errorf("EnsureControllerRevision: nil client")
+	}
+	if reads == nil {
+		return nil, false, fmt.Errorf("EnsureControllerRevision: nil reader")
+	}
+
 	name := Name(key, hash)
 	objKey := client.ObjectKey{Namespace: key.Namespace, Name: name}
 

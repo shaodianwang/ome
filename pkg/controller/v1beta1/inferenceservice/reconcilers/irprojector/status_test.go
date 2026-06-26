@@ -444,6 +444,46 @@ func TestAggregateIRStatus_MultiComponent_EmitsBothConditions(t *testing.T) {
 	g.Expect(decoderCond.Status).To(gomega.Equal(corev1.ConditionTrue))
 }
 
+// TestAggregateIRStatus_NoWriteWhenUnchanged pins the no-op
+// short-circuit: a second AggregateIRStatus pass over an unchanged IR
+// must perform ZERO ISVC Status().Update writes. Each ISVC status write
+// re-triggers the ISVC reconciler, so the prior unconditional write
+// amplified idle reconciles into a write storm at scale.
+//
+// Verified via ResourceVersion: the fake client bumps RV on every
+// Status().Update. The first pass mutates the ISVC subtree + EngineReady
+// condition (RV bumps); the second pass over the same IR must recompute
+// an identical status and skip the write (RV unchanged). The knative
+// SetCondition LastTransitionTime-preserving semantics are what make the
+// second-pass status DeepEqual the first.
+func TestAggregateIRStatus_NoWriteWhenUnchanged(t *testing.T) {
+	g := gomega.NewWithT(t)
+	isvc := baselineISVC("llama", "prod")
+	ir := liveIR("llama", "prod", 1)
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc, ir).
+		Build()
+	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
+
+	// First pass: status changes (subtree + EngineReady condition) → write.
+	g.Expect(AggregateIRStatus(context.Background(), c, isvc, engineOMENativeModes)).To(gomega.Succeed())
+	afterFirst := &v1beta1.InferenceService{}
+	g.Expect(c.Get(context.Background(), key, afterFirst)).To(gomega.Succeed())
+	rvAfterFirst := afterFirst.ResourceVersion
+
+	// Second pass over the same IR: recomputed status equals live status →
+	// the DeepEqual guard must skip Status().Update (ResourceVersion stable).
+	// Use a fresh in-memory ISVC snapshot so the in-memory mirror from the
+	// first pass doesn't shortcut the recompute.
+	g.Expect(AggregateIRStatus(context.Background(), c, afterFirst.DeepCopy(), engineOMENativeModes)).To(gomega.Succeed())
+	afterSecond := &v1beta1.InferenceService{}
+	g.Expect(c.Get(context.Background(), key, afterSecond)).To(gomega.Succeed())
+	g.Expect(afterSecond.ResourceVersion).To(gomega.Equal(rvAfterFirst),
+		"a no-op AggregateIRStatus pass must perform ZERO writes (ResourceVersion unchanged)")
+}
+
 // TestIrStatusToComponentStatus_DeepCopiesInstanceStatuses pins the
 // aliasing guard: the IR.Status.InstanceStatuses slice must not be
 // aliased into the LifecycleStatus — downstream mutations
