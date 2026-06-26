@@ -294,6 +294,56 @@ func TestPodMonitorReconciler_NoOp_WhenEqual(t *testing.T) {
 	assert.Equal(t, 0, cc.createCalls)
 }
 
+func TestPodMonitorReconciler_NoOp_WhenOperatorDefaulted(t *testing.T) {
+	scheme := buildScheme(t)
+	meta := metav1.ObjectMeta{Name: "svc-defaulted", Namespace: "ns-defaulted"}
+
+	httpPort := "http"
+	// Mimic what the Prometheus operator stores: the same managed fields OME
+	// sets, plus operator defaults (scheme/scrapeTimeout/honorLabels).
+	existing := &monitoringv1.PodMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      meta.Name,
+			Namespace: meta.Namespace,
+			Labels:    map[string]string{"app": meta.Name},
+		},
+		Spec: monitoringv1.PodMonitorSpec{
+			Selector: metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": meta.Name},
+			},
+			NamespaceSelector: monitoringv1.NamespaceSelector{
+				MatchNames: []string{meta.Namespace},
+			},
+			PodMetricsEndpoints: []monitoringv1.PodMetricsEndpoint{{
+				Port:          &httpPort,
+				Path:          "/metrics",
+				Interval:      "10s",
+				Scheme:        "http",
+				ScrapeTimeout: "10s",
+				HonorLabels:   true,
+			}},
+		},
+	}
+
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	cc := &countingClient{Client: baseClient}
+
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Ports: []corev1.ContainerPort{{ContainerPort: 30000, Name: "http"}},
+		}},
+	}
+	r := NewPodMonitorReconciler(cc, scheme, meta, podSpec)
+	obj, err := r.Reconcile()
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+
+	// Steady state: no PUT despite the operator-defaulted endpoint fields.
+	assert.Equal(t, 0, cc.updateCalls)
+	assert.Equal(t, 0, cc.createCalls)
+}
+
 func TestPodMonitorReconciler_ErrorPaths(t *testing.T) {
 	scheme := buildScheme(t)
 	meta := metav1.ObjectMeta{Name: "svc-err", Namespace: "ns-err"}
@@ -365,6 +415,26 @@ func Test_semanticPodMonitorEquals(t *testing.T) {
 		},
 	}
 	assert.True(t, semanticPodMonitorEquals(base, same))
+
+	// The Prometheus operator defaults scheme/scrapeTimeout/honorLabels/etc.
+	// onto the stored object. The live endpoint is richer than the minimal one
+	// OME builds, but it must still be treated as equal so we don't issue a
+	// no-op Update every reconcile.
+	defaulted := &monitoringv1.PodMonitor{
+		Spec: monitoringv1.PodMonitorSpec{
+			Selector:          selector,
+			NamespaceSelector: nsSelector,
+			PodMetricsEndpoints: []monitoringv1.PodMetricsEndpoint{{
+				Port:          &httpPort,
+				Path:          "/metrics",
+				Interval:      "10s",
+				Scheme:        "http",
+				ScrapeTimeout: "10s",
+				HonorLabels:   true,
+			}},
+		},
+	}
+	assert.True(t, semanticPodMonitorEquals(base, defaulted))
 
 	diffPort := &monitoringv1.PodMonitor{
 		Spec: monitoringv1.PodMonitorSpec{
