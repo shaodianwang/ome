@@ -22,6 +22,7 @@ const (
 	OmeAgentConfigName       = "omeAgent"
 	ModelCacheConfigName     = "modelCache"
 	CanaryAnalysisConfigName = "canaryAnalysis"
+	CoordinationConfigName   = "coordination"
 
 	DefaultDomainTemplate = "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"
 	DefaultIngressDomain  = "example.com"
@@ -125,6 +126,25 @@ type CanaryAnalysisConfig struct {
 	// CacheTTL is how long a sampled result stays usable before the sampler evicts
 	// it. A duration string; the loader falls back to DefaultAnalysisCacheTTL.
 	CacheTTL string `json:"cacheTTL,omitempty"`
+}
+
+// +kubebuilder:object:generate=false
+// CoordinationConfig holds operator-level tuning for the OMENative cross-Component
+// coordination layer (the pod-proportional per-revision traffic producer).
+type CoordinationConfig struct {
+	// TrafficWeightDeadbandPercent is the per-revision hysteresis band applied to
+	// the pod-proportional traffic writer: a recomputed weight set whose every
+	// per-revision percent moves by strictly less than this from what is already in
+	// Status.Components.<c>.Traffic is treated as pod-count jitter and the status
+	// write (plus the HTTPRoute re-enqueue it triggers) is suppressed. Dampens the
+	// continuous churn from pods momentarily Pending between reconciles at scale.
+	//
+	// There is intentionally NO in-code default — the value is supplied via the
+	// inferenceservice-config ConfigMap (set by the Helm chart / GitOps). Zero
+	// (absent config) disables the band and preserves the exact prior
+	// write-on-any-diff behavior, so eventual correctness is never traded away
+	// silently.
+	TrafficWeightDeadbandPercent int32 `json:"trafficWeightDeadbandPercent,omitempty"`
 }
 
 // +kubebuilder:object:generate=false
@@ -417,6 +437,22 @@ func parseCanaryAnalysisConfig(configMap *v1.ConfigMap) (*CanaryAnalysisConfig, 
 	}
 	if cfg.CacheTTL == "" {
 		cfg.CacheTTL = DefaultAnalysisCacheTTL
+	}
+	return cfg, nil
+}
+
+// NewCoordinationConfig loads the OMENative coordination tuning from the
+// inferenceservice-config ConfigMap. There are no in-code defaults: an absent
+// "coordination" key yields a zero-valued config (deadband disabled), preserving
+// the prior write-on-any-diff behavior.
+func NewCoordinationConfig(clientset kubernetes.Interface) (*CoordinationConfig, error) {
+	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	cfg := &CoordinationConfig{}
+	if err := getComponentConfig(CoordinationConfigName, configMap, cfg); err != nil {
+		return nil, fmt.Errorf("unable to parse coordination config json: %w", err)
 	}
 	return cfg, nil
 }

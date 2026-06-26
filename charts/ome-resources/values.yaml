@@ -74,6 +74,17 @@ ome:
       queryTimeout: "5s"
       maxConcurrency: 8
       cacheTTL: "2m"
+    # coordination tunes the OMENative cross-Component coordination layer.
+    coordination:
+      # Per-revision hysteresis band (percent) for the pod-proportional traffic
+      # writer. A recomputed weight set whose every per-revision percent moves by
+      # strictly less than this from what is already in status is treated as
+      # pod-count jitter (a pod momentarily Pending between reconciles) and the
+      # status write + HTTPRoute re-enqueue is suppressed. 0 disables the band
+      # (write on any diff — the prior behavior). A small value (e.g. 5) damps the
+      # continuous churn at large pod counts; a sustained ratio change still
+      # exceeds the band and converges.
+      trafficWeightDeadbandPercent: 0
     ingressGateway:
       domain: svc.cluster.local
       domainTemplate: "{{ .Name }}.{{ .Namespace }}.{{ .IngressDomain }}"

@@ -218,3 +218,92 @@ func TestTrafficDiffersMeaningfully_LatestRevisionSameNoDiff(t *testing.T) {
 		t.Errorf("identical LatestRevision: should not report diff")
 	}
 }
+
+// TestTrafficWithinDeadband_BlipSuppressed pins the core hysteresis fix:
+// weights are derived from RAW live pod counts, so a single pod momentarily
+// Pending between reconciles shifts a revision's percent by a few points. With
+// a non-zero deadband, that sub-band jitter is treated as noise and the status
+// write (and the HTTPRoute re-enqueue it would trigger) is suppressed.
+//
+// Scenario: a large Component already written at 80/20; one pod blips and the
+// recomputed weights become 78/22 — a 2-point swing on each revision. With a
+// deadband of 5, the write is suppressed (no churn).
+func TestTrafficWithinDeadband_BlipSuppressed(t *testing.T) {
+	observed := []v1beta1.ComponentTrafficTarget{
+		{RevisionName: "a", Percent: 80, LatestRevision: true},
+		{RevisionName: "b", Percent: 20},
+	}
+	desired := []v1beta1.ComponentTrafficTarget{
+		{RevisionName: "a", Percent: 78, LatestRevision: true},
+		{RevisionName: "b", Percent: 22},
+	}
+	// The raw diff IS meaningful (percent changed), so absent hysteresis this
+	// would write every reconcile.
+	if !TrafficDiffersMeaningfully(desired, observed) {
+		t.Fatalf("precondition: a 2-point percent change should be a raw diff")
+	}
+	if !TrafficWithinDeadband(desired, observed, 5) {
+		t.Errorf("blip within deadband: should suppress the write (got churn)")
+	}
+}
+
+// TestTrafficWithinDeadband_SustainedChangeConverges proves eventual
+// correctness: a real ratio shift that moves a revision by >= deadband is NOT
+// suppressed, so weights converge to the true distribution.
+func TestTrafficWithinDeadband_SustainedChangeConverges(t *testing.T) {
+	observed := []v1beta1.ComponentTrafficTarget{
+		{RevisionName: "a", Percent: 80, LatestRevision: true},
+		{RevisionName: "b", Percent: 20},
+	}
+	desired := []v1beta1.ComponentTrafficTarget{
+		{RevisionName: "a", Percent: 60, LatestRevision: true},
+		{RevisionName: "b", Percent: 40},
+	}
+	if TrafficWithinDeadband(desired, observed, 5) {
+		t.Errorf("sustained 20-point shift exceeds deadband: must NOT be suppressed")
+	}
+}
+
+// TestTrafficWithinDeadband_ZeroDisablesBand pins the graceful-degradation
+// contract: deadband <= 0 (absent config) restores the exact prior
+// write-on-any-diff behavior — TrafficWithinDeadband never suppresses.
+func TestTrafficWithinDeadband_ZeroDisablesBand(t *testing.T) {
+	observed := []v1beta1.ComponentTrafficTarget{{RevisionName: "a", Percent: 80}, {RevisionName: "b", Percent: 20}}
+	desired := []v1beta1.ComponentTrafficTarget{{RevisionName: "a", Percent: 79}, {RevisionName: "b", Percent: 21}}
+	if TrafficWithinDeadband(desired, observed, 0) {
+		t.Errorf("deadband 0: band disabled, must never suppress")
+	}
+	if TrafficWithinDeadband(desired, observed, -3) {
+		t.Errorf("negative deadband: band disabled, must never suppress")
+	}
+}
+
+// TestTrafficWithinDeadband_RevisionSetChangeNotSuppressed: a revision
+// appearing or disappearing is a real topology change, never jitter.
+func TestTrafficWithinDeadband_RevisionSetChangeNotSuppressed(t *testing.T) {
+	observed := []v1beta1.ComponentTrafficTarget{{RevisionName: "a", Percent: 100, LatestRevision: true}}
+	// New revision "b" appears; lengths differ.
+	desiredAppear := []v1beta1.ComponentTrafficTarget{
+		{RevisionName: "a", Percent: 98, LatestRevision: true},
+		{RevisionName: "b", Percent: 2},
+	}
+	if TrafficWithinDeadband(desiredAppear, observed, 5) {
+		t.Errorf("new revision appearing: must not be suppressed")
+	}
+	// Same length but the revision name swapped — not jitter.
+	desiredSwap := []v1beta1.ComponentTrafficTarget{{RevisionName: "c", Percent: 100, LatestRevision: true}}
+	if TrafficWithinDeadband(desiredSwap, observed, 5) {
+		t.Errorf("revision name swap: must not be suppressed")
+	}
+}
+
+// TestTrafficWithinDeadband_LatestRevisionFlipNotSuppressed: a LatestRevision
+// flag flip is operator-visible and consumed by HTTPRoute reconcilers, so it
+// must write even when the percents are within the band.
+func TestTrafficWithinDeadband_LatestRevisionFlipNotSuppressed(t *testing.T) {
+	observed := []v1beta1.ComponentTrafficTarget{{RevisionName: "a", Percent: 100, LatestRevision: false}}
+	desired := []v1beta1.ComponentTrafficTarget{{RevisionName: "a", Percent: 100, LatestRevision: true}}
+	if TrafficWithinDeadband(desired, observed, 5) {
+		t.Errorf("LatestRevision flip: must not be suppressed even with identical percent")
+	}
+}

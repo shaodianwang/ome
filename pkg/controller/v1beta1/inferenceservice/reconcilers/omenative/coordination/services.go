@@ -257,6 +257,45 @@ func ensureService(
 	return nil
 }
 
+// PerRevisionServicesConverged reports whether the per-revision Service
+// ensure + GC can be skipped this reconcile because the live revision-hash
+// set already matches the set last recorded on Status.Components.<c>.Traffic.
+//
+// The recorded set is reconstructed by reversing PerRevisionServiceName on
+// each Traffic[].RevisionName. When the live pod-hash set equals the recorded
+// set, the previous (non-skipped) reconcile already ensured a Service for every
+// live hash and GC'd every orphan, so re-running the CreateOrUpdate Gets and the
+// namespace Service LIST is pure overhead. Any divergence — a new hash with
+// pods, a hash that drained to zero, or a live hash that BuildTrafficTargets
+// dropped for rounding to 0% (so it never appears in Traffic) — returns false
+// and forces the full ensure/GC path, which is correctness-complete.
+func PerRevisionServicesConverged(isvcName string, component v1beta1.ComponentType, liveHashes map[string]int32, recorded []v1beta1.ComponentTrafficTarget) bool {
+	live := make(map[string]struct{}, len(liveHashes))
+	for h, n := range liveHashes {
+		if h == "" || n <= 0 {
+			continue
+		}
+		live[h] = struct{}{}
+	}
+	prefix := PerRevisionServiceName(isvcName, component, "")
+	rec := make(map[string]struct{}, len(recorded))
+	for _, t := range recorded {
+		if len(t.RevisionName) <= len(prefix) || t.RevisionName[:len(prefix)] != prefix {
+			continue
+		}
+		rec[t.RevisionName[len(prefix):]] = struct{}{}
+	}
+	if len(live) != len(rec) {
+		return false
+	}
+	for h := range live {
+		if _, ok := rec[h]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // GCPerRevisionServices deletes both per-revision Services for one
 // (component, revisionHash). Called when the revision is past
 // retention AND no live pod carries the hash. NotFound is treated as

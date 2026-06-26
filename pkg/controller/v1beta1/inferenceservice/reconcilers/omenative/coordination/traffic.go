@@ -177,3 +177,65 @@ func TrafficDiffersMeaningfully(desired, observed []v1beta1.ComponentTrafficTarg
 	}
 	return false
 }
+
+// TrafficWithinDeadband reports whether desired is close enough to the
+// already-written observed targets that the write should be SUPPRESSED
+// as pod-count jitter rather than a real ratio shift.
+//
+// Why: weights are derived from RAW live pod counts. A pod momentarily
+// Pending between reconciles changes a revision's count, flipping the
+// computed percentage; with deadband=0 every flip clears
+// TrafficDiffersMeaningfully and triggers a status write + HTTPRoute
+// re-enqueue. At ~6000 pods this is continuous churn. The deadband adds
+// hysteresis: a write is suppressed only when the revision SET is
+// identical, no LatestRevision flag flips, and every per-revision percent
+// moves by strictly less than deadband from the value already in status.
+//
+// Eventual correctness is preserved: a sustained ratio change always
+// moves at least one revision's percent by >= deadband (the deadband is a
+// per-revision band, not a cumulative tolerance), so it is never
+// permanently suppressed — only transient sub-band jitter is.
+//
+// deadband <= 0 disables the band entirely (TrafficWithinDeadband is
+// always false), preserving the exact prior write-on-any-diff behavior.
+func TrafficWithinDeadband(desired, observed []v1beta1.ComponentTrafficTarget, deadband int32) bool {
+	if deadband <= 0 {
+		return false
+	}
+	if len(desired) != len(observed) {
+		return false
+	}
+	type have struct {
+		percent        int32
+		latestRevision bool
+	}
+	haveBy := make(map[string]have, len(observed))
+	for _, t := range observed {
+		haveBy[t.RevisionName] = have{percent: t.Percent, latestRevision: t.LatestRevision}
+	}
+	for _, t := range desired {
+		h, ok := haveBy[t.RevisionName]
+		if !ok {
+			// Revision set changed (a revision appeared/disappeared);
+			// never suppress that — it's a real topology change.
+			return false
+		}
+		// A LatestRevision flag flip is operator-visible and consumed by
+		// HTTPRoute reconcilers; never suppress it (mirrors the contract
+		// in TrafficDiffersMeaningfully).
+		if h.latestRevision != t.LatestRevision {
+			return false
+		}
+		if absInt32(t.Percent-h.percent) >= deadband {
+			return false
+		}
+	}
+	return true
+}
+
+func absInt32(v int32) int32 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}

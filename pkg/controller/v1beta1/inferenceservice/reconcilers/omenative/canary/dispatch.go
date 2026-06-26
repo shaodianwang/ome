@@ -75,6 +75,15 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	// secondary's revision endpoint dangling. Mirrors coordination's per-Component
 	// ensure+GC loop.
 	for _, comp := range configuredComponents(d.ISVC) {
+		// Change-detector: skip the ensure (2 Gets/hash via CreateOrUpdate)
+		// and GC (a namespace Service LIST) when the live revision-hash set
+		// already matches the set recorded on Status.Components.<c>.Traffic
+		// from a prior reconcile. Mirrors coordination's gate. Secondaries
+		// (whose Traffic the canary never writes) always fall through, which
+		// is correct — they just don't get the steady-state skip.
+		if coordination.PerRevisionServicesConverged(d.ISVC.Name, comp, perRev[comp], d.ISVC.Status.Components[comp].Traffic) {
+			continue
+		}
 		multiPod := isvcutils.IsMultiPodComponent(d.ISVC, comp)
 		for hash := range perRev[comp] {
 			if hash == "" {

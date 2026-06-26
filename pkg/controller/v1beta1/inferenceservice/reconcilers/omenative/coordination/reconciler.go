@@ -29,11 +29,18 @@ type ReconcileInputs struct {
 	ISVC *v1beta1.InferenceService
 
 	// Client is the cached controller-runtime client. Used for
-	// per-revision Service ensure/GC and live pod reads.
+	// per-revision Service ensure/GC and the coordination layer's own
+	// per-revision pod reads. The manager cache scopes the Pod informer
+	// to the ome.io/inferenceservice label key, so it carries every pod
+	// the coordination layer lists — a cached read hides nothing here
+	// while shedding the apiserver LIST cost on the hot reconcile path.
 	Client client.Client
 
-	// Reader is the live API reader for correctness-critical pod
-	// reads.
+	// Reader is the live (uncached) API reader, reserved for
+	// correctness-critical pod reads. The coordination layer itself
+	// reads pods via Client; the live reader is consumed only by the
+	// canary capacity gate (canary.Dispatch -> ObservePerRevisionPods),
+	// which must not lag reality before shifting traffic.
 	Reader client.Reader
 
 	// Recorder emits K8s Events for coordination transitions.
@@ -42,6 +49,20 @@ type ReconcileInputs struct {
 	// Now is the wall-clock used for LastTransitionTime; callers may
 	// override for tests. Zero defaults to time.Now().
 	Now time.Time
+
+	// TrafficWeightDeadbandPercent is the per-revision hysteresis band
+	// (in percent) applied to the pod-proportional traffic writer: a
+	// recomputed weight set whose every per-revision percent moves by
+	// strictly less than this from what is already in
+	// Status.Components.<c>.Traffic is treated as pod-count jitter and the
+	// status write is suppressed. Dampens the write+HTTPRoute-re-enqueue
+	// churn from pods momentarily Pending between reconciles at scale.
+	//
+	// There is intentionally NO in-code default: the value is supplied via
+	// the inferenceservice-config ConfigMap (set by the Helm chart /
+	// GitOps). Zero (absent config) disables the band and preserves the
+	// exact prior write-on-any-diff behavior.
+	TrafficWeightDeadbandPercent int32
 }
 
 // Result reports what the coordination layer did this reconcile. The
@@ -144,7 +165,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			len(componentsTouched), componentsTouched)
 	}
 
-	perRevisionPods, _, err := observePerRevisionPods(ctx, in.Reader, in.ISVC, componentsTouched)
+	perRevisionPods, _, err := observePerRevisionPods(ctx, in.Client, in.ISVC, componentsTouched)
 	if err != nil {
 		return nil, fmt.Errorf("observe per-revision pods: %w", err)
 	}
@@ -161,6 +182,18 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		// per-revision). Multi-pod Components route traffic only to
 		// rank-0; the routing Service selector picks that up.
 		multiPod := isvcutils.IsMultiPodComponent(in.ISVC, c)
+		SetPerRevisionServiceCount(in.ISVC.Name, string(c), float64(len(perRevisionPods[c])))
+
+		// Change-detector: skip the per-revision Service ensure (2 Gets
+		// per hash via CreateOrUpdate) and GC (a namespace Service LIST)
+		// when the live revision-hash set already matches the set last
+		// recorded on Status.Components.<c>.Traffic. A prior reconcile
+		// converged the Services for that set, so re-running the apiserver
+		// round-trips every steady-state pass is pure overhead at scale.
+		if PerRevisionServicesConverged(in.ISVC.Name, c, perRevisionPods[c], in.ISVC.Status.Components[c].Traffic) {
+			continue
+		}
+
 		for hash := range perRevisionPods[c] {
 			if hash == "" {
 				continue
@@ -170,7 +203,6 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			}
 			result.PerRevisionServicesEnsured++
 		}
-		SetPerRevisionServiceCount(in.ISVC.Name, string(c), float64(len(perRevisionPods[c])))
 
 		// Delete per-revision Service pairs whose revision-hash has no
 		// live pods. Safe because we Ensure only for hashes with pods —
@@ -184,7 +216,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// Write per-Component Traffic[] from observed pod distribution
 	// (producer-side contract feeding the HTTPRoute weighted-
 	// backendRef consumer).
-	updateTrafficStatus(in.ISVC, componentsTouched, perRevisionPods)
+	updateTrafficStatus(in.ISVC, componentsTouched, perRevisionPods, in.TrafficWeightDeadbandPercent)
 
 	// Drive the per-group state machine.
 	for _, g := range groups {
@@ -407,7 +439,7 @@ func dropCanaryOwned(comps []v1beta1.ComponentType, isvc *v1beta1.InferenceServi
 	return out
 }
 
-func updateTrafficStatus(isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, perRevisionPods map[v1beta1.ComponentType]map[string]int32) {
+func updateTrafficStatus(isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, perRevisionPods map[v1beta1.ComponentType]map[string]int32, deadbandPercent int32) {
 	if isvc.Status.Components == nil {
 		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
@@ -426,6 +458,13 @@ func updateTrafficStatus(isvc *v1beta1.InferenceService, components []v1beta1.Co
 		// Only write when something changed.
 		cs := isvc.Status.Components[c]
 		if !TrafficDiffersMeaningfully(traffic, cs.Traffic) {
+			continue
+		}
+		// Hysteresis: suppress writes that are within the per-revision
+		// deadband of what's already in status — pod-count jitter from a
+		// pod momentarily Pending between reconciles, not a real ratio
+		// shift. A sustained change exceeds the band and still converges.
+		if TrafficWithinDeadband(traffic, cs.Traffic, deadbandPercent) {
 			continue
 		}
 		cs.Traffic = traffic

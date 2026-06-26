@@ -109,6 +109,107 @@ func TestReconcile_DataPlaneRunsWithoutCoordinationGroup(t *testing.T) {
 	}
 }
 
+// steadyEngineStatus seeds the engine Component as fully settled onto a
+// single revision with a converged 100% Traffic[0] target.
+func steadyEngineStatus(isvc *v1beta1.InferenceService, hash string) {
+	rev := isvc.Name + "-engine-" + hash
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			Lifecycle: &v1beta1.LifecycleStatus{
+				CurrentRevision: rev,
+				UpdateRevision:  rev,
+			},
+			Traffic: []v1beta1.ComponentTrafficTarget{{
+				RevisionName:   PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, hash),
+				Percent:        100,
+				LatestRevision: true,
+			}},
+		},
+	}
+}
+
+// TestReconcile_SkipsServiceEnsureWhenRevisionSetConverged pins the
+// merged change-driven contract: when the live revision-hash set already
+// matches the set recorded on Status.Components.<c>.Traffic, the
+// change-detector (PerRevisionServicesConverged) skips the per-revision
+// Service ensure + GC for that Component — a prior reconcile already
+// converged them, so the apiserver round-trips are pure steady-state
+// overhead. The cached-read switch is orthogonal: pods are still observed
+// via Client every pass; only the write-side ensure/GC is gated.
+func TestReconcile_SkipsServiceEnsureWhenRevisionSetConverged(t *testing.T) {
+	isvc := testOMENativeISVC()
+	steadyEngineStatus(isvc, "hash1")
+	// Live pod whose hash matches the recorded Traffic set -> converged.
+	pods := []runtime.Object{
+		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
+	}
+	c := testClient(pods...)
+	r, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.PerRevisionServicesEnsured != 0 {
+		t.Errorf("converged revision set: Service ensure must be skipped, got %d ensured", r.PerRevisionServicesEnsured)
+	}
+}
+
+// TestReconcile_EnsuresServicesWhenRevisionSetDiverges pins the other
+// branch of the change-detector: when the live pod-hash set differs from
+// the recorded Traffic set (here no Traffic is recorded yet but a live pod
+// exists), the full ensure path runs and creates the per-revision Service.
+func TestReconcile_EnsuresServicesWhenRevisionSetDiverges(t *testing.T) {
+	isvc := testOMENativeISVC()
+	// No recorded Traffic: recorded set is empty, live set is {hash1}; they
+	// diverge, so the ensure path must run and create the Service.
+	pods := []runtime.Object{
+		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
+	}
+	c := testClient(pods...)
+	r, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.PerRevisionServicesEnsured == 0 {
+		t.Errorf("diverged revision set: per-revision Services must be ensured, got %d", r.PerRevisionServicesEnsured)
+	}
+	svc := &corev1.Service{}
+	key := client.ObjectKey{Namespace: isvc.Namespace, Name: PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash1")}
+	if err := c.Get(context.Background(), key, svc); err != nil {
+		t.Errorf("diverged revision set: per-revision Service should be created, got: %v", err)
+	}
+}
+
+// TestReconcile_ObservesPodsViaCachedClient confirms the coordination
+// layer reads per-revision pods through the cached Client, not the live
+// Reader: a nil Reader must not be dereferenced. The full observe / ensure
+// path runs entirely off Client.
+func TestReconcile_ObservesPodsViaCachedClient(t *testing.T) {
+	isvc := testOMENativeISVC()
+	pods := []runtime.Object{
+		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
+	}
+	c := testClient(pods...)
+	// Reader deliberately nil: if coordination still read pods via Reader
+	// this would panic. The cached Client must carry the observation.
+	r, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: nil, Now: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.PerRevisionServicesEnsured == 0 {
+		t.Errorf("cached-read path: pods observed via Client must drive Service ensure, got %d", r.PerRevisionServicesEnsured)
+	}
+	cs, ok := isvc.Status.Components[v1beta1.EngineComponent]
+	if !ok || len(cs.Traffic) == 0 {
+		t.Errorf("cached-read path: Traffic[] must populate from pods read via Client, got %+v", cs)
+	}
+}
+
 func TestReconcile_WritesTrafficStatus(t *testing.T) {
 	isvc := testOMENativeISVC()
 	isvc.Spec.Rollout = singleEngineGroup()

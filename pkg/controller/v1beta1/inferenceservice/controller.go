@@ -577,11 +577,21 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			pendingRequeue.RequeueAfter = ra
 		}
 	}
+	// Load the coordination tuning per-reconcile from the operator config so
+	// ConfigMap edits take effect without a restart (mirrors canaryAnalysis). An
+	// absent "coordination" key yields a zero deadband (no hysteresis), preserving
+	// the prior write-on-any-diff behavior.
+	coordinationConfig, err := controllerconfig.NewCoordinationConfig(r.Clientset)
+	if err != nil {
+		log.Error(err, "Failed to load coordination config")
+		return reconcile.Result{}, errors.Wrapf(err, "fails to load coordination config")
+	}
 	if _, err := coordination.Reconcile(ctx, coordination.ReconcileInputs{
-		ISVC:     isvc,
-		Client:   r.Client,
-		Reader:   r.APIReader,
-		Recorder: r.Recorder,
+		ISVC:                         isvc,
+		Client:                       r.Client,
+		Reader:                       r.APIReader,
+		Recorder:                     r.Recorder,
+		TrafficWeightDeadbandPercent: coordinationConfig.TrafficWeightDeadbandPercent,
 	}); err != nil {
 		log.Error(err, "Failed to reconcile cross-Component coordination")
 		return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile coordination")

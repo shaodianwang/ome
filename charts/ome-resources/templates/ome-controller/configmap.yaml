@@ -34,6 +34,11 @@ data:
       "cacheTTL": "{{ .Values.ome.controller.canaryAnalysis.cacheTTL | default "2m" }}"
     }
 
+  coordination: |-
+    {
+      "trafficWeightDeadbandPercent": {{ .Values.ome.controller.coordination.trafficWeightDeadbandPercent | default 0 }}
+    }
+
   metricsAggregator: |-
     {
       "enableMetricAggregation": "{{ .Values.ome.metricsaggregator.enableMetricAggregation }}",
