@@ -532,3 +532,76 @@ func TestSemanticHPAEquals(t *testing.T) {
 			Spec:       autoscalingv2.HorizontalPodAutoscalerSpec{MinReplicas: ptr.Int32(3)},
 		}))
 }
+
+// TestSemanticHPAEquals_ServerDefaultedBehavior is the regression test for the
+// no-op-write bug: OME's generated HPA carries a nil or empty-stub
+// spec.behavior, while the live HPA always has the apiserver-defaulted
+// scaleUp/scaleDown policies populated. semanticHPAEquals must treat that as
+// equal (so the reconciler reports Existed, not Update) yet still catch a real
+// spec diff.
+func TestSemanticHPAEquals_ServerDefaultedBehavior(t *testing.T) {
+	stab := int32(300)
+	selectPolicy := autoscalingv2.MaxChangePolicySelect
+	// The block the apiserver injects when behavior is omitted.
+	serverDefaulted := &autoscalingv2.HorizontalPodAutoscalerBehavior{
+		ScaleDown: &autoscalingv2.HPAScalingRules{
+			StabilizationWindowSeconds: &stab,
+			SelectPolicy:               &selectPolicy,
+		},
+	}
+
+	baseSpec := func(behavior *autoscalingv2.HorizontalPodAutoscalerBehavior) autoscalingv2.HorizontalPodAutoscalerSpec {
+		return autoscalingv2.HorizontalPodAutoscalerSpec{
+			MinReplicas: ptr.Int32(1),
+			MaxReplicas: 5,
+			Behavior:    behavior,
+		}
+	}
+
+	t.Run("nil desired behavior ignores server default -> equal", func(t *testing.T) {
+		desired := &autoscalingv2.HorizontalPodAutoscaler{Spec: baseSpec(nil)}
+		existing := &autoscalingv2.HorizontalPodAutoscaler{Spec: baseSpec(serverDefaulted)}
+		assert.True(t, semanticHPAEquals(desired, existing),
+			"a steady HPA with only server-defaulted behavior must report Existed")
+	})
+
+	t.Run("empty-stub desired behavior ignores server default -> equal", func(t *testing.T) {
+		desired := &autoscalingv2.HorizontalPodAutoscaler{
+			Spec: baseSpec(&autoscalingv2.HorizontalPodAutoscalerBehavior{}),
+		}
+		existing := &autoscalingv2.HorizontalPodAutoscaler{Spec: baseSpec(serverDefaulted)}
+		assert.True(t, semanticHPAEquals(desired, existing),
+			"empty-stub behavior (createHPA default) must still report Existed")
+	})
+
+	t.Run("real spec diff still detected despite server-defaulted behavior", func(t *testing.T) {
+		desired := &autoscalingv2.HorizontalPodAutoscaler{Spec: baseSpec(nil)}
+		existing := &autoscalingv2.HorizontalPodAutoscaler{
+			Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+				MinReplicas: ptr.Int32(2), // drift
+				MaxReplicas: 5,
+				Behavior:    serverDefaulted,
+			},
+		}
+		assert.False(t, semanticHPAEquals(desired, existing),
+			"a real MinReplicas drift must report Update even when behavior is server-defaulted")
+	})
+
+	t.Run("explicit desired behavior is compared, not ignored", func(t *testing.T) {
+		desired := &autoscalingv2.HorizontalPodAutoscaler{Spec: baseSpec(serverDefaulted)}
+		existing := &autoscalingv2.HorizontalPodAutoscaler{
+			Spec: baseSpec(&autoscalingv2.HorizontalPodAutoscalerBehavior{
+				ScaleDown: &autoscalingv2.HPAScalingRules{StabilizationWindowSeconds: ptr.Int32(60)},
+			}),
+		}
+		assert.False(t, semanticHPAEquals(desired, existing),
+			"a managed (non-empty) behavior block must still be compared")
+	})
+
+	t.Run("does not mutate inputs", func(t *testing.T) {
+		desired := &autoscalingv2.HorizontalPodAutoscaler{Spec: baseSpec(nil)}
+		existing := &autoscalingv2.HorizontalPodAutoscaler{Spec: baseSpec(serverDefaulted)}
+		_ = semanticHPAEquals(desired, existing)
+		assert.NotNil(t, existing.Spec.Behavior, "semanticHPAEquals must not mutate the existing HPA")
+	})
+}

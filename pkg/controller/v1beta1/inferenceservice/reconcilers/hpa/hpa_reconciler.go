@@ -240,12 +240,40 @@ func (r *HPAReconciler) checkHPAExist() (constants.CheckResultType, *autoscaling
 	return constants.CheckResultUpdate, existingHPA, nil
 }
 
+// semanticHPAEquals reports whether the live HPA already matches the desired
+// one for every field OME manages. The apiserver defaults spec.behavior
+// (scaleUp/scaleDown policies) whenever the desired HPA omits it, so the live
+// behavior is always populated while the generated one is nil or an empty stub.
+// Comparing the full spec would therefore diff on every reconcile and trigger a
+// perpetual no-op Update. When OME does not manage a behavior block (desired
+// behavior is nil or zero-valued) we treat it as "don't care" and exclude it
+// from the comparison rather than re-introducing the server defaults in code.
 func semanticHPAEquals(desired, existing *autoscalingv2.HorizontalPodAutoscaler) bool {
 	desiredAutoscalerClass := desired.Annotations[constants.AutoscalerClass]
 	existingAutoscalerClass := existing.Annotations[constants.AutoscalerClass]
+	if desiredAutoscalerClass != existingAutoscalerClass {
+		return false
+	}
 
-	autoscalerClassChanged := desiredAutoscalerClass != existingAutoscalerClass
-	return equality.Semantic.DeepEqual(desired.Spec, existing.Spec) && !autoscalerClassChanged
+	desiredSpec := desired.Spec
+	existingSpec := existing.Spec
+	if behaviorUnmanaged(desiredSpec.Behavior) {
+		desiredSpec.Behavior = nil
+		existingSpec.Behavior = nil
+	}
+
+	return equality.Semantic.DeepEqual(desiredSpec, existingSpec)
+}
+
+// behaviorUnmanaged reports whether OME is not asserting any HPA behavior:
+// either no block at all, or an empty stub (the legacy default emitted by
+// createHPA when the caller supplies none). In both cases the live,
+// server-defaulted behavior must be ignored in the equality check.
+func behaviorUnmanaged(b *autoscalingv2.HorizontalPodAutoscalerBehavior) bool {
+	if b == nil {
+		return true
+	}
+	return equality.Semantic.DeepEqual(b, &autoscalingv2.HorizontalPodAutoscalerBehavior{})
 }
 
 func shouldDeleteHPA(desired *autoscalingv2.HorizontalPodAutoscaler) bool {
