@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -1077,7 +1078,7 @@ func TestObservePerRevisionPods_TotalVsReady(t *testing.T) {
 		buildReadyPod(isvc, v1beta1.EngineComponent, canary, 2, true),  // serving
 		buildReadyPod(isvc, v1beta1.EngineComponent, canary, 3, false), // exists, not serving yet
 	}
-	total, ready, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, []v1beta1.ComponentType{v1beta1.EngineComponent})
+	total, ready, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, []v1beta1.ComponentType{v1beta1.EngineComponent}, true)
 	if err != nil {
 		t.Fatalf("observePerRevisionPods: %v", err)
 	}
@@ -1090,6 +1091,49 @@ func TestObservePerRevisionPods_TotalVsReady(t *testing.T) {
 	}
 	if total[eng][stable] != 2 || ready[eng][stable] != 2 {
 		t.Errorf("stable total/ready = %d/%d, want 2/2", total[eng][stable], ready[eng][stable])
+	}
+}
+
+// TestObservePerRevisionPods_IndexParityWithLabelPath asserts the indexed read
+// strategy (useIndex=true) buckets the EXACT same pods, by revision hash, as the
+// label-selector strategy (useIndex=false) — including a pod with a missing
+// revision-hash label, which must be dropped from both maps. The fake client has
+// no field index, so useIndex=true exercises ListOMENativePodsByName's index
+// fallback; this guards that the index path stays bucket-for-bucket identical to
+// the old raw label List.
+func TestObservePerRevisionPods_IndexParityWithLabelPath(t *testing.T) {
+	isvc := testReconcilerISVC()
+	const stable, canary = "stablehash", "canaryhash"
+	objs := []runtime.Object{
+		buildReadyPod(isvc, v1beta1.EngineComponent, stable, 0, true),
+		buildReadyPod(isvc, v1beta1.EngineComponent, stable, 1, false),
+		buildReadyPod(isvc, v1beta1.EngineComponent, canary, 2, true),
+		buildReadyPod(isvc, v1beta1.EngineComponent, "", 3, true), // missing hash → dropped
+	}
+	comps := []v1beta1.ComponentType{v1beta1.EngineComponent}
+
+	totalIdx, readyIdx, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, comps, true)
+	if err != nil {
+		t.Fatalf("observePerRevisionPods(useIndex=true): %v", err)
+	}
+	totalLbl, readyLbl, err := observePerRevisionPods(context.Background(), testClient(objs...), isvc, comps, false)
+	if err != nil {
+		t.Fatalf("observePerRevisionPods(useIndex=false): %v", err)
+	}
+
+	if !reflect.DeepEqual(totalIdx, totalLbl) {
+		t.Errorf("total maps differ: index=%v label=%v", totalIdx, totalLbl)
+	}
+	if !reflect.DeepEqual(readyIdx, readyLbl) {
+		t.Errorf("ready maps differ: index=%v label=%v", readyIdx, readyLbl)
+	}
+	eng := v1beta1.EngineComponent
+	// Empty-hash pod must not appear under any bucket.
+	if _, ok := totalIdx[eng][""]; ok {
+		t.Errorf("empty-hash pod leaked into total bucket: %v", totalIdx[eng])
+	}
+	if totalIdx[eng][stable] != 2 || totalIdx[eng][canary] != 1 {
+		t.Errorf("total buckets = %v, want stable=2 canary=1", totalIdx[eng])
 	}
 }
 

@@ -62,7 +62,9 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	// per-revision Services + pick the stable revision); readyRev is the READY
 	// (serving) subset — the capacity gate MUST use ready so traffic never shifts
 	// onto canary pods that exist but are not serving yet.
-	perRev, readyRev, err := coordination.ObservePerRevisionPods(ctx, d.Reader, d.ISVC, configuredComponents(d.ISVC))
+	// d.Reader is the live API reader (no Pod field index) — useIndex=false skips
+	// the doomed MatchingFields probe and goes straight to the label-selector List.
+	perRev, readyRev, err := coordination.ObservePerRevisionPods(ctx, d.Reader, d.ISVC, configuredComponents(d.ISVC), false)
 	if err != nil {
 		return 0, err
 	}

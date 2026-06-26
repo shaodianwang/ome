@@ -13,8 +13,12 @@ import (
 // canary) can reuse the exact same accounting instead of re-implementing it.
 // Returns TWO maps keyed by component → revision hash: total pods, and the READY
 // (serving) subset. Capacity gates that shift traffic must use the ready map.
-func ObservePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) (total, ready map[v1beta1.ComponentType]map[string]int32, err error) {
-	return observePerRevisionPods(ctx, reads, isvc, components)
+//
+// useIndex MUST match the reader (see observePerRevisionPods): the canary capacity
+// gate passes the LIVE API reader, which has no Pod field index, so it MUST pass
+// useIndex=false.
+func ObservePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, useIndex bool) (total, ready map[v1beta1.ComponentType]map[string]int32, err error) {
+	return observePerRevisionPods(ctx, reads, isvc, components, useIndex)
 }
 
 // LatestRevisionHash returns the latest (target) revision hash for a component,

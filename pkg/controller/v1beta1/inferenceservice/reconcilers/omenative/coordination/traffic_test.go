@@ -297,6 +297,29 @@ func TestTrafficWithinDeadband_RevisionSetChangeNotSuppressed(t *testing.T) {
 	}
 }
 
+// TestTrafficWithinDeadband_TerminalConvergenceNotSuppressed pins the
+// boundary-write fix: when an operator sets a deadband LARGER than the final
+// canary step, the terminal write to a clean single-revision split must still
+// happen. Last-written 95/5, target 100/0, deadband 10: both revisions move
+// only 5 (< band), so a naive band would suppress the write and stick traffic
+// at 95/5 forever. A revision arriving at 100 (or leaving to 0) is terminal
+// convergence, never jitter, so the write must proceed.
+func TestTrafficWithinDeadband_TerminalConvergenceNotSuppressed(t *testing.T) {
+	observed := []v1beta1.ComponentTrafficTarget{
+		{RevisionName: "a", Percent: 95, LatestRevision: true},
+		{RevisionName: "b", Percent: 5},
+	}
+	desired := []v1beta1.ComponentTrafficTarget{
+		{RevisionName: "a", Percent: 100, LatestRevision: true},
+		{RevisionName: "b", Percent: 0},
+	}
+	// Sanity: both per-revision moves (5) are strictly under the band (10), so
+	// only the boundary carve-out keeps this from being suppressed.
+	if TrafficWithinDeadband(desired, observed, 10) {
+		t.Errorf("terminal convergence 95/5 -> 100/0 with deadband 10: must NOT be suppressed (traffic would stick at 95/5)")
+	}
+}
+
 // TestTrafficWithinDeadband_LatestRevisionFlipNotSuppressed: a LatestRevision
 // flag flip is operator-visible and consumed by HTTPRoute reconcilers, so it
 // must write even when the percents are within the band.

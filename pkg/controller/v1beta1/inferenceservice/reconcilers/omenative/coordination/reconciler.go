@@ -7,7 +7,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -16,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -166,7 +166,9 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			len(componentsTouched), componentsTouched)
 	}
 
-	perRevisionPods, _, err := observePerRevisionPods(ctx, in.Client, in.ISVC, componentsTouched)
+	// Cached client carries the OMENative Pod field index — useIndex=true takes
+	// the index fast path instead of scanning the whole informer store per Component.
+	perRevisionPods, _, err := observePerRevisionPods(ctx, in.Client, in.ISVC, componentsTouched, true)
 	if err != nil {
 		return nil, fmt.Errorf("observe per-revision pods: %w", err)
 	}
@@ -370,36 +372,38 @@ func componentIsOMENative(ext *v1beta1.ComponentExtensionSpec, specMode *constan
 
 // observePerRevisionPods returns per-Component, per-revisionHash pod counts —
 // both the TOTAL pods carrying each revision hash and the subset that are READY
-// (serving). Reads pods via the live reader so observations don't lag reality.
-// Callers that gate on serving capacity (e.g. the canary traffic-shift gate)
-// MUST use the ready map: a pod that merely exists (ContainerCreating/Pending)
+// (serving). Callers that gate on serving capacity (e.g. the canary traffic-shift
+// gate) MUST use the ready map: a pod that merely exists (ContainerCreating/Pending)
 // is not serving yet, and counting it lets a rollout cut over before the new
 // revision can actually take traffic.
-func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType) (map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]map[string]int32, error) {
+//
+// The per-Component pod fetch routes through query.ListOMENativePodsByName so it
+// rides the OMENative Pod field index instead of scanning the whole informer
+// store per Component. useIndex MUST match the reader: pass true for the cached
+// client (coordination's own observe — it has the field index registered) and
+// false for the live API reader (canary capacity gate — the apiserver has no
+// custom Pod field selector). Both modes return the identical pod set; useIndex
+// only picks how the set is fetched.
+func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, components []v1beta1.ComponentType, useIndex bool) (map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]map[string]int32, error) {
 	total := make(map[v1beta1.ComponentType]map[string]int32, len(components))
 	ready := make(map[v1beta1.ComponentType]map[string]int32, len(components))
 	if reads == nil {
 		return total, ready, nil
 	}
 	for _, c := range components {
-		pods := &corev1.PodList{}
-		sel := labels.SelectorFromSet(labels.Set{
-			constants.InferenceServicePodLabelKey: isvc.Name,
-			constants.OMEComponentLabel:           string(c),
-			query.LabelManagedBy:                  query.ManagedByOMENative,
-		})
-		if err := reads.List(ctx, pods, client.InNamespace(isvc.Namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
+		pods, err := query.ListOMENativePodsByName(ctx, reads, isvc.Namespace, isvc.Name, v1beta1convert.ComponentTypeToWorkload(c), useIndex)
+		if err != nil {
 			return nil, nil, fmt.Errorf("list pods for %s/%s: %w", isvc.Namespace, c, err)
 		}
 		byHash := make(map[string]int32, 4)
 		readyByHash := make(map[string]int32, 4)
-		for i := range pods.Items {
-			hash := pods.Items[i].Labels[query.LabelRevisionHash]
+		for _, pod := range pods {
+			hash := pod.Labels[query.LabelRevisionHash]
 			if hash == "" {
 				continue
 			}
 			byHash[hash]++
-			if podReadyAndServing(&pods.Items[i]) {
+			if podReadyAndServing(pod) {
 				readyByHash[hash]++
 			}
 		}

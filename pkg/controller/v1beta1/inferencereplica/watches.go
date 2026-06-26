@@ -111,16 +111,103 @@ func podReconcileRelevantChanged(oldPod, newPod *corev1.Pod) bool {
 	if podreadiness.IsServing(oldPod) != podreadiness.IsServing(newPod) {
 		return true
 	}
-	if !equality.Semantic.DeepEqual(oldPod.Status.ContainerStatuses, newPod.Status.ContainerStatuses) {
+	if containerStatusesRelevantChanged(oldPod.Status.ContainerStatuses, newPod.Status.ContainerStatuses) {
 		return true
 	}
-	if !equality.Semantic.DeepEqual(oldPod.Status.InitContainerStatuses, newPod.Status.InitContainerStatuses) {
+	if containerStatusesRelevantChanged(oldPod.Status.InitContainerStatuses, newPod.Status.InitContainerStatuses) {
 		return true
 	}
 	if !equality.Semantic.DeepEqual(oldPod.OwnerReferences, newPod.OwnerReferences) {
 		return true
 	}
 	return routingLabelsChanged(oldPod, newPod)
+}
+
+// containerStatusesRelevantChanged reports whether old→new container
+// statuses differ in any field the IR reconcile / workload dispatcher
+// actually reads. It replaces a reflection-based DeepEqual over the whole
+// ContainerStatus slice — which walks ImageID, ContainerID, Resources,
+// Started, and every nested timestamp that churns on each kubelet
+// heartbeat — with a compare over only the read fields. The full set the
+// workload package reads (and why each matters for an enqueue):
+//
+//   - Name — the matching key; also read by termination + image-diff.
+//   - Image — in-place update convergence: ops.podRuntimeImagesMatch
+//     declares an in-place image roll done only once kubelet stamps the
+//     new image into Status.ContainerStatuses[*].Image, so that flip MUST
+//     wake the reconcile or the rollout stalls until the periodic resync.
+//   - State.Waiting (Reason+Message) — terminal-failure / stuck-pod
+//     escalation (workload.PodStuckPullFailure, types.PodTermination).
+//   - State.Terminated (ExitCode+Reason+Message) — crash detection
+//     (types.PodTermination).
+//   - LastTerminationState.Terminated (ExitCode+Reason+Message) — a
+//     CrashLoopBackOff pod shows its crash here while live State is
+//     Waiting; types.nonZeroTerminated reads it.
+//
+// Fields deliberately NOT compared because nothing in the IR/workload
+// reconcile reads them, and they're the heartbeat churn this avoids:
+// ImageID, ContainerID, RestartCount, per-container Ready (readiness is
+// taken from the ContainersReady pod condition, compared separately
+// above), Resources, Started, and the Running/Terminated StartedAt/
+// FinishedAt timestamps.
+//
+// A length or per-name mismatch (containers added/removed/reordered)
+// always enqueues. A miss only ever delays a reconcile to the next
+// genuine change or the resync, never drops state permanently.
+func containerStatusesRelevantChanged(oldCS, newCS []corev1.ContainerStatus) bool {
+	if len(oldCS) != len(newCS) {
+		return true
+	}
+	oldByName := make(map[string]*corev1.ContainerStatus, len(oldCS))
+	for i := range oldCS {
+		oldByName[oldCS[i].Name] = &oldCS[i]
+	}
+	for i := range newCS {
+		n := &newCS[i]
+		o, ok := oldByName[n.Name]
+		if !ok {
+			return true
+		}
+		if o.Image != n.Image {
+			return true
+		}
+		if waitingRelevantChanged(o.State.Waiting, n.State.Waiting) {
+			return true
+		}
+		if terminatedRelevantChanged(o.State.Terminated, n.State.Terminated) {
+			return true
+		}
+		if terminatedRelevantChanged(o.LastTerminationState.Terminated, n.LastTerminationState.Terminated) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitingRelevantChanged compares the Waiting fields the escalator reads
+// (Reason for terminal-state classification, Message for the LastFailure
+// diagnostic record).
+func waitingRelevantChanged(a, b *corev1.ContainerStateWaiting) bool {
+	if (a == nil) != (b == nil) {
+		return true
+	}
+	if a == nil {
+		return false
+	}
+	return a.Reason != b.Reason || a.Message != b.Message
+}
+
+// terminatedRelevantChanged compares the Terminated fields the failure
+// extractor reads (ExitCode + Reason + Message). StartedAt/FinishedAt and
+// the signal/containerID are intentionally ignored.
+func terminatedRelevantChanged(a, b *corev1.ContainerStateTerminated) bool {
+	if (a == nil) != (b == nil) {
+		return true
+	}
+	if a == nil {
+		return false
+	}
+	return a.ExitCode != b.ExitCode || a.Reason != b.Reason || a.Message != b.Message
 }
 
 // routingLabelsChanged compares only the OMENative labels the handler

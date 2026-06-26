@@ -3,6 +3,7 @@ package controllerconfig
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -642,6 +643,65 @@ func TestConfigCache(t *testing.T) {
 		_, err := NewDeployConfigCached(cache, clientset)
 		assert.Error(t, err, "missing ConfigMap must surface as an error")
 	})
+}
+
+// TestConfigCacheSingleflight proves that when many reconciles race into the
+// same TTL expiry, the cache issues exactly ONE apiserver GET (and never holds
+// its lock across that GET). The reactor blocks all in-flight GETs on a gate so
+// the goroutines pile up inside get() simultaneously; without singleflight each
+// would issue its own GET, so the counter would exceed one.
+func TestConfigCacheSingleflight(t *testing.T) {
+	const goroutines = 64
+
+	clientset := fake.NewSimpleClientset(&v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      constants.InferenceServiceConfigMapName,
+			Namespace: constants.OMENamespace,
+		},
+		Data: map[string]string{
+			DeployConfigName: `{"defaultDeploymentMode":"RawDeployment"}`,
+		},
+	})
+
+	var gets int64
+	release := make(chan struct{})
+	var first sync.Once
+	firstInFlight := make(chan struct{})
+	clientset.PrependReactor("get", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.(k8stesting.GetAction).GetName() == constants.InferenceServiceConfigMapName {
+			atomic.AddInt64(&gets, 1)
+			// Signal that a GET has begun, then block until the test releases
+			// it — this widens the window so concurrent callers must dedupe via
+			// singleflight rather than each issuing their own GET.
+			first.Do(func() { close(firstInFlight) })
+			<-release
+		}
+		return false, nil, nil
+	})
+
+	cache := NewConfigCache(30 * time.Second)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			cfg, err := NewDeployConfigCached(cache, clientset)
+			assert.NoError(t, err)
+			if cfg != nil {
+				assert.Equal(t, "RawDeployment", cfg.DefaultDeploymentMode)
+			}
+		}()
+	}
+
+	// Wait until at least one GET is in flight (all callers should now be
+	// joined onto the single singleflight call), then release the apiserver.
+	<-firstInFlight
+	close(release)
+	wg.Wait()
+
+	assert.Equal(t, int64(1), atomic.LoadInt64(&gets),
+		"concurrent loads across one expiry window must collapse to exactly one apiserver GET")
 }
 
 // TestNewCoordinationConfigCached verifies the cached coordination loader shares

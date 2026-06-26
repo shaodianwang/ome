@@ -958,6 +958,14 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.ConfigCache = controllerconfig.NewConfigCache(r.ConfigCacheTTL)
 	}
 
+	// Register the spec.runtime.name field index so runtime change events
+	// fan out to referencing ISVCs through the cache index instead of
+	// scanning every cached InferenceService — see
+	// pinnedISVCsReferencingRuntime.
+	if err := registerISVCRuntimeNameIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		return err
+	}
+
 	// Initialize RuntimeSelector
 	runtimeSelectorConfig := runtimeselector.NewConfig(mgr.GetClient())
 	runtimeSelectorConfig.ModelCacheProvider = r.ModelCache.Name
@@ -1086,6 +1094,41 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrlBuilder.Complete(r)
 }
 
+// isvcRuntimeNameIndexField is the controller-runtime cache field-index
+// name keyed on an ISVC's spec.runtime.name. Without it, a runtime
+// change event lists every cached InferenceService and scans for those
+// referencing the runtime; with it MatchingFields narrows the list to
+// the referencing ISVCs in O(matched). Registered on the manager cache
+// in SetupWithManager (see registerISVCRuntimeNameIndex).
+//
+// The field name is an internal index identifier (a code constant), not
+// a behavioral/user-facing value — no config surface is required.
+const isvcRuntimeNameIndexField = "spec.runtime.name"
+
+// isvcRuntimeNameIndexExtractor is the cache IndexerFunc registered for
+// isvcRuntimeNameIndexField. It returns the ISVC's spec.runtime.name, or
+// nil when the runtime ref (or its name) is absent — the unindexed
+// match below skips those identically.
+func isvcRuntimeNameIndexExtractor(obj client.Object) []string {
+	isvc, ok := obj.(*v1beta1.InferenceService)
+	if !ok {
+		return nil
+	}
+	if isvc.Spec.Runtime == nil || isvc.Spec.Runtime.Name == "" {
+		return nil
+	}
+	return []string{isvc.Spec.Runtime.Name}
+}
+
+// registerISVCRuntimeNameIndex installs isvcRuntimeNameIndexField on the
+// supplied indexer (mgr.GetFieldIndexer()). Call once during manager
+// setup, before Start, so pinnedISVCsReferencingRuntime resolves
+// referencing ISVCs through the index instead of scanning every cached
+// InferenceService.
+func registerISVCRuntimeNameIndex(ctx context.Context, indexer client.FieldIndexer) error {
+	return indexer.IndexField(ctx, &v1beta1.InferenceService{}, isvcRuntimeNameIndexField, isvcRuntimeNameIndexExtractor)
+}
+
 // pinnedISVCsReferencingRuntime returns reconcile requests for ISVCs
 // that pin to the runtime named by obj (spec.runtime.name match +
 // autoSync=false). Empty when nothing pins to it — autoSync=true
@@ -1095,8 +1138,11 @@ func (r *InferenceServiceReconciler) pinnedISVCsReferencingRuntime(ctx context.C
 	runtimeName := obj.GetName()
 	runtimeNamespace := obj.GetNamespace() // empty for cluster-scoped
 
+	// Narrow to ISVCs whose spec.runtime.name matches via the field
+	// index; the in-memory filters below still apply (kind/namespace
+	// scope + autoSync), preserving the exact enqueued set.
 	var isvcs v1beta1.InferenceServiceList
-	if err := r.List(ctx, &isvcs); err != nil {
+	if err := r.List(ctx, &isvcs, client.MatchingFields{isvcRuntimeNameIndexField: runtimeName}); err != nil {
 		r.Log.Error(err, "fan-out runtime event: list InferenceServices failed")
 		return nil
 	}

@@ -139,6 +139,157 @@ func TestManagedByOMENativePredicate_UpdateFieldDiff(t *testing.T) {
 			wantPass: true,
 		},
 		{
+			name: "Waiting.Reason change passes",
+			old: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "main", State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}},
+				}
+				return p
+			}(),
+			new: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "main", State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}},
+				}
+				return p
+			}(),
+			wantPass: true,
+		},
+		{
+			name: "Terminated exit-code change passes",
+			old: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "main", State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+				}
+				return p
+			}(),
+			new: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "main", State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}}},
+				}
+				return p
+			}(),
+			wantPass: true,
+		},
+		{
+			name: "LastTerminationState crash detail change passes",
+			old: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "main"},
+				}
+				return p
+			}(),
+			new: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "main", LastTerminationState: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}}},
+				}
+				return p
+			}(),
+			wantPass: true,
+		},
+		{
+			name: "container Image flip (in-place convergence) passes",
+			old: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "main", Image: "fake-serving:v1"},
+				}
+				return p
+			}(),
+			new: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "main", Image: "fake-serving:v2"},
+				}
+				return p
+			}(),
+			wantPass: true,
+		},
+		{
+			name: "InitContainerStatuses terminal-failure change passes",
+			old: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.InitContainerStatuses = []corev1.ContainerStatus{
+					{Name: "init", State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}},
+				}
+				return p
+			}(),
+			new: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.InitContainerStatuses = []corev1.ContainerStatus{
+					{Name: "init", State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerError"}}},
+				}
+				return p
+			}(),
+			wantPass: true,
+		},
+		{
+			name: "container added passes (length change)",
+			old: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "main", Image: "fake-serving:v1"},
+				}
+				return p
+			}(),
+			new: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "main", Image: "fake-serving:v1"},
+					{Name: "sidecar", Image: "sidecar:v1"},
+				}
+				return p
+			}(),
+			wantPass: true,
+		},
+		{
+			name: "ImageID/RestartCount/Resources heartbeat churn is dropped",
+			old: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{
+						Name:         "main",
+						Image:        "fake-serving:v1",
+						ImageID:      "sha256:aaaa",
+						RestartCount: 1,
+						Ready:        true,
+						State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{
+							StartedAt: metav1.Now()}},
+					},
+				}
+				return p
+			}(),
+			new: func() *corev1.Pod {
+				p := managedPod()
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{
+						Name:         "main",
+						Image:        "fake-serving:v1",
+						ImageID:      "sha256:bbbb", // churn
+						RestartCount: 2,             // churn
+						Ready:        true,          // per-container Ready (pod condition handled separately)
+						State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{
+							StartedAt: metav1.Now()}}, // timestamp churn
+						AllocatedResources: corev1.ResourceList{}, // resource churn
+					},
+				}
+				return p
+			}(),
+			wantPass: false,
+		},
+		{
 			name: "SchedulingGates removal (Kueue gate-exit) passes",
 			old: func() *corev1.Pod {
 				p := managedPod()

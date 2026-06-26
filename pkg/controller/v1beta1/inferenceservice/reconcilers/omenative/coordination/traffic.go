@@ -198,6 +198,14 @@ func TrafficDiffersMeaningfully(desired, observed []v1beta1.ComponentTrafficTarg
 //
 // deadband <= 0 disables the band entirely (TrafficWithinDeadband is
 // always false), preserving the exact prior write-on-any-diff behavior.
+//
+// Terminal/boundary convergence is always written, never suppressed: if any
+// revision's desired percent is exactly 0 or 100 and differs from its last-
+// written value, the write proceeds regardless of deadband. Without this, an
+// operator who sets deadband larger than the final canary step (e.g. 95/5 ->
+// 100/0 with deadband 10, where both revisions move only 5) would have the
+// terminal write permanently suppressed, sticking traffic at 95/5 and never
+// reaching a clean 100/0. The band only ever gates genuinely mid-range jitter.
 func TrafficWithinDeadband(desired, observed []v1beta1.ComponentTrafficTarget, deadband int32) bool {
 	if deadband <= 0 {
 		return false
@@ -224,6 +232,14 @@ func TrafficWithinDeadband(desired, observed []v1beta1.ComponentTrafficTarget, d
 		// HTTPRoute reconcilers; never suppress it (mirrors the contract
 		// in TrafficDiffersMeaningfully).
 		if h.latestRevision != t.LatestRevision {
+			return false
+		}
+		// A revision arriving at or leaving a boundary (0 or 100) is a
+		// terminal convergence event, not mid-range jitter; never suppress
+		// it even when the per-revision move is under the band. Otherwise a
+		// deadband larger than the final canary step could permanently
+		// suppress the converging write.
+		if (t.Percent == 0 || t.Percent == 100) && t.Percent != h.percent {
 			return false
 		}
 		if absInt32(t.Percent-h.percent) >= deadband {

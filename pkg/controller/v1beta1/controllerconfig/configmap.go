@@ -12,6 +12,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 )
@@ -208,6 +210,12 @@ type ConfigCache struct {
 	ttl time.Duration
 	now func() time.Time
 
+	// sf collapses concurrent refreshes (under MaxConcurrentReconciles>1) so an
+	// expiry triggers exactly one apiserver GET: callers that miss the cache at
+	// the same time share the single in-flight fetch instead of each issuing
+	// their own. Keyed on the ConfigMap name.
+	sf singleflight.Group
+
 	mu        sync.Mutex
 	cm        *v1.ConfigMap
 	fetchedAt time.Time
@@ -222,25 +230,59 @@ func NewConfigCache(ttl time.Duration) *ConfigCache {
 // it from the apiserver and refreshes the entry. A non-positive TTL never
 // caches. The returned ConfigMap is shared (read-only): the config constructors
 // only read .Data, never mutate it.
+//
+// The lock is held only to check freshness and to swap in a result — never
+// across the apiserver GET. Concurrent refreshes after an expiry are collapsed
+// via singleflight, so the TTL window costs exactly one apiserver GET no matter
+// how many reconciles race into it.
 func (c *ConfigCache) get(clientset kubernetes.Interface) (*v1.ConfigMap, error) {
 	if c == nil || c.ttl <= 0 {
 		return getInferenceServiceConfigMap(clientset)
 	}
+
+	// Fast path: serve a fresh entry without touching the apiserver.
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.cm != nil && c.now().Sub(c.fetchedAt) < c.ttl {
-		return c.cm, nil
+		cm := c.cm
+		c.mu.Unlock()
+		return cm, nil
 	}
-	cm, err := getInferenceServiceConfigMap(clientset)
+	c.mu.Unlock()
+
+	// Miss/expiry: collapse concurrent refreshes onto a single GET. The result
+	// is shared with every caller that joins this in-flight fetch.
+	v, err, _ := c.sf.Do(constants.InferenceServiceConfigMapName, func() (interface{}, error) {
+		// Re-check freshness now that we hold the singleflight slot: a refresh
+		// may have completed between our fast-path miss and acquiring it,
+		// leaving the entry fresh again (avoids a redundant back-to-back GET).
+		c.mu.Lock()
+		if c.cm != nil && c.now().Sub(c.fetchedAt) < c.ttl {
+			cm := c.cm
+			c.mu.Unlock()
+			return cm, nil
+		}
+		c.mu.Unlock()
+
+		// GET happens outside the lock so concurrent readers are never blocked
+		// on apiserver I/O.
+		cm, err := getInferenceServiceConfigMap(clientset)
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err != nil {
+			// On error, drop any stale entry so the next call retries rather
+			// than serving a config that may no longer exist.
+			c.cm = nil
+			return nil, err
+		}
+		c.cm = cm
+		c.fetchedAt = c.now()
+		return cm, nil
+	})
 	if err != nil {
-		// On error, drop any stale entry so the next call retries rather than
-		// serving a config that may no longer exist.
-		c.cm = nil
 		return nil, err
 	}
-	c.cm = cm
-	c.fetchedAt = c.now()
-	return cm, nil
+	return v.(*v1.ConfigMap), nil
 }
 
 // NewInferenceServicesConfig verifies that the inferenceservice ConfigMap
