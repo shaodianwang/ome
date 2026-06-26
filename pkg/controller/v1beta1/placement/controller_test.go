@@ -538,3 +538,187 @@ func TestEndpointFor_NilSafe(t *testing.T) {
 	assert.Nil(t, endpointFor(nil))
 	assert.Nil(t, endpointFor(&v1beta1.InferenceService{}))
 }
+
+// deleteFailClient fails every Delete (simulates a cluster that errors on
+// loser cleanup).
+type deleteFailClient struct {
+	client.WithWatch
+}
+
+func (c deleteFailClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	return apierrors.NewInternalError(errors.New("delete rejected"))
+}
+
+// getFailClient fails every Get (simulates a transient remote read error).
+type getFailClient struct {
+	client.WithWatch
+}
+
+func (c getFailClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	return apierrors.NewInternalError(errors.New("get rejected"))
+}
+
+// foreignDerived builds a same-named ISVC NOT created by this control plane (no
+// origin label, or an origin label for a different source UID).
+func foreignDerived(originUID string) *v1beta1.InferenceService {
+	o := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"}}
+	if originUID != "" {
+		o.Labels = map[string]string{PlacementOriginLabel: originUID}
+	}
+	return o
+}
+
+// Bug #1 (cross-tenant DATA LOSS): the loser sweep must NOT delete a same-named
+// ISVC on a connected NON-candidate cluster that this control plane did not
+// derive. Pre-fix deleteLosers iterated ALL connected clusters and
+// deleteDerivedOn deleted by identity, so a user's same-named ISVC on an
+// unrelated connected cluster was reaped.
+func TestReconcile_LoserSweepDoesNotTouchForeignISVCOnNonCandidate(t *testing.T) {
+	s := testScheme(t)
+	// "other" is connected but NOT a candidate (label does not match the
+	// selector) and carries a user-created same-named ISVC with no origin label.
+	wOther := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(foreignDerived("")).Build()
+	wb := workerWithAdmittedDerived(t, s) // winner (candidate)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"other": workloadcluster.NewNeverCachingClient(wOther),
+		"b":     workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("other", map[string]string{"gpu": "h100"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	assert.True(t, hasDerived(t, wOther), "foreign same-named ISVC on non-candidate connected cluster must NOT be deleted")
+	assert.True(t, hasDerived(t, wb), "winner kept")
+	assert.Equal(t, "b", cpPlacement(t, cp).Cluster)
+}
+
+// Bug #1 variant: even on a candidate (loser) cluster, an object derived from a
+// DIFFERENT source UID must survive the origin-guarded sweep.
+func TestReconcile_LoserSweepDoesNotDeleteOtherSourceDerived(t *testing.T) {
+	s := testScheme(t)
+	// a is a candidate and holds an ISVC derived from a different source.
+	wa := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(foreignDerived("some-other-uid")).Build()
+	wb := workerWithAdmittedDerived(t, s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	// Make this a sticky-winner pass so a's foreign object is only ever subject
+	// to the loser sweep (not adopted by a fan-out CreateOrUpdate).
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	r, _ := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+	assert.True(t, hasDerived(t, wa), "derived owned by a different source UID must NOT be deleted")
+}
+
+// Bug: deleteLosers must tolerate a per-cluster delete failure instead of
+// aborting the whole reconcile on the first error.
+func TestReconcile_LoserCleanupToleratesPerClusterError(t *testing.T) {
+	s := testScheme(t)
+	// a holds OUR stray derived but errors on Delete; the reconcile must still
+	// succeed (place the winner) rather than abort.
+	wa := deleteFailClient{WithWatch: fakeclient.NewClientBuilder().WithScheme(s).
+		WithObjects(&v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
+			Name: "svc", Namespace: "prod", Labels: map[string]string{PlacementOriginLabel: "uid-1"}}}).Build()}
+	wb := workerWithAdmittedDerived(t, s) // winner
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err, "a single loser-cluster delete error must not abort the reconcile")
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, cpPlacement(t, cp).Phase)
+	assert.Equal(t, "b", cpPlacement(t, cp).Cluster)
+}
+
+// Bug: a transient remote GET error in the sticky-winner path must hold the
+// existing placement and requeue, not abort and not re-race.
+func TestReconcile_StickyWinnerTransientGetHoldsPlacement(t *testing.T) {
+	s := testScheme(t)
+	wa := emptyWorker(s)
+	wb := getFailClient{WithWatch: emptyWorker(s)} // winner's GET fails transiently
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	r, cp := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	res, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err, "transient remote GET error must not abort the reconcile")
+	assert.Positive(t, res.RequeueAfter, "should requeue to retry")
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, "b", p.Cluster, "existing placement held")
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
+	assert.False(t, hasDerived(t, wa), "must NOT re-race / fan out to a on a transient read error")
+}
+
+// Bug: placeOn must merge control-plane-owned metadata onto the derived rather
+// than clobbering worker-added labels/annotations every poll.
+func TestPlaceOn_PreservesWorkerMetadata(t *testing.T) {
+	s := testScheme(t)
+	// Pre-existing derived carrying a worker-added label + annotation.
+	existing := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
+		Name: "svc", Namespace: "prod",
+		Labels:      map[string]string{"worker.io/managed": "yes"},
+		Annotations: map[string]string{"worker.io/state": "bookkeeping"},
+	}}
+	w := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(w),
+	}}
+	r, _ := newPlacer(s, clusters, srcISVC(""))
+
+	require.NoError(t, r.placeOn(context.Background(), w, srcISVC("")))
+
+	got := &v1beta1.InferenceService{}
+	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
+	assert.Equal(t, "yes", got.Labels["worker.io/managed"], "worker label preserved")
+	assert.Equal(t, "bookkeeping", got.Annotations["worker.io/state"], "worker annotation preserved")
+	assert.Equal(t, "uid-1", got.Labels[PlacementOriginLabel], "control-plane origin label set")
+}
+
+// Bug: reconcileDelete must NOT remove the finalizer while a connected cluster
+// still holds our derived because its delete errored (would orphan it). It
+// requeues instead.
+func TestReconcileDelete_HoldsFinalizerWhenConnectedDeleteFails(t *testing.T) {
+	s := testScheme(t)
+	wa := deleteFailClient{WithWatch: fakeclient.NewClientBuilder().WithScheme(s).
+		WithObjects(&v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
+			Name: "svc", Namespace: "prod", Labels: map[string]string{PlacementOriginLabel: "uid-1"}}}).Build()}
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	r, cp := newPlacer(s, clusters, isvc, readyWC("a", map[string]string{"gpu": "gb300"}))
+	require.NoError(t, cp.Delete(context.Background(), isvc)) // -> DeletionTimestamp (finalizer present)
+
+	res, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+	assert.Positive(t, res.RequeueAfter, "should requeue to retry teardown")
+
+	got := &v1beta1.InferenceService{}
+	require.NoError(t, cp.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
+	assert.Contains(t, got.Finalizers, PlacementFinalizer, "finalizer held while connected cluster still holds derived")
+}

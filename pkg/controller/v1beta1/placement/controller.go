@@ -104,7 +104,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if winner := winnerCluster(isvc); winner != "" && slices.Contains(candidates, winner) {
 		derived, exists, err := r.getDerived(ctx, winner, isvc)
 		if err != nil {
-			return ctrl.Result{}, err
+			// A transient remote GET error must NOT abort the reconcile or be
+			// misread as "derived gone" (which would prematurely re-race and
+			// sweep losers). Hold the existing placement and retry next poll.
+			r.Log.Error(err, "sticky winner: remote get failed; holding placement", "cluster", winner, "isvc", isvc.Namespace+"/"+isvc.Name)
+			return ctrl.Result{RequeueAfter: r.requeue()}, nil
 		}
 		if exists {
 			if IsTerminallyFailed(derived) {
@@ -120,15 +124,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 					url:        u,
 				})
 			}
-			// Re-apply on the winner and sweep any stray derived on other clusters.
+			// Re-apply on the winner and sweep any stray derived on the other
+			// candidates (origin-guarded, so a same-named user ISVC is safe).
 			if cl, ok := r.Clusters.ClientFor(winner); ok {
 				if err := r.placeOn(ctx, cl, isvc); err != nil {
 					return ctrl.Result{}, err
 				}
 			}
-			if err := r.deleteLosers(ctx, isvc, winner); err != nil {
-				return ctrl.Result{}, err
-			}
+			r.deleteLosers(ctx, isvc, candidates, winner)
 			return r.writePlacement(ctx, isvc, placedResult(winner, derived, isvc))
 		}
 		// derived gone (deleted out from under us) -> fall through to re-race.
@@ -157,10 +160,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhaseRacing, candidates: cands})
 	}
 
-	// Winner: sweep the losers (every connected cluster except the winner).
-	if err := r.deleteLosers(ctx, isvc, winner); err != nil {
-		return ctrl.Result{}, err
-	}
+	// Winner: sweep the losers (every candidate cluster except the winner;
+	// each delete is origin-guarded so only our derived copies are removed).
+	r.deleteLosers(ctx, isvc, candidates, winner)
 	wd, _, err := r.getDerived(ctx, winner, isvc)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -194,37 +196,44 @@ func (r *Reconciler) fanOut(ctx context.Context, isvc *v1beta1.InferenceService,
 }
 
 // findWinner returns the winning cluster: the first placed candidate, in sorted
-// candidate order, whose derived ISVC reports an admitted instance, or "" if
-// none has been admitted yet. When several admit near-simultaneously the
-// lowest-named candidate wins — a deterministic tie-break, not literally
-// "first in wall-clock time".
+// candidate order, whose derived ISVC reports EVERY declared component admitted,
+// or "" if none is fully admitted yet. Requiring all components (not just one
+// instance) prevents a PD service from being declared placed while only the
+// engine has cleared Kueue and the decoder is still gated. When several clusters
+// fully admit near-simultaneously the lowest-named candidate wins — a
+// deterministic tie-break, not literally "first in wall-clock time".
 func (r *Reconciler) findWinner(ctx context.Context, isvc *v1beta1.InferenceService, placed []string) (string, error) {
 	for _, c := range placed {
 		derived, ok, err := r.getDerived(ctx, c, isvc)
 		if err != nil {
 			return "", err
 		}
-		if ok && AnyInstanceAdmitted(derived) {
+		if ok && AllComponentsAdmitted(derived) {
 			return c, nil
 		}
 	}
 	return "", nil
 }
 
-// deleteLosers deletes the derived ISVC on every currently-connected cluster
-// except keep. Self-healing: it sweeps any stray derived left by a prior
-// fan-out or a delete that was skipped while a cluster was disconnected, so
-// loser cleanup does NOT depend on the (possibly stale) status candidate list.
-func (r *Reconciler) deleteLosers(ctx context.Context, isvc *v1beta1.InferenceService, keep string) error {
-	for _, c := range r.Clusters.Connected() {
+// deleteLosers best-effort deletes THIS ISVC's derived copy on each cluster in
+// clusters except keep. deleteDerivedOn only ever deletes an object that carries
+// this source ISVC's origin label, so a same-named ISVC a user created directly
+// on a workload cluster is never touched (cross-tenant data-loss guard).
+//
+// Per-cluster failures are tolerated (like fanOut): one slow/unreachable cluster
+// must not block loser cleanup on the healthy ones, and must NOT block recording
+// the winner. Failures are logged; the next poll retries, and the GC sweep is a
+// backstop. Callers that must confirm full teardown (reconcileDelete) verify the
+// derived is actually gone separately rather than relying on the return here.
+func (r *Reconciler) deleteLosers(ctx context.Context, isvc *v1beta1.InferenceService, clusters []string, keep string) {
+	for _, c := range clusters {
 		if c == keep {
 			continue
 		}
 		if err := r.deleteDerivedOn(ctx, c, isvc); err != nil {
-			return err
+			r.Log.Error(err, "loser cleanup failed on cluster (will retry next poll)", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
 		}
 	}
-	return nil
 }
 
 // getDerived fetches the derived ISVC on a cluster. Returns ok=false if the
@@ -245,48 +254,132 @@ func (r *Reconciler) getDerived(ctx context.Context, cluster string, isvc *v1bet
 }
 
 // placeOn creates-or-updates the derived ISVC on the target cluster. The control
-// plane is the sole owner of the derived ISVC's spec and metadata; this overwrites
-// them wholesale on each reconcile.
+// plane owns the derived Spec and the metadata keys IT stamps (origin markers,
+// Kueue queue/serving gating); it does NOT own the rest of the object's labels
+// and annotations. The worker-cluster reconciler adds its own metadata (status
+// bookkeeping annotations, generated labels) to the derived object, so this
+// merges the control-plane-owned keys into the existing maps rather than
+// replacing them wholesale — preserving worker-side reconciler state across the
+// poll-driven re-apply.
 func (r *Reconciler) placeOn(ctx context.Context, cl client.Client, src *v1beta1.InferenceService) error {
 	desired := DeriveISVC(src)
 	target := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, cl, target, func() error {
-		target.Labels = desired.Labels
-		target.Annotations = desired.Annotations
+		target.Labels = mergeOwnedKeys(target.Labels, desired.Labels)
+		target.Annotations = mergeOwnedKeys(target.Annotations, desired.Annotations)
 		target.Spec = desired.Spec
 		return nil
 	})
 	return err
 }
 
-// deleteDerivedOn best-effort deletes the derived ISVC on a cluster.
+// mergeOwnedKeys overlays the control-plane-owned keys (from desired) onto the
+// existing map without dropping keys the worker-cluster reconciler added. nil
+// existing maps are initialized only when there is something to set.
+func mergeOwnedKeys(existing, owned map[string]string) map[string]string {
+	if len(owned) == 0 {
+		return existing
+	}
+	if existing == nil {
+		existing = make(map[string]string, len(owned))
+	}
+	for k, v := range owned {
+		existing[k] = v
+	}
+	return existing
+}
+
+// deleteDerivedOn best-effort deletes the derived ISVC on a cluster, but ONLY
+// if the object actually present there is a copy this control plane derived from
+// THIS source ISVC (it carries our origin label set to the source UID). It never
+// deletes by identity alone: a same-named ISVC a user created directly on the
+// workload cluster, or a copy derived from a different source UID, is left
+// untouched. The UID precondition on Delete closes the read-then-delete race so
+// a concurrently-recreated object isn't deleted out from under its owner.
 func (r *Reconciler) deleteDerivedOn(ctx context.Context, cluster string, isvc *v1beta1.InferenceService) error {
 	cl, ok := r.Clusters.ClientFor(cluster)
 	if !ok {
 		return nil
 	}
-	derived := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: isvc.Name, Namespace: isvc.Namespace}}
-	if err := cl.Delete(ctx, derived); err != nil && !apierrors.IsNotFound(err) {
+	derived := &v1beta1.InferenceService{}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: isvc.Namespace, Name: isvc.Name}, derived); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !isOurDerived(derived, isvc) {
+		// Same-named object that is NOT ours: do not delete (cross-tenant guard).
+		return nil
+	}
+	uid := derived.UID
+	opts := []client.DeleteOption{}
+	if uid != "" {
+		opts = append(opts, client.Preconditions{UID: &uid})
+	}
+	if err := cl.Delete(ctx, derived, opts...); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil
+}
+
+// isOurDerived reports whether derived is a placement copy this control plane
+// created from src (its origin label/annotation equals src's UID). The empty UID
+// case (e.g. a fake/source without a server-assigned UID) requires the marker to
+// be present and non-empty, never matches a blank.
+func isOurDerived(derived, src *v1beta1.InferenceService) bool {
+	want := string(src.UID)
+	if want == "" {
+		return false
+	}
+	return derived.Labels[PlacementOriginLabel] == want ||
+		derived.Annotations[PlacementOriginUIDAnnotation] == want
 }
 
 func (r *Reconciler) reconcileDelete(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(isvc, PlacementFinalizer) {
 		return ctrl.Result{}, nil
 	}
-	// Best-effort cleanup on every currently-connected cluster. A cluster that
-	// is disconnected at delete time is reaped later by the GC sweep (its source
-	// UID is gone), so finalizer cleanup need not block on it.
-	if err := r.deleteLosers(ctx, isvc, ""); err != nil {
+	// Clean up our derived copy on every currently-connected cluster. The delete
+	// is origin-guarded, so it only removes copies derived from THIS source. A
+	// cluster that is disconnected at delete time can't be cleaned now; it is
+	// reaped later by the GC sweep (the source UID is gone once the finalizer is
+	// removed), so we don't block teardown on an unreachable cluster.
+	//
+	// We do, however, hold the finalizer if a CONNECTED cluster errored on
+	// cleanup: dropping the finalizer then would orphan a still-reachable derived
+	// (and the GC only catches it on its slower cadence). Requeue and retry.
+	connected := r.Clusters.Connected()
+	r.deleteLosers(ctx, isvc, connected, "")
+	if remaining, err := r.derivedRemainingOnConnected(ctx, isvc, connected); err != nil {
 		return ctrl.Result{}, err
+	} else if remaining {
+		// A connected cluster still holds our derived (transient delete error
+		// tolerated by deleteLosers). Keep the finalizer; retry on the next poll.
+		return ctrl.Result{RequeueAfter: r.requeue()}, nil
 	}
 	controllerutil.RemoveFinalizer(isvc, PlacementFinalizer)
 	if err := r.Update(ctx, isvc); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// derivedRemainingOnConnected reports whether any connected cluster still holds
+// our derived copy of isvc. Used during teardown to decide whether the finalizer
+// can be safely removed. A transient GET error is reported as an error (caller
+// requeues) rather than silently treated as "gone".
+func (r *Reconciler) derivedRemainingOnConnected(ctx context.Context, isvc *v1beta1.InferenceService, connected []string) (bool, error) {
+	for _, c := range connected {
+		derived, exists, err := r.getDerived(ctx, c, isvc)
+		if err != nil {
+			return false, err
+		}
+		if exists && isOurDerived(derived, isvc) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // writePlacement sets status.placement (+ the mirrored status.url) for one pass,
