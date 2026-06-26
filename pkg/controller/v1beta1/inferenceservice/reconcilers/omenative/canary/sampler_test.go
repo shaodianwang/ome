@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
@@ -71,6 +72,66 @@ func TestSampler_DedupsInflight(t *testing.T) {
 	<-events
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("dedup failed: %d evals, want 1", got)
+	}
+}
+
+// TestSampler_StarvationMetrics: when MaxConcurrency is saturated, a query that
+// queues behind the semaphore bumps the starvation counter and is recorded as
+// inflight once it runs — the signal operators use to see Interval being silently
+// violated. The semaphore semantics (one slot at a time) are unchanged.
+func TestSampler_StarvationMetrics(t *testing.T) {
+	events := make(chan event.GenericEvent, 4)
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	s := NewSampler(func(context.Context, SampleRequest) analysis.Result {
+		started <- struct{}{}
+		<-release
+		return analysis.Result{Outcome: analysis.Pass}
+	}, events, 1, time.Minute) // cap of 1: the second key must queue
+
+	starvedBefore := testutil.ToFloat64(canarySamplerStarvedTotal)
+
+	// First key takes the only slot.
+	s.Get(SampleRequest{Key: SampleKey{ISVCName: "a"}}, time.Time{})
+	<-started
+	if got := testutil.ToFloat64(canarySamplerInflight); got != 1 {
+		t.Fatalf("inflight should be 1 while first query runs, got %v", got)
+	}
+
+	// Second key finds the slot busy → it starves and queues.
+	s.Get(SampleRequest{Key: SampleKey{ISVCName: "b"}}, time.Time{})
+	deadline := time.After(2 * time.Second)
+	for {
+		if testutil.ToFloat64(canarySamplerStarvedTotal)-starvedBefore >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("second query should have starved on the saturated semaphore")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if got := testutil.ToFloat64(canarySamplerQueueDepth); got != 1 {
+		t.Fatalf("queue depth should be 1 while the second query waits, got %v", got)
+	}
+
+	close(release)
+	<-started // second query now runs
+	<-events
+	<-events
+
+	// Drain to terminal: both done, no slots held, nothing queued.
+	deadline = time.After(2 * time.Second)
+	for {
+		if testutil.ToFloat64(canarySamplerInflight) == 0 && testutil.ToFloat64(canarySamplerQueueDepth) == 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("inflight/queue should drain to 0, got inflight=%v queue=%v",
+				testutil.ToFloat64(canarySamplerInflight), testutil.ToFloat64(canarySamplerQueueDepth))
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
 

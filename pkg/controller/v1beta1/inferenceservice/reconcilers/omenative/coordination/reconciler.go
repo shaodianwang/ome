@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -182,7 +183,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		// per-revision). Multi-pod Components route traffic only to
 		// rank-0; the routing Service selector picks that up.
 		multiPod := isvcutils.IsMultiPodComponent(in.ISVC, c)
-		SetPerRevisionServiceCount(in.ISVC.Name, string(c), float64(len(perRevisionPods[c])))
+		SetPerRevisionServiceCount(in.ISVC.Namespace, in.ISVC.Name, string(c), float64(len(perRevisionPods[c])))
 
 		// Change-detector: skip the per-revision Service ensure (2 Gets
 		// per hash via CreateOrUpdate) and GC (a namespace Service LIST)
@@ -236,7 +237,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 
 		// Record observability for this group.
 		prevPhase := previousGroupPhase(in.ISVC, g.Name)
-		RecordGroupPhase(in.ISVC.Name, g.Name, string(tr.Phase))
+		RecordGroupPhase(in.ISVC.Namespace, in.ISVC.Name, g.Name, string(tr.Phase))
 		// Steady-state breadcrumb (no transition): V(1) so operators
 		// can `grep group=foo` without drowning the log under normal
 		// load. Includes phase + policy + componentCount + rollout
@@ -256,7 +257,13 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 			"rolloutInFlight", rolloutInFlight,
 			"ratioSkewRejected", tr.RatioSkewRejected)
 		if prevPhase != "" && string(prevPhase) != string(tr.Phase) {
-			RecordGroupTransition(in.ISVC.Name, g.Name, string(prevPhase), string(tr.Phase))
+			RecordGroupTransition(in.ISVC.Namespace, in.ISVC.Name, g.Name, string(prevPhase), string(tr.Phase))
+			// Phase-dwell observability: how long the group sat in the
+			// phase it is now leaving. obs.PreviousPhaseEnteredAt is the
+			// timestamp that phase was entered; now is this transition.
+			// Labeled by the phase being left (bounded enum, not per-isvc)
+			// to keep series count flat at fleet scale.
+			obsmetrics.RecordRolloutPhaseDuration(string(prevPhase), now.Sub(obs.PreviousPhaseEnteredAt).Seconds())
 			// Real Phase transition: Info-level so it shows up in
 			// operator-facing dashboards alongside the K8s event the
 			// emitPhaseEvents call below records.
@@ -268,14 +275,14 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 				"message", tr.Message)
 		}
 		if tr.Phase == v1beta1.CoordinationPhaseFailed {
-			RecordGroupFailure(in.ISVC.Name, g.Name, tr.Message)
+			RecordGroupFailure(in.ISVC.Namespace, in.ISVC.Name, g.Name, tr.Message)
 		}
 
 		// RollingUpdate mixed-pairing observability: emit when distinct
 		// revision hashes coexist across Components (RollingUpdate
 		// permits this but operators want to know).
 		if g.Policy == v1beta1.CoordinationPolicyRollingUpdate && hasMixedPairing(g, perRevisionPods) {
-			RecordMixedPairing(in.ISVC.Name, g.Name)
+			RecordMixedPairing(in.ISVC.Namespace, in.ISVC.Name, g.Name)
 			if in.Recorder != nil {
 				in.Recorder.Eventf(in.ISVC, corev1.EventTypeNormal, EventReasonMixedPairingObserved,
 					"RollingUpdate group %s observed distinct per-Component revision hashes", g.Name)
@@ -286,7 +293,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		// EvaluateSurge zeroed at least one Component's surge budget
 		// to preserve the cross-Component ratio.
 		if tr.RatioSkewRejected {
-			RecordRatioSkew(in.ISVC.Name, g.Name)
+			RecordRatioSkew(in.ISVC.Namespace, in.ISVC.Name, g.Name)
 			if in.Recorder != nil {
 				in.Recorder.Eventf(in.ISVC, corev1.EventTypeNormal, EventReasonRatioSkewRejected,
 					"RatioBalanced pacing rejected surge in group %s to preserve cross-Component ratio", g.Name)

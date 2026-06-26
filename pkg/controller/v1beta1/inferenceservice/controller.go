@@ -51,6 +51,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	traffic "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 )
@@ -219,6 +220,12 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	} else {
 		// The object is being deleted
 		if controllerutil.ContainsFinalizer(isvc, finalizerName) {
+			// Drop this ISVC's OMENative coordination + canary metric series so
+			// the per-(namespace,isvc) vectors do not leak unbounded after
+			// teardown. Idempotent and runs on the finalizer-bearing delete pass.
+			coordination.DeleteForISVC(isvc.Namespace, isvc.Name)
+			canary.DeleteForISVC(isvc.Namespace, isvc.Name)
+
 			// remove our finalizer from the list and update it.
 			controllerutil.RemoveFinalizer(isvc, finalizerName)
 			if err := r.Update(context.Background(), isvc); err != nil {
@@ -837,13 +844,23 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 		// during the retry loop, there's nothing to update — drop the
 		// work item silently. Only log + retry on other errors.
 		if apierrors.IsNotFound(err) {
+			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerISVC, obsmetrics.ResultNotFound)
 			return nil
+		}
+		// Exhausted RetryOnConflict still surfaces a Conflict error —
+		// bucket it separately so the OMENative 409 churn hotspot stays
+		// visible apart from other write failures.
+		if apierrors.IsConflict(err) {
+			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerISVC, obsmetrics.ResultConflict)
+		} else {
+			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerISVC, obsmetrics.ResultError)
 		}
 		r.Log.Error(err, "Failed to update InferenceService status", "InferenceService", desiredService.Name)
 		r.Recorder.Eventf(desiredService, v1.EventTypeWarning, "UpdateFailed",
 			"Failed to update status for InferenceService %q: %v", desiredService.Name, err)
 		return errors.Wrapf(err, "fails to update InferenceService status")
 	}
+	obsmetrics.RecordStatusUpdate(obsmetrics.ControllerISVC, obsmetrics.ResultSuccess)
 
 	// Ready / NotReady transition events fire only after a successful
 	// status write that actually flipped readiness.

@@ -195,7 +195,7 @@ func detectStuckInstancesForAutoMigration(ctx context.Context, p core.ReconcileP
 			"OMENative auto-migration triggered: %s phase=%s stuck %.0fs deadline=%.0fs attempt=%d/%d uuid=%s",
 			status.InstanceKey(component, s.Index), s.Phase, now.Sub(stuckSince).Seconds(),
 			deadline.Seconds(), retries+1, maxRetries, reqUUID)
-		coordination.RecordAutoMigrationTriggered(p.ISVC.Name, string(component), AutoMigrateReason)
+		coordination.RecordAutoMigrationTriggered(p.ISVC.Namespace, p.ISVC.Name, string(component), AutoMigrateReason)
 	}
 
 	if !mutated {

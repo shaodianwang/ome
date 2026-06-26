@@ -121,7 +121,10 @@ type CanaryAnalysisConfig struct {
 	// duration string (e.g. "5s"); the loader falls back to DefaultAnalysisQueryTimeout.
 	QueryTimeout string `json:"queryTimeout,omitempty"`
 	// MaxConcurrency caps how many analysis queries run in the background at once,
-	// across all canaries. The loader falls back to DefaultAnalysisMaxConcurrency.
+	// across all canaries. It is a fleet-wide ceiling: with many concurrent canaries
+	// queries queue behind it and the effective sample interval degrades (watch the
+	// ome_canary_sampler_queue_depth / _starved_total metrics), so scale this with
+	// fleet size. The loader falls back to DefaultAnalysisMaxConcurrency.
 	MaxConcurrency int32 `json:"maxConcurrency,omitempty"`
 	// CacheTTL is how long a sampled result stays usable before the sampler evicts
 	// it. A duration string; the loader falls back to DefaultAnalysisCacheTTL.

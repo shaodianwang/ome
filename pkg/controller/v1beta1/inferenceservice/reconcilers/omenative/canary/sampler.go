@@ -115,8 +115,20 @@ func (s *Sampler) Get(req SampleRequest, since time.Time) (result analysis.Resul
 // wakes the controller. It is bounded by the semaphore and uses a standalone
 // context (the reconcile's ctx is gone by now) with the request's query timeout.
 func (s *Sampler) run(req SampleRequest) {
-	s.sem <- struct{}{}
-	defer func() { <-s.sem }()
+	// A non-blocking acquire that fails means every slot is busy and this query is
+	// about to queue — surface that as queue depth + a starvation count so operators
+	// can see MaxConcurrency throttling the effective sample interval. The semantics
+	// are unchanged: the subsequent blocking send is the same wait as before.
+	select {
+	case s.sem <- struct{}{}:
+	default:
+		canarySamplerStarvedTotal.Inc()
+		canarySamplerQueueDepth.Inc()
+		s.sem <- struct{}{}
+		canarySamplerQueueDepth.Dec()
+	}
+	canarySamplerInflight.Inc()
+	defer func() { canarySamplerInflight.Dec(); <-s.sem }()
 
 	ctx := context.Background()
 	if req.QueryTimeout > 0 {

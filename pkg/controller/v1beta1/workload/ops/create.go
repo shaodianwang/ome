@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -220,8 +221,32 @@ func reconcileInstance(ctx context.Context, deps workload.Deps, input workload.R
 		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceReady,
 			"OMENative %s is Ready (%d pod(s) serving)",
 			instanceKey(input.Key.Component, inst.Index), len(existing))
+		// Pod-create-to-ready latency: gap between the earliest pod's
+		// creation timestamp and this first Ready promotion. Recorded
+		// only on the not-ready→ready edge so re-reconciles of an
+		// already-Ready Instance don't re-observe. Labeled by component
+		// (bounded), not per-isvc.
+		if earliest := earliestPodCreation(existing); !earliest.IsZero() {
+			obsmetrics.RecordPodCreateToReady(string(input.Key.Component), time.Since(earliest).Seconds())
+		}
 	}
 	return true, nil
+}
+
+// earliestPodCreation returns the oldest CreationTimestamp across the
+// Instance's pods, or the zero time when the slice is empty / unstamped.
+func earliestPodCreation(pods []*corev1.Pod) time.Time {
+	var earliest time.Time
+	for _, p := range pods {
+		ct := p.CreationTimestamp.Time
+		if ct.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || ct.Before(earliest) {
+			earliest = ct
+		}
+	}
+	return earliest
 }
 
 // existingPodsMatchTargetRevision reports whether every existing pod

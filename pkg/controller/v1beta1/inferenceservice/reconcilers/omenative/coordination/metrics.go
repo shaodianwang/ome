@@ -8,29 +8,33 @@ import (
 // Coordination layer Prometheus metrics. Registered with the
 // controller-runtime metrics registry at package init so the operator's
 // /metrics endpoint surfaces them without additional wiring.
+//
+// Every per-ISVC vector carries both a "namespace" and an "isvc" label so
+// same-named ISVCs across namespaces do not collide, and so the series can be
+// dropped wholesale on ISVC teardown (see DeleteForISVC) to bound cardinality.
 var (
 	groupPhaseTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ome_omenative_rollout_group_phase_total",
-			Help: "Count of reconciles per (isvc, group, phase) for OMENative coordination groups.",
+			Help: "Count of reconciles per (namespace, isvc, group, phase) for OMENative coordination groups.",
 		},
-		[]string{"isvc", "group", "phase"},
+		[]string{"namespace", "isvc", "group", "phase"},
 	)
 
 	groupTransitionTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ome_omenative_rollout_group_transition_total",
-			Help: "Count of phase transitions per (isvc, group, from, to) for OMENative coordination groups.",
+			Help: "Count of phase transitions per (namespace, isvc, group, from, to) for OMENative coordination groups.",
 		},
-		[]string{"isvc", "group", "from", "to"},
+		[]string{"namespace", "isvc", "group", "from", "to"},
 	)
 
 	groupFailureTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ome_omenative_rollout_group_failure_total",
-			Help: "Count of group entries into the Failed phase per (isvc, group, reason).",
+			Help: "Count of group entries into the Failed phase per (namespace, isvc, group, reason).",
 		},
-		[]string{"isvc", "group", "reason"},
+		[]string{"namespace", "isvc", "group", "reason"},
 	)
 
 	ratioSkewTotal = prometheus.NewCounterVec(
@@ -38,15 +42,15 @@ var (
 			Name: "ome_omenative_ratio_skew_total",
 			Help: "Count of reconciles that rejected a surge to avoid cross-Component ratio skew.",
 		},
-		[]string{"isvc", "group"},
+		[]string{"namespace", "isvc", "group"},
 	)
 
 	perRevisionServiceGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "ome_omenative_per_revision_service_total",
-			Help: "Number of live per-revision Services per (isvc, component).",
+			Help: "Number of live per-revision Services per (namespace, isvc, component).",
 		},
-		[]string{"isvc", "component"},
+		[]string{"namespace", "isvc", "component"},
 	)
 
 	mixedPairingTotal = prometheus.NewCounterVec(
@@ -54,15 +58,15 @@ var (
 			Name: "ome_omenative_mixed_pairing_total",
 			Help: "Count of distinct cross-revision pairings observed in a RollingUpdate group.",
 		},
-		[]string{"isvc", "group"},
+		[]string{"namespace", "isvc", "group"},
 	)
 
 	autoMigrationsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ome_omenative_auto_migrations_total",
-			Help: "Count of auto-triggered migrations the controller initiated to recover an Instance stuck past MigrationPolicy.ProgressDeadlineSeconds, per (isvc, component, reason).",
+			Help: "Count of auto-triggered migrations the controller initiated to recover an Instance stuck past MigrationPolicy.ProgressDeadlineSeconds, per (namespace, isvc, component, reason).",
 		},
-		[]string{"isvc", "component", "reason"},
+		[]string{"namespace", "isvc", "component", "reason"},
 	)
 
 	ratioGateBypassedTotal = prometheus.NewCounterVec(
@@ -90,65 +94,65 @@ func init() {
 // RecordAutoMigrationTriggered increments the auto-migration counter
 // when the controller writes a synthetic migration ledger entry to
 // recover an Instance stuck past MigrationPolicy.ProgressDeadlineSeconds.
-func RecordAutoMigrationTriggered(isvc, component, reason string) {
+func RecordAutoMigrationTriggered(namespace, isvc, component, reason string) {
 	if isvc == "" || component == "" || reason == "" {
 		return
 	}
-	autoMigrationsTotal.WithLabelValues(isvc, component, reason).Inc()
+	autoMigrationsTotal.WithLabelValues(namespace, isvc, component, reason).Inc()
 }
 
 // RecordGroupPhase increments the phase counter for one reconcile.
 // Callers invoke this once per (group, reconcile).
-func RecordGroupPhase(isvc, group, phase string) {
+func RecordGroupPhase(namespace, isvc, group, phase string) {
 	if isvc == "" || group == "" || phase == "" {
 		return
 	}
-	groupPhaseTotal.WithLabelValues(isvc, group, phase).Inc()
+	groupPhaseTotal.WithLabelValues(namespace, isvc, group, phase).Inc()
 }
 
 // RecordGroupTransition increments the transition counter when a
 // group's phase changes between reconciles.
-func RecordGroupTransition(isvc, group, from, to string) {
+func RecordGroupTransition(namespace, isvc, group, from, to string) {
 	if isvc == "" || group == "" || from == to {
 		return
 	}
-	groupTransitionTotal.WithLabelValues(isvc, group, from, to).Inc()
+	groupTransitionTotal.WithLabelValues(namespace, isvc, group, from, to).Inc()
 }
 
 // RecordGroupFailure increments the failure counter when a group
 // enters the Failed phase.
-func RecordGroupFailure(isvc, group, reason string) {
+func RecordGroupFailure(namespace, isvc, group, reason string) {
 	if isvc == "" || group == "" {
 		return
 	}
-	groupFailureTotal.WithLabelValues(isvc, group, reason).Inc()
+	groupFailureTotal.WithLabelValues(namespace, isvc, group, reason).Inc()
 }
 
 // RecordRatioSkew increments the ratio-skew counter when RatioBalanced
 // pacing refuses a surge.
-func RecordRatioSkew(isvc, group string) {
+func RecordRatioSkew(namespace, isvc, group string) {
 	if isvc == "" || group == "" {
 		return
 	}
-	ratioSkewTotal.WithLabelValues(isvc, group).Inc()
+	ratioSkewTotal.WithLabelValues(namespace, isvc, group).Inc()
 }
 
 // SetPerRevisionServiceCount updates the gauge tracking the number of
 // live per-revision Services for one (isvc, component).
-func SetPerRevisionServiceCount(isvc, component string, count float64) {
+func SetPerRevisionServiceCount(namespace, isvc, component string, count float64) {
 	if isvc == "" || component == "" {
 		return
 	}
-	perRevisionServiceGauge.WithLabelValues(isvc, component).Set(count)
+	perRevisionServiceGauge.WithLabelValues(namespace, isvc, component).Set(count)
 }
 
 // RecordMixedPairing increments the mixed-pairing counter when a
 // RollingUpdate group sees a distinct revision-pair combination.
-func RecordMixedPairing(isvc, group string) {
+func RecordMixedPairing(namespace, isvc, group string) {
 	if isvc == "" || group == "" {
 		return
 	}
-	mixedPairingTotal.WithLabelValues(isvc, group).Inc()
+	mixedPairingTotal.WithLabelValues(namespace, isvc, group).Inc()
 }
 
 // RecordRatioGateBypassed increments the bypass counter when the
@@ -160,4 +164,22 @@ func RecordRatioGateBypassed(component, strategy string) {
 		return
 	}
 	ratioGateBypassedTotal.WithLabelValues(component, strategy).Inc()
+}
+
+// DeleteForISVC drops every coordination series carrying the given
+// (namespace, isvc) label pair. Called on terminal ISVC delete so the
+// per-ISVC vectors do not leak unbounded series after teardown. The
+// ratioGateBypassedTotal vector is not keyed by isvc, so it is unaffected.
+func DeleteForISVC(namespace, isvc string) {
+	if isvc == "" {
+		return
+	}
+	match := prometheus.Labels{"namespace": namespace, "isvc": isvc}
+	groupPhaseTotal.DeletePartialMatch(match)
+	groupTransitionTotal.DeletePartialMatch(match)
+	groupFailureTotal.DeletePartialMatch(match)
+	ratioSkewTotal.DeletePartialMatch(match)
+	perRevisionServiceGauge.DeletePartialMatch(match)
+	mixedPairingTotal.DeletePartialMatch(match)
+	autoMigrationsTotal.DeletePartialMatch(match)
 }

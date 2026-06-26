@@ -16,6 +16,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -119,6 +120,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		if err := r.Client.Get(ctx, key, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
 				// IR deleted under us; nothing to aggregate into.
+				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
 				return nil
 			}
 			return fmt.Errorf("aggregateAndWriteStatus: re-read IR: %w", err)
@@ -190,6 +192,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 
 		if err := r.Client.Status().Update(ctx, fresh); err != nil {
 			if apierrors.IsNotFound(err) {
+				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultNotFound)
 				return nil
 			}
 			return fmt.Errorf("aggregateAndWriteStatus: update IR status: %w", err)
@@ -229,8 +232,17 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		} else {
 			ir.Status.Conditions = nil
 		}
+		obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultSuccess)
 		return nil
 	}); err != nil {
+		// Exhausted RetryOnConflict still surfaces a Conflict error
+		// (wrapped via %w above); bucket it apart from other write
+		// failures so the 409 churn hotspot is visible per controller.
+		if apierrors.IsConflict(err) {
+			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultConflict)
+		} else {
+			obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultError)
+		}
 		return err
 	}
 
