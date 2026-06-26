@@ -449,10 +449,24 @@ func parseCanaryAnalysisConfig(configMap *v1.ConfigMap) (*CanaryAnalysisConfig, 
 // "coordination" key yields a zero-valued config (deadband disabled), preserving
 // the prior write-on-any-diff behavior.
 func NewCoordinationConfig(clientset kubernetes.Interface) (*CoordinationConfig, error) {
-	configMap, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Get(context.TODO(), constants.InferenceServiceConfigMapName, metav1.GetOptions{})
+	configMap, err := getInferenceServiceConfigMap(clientset)
 	if err != nil {
 		return nil, err
 	}
+	return parseCoordinationConfig(configMap)
+}
+
+// NewCoordinationConfigCached is the ConfigCache-backed variant of
+// NewCoordinationConfig used on the reconcile hot path.
+func NewCoordinationConfigCached(cache *ConfigCache, clientset kubernetes.Interface) (*CoordinationConfig, error) {
+	configMap, err := cache.get(clientset)
+	if err != nil {
+		return nil, err
+	}
+	return parseCoordinationConfig(configMap)
+}
+
+func parseCoordinationConfig(configMap *v1.ConfigMap) (*CoordinationConfig, error) {
 	cfg := &CoordinationConfig{}
 	if err := getComponentConfig(CoordinationConfigName, configMap, cfg); err != nil {
 		return nil, fmt.Errorf("unable to parse coordination config json: %w", err)

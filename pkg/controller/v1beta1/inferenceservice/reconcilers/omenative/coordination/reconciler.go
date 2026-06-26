@@ -185,16 +185,13 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		multiPod := isvcutils.IsMultiPodComponent(in.ISVC, c)
 		SetPerRevisionServiceCount(in.ISVC.Namespace, in.ISVC.Name, string(c), float64(len(perRevisionPods[c])))
 
-		// Change-detector: skip the per-revision Service ensure (2 Gets
-		// per hash via CreateOrUpdate) and GC (a namespace Service LIST)
-		// when the live revision-hash set already matches the set last
-		// recorded on Status.Components.<c>.Traffic. A prior reconcile
-		// converged the Services for that set, so re-running the apiserver
-		// round-trips every steady-state pass is pure overhead at scale.
-		if PerRevisionServicesConverged(in.ISVC.Name, c, perRevisionPods[c], in.ISVC.Status.Components[c].Traffic) {
-			continue
-		}
-
+		// Ensure runs EVERY reconcile — it is the self-heal path. A
+		// per-revision routing/headless Service deleted out-of-band must
+		// be recreated even when the live revision-hash set is unchanged;
+		// EnsurePerRevisionServices uses CreateOrUpdate, whose Gets are
+		// cache-served and cheap, and recreates a missing Service. Gating
+		// ensure on revision-set convergence would let a deleted Service
+		// stay gone and strand the HTTPRoute on a dead backend.
 		for hash := range perRevisionPods[c] {
 			if hash == "" {
 				continue
@@ -203,6 +200,16 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 				return nil, fmt.Errorf("ensure per-revision service for %s/%s: %w", c, hash, err)
 			}
 			result.PerRevisionServicesEnsured++
+		}
+
+		// GC — and only GC — may be skipped when converged. The orphan
+		// sweep is a heavier namespace Service LIST, and when the live
+		// revision-hash set matches the set last recorded on
+		// Status.Components.<c>.Traffic there is provably nothing to
+		// delete: a prior reconcile already GC'd every orphan for that
+		// set. Any divergence forces the full sweep.
+		if PerRevisionServicesConverged(in.ISVC.Name, c, perRevisionPods[c], in.ISVC.Status.Components[c].Traffic) {
+			continue
 		}
 
 		// Delete per-revision Service pairs whose revision-hash has no

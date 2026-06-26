@@ -321,6 +321,63 @@ func TestDispatch_EnsuresPerRevisionServicesForSecondary(t *testing.T) {
 	}
 }
 
+// TestDispatch_RecreatesDeletedServiceWhenConverged is the canary-side
+// regression test for the self-heal bug: a per-revision Service deleted
+// out-of-band must be recreated on the next Dispatch even when the live
+// revision-hash set matches the recorded Traffic set (converged). Pre-fix,
+// ensure was gated on PerRevisionServicesConverged, so the deleted Service
+// stayed gone and the weighted-route consumer routed to a dead backend.
+func TestDispatch_RecreatesDeletedServiceWhenConverged(t *testing.T) {
+	ns := "default"
+	n1 := 1
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "cv1"}}
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n1}}
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+		Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+			{Capacity: intstr.FromString("100%"), Traffic: 100},
+		}},
+	}}}
+	// Converged: a single revision present, recorded as the engine's Traffic set
+	// so PerRevisionServicesConverged returns true and the GC sweep is skipped.
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {Traffic: []v1beta1.ComponentTrafficTarget{{
+			RevisionName: coordination.PerRevisionServiceName("cv1", v1beta1.EngineComponent, "stable0"),
+			Percent:      100, LatestRevision: true,
+		}}},
+	}
+	objs := []runtime.Object{isvc, ir(ns, "cv1", v1beta1.EngineComponent, "stable0"),
+		canaryPod(ns, "cv1", "engine", "stable0", "cv1-engine-0"),
+	}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objs...).Build()
+	ctx := context.Background()
+
+	// First Dispatch ensures the per-revision Service.
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
+		t.Fatalf("first Dispatch error: %v", err)
+	}
+	key := types.NamespacedName{Namespace: ns, Name: coordination.PerRevisionServiceName("cv1", v1beta1.EngineComponent, "stable0")}
+	if err := c.Get(ctx, key, &corev1.Service{}); err != nil {
+		t.Fatalf("setup: routing Service should exist after first Dispatch: %v", err)
+	}
+
+	// Delete the Service out-of-band while the revision set stays converged.
+	if err := c.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}); err != nil {
+		t.Fatalf("delete out-of-band: %v", err)
+	}
+	if err := c.Get(ctx, key, &corev1.Service{}); err == nil {
+		t.Fatalf("setup: routing Service should be gone after delete")
+	}
+
+	// Second Dispatch: converged, but the deleted Service must be recreated.
+	if _, err := Dispatch(ctx, DispatchDeps{Client: c, Reader: c, ISVC: isvc}); err != nil {
+		t.Fatalf("second Dispatch error: %v", err)
+	}
+	if err := c.Get(ctx, key, &corev1.Service{}); err != nil {
+		t.Errorf("converged revision set: deleted per-revision Service must be recreated, got: %v", err)
+	}
+}
+
 // TestPrimaryComponent pins the router>engine>decoder priority for the externally-
 // routed Component that carries the canary's traffic weight. In v2 the primary is
 // chosen among the canary GROUP's Components (not the raw Spec.* presence), so the

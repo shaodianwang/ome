@@ -351,7 +351,9 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 // read source DetectRestartTrigger used per-Instance, hoisted to once per
 // reconcile.
 func liveBucketPods(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (map[int32][]*corev1.Pod, error) {
-	pods, err := query.ListOMENativePodsByName(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, component)
+	// Live reader (APIReader) has no Pod field index — useIndex=false skips
+	// the doomed MatchingFields probe so this is exactly ONE live List.
+	pods, err := query.ListOMENativePodsByName(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, component, false)
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +365,9 @@ func liveBucketPods(ctx context.Context, deps Deps, input ReconcileInput, compon
 // the same non-destructive read source DetectUpdateTrigger / Update used
 // per-Instance, hoisted to once per reconcile.
 func cachedBucketPods(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (map[int32][]*corev1.Pod, error) {
-	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, component)
+	// Cached client has the OMENative Pod field index — useIndex=true takes
+	// the index fast path instead of scanning every cached pod.
+	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, component, true)
 	if err != nil {
 		return nil, err
 	}

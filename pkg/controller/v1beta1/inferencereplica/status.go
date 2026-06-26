@@ -96,22 +96,27 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	desiredByIdx := workload.DesiredPodCountByInstance(plan)
 	component := v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)
 
-	// Live-list pods + EndpointSlices outside the retry closure: both
-	// reads are idempotent (no apiserver-side mutation), so on a status
-	// conflict we just re-stamp the same counters onto the re-read IR.
-	// Mirrors the omenative direct path which reads pods + availability
-	// once at the top of AggregateAndWriteStatus.
-	reader := client.Reader(r.Client)
-	if r.APIReader != nil {
-		reader = r.APIReader
-	}
-	pods, err := query.ListOMENativePodsByName(ctx, reader, ir.Namespace, ir.Spec.ParentRef.Name, component)
+	// List pods + EndpointSlices via the CACHED client (r.Client), outside
+	// the retry closure: both reads are idempotent (no apiserver-side
+	// mutation), so on a status conflict we just re-stamp the same counters
+	// onto the re-read IR. Mirrors the omenative direct path which reads pods
+	// + availability once at the top of AggregateAndWriteStatus.
+	//
+	// This aggregator is observability-only COUNTING — the manager cache is
+	// scoped to OME pods, has the OMENative Pod field index registered, and
+	// watches EndpointSlices, so cache-served counts are both correct and
+	// cheap. Going live (r.APIReader) on every reconcile was the #1 hot-path
+	// cost: an uncached LIST per IR reconcile purely for counters, plus the
+	// doomed MatchingFields probe the live reader can't serve. r.APIReader
+	// stays reserved for the destructive/correctness-critical paths
+	// (drain/delete/recreate confirm) that genuinely need a live read.
+	pods, err := query.ListOMENativePodsByName(ctx, r.Client, ir.Namespace, ir.Spec.ParentRef.Name, component, true)
 	if err != nil {
 		return fmt.Errorf("aggregateAndWriteStatus: list pods: %w", err)
 	}
 	byIndex := query.BucketPodsByInstanceIdx(pods)
 	serviceName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, component)
-	availableByPod, err := workload.AvailablePodSet(ctx, reader, ir.Namespace, serviceName)
+	availableByPod, err := workload.AvailablePodSet(ctx, r.Client, ir.Namespace, serviceName)
 	if err != nil {
 		return fmt.Errorf("aggregateAndWriteStatus: compute availability: %w", err)
 	}

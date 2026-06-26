@@ -75,15 +75,13 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	// secondary's revision endpoint dangling. Mirrors coordination's per-Component
 	// ensure+GC loop.
 	for _, comp := range configuredComponents(d.ISVC) {
-		// Change-detector: skip the ensure (2 Gets/hash via CreateOrUpdate)
-		// and GC (a namespace Service LIST) when the live revision-hash set
-		// already matches the set recorded on Status.Components.<c>.Traffic
-		// from a prior reconcile. Mirrors coordination's gate. Secondaries
-		// (whose Traffic the canary never writes) always fall through, which
-		// is correct — they just don't get the steady-state skip.
-		if coordination.PerRevisionServicesConverged(d.ISVC.Name, comp, perRev[comp], d.ISVC.Status.Components[comp].Traffic) {
-			continue
-		}
+		// Ensure runs EVERY reconcile — it is the self-heal path. A
+		// per-revision Service deleted out-of-band must be recreated even
+		// when the live revision-hash set is unchanged; EnsurePerRevisionServices
+		// uses CreateOrUpdate, whose Gets are cache-served and cheap, and
+		// recreates a missing Service. Gating ensure on revision-set
+		// convergence would strand the weighted-route consumer (and the
+		// peer OME_<PEER>_REVISION_ENDPOINT) on a dead backend.
 		multiPod := isvcutils.IsMultiPodComponent(d.ISVC, comp)
 		for hash := range perRev[comp] {
 			if hash == "" {
@@ -92,6 +90,16 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 			if _, err := coordination.EnsurePerRevisionServices(ctx, d.Client, d.ISVC, comp, hash, multiPod); err != nil {
 				return 0, err
 			}
+		}
+		// GC — and only GC — may be skipped when converged. The orphan
+		// sweep is a heavier namespace Service LIST; when the live
+		// revision-hash set matches the set recorded on
+		// Status.Components.<c>.Traffic there is nothing to delete.
+		// Mirrors coordination's gate. Secondaries (whose Traffic the
+		// canary never writes) always fall through, which is correct —
+		// they just don't get the steady-state GC skip.
+		if coordination.PerRevisionServicesConverged(d.ISVC.Name, comp, perRev[comp], d.ISVC.Status.Components[comp].Traffic) {
+			continue
 		}
 		if err := coordination.GCOrphanedPerRevisionServices(ctx, d.Client, d.ISVC, comp, perRev[comp]); err != nil {
 			return 0, err

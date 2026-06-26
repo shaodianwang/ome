@@ -128,30 +128,79 @@ func steadyEngineStatus(isvc *v1beta1.InferenceService, hash string) {
 	}
 }
 
-// TestReconcile_SkipsServiceEnsureWhenRevisionSetConverged pins the
-// merged change-driven contract: when the live revision-hash set already
-// matches the set recorded on Status.Components.<c>.Traffic, the
-// change-detector (PerRevisionServicesConverged) skips the per-revision
-// Service ensure + GC for that Component — a prior reconcile already
-// converged them, so the apiserver round-trips are pure steady-state
-// overhead. The cached-read switch is orthogonal: pods are still observed
-// via Client every pass; only the write-side ensure/GC is gated.
-func TestReconcile_SkipsServiceEnsureWhenRevisionSetConverged(t *testing.T) {
+// TestReconcile_SkipsGCWhenRevisionSetConverged pins the change-driven
+// perf contract: when the live revision-hash set already matches the set
+// recorded on Status.Components.<c>.Traffic, the heavier GC orphan sweep
+// (a namespace Service LIST) is skipped — a prior reconcile already GC'd
+// every orphan for that set. Ensure, by contrast, still runs (self-heal,
+// see TestReconcile_RecreatesDeletedServiceWhenConverged); its Gets are
+// cache-served and cheap. The cached-read switch is orthogonal: pods are
+// still observed via Client every pass.
+func TestReconcile_SkipsGCWhenRevisionSetConverged(t *testing.T) {
 	isvc := testOMENativeISVC()
 	steadyEngineStatus(isvc, "hash1")
 	// Live pod whose hash matches the recorded Traffic set -> converged.
 	pods := []runtime.Object{
 		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
 	}
-	c := testClient(pods...)
+	c := &listCountingClient{Client: testClient(pods...)}
 	r, err := Reconcile(context.Background(), ReconcileInputs{
 		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if r.PerRevisionServicesEnsured != 0 {
-		t.Errorf("converged revision set: Service ensure must be skipped, got %d ensured", r.PerRevisionServicesEnsured)
+	// Ensure still runs every reconcile (self-heal); the converged set has
+	// one live hash, so exactly that hash is ensured.
+	if r.PerRevisionServicesEnsured != 1 {
+		t.Errorf("converged revision set: ensure must still run (self-heal), got %d ensured want 1", r.PerRevisionServicesEnsured)
+	}
+	// The GC orphan sweep (Service LIST) must be skipped when converged.
+	if c.serviceLists != 0 {
+		t.Errorf("converged revision set: GC Service LIST must be skipped, got %d LIST calls", c.serviceLists)
+	}
+}
+
+// TestReconcile_RecreatesDeletedServiceWhenConverged is the regression
+// test for the self-heal bug: a per-revision Service deleted out-of-band
+// must be recreated on the next reconcile even when the live revision-hash
+// set is unchanged (converged). Pre-fix, ensure was gated on convergence,
+// so the deleted Service stayed gone and the HTTPRoute routed to a dead
+// backend.
+func TestReconcile_RecreatesDeletedServiceWhenConverged(t *testing.T) {
+	isvc := testOMENativeISVC()
+	steadyEngineStatus(isvc, "hash1")
+	pods := []runtime.Object{
+		buildPod(isvc, v1beta1.EngineComponent, "hash1", 0),
+	}
+	c := testClient(pods...)
+	ctx := context.Background()
+
+	// First reconcile creates the per-revision Services for hash1.
+	if _, err := Reconcile(ctx, ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now()}); err != nil {
+		t.Fatalf("first reconcile: unexpected error: %v", err)
+	}
+	routingKey := client.ObjectKey{Namespace: isvc.Namespace, Name: PerRevisionServiceName(isvc.Name, v1beta1.EngineComponent, "hash1")}
+	if err := c.Get(ctx, routingKey, &corev1.Service{}); err != nil {
+		t.Fatalf("setup: routing Service should exist after first reconcile: %v", err)
+	}
+
+	// Delete the routing Service out-of-band (e.g. operator fat-fingered a
+	// kubectl delete) while the revision set stays converged.
+	if err := c.Delete(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: routingKey.Namespace, Name: routingKey.Name}}); err != nil {
+		t.Fatalf("delete out-of-band: %v", err)
+	}
+	if err := c.Get(ctx, routingKey, &corev1.Service{}); err == nil {
+		t.Fatalf("setup: routing Service should be gone after delete")
+	}
+
+	// Second reconcile: revision set is unchanged (converged), but the
+	// deleted Service must be recreated.
+	if _, err := Reconcile(ctx, ReconcileInputs{ISVC: isvc, Client: c, Reader: c, Now: time.Now()}); err != nil {
+		t.Fatalf("second reconcile: unexpected error: %v", err)
+	}
+	if err := c.Get(ctx, routingKey, &corev1.Service{}); err != nil {
+		t.Errorf("converged revision set: deleted per-revision Service must be recreated, got: %v", err)
 	}
 }
 
@@ -601,6 +650,21 @@ func testClient(objs ...runtime.Object) client.Client {
 		panic(err)
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+}
+
+// listCountingClient wraps a client.Client and counts Service LIST calls so
+// a test can assert the GC orphan sweep (the heavier namespace Service LIST)
+// is skipped when the revision set is converged, while ensure still runs.
+type listCountingClient struct {
+	client.Client
+	serviceLists int
+}
+
+func (c *listCountingClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*corev1.ServiceList); ok {
+		c.serviceLists++
+	}
+	return c.Client.List(ctx, list, opts...)
 }
 
 func TestReconcile_ConsiderCoordinationGroupEventFiresForMultiOMENativeWithoutCoord(t *testing.T) {

@@ -90,7 +90,7 @@ func createFiltered(ctx context.Context, deps workload.Deps, input workload.Reco
 		return ctrl.Result{}, fmt.Errorf("Create: nil client")
 	}
 
-	existing, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component)
+	existing, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component, true)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("Create: list pods: %w", err)
 	}

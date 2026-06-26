@@ -355,11 +355,14 @@ func TestListOMENativePodsByName_IndexAndFallbackAgree(t *testing.T) {
 	indexed := newIndexedDiscoverTestClient(t, objs...)
 	fallback := newDiscoverTestClient(t, objs...)
 
-	gotIndexed, err := ListOMENativePodsByName(context.Background(), indexed, "ns", "isvc", workload.ComponentEngine)
+	// useIndex=true on both: the indexed client takes the MatchingFields
+	// fast path; the index-less client falls back to the label selector.
+	// Both must return the identical set.
+	gotIndexed, err := ListOMENativePodsByName(context.Background(), indexed, "ns", "isvc", workload.ComponentEngine, true)
 	if err != nil {
 		t.Fatalf("indexed list: %v", err)
 	}
-	gotFallback, err := ListOMENativePodsByName(context.Background(), fallback, "ns", "isvc", workload.ComponentEngine)
+	gotFallback, err := ListOMENativePodsByName(context.Background(), fallback, "ns", "isvc", workload.ComponentEngine, true)
 	if err != nil {
 		t.Fatalf("fallback list: %v", err)
 	}
@@ -378,5 +381,85 @@ func assertPodSet(t *testing.T, label string, pods []*corev1.Pod, want map[strin
 		if !want[p.Name] {
 			t.Errorf("%s: unexpected pod %q in result set %v", label, p.Name, podNames(pods))
 		}
+	}
+}
+
+// probeCountingReader wraps a client.Reader and records, per PodList List
+// call, whether the caller passed a MatchingFields option (the index
+// probe). Lets a test prove the live-reader path skips the doomed probe.
+type probeCountingReader struct {
+	client.Reader
+	podListCalls       int
+	matchingFieldsHits int
+}
+
+func (r *probeCountingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*corev1.PodList); ok {
+		r.podListCalls++
+		for _, o := range opts {
+			if _, ok := o.(client.MatchingFields); ok {
+				r.matchingFieldsHits++
+			}
+		}
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+// TestListOMENativePodsByName_LiveReaderSkipsProbe pins issue #1: with
+// useIndex=false (the live-reader / index-less path), the helper goes
+// STRAIGHT to the label selector — exactly ONE PodList List, and ZERO
+// MatchingFields probes. The old code always issued a MatchingFields probe
+// first; on the live API reader that probe ALWAYS failed and forced a
+// second fallback List. Asserting one List + zero probes proves the doomed
+// probe is gone on the live path while the returned set is still correct.
+func TestListOMENativePodsByName_LiveReaderSkipsProbe(t *testing.T) {
+	objs := []client.Object{
+		newDiscoverPodFor("eng-0", "isvc", workload.ComponentEngine),
+		newDiscoverPodFor("eng-1", "isvc", workload.ComponentEngine),
+		newDiscoverPodFor("dec-0", "isvc", workload.ComponentDecoder),
+	}
+	// Index-less client (the real APIReader has no Pod field index either).
+	live := newDiscoverTestClient(t, objs...)
+	counter := &probeCountingReader{Reader: live}
+
+	got, err := ListOMENativePodsByName(context.Background(), counter, "ns", "isvc", workload.ComponentEngine, false)
+	if err != nil {
+		t.Fatalf("live list: %v", err)
+	}
+	assertPodSet(t, "live", got, map[string]bool{"eng-0": true, "eng-1": true})
+
+	if counter.matchingFieldsHits != 0 {
+		t.Errorf("live reader path must NOT issue a MatchingFields probe, got %d", counter.matchingFieldsHits)
+	}
+	if counter.podListCalls != 1 {
+		t.Errorf("live reader path must issue exactly 1 PodList List, got %d", counter.podListCalls)
+	}
+}
+
+// TestListOMENativePodsByName_CachedReaderUsesIndex is the companion to the
+// live-path test: with useIndex=true against an index-backed client, the
+// helper takes the MatchingFields fast path in a SINGLE List (the index
+// resolves, no fallback). Together the two tests prove cached callers keep
+// the index fast path while live callers skip the probe.
+func TestListOMENativePodsByName_CachedReaderUsesIndex(t *testing.T) {
+	objs := []client.Object{
+		newDiscoverPodFor("eng-0", "isvc", workload.ComponentEngine),
+		newDiscoverPodFor("eng-1", "isvc", workload.ComponentEngine),
+		newDiscoverPodFor("dec-0", "isvc", workload.ComponentDecoder),
+	}
+	indexed := newIndexedDiscoverTestClient(t, objs...)
+	counter := &probeCountingReader{Reader: indexed}
+
+	got, err := ListOMENativePodsByName(context.Background(), counter, "ns", "isvc", workload.ComponentEngine, true)
+	if err != nil {
+		t.Fatalf("cached list: %v", err)
+	}
+	assertPodSet(t, "cached", got, map[string]bool{"eng-0": true, "eng-1": true})
+
+	if counter.matchingFieldsHits != 1 {
+		t.Errorf("cached reader path must take the MatchingFields fast path exactly once, got %d", counter.matchingFieldsHits)
+	}
+	if counter.podListCalls != 1 {
+		t.Errorf("cached reader path must resolve via the index in 1 List (no fallback), got %d", counter.podListCalls)
 	}
 }

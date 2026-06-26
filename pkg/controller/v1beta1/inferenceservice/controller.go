@@ -591,10 +591,10 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 	// Load the coordination tuning per-reconcile from the operator config so
-	// ConfigMap edits take effect without a restart (mirrors canaryAnalysis). An
-	// absent "coordination" key yields a zero deadband (no hysteresis), preserving
-	// the prior write-on-any-diff behavior.
-	coordinationConfig, err := controllerconfig.NewCoordinationConfig(r.Clientset)
+	// ConfigMap edits take effect within the cache TTL without a restart (mirrors
+	// canaryAnalysis). An absent "coordination" key yields a zero deadband (no
+	// hysteresis), preserving the prior write-on-any-diff behavior.
+	coordinationConfig, err := controllerconfig.NewCoordinationConfigCached(r.ConfigCache, r.Clientset)
 	if err != nil {
 		log.Error(err, "Failed to load coordination config")
 		return reconcile.Result{}, errors.Wrapf(err, "fails to load coordination config")

@@ -51,7 +51,7 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 	if deps.Client == nil {
 		return false, fmt.Errorf("Update: nil client")
 	}
-	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component)
+	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component, true)
 	if err != nil {
 		return false, fmt.Errorf("Update: list pods (instance=%d): %w", inst.Index, err)
 	}
@@ -335,7 +335,7 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 	// standalone DetectUpdateTrigger path).
 	pods := instancePods
 	if pods == nil {
-		all, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component)
+		all, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component, true)
 		if err != nil {
 			return false, err
 		}

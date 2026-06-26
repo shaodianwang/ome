@@ -643,3 +643,60 @@ func TestConfigCache(t *testing.T) {
 		assert.Error(t, err, "missing ConfigMap must surface as an error")
 	})
 }
+
+// TestNewCoordinationConfigCached verifies the cached coordination loader shares
+// one apiserver GET within the TTL and re-fetches after it elapses so a
+// ConfigMap edit applies without a restart — mirroring the other cached loaders
+// (the coordination loader runs on every ISVC reconcile).
+func TestNewCoordinationConfigCached(t *testing.T) {
+	t.Run("hit: repeated loads share one GET within TTL", func(t *testing.T) {
+		clientset, gets := countingClientset(t, map[string]string{
+			CoordinationConfigName: `{"trafficWeightDeadbandPercent":5}`,
+		})
+		fakeNow := time.Unix(0, 0)
+		cache := &ConfigCache{ttl: 30 * time.Second, now: func() time.Time { return fakeNow }}
+
+		cfg, err := NewCoordinationConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Equal(t, int32(5), cfg.TrafficWeightDeadbandPercent)
+
+		_, err = NewCoordinationConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), atomic.LoadInt64(gets), "both loads must share one apiserver GET")
+	})
+
+	t.Run("expiry picks up a ConfigMap edit without restart", func(t *testing.T) {
+		clientset, _ := countingClientset(t, map[string]string{
+			CoordinationConfigName: `{"trafficWeightDeadbandPercent":5}`,
+		})
+		fakeNow := time.Unix(0, 0)
+		cache := &ConfigCache{ttl: 30 * time.Second, now: func() time.Time { return fakeNow }}
+
+		cfg, err := NewCoordinationConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Equal(t, int32(5), cfg.TrafficWeightDeadbandPercent)
+
+		// Edit the ConfigMap to bump the deadband.
+		_, err = clientset.CoreV1().ConfigMaps(constants.OMENamespace).Update(context.TODO(), &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.InferenceServiceConfigMapName,
+				Namespace: constants.OMENamespace,
+			},
+			Data: map[string]string{
+				CoordinationConfigName: `{"trafficWeightDeadbandPercent":10}`,
+			},
+		}, metav1.UpdateOptions{})
+		require.NoError(t, err)
+
+		// Within TTL the edit is not yet visible.
+		cfg, err = NewCoordinationConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Equal(t, int32(5), cfg.TrafficWeightDeadbandPercent)
+
+		// After TTL the edit applies.
+		fakeNow = fakeNow.Add(31 * time.Second)
+		cfg, err = NewCoordinationConfigCached(cache, clientset)
+		require.NoError(t, err)
+		assert.Equal(t, int32(10), cfg.TrafficWeightDeadbandPercent)
+	})
+}

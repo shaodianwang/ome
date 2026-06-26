@@ -84,35 +84,66 @@ func indexUnavailable(err error) bool {
 // either the cached client or the live reader (destructive paths need live
 // — see LiveListPodsForInstance below).
 //
+// useIndex selects the read strategy and MUST match the reader's
+// capability:
+//
+//   - useIndex=true  — cached client (mgr.GetClient()) that has the
+//     OMENativePodIndexField registered. Resolves the Instance's pods
+//     through the field index in O(matched) instead of scanning every
+//     cached pod per call. Pass true ONLY for the cached client.
+//   - useIndex=false — live API reader (APIReader) or any reader without
+//     the field index. The apiserver has no custom Pod field selector, so
+//     a MatchingFields probe ALWAYS fails there and would force a second,
+//     fallback List on every call. Skipping straight to the label selector
+//     does ONE List. Pass false for every live-reader / index-less caller.
+//
+// Both modes return the identical pod set (the index extractor mirrors the
+// label selector below) — useIndex only picks how the set is fetched.
+//
 // Adapters with a typed owner handle (e.g. ISVC, IR) compose the namespace
 // + name + component arguments from their own source-of-truth shape; this
 // helper stays owner-agnostic so the workload pipeline can call it from
 // either adapter path.
-func ListOMENativePodsByName(ctx context.Context, c client.Reader, namespace, isvcName string, component workload.ComponentType) ([]*corev1.Pod, error) {
+func ListOMENativePodsByName(ctx context.Context, c client.Reader, namespace, isvcName string, component workload.ComponentType, useIndex bool) ([]*corev1.Pod, error) {
 	pods := &corev1.PodList{}
-	// Fast path: cache field index keyed on (isvc, component). Avoids
-	// scanning every cached pod per call on large clusters. Falls back to
-	// the label selector when the reader has no such index (live API
-	// reader / index-less fake client) — both return the identical set.
-	err := c.List(ctx, pods, client.InNamespace(namespace),
-		client.MatchingFields{OMENativePodIndexField: OMENativePodIndexValue(isvcName, component)})
-	if indexUnavailable(err) {
+	if useIndex {
+		// Fast path: cache field index keyed on (isvc, component). Avoids
+		// scanning every cached pod per call on large clusters. Falls back
+		// to the label selector only if the index is somehow missing (e.g.
+		// an index-less fake client in tests) — both return the identical
+		// set.
+		err := c.List(ctx, pods, client.InNamespace(namespace),
+			client.MatchingFields{OMENativePodIndexField: OMENativePodIndexValue(isvcName, component)})
+		if err == nil {
+			return collectPods(pods), nil
+		}
+		if !indexUnavailable(err) {
+			return nil, err
+		}
 		pods = &corev1.PodList{}
-		sel := labels.SelectorFromSet(labels.Set{
-			constants.InferenceServicePodLabelKey: isvcName,
-			constants.OMEComponentLabel:           string(component),
-			LabelManagedBy:                        ManagedByOMENative,
-		})
-		err = c.List(ctx, pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel})
 	}
-	if err != nil {
+	// Label-selector path: the only path for live / index-less readers
+	// (skips the doomed MatchingFields probe), and the fallback when an
+	// index-backed reader unexpectedly lacks the index.
+	sel := labels.SelectorFromSet(labels.Set{
+		constants.InferenceServicePodLabelKey: isvcName,
+		constants.OMEComponentLabel:           string(component),
+		LabelManagedBy:                        ManagedByOMENative,
+	})
+	if err := c.List(ctx, pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
 		return nil, err
 	}
+	return collectPods(pods), nil
+}
+
+// collectPods flattens a PodList into a slice of pointers into its backing
+// array.
+func collectPods(pods *corev1.PodList) []*corev1.Pod {
 	out := make([]*corev1.Pod, 0, len(pods.Items))
 	for i := range pods.Items {
 		out = append(out, &pods.Items[i])
 	}
-	return out, nil
+	return out
 }
 
 // RegisterOMENativePodIndex installs the OMENativePodIndexField field
@@ -144,7 +175,9 @@ func RegisterOMENativePodIndex(ctx context.Context, indexer client.FieldIndexer)
 // keeps the leaf importable by both adapter paths without closing a
 // cycle. Adapters compose these from their own Deps + key.
 func LiveListPodsForInstance(ctx context.Context, reader client.Reader, namespace, isvcName string, component workload.ComponentType, idx int32) ([]*corev1.Pod, error) {
-	pods, err := ListOMENativePodsByName(ctx, reader, namespace, isvcName, component)
+	// Live API reader has no Pod field index — skip the doomed MatchingFields
+	// probe (useIndex=false) and go straight to the label selector.
+	pods, err := ListOMENativePodsByName(ctx, reader, namespace, isvcName, component, false)
 	if err != nil {
 		return nil, err
 	}

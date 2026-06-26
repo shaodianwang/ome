@@ -682,15 +682,14 @@ func TestReconcile_RestartPass_OneLiveListForManyInstances(t *testing.T) {
 		enginePod(isvc.Name, isvc.Namespace, 1),
 		enginePod(isvc.Name, isvc.Namespace, 2),
 	}
-	// Register the same OMENative pod field index cmd/manager installs on
-	// the manager cache, so ListOMENativePodsByName resolves through the
-	// index fast path (one physical List) rather than the probe-then-
-	// label-selector fallback (two physical Lists on an index-less reader).
-	// This keeps the assertion measuring the per-Component-vs-per-Instance
-	// list count, not the index fallback's extra probe.
+	// The restart pass reads the LIVE reader (APIReader), which has no Pod
+	// field index — liveBucketPods calls ListOMENativePodsByName with
+	// useIndex=false, so it goes straight to the label selector (ONE List).
+	// No index registration here: the live path never probes MatchingFields,
+	// so the assertion measures the per-Component-vs-per-Instance list count
+	// without any index-fallback noise.
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithIndex(&corev1.Pod{}, query.OMENativePodIndexField, query.OMENativePodIndexExtractor).
 		WithObjects(pods...).Build()
 	counter := &listCountingReader{Reader: c}
 	deps := workload.Deps{Client: c, APIReader: counter}
