@@ -15,7 +15,6 @@ spec:
         - components: [engine]
           soak: 30s
           canary:
-            promotion: Auto
             steps:
               - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
               - { capacity: "100%", traffic: 100 }
