@@ -108,6 +108,31 @@ clusters:
 	}
 }
 
+// TestIsValidHostname_RequiresHTTPS pins that a workload-cluster endpoint must
+// be reached over TLS: a plaintext (http) or scheme-less server is rejected so
+// the cross-cluster bearer credential is never sent in the clear.
+func TestIsValidHostname_RequiresHTTPS(t *testing.T) {
+	cases := []struct {
+		name   string
+		server string
+		want   bool
+	}{
+		{"https dns", "https://api.example.com:6443", true},
+		{"https ip", "https://10.0.0.1:6443", true},
+		{"http rejected", "http://api.example.com:6443", false},
+		{"http ip rejected", "http://10.0.0.1:6443", false},
+		{"scheme-less rejected", "api.example.com:6443", false},
+		{"empty rejected", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isValidHostname(tc.server); got != tc.want {
+				t.Errorf("isValidHostname(%q) = %v, want %v", tc.server, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRESTConfigFromKubeConfig_BadBytes(t *testing.T) {
 	if _, err := RESTConfigFromKubeConfig([]byte("not-a-kubeconfig"), ExecCredentialPolicy{}); err == nil {
 		t.Errorf("expected error for malformed kubeconfig, got nil")

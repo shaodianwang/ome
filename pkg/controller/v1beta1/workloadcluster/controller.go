@@ -3,6 +3,7 @@ package workloadcluster
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -26,6 +27,15 @@ import (
 // default.
 const DefaultHealthInterval = time.Minute
 
+// DefaultConnectionGracePeriod is the fallback window during which a cluster
+// that was previously reachable tolerates transient probe failures before it is
+// flipped to Ready=False and disconnected. A single failed /version probe (a
+// momentary blip) must not tear down a live, working connection. The operative
+// value is supplied by the manager flag / chart; this is the
+// graceful-degradation default. A non-positive ConnectionGracePeriod disables
+// grace (flip to Ready=False on the first failure — the original behavior).
+const DefaultConnectionGracePeriod = 2 * time.Minute
+
 // +kubebuilder:rbac:groups=ome.io,resources=workloadclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ome.io,resources=workloadclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
@@ -48,6 +58,19 @@ type Reconciler struct {
 	Manager *Manager
 	// ExecPolicy is the exec credential policy applied during validation.
 	ExecPolicy ExecCredentialPolicy
+	// ConnectionGracePeriod is how long a previously reachable cluster tolerates
+	// transient probe failures before it is flipped to Ready=False and
+	// disconnected; defaults to DefaultConnectionGracePeriod. A non-positive
+	// value disables grace.
+	ConnectionGracePeriod time.Duration
+
+	// mu guards firstFailure. The reconciler runs single-worker per key, but
+	// firstFailure is shared across keys.
+	mu sync.Mutex
+	// firstFailure records, per cluster, when the current run of consecutive
+	// probe failures began. Cleared on a successful probe. Used to keep a live
+	// connection up across brief blips (within ConnectionGracePeriod).
+	firstFailure map[string]time.Time
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -57,12 +80,46 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			if r.Manager != nil {
 				r.Manager.Disconnect(req.Name)
 			}
+			r.clearFailure(req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
 	status, reason, msg, raw := r.assess(ctx, wc)
+
+	// Reconnect/backoff: a transient probe failure must not immediately tear
+	// down a live, working connection. If the only thing that failed is the
+	// reachability probe (ConnectionFailed) and we still hold a connection that
+	// failed within the grace window, hold the previous Ready=True and keep the
+	// client connected. Only after the grace period elapses do we flip to
+	// Ready=False and disconnect. Non-probe failures (bad secret/kubeconfig/
+	// unsupported source) are config problems, not blips: act on them at once.
+	requeue := r.healthInterval()
+	if status == metav1.ConditionFalse && reason == "ConnectionFailed" && r.withinGrace(wc.Name) {
+		// Re-probe sooner than the steady-state cadence so a real outage is
+		// confirmed (and torn down) promptly once grace expires.
+		requeue = r.graceRequeue()
+		apimeta.SetStatusCondition(&wc.Status.Conditions, metav1.Condition{
+			Type:               v1beta1.WorkloadClusterReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             "ProbeFailedRetrying",
+			Message:            fmt.Sprintf("transient probe failure, holding connection within grace period: %s", msg),
+			ObservedGeneration: wc.Generation,
+		})
+		// Leave the existing connection in place; do not Connect/Disconnect.
+		return r.finish(ctx, wc, requeue)
+	}
+
+	if status == metav1.ConditionTrue {
+		r.clearFailure(wc.Name)
+	} else if reason == "ConnectionFailed" {
+		r.recordFailure(wc.Name)
+	} else {
+		// Non-probe failure: not a blip, so reset the failure clock.
+		r.clearFailure(wc.Name)
+	}
+
 	apimeta.SetStatusCondition(&wc.Status.Conditions, metav1.Condition{
 		Type:               v1beta1.WorkloadClusterReady,
 		Status:             status,
@@ -72,7 +129,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	})
 	if r.Manager != nil {
 		if status == metav1.ConditionTrue {
-			if err := r.Manager.Connect(ctx, wc.Name, raw); err != nil {
+			if err := r.Manager.Connect(r.connectCtx(), wc.Name, raw); err != nil {
+				r.recordFailure(wc.Name)
 				apimeta.SetStatusCondition(&wc.Status.Conditions, metav1.Condition{
 					Type:               v1beta1.WorkloadClusterReady,
 					Status:             metav1.ConditionFalse,
@@ -85,13 +143,97 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			r.Manager.Disconnect(wc.Name)
 		}
 	}
+	return r.finish(ctx, wc, requeue)
+}
+
+// finish writes the status and returns the steady requeue.
+func (r *Reconciler) finish(ctx context.Context, wc *v1beta1.WorkloadCluster, requeue time.Duration) (ctrl.Result, error) {
 	if err := r.Status().Update(ctx, wc); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("workloadcluster %s: update status: %w", wc.Name, err)
 	}
-	return ctrl.Result{RequeueAfter: r.healthInterval()}, nil
+	return ctrl.Result{RequeueAfter: requeue}, nil
+}
+
+// connectCtx returns the long-lived context that remote clients (and their
+// future cache informers) must derive from, so they outlive the request-scoped
+// reconcile ctx and are torn down only by Manager.Disconnect / Stop. Falls back
+// to context.Background() when no base context was wired (e.g. unit tests that
+// build the Reconciler directly).
+func (r *Reconciler) connectCtx() context.Context {
+	if r.Manager != nil {
+		if base := r.Manager.BaseContext(); base != nil {
+			return base
+		}
+	}
+	return context.Background()
+}
+
+func (r *Reconciler) gracePeriod() time.Duration {
+	if r.ConnectionGracePeriod != 0 {
+		return r.ConnectionGracePeriod
+	}
+	return DefaultConnectionGracePeriod
+}
+
+// graceRequeue is the re-probe cadence used while holding a connection within
+// the grace window. It is the shorter of the health interval and the grace
+// period so the outage is confirmed promptly without busy-looping.
+func (r *Reconciler) graceRequeue() time.Duration {
+	g := r.gracePeriod()
+	h := r.healthInterval()
+	if g > 0 && g < h {
+		return g
+	}
+	return h
+}
+
+// withinGrace reports whether the named cluster is still inside its transient-
+// failure grace window AND currently holds a live connection. A cluster with no
+// connection (or no Manager) cannot be "held", so it is never within grace.
+func (r *Reconciler) withinGrace(name string) bool {
+	if r.Manager == nil {
+		return false
+	}
+	if _, connected := r.Manager.ClientFor(name); !connected {
+		return false
+	}
+	g := r.gracePeriod()
+	if g <= 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.firstFailure == nil {
+		r.firstFailure = map[string]time.Time{}
+	}
+	first, ok := r.firstFailure[name]
+	if !ok {
+		// First failure of a previously-healthy connection: start the clock and
+		// hold the connection this pass.
+		r.firstFailure[name] = time.Now()
+		return true
+	}
+	return time.Since(first) < g
+}
+
+func (r *Reconciler) recordFailure(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.firstFailure == nil {
+		r.firstFailure = map[string]time.Time{}
+	}
+	if _, ok := r.firstFailure[name]; !ok {
+		r.firstFailure[name] = time.Now()
+	}
+}
+
+func (r *Reconciler) clearFailure(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.firstFailure, name)
 }
 
 // assess resolves the connection and probes it, returning the Ready condition
@@ -148,6 +290,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Probe = func(ctx context.Context, raw []byte) error {
 			return probeViaServerVersion(ctx, raw, r.ExecPolicy)
 		}
+	}
+	if r.firstFailure == nil {
+		r.firstFailure = map[string]time.Time{}
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.WorkloadCluster{}).

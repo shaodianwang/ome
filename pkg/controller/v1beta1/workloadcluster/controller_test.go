@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -168,6 +169,154 @@ func TestReconcile_ConnectsManagerWhenReachable(t *testing.T) {
 
 	_, ok := mgr.ClientFor("c1")
 	assert.True(t, ok, "a Reachable cluster must be connected in the Manager")
+}
+
+// TestReconcile_BackoffHoldsConnectionOnTransientProbeFailure: a previously
+// reachable+connected cluster whose /version probe fails once must NOT be torn
+// down — within the grace window the live client stays connected and Ready is
+// held True (reason ProbeFailedRetrying). PRE-FIX this flipped Ready=False and
+// Disconnected on the first failure.
+func TestReconcile_BackoffHoldsConnectionOnTransientProbeFailure(t *testing.T) {
+	s := scheme(t)
+	wc := wcWithSecret("c1")
+	secret := kcSecret(validKubeconfig)
+	mgr := NewManager(s)
+	mgr.newClient = func(_ context.Context, raw []byte, _ *runtime.Scheme) (SelectivelyCachingClient, context.CancelFunc, error) {
+		return &stubClient{id: "c1"}, func() {}, nil
+	}
+	fail := false
+	r, c := newReconciler(s, func(context.Context, []byte) error {
+		if fail {
+			return errors.New("dial tcp: i/o timeout")
+		}
+		return nil
+	}, wc, secret)
+	r.Manager = mgr
+	r.ConnectionGracePeriod = time.Hour // generous grace so the blip is held
+
+	// Pass 1: reachable -> connected.
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+	_, ok := mgr.ClientFor("c1")
+	require.True(t, ok, "cluster must be connected after a reachable pass")
+
+	// Pass 2: transient probe failure within grace -> held.
+	fail = true
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+	_, ok = mgr.ClientFor("c1")
+	assert.True(t, ok, "a transient probe failure within grace must NOT disconnect the live client")
+	cond := readyCond(c, "c1")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status, "Ready must be held True within grace")
+	assert.Equal(t, "ProbeFailedRetrying", cond.Reason)
+}
+
+// TestReconcile_BackoffTearsDownAfterGrace: once the grace window elapses, a
+// persistent probe failure flips Ready=False and disconnects the client.
+func TestReconcile_BackoffTearsDownAfterGrace(t *testing.T) {
+	s := scheme(t)
+	wc := wcWithSecret("c1")
+	secret := kcSecret(validKubeconfig)
+	mgr := NewManager(s)
+	mgr.newClient = func(_ context.Context, raw []byte, _ *runtime.Scheme) (SelectivelyCachingClient, context.CancelFunc, error) {
+		return &stubClient{id: "c1"}, func() {}, nil
+	}
+	fail := false
+	r, c := newReconciler(s, func(context.Context, []byte) error {
+		if fail {
+			return errors.New("dial tcp: i/o timeout")
+		}
+		return nil
+	}, wc, secret)
+	r.Manager = mgr
+	r.ConnectionGracePeriod = time.Hour
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+
+	// Simulate that the failure run started well outside the grace window.
+	fail = true
+	r.mu.Lock()
+	if r.firstFailure == nil {
+		r.firstFailure = map[string]time.Time{}
+	}
+	r.firstFailure["c1"] = time.Now().Add(-2 * time.Hour)
+	r.mu.Unlock()
+
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+	_, ok := mgr.ClientFor("c1")
+	assert.False(t, ok, "after grace elapses a persistent failure must disconnect the client")
+	cond := readyCond(c, "c1")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "ConnectionFailed", cond.Reason)
+}
+
+// TestReconcile_NoGraceForNeverConnected: a cluster that was never connected
+// (probe fails on the very first pass) must flip to Ready=False immediately —
+// there is no live connection to protect.
+func TestReconcile_NoGraceForNeverConnected(t *testing.T) {
+	s := scheme(t)
+	wc := wcWithSecret("c1")
+	secret := kcSecret(validKubeconfig)
+	mgr := NewManager(s)
+	mgr.newClient = func(_ context.Context, raw []byte, _ *runtime.Scheme) (SelectivelyCachingClient, context.CancelFunc, error) {
+		return &stubClient{id: "c1"}, func() {}, nil
+	}
+	r, c := newReconciler(s, func(context.Context, []byte) error { return errors.New("dial tcp: timeout") }, wc, secret)
+	r.Manager = mgr
+	r.ConnectionGracePeriod = time.Hour
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}})
+	require.NoError(t, err)
+	_, ok := mgr.ClientFor("c1")
+	assert.False(t, ok, "a never-connected cluster has nothing to hold")
+	cond := readyCond(c, "c1")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "ConnectionFailed", cond.Reason)
+}
+
+// TestReconcile_RecoversAfterTransientFailure: a blip held within grace, then a
+// recovered probe, clears the failure clock and reports Reachable again.
+func TestReconcile_RecoversAfterTransientFailure(t *testing.T) {
+	s := scheme(t)
+	wc := wcWithSecret("c1")
+	secret := kcSecret(validKubeconfig)
+	mgr := NewManager(s)
+	mgr.newClient = func(_ context.Context, raw []byte, _ *runtime.Scheme) (SelectivelyCachingClient, context.CancelFunc, error) {
+		return &stubClient{id: "c1"}, func() {}, nil
+	}
+	fail := false
+	r, c := newReconciler(s, func(context.Context, []byte) error {
+		if fail {
+			return errors.New("blip")
+		}
+		return nil
+	}, wc, secret)
+	r.Manager = mgr
+	r.ConnectionGracePeriod = time.Hour
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "c1"}}
+	_, err := r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	fail = true
+	_, err = r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	fail = false
+	_, err = r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	r.mu.Lock()
+	_, stillFailing := r.firstFailure["c1"]
+	r.mu.Unlock()
+	assert.False(t, stillFailing, "a recovered probe must clear the failure clock")
+	cond := readyCond(c, "c1")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "Reachable", cond.Reason)
 }
 
 func TestReconcile_DisconnectsManagerWhenDeleted(t *testing.T) {

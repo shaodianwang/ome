@@ -128,6 +128,12 @@ func isValidHostname(server string) bool {
 	if err != nil {
 		return false
 	}
+	// A workload-cluster API endpoint carries a cross-cluster bearer credential;
+	// it MUST be reached over TLS. Reject plaintext (http) and scheme-less
+	// endpoints so a credential is never sent in the clear.
+	if u.Scheme != "https" {
+		return false
+	}
 	host := u.Host
 	if h, _, err := net.SplitHostPort(u.Host); err == nil {
 		host = h

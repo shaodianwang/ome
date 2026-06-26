@@ -142,6 +142,7 @@ type Options struct {
 	allowExecCredentials        bool
 	execCredentialAllowedCmds   string
 	clusterHealthInterval       time.Duration
+	clusterConnectionGrace      time.Duration
 	placementRequeueInterval    time.Duration
 	placementGCInterval         time.Duration
 	configCacheTTL              time.Duration
@@ -172,6 +173,7 @@ func DefaultOptions() Options {
 		allowExecCredentials:       false,
 		execCredentialAllowedCmds:  "aws,gke-gcloud-auth-plugin,kubelogin",
 		clusterHealthInterval:      workloadcluster.DefaultHealthInterval,
+		clusterConnectionGrace:     workloadcluster.DefaultConnectionGracePeriod,
 		placementRequeueInterval:   placement.DefaultPlacementRequeue,
 		placementGCInterval:        placement.DefaultGCInterval,
 		// Short TTL for the inferenceservice-config ConfigMap read on the ISVC
@@ -231,6 +233,8 @@ func GetOptions() Options {
 		"Comma-separated allowlist of exec credential plugin command basenames permitted when --allow-exec-credentials is set.")
 	flag.DurationVar(&opts.clusterHealthInterval, "workloadcluster-health-interval", opts.clusterHealthInterval,
 		"OEP-0018: how often each WorkloadCluster is re-probed for reachability when nothing else triggers a reconcile.")
+	flag.DurationVar(&opts.clusterConnectionGrace, "workloadcluster-connection-grace", opts.clusterConnectionGrace,
+		"OEP-0018: how long a previously reachable WorkloadCluster tolerates transient probe failures before it is flipped to Ready=False and disconnected. 0 disables grace (flip on first failure).")
 	flag.DurationVar(&opts.placementRequeueInterval, "placement-requeue-interval", opts.placementRequeueInterval,
 		"OEP-0018: status-refresh poll cadence for the placement (fan-out) controller.")
 	flag.DurationVar(&opts.placementGCInterval, "placement-gc-interval", opts.placementGCInterval,
@@ -537,14 +541,23 @@ func main() {
 			AllowedCommands: splitAndTrim(options.execCredentialAllowedCmds),
 		}
 		clusterManager.SetExecCredentialPolicy(execPolicy)
+		// Run the cluster Manager as a Runnable so it captures the
+		// controller-manager's long-lived context as the base for remote-client
+		// (and future cache-informer) contexts, and disconnects everything on
+		// shutdown (no leaked background watches).
+		if err = mgr.Add(clusterManager); err != nil {
+			setupLog.Error(err, "unable to add WorkloadCluster manager runnable")
+			os.Exit(1)
+		}
 		setupLog.Info("Setting up WorkloadCluster controller")
 		if err = (&workloadcluster.Reconciler{
-			Client:         mgr.GetClient(),
-			Scheme:         mgr.GetScheme(),
-			Log:            ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
-			Manager:        clusterManager,
-			ExecPolicy:     execPolicy,
-			HealthInterval: options.clusterHealthInterval,
+			Client:                mgr.GetClient(),
+			Scheme:                mgr.GetScheme(),
+			Log:                   ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
+			Manager:               clusterManager,
+			ExecPolicy:            execPolicy,
+			HealthInterval:        options.clusterHealthInterval,
+			ConnectionGracePeriod: options.clusterConnectionGrace,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "WorkloadCluster")
 			os.Exit(1)

@@ -22,6 +22,12 @@ type Manager struct {
 	scheme     *runtime.Scheme
 	execPolicy ExecCredentialPolicy
 
+	// baseCtx is the long-lived context remote clients derive from, so their
+	// (future Phase 5) cache informers are scoped to the controller-manager
+	// lifetime rather than a request-scoped reconcile ctx. Set by Start (the
+	// Runnable entrypoint); nil-safe — Connect falls back to its caller's ctx.
+	baseCtx context.Context
+
 	mu    sync.RWMutex
 	conns map[string]*remoteConn
 
@@ -29,6 +35,33 @@ type Manager struct {
 	// watch context) from raw kubeconfig bytes. Injected for tests; defaults to
 	// buildRemoteClient.
 	newClient func(ctx context.Context, raw []byte, scheme *runtime.Scheme) (SelectivelyCachingClient, context.CancelFunc, error)
+}
+
+// Start records the controller-manager's long-lived context as the base for all
+// remote-client (and future cache-informer) contexts, then blocks until that
+// context is cancelled, at which point it disconnects every cluster so no
+// background watch leaks past manager shutdown. It implements
+// sigs.k8s.io/controller-runtime/pkg/manager.Runnable so the cmd wires it with
+// mgr.Add(clusterManager).
+func (m *Manager) Start(ctx context.Context) error {
+	m.mu.Lock()
+	m.baseCtx = ctx
+	m.mu.Unlock()
+	<-ctx.Done()
+	m.DisconnectAll()
+	return nil
+}
+
+// DisconnectAll disposes every connected client. Used on manager shutdown.
+func (m *Manager) DisconnectAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name, c := range m.conns {
+		if c.cancel != nil {
+			c.cancel()
+		}
+		delete(m.conns, name)
+	}
 }
 
 type remoteConn struct {
@@ -81,6 +114,11 @@ func (m *Manager) Connect(ctx context.Context, name string, raw []byte) error {
 
 	cl, cancel, err := m.newClient(ctx, raw, m.scheme)
 	if err != nil {
+		// Build failed for a CHANGED kubeconfig: the cached client (if any) is
+		// for the stale config and must not be left serving requests against
+		// credentials/endpoints the user has rotated away. Evict it so callers
+		// see (nil, false) rather than a silently-stale connection.
+		m.Disconnect(name)
 		return fmt.Errorf("workloadcluster %q: build remote client: %w", name, err)
 	}
 
@@ -91,6 +129,14 @@ func (m *Manager) Connect(ctx context.Context, name string, raw []byte) error {
 	m.conns[name] = &remoteConn{client: cl, cancel: cancel, configHash: hash}
 	m.mu.Unlock()
 	return nil
+}
+
+// BaseContext returns the long-lived context wired by Start, or nil if Start
+// has not run yet (e.g. in unit tests that drive Connect directly).
+func (m *Manager) BaseContext() context.Context {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.baseCtx
 }
 
 // Disconnect disposes the client for a cluster (cancels its watch context) and
