@@ -3,6 +3,7 @@ package autoscaler
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -214,10 +215,35 @@ func mirrorScaledObjectStatus(ctx context.Context, cli client.Client, namespace,
 	return nil
 }
 
+// podNameRefRe matches the volatile "of Pod <name>" tail the HPA metrics
+// controller appends to FailedGetResourceMetric / FailedGetPodsMetric
+// condition messages, e.g.
+//
+//	"...missing request for cpu in container ome-container of Pod sglang-decoder-7d9f8-abcde"
+//
+// The trailing pod name rotates every time the metrics client samples a
+// different replica, so mirroring the raw message onto the ISVC status makes
+// the status genuinely differ on every reconcile pass — which re-triggers the
+// ISVC's own For() watch and drives a status-write storm. We collapse the pod
+// reference to a stable placeholder so the mirrored message carries the same
+// signal (which metric / container failed) without the rotating identifier.
+var podNameRefRe = regexp.MustCompile(`(?i) of pod \S+`)
+
+// normalizeAutoscalerMessage strips volatile per-pod runtime detail from a
+// scaler condition message so the mirrored ISVC status stays byte-stable
+// across reconciles when nothing meaningful changed. Currently this collapses
+// the rotating "of Pod <name>" tail to "of Pod <pod>"; the stable prefix
+// (which metric/container failed, the reason) is preserved verbatim.
+func normalizeAutoscalerMessage(msg string) string {
+	return podNameRefRe.ReplaceAllString(msg, " of Pod <pod>")
+}
+
 // hpaConditionsToMetav1 translates the HPA condition type (which uses
 // autoscalingv2.HorizontalPodAutoscalerCondition) into metav1.Condition so
 // the ISVC status surface can stay agnostic of the source scaler. Type +
-// Status + Reason + Message + LastTransitionTime pass through 1:1.
+// Status + Reason + LastTransitionTime pass through 1:1; Message is run
+// through normalizeAutoscalerMessage to drop the rotating per-pod tail that
+// would otherwise churn the ISVC status every reconcile.
 func hpaConditionsToMetav1(in []autoscalingv2.HorizontalPodAutoscalerCondition) []metav1.Condition {
 	if len(in) == 0 {
 		return nil
@@ -229,7 +255,7 @@ func hpaConditionsToMetav1(in []autoscalingv2.HorizontalPodAutoscalerCondition) 
 			Type:               string(c.Type),
 			Status:             metav1.ConditionStatus(c.Status),
 			Reason:             c.Reason,
-			Message:            c.Message,
+			Message:            normalizeAutoscalerMessage(c.Message),
 			LastTransitionTime: c.LastTransitionTime,
 		})
 	}
@@ -252,7 +278,7 @@ func kedaConditionsToMetav1(in kedav1.Conditions) []metav1.Condition {
 			Type:    string(c.Type),
 			Status:  c.Status,
 			Reason:  c.Reason,
-			Message: c.Message,
+			Message: normalizeAutoscalerMessage(c.Message),
 		})
 	}
 	return out

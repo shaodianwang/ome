@@ -434,3 +434,75 @@ func TestWriteAutoscalerStatus_ExternalManagedSkipsMirror(t *testing.T) {
 		"external-managed → MUST NOT mirror; counters stay zero")
 	g.Expect(status.Conditions).To(gomega.BeNil())
 }
+
+// hpaWithMetricFailure builds an HPA whose ScalingActive=False condition
+// carries a FailedGetResourceMetric message ending in "of Pod <podName>" —
+// the exact shape the metrics controller emits when a pod lacks a CPU
+// request. The pod name is the only thing that rotates between reconciles.
+func hpaWithMetricFailure(podName string) *autoscalingv2.HorizontalPodAutoscaler {
+	return &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "isvc-decoder"},
+		Status: autoscalingv2.HorizontalPodAutoscalerStatus{
+			CurrentReplicas: 2,
+			DesiredReplicas: 2,
+			Conditions: []autoscalingv2.HorizontalPodAutoscalerCondition{
+				{
+					Type:   autoscalingv2.ScalingActive,
+					Status: corev1.ConditionFalse,
+					Reason: "FailedGetResourceMetric",
+					Message: "the HPA was unable to compute the replica count: " +
+						"failed to get cpu utilization: missing request for cpu in container " +
+						"ome-container of Pod " + podName,
+				},
+			},
+		},
+	}
+}
+
+// TestWriteAutoscalerStatus_HPAMirror_StableAcrossPodNameChurn is the
+// regression guard for the self-reconcile loop. A CPU-utilization HPA on
+// pods with no CPU request perpetually emits FailedGetResourceMetric with a
+// message whose only volatile component is the sampled pod name. The mirror
+// MUST normalize that away so the ISVC status is byte-identical across two
+// reconciles that differ ONLY in the rotating pod name — otherwise the
+// status write churns and the For() watch re-triggers reconcile forever.
+func TestWriteAutoscalerStatus_HPAMirror_StableAcrossPodNameChurn(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	resolved := &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}
+	ref := v1beta1.ScaleTargetRef{APIVersion: "ome.io/v1beta1", Kind: "InferenceReplica", Name: "isvc-decoder"}
+
+	mirror := func(podName string) *v1beta1.ComponentAutoscalerStatus {
+		cli := fake.NewClientBuilder().
+			WithScheme(newStatusTestScheme(t)).
+			WithObjects(hpaWithMetricFailure(podName)).
+			Build()
+		status, _, err := WriteAutoscalerStatus(
+			context.Background(), cli, "ns1", "isvc-decoder",
+			resolved, SpecSourceISVC, ref,
+		)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		return status
+	}
+
+	first := mirror("isvc-decoder-7d9f8-abcde")
+	second := mirror("isvc-decoder-7d9f8-zzzzz")
+
+	// The two HPA inputs differ ONLY in the pod name. The mirrored status —
+	// conditions included — must be byte-identical, so updateStatus sees no
+	// diff and does not write (and thus does not re-trigger reconcile).
+	g.Expect(second).To(gomega.Equal(first),
+		"mirror must be stable across pod-name churn (got %+v, want %+v)", second, first)
+
+	// The stable signal is preserved: type/status/reason intact, message
+	// normalized to a churn-free placeholder.
+	g.Expect(first.Conditions).To(gomega.HaveLen(1))
+	c := first.Conditions[0]
+	g.Expect(c.Type).To(gomega.Equal("ScalingActive"))
+	g.Expect(c.Status).To(gomega.Equal(metav1.ConditionFalse))
+	g.Expect(c.Reason).To(gomega.Equal("FailedGetResourceMetric"))
+	g.Expect(c.Message).To(gomega.ContainSubstring("missing request for cpu in container ome-container"))
+	g.Expect(c.Message).To(gomega.HaveSuffix("of Pod <pod>"))
+	g.Expect(c.Message).NotTo(gomega.ContainSubstring("abcde"))
+	g.Expect(c.Message).NotTo(gomega.ContainSubstring("zzzzz"))
+}

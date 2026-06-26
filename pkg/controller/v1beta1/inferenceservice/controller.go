@@ -29,6 +29,7 @@ import (
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"knative.dev/pkg/network"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -1012,13 +1013,22 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// MaxConcurrentReconciles parallelizes reconciles for distinct ISVCs;
 		// zero (unset) falls back to controller-runtime's single-worker default.
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
-		For(&v1beta1.InferenceService{}).
+		// Ignore the ISVC's own status-only writes (which bump resourceVersion
+		// without touching spec/generation or metadata). Still trigger on spec
+		// (generation) changes AND on label/annotation changes — OME drives
+		// canary promote/rollback via annotations that do NOT bump generation,
+		// so a blanket GenerationChangedPredicate would break rollouts.
+		For(&v1beta1.InferenceService{}, builder.WithPredicates(isvcReconcileTriggerPredicate())).
 		Owns(&appsv1.Deployment{}).
 		Owns(&v1.Service{}).
 		Owns(&v1.ConfigMap{}).
 		Owns(&v1.PersistentVolume{}).
 		Owns(&v1.PersistentVolumeClaim{}).
-		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+		// Ignore HPA status-only churn. The HPA controller perpetually
+		// rewrites .status.conditions when a metric can't be fetched
+		// (e.g. CPU-utilization HPA on pods with no CPU request); without
+		// this filter every such rewrite re-reconciles the ISVC.
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}, builder.WithPredicates(ownedStatusIgnoringPredicate())).
 		Owns(&policyv1.PodDisruptionBudget{}).
 		// OMENative revision history is owned by the ISVC
 		// so revision-driven status writes enqueue the parent.
@@ -1043,8 +1053,10 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		// KEDA ScaledObject is owned unconditionally — the scheme is
 		// registered at startup and KEDA is a hard cluster-side
-		// dependency for OME.
-		Owns(&kedav1.ScaledObject{})
+		// dependency for OME. Ignore its status-only churn for the same
+		// reason as the HPA above (KEDA continuously rewrites SO status /
+		// the derived HPA conditions).
+		Owns(&kedav1.ScaledObject{}, builder.WithPredicates(ownedStatusIgnoringPredicate()))
 
 	if podMonitorFound {
 		ctrlBuilder = ctrlBuilder.Owns(&monitoringv1.PodMonitor{})
