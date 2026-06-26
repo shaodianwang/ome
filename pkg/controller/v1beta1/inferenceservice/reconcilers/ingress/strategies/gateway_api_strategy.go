@@ -152,7 +152,7 @@ func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, is
 			Reason:  "ComponentNotReady",
 			Message: fmt.Sprintf("%s component not ready for HTTPRoute creation", componentType),
 		})
-		klog.Info("Builder returned nil HTTPRoute - component not ready", "isvc", isvc.Name, "component", componentType)
+		klog.V(1).InfoS("Builder returned nil HTTPRoute; component not ready", "isvc", isvc.Name, "component", componentType)
 		return nil
 	}
 
@@ -172,7 +172,7 @@ func (g *GatewayAPIStrategy) reconcileComponentHTTPRoute(ctx context.Context, is
 			Reason:  "ComponentNotReady",
 			Message: fmt.Sprintf("%s component not ready for HTTPRoute creation", componentType),
 		})
-		klog.Info("Builder returned typed-nil HTTPRoute - component not ready", "isvc", isvc.Name, "component", componentType)
+		klog.V(1).InfoS("Builder returned typed-nil HTTPRoute; component not ready", "isvc", isvc.Name, "component", componentType)
 		return nil
 	}
 

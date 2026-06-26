@@ -70,7 +70,7 @@ func (k *KubernetesIngressStrategy) Reconcile(ctx context.Context, isvc *v1beta1
 				Reason:  "ComponentNotReady",
 				Message: "Target service not ready for ingress creation",
 			})
-			klog.Info("Builder returned nil ingress - component not ready for ingress ", "isvc: ", isvc.Name)
+			klog.V(1).InfoS("Builder returned nil ingress; component not ready", "isvc", isvc.Name)
 			return nil
 		}
 
