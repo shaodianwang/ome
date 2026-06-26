@@ -42,7 +42,29 @@ const UpdateRequeueInterval = 5 * time.Second
 //   - InPlaceOnly: image-patch when eligible; error otherwise.
 //
 // done=true once Phase=Ready with RunningRevision=target.Name.
+//
+// Self-lists the Component's pods (cached) then filters to this Instance.
+// The dispatcher's per-reconcile update pass instead calls UpdateWithPods
+// after a single cached List + bucket, so a Component with N Instances
+// costs one List per reconcile instead of N.
 func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec) (bool, error) {
+	if deps.Client == nil {
+		return false, fmt.Errorf("Update: nil client")
+	}
+	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component)
+	if err != nil {
+		return false, fmt.Errorf("Update: list pods (instance=%d): %w", inst.Index, err)
+	}
+	return UpdateWithPods(ctx, deps, input, plan, inst, target, targetSpec, filterPodsByInstance(pods, inst.Index))
+}
+
+// UpdateWithPods is Update with this Instance's pods supplied by the
+// caller — the dispatcher does a single per-Component cached List + bucket
+// once per reconcile and threads each Instance's slice here, instead of
+// one cached List per Instance. instancePods must already be filtered to
+// inst.Index. Semantics are identical to Update; only the read source
+// differs.
+func UpdateWithPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, instancePods []*corev1.Pod) (bool, error) {
 	if deps.Client == nil {
 		return false, fmt.Errorf("Update: nil client")
 	}
@@ -50,11 +72,7 @@ func Update(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 		return false, fmt.Errorf("Update: nil target revision or spec (instance=%d)", inst.Index)
 	}
 
-	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component)
-	if err != nil {
-		return false, fmt.Errorf("Update: list pods (instance=%d): %w", inst.Index, err)
-	}
-	pods = filterPodsByInstance(pods, inst.Index)
+	pods := instancePods
 
 	// Eligibility compares against the recorded running revision, NOT the
 	// live pod. Live pods carry apiserver-defaulted fields and Render
@@ -275,7 +293,22 @@ func podSpecWithoutImages(spec *corev1.PodSpec) ([]byte, error) {
 //
 // Exported for the dispatcher (omenative/ops/dispatch.go) which iterates
 // Instances and consults this before invoking Update.
+//
+// Self-lists only on the slow path (empty RunningRevision). The
+// dispatcher's per-reconcile update pass calls DetectUpdateTriggerWithPods
+// with the Instance's pods from a single per-Component cached List +
+// bucket, so the rare per-pod fallback doesn't cost one List per Instance.
 func DetectUpdateTrigger(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec) (bool, error) {
+	return DetectUpdateTriggerWithPods(ctx, deps, input, plan, inst, target, targetSpec, nil)
+}
+
+// DetectUpdateTriggerWithPods is DetectUpdateTrigger with this Instance's
+// pods supplied by the caller for the empty-RunningRevision fallback path.
+// instancePods must already be filtered to inst.Index. A nil slice means
+// "not pre-listed"; the function then self-lists on the fallback path,
+// preserving the standalone DetectUpdateTrigger contract. Semantics are
+// otherwise identical.
+func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, instancePods []*corev1.Pod) (bool, error) {
 	s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
 	if s == nil {
 		return false, nil
@@ -297,12 +330,17 @@ func DetectUpdateTrigger(ctx context.Context, deps workload.Deps, input workload
 	if s.RunningRevision == target.Name {
 		return false, nil
 	}
-	// Empty RunningRevision — fall back to per-pod diff and backfill.
-	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component)
-	if err != nil {
-		return false, err
+	// Empty RunningRevision — fall back to per-pod diff and backfill. Use
+	// the caller-supplied pods when present; otherwise self-list (the
+	// standalone DetectUpdateTrigger path).
+	pods := instancePods
+	if pods == nil {
+		all, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component)
+		if err != nil {
+			return false, err
+		}
+		pods = filterPodsByInstance(all, inst.Index)
 	}
-	pods = filterPodsByInstance(pods, inst.Index)
 	for _, pod := range pods {
 		if !podMatchesTarget(pod, targetSpec) {
 			return true, nil

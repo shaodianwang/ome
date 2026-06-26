@@ -32,9 +32,11 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
 // ratioGateRequeueInterval is short enough that a peer Component
@@ -92,11 +94,16 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	// 2. Per-Instance restart pass.
 	anyRestarting := false
 	if plan.RestartPolicy == RestartPolicyRecreateInstance {
+		// One live List + bucket for the whole Component instead of one
+		// live List per Instance (the gang-default O(gangs^2) hot path).
+		// The live reader matches DetectRestartTrigger's own read source —
+		// restart is destructive, so it must not act on a stale cache.
+		liveByInstance, lerr := liveBucketPods(ctx, deps, input, plan.Component)
+		if lerr != nil {
+			return ctrl.Result{}, fmt.Errorf("workload.Reconcile: list pods for restart pass (component=%s): %w", plan.Component, lerr)
+		}
 		for _, inst := range plan.Instances {
-			needsRestart, reason, derr := workloadops.DetectRestartTrigger(ctx, deps, input, plan, inst)
-			if derr != nil {
-				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: detect restart trigger (instance=%d): %w", inst.Index, derr)
-			}
+			needsRestart, reason := workloadops.DetectRestartTriggerWithPods(input, plan, inst, liveByInstance[inst.Index])
 			if !needsRestart {
 				continue
 			}
@@ -228,6 +235,14 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		// charge the budget against the same Instance.
 		priorSurgeInFlight := CurrentSurgeInFlight(input.ObservedState.InstanceStatuses)
 		priorUnavailInFlight := CurrentUnavailableInFlight(input.ObservedState.InstanceStatuses)
+		// One cached List + bucket for the whole Component instead of one
+		// cached List per Instance inside DetectUpdateTrigger / Update (the
+		// O(instances^2) update hot path). Cached reader matches the
+		// non-destructive per-Instance read source those ops used.
+		updateByInstance, lerr := cachedBucketPods(ctx, deps, input, plan.Component)
+		if lerr != nil {
+			return ctrl.Result{}, fmt.Errorf("workload.Reconcile: list pods for update pass (component=%s): %w", plan.Component, lerr)
+		}
 		for _, inst := range plan.Instances {
 			// RollingUpdate.Partition (canary): normally hold Instances with index
 			// < Partition on the old revision (skip their update). skipAsHeld carves
@@ -237,7 +252,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 				findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)) {
 				continue
 			}
-			needs, derr := workloadops.DetectUpdateTrigger(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec)
+			needs, derr := workloadops.DetectUpdateTriggerWithPods(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec, updateByInstance[inst.Index])
 			if derr != nil {
 				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: detect update trigger (instance=%d): %w", inst.Index, derr)
 			}
@@ -280,7 +295,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 					}
 				}
 			}
-			done, uerr := workloadops.Update(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec)
+			done, uerr := workloadops.UpdateWithPods(ctx, deps, input, plan, inst, target, input.DesiredSpec.PodSpec, updateByInstance[inst.Index])
 			if uerr != nil {
 				return ctrl.Result{}, fmt.Errorf("workload.Reconcile: update instance %d: %w", inst.Index, uerr)
 			}
@@ -328,6 +343,31 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 
 	// 5. Create pass.
 	return workloadops.Create(ctx, deps, input, plan, target)
+}
+
+// liveBucketPods does ONE live List of the Component's pods and buckets
+// them by Instance index. The restart pass uses the live reader because
+// restart is destructive and must not act on a stale cache — the same
+// read source DetectRestartTrigger used per-Instance, hoisted to once per
+// reconcile.
+func liveBucketPods(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (map[int32][]*corev1.Pod, error) {
+	pods, err := query.ListOMENativePodsByName(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, component)
+	if err != nil {
+		return nil, err
+	}
+	return query.BucketPodsByInstanceIdx(pods), nil
+}
+
+// cachedBucketPods does ONE cached List of the Component's pods and
+// buckets them by Instance index. The update pass uses the cached reader —
+// the same non-destructive read source DetectUpdateTrigger / Update used
+// per-Instance, hoisted to once per reconcile.
+func cachedBucketPods(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (map[int32][]*corev1.Pod, error) {
+	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, component)
+	if err != nil {
+		return nil, err
+	}
+	return query.BucketPodsByInstanceIdx(pods), nil
 }
 
 // ExtraInstanceIndices returns InstanceStatus indices the plan no

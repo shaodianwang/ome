@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -52,6 +53,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	v1beta1runtimerevisioncontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/runtimerevision"
 	v1beta1servingruntimecontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/servingruntime"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadcluster "github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
@@ -305,6 +307,14 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to initialize controller manager")
+		os.Exit(1)
+	}
+
+	// Register the OMENative pod field index so per-Instance pod lookups
+	// resolve through the cache index instead of scanning every cached
+	// pod — see query.ListOMENativePodsByName.
+	if err := query.RegisterOMENativePodIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		setupLog.Error(err, "Failed to register OMENative pod field index")
 		os.Exit(1)
 	}
 

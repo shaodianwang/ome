@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,6 +46,9 @@ func makeScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add appsv1: %v", err)
+	}
+	if err := discoveryv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add discoveryv1: %v", err)
 	}
 	return scheme
 }
@@ -636,4 +640,151 @@ func instanceStatusByIndex(isvc *v1beta1.InferenceService, component v1beta1.Com
 		}
 	}
 	return nil
+}
+
+// listCountingReader wraps a client.Reader and counts PodList List calls.
+// Used to prove the dispatcher's restart pass lists pods ONCE per
+// reconcile (via the live APIReader) instead of once per Instance.
+type listCountingReader struct {
+	client.Reader
+	podListCalls int
+}
+
+func (r *listCountingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*corev1.PodList); ok {
+		r.podListCalls++
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+// failedEnginePod is enginePod with Phase=Failed — a restart trigger.
+func failedEnginePod(isvc, ns string, idx int32) *corev1.Pod {
+	pod := enginePod(isvc, ns, idx)
+	pod.Status.Phase = corev1.PodFailed
+	return pod
+}
+
+// TestReconcile_RestartPass_OneLiveListForManyInstances pins the
+// O(gangs^2) fix: the restart pass does a SINGLE live pod List for the
+// whole Component and buckets by Instance index, not one live List per
+// Instance. With three healthy Ready instances under the gang-default
+// RecreateInstance policy, the live APIReader must see exactly one
+// PodList call from the restart pass (the update / create passes read
+// the cached Client, not the live reader).
+func TestReconcile_RestartPass_OneLiveListForManyInstances(t *testing.T) {
+	scheme := makeScheme(t)
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
+	}
+	pods := []client.Object{
+		isvc,
+		enginePod(isvc.Name, isvc.Namespace, 0),
+		enginePod(isvc.Name, isvc.Namespace, 1),
+		enginePod(isvc.Name, isvc.Namespace, 2),
+	}
+	// Register the same OMENative pod field index cmd/manager installs on
+	// the manager cache, so ListOMENativePodsByName resolves through the
+	// index fast path (one physical List) rather than the probe-then-
+	// label-selector fallback (two physical Lists on an index-less reader).
+	// This keeps the assertion measuring the per-Component-vs-per-Instance
+	// list count, not the index fallback's extra probe.
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithIndex(&corev1.Pod{}, query.OMENativePodIndexField, query.OMENativePodIndexExtractor).
+		WithObjects(pods...).Build()
+	counter := &listCountingReader{Reader: c}
+	deps := workload.Deps{Client: c, APIReader: counter}
+
+	in := minimalInput(t)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
+		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady},
+		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady},
+	}
+	plan := workload.ComponentPlan{
+		Component:     workload.ComponentEngine,
+		Replicas:      3,
+		RestartPolicy: workload.RestartPolicyRecreateInstance,
+		Instances: []workload.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+	}
+
+	if _, err := workload.Reconcile(context.Background(), deps, in, plan, nil); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	// The live reader is used ONLY by the restart pass here (no restart
+	// fires, so no destructive live ops run). It must list once, not once
+	// per Instance.
+	if counter.podListCalls != 1 {
+		t.Errorf("restart pass must issue exactly 1 live pod List for 3 instances, got %d", counter.podListCalls)
+	}
+}
+
+// TestReconcile_RestartPass_PerInstanceSemanticsPreserved proves the
+// single-List + bucket refactor preserves exact per-Instance restart
+// semantics: a Failed pod in index 1's bucket triggers a restart (status
+// flips to Restarting on index 1) while healthy indices 0 and 2 are left
+// untouched.
+func TestReconcile_RestartPass_PerInstanceSemanticsPreserved(t *testing.T) {
+	scheme := makeScheme(t)
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
+	}
+	objs := []client.Object{
+		isvc,
+		enginePod(isvc.Name, isvc.Namespace, 0),
+		failedEnginePod(isvc.Name, isvc.Namespace, 1), // the restart trigger
+		enginePod(isvc.Name, isvc.Namespace, 2),
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(objs...).Build()
+	deps := workload.Deps{Client: c, APIReader: c}
+
+	in := minimalInput(t)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
+		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady},
+		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady},
+	}
+	in.MutateInstance = roundTripMutateInstance(c, isvc, workload.ComponentEngine)
+	plan := workload.ComponentPlan{
+		Component:     workload.ComponentEngine,
+		Replicas:      3,
+		RestartPolicy: workload.RestartPolicyRecreateInstance,
+		Instances: []workload.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+	}
+
+	result, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Errorf("a restart in flight must requeue; got %+v", result)
+	}
+
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("get isvc: %v", err)
+	}
+	s1 := instanceStatusByIndex(fresh, v1beta1.EngineComponent, 1)
+	if s1 == nil || s1.Phase != v1beta1.OMENativeInstanceRestarting {
+		t.Errorf("index 1 (Failed pod) must flip to Restarting; got %+v", s1)
+	}
+	for _, idx := range []int32{0, 2} {
+		s := instanceStatusByIndex(fresh, v1beta1.EngineComponent, idx)
+		// Healthy indices must not be dragged into a restart. The dispatcher
+		// short-circuits on the first restarting Instance, so their status
+		// stays at its observed Ready (or is simply never written).
+		if s != nil && s.Phase == v1beta1.OMENativeInstanceRestarting {
+			t.Errorf("healthy index %d must NOT be restarting; got %+v", idx, s)
+		}
+	}
 }

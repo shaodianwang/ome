@@ -303,3 +303,80 @@ func podNames(pods []*corev1.Pod) []string {
 	}
 	return out
 }
+
+// newIndexedDiscoverTestClient mirrors newDiscoverTestClient but also
+// registers the OMENativePodIndexField on Pods — the same index
+// cmd/manager installs on the manager cache. Lets the test exercise the
+// MatchingFields fast path in ListOMENativePodsByName.
+func newIndexedDiscoverTestClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1: %v", err)
+	}
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add v1beta1: %v", err)
+	}
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&corev1.Pod{}, OMENativePodIndexField, OMENativePodIndexExtractor).
+		WithObjects(objs...).
+		Build()
+}
+
+// pod with arbitrary isvc/component labels — used to prove the index
+// excludes pods from a different (isvc, component) tuple.
+func newDiscoverPodFor(name, isvc string, component workload.ComponentType) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "ns",
+			Labels:    testPodLabels(isvc, component, 0, "default", 1),
+		},
+	}
+}
+
+// TestListOMENativePodsByName_IndexAndFallbackAgree pins the core
+// invariant of the field-index optimization: the MatchingFields fast path
+// (index registered) and the label-selector fallback (no index) return
+// the identical set, and the index excludes other (isvc, component)
+// tuples. Without the index the existing tests above already cover the
+// fallback; this adds the indexed path and the cross-tuple exclusion.
+func TestListOMENativePodsByName_IndexAndFallbackAgree(t *testing.T) {
+	objs := []client.Object{
+		newDiscoverPodFor("eng-0", "isvc", workload.ComponentEngine),
+		newDiscoverPodFor("eng-1", "isvc", workload.ComponentEngine),
+		// Different component — must be excluded.
+		newDiscoverPodFor("dec-0", "isvc", workload.ComponentDecoder),
+		// Different isvc — must be excluded.
+		newDiscoverPodFor("other-eng-0", "other", workload.ComponentEngine),
+	}
+
+	indexed := newIndexedDiscoverTestClient(t, objs...)
+	fallback := newDiscoverTestClient(t, objs...)
+
+	gotIndexed, err := ListOMENativePodsByName(context.Background(), indexed, "ns", "isvc", workload.ComponentEngine)
+	if err != nil {
+		t.Fatalf("indexed list: %v", err)
+	}
+	gotFallback, err := ListOMENativePodsByName(context.Background(), fallback, "ns", "isvc", workload.ComponentEngine)
+	if err != nil {
+		t.Fatalf("fallback list: %v", err)
+	}
+
+	want := map[string]bool{"eng-0": true, "eng-1": true}
+	assertPodSet(t, "indexed", gotIndexed, want)
+	assertPodSet(t, "fallback", gotFallback, want)
+}
+
+func assertPodSet(t *testing.T, label string, pods []*corev1.Pod, want map[string]bool) {
+	t.Helper()
+	if len(pods) != len(want) {
+		t.Fatalf("%s: got %v, want keys %v", label, podNames(pods), want)
+	}
+	for _, p := range pods {
+		if !want[p.Name] {
+			t.Errorf("%s: unexpected pod %q in result set %v", label, p.Name, podNames(pods))
+		}
+	}
+}

@@ -30,28 +30,52 @@ const RestartRequeueInterval = 5 * time.Second
 //
 // Returns (needsRestart, reason, err). When needsRestart is true the
 // reason lands on Operation.Reason on the first pass through Restart.
+//
+// Self-lists this Instance's pods live. The dispatcher's per-reconcile
+// restart pass instead calls DetectRestartTriggerWithPods after a single
+// live List + bucket, so a Component with N gangs costs one live List per
+// reconcile instead of N — see that variant.
 func DetectRestartTrigger(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan) (bool, string, error) {
 	s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-	if s == nil {
-		return false, "", nil
-	}
-	if isMigrateOwnedStatus(s) {
-		return false, "", nil
-	}
-	if s.Phase == workload.InstancePhaseRestarting {
-		return true, "", nil
-	}
-	if s.Phase != workload.InstancePhaseReady {
-		return false, "", nil
+	// Only Phase=Ready reaches the pod-set comparison; every other state
+	// (absent, Migrate-owned, Restarting, or non-Ready) short-circuits in
+	// WithPods without inspecting pods, so the live List is wasted there.
+	if s == nil || isMigrateOwnedStatus(s) || s.Phase != workload.InstancePhaseReady {
+		needs, reason := DetectRestartTriggerWithPods(input, plan, inst, nil)
+		return needs, reason, nil
 	}
 
 	pods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, inst.Index)
 	if err != nil {
 		return false, "", err
 	}
-	expected := inst.TotalPods()
+	needs, reason := DetectRestartTriggerWithPods(input, plan, inst, pods)
+	return needs, reason, nil
+}
 
-	for _, pod := range pods {
+// DetectRestartTriggerWithPods is DetectRestartTrigger with this
+// Instance's pods supplied by the caller — the dispatcher does a single
+// per-Component live List + bucket once per reconcile and threads each
+// Instance's slice here, instead of one live List per Instance.
+// instancePods must already be filtered to inst.Index. Semantics are
+// identical to DetectRestartTrigger; only the read source differs.
+func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, instancePods []*corev1.Pod) (bool, string) {
+	s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+	if s == nil {
+		return false, ""
+	}
+	if isMigrateOwnedStatus(s) {
+		return false, ""
+	}
+	if s.Phase == workload.InstancePhaseRestarting {
+		return true, ""
+	}
+	if s.Phase != workload.InstancePhaseReady {
+		return false, ""
+	}
+
+	expected := inst.TotalPods()
+	for _, pod := range instancePods {
 		if pod.Status.Phase == corev1.PodFailed {
 			// Build a richer reason from the failed pod's container
 			// termination so the RestartTriggered event names the actual
@@ -59,15 +83,15 @@ func DetectRestartTrigger(ctx context.Context, deps workload.Deps, input workloa
 			// the bare "pod X Failed". Falls back to the pod name when no
 			// per-container detail is available.
 			if t := workload.PodTermination(pod, metav1.Now()); t != nil {
-				return true, t.ShortString(), nil
+				return true, t.ShortString()
 			}
-			return true, fmt.Sprintf("pod %s Failed", pod.Name), nil
+			return true, fmt.Sprintf("pod %s Failed", pod.Name)
 		}
 	}
-	if int32(len(pods)) < expected {
-		return true, fmt.Sprintf("pod count %d below desired %d", len(pods), expected), nil
+	if int32(len(instancePods)) < expected {
+		return true, fmt.Sprintf("pod count %d below desired %d", len(instancePods), expected)
 	}
-	return false, "", nil
+	return false, ""
 }
 
 // restartDrainKey identifies a Restart drain writer against one Instance

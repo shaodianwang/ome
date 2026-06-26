@@ -8,6 +8,7 @@ package query
 import (
 	"context"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -17,6 +18,66 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
+
+// OMENativePodIndexField is the controller-runtime cache field-index
+// name keyed on the (isvc, component) tuple every OMENative pod carries.
+// Without it, a label-selector List scans every cached pod (~6k on a
+// large cluster) per call; with it MatchingFields resolves an Instance's
+// pods through the index in O(matched). Registered on the manager cache
+// in cmd/manager (see RegisterOMENativePodIndex); the live API reader and
+// the index-less fake client both fall back to the label selector below,
+// which returns the identical set.
+//
+// The field name is an internal index identifier (a code constant like
+// the label keys above), not a behavioral/user-facing value — no config
+// surface is required.
+const OMENativePodIndexField = "ome.io/omenative-pod"
+
+// OMENativePodIndexValue builds the index value for one Instance's pods.
+// Only pods OMENative manages (LabelManagedBy == ManagedByOMENative) are
+// indexed; the extractor below returns nil for everything else so the
+// index set matches the label selector exactly.
+func OMENativePodIndexValue(isvcName string, component workload.ComponentType) string {
+	return isvcName + "/" + string(component)
+}
+
+// OMENativePodIndexExtractor is the cache IndexerFunc registered for the
+// OMENativePodIndexField. It mirrors the label selector in
+// ListOMENativePodsByName: a pod is indexed only when it carries the
+// managed-by label, and its index value is the (isvc, component) tuple.
+func OMENativePodIndexExtractor(obj client.Object) []string {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+	if pod.Labels[LabelManagedBy] != ManagedByOMENative {
+		return nil
+	}
+	isvcName := pod.Labels[constants.InferenceServicePodLabelKey]
+	component := pod.Labels[constants.OMEComponentLabel]
+	if isvcName == "" || component == "" {
+		return nil
+	}
+	return []string{OMENativePodIndexValue(isvcName, workload.ComponentType(component))}
+}
+
+// indexUnavailable reports whether a MatchingFields List failed because
+// the OMENativePodIndexField isn't backed by an index for the given
+// reader — true for the live API reader (the apiserver has no custom Pod
+// field selector) and for an index-less cache/fake client. Callers fall
+// back to the label-selector path, which returns the identical set.
+func indexUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// Cache: "Index with name field:... does not exist" / "no index ...".
+	// API server: rejects the unsupported field selector ("field label
+	// not supported" / "Unable to find ... field selector").
+	return strings.Contains(msg, "index") ||
+		strings.Contains(msg, "field label not supported") ||
+		strings.Contains(msg, "field selector")
+}
 
 // ListOMENativePodsByName returns every pod the OMENative selector matches
 // for (namespace, isvcName, component). Takes a Reader so callers can use
@@ -29,12 +90,22 @@ import (
 // either adapter path.
 func ListOMENativePodsByName(ctx context.Context, c client.Reader, namespace, isvcName string, component workload.ComponentType) ([]*corev1.Pod, error) {
 	pods := &corev1.PodList{}
-	sel := labels.SelectorFromSet(labels.Set{
-		constants.InferenceServicePodLabelKey: isvcName,
-		constants.OMEComponentLabel:           string(component),
-		LabelManagedBy:                        ManagedByOMENative,
-	})
-	if err := c.List(ctx, pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
+	// Fast path: cache field index keyed on (isvc, component). Avoids
+	// scanning every cached pod per call on large clusters. Falls back to
+	// the label selector when the reader has no such index (live API
+	// reader / index-less fake client) — both return the identical set.
+	err := c.List(ctx, pods, client.InNamespace(namespace),
+		client.MatchingFields{OMENativePodIndexField: OMENativePodIndexValue(isvcName, component)})
+	if indexUnavailable(err) {
+		pods = &corev1.PodList{}
+		sel := labels.SelectorFromSet(labels.Set{
+			constants.InferenceServicePodLabelKey: isvcName,
+			constants.OMEComponentLabel:           string(component),
+			LabelManagedBy:                        ManagedByOMENative,
+		})
+		err = c.List(ctx, pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel})
+	}
+	if err != nil {
 		return nil, err
 	}
 	out := make([]*corev1.Pod, 0, len(pods.Items))
@@ -42,6 +113,16 @@ func ListOMENativePodsByName(ctx context.Context, c client.Reader, namespace, is
 		out = append(out, &pods.Items[i])
 	}
 	return out, nil
+}
+
+// RegisterOMENativePodIndex installs the OMENativePodIndexField field
+// index on the supplied indexer (mgr.GetFieldIndexer()). Call once during
+// manager setup, before Start, so ListOMENativePodsByName's cache fast
+// path resolves an Instance's pods through the index instead of scanning
+// every cached pod. Idempotent re-registration is the caller's concern;
+// controller-runtime errors on a duplicate field name.
+func RegisterOMENativePodIndex(ctx context.Context, indexer client.FieldIndexer) error {
+	return indexer.IndexField(ctx, &corev1.Pod{}, OMENativePodIndexField, OMENativePodIndexExtractor)
 }
 
 // LiveListPodsForInstance returns the pods matching the (component,
