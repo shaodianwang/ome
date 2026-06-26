@@ -4,27 +4,35 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 )
 
 const (
-	defaultPlacementRequeue = 30 * time.Second
+	// DefaultPlacementRequeue is the fallback status-refresh poll cadence used
+	// when Reconciler.Requeue is unset. The operative value is supplied by the
+	// manager flag / chart; this is the graceful-degradation default.
+	DefaultPlacementRequeue = 30 * time.Second
 )
 
 // placementResult is the status the reconciler writes for one pass.
@@ -54,7 +62,7 @@ type Reconciler struct {
 	Scheme   *runtime.Scheme
 	Log      logr.Logger
 	Clusters ClusterClients
-	// Requeue is the status-refresh poll cadence; defaults to defaultPlacementRequeue.
+	// Requeue is the status-refresh poll cadence; defaults to DefaultPlacementRequeue.
 	Requeue time.Duration
 }
 
@@ -346,16 +354,44 @@ func (r *Reconciler) requeue() time.Duration {
 	if r.Requeue > 0 {
 		return r.Requeue
 	}
-	return defaultPlacementRequeue
+	return DefaultPlacementRequeue
 }
 
 // SetupWithManager wires the placer: reconcile ISVCs, and re-enqueue all ISVCs
-// when a WorkloadCluster changes (new/removed capacity may change placement).
+// when a WorkloadCluster changes in a placement-relevant way (new/removed
+// capacity, readiness flip, or label change). The predicate suppresses the
+// per-heartbeat status writes (the WorkloadCluster reconciler re-stamps Ready
+// every health interval) so a routine heartbeat does NOT fan out to every ISVC.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.InferenceService{}).
-		Watches(&v1beta1.WorkloadCluster{}, handler.EnqueueRequestsFromMapFunc(r.isvcsForClusterChange)).
+		Watches(&v1beta1.WorkloadCluster{}, handler.EnqueueRequestsFromMapFunc(r.isvcsForClusterChange),
+			builder.WithPredicates(placementRelevantClusterChange)).
 		Complete(r)
+}
+
+// placementRelevantClusterChange admits WorkloadCluster events that can change
+// placement decisions: create/delete (capacity appears/disappears) and updates
+// that flip the Ready condition status or change labels. It drops the routine
+// status heartbeat (the health-probe re-stamp of an unchanged Ready condition),
+// which would otherwise re-enqueue every control-plane ISVC on each probe.
+var placementRelevantClusterChange = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldWC, ok1 := e.ObjectOld.(*v1beta1.WorkloadCluster)
+		newWC, ok2 := e.ObjectNew.(*v1beta1.WorkloadCluster)
+		if !ok1 || !ok2 {
+			return true // unexpected type: fail safe by re-enqueuing
+		}
+		if clusterReady(oldWC) != clusterReady(newWC) {
+			return true
+		}
+		return !maps.Equal(oldWC.Labels, newWC.Labels)
+	},
+}
+
+// clusterReady reports whether the WorkloadCluster's Ready condition is True.
+func clusterReady(wc *v1beta1.WorkloadCluster) bool {
+	return apimeta.IsStatusConditionTrue(wc.Status.Conditions, v1beta1.WorkloadClusterReady)
 }
 
 func (r *Reconciler) isvcsForClusterChange(ctx context.Context, _ client.Object) []ctrl.Request {

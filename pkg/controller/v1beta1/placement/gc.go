@@ -7,12 +7,28 @@ import (
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-const defaultGCInterval = 5 * time.Minute
+// DefaultGCInterval is the fallback orphan-sweep cadence used when
+// GCReconciler.Interval is unset. The operative value is supplied by the
+// manager flag / chart; this is the graceful-degradation default.
+const DefaultGCInterval = 5 * time.Minute
+
+// defaultGCPageSize bounds the per-request item count for the paginated
+// control-plane sweep list. Fallback only; override via GCReconciler.PageSize.
+const defaultGCPageSize = 500
+
+// isvcMetadataList returns an empty metadata-only list typed as ome.io
+// InferenceServices, so List deserializes object metadata only (no spec/status).
+func isvcMetadataList() *metav1.PartialObjectMetadataList {
+	l := &metav1.PartialObjectMetadataList{}
+	l.SetGroupVersionKind(v1beta1.SchemeGroupVersion.WithKind("InferenceServiceList"))
+	return l
+}
 
 // GCReconciler periodically sweeps workload clusters for orphaned derived
 // InferenceServices — copies this control plane created whose source ISVC no
@@ -28,14 +44,18 @@ type GCReconciler struct {
 	APIReader client.Reader
 	Log       logr.Logger
 	Clusters  ClusterClients
-	// Interval is the sweep cadence; defaults to defaultGCInterval.
+	// Interval is the sweep cadence; defaults to DefaultGCInterval.
 	Interval time.Duration
+	// PageSize bounds the per-request item count for the paginated control-plane
+	// list; defaults to defaultGCPageSize.
+	PageSize int64
 }
 
 // OrphanedDeriveds returns the derived ISVCs whose origin-UID is not in the set
-// of live control-plane ISVC UIDs.
-func OrphanedDeriveds(liveUIDs map[string]bool, derived []v1beta1.InferenceService) []v1beta1.InferenceService {
-	var orphans []v1beta1.InferenceService
+// of live control-plane ISVC UIDs. Operates on metadata only — orphan
+// classification and deletion need just the annotations and name/namespace.
+func OrphanedDeriveds(liveUIDs map[string]bool, derived []metav1.PartialObjectMetadata) []metav1.PartialObjectMetadata {
+	var orphans []metav1.PartialObjectMetadata
 	for i := range derived {
 		uid := derived[i].Annotations[PlacementOriginUIDAnnotation]
 		if uid == "" {
@@ -49,15 +69,27 @@ func OrphanedDeriveds(liveUIDs map[string]bool, derived []v1beta1.InferenceServi
 }
 
 // sweep lists live CP ISVC UIDs, then for each connected cluster deletes
-// origin-labeled derived ISVCs whose source is gone.
+// origin-labeled derived ISVCs whose source is gone. Both lists are
+// metadata-only so full specs/status are never deserialized.
 func (g *GCReconciler) sweep(ctx context.Context) error {
-	cpList := &v1beta1.InferenceServiceList{}
-	if err := g.APIReader.List(ctx, cpList); err != nil {
-		return fmt.Errorf("gc: list control-plane ISVCs: %w", err)
+	pageSize := g.PageSize
+	if pageSize <= 0 {
+		pageSize = defaultGCPageSize
 	}
-	live := make(map[string]bool, len(cpList.Items))
-	for i := range cpList.Items {
-		live[string(cpList.Items[i].UID)] = true
+	live := map[string]bool{}
+	continueToken := ""
+	for {
+		cpList := isvcMetadataList()
+		if err := g.APIReader.List(ctx, cpList, client.Limit(pageSize), client.Continue(continueToken)); err != nil {
+			return fmt.Errorf("gc: list control-plane ISVCs: %w", err)
+		}
+		for i := range cpList.Items {
+			live[string(cpList.Items[i].UID)] = true
+		}
+		continueToken = cpList.Continue
+		if continueToken == "" {
+			break
+		}
 	}
 
 	for _, cluster := range g.Clusters.Connected() {
@@ -65,13 +97,14 @@ func (g *GCReconciler) sweep(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		derivedList := &v1beta1.InferenceServiceList{}
+		derivedList := isvcMetadataList()
 		if err := cl.List(ctx, derivedList, client.HasLabels{PlacementOriginLabel}); err != nil {
 			g.Log.Error(err, "gc: list derived ISVCs", "cluster", cluster)
 			continue
 		}
 		for _, orphan := range OrphanedDeriveds(live, derivedList.Items) {
 			o := orphan
+			o.SetGroupVersionKind(v1beta1.SchemeGroupVersion.WithKind("InferenceService"))
 			if err := cl.Delete(ctx, &o); err != nil && !apierrors.IsNotFound(err) {
 				g.Log.Error(err, "gc: delete orphan derived", "cluster", cluster, "isvc", o.Namespace+"/"+o.Name)
 				continue
@@ -87,7 +120,7 @@ func (g *GCReconciler) sweep(ctx context.Context) error {
 func (g *GCReconciler) Start(ctx context.Context) error {
 	interval := g.Interval
 	if interval <= 0 {
-		interval = defaultGCInterval
+		interval = DefaultGCInterval
 	}
 	// Sweep once on startup (APIReader is uncached, so this is safe immediately)
 	// rather than waiting a full interval to reap orphans after a restart.

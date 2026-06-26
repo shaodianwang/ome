@@ -31,6 +31,8 @@ import (
 	"strings"
 	"sync/atomic"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -123,8 +125,19 @@ func (c *selectivelyCachingClient) AddCacheEventHandler(ctx context.Context, obj
 	return inf.AddEventHandler(handler)
 }
 
+// podGroupKind is the GroupKind the remote cache must never hold: at 10 clusters
+// x ~6000 pods the Pod informer alone would dwarf everything the placer reads
+// (aggregated derived-ISVC status, not remote Pods).
+var podGroupKind = corev1.SchemeGroupVersion.WithKind("Pod").GroupKind()
+
 // NewSelectivelyCachingClient constructs the background cache, registers indexes,
 // starts it in the background, and returns the client.
+//
+// defaultSelector scopes every cached kind to the caller-supplied label selector
+// (mirrors the manager cache's placement-origin scoping); pass nil to cache
+// unfiltered. There is intentionally no in-code default selector — the value is
+// the caller's to supply, per the repo's no-magic-values rule. Caching Pods is
+// rejected outright: the remote cache must never LIST+WATCH cluster-wide Pods.
 func NewSelectivelyCachingClient(
 	ctx context.Context,
 	restConfig *rest.Config,
@@ -132,8 +145,24 @@ func NewSelectivelyCachingClient(
 	scheme *runtime.Scheme,
 	cachedKinds sets.Set[schema.GroupKind],
 	indexes []CacheIndexOption,
+	defaultSelector labels.Selector,
 ) (SelectivelyCachingClient, error) {
-	remoteCache, err := cache.New(restConfig, cache.Options{Scheme: scheme})
+	if cachedKinds.Has(podGroupKind) {
+		return nil, fmt.Errorf("refusing to cache kind %s: the remote cache must never hold cluster-wide Pods", podGroupKind.String())
+	}
+
+	cacheOpts := cache.Options{
+		Scheme: scheme,
+		// Strip managedFields from every cached object (typically a large
+		// fraction of each object's serialized size and never read here),
+		// mirroring the manager cache in cmd/manager/main.go.
+		DefaultTransform: cache.TransformStripManagedFields(),
+	}
+	if defaultSelector != nil {
+		cacheOpts.DefaultLabelSelector = defaultSelector
+	}
+
+	remoteCache, err := cache.New(restConfig, cacheOpts)
 	if err != nil {
 		return nil, fmt.Errorf("creating remote cache: %w", err)
 	}

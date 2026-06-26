@@ -19,9 +19,12 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// defaultHealthInterval is how often a WorkloadCluster is re-probed for
-// reachability when nothing else triggers a reconcile.
-const defaultHealthInterval = time.Minute
+// DefaultHealthInterval is the fallback re-probe cadence used when
+// Reconciler.HealthInterval is unset — how often a WorkloadCluster is re-probed
+// for reachability when nothing else triggers a reconcile. The operative value
+// is supplied by the manager flag / chart; this is the graceful-degradation
+// default.
+const DefaultHealthInterval = time.Minute
 
 // +kubebuilder:rbac:groups=ome.io,resources=workloadclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ome.io,resources=workloadclusters/status,verbs=get;update;patch
@@ -37,7 +40,7 @@ type Reconciler struct {
 	// Probe reports whether the cluster described by these kubeconfig bytes is
 	// reachable. Defaults to probeViaServerVersion; overridden in tests.
 	Probe func(ctx context.Context, kubeconfig []byte) error
-	// HealthInterval is the re-probe cadence; defaults to defaultHealthInterval.
+	// HealthInterval is the re-probe cadence; defaults to DefaultHealthInterval.
 	HealthInterval time.Duration
 	// Manager holds the live per-cluster clients; the reconciler connects a
 	// cluster when it becomes Reachable and disconnects it on removal. Optional
@@ -135,7 +138,7 @@ func (r *Reconciler) healthInterval() time.Duration {
 	if r.HealthInterval > 0 {
 		return r.HealthInterval
 	}
-	return defaultHealthInterval
+	return DefaultHealthInterval
 }
 
 // SetupWithManager wires the reconciler: watch WorkloadClusters, and re-enqueue

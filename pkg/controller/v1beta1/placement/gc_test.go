@@ -26,9 +26,15 @@ func derivedWithOrigin(name, originUID string) *v1beta1.InferenceService {
 
 func TestOrphanedDeriveds(t *testing.T) {
 	live := map[string]bool{"uid-live": true}
-	derived := []v1beta1.InferenceService{
-		*derivedWithOrigin("a", "uid-live"), // source exists -> keep
-		*derivedWithOrigin("b", "uid-gone"), // source gone -> orphan
+	withOrigin := func(name, originUID string) metav1.PartialObjectMetadata {
+		return metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "prod", Name: name,
+			Annotations: map[string]string{PlacementOriginUIDAnnotation: originUID},
+		}}
+	}
+	derived := []metav1.PartialObjectMetadata{
+		withOrigin("a", "uid-live"), // source exists -> keep
+		withOrigin("b", "uid-gone"), // source gone -> orphan
 	}
 	orphans := OrphanedDeriveds(live, derived)
 	require.Len(t, orphans, 1)

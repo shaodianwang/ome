@@ -139,6 +139,9 @@ type Options struct {
 	multiClusterRole           string
 	allowExecCredentials       bool
 	execCredentialAllowedCmds  string
+	clusterHealthInterval      time.Duration
+	placementRequeueInterval   time.Duration
+	placementGCInterval        time.Duration
 	configCacheTTL             time.Duration
 	zapOpts                    zap.Options
 }
@@ -166,6 +169,9 @@ func DefaultOptions() Options {
 		multiClusterRole:           "",
 		allowExecCredentials:       false,
 		execCredentialAllowedCmds:  "aws,gke-gcloud-auth-plugin,kubelogin",
+		clusterHealthInterval:      workloadcluster.DefaultHealthInterval,
+		placementRequeueInterval:   placement.DefaultPlacementRequeue,
+		placementGCInterval:        placement.DefaultGCInterval,
 		// Short TTL for the inferenceservice-config ConfigMap read on the ISVC
 		// reconcile hot path. Collapses the per-pass Deploy/InferenceServices/
 		// Ingress/CanaryAnalysis loads onto one apiserver GET per TTL window
@@ -215,6 +221,12 @@ func GetOptions() Options {
 			"SECURITY: an exec block runs a command in the controller pod; keep WorkloadCluster kubeconfig Secrets admin-only.")
 	flag.StringVar(&opts.execCredentialAllowedCmds, "exec-credential-allowed-commands", opts.execCredentialAllowedCmds,
 		"Comma-separated allowlist of exec credential plugin command basenames permitted when --allow-exec-credentials is set.")
+	flag.DurationVar(&opts.clusterHealthInterval, "workloadcluster-health-interval", opts.clusterHealthInterval,
+		"OEP-0018: how often each WorkloadCluster is re-probed for reachability when nothing else triggers a reconcile.")
+	flag.DurationVar(&opts.placementRequeueInterval, "placement-requeue-interval", opts.placementRequeueInterval,
+		"OEP-0018: status-refresh poll cadence for the placement (fan-out) controller.")
+	flag.DurationVar(&opts.placementGCInterval, "placement-gc-interval", opts.placementGCInterval,
+		"OEP-0018: orphan-sweep cadence for the placement GC runnable.")
 	flag.DurationVar(&opts.configCacheTTL, "config-cache-ttl", opts.configCacheTTL,
 		"TTL for the in-memory cache of the inferenceservice-config ConfigMap on the InferenceService reconcile path. "+
 			"Collapses the per-reconcile config loads onto one apiserver GET per window; kept short so ConfigMap edits "+
@@ -509,11 +521,12 @@ func main() {
 		clusterManager.SetExecCredentialPolicy(execPolicy)
 		setupLog.Info("Setting up WorkloadCluster controller")
 		if err = (&workloadcluster.Reconciler{
-			Client:     mgr.GetClient(),
-			Scheme:     mgr.GetScheme(),
-			Log:        ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
-			Manager:    clusterManager,
-			ExecPolicy: execPolicy,
+			Client:         mgr.GetClient(),
+			Scheme:         mgr.GetScheme(),
+			Log:            ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
+			Manager:        clusterManager,
+			ExecPolicy:     execPolicy,
+			HealthInterval: options.clusterHealthInterval,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "WorkloadCluster")
 			os.Exit(1)
@@ -525,6 +538,7 @@ func main() {
 				Scheme:   mgr.GetScheme(),
 				Log:      ctrl.Log.WithName("controllers").WithName("Placement"),
 				Clusters: clusterManager,
+				Requeue:  options.placementRequeueInterval,
 			}).SetupWithManager(mgr); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "Placement")
 				os.Exit(1)
@@ -533,6 +547,7 @@ func main() {
 				APIReader: mgr.GetAPIReader(),
 				Log:       ctrl.Log.WithName("controllers").WithName("PlacementGC"),
 				Clusters:  clusterManager,
+				Interval:  options.placementGCInterval,
 			}); err != nil {
 				setupLog.Error(err, "unable to add placement GC runnable")
 				os.Exit(1)

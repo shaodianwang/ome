@@ -33,6 +33,14 @@ ome:
     execCredentials:
       enabled: false
       allowedCommands: "aws,gke-gcloud-auth-plugin,kubelogin"
+    # Reconcile cadences for the OEP-0018 controllers (Go duration strings, e.g.
+    # "1m", "30s", "5m"). Leave empty to use the manager's built-in defaults.
+    # healthInterval: how often each WorkloadCluster is re-probed for reachability.
+    healthInterval: ""
+    # placementRequeueInterval: status-refresh poll cadence for the fan-out placer.
+    placementRequeueInterval: ""
+    # placementGCInterval: orphan-sweep cadence for the placement GC runnable.
+    placementGCInterval: ""
   # modelCache configures the optional cluster-wide model cache provider used
   # by BaseModel and ClusterBaseModel resources with spec.distribution: Sharded.
   # Leave provider empty to keep the default PerNode/model-agent behavior.
