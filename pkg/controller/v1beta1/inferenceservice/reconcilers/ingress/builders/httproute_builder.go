@@ -34,8 +34,6 @@ const (
 	RouterDefaultPort  int32 = 30080
 )
 
-var DefaultTimeout = toGatewayAPIDuration(1800)
-
 // HTTPRouteBuilder builds Gateway API HTTPRoute resources
 type HTTPRouteBuilder struct {
 	client        client.Client
@@ -106,6 +104,18 @@ func (b *HTTPRouteBuilder) BuildHTTPRoute(ctx context.Context, isvc *v1beta1.Inf
 func toGatewayAPIDuration(seconds int64) *gatewayapiv1.Duration {
 	duration := gatewayapiv1.Duration(fmt.Sprintf("%ds", seconds))
 	return &duration
+}
+
+// defaultTimeout returns the cluster-default HTTPRoute request timeout from
+// IngressConfig.DefaultRouteTimeoutSeconds, or nil when unset/non-positive — in
+// which case OME imposes no route timeout and the gateway's own default applies.
+// The default is config-driven (inferenceservice-config ConfigMap / chart), never
+// a hardcoded literal. A per-ISVC spec.<component>.timeoutSeconds still overrides.
+func (b *HTTPRouteBuilder) defaultTimeout() *gatewayapiv1.Duration {
+	if b.ingressConfig != nil && b.ingressConfig.DefaultRouteTimeoutSeconds != nil && *b.ingressConfig.DefaultRouteTimeoutSeconds > 0 {
+		return toGatewayAPIDuration(*b.ingressConfig.DefaultRouteTimeoutSeconds)
+	}
+	return nil
 }
 
 // gatewayHostnameForDomain renders the HTTPRoute host for a given gateway domain.
@@ -243,14 +253,19 @@ func (b *HTTPRouteBuilder) createHTTPRouteRule(routeMatches []gatewayapiv1.HTTPR
 			},
 		}
 	}
-	return gatewayapiv1.HTTPRouteRule{
+	rule := gatewayapiv1.HTTPRouteRule{
 		Matches:     routeMatches,
 		Filters:     filters,
 		BackendRefs: backendRefs,
-		Timeouts: &gatewayapiv1.HTTPRouteTimeouts{
-			Request: timeout,
-		},
 	}
+	// Only set a request timeout when one is configured (cluster default via
+	// IngressConfig.DefaultRouteTimeoutSeconds, or a per-ISVC override). A nil
+	// timeout leaves Timeouts unset so the gateway's own default governs —
+	// OME never imposes a hardcoded timeout.
+	if timeout != nil {
+		rule.Timeouts = &gatewayapiv1.HTTPRouteTimeouts{Request: timeout}
+	}
+	return rule
 }
 
 func (b *HTTPRouteBuilder) buildEngineHTTPRoute(ctx context.Context, isvc *v1beta1.InferenceService) (*gatewayapiv1.HTTPRoute, error) {
@@ -275,7 +290,7 @@ func (b *HTTPRouteBuilder) buildEngineHTTPRoute(ctx context.Context, isvc *v1bet
 	prefix := b.pathPrefix(isvc, engineName)
 	filters := b.componentFilters(isvc)
 
-	timeout := DefaultTimeout
+	timeout := b.defaultTimeout()
 	if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
 		timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
 	}
@@ -303,7 +318,7 @@ func (b *HTTPRouteBuilder) buildRouterHTTPRoute(ctx context.Context, isvc *v1bet
 	prefix := b.pathPrefix(isvc, routerName)
 	filters := b.componentFilters(isvc)
 
-	timeout := DefaultTimeout
+	timeout := b.defaultTimeout()
 	if isvc.Spec.Router.TimeoutSeconds != nil {
 		timeout = toGatewayAPIDuration(*isvc.Spec.Router.TimeoutSeconds)
 	}
@@ -331,7 +346,7 @@ func (b *HTTPRouteBuilder) buildDecoderHTTPRoute(ctx context.Context, isvc *v1be
 	prefix := b.pathPrefix(isvc, decoderName)
 	filters := b.componentFilters(isvc)
 
-	timeout := DefaultTimeout
+	timeout := b.defaultTimeout()
 	if isvc.Spec.Decoder.TimeoutSeconds != nil {
 		timeout = toGatewayAPIDuration(*isvc.Spec.Decoder.TimeoutSeconds)
 	}
@@ -355,7 +370,7 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(ctx context.Context, isvc *v1b
 	if isvc.Spec.Router != nil {
 		serviceName = constants.RouterServiceName(isvc.Name)
 		port = b.resolveServicePort(ctx, isvc.Namespace, serviceName, RouterDefaultPort)
-		timeout = DefaultTimeout
+		timeout = b.defaultTimeout()
 		if isvc.Spec.Router.TimeoutSeconds != nil {
 			timeout = toGatewayAPIDuration(*isvc.Spec.Router.TimeoutSeconds)
 		}
@@ -375,7 +390,7 @@ func (b *HTTPRouteBuilder) buildTopLevelHTTPRoute(ctx context.Context, isvc *v1b
 		// Engine-architecture post-Predictor world.
 		serviceName = constants.EngineServiceName(isvc.Name)
 		port = b.resolveServicePort(ctx, isvc.Namespace, serviceName, EngineDefaultPort)
-		timeout = DefaultTimeout
+		timeout = b.defaultTimeout()
 		if isvc.Spec.Engine != nil && isvc.Spec.Engine.TimeoutSeconds != nil {
 			timeout = toGatewayAPIDuration(*isvc.Spec.Engine.TimeoutSeconds)
 		}

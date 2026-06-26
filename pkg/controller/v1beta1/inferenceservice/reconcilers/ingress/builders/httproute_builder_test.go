@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -63,7 +64,7 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_EngineComponent(t *testing.T) {
 			expectedError:   false,
 			expectedRules:   1,
 			expectedHosts:   1,
-			expectedTimeout: DefaultTimeout, // default
+			expectedTimeout: toGatewayAPIDuration(1800), // cluster default from IngressConfig
 		},
 		{
 			name:          "engine component not ready",
@@ -132,7 +133,7 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_RouterComponent(t *testing.T) {
 			isvc:            createTestInferenceServiceWithRouterHTTPRoute("test-isvc", "default"),
 			expectedName:    "test-isvc-router",
 			expectedError:   false,
-			expectedTimeout: DefaultTimeout,
+			expectedTimeout: toGatewayAPIDuration(1800),
 		},
 		{
 			name:          "router component not ready",
@@ -197,7 +198,7 @@ func TestHTTPRouteBuilder_BuildHTTPRoute_DecoderComponent(t *testing.T) {
 			isvc:            createTestInferenceServiceWithDecoderHTTPRoute("test-isvc", "default"),
 			expectedName:    "test-isvc-decoder",
 			expectedError:   false,
-			expectedTimeout: DefaultTimeout,
+			expectedTimeout: toGatewayAPIDuration(1800),
 		},
 		{
 			name:          "decoder component not ready",
@@ -944,13 +945,50 @@ func TestHTTPRouteBuilder_PerISVCSubdomain_KeepsBackendPortResolution(t *testing
 }
 
 // Helper functions
+// TestHTTPRouteBuilder_NoDefaultTimeout_OmitsRouteTimeout verifies the
+// graceful-degradation contract: when IngressConfig.DefaultRouteTimeoutSeconds
+// is unset (nil), OME imposes no route timeout (Timeouts left nil) so the
+// gateway's own default governs — no hardcoded fallback.
+func TestHTTPRouteBuilder_NoDefaultTimeout_OmitsRouteTimeout(t *testing.T) {
+	builder := createHTTPRouteBuilder()
+	builder.ingressConfig.DefaultRouteTimeoutSeconds = nil // operator did not configure one
+
+	isvc := createTestInferenceServiceHTTPRoute("test-isvc", "default")
+	setEngineReady(isvc)
+
+	result, err := builder.BuildHTTPRoute(context.Background(), isvc, EngineComponent)
+	require.NoError(t, err)
+	httpRoute, ok := result.(*gatewayapiv1.HTTPRoute)
+	require.True(t, ok)
+	require.Len(t, httpRoute.Spec.Rules, 1)
+	assert.Nil(t, httpRoute.Spec.Rules[0].Timeouts, "no default configured => no route timeout imposed by OME")
+}
+
+// TestHTTPRouteBuilder_NonPositiveDefaultTimeout_OmitsRouteTimeout verifies a
+// 0/negative configured value is treated as "no timeout" rather than emitting
+// an invalid "0s"/"-Ns" duration.
+func TestHTTPRouteBuilder_NonPositiveDefaultTimeout_OmitsRouteTimeout(t *testing.T) {
+	builder := createHTTPRouteBuilder()
+	builder.ingressConfig.DefaultRouteTimeoutSeconds = ptr.To(int64(0))
+
+	isvc := createTestInferenceServiceHTTPRoute("test-isvc", "default")
+	setEngineReady(isvc)
+
+	result, err := builder.BuildHTTPRoute(context.Background(), isvc, EngineComponent)
+	require.NoError(t, err)
+	httpRoute := result.(*gatewayapiv1.HTTPRoute)
+	require.Len(t, httpRoute.Spec.Rules, 1)
+	assert.Nil(t, httpRoute.Spec.Rules[0].Timeouts, "non-positive default => no route timeout")
+}
+
 func createHTTPRouteBuilder() *HTTPRouteBuilder {
 	return &HTTPRouteBuilder{
 		ingressConfig: &controllerconfig.IngressConfig{
-			IngressDomain:     "example.com",
-			DomainTemplate:    "{{.Name}}.{{.Namespace}}.{{.IngressDomain}}",
-			OmeIngressGateway: "istio-system/gateway",
-			SharedHostPrefix:  "llm",
+			IngressDomain:              "example.com",
+			DomainTemplate:             "{{.Name}}.{{.Namespace}}.{{.IngressDomain}}",
+			OmeIngressGateway:          "istio-system/gateway",
+			SharedHostPrefix:           "llm",
+			DefaultRouteTimeoutSeconds: ptr.To(int64(1800)),
 		},
 		isvcConfig:    &controllerconfig.InferenceServicesConfig{},
 		domainService: services.NewDomainService(),

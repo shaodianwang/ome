@@ -89,6 +89,14 @@ type IngressConfig struct {
 	// hostname rendered from its own IngressDomain. Empty preserves the
 	// single-gateway behavior.
 	AdditionalIngressGateways []IngressGatewaySpec `json:"additionalIngressGateways,omitempty"`
+	// DefaultRouteTimeoutSeconds is the cluster-default Gateway API request
+	// timeout (HTTPRouteRule.Timeouts.Request) applied to every generated route
+	// whose ISVC does not set a per-component spec.<component>.timeoutSeconds
+	// override. There is intentionally NO in-code default — the value is supplied
+	// via the inferenceservice-config ConfigMap (Helm chart / GitOps), so the
+	// timeout is never a hardcoded magic number. nil or non-positive means OME
+	// imposes no route timeout and the gateway's own default applies.
+	DefaultRouteTimeoutSeconds *int64 `json:"defaultRouteTimeoutSeconds,omitempty"`
 }
 
 // IngressGatewaySpec identifies one gateway an HTTPRoute attaches to, plus the

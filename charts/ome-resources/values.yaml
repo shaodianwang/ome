@@ -130,6 +130,13 @@ ome:
       #     - omeIngressGateway: "envoy-gateway-system/external-gateway"
       #       ingressDomain: "external.example.com"
       additionalIngressGateways: []
+      # Cluster-default Gateway API request timeout (seconds) applied to every
+      # generated HTTPRoute whose ISVC doesn't set spec.<component>.timeoutSeconds.
+      # The OME binary has NO built-in default — this chart value is the source of
+      # truth (override per-cluster via GitOps). Generous by default because LLM
+      # generations/streams can run long; lower it if your traffic skews short.
+      # null/0 => OME imposes no route timeout (the gateway's own default applies).
+      defaultRouteTimeoutSeconds: 3600
     nodeSelector: {}
     tolerations: []
     topologySpreadConstraints: []
