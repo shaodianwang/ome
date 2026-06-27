@@ -237,6 +237,24 @@ func IsContainersReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// IsPodReady reports whether the kubelet-owned PodReady condition is True —
+// containers ready AND every readiness gate (including ome.io/serving)
+// satisfied. This is the signal that the pod is actually in Service rotation,
+// distinct from IsContainersReady (probes only) and IsServing (the gate
+// condition alone, before kubelet re-evaluates PodReady). Use this to confirm
+// a freshly-served replacement is carrying traffic before draining its source.
+func IsPodReady(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
 // MarkPodServing removes the {userAgent, key} entry from the
 // ome.io/serving condition's writer list. If the resulting list is
 // empty (or the condition didn't exist yet — fresh pod case), the

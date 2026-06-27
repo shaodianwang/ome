@@ -145,9 +145,11 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		return false, nil
 	}
 
-	// 3. Wait for the WHOLE replacement gang to be Ready, then serving.
-	// Draining the source before every member is Ready would reintroduce
-	// the capacity dip this whole change exists to remove.
+	// 3. Wait for the whole replacement gang to pass its readiness probes
+	// (ContainersReady), then put it into serving rotation. MarkPodServing is
+	// gated on ContainersReady, NOT PodReady, on purpose: ome.io/serving is
+	// itself a readiness gate, so gating the serving flip on PodReady would
+	// deadlock (PodReady needs serving=True needs PodReady).
 	if int32(len(surgePods)) < inst.TotalPods() || !query.AllPodsRuntimeReady(surgePods) {
 		return false, nil
 	}
@@ -160,20 +162,35 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		}
 	}
 
-	// 4. Drain the source gang — replacement is Ready, so capacity holds.
+	// 4. Drain the source gang once the replacement is in rotation.
 	sourcePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, sourceIdx)
 	if err != nil {
 		return false, fmt.Errorf("list source gang pods (instance=%d): %w", sourceIdx, err)
 	}
 	if len(sourcePods) > 0 {
-		// Flip the source gang OUT of serving rotation in the SAME pass the
-		// replacement gang joined it — mirroring single-pod surgeUpdate. A
+		// Hold the drain until the replacement gang is actually PodReady —
+		// containers ready AND the ome.io/serving gate AND'd in by kubelet —
+		// not merely ContainersReady. Serving is itself a readiness gate, so a
+		// just-served pod is not yet PodReady (not in Service rotation) until
+		// kubelet re-evaluates the gate a beat after MarkPodServing. Draining
+		// the source before then drops it out of rotation while the replacement
+		// is still not in it — an N-1 capacity TROUGH. Across Components rolled
+		// on independent timelines those offset troughs skew the live
+		// RatioBalanced ratio (the engine 2 : decoder 1 regression). Waiting
+		// keeps true capacity overlap: N -> N+1 -> N, never below N. (Gated
+		// only when there is a source to drain; a source already gone — the
+		// promote step below — has no trough to guard against.)
+		for _, pod := range surgePods {
+			if !podreadiness.IsPodReady(pod) {
+				return false, nil
+			}
+		}
+		// Flip the source gang OUT of serving rotation before deleting it. A
 		// pod merely Deleted keeps serving=True (ContainersReady) through its
-		// whole termination grace, so the source would linger in
-		// ServingReplicas beside the replacement (the N+1 PEAK) for the
-		// drain window. For a gang that window spans reconciles, holding the
-		// live cross-Component serving ratio out of band under RatioBalanced.
-		// Draining first collapses serving back to N atomically.
+		// whole termination grace, so an undrained source would linger in
+		// ServingReplicas beside the replacement (a durable N+1). Flipping it
+		// now collapses serving back to N — and because the replacement is
+		// already PodReady, serving never dips below N in the gap.
 		for _, pod := range sourcePods {
 			if !podreadiness.IsServing(pod) {
 				continue

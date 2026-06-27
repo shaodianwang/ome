@@ -1229,15 +1229,17 @@ func TestGangSurgeUpdate_BumpDuringBump_PromotesPinnedRev(t *testing.T) {
 	}
 }
 
-// TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete pins the
-// multi-node RatioBalanced pacing fix: when the replacement gang is Ready +
-// serving and the drain step fires, the SOURCE gang's pods must be flipped
-// OUT of serving rotation (serving=False) in the SAME pass — not merely
-// Deleted. A Deleted-but-terminating pod keeps serving=True through its grace
-// window, so the source would linger in ServingReplicas beside the
-// replacement (the N+1 PEAK) for the multi-reconcile drain window, holding
-// the cross-Component serving ratio out of band. Single-pod surgeUpdate
-// already drains-then-deletes; this gives the gang path the same atomic flip.
+// TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete pins half of the
+// multi-node RatioBalanced invariant: once the replacement gang is PodReady
+// (in rotation) and the drain step fires, the SOURCE gang's pods must be
+// flipped OUT of serving rotation (serving=False) before being Deleted. A
+// Deleted-but-terminating pod keeps serving=True through its grace window, so
+// an undrained source would linger in ServingReplicas beside the replacement
+// (a durable N+1) for the multi-reconcile drain window. Single-pod surgeUpdate
+// already drains-then-deletes; this gives the gang path the same flip. (The
+// complementary half — NOT draining until the replacement is PodReady so the
+// gap never troughs below N — is covered by
+// TestGangSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady.)
 func TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc := surgeISVCReady("llama-70b", "prod", 1)
@@ -1260,9 +1262,15 @@ func TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete(t *testing.T) {
 			t.Fatalf("seed source gang pod (%s): %v", runner, err)
 		}
 	}
-	// Replacement gang (idx=1) Ready + serving → drain step is next.
+	// Replacement gang (idx=1) Ready + serving + PodReady → it is in rotation,
+	// so the drain step may now flip the source out (the drain is gated on the
+	// replacement being PodReady, not merely ContainersReady).
 	for _, runner := range []string{"leader", "worker"} {
-		if err := c.Create(context.Background(), gangPodAt(isvc, 1, runner, v2Hash, true, true)); err != nil {
+		p := gangPodAt(isvc, 1, runner, v2Hash, true, true)
+		p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue,
+		})
+		if err := c.Create(context.Background(), p); err != nil {
 			t.Fatalf("seed surge gang pod (%s): %v", runner, err)
 		}
 	}
@@ -1299,8 +1307,8 @@ func TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete(t *testing.T) {
 		}
 		if podreadiness.IsServing(pod) {
 			t.Errorf("source gang pod %s is still serving=True during the drain "+
-				"step — it must be flipped out of rotation atomically with the "+
-				"replacement joining, else the N+1 surge peak lingers and "+
+				"step — it must be flipped out of rotation before delete, else a "+
+				"terminating-but-serving source lingers as a durable N+1 and "+
 				"RatioBalanced pacing breaks for gangs", pod.Name)
 		}
 	}

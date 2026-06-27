@@ -14,6 +14,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -126,5 +127,100 @@ func TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods(t *testing.T) {
 		if got := pod.Labels[query.LabelPodGroup]; got != wantPG {
 			t.Errorf("surge pod %s pod-group label=%q, want %q", pod.Name, got, wantPG)
 		}
+	}
+}
+
+// TestGangSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady pins the
+// RatioBalanced regression fix: a gang surge must NOT drain the source gang
+// out of serving until the REPLACEMENT gang is PodReady (containers ready AND
+// the ome.io/serving readiness gate AND'd in by kubelet) — not merely
+// ContainersReady. ome.io/serving is itself a readiness gate, so a just-served
+// pod is not PodReady (not in Service rotation) until kubelet re-evaluates the
+// gate. Draining the source on ContainersReady (the #528 behavior) drops it out
+// of rotation while the replacement is still not in it — an N-1 capacity
+// TROUGH. Across Components rolled on independent timelines those offset troughs
+// skew the live RatioBalanced ratio (the engine 2 : decoder 1 regression that
+// passed on 2026-06-08 and broke 2026-06-22).
+func TestGangSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc := surgeISVCReady("p72", "prod", 1)
+	plan := gangSurgePlan()
+
+	v1Name := "p72-engine-rev-v1hash"
+	v2Name := "p72-engine-rev-v2hash"
+	isvc.Status.Components = gangSurgeInFlightStatus(v1Name, v2Name)
+
+	c := gangSchedClient(t, isvc)
+	makeCR(t, c, isvc, v1Name)
+	makeCR(t, c, isvc, v2Name)
+	v1Hash := query.RevisionHashFromControllerRevisionName(v1Name)
+	v2Hash := query.RevisionHashFromControllerRevisionName(v2Name)
+
+	// Source gang (idx=0, old rev) fully in rotation.
+	for _, runner := range []string{"leader", "worker"} {
+		if err := c.Create(context.Background(), gangPodAt(isvc, 0, runner, v1Hash, true, true)); err != nil {
+			t.Fatalf("seed source pod (%s): %v", runner, err)
+		}
+	}
+	// Replacement gang (idx=1, new rev): ContainersReady + serving, but NOT
+	// yet PodReady — the window where the bug drained the source too early.
+	for _, runner := range []string{"leader", "worker"} {
+		if err := c.Create(context.Background(), gangPodAt(isvc, 1, runner, v2Hash, true, true)); err != nil {
+			t.Fatalf("seed replacement pod (%s): %v", runner, err)
+		}
+	}
+
+	input := gangInputWithRemove(isvc, c)
+	input.DesiredSpec.GangSchedulingAvailable = true
+	deps := legacyTestDeps(c)
+	deps.EnsureGangPodGroup = gang.EnsureSurgePodGroup(c)
+
+	v2 := &appsv1.ControllerRevision{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: v2Name}, v2); err != nil {
+		t.Fatalf("get v2 CR: %v", err)
+	}
+
+	srcServing := func(when string) (present int, serving int) {
+		pods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "p72", workload.ComponentEngine, 0)
+		if err != nil {
+			t.Fatalf("list source pods (%s): %v", when, err)
+		}
+		for _, p := range pods {
+			present++
+			if podreadiness.IsServing(p) {
+				serving++
+			}
+		}
+		return
+	}
+
+	// Pass 1: replacement NOT PodReady → the source must stay fully serving.
+	if _, err := surgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], v2, nil); err != nil {
+		t.Fatalf("gang surge pass 1: %v", err)
+	}
+	if present, serving := srcServing("pass1"); present == 0 || serving != present {
+		t.Fatalf("source drained before replacement PodReady (present=%d serving=%d) — capacity trough", present, serving)
+	}
+
+	// Flip the replacement gang to PodReady (kubelet AND'd the serving gate).
+	replPods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "p72", workload.ComponentEngine, 1)
+	if err != nil {
+		t.Fatalf("list replacement pods: %v", err)
+	}
+	for _, p := range replPods {
+		p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue,
+		})
+		if err := c.Status().Update(context.Background(), p); err != nil {
+			t.Fatalf("flip replacement PodReady (%s): %v", p.Name, err)
+		}
+	}
+
+	// Pass 2: replacement PodReady → NOW the source drains out of serving.
+	if _, err := surgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], v2, nil); err != nil {
+		t.Fatalf("gang surge pass 2: %v", err)
+	}
+	if present, serving := srcServing("pass2"); present > 0 && serving > 0 {
+		t.Errorf("source still serving after replacement PodReady (present=%d serving=%d) — drain did not fire", present, serving)
 	}
 }
