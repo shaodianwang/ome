@@ -624,10 +624,12 @@ integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tes
 	@# which registers Gomega's fail handler with ginkgo.RunSpecs.
 	@#
 	@# Excluded packages:
-	@#   - tests/integration/kindutil/*  — plain testing.T helpers, NOT
-	@#     a Ginkgo suite. -ginkgo.trace below would error with
+	@#   - tests/integration/kindutil/* AND tests/perf/*  — plain testing.T
+	@#     packages, NOT Ginkgo suites (they do not import ginkgo, so its
+	@#     flags are unregistered). -ginkgo.trace below would error with
 	@#     `flag provided but not defined: -ginkgo.trace` and fail the
-	@#     binary before any test runs.
+	@#     binary before any test runs. tests/perf/* runs in its own CI step
+	@#     via the `test-perf` target (the scale harness + rangespec check).
 	@#   - tests/integration/.../*_kind  — KIND-backed suites (real
 	@#     kubelet via Docker): omenative_coordination_kind, irmanaged_kind,
 	@#     rawdeployment_kind, omenative_perm_kind. Run locally via the
@@ -648,9 +650,44 @@ integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tes
 	@# Timeout: go test defaults to 10m PER PACKAGE. 20m gives headroom
 	@# without masking a genuine deadlock — any real loop bug would
 	@# still hang past 20m.
-	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|_kind$$') ; \
+	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|_kind$$|/tests/perf/') ; \
 	$(TEST_ENV) go test -v -timeout=20m $$PKGS $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@echo "✅ Integration tests passed"
+
+# Perf scenario selection. Defaults to the baseline (large, for beefy/local
+# runs); the CI step overrides these with the smaller ci/ scenario that converges
+# on a constrained agent. Override on the CLI to run a custom scenario.
+PERF_GENERATOR ?= tests/perf/inferenceservice/configs/baseline/generator.yaml
+PERF_RANGESPEC ?= tests/perf/inferenceservice/configs/baseline/rangespec.yaml
+
+.PHONY: run-perf-isvc
+run-perf-isvc: envtest dep-crds ## 🏎️  Run the local InferenceService scale harness (envtest + fake executor, no kubelet).
+	@echo "🏎️  Running InferenceService perf harness ($(PERF_GENERATOR))..."
+	@mkdir -p $(PROJECT_DIR)/artifacts/perf-isvc
+	@$(TEST_ENV) go run ./tests/perf/inferenceservice/runner \
+		-o $(PROJECT_DIR)/artifacts/perf-isvc \
+		-generator-config $(PERF_GENERATOR) \
+		-project-root $(PROJECT_DIR)
+
+.PHONY: test-perf-isvc
+test-perf-isvc: run-perf-isvc ## 🏁 Run the perf harness, then check results against the rangespec.
+	@echo "🏁 Checking perf results against rangespec ($(PERF_RANGESPEC))..."
+	@# -range must be absolute: `go test` runs the checker binary from its own
+	@# package dir, not the repo root, so a repo-relative path would not resolve.
+	@go test ./tests/perf/inferenceservice/checker/... -args \
+		-summary $(PROJECT_DIR)/artifacts/perf-isvc/summary.yaml \
+		-cmd-stats $(PROJECT_DIR)/artifacts/perf-isvc/cmd.stats.yaml \
+		-range $(PROJECT_DIR)/$(PERF_RANGESPEC)
+
+.PHONY: test-perf
+test-perf: ## 🏎️  Perf CI step (separate from integration-test): harness unit tests + the CI-sized scale harness + rangespec check.
+	@echo "🧪 Running perf-harness unit tests (plain testing.T, no ginkgo flags)..."
+	@$(TEST_ENV) go test -timeout=10m ./tests/perf/...
+	@# CI agents are constrained, so run the small ci/ scenario (the 300-ISVC
+	@# baseline does not converge in the recorder window on an mks-cpu pod).
+	@$(MAKE) test-perf-isvc \
+		PERF_GENERATOR=tests/perf/inferenceservice/configs/ci/generator.yaml \
+		PERF_RANGESPEC=tests/perf/inferenceservice/configs/ci/rangespec.yaml
 
 .PHONY: test-kind
 test-kind: xet-build dep-crds ## 🧪 Run KIND-backed integration tests (real kubelet — needs docker + kind locally)

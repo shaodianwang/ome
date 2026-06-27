@@ -1,0 +1,26 @@
+title: "Multi-cluster performance hardening + endpoint publisher"
+oep-number: "0018.2"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-06-26
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follows OEP-0018 (the placement/fan-out alpha) and is tested via the harness
+# proposed in OEP-0020. Modeled on Kueue MultiKueue's connection layer.
+see-also:
+  - "/oeps/0018-multi-cluster-placement" # the alpha this hardens to production scale
+  - "/oeps/0018.1-multicluster-scaleout" # sibling 0018 follow-up (fractional admission); complementary axis
+  - "/oeps/0020-integration-test-framework-v2" # the multi-cluster + perf test beds this leans on
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"

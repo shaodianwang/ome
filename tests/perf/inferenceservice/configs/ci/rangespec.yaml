@@ -1,0 +1,23 @@
+# Expected-range thresholds for the CI scenario (configs/ci/generator.yaml),
+# asserted by the checker. These are deliberately GENEROUS placeholders — the CI
+# perf step is soft-fail and exists to exercise the harness + emit numbers, not
+# to gate on a calibrated bound. Calibrate (and tighten) per the recipe in
+# configs/baseline/rangespec.yaml once the step runs on stable CI hardware.
+
+cmd:
+  # Upper bound on total runner wall time. Generous: the constrained CI agent is
+  # slow per-reconcile, and this is a soft-fail signal, not a gate.
+  maxWallMs: 540_000
+
+# Fraction of expected InferenceServices that must reach Ready. The runner only
+# exits cleanly once every expected object is Ready, so a successful run is 1.0;
+# this floor is the backstop.
+minReadyFraction: 0.95
+
+classes:
+  small:
+    maxAvgTimeToReadyMs: 30_000
+  medium:
+    maxAvgTimeToReadyMs: 60_000
+  large:
+    maxAvgTimeToReadyMs: 120_000

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"go.uber.org/zap/zaptest/observer"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
@@ -75,11 +76,23 @@ type Framework struct {
 	// defaultControlPlaneStopTimeout if zero.
 	ControlPlaneStopTimeout time.Duration
 
+	// SkipWriteConflictCheck disables the Teardown write-conflict gate
+	// for this Framework. The gate fails the suite when a controller
+	// logs an apiserver optimistic-lock rejection at error level (a
+	// missing conflict-retry path). Leave false for normal suites; set
+	// true only for suites that deliberately provoke conflicts.
+	SkipWriteConflictCheck bool
+
 	// scheme is the *client-side* runtime.Scheme assembled in
 	// SetupClient. Distinct from f.testEnv.Scheme (apiserver-side); the
 	// split lets us register controller-only types (e.g. KEDA)
 	// without polluting the apiserver scheme.
 	scheme *apiruntime.Scheme
+
+	// observedLogs captures controller-runtime log entries for the
+	// Teardown write-conflict gate. Set by Init (via the OnceValue
+	// logger), read by Teardown. Nil if Init was never called.
+	observedLogs *observer.ObservedLogs
 
 	// unexported state — set by Init/StartManager, consumed by Teardown.
 	testEnv        *envtest.Environment
@@ -111,6 +124,12 @@ type OptionalCRDBundle struct {
 // any controller is running — useful for seeding baseline state and
 // for webhook-only suites.
 func (f *Framework) Init() (*rest.Config, error) {
+	// Wire the controller-runtime logger to an observing tee before
+	// anything starts so the whole suite's >=Error logs are captured
+	// for the Teardown write-conflict gate. Idempotent across multiple
+	// Frameworks in one test binary (sync.OnceValue).
+	f.observedLogs = setupObservedLogger()
+
 	if f.ProjectRoot == "" {
 		root, err := findProjectRoot()
 		if err != nil {
@@ -211,13 +230,31 @@ func (f *Framework) Scheme() *apiruntime.Scheme {
 	return f.scheme
 }
 
-// Teardown stops envtest. Idempotent: safe to call from AfterSuite even
-// if Init failed.
+// ObservedLogs returns the in-memory log observer wired by Init. Nil
+// before Init. Suites rarely need this — Teardown runs the write-
+// conflict gate automatically — but it is exposed for suites that want
+// to assert on captured controller logs directly.
+func (f *Framework) ObservedLogs() *observer.ObservedLogs {
+	return f.observedLogs
+}
+
+// Teardown stops envtest and runs the write-conflict gate. Idempotent:
+// safe to call from AfterSuite even if Init failed.
+//
+// The gate (VerifyNoWriteConflicts) runs after envtest is stopped so
+// the observer holds the suite's complete log history. It fails the
+// suite via Gomega if any controller logged an apiserver optimistic-
+// lock rejection at error level. Disable per-Framework with
+// SkipWriteConflictCheck for suites that provoke conflicts on purpose.
 func (f *Framework) Teardown() error {
 	if f.testEnv == nil {
 		return nil
 	}
-	return f.testEnv.Stop()
+	stopErr := f.testEnv.Stop()
+	if !f.SkipWriteConflictCheck {
+		VerifyNoWriteConflicts(f.observedLogs)
+	}
+	return stopErr
 }
 
 // findProjectRoot walks up from the file that called the public

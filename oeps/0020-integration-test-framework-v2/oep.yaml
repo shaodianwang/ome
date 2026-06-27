@@ -1,0 +1,27 @@
+title: "Integration test framework v2: multi-cluster, perf, conflict gate"
+oep-number: "0020"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-06-26
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# This OEP exists to test the surfaces the multi-cluster / control-plane-split
+# OEPs introduced. It leans on their controllers and their existing
+# (fake-client-only) test gaps.
+see-also:
+  - "/oeps/0018-multi-cluster-placement" # placement fan-out + WorkloadCluster transport this OEP must test against a real apiserver
+  - "/oeps/0019-control-plane-split"     # serving/model/webhook plane split this framework must spin up independently
+  - "/oeps/0007.1-omenative-coordinated-rollout" # the coordination behavior the flaky PodKubeletSimulator was built to test
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"

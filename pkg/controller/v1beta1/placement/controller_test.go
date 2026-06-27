@@ -230,7 +230,11 @@ func TestReconcile_StickyWinner(t *testing.T) {
 	assert.True(t, hasDerived(t, wb))
 }
 
-func TestReconcile_ReplaceOnWinnerLost(t *testing.T) {
+// When the winner's derived is gone on a CONNECTED winner cluster, the
+// controller holds the existing placement for the grace window (riding out a
+// transient gap) before re-racing. With a non-trivial grace, the first pass
+// holds: the winner is retained, no re-fan-out, and a requeue is scheduled.
+func TestReconcile_WinnerLostWithinGraceHolds(t *testing.T) {
 	s := testScheme(t)
 	wa, wb := emptyWorker(s), emptyWorker(s) // b's derived is GONE (winner lost)
 	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
@@ -245,16 +249,53 @@ func TestReconcile_ReplaceOnWinnerLost(t *testing.T) {
 	}
 	r, cp := newPlacer(s, clusters, isvc,
 		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+	r.WinnerLostGracePeriod = time.Minute // non-trivial: first pass is within grace
+
+	res, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+	assert.Positive(t, res.RequeueAfter, "requeues to re-check after grace")
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, "b", p.Cluster, "winner held during grace")
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase, "phase held during grace")
+	assert.False(t, hasDerived(t, wa), "must NOT re-fan-out to a within grace")
+}
+
+// Once the winner-lost grace window has elapsed (the derived stayed gone on the
+// connected winner), the controller gives up on the winner and re-races: it
+// clears the winner and re-fans-out to every candidate.
+func TestReconcile_ReplaceOnWinnerLostAfterGrace(t *testing.T) {
+	s := testScheme(t)
+	wa, wb := emptyWorker(s), emptyWorker(s) // b's derived is GONE (winner lost)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	r, cp := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+	r.WinnerLostGracePeriod = time.Minute
+	// Pre-seed the grace clock so the window is already elapsed on this pass.
+	r.winnerLostSince.Store(isvc.UID, time.Now().Add(-2*time.Minute))
 
 	_, err := r.Reconcile(context.Background(), req())
 	require.NoError(t, err)
 
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
-	assert.Empty(t, p.Cluster, "lost winner cleared")
+	assert.Empty(t, p.Cluster, "lost winner cleared after grace")
 	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
 	assert.True(t, hasDerived(t, wa), "re-fanned out to a")
 	assert.True(t, hasDerived(t, wb), "re-fanned out to b")
+	// Marker cleared once re-raced.
+	_, ok := r.winnerLostSince.Load(isvc.UID)
+	assert.False(t, ok, "grace marker cleared after re-race")
 }
 
 func TestReconcile_WinnerFailedSurfacesFailed(t *testing.T) {
@@ -452,6 +493,10 @@ func TestReconcile_ClearsEndpointOnWinnerLost(t *testing.T) {
 	isvc.Status.URL = oldURL
 	r, cp := newPlacer(s, clusters, isvc,
 		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+	r.WinnerLostGracePeriod = time.Minute
+	// Grace already elapsed: the endpoint is cleared only once we genuinely
+	// re-race (a transient gap within grace keeps the sticky endpoint).
+	r.winnerLostSince.Store(isvc.UID, time.Now().Add(-2*time.Minute))
 
 	_, err := r.Reconcile(context.Background(), req())
 	require.NoError(t, err)
@@ -461,6 +506,37 @@ func TestReconcile_ClearsEndpointOnWinnerLost(t *testing.T) {
 	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
 	assert.Nil(t, p.Endpoint)
 	assert.Nil(t, cpStatusURL(t, cp))
+}
+
+// Within the grace window the sticky endpoint MUST survive a transient
+// winner-derived gap: an external LB watching status.url must not see a spurious
+// deroute on a momentary blip.
+func TestReconcile_StickyEndpointSurvivesWinnerGapWithinGrace(t *testing.T) {
+	s := testScheme(t)
+	wb := emptyWorker(s) // b's derived GONE this pass (transient)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	oldURL := &apis.URL{Scheme: "https", Host: "svc.prod.b.example"}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced, Endpoint: oldURL,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	isvc.Status.URL = oldURL
+	r, cp := newPlacer(s, clusters, isvc, readyWC("b", map[string]string{"gpu": "gb300"}))
+	r.WinnerLostGracePeriod = time.Minute // within grace on first pass
+
+	res, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+	assert.Positive(t, res.RequeueAfter)
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase, "placement held during grace")
+	require.NotNil(t, p.Endpoint, "sticky endpoint survives a transient gap within grace")
+	assert.Equal(t, "svc.prod.b.example", p.Endpoint.Host)
 }
 
 func TestReconcile_StickyEndpointPersistsAcrossTransientGap(t *testing.T) {
@@ -721,4 +797,233 @@ func TestReconcileDelete_HoldsFinalizerWhenConnectedDeleteFails(t *testing.T) {
 	got := &v1beta1.InferenceService{}
 	require.NoError(t, cp.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
 	assert.Contains(t, got.Finalizers, PlacementFinalizer, "finalizer held while connected cluster still holds derived")
+}
+
+// Winner-lost grace: a DISCONNECTED winner must be treated as transient
+// — the controller holds the placement and requeues, and crucially does NOT arm
+// the grace clock (which tracks absence on a CONNECTED winner). A transport flap
+// must never tear down a healthy placement or even start counting toward a
+// re-race.
+func TestReconcile_StickyWinnerDisconnectedHoldsWithoutArmingGrace(t *testing.T) {
+	s := testScheme(t)
+	// Winner "b" is a Ready candidate WorkloadCluster but is NOT in the connected
+	// client set (transport flap): ClientFor("b") -> (nil, false).
+	wa := emptyWorker(s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	r, cp := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+	r.WinnerLostGracePeriod = time.Nanosecond // even a ~zero grace must not re-race a disconnected winner
+
+	res, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+	assert.Positive(t, res.RequeueAfter, "disconnected winner: hold and requeue")
+
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, "b", p.Cluster, "disconnected winner held, not cleared")
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
+	assert.False(t, hasDerived(t, wa), "must NOT re-race / fan out to a on a disconnected winner")
+	_, armed := r.winnerLostSince.Load(isvc.UID)
+	assert.False(t, armed, "grace clock must NOT be armed for a disconnected winner")
+}
+
+// Winner-lost grace: once the derived reappears on the connected winner, any pending grace
+// marker is cleared so a later disappearance starts a fresh window.
+func TestReconcile_StickyWinnerPresentClearsGraceMarker(t *testing.T) {
+	s := testScheme(t)
+	wa := emptyWorker(s)
+	wb := workerWithAdmittedDerived(t, s) // present + admitted
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	r, cp := newPlacer(s, clusters, isvc,
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+	// Pre-seed a stale grace marker (as if the derived had briefly vanished).
+	r.winnerLostSince.Store(isvc.UID, time.Now())
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	assert.Equal(t, v1beta1.PlacementPhasePlaced, cpPlacement(t, cp).Phase)
+	_, ok := r.winnerLostSince.Load(isvc.UID)
+	assert.False(t, ok, "grace marker cleared once derived is present again")
+}
+
+// Fault isolation: a candidate that is NOT in the connected snapshot is
+// skipped during fan-out — its absence must not block placing on the connected
+// candidates, and the placement still proceeds to Racing.
+func TestReconcile_FanOutSkipsDisconnectedCandidate(t *testing.T) {
+	s := testScheme(t)
+	// Both "a" and "b" are Ready candidates, but only "a" is connected.
+	wa := emptyWorker(s)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err, "a disconnected candidate must not fail the reconcile")
+
+	assert.True(t, hasDerived(t, wa), "connected candidate a got the derived")
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
+}
+
+// Index: isvcsForClusterChange enqueues an ISVC only when the changed
+// cluster is (or could become) one of its candidates — its requirement selector
+// matches the cluster's labels — and skips ISVCs the cluster cannot affect.
+func TestIsvcsForClusterChange_EnqueuesOnlyMatchingCandidates(t *testing.T) {
+	s := testScheme(t)
+	// match: selector gpu=gb300 matches the changed cluster.
+	match := srcISVCNamed("match", map[string]string{AcceleratorRequirementsAnnotation: "gpu=gb300"})
+	// noMatch: requires a different accelerator; the changed cluster is not a candidate.
+	noMatch := srcISVCNamed("nomatch", map[string]string{AcceleratorRequirementsAnnotation: "gpu=h100"})
+	// noReq: declares no placement requirement; never fanned out, must be excluded
+	// (and is not even in the index).
+	noReq := srcISVCNamed("noreq", nil)
+
+	c := indexedPlacementClient(t, s, match, noMatch, noReq)
+	r := &Reconciler{Client: c, Scheme: s, Log: log.Log}
+
+	changed := readyWC("b", map[string]string{"gpu": "gb300"})
+	reqs := r.isvcsForClusterChange(context.Background(), changed)
+
+	got := requestNames(reqs)
+	assert.Contains(t, got, "match", "ISVC whose selector matches the changed cluster is enqueued")
+	assert.NotContains(t, got, "nomatch", "ISVC whose selector does not match is skipped")
+	assert.NotContains(t, got, "noreq", "ISVC with no placement requirement is skipped")
+}
+
+// Index: an ISVC whose status references the changed cluster (it is
+// placed/racing there) is enqueued even when the post-change labels no longer
+// match its selector — this is the "cluster leaving the candidate set" case the
+// event's post-change object alone would miss.
+func TestIsvcsForClusterChange_EnqueuesStatusReferencedClusterOnLabelLoss(t *testing.T) {
+	s := testScheme(t)
+	// Selector requires gpu=gb300, but the changed cluster has LOST that label.
+	// The ISVC is currently placed on "b", so it must be re-evaluated.
+	placed := srcISVCNamed("placed", map[string]string{AcceleratorRequirementsAnnotation: "gpu=gb300"})
+	placed.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "b", Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted}},
+	}
+	c := indexedPlacementClient(t, s, placed)
+	r := &Reconciler{Client: c, Scheme: s, Log: log.Log}
+
+	// Changed cluster "b" no longer carries gpu=gb300 (label removed).
+	changed := readyWC("b", map[string]string{"gpu": "h100"})
+	reqs := r.isvcsForClusterChange(context.Background(), changed)
+
+	assert.Contains(t, requestNames(reqs), "placed",
+		"ISVC placed on the cluster is re-enqueued even when the cluster's new labels no longer match its selector")
+}
+
+// Index: the field-index extractor marks exactly the requirement-
+// declaring ISVCs (and leaves the rest unindexed).
+func TestPlacementEligibleIndexExtractor(t *testing.T) {
+	withAccel := srcISVCNamed("a", map[string]string{AcceleratorRequirementsAnnotation: "gpu=gb300"})
+	withSelector := srcISVCNamed("b", map[string]string{ClusterSelectorAnnotation: "provider=cw"})
+	withNone := srcISVCNamed("c", nil)
+
+	assert.Equal(t, []string{placementEligibleIndexValue}, placementEligibleIndexExtractor(withAccel))
+	assert.Equal(t, []string{placementEligibleIndexValue}, placementEligibleIndexExtractor(withSelector))
+	assert.Nil(t, placementEligibleIndexExtractor(withNone))
+	// Wrong type yields no index entry.
+	assert.Nil(t, placementEligibleIndexExtractor(&v1beta1.WorkloadCluster{}))
+}
+
+// srcISVCNamed builds a placement source ISVC with a given name and annotation
+// set (nil annotations => no placement requirement).
+func srcISVCNamed(name string, annotations map[string]string) *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "prod", UID: types.UID("uid-" + name),
+			Annotations: annotations,
+		},
+		Spec: v1beta1.InferenceServiceSpec{
+			Engine: &v1beta1.EngineSpec{Runner: &v1beta1.RunnerSpec{Container: corev1.Container{Name: "ome-container", Image: "img"}}},
+		},
+	}
+}
+
+// indexedPlacementClient builds a fake control-plane client with the placement-
+// eligible field index registered (mirroring what cmd/manager installs on the
+// manager cache), so isvcsForClusterChange's MatchingFields list resolves.
+func indexedPlacementClient(t *testing.T, s *runtime.Scheme, objs ...client.Object) client.Client {
+	t.Helper()
+	return fakeclient.NewClientBuilder().WithScheme(s).
+		WithIndex(&v1beta1.InferenceService{}, placementEligibleIndexField, placementEligibleIndexExtractor).
+		WithObjects(objs...).
+		Build()
+}
+
+func requestNames(reqs []ctrl.Request) []string {
+	out := make([]string, 0, len(reqs))
+	for _, r := range reqs {
+		out = append(out, r.Name)
+	}
+	return out
+}
+
+// hangingClient blocks every Create until the (per-cluster) context deadline
+// fires, simulating a wedged remote apiserver that neither succeeds nor returns
+// an error promptly.
+type hangingClient struct {
+	client.WithWatch
+}
+
+func (c hangingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Fault isolation: a wedged remote whose apply hangs is bounded by the
+// per-cluster PlaceTimeout and skipped, so the healthy peer still gets the
+// derived and the reconcile completes (Racing) instead of stalling on the stuck
+// cluster.
+func TestReconcile_FanOutBoundsStuckClusterAndProceeds(t *testing.T) {
+	s := testScheme(t)
+	wa := hangingClient{WithWatch: fakeclient.NewClientBuilder().WithScheme(s).Build()} // wedged
+	wb := emptyWorker(s)                                                                // healthy
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(wa),
+		"b": workloadcluster.NewNeverCachingClient(wb),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}), readyWC("b", map[string]string{"gpu": "gb300"}))
+	r.PlaceTimeout = 50 * time.Millisecond // bound the wedged apply tightly for the test
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err := r.Reconcile(context.Background(), req())
+		assert.NoError(t, err, "a wedged cluster must not fail the whole reconcile")
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconcile blocked on a stuck cluster; per-cluster timeout did not fire")
+	}
+
+	assert.True(t, hasDerived(t, wb), "healthy cluster b still got the derived despite the wedged peer")
+	p := cpPlacement(t, cp)
+	require.NotNil(t, p)
+	assert.Equal(t, v1beta1.PlacementPhaseRacing, p.Phase)
 }

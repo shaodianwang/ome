@@ -13,8 +13,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -71,6 +73,18 @@ type Reconciler struct {
 	// probe failures began. Cleared on a successful probe. Used to keep a live
 	// connection up across brief blips (within ConnectionGracePeriod).
 	firstFailure map[string]time.Time
+	// failCount records, per cluster, how many consecutive connection failures
+	// have occurred. It drives the reconnect retry backoff (retryAfter) so a
+	// persistently-down cluster is re-probed with exponentially-spaced requeues
+	// instead of every health interval. Cleared on a successful pass.
+	failCount map[string]uint
+
+	// cfg is the resolved timing configuration assembled at SetupWithManager
+	// from functional Options (seeded by the HealthInterval/ConnectionGracePeriod
+	// struct fields). Nil until Setup runs — the helper methods fall back to the
+	// struct fields + Default* consts so a Reconciler built directly (unit tests)
+	// keeps working without Setup.
+	cfg *controllerConfig
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -81,6 +95,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				r.Manager.Disconnect(req.Name)
 			}
 			r.clearFailure(req.Name)
+			r.clearRetry(req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -127,10 +142,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		Message:            msg,
 		ObservedGeneration: wc.Generation,
 	})
+	connFailed := status != metav1.ConditionTrue && reason == "ConnectionFailed"
 	if r.Manager != nil {
 		if status == metav1.ConditionTrue {
 			if err := r.Manager.Connect(r.connectCtx(), wc.Name, raw); err != nil {
 				r.recordFailure(wc.Name)
+				connFailed = true
 				apimeta.SetStatusCondition(&wc.Status.Conditions, metav1.Condition{
 					Type:               v1beta1.WorkloadClusterReady,
 					Status:             metav1.ConditionFalse,
@@ -142,6 +159,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		} else {
 			r.Manager.Disconnect(wc.Name)
 		}
+	}
+	// Space reconnect attempts to a down cluster with the retry backoff
+	// (0 -> ~5m20s) instead of hammering at the health interval, and clear the
+	// counter once the cluster is healthy again.
+	if connFailed {
+		requeue = r.nextRetryRequeue(wc.Name)
+	} else {
+		r.clearRetry(wc.Name)
 	}
 	return r.finish(ctx, wc, requeue)
 }
@@ -172,6 +197,9 @@ func (r *Reconciler) connectCtx() context.Context {
 }
 
 func (r *Reconciler) gracePeriod() time.Duration {
+	if r.cfg != nil {
+		return r.cfg.connectionGracePeriod
+	}
 	if r.ConnectionGracePeriod != 0 {
 		return r.ConnectionGracePeriod
 	}
@@ -236,6 +264,32 @@ func (r *Reconciler) clearFailure(name string) {
 	delete(r.firstFailure, name)
 }
 
+// nextRetryRequeue increments the cluster's consecutive-failure count and
+// returns the retry-backoff delay for it (0 on the first failure, then growing
+// to the configured cap). Falls back to the default backoff when Setup has not
+// resolved one (e.g. unit tests building the Reconciler directly).
+func (r *Reconciler) nextRetryRequeue(name string) time.Duration {
+	r.mu.Lock()
+	if r.failCount == nil {
+		r.failCount = map[string]uint{}
+	}
+	r.failCount[name]++
+	n := r.failCount[name]
+	r.mu.Unlock()
+
+	b := defaultReconnectBackoff()
+	if r.cfg != nil {
+		b = r.cfg.reconnect
+	}
+	return b.retryAfter(n)
+}
+
+func (r *Reconciler) clearRetry(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.failCount, name)
+}
+
 // assess resolves the connection and probes it, returning the Ready condition
 // fields. The Probe is injected so this is unit-testable without a real cluster.
 func (r *Reconciler) assess(ctx context.Context, wc *v1beta1.WorkloadCluster) (status metav1.ConditionStatus, reason, msg string, kubeconfig []byte) {
@@ -277,6 +331,9 @@ func (r *Reconciler) assess(ctx context.Context, wc *v1beta1.WorkloadCluster) (s
 }
 
 func (r *Reconciler) healthInterval() time.Duration {
+	if r.cfg != nil {
+		return r.cfg.healthInterval
+	}
 	if r.HealthInterval > 0 {
 		return r.HealthInterval
 	}
@@ -284,8 +341,10 @@ func (r *Reconciler) healthInterval() time.Duration {
 }
 
 // SetupWithManager wires the reconciler: watch WorkloadClusters, and re-enqueue
-// when a referenced kubeconfig Secret changes.
-func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+// (debounced by the events-batch period) when a referenced kubeconfig Secret
+// changes. Functional Options shrink the timing knobs (health interval,
+// worker-lost timeout, reconnect backoff, events-batch period) for tests.
+func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...Option) error {
 	if r.Probe == nil {
 		r.Probe = func(ctx context.Context, raw []byte) error {
 			return probeViaServerVersion(ctx, raw, r.ExecPolicy)
@@ -294,10 +353,44 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.firstFailure == nil {
 		r.firstFailure = map[string]time.Time{}
 	}
+	cfg := r.resolveConfig(opts...)
+	r.cfg = &cfg
+	// Propagate the resolved reconnect backoff to the transport so reconnect
+	// attempts use the configured establish/retry schedule.
+	if r.Manager != nil {
+		r.Manager.SetReconnectBackoff(cfg.reconnect)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.WorkloadCluster{}).
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.workloadClustersForSecret)).
+		Watches(&corev1.Secret{}, r.secretEventHandler(cfg.eventsBatchPeriod)).
 		Complete(r)
+}
+
+// secretEventHandler re-enqueues the WorkloadClusters referencing a changed
+// Secret, debounced by batchPeriod via AddAfter so a kubeconfig rotation that
+// touches several Secret keys back-to-back folds into one reconcile (and thus
+// one remote-client rebuild) instead of a burst.
+func (r *Reconciler) secretEventHandler(batchPeriod time.Duration) handler.EventHandler {
+	enqueue := func(ctx context.Context, obj client.Object, q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
+		for _, req := range r.workloadClustersForSecret(ctx, obj) {
+			if batchPeriod > 0 {
+				q.AddAfter(req, batchPeriod)
+			} else {
+				q.Add(req)
+			}
+		}
+	}
+	return handler.Funcs{
+		CreateFunc: func(ctx context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
+			enqueue(ctx, e.Object, q)
+		},
+		UpdateFunc: func(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
+			enqueue(ctx, e.ObjectNew, q)
+		},
+		DeleteFunc: func(ctx context.Context, e event.DeleteEvent, q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
+			enqueue(ctx, e.Object, q)
+		},
+	}
 }
 
 // workloadClustersForSecret maps a Secret change to the WorkloadClusters whose

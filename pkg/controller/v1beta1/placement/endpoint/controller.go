@@ -1,0 +1,202 @@
+package endpoint
+
+import (
+	"context"
+
+	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+)
+
+// Reconciler watches InferenceServices on the control-plane cluster and, when an
+// ISVC is Placed (status.placement reports a winner and an addressable
+// endpoint), programs the configured Publisher so the global host resolves to
+// the winner's ingress. It repoints the backend on re-placement and tears it
+// down when the ISVC is no longer placed or is deleted. When the Publisher's
+// backend is not configured (no global gateway), Reconcile no-ops.
+type Reconciler struct {
+	client.Client
+	Log logr.Logger
+	// Publisher is the global-traffic backend. Required.
+	Publisher EndpointPublisher
+	// Config supplies the config-driven host/gateway/port/namespace inputs.
+	Config Config
+}
+
+// +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=ome.io,resources=inferenceservices/finalizers,verbs=update
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	isvc := &v1beta1.InferenceService{}
+	if err := r.Get(ctx, req.NamespacedName, isvc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	// Backend not configured: do nothing, and do not strand a finalizer.
+	if !r.Config.IsEnabled() {
+		if controllerutil.ContainsFinalizer(isvc, EndpointFinalizer) && isvc.DeletionTimestamp.IsZero() {
+			controllerutil.RemoveFinalizer(isvc, EndpointFinalizer)
+			if err := r.Update(ctx, isvc); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if !isvc.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, isvc)
+	}
+
+	target, ok, err := r.resolveTarget(isvc)
+	if err != nil {
+		// A bad global-host template is the operator's config error; surface it
+		// and retry on the next change/poll rather than hot-looping.
+		r.Log.Error(err, "endpoint: resolve target failed", "isvc", req.String())
+		return ctrl.Result{}, nil
+	}
+
+	if !ok {
+		// Not placed (or no usable host yet): ensure any previously-published
+		// backend is removed, then drop the finalizer so an ISVC that never
+		// publishes is not held.
+		return r.reconcileUnpublish(ctx, isvc)
+	}
+
+	if err := r.ensureFinalizer(ctx, isvc); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.Publisher.Publish(ctx, isvc, target); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.Log.Info("endpoint published", "isvc", req.String(), "backend", r.Publisher.Name(),
+		"globalHost", target.GlobalHost, "cluster", target.Cluster, "backendHost", target.BackendHost)
+	return ctrl.Result{}, nil
+}
+
+// resolveTarget builds the publication Target from status.placement. ok is false
+// when the ISVC is not in a publishable state: not Placed, no winner cluster, no
+// addressable endpoint host yet, or no global host resolvable from config. In
+// every not-ok case the caller tears down any stale backend rather than leaving
+// the global host pointed at a cluster that no longer wins.
+func (r *Reconciler) resolveTarget(isvc *v1beta1.InferenceService) (Target, bool, error) {
+	host, err := r.Config.GlobalHostFor(isvc)
+	if err != nil {
+		return Target{}, false, err
+	}
+	if host == "" {
+		return Target{}, false, nil
+	}
+	pl := isvc.Status.Placement
+	if pl == nil || pl.Phase != v1beta1.PlacementPhasePlaced || pl.Cluster == "" {
+		return Target{}, false, nil
+	}
+	if pl.Endpoint == nil || pl.Endpoint.Host == "" {
+		// Winner declared but not yet addressable — nothing concrete to point at.
+		return Target{}, false, nil
+	}
+	return Target{
+		GlobalHost:  host,
+		Cluster:     pl.Cluster,
+		BackendHost: pl.Endpoint.Host,
+	}, true, nil
+}
+
+func (r *Reconciler) reconcileUnpublish(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(isvc, EndpointFinalizer) {
+		// Never published; nothing to clean and no finalizer to drop.
+		return ctrl.Result{}, nil
+	}
+	if err := r.Publisher.Unpublish(ctx, isvc); err != nil {
+		return ctrl.Result{}, err
+	}
+	controllerutil.RemoveFinalizer(isvc, EndpointFinalizer)
+	if err := r.Update(ctx, isvc); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *Reconciler) reconcileDelete(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(isvc, EndpointFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	if err := r.Publisher.Unpublish(ctx, isvc); err != nil {
+		return ctrl.Result{}, err
+	}
+	controllerutil.RemoveFinalizer(isvc, EndpointFinalizer)
+	if err := r.Update(ctx, isvc); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *Reconciler) ensureFinalizer(ctx context.Context, isvc *v1beta1.InferenceService) error {
+	if controllerutil.AddFinalizer(isvc, EndpointFinalizer) {
+		return r.Update(ctx, isvc)
+	}
+	return nil
+}
+
+// SetupWithManager wires the controller: reconcile ISVCs, but only react to
+// events that can change a publication decision — placement-status changes,
+// deletions, and the global-host annotation — so routine ISVC spec churn does
+// not re-publish on every reconcile.
+func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&v1beta1.InferenceService{}, builder.WithPredicates(placementPublishChange)).
+		Complete(r)
+}
+
+// placementPublishChange admits ISVC events that can change what the publisher
+// programs: any create/delete, and updates that change status.placement (winner,
+// phase, or endpoint) or the global-host annotation. Other spec/status churn is
+// dropped so the publisher is not re-driven needlessly.
+var placementPublishChange = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldISVC, ok1 := e.ObjectOld.(*v1beta1.InferenceService)
+		newISVC, ok2 := e.ObjectNew.(*v1beta1.InferenceService)
+		if !ok1 || !ok2 {
+			return true // unexpected type: fail safe
+		}
+		if !placementEqual(oldISVC.Status.Placement, newISVC.Status.Placement) {
+			return true
+		}
+		if oldISVC.Annotations[GlobalHostAnnotation] != newISVC.Annotations[GlobalHostAnnotation] {
+			return true
+		}
+		// React to deletion entering (finalizer teardown) even if placement is
+		// otherwise unchanged.
+		return oldISVC.DeletionTimestamp.IsZero() != newISVC.DeletionTimestamp.IsZero()
+	},
+}
+
+// placementEqual reports whether two PlacementStatus values agree on the fields
+// the publisher consumes: phase, winner cluster, and the endpoint host.
+func placementEqual(a, b *v1beta1.PlacementStatus) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Phase != b.Phase || a.Cluster != b.Cluster {
+		return false
+	}
+	return endpointHost(a) == endpointHost(b)
+}
+
+func endpointHost(pl *v1beta1.PlacementStatus) string {
+	if pl == nil || pl.Endpoint == nil {
+		return ""
+	}
+	return pl.Endpoint.Host
+}

@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -21,11 +22,22 @@ import (
 type Manager struct {
 	scheme     *runtime.Scheme
 	execPolicy ExecCredentialPolicy
+	// tuning sets QPS/Burst/per-call-timeout on every remote rest.Config. The
+	// zero value leaves client-go's own defaults in place (graceful degradation,
+	// no magic literal baked in).
+	tuning ClientTuning
+	// cacheOpts selects which kinds the remote client caches and how the cache is
+	// scoped. The zero value (empty CachedKinds) keeps the never-caching client.
+	cacheOpts CacheOptions
+	// reconnect is the establish/retry backoff schedule the transport uses when
+	// (re)establishing a remote connection. The zero value falls back to
+	// defaultReconnectBackoff via the ReconnectBackoff accessor.
+	reconnect reconnectBackoff
 
 	// baseCtx is the long-lived context remote clients derive from, so their
-	// (future Phase 5) cache informers are scoped to the controller-manager
-	// lifetime rather than a request-scoped reconcile ctx. Set by Start (the
-	// Runnable entrypoint); nil-safe — Connect falls back to its caller's ctx.
+	// cache informers are scoped to the controller-manager lifetime rather than a
+	// request-scoped reconcile ctx. Set by Start (the Runnable entrypoint);
+	// nil-safe — Connect falls back to its caller's ctx.
 	baseCtx context.Context
 
 	mu    sync.RWMutex
@@ -38,9 +50,9 @@ type Manager struct {
 }
 
 // Start records the controller-manager's long-lived context as the base for all
-// remote-client (and future cache-informer) contexts, then blocks until that
-// context is cancelled, at which point it disconnects every cluster so no
-// background watch leaks past manager shutdown. It implements
+// remote-client and cache-informer contexts, then blocks until that context is
+// cancelled, at which point it disconnects every cluster so no background watch
+// leaks past manager shutdown. It implements
 // sigs.k8s.io/controller-runtime/pkg/manager.Runnable so the cmd wires it with
 // mgr.Add(clusterManager).
 func (m *Manager) Start(ctx context.Context) error {
@@ -71,8 +83,9 @@ type remoteConn struct {
 }
 
 // NewManager returns an empty Manager whose default builder constructs a
-// controller-runtime client (never-caching for now; Phase 3 registers cached
-// kinds) from the validated kubeconfig.
+// controller-runtime client from the validated kubeconfig. With no CacheOptions
+// configured (the default) the client is never-caching; SetCacheOptions with a
+// non-empty CachedKinds set switches it to a selectively-caching client.
 func NewManager(scheme *runtime.Scheme) *Manager {
 	m := &Manager{
 		scheme: scheme,
@@ -85,6 +98,67 @@ func NewManager(scheme *runtime.Scheme) *Manager {
 // SetExecCredentialPolicy configures the exec credential policy for this manager.
 func (m *Manager) SetExecCredentialPolicy(p ExecCredentialPolicy) {
 	m.execPolicy = p
+}
+
+// SetClientTuning configures the QPS/Burst/per-call-timeout applied to every
+// remote rest.Config built after this call. Call before the WorkloadCluster
+// reconciler connects clusters (i.e. during wiring); already-connected clients
+// keep their tuning until their kubeconfig changes and they are rebuilt.
+func (m *Manager) SetClientTuning(t ClientTuning) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tuning = t
+}
+
+// SetCacheOptions configures the remote informer cache. A non-empty
+// CachedKinds switches buildRemoteClient to a selectively-caching client whose
+// cache is scoped by DefaultSelector and indexed by Indexes; an empty set keeps
+// the never-caching client. As with tuning, this applies to clients built after
+// the call, so set it during wiring.
+func (m *Manager) SetCacheOptions(o CacheOptions) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cacheOpts = o
+}
+
+// SetReconnectBackoff records the establish/retry backoff schedule the transport
+// uses when (re)establishing a remote connection. Wired from the reconciler's
+// resolved config at Setup so the schedule is config-driven.
+func (m *Manager) SetReconnectBackoff(b reconnectBackoff) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reconnect = b
+}
+
+// ReconnectBackoff returns the configured establish/retry backoff, falling back
+// to the package default when none was set. The watch-funnel reconnect path
+// consumes this via EstablishWatch / retryAfter.
+func (m *Manager) ReconnectBackoff() reconnectBackoff {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.reconnect.establishInitial <= 0 {
+		return defaultReconnectBackoff()
+	}
+	return m.reconnect
+}
+
+// EstablishWatch opens a remote watch on the named cluster's client, bounded by
+// the configured establish timeout for the given (1-based) attempt. On timeout
+// the in-flight Watch is abandoned and errWatchEstablishTimeout is returned so
+// the caller falls back to the retry backoff (retryAfter). Returns (nil, false,
+// nil) when the cluster is not connected. This is the establish half of the
+// two-backoff reconnect scheme; the status-mirroring watch funnel consumes it.
+func (m *Manager) EstablishWatch(ctx context.Context, cluster string, list client.ObjectList, attempt int, opts ...client.ListOption) (watch.Interface, bool, error) {
+	cl, ok := m.ClientFor(cluster)
+	if !ok {
+		return nil, false, nil
+	}
+	timeout := m.ReconnectBackoff().establishWaitTime(attempt)
+	w, err := establishWatch(ctx, cl, list, timeout, opts...)
+	if err != nil {
+		return nil, true, err
+	}
+	return w, true, nil
 }
 
 // ClientFor returns the live client for a cluster, or (nil, false) if none is
@@ -169,25 +243,51 @@ func hashBytes(b []byte) string {
 }
 
 // buildRemoteClient is the default Manager.newClient: validate+parse the
-// kubeconfig (Phase 1's RESTConfigFromKubeConfig), build a watch-capable
-// controller-runtime client, and wrap it never-caching (Phase 3 will switch to
-// NewSelectivelyCachingClient with the kinds it watches). The returned cancel
-// tears down the (currently unused) watch context.
+// kubeconfig (RESTConfigFromKubeConfig), apply the configured client tuning,
+// build a watch-capable controller-runtime client, and — when CacheOptions
+// names cached kinds — wrap it in a selectively-caching client backed by a
+// background informer cache. The returned cancel tears that cache down on
+// Disconnect; the never-caching path returns a no-op cancel.
 func (m *Manager) buildRemoteClient(ctx context.Context, raw []byte, scheme *runtime.Scheme) (SelectivelyCachingClient, context.CancelFunc, error) {
-	restConfig, err := RESTConfigFromKubeConfig(raw, m.execPolicy)
+	// Snapshot config under the lock: distinct cluster names build concurrently
+	// and a setter may run during wiring.
+	m.mu.RLock()
+	tuning := m.tuning
+	cacheOpts := m.cacheOpts
+	execPolicy := m.execPolicy
+	m.mu.RUnlock()
+
+	restConfig, err := RESTConfigFromKubeConfig(raw, execPolicy)
 	if err != nil {
 		return nil, nil, err
 	}
+	// Raise the per-cluster rate limits and per-call timeout from the client-go
+	// defaults (5 QPS / 10 burst) so fan-out across many remote apiservers is not
+	// throttled. Zero leaves client-go's default untouched (no magic literal).
+	tuning.apply(restConfig)
+
 	wc, err := client.NewWithWatch(restConfig, client.Options{Scheme: scheme})
 	if err != nil {
 		return nil, nil, fmt.Errorf("new watch client: %w", err)
 	}
-	// The never-caching client has no background goroutines, so there is
-	// nothing to tear down: return a no-op cancel. Phase 5 will switch to a
-	// selective-caching client — when it does, this MUST derive a context via
-	// context.WithCancel(ctx), pass THAT context to NewSelectivelyCachingClient
-	// (which starts the cache informers on it), and return its cancel so
-	// Disconnect tears the cache down. (Returning a cancel from an unused
-	// derived context, as before, was a silent no-op that invited a leak.)
-	return NewNeverCachingClient(wc), func() {}, nil
+
+	// No cached kinds configured: never-caching client has no background
+	// goroutines, so there is nothing to tear down — return a no-op cancel.
+	if !cacheOpts.enabled() {
+		return NewNeverCachingClient(wc), func() {}, nil
+	}
+
+	// Cached kinds configured: derive a cancellable context from the long-lived
+	// base ctx so the cache's informers are scoped to the manager lifetime, and
+	// return its cancel so Disconnect tears the cache down (no leaked watches).
+	cacheCtx, cancel := context.WithCancel(ctx)
+	cl, err := NewSelectivelyCachingClient(
+		cacheCtx, restConfig, wc, scheme,
+		cacheOpts.CachedKinds, cacheOpts.Indexes, cacheOpts.DefaultSelector,
+	)
+	if err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("new selectively-caching client: %w", err)
+	}
+	return cl, cancel, nil
 }

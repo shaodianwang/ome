@@ -1,0 +1,42 @@
+# CI scale scenario for the InferenceService performance harness.
+#
+# A deliberately SMALL scenario (30 InferenceServices) sized to converge inside
+# the recorder window on a constrained CI agent (an mks-cpu pod): the 300-ISVC
+# baseline only reached ~126/300 Ready in 10m there. This run still exercises the
+# full create -> reconcile -> Ready path across three size classes and the
+# runtimeselector pool, and emits the same summary the checker validates — it
+# just measures fewer objects. Use configs/baseline/ for real scale numbers on
+# beefy/local hardware.
+#
+# Every value is consumed verbatim by the runner (no in-code defaults). The
+# committed ci/rangespec.yaml is the (placeholder) expected-range for THIS file.
+
+catalog:
+  servingRuntimes: 3
+  baseModels: 3
+  modelFormat: safetensors
+  modelArchitecture: LlamaForCausalLM
+  modelFramework: Transformers
+  storageUri: oci://n/perf/b/models/o/llama
+
+classes:
+  - className: small
+    count: 20
+    replicas: 1
+    creationIntervalMs: 20
+    readyAfterMs: 300
+    image: ghcr.io/perf/runtime:small
+
+  - className: medium
+    count: 6
+    replicas: 2
+    creationIntervalMs: 50
+    readyAfterMs: 800
+    image: ghcr.io/perf/runtime:medium
+
+  - className: large
+    count: 4
+    replicas: 3
+    creationIntervalMs: 100
+    readyAfterMs: 1500
+    image: ghcr.io/perf/runtime:large

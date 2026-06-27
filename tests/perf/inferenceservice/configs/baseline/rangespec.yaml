@@ -1,0 +1,55 @@
+# Expected-range thresholds for the baseline scenario, asserted by the
+# checker (tests/perf/inferenceservice/checker). The numbers below are
+# PLACEHOLDERS until calibrated on the target CI hardware — they are
+# deliberately generous so a freshly-cloned tree does not red-fail the
+# checker before anyone has run a calibration pass. Re-calibrate before
+# treating a checker failure as a real regression.
+#
+# ── Calibration recipe ───────────────────────────────────────────────
+# Behavioral thresholds must come from measured runs, never from a number
+# someone felt was "about right". To (re)calibrate:
+#
+#   1. Run the harness N>=5 times on the target hardware against
+#      configs/baseline/generator.yaml, collecting each run's
+#      summary.yaml + cmd.stats.yaml.
+#   2. For each size class, take the mean of averageTimeToReadyMs across
+#      the N runs. Set the UPPER bound (classes.<name>.maxAvgTimeToReadyMs)
+#      to mean * 1.2 — a 20% ceiling absorbs normal run-to-run variance
+#      without letting a real regression through.
+#   3. Set cmd.maxWallMs to (mean wall time across the N runs) * 1.2 for
+#      the same reason.
+#   4. For the convergence floor (minReadyFraction), take the mean
+#      readyFraction (totalReady / expectedTotal) across the N runs and
+#      subtract 7% (multiply by 0.93). On a healthy run this is 1.0, so
+#      the floor lands at 0.93 — a run that fails to converge >7% of its
+#      services trips it. The asymmetry is intentional: time bounds get a
+#      generous +20% (latency is noisy), convergence gets a tight -7%
+#      (dropping work is almost always a real bug).
+#
+# The 1.2 / 0.93 multipliers mirror kueue's performance rangespec
+# discipline (a +20% ceiling over the observed mean); see
+# test/performance/scheduler/configs/baseline/rangespec.yaml in kueue.
+#
+# Record the trial run IDs you calibrated against here so the next person
+# can see how stale the numbers are:
+#   # calibrated against runs: <id1> <id2> <id3> <id4> <id5>  (date)
+# (uncalibrated — placeholders below)
+
+cmd:
+  # Upper bound on total runner wall time. Placeholder; set to
+  # (mean wall) * 1.2 after calibration.
+  maxWallMs: 600_000
+
+# Fraction of expected InferenceServices that must reach Ready for the run
+# to count as converged. Placeholder floor; set to (mean readyFraction) *
+# 0.93 after calibration. 1.0 means "every service must converge".
+minReadyFraction: 0.95
+
+classes:
+  small:
+    # Placeholder; set to (mean averageTimeToReadyMs) * 1.2.
+    maxAvgTimeToReadyMs: 30_000
+  medium:
+    maxAvgTimeToReadyMs: 60_000
+  large:
+    maxAvgTimeToReadyMs: 120_000

@@ -1,0 +1,48 @@
+# Baseline scale scenario for the InferenceService performance harness.
+#
+# Shape: a shared catalog of 5 ClusterServingRuntimes x 5 ClusterBaseModels,
+# then 300 InferenceServices spread across three size classes. Each ISVC
+# round-robins a runtime + model from the catalog, so the runtimeselector's
+# fetch/match path is exercised against the whole pool rather than one hot
+# pair.
+#
+# Every value here is consumed verbatim by the runner — there are no
+# in-code defaults. Tune counts / intervals / delays per environment; the
+# committed rangespec.yaml is calibrated against THIS file (see the
+# calibration recipe in that file's header).
+
+catalog:
+  servingRuntimes: 5
+  baseModels: 5
+  modelFormat: safetensors
+  modelArchitecture: LlamaForCausalLM
+  modelFramework: Transformers
+  storageUri: oci://n/perf/b/models/o/llama
+
+classes:
+  # small: single-replica services, created fast, "load" quickly. The bulk
+  # of the run and the lowest expected time-to-Ready.
+  - className: small
+    count: 200
+    replicas: 1
+    creationIntervalMs: 20
+    readyAfterMs: 500
+    image: ghcr.io/perf/runtime:small
+
+  # medium: a few replicas, a slower simulated load, a gentler creation
+  # cadence.
+  - className: medium
+    count: 75
+    replicas: 3
+    creationIntervalMs: 50
+    readyAfterMs: 2000
+    image: ghcr.io/perf/runtime:medium
+
+  # large: the heaviest class — most replicas, slowest simulated load,
+  # widest creation spacing. The tail the rangespec gives the most headroom.
+  - className: large
+    count: 25
+    replicas: 8
+    creationIntervalMs: 100
+    readyAfterMs: 5000
+    image: ghcr.io/perf/runtime:large

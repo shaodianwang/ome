@@ -231,6 +231,32 @@ def ci_steps() -> str:
                       - name: container-0
                         image: "{CI_IMAGE}"
 
+          - label: ":racing_car: Perf Tests"
+            key: "perf-test"
+{_gh_status("perf-test")}
+            # The InferenceService scale harness (envtest + fake executor)
+            # plus the perf-harness unit tests. Separate from integration-test
+            # because the perf packages are plain testing.T (not Ginkgo, so
+            # they can't take -ginkgo.trace) and the harness is slower. Runs in
+            # parallel with everything else; bootstraps its own envtest + xet.
+            #
+            # soft_fail: the baseline rangespec is still placeholder/uncalibrated
+            # (see configs/baseline/rangespec.yaml), so a threshold breach must
+            # not block merges yet — the step's value today is producing the
+            # numbers + exercising the harness. Flip to hard fail once the
+            # rangespec is calibrated on CI hardware.
+            soft_fail: true
+            command: |
+              sh .buildkite/run_perf_tests.sh
+            agents:
+              queue: "{DEFAULT_QUEUE}"
+            plugins:
+              - kubernetes:
+                  podSpec:
+                    containers:
+                      - name: container-0
+                        image: "{CI_IMAGE}"
+
           - label: ":helm: Helm Lint"
             key: "helm-lint"
 {_gh_status("helm-lint")}
