@@ -1,0 +1,71 @@
+# Sample model-download Job (the real dl-tier5-42b-128k-bf16-simolin, ns prod,
+# cluster cw/msl-cw-use2-2). Pulls a Manifold checkpoint into the PVC at /mnt/models.
+# Prereqs (must already exist): PVC (pvc.yaml), secret inference-aqueduct-cert,
+# cloud_oss at /opt/cf/cloud_oss on the node, shared-vast SC. See README.md.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dl-tier5-42b-128k-bf16-simolin
+  namespace: prod
+  labels:
+    app.kubernetes.io/component: model-downloader
+    user: simolin
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: model-downloader
+        user: simolin
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        metafb.cloud/node-type: gb300
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: model-downloader
+          image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/model-downloader:latest
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              mkdir -p ~/.aws
+              cat > ~/.aws/config <<'AWSCFG'
+              [default]
+              credential_process = /opt/cf/cloud_oss/cloud_oss cat generate cat --verifier-identity SERVICE_IDENTITY:manifold.blobstore --verifier-identity SERVICE_IDENTITY:memcache --verifier-identity SERVICE_IDENTITY:ai_security/ads_token_service_v2 -o cli --timeout-secs 3600
+              region = us-east-2
+              AWSCFG
+              exec /download.py \
+                checkpoint \
+                --provider=manifold \
+                --local_dir=/mnt/models \
+                --s3_download_base_uri=s3://fair_llms_prod/tree/vllm_test/consolidation_sv4_1_tier5_42b_128k-gxrj1qwt/checkpoint_0000200
+          env:
+            - {name: PYTHONUNBUFFERED, value: "1"}
+            - {name: HOME, value: /tmp}
+            - {name: THRIFT_TLS_SRV_CA_PATH, value: /etc/ssl/certs/ca-bundle.crt}
+            - {name: THRIFT_TLS_CL_CERT_PATH, value: /var/facebook/x509_svc/tls.crt}
+            - {name: THRIFT_TLS_CL_KEY_PATH, value: /var/facebook/x509_svc/tls.key}
+          resources:
+            requests: {cpu: "4", memory: 8Gi}
+            limits: {cpu: "8", memory: 16Gi}
+          volumeMounts:
+            - {name: models, mountPath: /mnt/models}
+            - {name: cloud-oss, mountPath: /opt/cf/cloud_oss, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            - {name: tls-cert, mountPath: /var/facebook/x509_svc/}
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ckpt-tier5-42b-128k-bf16
+        - name: cloud-oss
+          hostPath: {path: /opt/cf/cloud_oss, type: Directory}
+        - name: tls-cert
+          secret: {secretName: inference-aqueduct-cert, defaultMode: 420}
+        - name: tmp
+          emptyDir: {}

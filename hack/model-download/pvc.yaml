@@ -1,0 +1,17 @@
+# Sample PVC for staging model weights on shared-vast (dynamically provisioned PV,
+# Retain). This is the real ckpt-tier5-42b-128k-bf16 used by the prod download job.
+# Reusable as-is: do NOT set spec.volumeName for a fresh claim (the provisioner
+# binds a new PV). Generate variants with gen-download.sh.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ckpt-tier5-42b-128k-bf16
+  namespace: prod
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: shared-vast
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 3Ti
