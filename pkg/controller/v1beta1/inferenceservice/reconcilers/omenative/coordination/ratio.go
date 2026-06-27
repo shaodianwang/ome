@@ -21,9 +21,12 @@ type RatioState struct {
 	Current map[v1beta1.ComponentType]int32
 
 	// NewPods maps Component → number of new-revision pods (i.e.,
-	// pods on the target ControllerRevision) as of this reconcile.
-	// Retained for status reporting / observability; the RatioBalanced
-	// math uses Serving instead.
+	// pods on the target ControllerRevision) as of this reconcile. The
+	// serving-capacity band projects against Serving (live traffic
+	// capacity), but the surge-path new-revision lockstep
+	// (outpacesPeerProgress) reads NewPods: under SurgeThenDrain serving
+	// holds at the original N for every Component, so only rollout
+	// progress can pace the leading Component.
 	NewPods map[v1beta1.ComponentType]int32
 
 	// Serving maps Component → number of pods CURRENTLY in the load
@@ -159,6 +162,26 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 			Reason:            "drain would skew cross-Component serving ratio past tolerance",
 		}
 	}
+	// New-revision lockstep. The serving-capacity band below is invariant
+	// under SurgeThenDrain — a surge rotates its replacement IN before the
+	// source drains OUT, so live serving stays at the original N:N for every
+	// Component the whole roll. That makes the capacity band (and its
+	// tiebreaker) authorize every surge and the gate never holds the leading
+	// Component: engine finishes its entire roll while decoder still lags,
+	// and their per-Instance readiness dips fall out of alignment, so the
+	// live ready-capacity ratio sits skewed (engine 2 : decoder 1) for the
+	// whole gap. Hold the Component whose new-revision rollout is already
+	// running ahead of a peer's: refuse to START another surge when this
+	// Component's rollout fraction already outpaces a peer's beyond the
+	// band. A Component that is level with (or behind) every peer always
+	// proceeds, so the pair advances in lockstep and never deadlocks.
+	if outpacesPeerProgress(state.Original, state.NewPods, component, band) {
+		return RatioDecision{
+			AllowedSurgeDelta: 0,
+			SkewRejected:      true,
+			Reason:            "surge would outpace peer new-revision rollout past tolerance",
+		}
+	}
 	for delta := proposedDelta; delta > 0; delta-- {
 		projected := projectedServing(baseline, component, delta)
 		if respectsBand(state.Original, projected, band) {
@@ -201,6 +224,65 @@ func EvaluateSurge(pacing v1beta1.CoordinationPacing, state RatioState, componen
 		SkewRejected:      true,
 		Reason:            "surge would skew cross-Component serving ratio past tolerance",
 	}
+}
+
+// outpacesPeerProgress reports whether `component` is ALREADY rolling
+// ahead of a peer by more than the tolerance band — the signal to hold it
+// from starting yet another new-revision surge. It is the lockstep guard
+// the serving-capacity band cannot supply: under SurgeThenDrain live
+// serving holds at the original N for every Component (a surge rotates its
+// replacement IN before the source drains OUT), so the capacity math never
+// registers a skew and never paces the leading Component — engine outruns
+// decoder and the live ready-capacity ratio drifts off band for the whole
+// gap.
+//
+// Progress is measured as the rollout FRACTION new[c]/original[c] so the
+// guard is ratio-correct for asymmetric pairs (a 4:2 group rolls in step
+// when both are 50% rolled = 2 new : 1 new, not 2 new : 2 new). The
+// tolerance band is read as an allowed lead in fraction units, mirroring
+// the serving band's "± band of the starting ratio" semantic.
+//
+// The comparison is on CURRENT progress (before this surge), not projected:
+// surging advances in whole-Instance steps, so a Component leaving a tie
+// unavoidably takes a transient one-Instance lead. Gating on the projected
+// post-surge lead would deny that first step and deadlock a roll that can
+// only proceed by surging (the same wedge the serving-side tiebreaker
+// exists to avoid). Gating on the CURRENT lead instead lets a level-or-
+// behind Component take the minimal step, but holds a Component that is
+// already out front. Properties:
+//   - No deadlock: a Component level with or behind every still-rolling
+//     peer always proceeds, so the slowest peer is never blocked.
+//   - No false hold at the finish: a peer that has fully rolled no longer
+//     constrains, so the trailing Component's final surges aren't blocked.
+//   - First surge always allowed: at 0 new : 0 new neither side leads.
+//
+// A Component alone in its group (no peer with positive original) is never
+// outpacing anyone — returns false. A nil newPods map reads as all-zero
+// (no progress yet), the correct default for the first reconcile and for
+// unit callers that don't populate it.
+func outpacesPeerProgress(original, newPods map[v1beta1.ComponentType]int32, component v1beta1.ComponentType, band float64) bool {
+	if band < 0 {
+		band = 0
+	}
+	origC := original[component]
+	if origC <= 0 {
+		return false
+	}
+	fracC := float64(newPods[component]) / float64(origC)
+	for peer, origP := range original {
+		if peer == component || origP <= 0 {
+			continue
+		}
+		// A peer that has finished rolling no longer paces this Component.
+		if newPods[peer] >= origP {
+			continue
+		}
+		peerFrac := float64(newPods[peer]) / float64(origP)
+		if fracC-peerFrac > band {
+			return true
+		}
+	}
+	return false
 }
 
 // projectedServing clones the baseline serving map with component += delta.

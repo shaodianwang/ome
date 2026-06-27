@@ -1121,6 +1121,124 @@ func TestEvaluateUpdateGate_RatioBalancedSurgeNotDeadlocked(t *testing.T) {
 	// tiebreaker — see TestEvaluateUpdateGate_RecreatePodSymmetricCleared.)
 }
 
+// mkRatioProgressFixture builds a 2-member [engine, decoder] RatioBalanced
+// group with per-Component (original, new-revision, serving) counts so the
+// surge-path new-revision lockstep can be exercised end-to-end through
+// EvaluateUpdateGate. Serving is held at the original for both Components —
+// the SurgeThenDrain steady state — so the serving-capacity band alone
+// would authorize every surge; only the new-revision lockstep can pace it.
+func mkRatioProgressFixture(tol, origE, newE, origD, newD int32) *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		Spec: v1beta1.InferenceServiceSpec{
+			Rollout: &v1beta1.RolloutSpec{
+				Groups: []v1beta1.RolloutGroup{{
+					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					RollingUpdate: &v1beta1.GroupRollingUpdate{},
+					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: tol},
+				}},
+			},
+		},
+		Status: v1beta1.InferenceServiceStatus{
+			RolloutCoordination: &v1beta1.RolloutCoordinationStatus{
+				Groups: []v1beta1.RolloutCoordinationGroupStatus{{
+					Name:       "0",
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+					Policy:     v1beta1.CoordinationPolicyRollingUpdate,
+					ObservedRatio: &v1beta1.RolloutCoordinationRatio{
+						Original: map[v1beta1.ComponentType]int32{
+							v1beta1.EngineComponent:  origE,
+							v1beta1.DecoderComponent: origD,
+						},
+					},
+				}},
+			},
+			Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {Lifecycle: &v1beta1.LifecycleStatus{
+					Replicas: origE, ServingReplicas: origE, UpdatedReplicas: newE,
+				}},
+				v1beta1.DecoderComponent: {Lifecycle: &v1beta1.LifecycleStatus{
+					Replicas: origD, ServingReplicas: origD, UpdatedReplicas: newD,
+				}},
+			},
+		},
+	}
+}
+
+// TestEvaluateUpdateGate_RatioBalancedHoldsLeadingComponent is the
+// regression for the live p72/p78/p80/p81/p83/p87/p95/p96 failures: a
+// multinode SurgeThenDrain RatioBalanced roll let the engine rotate its
+// Instances onto the new revision while the decoder lagged, holding the
+// live ready-capacity ratio off band for the whole gap. The serving
+// counts stay at the original N for both Components throughout a
+// SurgeThenDrain roll (surge rotates IN before the source drains OUT), so
+// the serving-capacity band — and its deadlock-breaking tiebreaker —
+// authorize every surge and never pace the leader. The new-revision
+// lockstep is what holds it.
+//
+// Each row reads "engine at newE/origE rolled, decoder at newD/origD; may
+// `comp` start its next surge?" through the production decision site
+// (EvaluateUpdateGate with SurgeThenDrain).
+func TestEvaluateUpdateGate_RatioBalancedHoldsLeadingComponent(t *testing.T) {
+	eng, dec := v1beta1.EngineComponent, v1beta1.DecoderComponent
+	cases := []struct {
+		name                     string
+		tol                      int32
+		origE, newE, origD, newD int32
+		comp                     v1beta1.ComponentType
+		wantAllowed              bool
+	}{
+		{ // p72 start of roll: nobody is ahead → opening surge proceeds.
+			name: "N=2 tol=25 both at 0 new — first surge allowed", tol: 25,
+			origE: 2, newE: 0, origD: 2, newD: 0, comp: eng, wantAllowed: true,
+		},
+		{ // p72 the actual bug: engine already 1/2 (50%), decoder 0/2 (0%);
+			// engine's NEXT surge would extend a 50pp lead > 25% → HELD.
+			name: "N=2 tol=25 engine 1 ahead of decoder 0 — engine held", tol: 25,
+			origE: 2, newE: 1, origD: 2, newD: 0, comp: eng, wantAllowed: false,
+		},
+		{ // …while the lagging decoder (0/2, behind engine's 50%) proceeds,
+			// so the pair converges instead of deadlocking.
+			name: "N=2 tol=25 decoder behind — decoder catches up", tol: 25,
+			origE: 2, newE: 1, origD: 2, newD: 0, comp: dec, wantAllowed: true,
+		},
+		{ // Both level at 1/2 → neither leads → both may take the next step.
+			name: "N=2 tol=25 both at 1 new — level, engine proceeds", tol: 25,
+			origE: 2, newE: 1, origD: 2, newD: 1, comp: eng, wantAllowed: true,
+		},
+		{ // p80 tight band at N=4: engine 1/4 (25%) vs decoder 0 (0%) is a
+			// 25pp lead > 10% tol → engine held one step earlier than at 25%.
+			name: "N=4 tol=10 engine 1 ahead — engine held", tol: 10,
+			origE: 4, newE: 1, origD: 4, newD: 0, comp: eng, wantAllowed: false,
+		},
+		{ // Asymmetric 4:2 rolls in FRACTION lockstep: engine 2/4 (50%) and
+			// decoder 1/2 (50%) are level, so engine's next surge proceeds —
+			// the guard is ratio-correct, not a raw equal-count rule.
+			name: "asymmetric 4:2 both at 50% — engine proceeds", tol: 25,
+			origE: 4, newE: 2, origD: 2, newD: 1, comp: eng, wantAllowed: true,
+		},
+		{ // Asymmetric 4:2: engine 2/4 (50%) ahead of decoder 0/2 (0%) →
+			// 50pp lead > 25% → engine held.
+			name: "asymmetric 4:2 engine 50% ahead of decoder 0% — held", tol: 25,
+			origE: 4, newE: 2, origD: 2, newD: 0, comp: eng, wantAllowed: false,
+		},
+		{ // No false hold at the finish: once the decoder is fully rolled it
+			// stops pacing, so the engine's trailing surges complete.
+			name: "decoder done — engine final surge allowed", tol: 25,
+			origE: 2, newE: 1, origD: 2, newD: 2, comp: eng, wantAllowed: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isvc := mkRatioProgressFixture(tc.tol, tc.origE, tc.newE, tc.origD, tc.newD)
+			allowed, reason := EvaluateUpdateGate(isvc, tc.comp, nil,
+				workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
+			if allowed != tc.wantAllowed {
+				t.Errorf("allowed=%v want %v (reason=%q)", allowed, tc.wantAllowed, reason)
+			}
+		})
+	}
+}
+
 // TestEvaluateSurge_SurgeTiebreaker pins the surge-side tiebreaker. When the
 // band is narrower than one whole pod, a surge-first roll deadlocks because the
 // discrete (N+1):N step exceeds the band. A surge only ADDS capacity (it can
