@@ -196,7 +196,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// failing the reconcile.
 	parent := r.resolveParent(ctx, ir)
 
-	input := r.buildReconcileInput(ir, parent)
+	input := r.buildReconcileInput(ctx, ir, parent)
 
 	// Spec target ControllerRevision (from the rendered desired). Computed up
 	// front and reported as UpdateRevision so a new spec target stays VISIBLE to

@@ -9,6 +9,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -91,7 +92,7 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // wrapping a nil pointer, so the `parent != nil` guards below (event
 // target + gate wiring) would both misfire. The typed parameter makes
 // the nil check correct.
-func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService) workload.ReconcileInput {
+func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService) workload.ReconcileInput {
 	desired := desiredFromIR(ir)
 	// Thread the controller's cached gang-availability into DesiredSpec —
 	// EnsurePodGroups gates per-Instance PodGroup creation on this flag.
@@ -151,16 +152,23 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent *v
 	// no coordination block to enforce and the dispatcher's nil-gate
 	// fallback ("always allowed") is correct.
 	if parent != nil {
-		// The gates read the GATED Component's serving / in-flight counts to
-		// enforce surge / unavailability / ratio budgets. On the IR-managed
-		// path the parent ISVC's per-Component status is PROJECTED from the IR
-		// by the (separate) ISVC controller, so it lags the IR's own rollout
-		// and the gate bounds leak across reconcile wake-ups (group MaxSurge
-		// overshoot; RatioBalanced over-drain). Overlay the IR's OWN fresh
-		// status for the Component being gated so the gates see current counts;
-		// peers stay projected (the leaking bounds are all about the gated
-		// Component's own count, and the dispatcher threads this-wake-up
-		// surge/unavail deltas to the gate separately).
+		// The gates read both the GATED Component's AND every PEER Component's
+		// serving / in-flight counts to enforce surge / unavailability / ratio
+		// budgets. On the IR-managed path the parent ISVC's per-Component status
+		// is PROJECTED from each IR by the (separate) ISVC controller, so it
+		// lags the IRs' own rollouts. Two failure modes follow from reading the
+		// lagged projection:
+		//   - GATED Component lag: the gate over-counts the Component's own
+		//     serving and the per-Component bounds leak across reconcile
+		//     wake-ups (group MaxSurge overshoot; RatioBalanced over-drain).
+		//   - PEER Component lag: the cross-Component coordination gates
+		//     (RatioBalanced band, Sequential ordering) read a stale peer count
+		//     and clear this Component to advance while the peer is genuinely
+		//     behind — the engine outruns the decoder.
+		// Overlay every group Component's OWN fresh IR status onto the gate's
+		// view so both the gated Component and its peers are read at their
+		// current position. These are READS only (no writes), so the reconcile
+		// storm the projector skip-write fixed is not reintroduced.
 		gateParent := parent.DeepCopy()
 		if gateParent.Status.Components == nil {
 			gateParent.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
@@ -168,6 +176,7 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent *v
 		gated := gateParent.Status.Components[ir.Spec.Component]
 		gated.Lifecycle = irprojector.IRStatusToComponentStatus(ir)
 		gateParent.Status.Components[ir.Spec.Component] = gated
+		r.overlayFreshPeerStatuses(ctx, gateParent, ir.Spec.Component)
 		input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, string) {
 			return coordination.EvaluateUpdateGate(gateParent, ir.Spec.Component, r.Recorder, strategy, inFlightSurge, inFlightUnavail)
 		}
@@ -189,6 +198,77 @@ func (r *Reconciler) buildReconcileInput(ir *v1beta1.InferenceReplica, parent *v
 	}
 
 	return input
+}
+
+// overlayFreshPeerStatuses replaces the lagged, projector-derived
+// per-Component Lifecycle on gateParent with each PEER Component's OWN
+// fresh IR status, for every Component that shares a coordination group
+// with `gated`. The cross-Component coordination gates (RatioBalanced
+// band, Sequential ordering) read peer serving / revision counts to decide
+// whether `gated` may advance; reading the stale projection lets `gated`
+// run ahead of a peer that is genuinely behind (the engine outrunning the
+// decoder). Resolving the peer's authoritative IR status restores the
+// freshness those gates depend on.
+//
+// Peer IRs are read via the live APIReader (falling back to the cached
+// client) so the overlay does not itself depend on the cache-propagation
+// lag that the projector's skip-write widened. Reads only — no writes — so
+// it never reintroduces the reconcile storm.
+//
+// Best-effort: a peer with no resolvable IR (not yet created, mid-GC, or a
+// read error) is left at whatever the parent projection already carried —
+// the same degradation the gate tolerated before, no worse. The gated
+// Component's own slot is never touched (the caller already overlaid it).
+func (r *Reconciler) overlayFreshPeerStatuses(ctx context.Context, gateParent *v1beta1.InferenceService, gated v1beta1.ComponentType) {
+	if gateParent == nil {
+		return
+	}
+	groups := coordination.ResolveGroups(gateParent.Spec.Rollout)
+	if len(groups) == 0 {
+		return
+	}
+	group, ok := coordination.MembershipFor(groups, gated)
+	if !ok {
+		return
+	}
+	for _, peer := range group.Components {
+		if peer == gated {
+			continue
+		}
+		peerIR := r.getInferenceReplica(ctx, gateParent.Namespace,
+			irprojector.InferenceReplicaName(gateParent.Name, peer))
+		if peerIR == nil {
+			continue
+		}
+		if gateParent.Status.Components == nil {
+			gateParent.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
+		}
+		cs := gateParent.Status.Components[peer]
+		cs.Lifecycle = irprojector.IRStatusToComponentStatus(peerIR)
+		gateParent.Status.Components[peer] = cs
+	}
+}
+
+// getInferenceReplica fetches one IR, preferring the live APIReader so the
+// caller observes the peer's current status rather than a cache snapshot
+// that informer lag (widened by the projector's skip-write) may leave
+// stale. Falls back to the cached client when no APIReader is wired (unit
+// tests). Returns nil on any miss / error — callers treat a nil result as
+// "no fresh override available".
+func (r *Reconciler) getInferenceReplica(ctx context.Context, namespace, name string) *v1beta1.InferenceReplica {
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	ir := &v1beta1.InferenceReplica{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, ir); err != nil {
+		if !apierrors.IsNotFound(err) && !apierrors.IsForbidden(err) {
+			r.Log.V(1).Info("Failed to fetch peer IR for coordination gate; using projected status",
+				"namespace", namespace, "name", name, "err", err)
+		}
+		return nil
+	}
+	return ir
 }
 
 // buildHeadlessServiceSpec adapts an InferenceReplica into the typed
