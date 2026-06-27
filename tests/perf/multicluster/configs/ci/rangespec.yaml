@@ -1,0 +1,42 @@
+# Expected-range thresholds for the CI scenario (configs/ci/generator.yaml),
+# asserted by the checker. These are deliberately GENEROUS placeholders — the CI
+# perf step is soft-fail and exists to exercise the harness + emit numbers
+# (especially the funnel-vs-poll convergence delta), not to gate on a calibrated
+# bound. Calibrate (and tighten) per the recipe in configs/baseline/rangespec.yaml
+# once the step runs on stable CI hardware.
+#
+# Reference observed run on a developer Mac (3 members, 10 sources):
+#   funnel convergence mean ~105ms, p95 ~106ms
+#   poll   convergence mean ~5468ms, p95 ~12497ms
+#   convergence delta mean ~5363ms
+#   class placement p95 ~9.9s (gated by fan-out throughput on 4 in-process
+#     apiservers, NOT by the funnel)
+#   wall ~33s
+
+cmd:
+  # Upper bound on total runner wall time (both passes + boot of 4 apiservers).
+  # Generous: a constrained CI agent is slow per-reconcile, and this is a
+  # soft-fail signal, not a gate.
+  maxWallMs: 540_000
+
+# Fraction of sources that must reach Placed in BOTH passes. The runner only
+# exits a pass cleanly once every source is Placed, so a successful run is 1.0;
+# this floor is the backstop.
+minPlacedFraction: 0.95
+
+# Ceiling on the funnel pass's p95 status-convergence latency. The funnel
+# converges on events (~batchPeriod), so this is well above the observed ~106ms
+# to absorb scheduling jitter on a loaded agent.
+maxFunnelConvergenceP95Ms: 3_000
+
+# Floor on the headline funnel win: poll-only convergence mean must exceed the
+# funnel convergence mean by at least this much. Observed ~5363ms; set to a
+# conservative fraction so a healthy run passes comfortably while a run where the
+# funnel showed NO benefit (a regression that broke event delivery) fails.
+minConvergenceDeltaMeanMs: 1_000
+
+classes:
+  small:
+    maxP95PlacementMs: 30_000
+  large:
+    maxP95PlacementMs: 30_000

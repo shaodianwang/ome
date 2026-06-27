@@ -1,0 +1,51 @@
+# Baseline OMENative rangespec — the checker gate for the baseline/ scenario
+# (the larger, beefy/local run).
+#
+# CALIBRATION STATUS: GENEROUS PLACEHOLDERS, NOT a measured baseline. These
+# ceilings exist to fail a GROSS regression (a run that never converges, a
+# requeue storm, a 409 conflict blow-up, an op-amplification explosion) —
+# NOT to pin a tight number. Re-run the harness and tighten each ceiling
+# from observed values before treating this as a real baseline.
+#
+# Observed on a developer Mac (envtest, ~117 pods, cold create, qps 200),
+# for reference only (the ceilings below carry deliberate slack over these):
+#   class single         avg time-to-Ready ~760ms  (max single ~1550ms)
+#   class multi-instance avg time-to-Ready ~610ms  (max single ~1450ms)
+#   class gang           avg time-to-Ready ~680ms  (max single ~1500ms)
+#   wall ~4.6s   apiOpsTotal ~21k   status conflicts 0   idle rate ~0-9/s
+
+cmd:
+  # envtest boot + CRD install + the larger run. Generous for a slow agent.
+  maxWallMs: 120000
+
+# Every InferenceService must reach Ready (IR ReadyReplicas == Replicas).
+minReadyFraction: 1.0
+
+# Per-class time-to-Ready ceilings. ~10x the observed means to absorb
+# constrained-agent latency; uncalibrated.
+classes:
+  single:
+    maxAvgTimeToReadyMs: 8000
+  multi-instance:
+    maxAvgTimeToReadyMs: 8000
+  gang:
+    maxAvgTimeToReadyMs: 8000
+
+# Grand-total apiserver op ceiling (placeholder). Observed ~21k; ceiling
+# carries ~5x slack to guard a gross op-amplification regression.
+apiOps:
+  maxTotal: 120000
+
+# 409 status-conflict guard (placeholder). Even at 117 pods the cold create
+# showed zero conflicts; the ceilings tolerate a modest retry burst on a
+# slower agent.
+statusConflict:
+  maxConflictRate: 0.5
+  maxConflictTotal: 500
+
+# Post-convergence steady-state reconcile rate — the storm guard. A real
+# hot-loop drives hundreds-to-thousands/sec; the convergence tail
+# contributes a small floor. 75/s catches the former while tolerating the
+# latter on the larger fleet.
+idleReconcile:
+  maxRatePerSec: 75

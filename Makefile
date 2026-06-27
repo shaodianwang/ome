@@ -679,15 +679,68 @@ test-perf-isvc: run-perf-isvc ## 🏁 Run the perf harness, then check results a
 		-cmd-stats $(PROJECT_DIR)/artifacts/perf-isvc/cmd.stats.yaml \
 		-range $(PROJECT_DIR)/$(PERF_RANGESPEC)
 
+# OMENative perf scenario selection. Mirrors PERF_GENERATOR/PERF_RANGESPEC but
+# for the OMENative / InferenceReplica harness (which drives REAL pods to Ready
+# via the fake kubelet, so its cost scales with pod count). Override on the CLI.
+PERF_OMEN_GENERATOR ?= tests/perf/omenative/configs/baseline/generator.yaml
+PERF_OMEN_RANGESPEC ?= tests/perf/omenative/configs/baseline/rangespec.yaml
+
+.PHONY: run-perf-omenative
+run-perf-omenative: envtest dep-crds ## 🏎️  Run the local OMENative/IR pod-reconcile scale harness (envtest + fake kubelet).
+	@echo "🏎️  Running OMENative perf harness ($(PERF_OMEN_GENERATOR))..."
+	@mkdir -p $(PROJECT_DIR)/artifacts/perf-omenative
+	@$(TEST_ENV) go run ./tests/perf/omenative/runner \
+		-o $(PROJECT_DIR)/artifacts/perf-omenative \
+		-generator-config $(PERF_OMEN_GENERATOR) \
+		-project-root $(PROJECT_DIR)
+
+.PHONY: test-perf-omenative
+test-perf-omenative: run-perf-omenative ## 🏁 Run the OMENative perf harness, then check results against the rangespec.
+	@echo "🏁 Checking OMENative perf results against rangespec ($(PERF_OMEN_RANGESPEC))..."
+	@# -range must be absolute: go test runs the checker binary from its own pkg dir.
+	@go test ./tests/perf/omenative/checker/... -args \
+		-summary $(PROJECT_DIR)/artifacts/perf-omenative/summary.yaml \
+		-cmd-stats $(PROJECT_DIR)/artifacts/perf-omenative/cmd.stats.yaml \
+		-range $(PROJECT_DIR)/$(PERF_OMEN_RANGESPEC)
+
+# Multi-cluster PLACEMENT perf scenario selection. Baseline stands up 1 control
+# plane + N member apiservers in one process; the CI step overrides to the
+# smaller ci/ scenario. Override on the CLI.
+PERF_MC_GENERATOR ?= tests/perf/multicluster/configs/baseline/generator.yaml
+PERF_MC_RANGESPEC ?= tests/perf/multicluster/configs/baseline/rangespec.yaml
+
+.PHONY: run-perf-multicluster
+run-perf-multicluster: envtest dep-crds ## 🏎️  Run the local multi-cluster placement harness (1 control plane + N member envtests).
+	@echo "🏎️  Running multi-cluster placement perf harness ($(PERF_MC_GENERATOR))..."
+	@mkdir -p $(PROJECT_DIR)/artifacts/perf-multicluster
+	@$(TEST_ENV) go run ./tests/perf/multicluster/runner \
+		-o $(PROJECT_DIR)/artifacts/perf-multicluster \
+		-generator-config $(PERF_MC_GENERATOR)
+
+.PHONY: test-perf-multicluster
+test-perf-multicluster: run-perf-multicluster ## 🏁 Run the placement harness, then check results against the rangespec.
+	@echo "🏁 Checking placement perf results against rangespec ($(PERF_MC_RANGESPEC))..."
+	@# -range must be absolute: go test runs the checker binary from its own pkg dir.
+	@go test ./tests/perf/multicluster/checker/... -args \
+		-summary $(PROJECT_DIR)/artifacts/perf-multicluster/summary.yaml \
+		-cmd-stats $(PROJECT_DIR)/artifacts/perf-multicluster/cmd.stats.yaml \
+		-range $(PROJECT_DIR)/$(PERF_MC_RANGESPEC)
+
 .PHONY: test-perf
-test-perf: ## 🏎️  Perf CI step (separate from integration-test): harness unit tests + the CI-sized scale harness + rangespec check.
+test-perf: ## 🏎️  Perf CI step (separate from integration-test): harness unit tests + the CI-sized scale harnesses + rangespec checks.
 	@echo "🧪 Running perf-harness unit tests (plain testing.T, no ginkgo flags)..."
 	@$(TEST_ENV) go test -timeout=10m ./tests/perf/...
-	@# CI agents are constrained, so run the small ci/ scenario (the 300-ISVC
-	@# baseline does not converge in the recorder window on an mks-cpu pod).
+	@# CI agents are constrained, so run the small ci/ scenarios (the large
+	@# baselines do not converge in the recorder window on an mks-cpu pod).
 	@$(MAKE) test-perf-isvc \
 		PERF_GENERATOR=tests/perf/inferenceservice/configs/ci/generator.yaml \
 		PERF_RANGESPEC=tests/perf/inferenceservice/configs/ci/rangespec.yaml
+	@$(MAKE) test-perf-omenative \
+		PERF_OMEN_GENERATOR=tests/perf/omenative/configs/ci/generator.yaml \
+		PERF_OMEN_RANGESPEC=tests/perf/omenative/configs/ci/rangespec.yaml
+	@$(MAKE) test-perf-multicluster \
+		PERF_MC_GENERATOR=tests/perf/multicluster/configs/ci/generator.yaml \
+		PERF_MC_RANGESPEC=tests/perf/multicluster/configs/ci/rangespec.yaml
 
 .PHONY: test-kind
 test-kind: xet-build dep-crds ## 🧪 Run KIND-backed integration tests (real kubelet — needs docker + kind locally)

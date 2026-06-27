@@ -1,0 +1,76 @@
+# CI scenario for the multi-cluster PLACEMENT performance harness.
+#
+# Deliberately SMALL. Each member is a FULL in-process envtest apiserver+etcd,
+# so the dominant cost is the number of members plus the control plane (4 in
+# total here). On a constrained CI agent (an mks-cpu pod) that is already a lot
+# of apiservers in one process, so this keeps members at 3 and the source-ISVC
+# count low so BOTH passes (funnel-on and funnel-off) boot and converge inside
+# the per-pass recorder window. Use configs/baseline/ for real scale numbers on
+# beefy/local hardware.
+#
+# Timing note (why the admit delays are larger than the poll interval): the
+# headline metric is how fast the WINNER's admission FLOWS BACK to the source
+# status — the funnel reacts on an event, the poll waits up to its interval. To
+# isolate that flow-back step from fan-out time, the winner's admit delay is set
+# comfortably ABOVE the (small) fan-out latency, so by the time the winner
+# admits the placer is already Racing and simply waiting for the win to land.
+# The funnel then converges within batchPeriodMs; the poll waits up to
+# disabledSafetyRequeueMs. That gap is the number the harness proves.
+#
+# Every value is consumed verbatim by the runner (no in-code defaults). The
+# committed ci/rangespec.yaml is the (placeholder) expected-range for THIS file.
+
+# Three members with a spread of admit delays so a deterministic winner emerges:
+# member-fast admits first and wins; the other two admit much later (they lose
+# and get swept). member-fast's delay is above the typical fan-out latency so the
+# win lands while the placer is already Racing.
+members:
+  - name: member-fast
+    admitDelayMs: 2500
+  - name: member-mid
+    admitDelayMs: 6000
+  - name: member-slow
+    admitDelayMs: 9000
+
+placement:
+  acceleratorLabel: gpu
+  acceleratorValue: test-accel
+  controlPlaneId: perf-mc-ci
+  dispatcherMode: AllAtOnce
+  # Tight poll so a fan-out resolves within a couple of cycles. (This is the
+  # fan-out re-evaluation cadence, distinct from the status safety requeue.)
+  requeueMs: 500
+  # Bound a single per-cluster apply so one slow member can't stall the others.
+  placeTimeoutMs: 5000
+  # Let independent source ISVCs reconcile in parallel rather than serializing
+  # the whole fleet behind one slow remote; keeps fan-out latency low.
+  maxConcurrentReconciles: 16
+  # Re-probe members fast so their WorkloadClusters reach Ready (and become
+  # candidates) promptly at the start of each pass.
+  clusterHealthIntervalMs: 500
+
+funnel:
+  # Funnel-ON pass: long safety requeue so status convergence is attributable to
+  # funnel EVENTS, not the poll backstop. 2 minutes >> the per-pass window.
+  enabledSafetyRequeueMs: 120000
+  # Funnel-OFF pass: the (Racing) status re-check cadence — there is no event
+  # path, so the placer only re-checks for a winner this often. Set well above
+  # batchPeriodMs so the funnel's event-driven convergence is unmistakably
+  # faster; the delta vs the funnel pass is the headline.
+  disabledSafetyRequeueMs: 4000
+  # Debounce a burst of derived-status events for one source into one reconcile.
+  batchPeriodMs: 100
+  # Notice newly-connected members fast: they connect just after the control-
+  # plane manager starts, so a slow resync would leave the funnel blind to the
+  # first members (convergence would fall to the safety requeue) for that long.
+  resyncIntervalMs: 250
+
+classes:
+  - className: small
+    count: 8
+    creationIntervalMs: 30
+    image: ghcr.io/perf/runtime:small
+  - className: large
+    count: 2
+    creationIntervalMs: 100
+    image: ghcr.io/perf/runtime:large

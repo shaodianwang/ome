@@ -1,0 +1,65 @@
+# Expected-range thresholds for the baseline scenario, asserted by the checker
+# (tests/perf/multicluster/checker). The numbers below are PLACEHOLDERS until
+# calibrated on the target hardware — deliberately generous so a freshly-cloned
+# tree does not red-fail the checker before anyone has run a calibration pass.
+# Re-calibrate before treating a checker failure as a real regression.
+#
+# ── Calibration recipe ───────────────────────────────────────────────
+# Behavioral thresholds must come from measured runs, never from a number
+# someone felt was "about right". To (re)calibrate:
+#
+#   1. Run the harness N>=5 times on the target hardware against
+#      configs/baseline/generator.yaml, collecting each run's
+#      summary.yaml + cmd.stats.yaml.
+#   2. For each size class, take the mean of placement.p95Ms across the N runs.
+#      Set classes.<name>.maxP95PlacementMs to mean * 1.2 — a 20% ceiling
+#      absorbs normal run-to-run variance without letting a real regression
+#      through.
+#   3. Set cmd.maxWallMs to (mean wall time across the N runs) * 1.2.
+#   4. For the convergence floor (minPlacedFraction), take the mean placed
+#      fraction (totalPlaced / expectedTotalPerPass) across the N runs and
+#      subtract 7% (multiply by 0.93). On a healthy run this is 1.0, so the floor
+#      lands at 0.93.
+#   5. Set maxFunnelConvergenceP95Ms to (mean funnelEnabled.convergence.p95Ms)
+#      * 1.2.
+#   6. Set minConvergenceDeltaMeanMs to (mean convergenceDeltaMeanMs) * 0.5 — a
+#      conservative HALF the observed funnel win, so a healthy run passes
+#      comfortably while a regression that broke event-driven convergence
+#      (collapsing the funnel pass to the poll cadence) trips it. The asymmetry
+#      is intentional: latency ceilings get a generous +20% (latency is noisy);
+#      the funnel-win floor is conservative because losing it is always a real
+#      regression.
+#
+# The 1.2 / 0.93 / 0.5 multipliers mirror the InferenceService perf rangespec
+# discipline (a +20% ceiling over the observed mean).
+#
+# Record the trial run IDs you calibrated against here so the next person can see
+# how stale the numbers are:
+#   # calibrated against runs: <id1> <id2> <id3> <id4> <id5>  (date)
+# (uncalibrated — placeholders below)
+
+cmd:
+  # Upper bound on total runner wall time (both passes + boot of 6 apiservers).
+  # Placeholder; set to (mean wall) * 1.2 after calibration.
+  maxWallMs: 600_000
+
+# Fraction of sources that must reach Placed in BOTH passes for the run to count
+# as converged. Placeholder floor; set to (mean placed fraction) * 0.93.
+minPlacedFraction: 0.95
+
+# Ceiling on the funnel pass's p95 status-convergence latency. The funnel
+# converges on events (~batchPeriod), so this is generous to absorb jitter at
+# scale. Placeholder; set to (mean funnelEnabled.convergence.p95Ms) * 1.2.
+maxFunnelConvergenceP95Ms: 5_000
+
+# Floor on the headline funnel win (poll convergence mean - funnel convergence
+# mean). Placeholder; set to (mean convergenceDeltaMeanMs) * 0.5 after
+# calibration. A run where the funnel showed no benefit trips this.
+minConvergenceDeltaMeanMs: 1_500
+
+classes:
+  small:
+    # Placeholder; set to (mean placement.p95Ms) * 1.2.
+    maxP95PlacementMs: 60_000
+  large:
+    maxP95PlacementMs: 60_000

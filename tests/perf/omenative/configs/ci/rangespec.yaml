@@ -1,0 +1,53 @@
+# CI-sized OMENative rangespec — the checker gate for the ci/ scenario.
+#
+# CALIBRATION STATUS: GENEROUS PLACEHOLDERS, NOT a measured baseline. These
+# ceilings exist to fail a GROSS regression (a run that never converges, a
+# requeue storm, a 409 conflict blow-up, an op-amplification explosion) —
+# NOT to pin a tight number. Re-run the harness and tighten each ceiling
+# from observed values before treating this as a real baseline.
+#
+# Observed on a developer Mac (envtest, ~20 pods, cold create), for
+# reference only (the ceilings below carry deliberate slack over these):
+#   class single         avg time-to-Ready ~260ms  (max single ~390ms)
+#   class multi-instance avg time-to-Ready ~360ms  (max single ~430ms)
+#   class gang           avg time-to-Ready ~320ms  (max single ~340ms)
+#   wall ~2.7s   apiOpsTotal ~6k   status conflicts 0   idle rate ~0-11/s
+
+cmd:
+  # envtest boot + CRD install + the (tiny) run. Generous so a slow CI agent
+  # doesn't false-fail on control-plane startup.
+  maxWallMs: 60000
+
+# Every InferenceService must reach Ready (IR ReadyReplicas == Replicas).
+# A cold-create scenario has no excuse not to fully converge.
+minReadyFraction: 1.0
+
+# Per-class time-to-Ready ceilings. ~10x the observed means to absorb
+# constrained-agent latency; uncalibrated.
+classes:
+  single:
+    maxAvgTimeToReadyMs: 3000
+  multi-instance:
+    maxAvgTimeToReadyMs: 4000
+  gang:
+    maxAvgTimeToReadyMs: 4000
+
+# Grand-total apiserver op ceiling (placeholder). Guards a gross
+# op-amplification regression (pod-LIST fan-out / status-write churn).
+# Observed peak ~10k across runs; ceiling carries ~5x slack.
+apiOps:
+  maxTotal: 60000
+
+# 409 status-conflict guard (placeholder). Cold create on a single envtest
+# apiserver shows zero conflicts; the ceilings tolerate a modest burst so a
+# slower agent that drives a few retries doesn't false-fail.
+statusConflict:
+  maxConflictRate: 0.5
+  maxConflictTotal: 200
+
+# Post-convergence steady-state reconcile rate — the storm guard. A real
+# hot-loop requeue bug drives hundreds-to-thousands/sec; the convergence
+# tail (status roll-ups settling) contributes a small floor. 50/s catches
+# the former while tolerating the latter.
+idleReconcile:
+  maxRatePerSec: 50

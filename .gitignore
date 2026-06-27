@@ -85,6 +85,10 @@ out/
 dist/
 build/
 
+# Perf-harness run artifacts (summary.yaml + cmd.stats.yaml per run) are
+# local-only, regenerated each run by `make run-perf-*`; never commit them.
+artifacts/
+
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts

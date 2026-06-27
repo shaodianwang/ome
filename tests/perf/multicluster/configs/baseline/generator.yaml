@@ -1,0 +1,64 @@
+# Baseline scenario for the multi-cluster PLACEMENT performance harness.
+#
+# Larger than the CI scenario: 5 member clusters and 60 source InferenceServices
+# across two size classes. Each member is a FULL in-process envtest apiserver +
+# etcd, so 5 members + the control plane is 6 apiservers in one process — run
+# this on beefy/local hardware, not a constrained CI agent. Use configs/ci/ for
+# the small, soft-fail CI signal.
+#
+# Same timing principle as the CI scenario (see its header): the winner's admit
+# delay sits above the fan-out latency so the harness cleanly isolates the
+# status flow-back step, where the funnel's event-driven convergence beats the
+# poll backstop. Tune counts / delays / dispatcher per environment; the committed
+# rangespec.yaml is calibrated against THIS file (see the calibration recipe in
+# that file's header).
+#
+# Every value here is consumed verbatim by the runner — there are no in-code
+# defaults.
+
+# Five members with a clear winner (member-a, fast) and four progressively
+# slower losers, so the race outcome is deterministic and the loser-sweep path
+# (and its remote Deletes) is exercised at width.
+members:
+  - name: member-a
+    admitDelayMs: 3000
+  - name: member-b
+    admitDelayMs: 7000
+  - name: member-c
+    admitDelayMs: 8000
+  - name: member-d
+    admitDelayMs: 9000
+  - name: member-e
+    admitDelayMs: 10000
+
+placement:
+  acceleratorLabel: gpu
+  acceleratorValue: test-accel
+  controlPlaneId: perf-mc-baseline
+  # Switch to Incremental to also exercise the batched-fan-out dispatcher at
+  # scale (and its narrower peak blast radius); flip to AllAtOnce to compare.
+  dispatcherMode: Incremental
+  dispatcherStepSize: 2
+  dispatcherRoundTimeoutMs: 1500
+  requeueMs: 500
+  placeTimeoutMs: 5000
+  maxConcurrentReconciles: 32
+  clusterHealthIntervalMs: 500
+
+funnel:
+  enabledSafetyRequeueMs: 300000
+  # Larger poll penalty than CI so the funnel win is pronounced at scale; this is
+  # the Racing re-check cadence with the funnel off.
+  disabledSafetyRequeueMs: 6000
+  batchPeriodMs: 100
+  resyncIntervalMs: 250
+
+classes:
+  - className: small
+    count: 45
+    creationIntervalMs: 20
+    image: ghcr.io/perf/runtime:small
+  - className: large
+    count: 15
+    creationIntervalMs: 80
+    image: ghcr.io/perf/runtime:large

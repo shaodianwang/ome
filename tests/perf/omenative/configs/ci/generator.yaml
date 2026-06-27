@@ -1,0 +1,38 @@
+# CI-sized OMENative scale scenario. Deliberately small (~20 pods total)
+# so it converges inside the recorder window on a constrained CI agent.
+# The baseline/ scenario is the larger one for beefy/local runs.
+#
+# OMENative cost scales with POD count (one InferenceReplica per Component,
+# pods managed directly), so the classes vary BOTH the Instance count
+# (replicas) and the leader/worker gang size (workerSize) — the two knobs
+# that multiply into the pod fan-out the harness measures. All values are
+# config; nothing here is baked into the Go binary.
+catalog:
+  servingRuntimes: 2
+  baseModels: 2
+  modelFormat: safetensors
+  modelArchitecture: LlamaForCausalLM
+  modelFramework: Transformers
+  storageUri: oci://n/perf/b/models/o/llama-7b
+classes:
+  # Single-pod Instances: 8 ISVCs x 1 replica x 1 pod = 8 pods.
+  - className: single
+    count: 8
+    replicas: 1
+    workerSize: 0
+    creationIntervalMs: 50
+    image: ghcr.io/perf/fake-serving:v1
+  # Multi-Instance single-pod: 3 ISVCs x 2 replicas x 1 pod = 6 pods.
+  - className: multi-instance
+    count: 3
+    replicas: 2
+    workerSize: 0
+    creationIntervalMs: 100
+    image: ghcr.io/perf/fake-serving:v1
+  # Leader/worker gangs: 2 ISVCs x 1 replica x (1 leader + 2 workers) = 6 pods.
+  - className: gang
+    count: 2
+    replicas: 1
+    workerSize: 2
+    creationIntervalMs: 150
+    image: ghcr.io/perf/fake-serving:v1
