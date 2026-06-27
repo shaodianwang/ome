@@ -20,16 +20,32 @@ import (
 // source reads. It matches the CRD's `kubeConfig.key` default.
 const kubeConfigSecretKey = "kubeconfig"
 
+// kubeConfigBytesFor serializes a member cluster's rest.Config to kubeconfig bytes.
+func kubeConfigBytesFor(member cluster) []byte {
+	raw, err := util.RestConfigToKubeConfig(member.cfg)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "RestConfigToKubeConfig")
+	return raw
+}
+
 // kubeconfigSecretFor serializes a member cluster's rest.Config into a kubeconfig
 // Secret on the control cluster. The control plane's WorkloadCluster reconciler
 // reads this Secret to connect to the member.
 func kubeconfigSecretFor(member cluster, namespace, name string) *corev1.Secret {
-	raw, err := util.RestConfigToKubeConfig(member.cfg)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "RestConfigToKubeConfig")
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Data:       map[string][]byte{kubeConfigSecretKey: raw},
+		Data:       map[string][]byte{kubeConfigSecretKey: kubeConfigBytesFor(member)},
 	}
+}
+
+// rotateSecret overwrites a kubeconfig Secret's data on the given cluster,
+// retrying on conflict — used to simulate kubeconfig rotation.
+func rotateSecret(c cluster, namespace, name string, kubeconfig []byte) {
+	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+		s := &corev1.Secret{}
+		g.Expect(c.client.Get(c.ctx, types.NamespacedName{Namespace: namespace, Name: name}, s)).To(gomega.Succeed())
+		s.Data = map[string][]byte{kubeConfigSecretKey: kubeconfig}
+		g.Expect(c.client.Update(c.ctx, s)).To(gomega.Succeed())
+	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }
 
 // workloadClusterFor builds a WorkloadCluster CR pointing at a kubeconfig Secret,
@@ -68,6 +84,41 @@ func sourceISVC(namespace, name, acceleratorRequirements string) *v1beta1.Infere
 			},
 		},
 	}
+}
+
+// keeperISVC builds a minimal control-plane InferenceService with no accelerator
+// requirement, so the placer finds no candidates and never fans it out. It exists
+// only to keep the GC sweep's live-UID set non-empty (the sweep treats an empty
+// set as suspect and skips, so an orphan would never be reaped without one).
+func keeperISVC(namespace, name string) *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: v1beta1.InferenceServiceSpec{
+			Engine: &v1beta1.EngineSpec{
+				Runner: &v1beta1.RunnerSpec{
+					Container: corev1.Container{Name: "ome-container", Image: "example/model-server:test"},
+				},
+			},
+		},
+	}
+}
+
+// orphanDerived builds an InferenceService shaped like a placer-created derived
+// (origin label + origin-UID annotation + control-plane stamp), for direct
+// creation on a member to exercise the GC sweep. originUID is the source UID the
+// GC checks against the live control-plane set — a UID with no live source makes
+// it an orphan; controlPlaneID is the owning control plane (the GC reaps only its
+// own deriveds).
+func orphanDerived(namespace, name, controlPlaneID, originUID string) *v1beta1.InferenceService {
+	d := keeperISVC(namespace, name)
+	d.Labels = map[string]string{
+		placement.PlacementOriginLabel:       originUID,
+		placement.PlacementControlPlaneLabel: controlPlaneID,
+	}
+	d.Annotations = map[string]string{
+		placement.PlacementOriginUIDAnnotation: originUID,
+	}
+	return d
 }
 
 // createNamespace creates a namespace on the given cluster (idempotent: an

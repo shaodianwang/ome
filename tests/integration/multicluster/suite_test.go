@@ -64,6 +64,12 @@ const (
 	// the safety-requeue backstop).
 	winnerLostGrace = 2 * time.Second
 
+	// gcInterval is the placement orphan-sweep cadence. Short so the GC spec
+	// observes a reap within the Eventually window (production default is minutes).
+	// Harmless to the other specs: their deriveds have live sources, so the sweep
+	// never classifies them as orphans.
+	gcInterval = 1 * time.Second
+
 	// eventuallyTimeout / eventuallyPoll bound the Gomega Eventually assertions.
 	// Sized for a cross-apiserver poll loop, not envtest microseconds.
 	eventuallyTimeout = 30 * time.Second
@@ -160,13 +166,16 @@ func startControlPlaneManager(c *cluster) {
 			return err
 		}
 		cm = m
-		return components.SetupPlacement(setupCtx, mgr, m,
+		if err := components.SetupPlacement(setupCtx, mgr, m,
 			components.WithPlacementRequeue(placementRequeue),
 			components.WithControlPlaneID(controlPlaneID),
 			components.WithStatusFunnel(controlPlaneID),
 			components.WithStatusBatchPeriod(statusBatchPeriod),
 			components.WithStatusSafetyRequeue(statusSafetyRequeue),
-			components.WithWinnerLostGracePeriod(winnerLostGrace))
+			components.WithWinnerLostGracePeriod(winnerLostGrace)); err != nil {
+			return err
+		}
+		return components.SetupPlacementGC(setupCtx, mgr, m, controlPlaneID, gcInterval)
 	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "control-plane StartManager")
 	c.clusters = cm

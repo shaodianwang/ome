@@ -100,6 +100,40 @@ func TestDefaultOptions(t *testing.T) {
 	assert.False(t, opts.enableWebhook)
 	assert.Equal(t, ":8081", opts.probeAddr)
 	assert.Equal(t, LeaderElectionNamespace, opts.leaderElectionNamespace)
+	// Multi-cluster topology/identity/security flag defaults (the tunables moved
+	// to the ConfigMap; these five stay flags).
+	assert.False(t, opts.enableMultiCluster)
+	assert.Equal(t, "", opts.multiClusterRole)
+	assert.False(t, opts.allowExecCredentials)
+	assert.Equal(t, "aws,gke-gcloud-auth-plugin,kubelogin", opts.execCredentialAllowedCmds)
+	assert.Equal(t, "", opts.placementControlPlaneID)
+}
+
+// TestGetOptionsMultiCluster asserts the five retained multi-cluster flags parse
+// and bind onto Options (the tunables are ConfigMap-driven and tested separately).
+func TestGetOptionsMultiCluster(t *testing.T) {
+	oldArgs := os.Args
+	defer func() {
+		os.Args = oldArgs
+		flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	}()
+
+	flag.CommandLine = flag.NewFlagSet("cmd", flag.ExitOnError)
+	os.Args = []string{
+		"cmd",
+		"--enable-multicluster",
+		"--multicluster-role=control-plane",
+		"--allow-exec-credentials",
+		"--exec-credential-allowed-commands=aws,foo",
+		"--placement-control-plane-id=cp-1",
+	}
+
+	o := GetOptions()
+	assert.True(t, o.enableMultiCluster)
+	assert.Equal(t, "control-plane", o.multiClusterRole)
+	assert.True(t, o.allowExecCredentials)
+	assert.Equal(t, "aws,foo", o.execCredentialAllowedCmds)
+	assert.Equal(t, "cp-1", o.placementControlPlaneID)
 }
 
 func TestClusterCacheProviderRegistered(t *testing.T) {

@@ -20,7 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -51,12 +50,9 @@ import (
 	v1beta1isvccontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	trafficfactory "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/factory"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
-	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 	v1beta1runtimerevisioncontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/runtimerevision"
 	v1beta1servingruntimecontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/servingruntime"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
-	workloadcluster "github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 	"github.com/ome-projects/ome/pkg/version"
@@ -525,156 +521,14 @@ func main() {
 		setupLog.Info("InferenceReplica controller disabled via --enable-inferencereplica-controller=false")
 	}
 
-	// OEP-0018 multi-cluster. The WorkloadCluster registry/transport runs when
-	// multi-cluster is enabled OR this is the control plane (which requires it).
-	// The control plane additionally runs the placement (fan-out) controller,
-	// sharing the SAME Manager so it reads the live per-cluster clients the
-	// WorkloadCluster reconciler connects.
+	// Multi-cluster: the WorkloadCluster registry/transport runs when multi-cluster
+	// is enabled OR this is the control plane (which requires it). The control plane
+	// additionally runs the placement (fan-out) controller, its GC, and the endpoint
+	// publisher — see setupMultiCluster.
 	if options.enableMultiCluster || isControlPlane {
-		// Multi-cluster tunables come from the inferenceservice-config ConfigMap,
-		// loaded once here (the wiring below is built before any reconcile). Each
-		// zero/empty value makes the consuming option apply its own in-package
-		// default, so an absent block reproduces the built-in behavior.
-		var mcConfig *controllerconfig.MultiClusterConfig
-		if mcConfig, err = controllerconfig.NewMultiClusterConfig(clientSet); err != nil {
-			setupLog.Error(err, "Failed to initialize multi-cluster configuration")
+		if err = setupMultiCluster(mgr, clientSet, options, isControlPlane); err != nil {
+			setupLog.Error(err, "Failed to set up multi-cluster")
 			os.Exit(1)
-		}
-		mcWC, mcPlace, mcEndpoint := mcConfig.WorkloadCluster, mcConfig.Placement, mcConfig.Endpoint
-
-		clusterManager := workloadcluster.NewManager(mgr.GetScheme())
-		execPolicy := workloadcluster.ExecCredentialPolicy{
-			Allowed:         options.allowExecCredentials,
-			AllowedCommands: splitAndTrim(options.execCredentialAllowedCmds),
-		}
-		clusterManager.SetExecCredentialPolicy(execPolicy)
-		clusterManager.SetClientTuning(workloadcluster.ClientTuning{
-			QPS:            float32(mcWC.ClientQPS),
-			Burst:          mcWC.ClientBurst,
-			PerCallTimeout: mcWC.PerCallTimeoutDuration(),
-		})
-		if mcWC.CacheEnabled {
-			// Scope the cached derived-InferenceService informer to exactly the set
-			// the watch funnel watches and resolves: this control plane's deriveds
-			// (origin marker, control-plane-scoped when an identity is configured).
-			// Sharing one selector keeps the cache from holding another control
-			// plane's deriveds on a shared workload cluster and guarantees every
-			// object the funnel's cache handler resolves is actually cached.
-			clusterManager.SetCacheOptions(workloadcluster.CacheOptions{
-				CachedKinds:     sets.New(v1beta1.SchemeGroupVersion.WithKind("InferenceService").GroupKind()),
-				DefaultSelector: placement.FunnelConfigFor(options.placementControlPlaneID).WatchSelector,
-			})
-		}
-		// Run the cluster Manager as a Runnable so it captures the
-		// controller-manager's long-lived context as the base for remote-client
-		// (and future cache-informer) contexts, and disconnects everything on
-		// shutdown (no leaked background watches).
-		if err = mgr.Add(clusterManager); err != nil {
-			setupLog.Error(err, "unable to add WorkloadCluster manager runnable")
-			os.Exit(1)
-		}
-		setupLog.Info("Setting up WorkloadCluster controller")
-		if err = (&workloadcluster.Reconciler{
-			Client:                mgr.GetClient(),
-			Scheme:                mgr.GetScheme(),
-			Log:                   ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
-			Manager:               clusterManager,
-			ExecPolicy:            execPolicy,
-			HealthInterval:        mcWC.HealthIntervalDuration(),
-			ConnectionGracePeriod: mcWC.ConnectionGraceDuration(),
-		}).SetupWithManager(mgr,
-			workloadcluster.WithEventsBatchPeriod(mcWC.EventsBatchPeriodDuration()),
-			workloadcluster.WithReconnectBackoff(workloadcluster.ReconnectBackoffConfig{
-				EstablishInitial: mcWC.EstablishInitialDuration(),
-				EstablishMax:     mcWC.EstablishMaxDuration(),
-				RetryMax:         mcWC.ReconnectRetryMaxDuration(),
-			}),
-		); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "WorkloadCluster")
-			os.Exit(1)
-		}
-		if isControlPlane {
-			setupLog.Info("Setting up multi-cluster placement (fan-out) controller")
-
-			// Cross-cluster status convergence. When the remote cache is enabled
-			// (its hard dependency: the funnel registers a cache event handler on
-			// the derived-InferenceService informer the cache serves), run the watch
-			// funnel so a derived's status change on a workload cluster re-reconciles
-			// its local source on an event rather than waiting for a poll; the long
-			// safety requeue is only the backstop for a missed event. Without the
-			// cache there is no event source, so status convergence stays on the
-			// poll cadence (placement requeueInterval) and the funnel is not started.
-			convergeOpts := []placement.ConvergeOption{
-				placement.WithStatusBatchPeriod(mcPlace.StatusBatchPeriodDuration()),
-			}
-			if mcWC.CacheEnabled {
-				funnelCfg := placement.FunnelConfigFor(options.placementControlPlaneID)
-				funnelCfg.ResyncInterval = mcWC.FunnelResyncIntervalDuration()
-				funnelCfg.BufferSize = mcWC.FunnelBufferSize
-				funnel := workloadcluster.NewStatusFunnel(clusterManager, funnelCfg)
-				if err = mgr.Add(funnel); err != nil {
-					setupLog.Error(err, "unable to add multi-cluster status funnel runnable")
-					os.Exit(1)
-				}
-				convergeOpts = append(convergeOpts,
-					placement.WithStatusEvents(funnel.Events()),
-					placement.WithStatusSafetyRequeue(mcPlace.StatusSafetyRequeueDuration()),
-				)
-			} else {
-				convergeOpts = append(convergeOpts,
-					placement.WithStatusSafetyRequeue(mcPlace.RequeueIntervalDuration()),
-				)
-			}
-
-			if err = (&placement.Reconciler{
-				Client:                  mgr.GetClient(),
-				Scheme:                  mgr.GetScheme(),
-				Log:                     ctrl.Log.WithName("controllers").WithName("Placement"),
-				Clusters:                clusterManager,
-				Requeue:                 mcPlace.RequeueIntervalDuration(),
-				ControlPlaneID:          options.placementControlPlaneID,
-				MaxConcurrentReconciles: mcPlace.MaxConcurrentReconciles,
-				PlaceTimeout:            mcPlace.FanoutTimeoutDuration(),
-				WinnerLostGracePeriod:   mcPlace.WinnerLostGraceDuration(),
-				DispatcherMode:          placement.DispatcherMode(mcPlace.DispatcherMode),
-				DispatcherStepSize:      mcPlace.DispatcherStepSize,
-				DispatcherRoundTimeout:  mcPlace.DispatcherRoundTimeoutDuration(),
-			}).SetupWithManager(mgr, convergeOpts...); err != nil {
-				setupLog.Error(err, "unable to create controller", "controller", "Placement")
-				os.Exit(1)
-			}
-			if err = mgr.Add(&placement.GCReconciler{
-				APIReader:      mgr.GetAPIReader(),
-				Log:            ctrl.Log.WithName("controllers").WithName("PlacementGC"),
-				Clusters:       clusterManager,
-				Interval:       mcPlace.GCIntervalDuration(),
-				ControlPlaneID: options.placementControlPlaneID,
-			}); err != nil {
-				setupLog.Error(err, "unable to add placement GC runnable")
-				os.Exit(1)
-			}
-
-			// Program the global endpoint to the placement winner. The Gateway API
-			// scheme is required for the HTTPRoute the publisher writes; register it
-			// here (idempotent) since the control plane may not have EnableGatewayAPI
-			// set for its own (empty) ingress config.
-			utilruntime.Must(gatewayapiv1.Install(mgr.GetScheme()))
-			endpointCfg := placementendpoint.Config{
-				GlobalHostTemplate: mcEndpoint.GlobalHostTemplate,
-				GlobalGateway:      mcEndpoint.GlobalGateway,
-				RouteNamespace:     mcEndpoint.RouteNamespace,
-				BackendPort:        int32(mcEndpoint.BackendPort),
-			}
-			setupLog.Info("Setting up multi-cluster endpoint publisher")
-			if err = (&placementendpoint.Reconciler{
-				Client:    mgr.GetClient(),
-				Log:       ctrl.Log.WithName("controllers").WithName("PlacementEndpoint"),
-				Publisher: placementendpoint.NewGatewayAPIPublisher(mgr.GetClient(), endpointCfg),
-				Config:    endpointCfg,
-			}).SetupWithManager(mgr); err != nil {
-				setupLog.Error(err, "unable to create controller", "controller", "PlacementEndpoint")
-				os.Exit(1)
-			}
 		}
 	}
 

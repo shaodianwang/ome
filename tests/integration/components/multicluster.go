@@ -223,3 +223,25 @@ func SetupPlacement(_ context.Context, mgr ctrl.Manager, clusters *ClusterManage
 	}
 	return nil
 }
+
+// SetupPlacementGC registers the placement orphan-GC Runnable on the manager. It
+// periodically sweeps the connected workload clusters for derived ISVCs whose
+// source no longer exists, scoped to controlPlaneID so it never reaps another
+// control plane's deriveds. Reads the control plane UNCACHED (mgr.GetAPIReader)
+// exactly as cmd/manager wires it. interval is the sweep cadence (suites pass a
+// small value); a non-positive value falls back to the reconciler default.
+func SetupPlacementGC(_ context.Context, mgr ctrl.Manager, clusters *ClusterManager, controlPlaneID string, interval time.Duration) error {
+	if clusters == nil {
+		return fmt.Errorf("SetupPlacementGC: nil cluster manager (call SetupWorkloadCluster first)")
+	}
+	if err := mgr.Add(&placement.GCReconciler{
+		APIReader:      mgr.GetAPIReader(),
+		Log:            ctrl.Log.WithName("PlacementGC"),
+		Clusters:       clusters,
+		Interval:       interval,
+		ControlPlaneID: controlPlaneID,
+	}); err != nil {
+		return fmt.Errorf("SetupPlacementGC: add GC runnable: %w", err)
+	}
+	return nil
+}

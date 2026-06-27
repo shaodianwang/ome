@@ -37,15 +37,19 @@ var _ = ginkgo.Describe("WorkloadCluster kubeconfig handling", func() {
 		deleteIfExists(controlCluster, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secret, Namespace: secretNS}})
 	})
 
-	// expectReadyReason creates the WorkloadCluster and asserts its Ready
-	// condition settles on the given status/reason.
-	expectReadyReason := func(status metav1.ConditionStatus, reason string) {
-		mustCreate(controlCluster, workloadClusterFor(wcName, secretNS, secret, nil))
+	// waitReadyReason asserts the WorkloadCluster's Ready condition settles on the
+	// given status/reason.
+	waitReadyReason := func(status metav1.ConditionStatus, reason string) {
 		gomega.Eventually(func(g gomega.Gomega) {
 			wc := &v1beta1.WorkloadCluster{}
 			g.Expect(controlCluster.client.Get(controlCluster.ctx, types.NamespacedName{Name: wcName}, wc)).To(gomega.Succeed())
 			g.Expect(wc.Status.Conditions).To(ometesting.HaveConditionStatusAndReason(v1beta1.WorkloadClusterReady, status, reason))
 		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
+	}
+	// expectReadyReason creates the WorkloadCluster and asserts its Ready condition.
+	expectReadyReason := func(status metav1.ConditionStatus, reason string) {
+		mustCreate(controlCluster, workloadClusterFor(wcName, secretNS, secret, nil))
+		waitReadyReason(status, reason)
 	}
 
 	ginkgo.It("reports Ready=True/Reachable for a valid kubeconfig pointing at a live member", func() {
@@ -66,6 +70,21 @@ var _ = ginkgo.Describe("WorkloadCluster kubeconfig handling", func() {
 	ginkgo.It("reports Ready=False/BadKubeConfig when the kubeconfig disables TLS verification", func() {
 		mustCreate(controlCluster, badKubeconfigSecret(member1Cluster, secretNS, secret, insecureSkipTLS))
 		expectReadyReason(metav1.ConditionFalse, "BadKubeConfig")
+	})
+
+	ginkgo.It("re-validates and reconnects when the kubeconfig Secret is rotated (valid->bad->valid)", func() {
+		ginkgo.By("starting from a valid kubeconfig: Ready=True/Reachable")
+		mustCreate(controlCluster, kubeconfigSecretFor(member1Cluster, secretNS, secret))
+		mustCreate(controlCluster, workloadClusterFor(wcName, secretNS, secret, nil))
+		waitReadyReason(metav1.ConditionTrue, "Reachable")
+
+		ginkgo.By("rotating the Secret to an unsafe kubeconfig: Ready flips to False/BadKubeConfig")
+		rotateSecret(controlCluster, secretNS, secret, badKubeconfigBytes(member1Cluster, insecureSkipTLS))
+		waitReadyReason(metav1.ConditionFalse, "BadKubeConfig")
+
+		ginkgo.By("rotating the Secret back to a valid kubeconfig: Ready returns to True/Reachable")
+		rotateSecret(controlCluster, secretNS, secret, kubeConfigBytesFor(member1Cluster))
+		waitReadyReason(metav1.ConditionTrue, "Reachable")
 	})
 })
 
@@ -89,10 +108,10 @@ func insecureSkipTLS(cfg *clientcmdapi.Config) {
 	}
 }
 
-// badKubeconfigSecret builds a kubeconfig from a member's rest.Config, applies an
-// unsafe mutation, and wraps it in a Secret. It keeps the real server URL +
-// client credentials so the ONLY thing wrong is the property under test.
-func badKubeconfigSecret(member cluster, namespace, name string, mutate badKubeconfigVariant) *corev1.Secret {
+// badKubeconfigBytes builds a kubeconfig from a member's rest.Config and applies
+// an unsafe mutation. It keeps the real server URL + client credentials so the
+// ONLY thing wrong is the property under test.
+func badKubeconfigBytes(member cluster, mutate badKubeconfigVariant) []byte {
 	const (
 		clusterName = "default-cluster"
 		userName    = "default-user"
@@ -119,8 +138,13 @@ func badKubeconfigSecret(member cluster, namespace, name string, mutate badKubec
 	mutate(&cfg)
 	raw, err := clientcmd.Write(cfg)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "write bad kubeconfig")
+	return raw
+}
+
+// badKubeconfigSecret wraps badKubeconfigBytes in a Secret.
+func badKubeconfigSecret(member cluster, namespace, name string, mutate badKubeconfigVariant) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Data:       map[string][]byte{kubeConfigSecretKey: raw},
+		Data:       map[string][]byte{kubeConfigSecretKey: badKubeconfigBytes(member, mutate)},
 	}
 }
