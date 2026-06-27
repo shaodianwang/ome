@@ -42,6 +42,42 @@ data:
       "trafficWeightDeadbandPercent": {{ .Values.ome.controller.coordination.trafficWeightDeadbandPercent | default 0 }}
     }
 
+  multicluster: |-
+    {
+      "workloadCluster": {
+        "clientQPS": {{ .Values.ome.multicluster.config.workloadCluster.clientQPS | default 0 }},
+        "clientBurst": {{ .Values.ome.multicluster.config.workloadCluster.clientBurst | default 0 }},
+        "perCallTimeout": "{{ .Values.ome.multicluster.config.workloadCluster.perCallTimeout | default "" }}",
+        "cacheEnabled": {{ .Values.ome.multicluster.config.workloadCluster.cacheEnabled | default false }},
+        "healthInterval": "{{ .Values.ome.multicluster.config.workloadCluster.healthInterval | default "" }}",
+        "connectionGrace": "{{ .Values.ome.multicluster.config.workloadCluster.connectionGrace | default "" }}",
+        "eventsBatchPeriod": "{{ .Values.ome.multicluster.config.workloadCluster.eventsBatchPeriod | default "" }}",
+        "establishInitial": "{{ .Values.ome.multicluster.config.workloadCluster.establishInitial | default "" }}",
+        "establishMax": "{{ .Values.ome.multicluster.config.workloadCluster.establishMax | default "" }}",
+        "reconnectRetryMax": "{{ .Values.ome.multicluster.config.workloadCluster.reconnectRetryMax | default "" }}",
+        "funnelResyncInterval": "{{ .Values.ome.multicluster.config.workloadCluster.funnelResyncInterval | default "" }}",
+        "funnelBufferSize": {{ .Values.ome.multicluster.config.workloadCluster.funnelBufferSize | default 0 }}
+      },
+      "placement": {
+        "requeueInterval": "{{ .Values.ome.multicluster.config.placement.requeueInterval | default "" }}",
+        "gcInterval": "{{ .Values.ome.multicluster.config.placement.gcInterval | default "" }}",
+        "maxConcurrentReconciles": {{ .Values.ome.multicluster.config.placement.maxConcurrentReconciles | default 0 }},
+        "fanoutTimeout": "{{ .Values.ome.multicluster.config.placement.fanoutTimeout | default "" }}",
+        "winnerLostGrace": "{{ .Values.ome.multicluster.config.placement.winnerLostGrace | default "" }}",
+        "statusBatchPeriod": "{{ .Values.ome.multicluster.config.placement.statusBatchPeriod | default "" }}",
+        "statusSafetyRequeue": "{{ .Values.ome.multicluster.config.placement.statusSafetyRequeue | default "" }}",
+        "dispatcherMode": "{{ .Values.ome.multicluster.config.placement.dispatcherMode | default "" }}",
+        "dispatcherStepSize": {{ .Values.ome.multicluster.config.placement.dispatcherStepSize | default 0 }},
+        "dispatcherRoundTimeout": "{{ .Values.ome.multicluster.config.placement.dispatcherRoundTimeout | default "" }}"
+      },
+      "endpoint": {
+        "globalHostTemplate": "{{ .Values.ome.multicluster.config.endpoint.globalHostTemplate | default "" }}",
+        "globalGateway": "{{ .Values.ome.multicluster.config.endpoint.globalGateway | default "" }}",
+        "routeNamespace": "{{ .Values.ome.multicluster.config.endpoint.routeNamespace | default "" }}",
+        "backendPort": {{ .Values.ome.multicluster.config.endpoint.backendPort | default 0 }}
+      }
+    }
+
   metricsAggregator: |-
     {
       "enableMetricAggregation": "{{ .Values.ome.metricsaggregator.enableMetricAggregation }}",

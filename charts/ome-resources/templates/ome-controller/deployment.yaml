@@ -81,15 +81,6 @@ spec:
         - "--allow-exec-credentials"
         - "--exec-credential-allowed-commands={{ .Values.ome.multicluster.execCredentials.allowedCommands }}"
         {{- end }}
-        {{- with .Values.ome.multicluster.healthInterval }}
-        - "--workloadcluster-health-interval={{ . }}"
-        {{- end }}
-        {{- with .Values.ome.multicluster.placementRequeueInterval }}
-        - "--placement-requeue-interval={{ . }}"
-        {{- end }}
-        {{- with .Values.ome.multicluster.placementGCInterval }}
-        - "--placement-gc-interval={{ . }}"
-        {{- end }}
         {{- with .Values.ome.multicluster.placementControlPlaneID }}
         - "--placement-control-plane-id={{ . }}"
         {{- end }}

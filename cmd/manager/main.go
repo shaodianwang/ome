@@ -139,43 +139,17 @@ type Options struct {
 	isvcMaxConcurrentReconciles int
 	irMaxConcurrentReconciles   int
 	enableInferenceReplicaCtrl  bool
-	enableMultiCluster          bool
-	multiClusterRole            string
-	allowExecCredentials        bool
-	execCredentialAllowedCmds   string
-	clusterHealthInterval       time.Duration
-	clusterConnectionGrace      time.Duration
-	placementRequeueInterval    time.Duration
-	placementGCInterval         time.Duration
-	placementControlPlaneID     string
-	configCacheTTL              time.Duration
-	// Remote-client tuning + transport backoff for the multi-cluster connection
-	// layer, and the placement-scale + endpoint-publisher knobs.
-	clusterClientQPS         float64
-	clusterClientBurst       int
-	clusterPerCallTimeout    time.Duration
-	clusterCacheEnabled      bool
-	clusterEventsBatchPeriod time.Duration
-	clusterEstablishInitial  time.Duration
-	clusterEstablishMax      time.Duration
-	clusterReconnectRetryMax time.Duration
-	placementMaxConcurrent   int
-	placementFanoutTimeout   time.Duration
-	placementWinnerLostGrace time.Duration
-	endpointGlobalHostTmpl   string
-	endpointGlobalGateway    string
-	endpointRouteNamespace   string
-	endpointBackendPort      int
-	// Event-driven cross-cluster status convergence (the remote watch funnel)
-	// and the pluggable fan-out dispatcher breadth policy.
-	placementStatusBatchPeriod      time.Duration
-	placementStatusSafetyRequeue    time.Duration
-	clusterFunnelResyncInterval     time.Duration
-	clusterFunnelBufferSize         int
-	placementDispatcherMode         string
-	placementDispatcherStepSize     int
-	placementDispatcherRoundTimeout time.Duration
-	zapOpts                         zap.Options
+	// Multi-cluster topology, identity, and security: these decide which
+	// controllers run and the manager's identity, so they are deploy-time flags.
+	// The tunables live in the inferenceservice-config ConfigMap
+	// (controllerconfig.MultiClusterConfig), loaded at startup.
+	enableMultiCluster        bool
+	multiClusterRole          string
+	allowExecCredentials      bool
+	execCredentialAllowedCmds string
+	placementControlPlaneID   string
+	configCacheTTL            time.Duration
+	zapOpts                   zap.Options
 }
 
 // DefaultOptions returns the default values for the program options.
@@ -201,32 +175,12 @@ func DefaultOptions() Options {
 		multiClusterRole:           "",
 		allowExecCredentials:       false,
 		execCredentialAllowedCmds:  "aws,gke-gcloud-auth-plugin,kubelogin",
-		clusterHealthInterval:      workloadcluster.DefaultHealthInterval,
-		clusterConnectionGrace:     workloadcluster.DefaultConnectionGracePeriod,
-		placementRequeueInterval:   placement.DefaultPlacementRequeue,
-		placementGCInterval:        placement.DefaultGCInterval,
 		// Short TTL for the inferenceservice-config ConfigMap read on the ISVC
 		// reconcile hot path. Collapses the per-pass Deploy/InferenceServices/
 		// Ingress/CanaryAnalysis loads onto one apiserver GET per TTL window
 		// while staying short enough that a ConfigMap edit applies without a
 		// restart. Override via --config-cache-ttl (0 disables caching).
 		configCacheTTL: 30 * time.Second,
-		// Multi-cluster connection-layer fallbacks (operative values come from the
-		// chart/flags). QPS/Burst/PerCallTimeout zero = client-go's own default; the
-		// cache is opt-in (default off).
-		clusterEventsBatchPeriod: workloadcluster.DefaultEventsBatchPeriod,
-		clusterEstablishInitial:  workloadcluster.DefaultEstablishInitialTimeout,
-		clusterEstablishMax:      workloadcluster.DefaultEstablishMaxTimeout,
-		clusterReconnectRetryMax: workloadcluster.DefaultReconnectRetryMax,
-		placementFanoutTimeout:   placement.DefaultPlaceTimeout,
-		placementWinnerLostGrace: placement.DefaultWinnerLostGrace,
-		// Status-convergence + funnel fallbacks. The dispatcher knobs stay zero =>
-		// AllAtOnce (empty mode, advance-by-one / no dwell), preserving the
-		// historical fan-out absent config.
-		placementStatusBatchPeriod:   placement.DefaultStatusBatchPeriod,
-		placementStatusSafetyRequeue: placement.DefaultStatusSafetyRequeue,
-		clusterFunnelResyncInterval:  workloadcluster.DefaultFunnelResyncInterval,
-		clusterFunnelBufferSize:      workloadcluster.DefaultFunnelBufferSize,
 		zapOpts: zap.Options{
 			TimeEncoder: zapcore.RFC3339TimeEncoder,
 			ZapOpts:     []zaplog.Option{zaplog.AddCaller()},
@@ -276,14 +230,6 @@ func GetOptions() Options {
 			"SECURITY: an exec block runs a command in the controller pod; keep WorkloadCluster kubeconfig Secrets admin-only.")
 	flag.StringVar(&opts.execCredentialAllowedCmds, "exec-credential-allowed-commands", opts.execCredentialAllowedCmds,
 		"Comma-separated allowlist of exec credential plugin command basenames permitted when --allow-exec-credentials is set.")
-	flag.DurationVar(&opts.clusterHealthInterval, "workloadcluster-health-interval", opts.clusterHealthInterval,
-		"how often each WorkloadCluster is re-probed for reachability when nothing else triggers a reconcile.")
-	flag.DurationVar(&opts.clusterConnectionGrace, "workloadcluster-connection-grace", opts.clusterConnectionGrace,
-		"how long a previously reachable WorkloadCluster tolerates transient probe failures before it is flipped to Ready=False and disconnected. 0 disables grace (flip on first failure).")
-	flag.DurationVar(&opts.placementRequeueInterval, "placement-requeue-interval", opts.placementRequeueInterval,
-		"status-refresh poll cadence for the placement (fan-out) controller.")
-	flag.DurationVar(&opts.placementGCInterval, "placement-gc-interval", opts.placementGCInterval,
-		"orphan-sweep cadence for the placement GC runnable.")
 	flag.StringVar(&opts.placementControlPlaneID, "placement-control-plane-id", opts.placementControlPlaneID,
 		"identity stamped on every derived InferenceService this control plane creates. "+
 			"Required when multiple control planes share a workload cluster so each control plane's GC "+
@@ -293,51 +239,6 @@ func GetOptions() Options {
 		"TTL for the in-memory cache of the inferenceservice-config ConfigMap on the InferenceService reconcile path. "+
 			"Collapses the per-reconcile config loads onto one apiserver GET per window; kept short so ConfigMap edits "+
 			"apply without a restart. Set to 0 to disable caching (read the apiserver on every load).")
-	flag.Float64Var(&opts.clusterClientQPS, "workloadcluster-qps", opts.clusterClientQPS,
-		"steady-state request rate to each remote workload-cluster apiserver. 0 leaves the client-go default (5).")
-	flag.IntVar(&opts.clusterClientBurst, "workloadcluster-burst", opts.clusterClientBurst,
-		"token-bucket burst over --workloadcluster-qps. 0 leaves the client-go default (10).")
-	flag.DurationVar(&opts.clusterPerCallTimeout, "workloadcluster-percall-timeout", opts.clusterPerCallTimeout,
-		"per-request timeout on remote workload-cluster clients. 0 leaves no client-level timeout.")
-	flag.BoolVar(&opts.clusterCacheEnabled, "workloadcluster-cache", opts.clusterCacheEnabled,
-		"serve cross-cluster derived-InferenceService reads from a per-cluster informer cache (origin-scoped, Pods banned) instead of live apiserver reads. Default off; enable once validated by the multi-cluster suite.")
-	flag.DurationVar(&opts.clusterEventsBatchPeriod, "workloadcluster-events-batch-period", opts.clusterEventsBatchPeriod,
-		"debounce window folding a rotated-kubeconfig Secret's burst of key updates into one reconcile.")
-	flag.DurationVar(&opts.clusterEstablishInitial, "workloadcluster-establish-initial", opts.clusterEstablishInitial,
-		"initial timeout bounding a single remote watch-establish attempt (grows to --workloadcluster-establish-max).")
-	flag.DurationVar(&opts.clusterEstablishMax, "workloadcluster-establish-max", opts.clusterEstablishMax,
-		"cap on the remote watch-establish timeout.")
-	flag.DurationVar(&opts.clusterReconnectRetryMax, "workloadcluster-reconnect-retry-max", opts.clusterReconnectRetryMax,
-		"cap on the inter-attempt reconnect backoff for an unreachable workload cluster.")
-	flag.IntVar(&opts.placementMaxConcurrent, "placement-max-concurrent-reconciles", opts.placementMaxConcurrent,
-		"max placement (fan-out) reconciles in parallel (distinct ISVCs). No in-code default; the chart supplies it. Zero falls back to controller-runtime's single worker.")
-	flag.DurationVar(&opts.placementFanoutTimeout, "placement-fanout-timeout", opts.placementFanoutTimeout,
-		"per-cluster deadline bounding a single fan-out apply so one slow remote cannot block placement to healthy peers.")
-	flag.DurationVar(&opts.placementWinnerLostGrace, "placement-winner-lost-grace", opts.placementWinnerLostGrace,
-		"grace window held before re-placing when the sticky winner's derived is absent on a still-connected winner (0 = re-place immediately).")
-	flag.StringVar(&opts.endpointGlobalHostTmpl, "placement-endpoint-global-host-template", opts.endpointGlobalHostTmpl,
-		"text/template for the global host an ISVC publishes to the winner (e.g. \"{{.Name}}.{{.Namespace}}.global.example\"). Empty = only ISVCs with the ome.io/global-host annotation publish.")
-	flag.StringVar(&opts.endpointGlobalGateway, "placement-endpoint-global-gateway", opts.endpointGlobalGateway,
-		"\"namespace/name\" of the global-traffic Gateway the published HTTPRoute attaches to. Empty = the endpoint publisher is a no-op.")
-	flag.StringVar(&opts.endpointRouteNamespace, "placement-endpoint-route-namespace", opts.endpointRouteNamespace,
-		"namespace for the published HTTPRoute + backing Service. Empty = the ISVC's own namespace.")
-	flag.IntVar(&opts.endpointBackendPort, "placement-endpoint-backend-port", opts.endpointBackendPort,
-		"port on the winner cluster's ingress the global host forwards to.")
-	flag.DurationVar(&opts.placementStatusBatchPeriod, "placement-status-batch-period", opts.placementStatusBatchPeriod,
-		"debounce window folding a burst of cross-cluster derived-status events for one ISVC into a single placement reconcile.")
-	flag.DurationVar(&opts.placementStatusSafetyRequeue, "placement-status-safety-requeue", opts.placementStatusSafetyRequeue,
-		"steady-state re-read backstop for cross-cluster status when the watch funnel is enabled (events drive freshness; this only recovers a missed event). "+
-			"With --workloadcluster-cache off there is no event source, so status re-reads at --placement-requeue-interval instead and this is ignored.")
-	flag.DurationVar(&opts.clusterFunnelResyncInterval, "workloadcluster-funnel-resync-interval", opts.clusterFunnelResyncInterval,
-		"cadence at which the status watch funnel reconciles its per-cluster watch set against the connected clusters (how fast a newly-connected cluster is noticed; not the status latency).")
-	flag.IntVar(&opts.clusterFunnelBufferSize, "workloadcluster-funnel-buffer-size", opts.clusterFunnelBufferSize,
-		"depth of the status watch funnel's buffered event channel; a full channel drops events (the safety requeue recovers). Raise under sustained cross-cluster status churn.")
-	flag.StringVar(&opts.placementDispatcherMode, "placement-dispatcher-mode", opts.placementDispatcherMode,
-		"fan-out breadth policy: \"AllAtOnce\" (clone onto every matched candidate at once) or \"Incremental\" (probe candidates in batches). Empty/unrecognized = AllAtOnce.")
-	flag.IntVar(&opts.placementDispatcherStepSize, "placement-dispatcher-step-size", opts.placementDispatcherStepSize,
-		"candidates the Incremental dispatcher adds per round (only with --placement-dispatcher-mode=Incremental). No in-code default; the chart supplies it. Non-positive advances by one per round.")
-	flag.DurationVar(&opts.placementDispatcherRoundTimeout, "placement-dispatcher-round-timeout", opts.placementDispatcherRoundTimeout,
-		"how long an Incremental round waits for a nominated cluster to win before adding the next batch (only with Incremental). No in-code default; the chart supplies it. Non-positive enforces no dwell.")
 	opts.zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	return opts
@@ -630,6 +531,17 @@ func main() {
 	// sharing the SAME Manager so it reads the live per-cluster clients the
 	// WorkloadCluster reconciler connects.
 	if options.enableMultiCluster || isControlPlane {
+		// Multi-cluster tunables come from the inferenceservice-config ConfigMap,
+		// loaded once here (the wiring below is built before any reconcile). Each
+		// zero/empty value makes the consuming option apply its own in-package
+		// default, so an absent block reproduces the built-in behavior.
+		var mcConfig *controllerconfig.MultiClusterConfig
+		if mcConfig, err = controllerconfig.NewMultiClusterConfig(clientSet); err != nil {
+			setupLog.Error(err, "Failed to initialize multi-cluster configuration")
+			os.Exit(1)
+		}
+		mcWC, mcPlace, mcEndpoint := mcConfig.WorkloadCluster, mcConfig.Placement, mcConfig.Endpoint
+
 		clusterManager := workloadcluster.NewManager(mgr.GetScheme())
 		execPolicy := workloadcluster.ExecCredentialPolicy{
 			Allowed:         options.allowExecCredentials,
@@ -637,11 +549,11 @@ func main() {
 		}
 		clusterManager.SetExecCredentialPolicy(execPolicy)
 		clusterManager.SetClientTuning(workloadcluster.ClientTuning{
-			QPS:            float32(options.clusterClientQPS),
-			Burst:          options.clusterClientBurst,
-			PerCallTimeout: options.clusterPerCallTimeout,
+			QPS:            float32(mcWC.ClientQPS),
+			Burst:          mcWC.ClientBurst,
+			PerCallTimeout: mcWC.PerCallTimeoutDuration(),
 		})
-		if options.clusterCacheEnabled {
+		if mcWC.CacheEnabled {
 			// Scope the cached derived-InferenceService informer to exactly the set
 			// the watch funnel watches and resolves: this control plane's deriveds
 			// (origin marker, control-plane-scoped when an identity is configured).
@@ -668,14 +580,14 @@ func main() {
 			Log:                   ctrl.Log.WithName("controllers").WithName("WorkloadCluster"),
 			Manager:               clusterManager,
 			ExecPolicy:            execPolicy,
-			HealthInterval:        options.clusterHealthInterval,
-			ConnectionGracePeriod: options.clusterConnectionGrace,
+			HealthInterval:        mcWC.HealthIntervalDuration(),
+			ConnectionGracePeriod: mcWC.ConnectionGraceDuration(),
 		}).SetupWithManager(mgr,
-			workloadcluster.WithEventsBatchPeriod(options.clusterEventsBatchPeriod),
+			workloadcluster.WithEventsBatchPeriod(mcWC.EventsBatchPeriodDuration()),
 			workloadcluster.WithReconnectBackoff(workloadcluster.ReconnectBackoffConfig{
-				EstablishInitial: options.clusterEstablishInitial,
-				EstablishMax:     options.clusterEstablishMax,
-				RetryMax:         options.clusterReconnectRetryMax,
+				EstablishInitial: mcWC.EstablishInitialDuration(),
+				EstablishMax:     mcWC.EstablishMaxDuration(),
+				RetryMax:         mcWC.ReconnectRetryMaxDuration(),
 			}),
 		); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "WorkloadCluster")
@@ -691,14 +603,14 @@ func main() {
 			// its local source on an event rather than waiting for a poll; the long
 			// safety requeue is only the backstop for a missed event. Without the
 			// cache there is no event source, so status convergence stays on the
-			// poll cadence (placement-requeue-interval) and the funnel is not started.
+			// poll cadence (placement requeueInterval) and the funnel is not started.
 			convergeOpts := []placement.ConvergeOption{
-				placement.WithStatusBatchPeriod(options.placementStatusBatchPeriod),
+				placement.WithStatusBatchPeriod(mcPlace.StatusBatchPeriodDuration()),
 			}
-			if options.clusterCacheEnabled {
+			if mcWC.CacheEnabled {
 				funnelCfg := placement.FunnelConfigFor(options.placementControlPlaneID)
-				funnelCfg.ResyncInterval = options.clusterFunnelResyncInterval
-				funnelCfg.BufferSize = options.clusterFunnelBufferSize
+				funnelCfg.ResyncInterval = mcWC.FunnelResyncIntervalDuration()
+				funnelCfg.BufferSize = mcWC.FunnelBufferSize
 				funnel := workloadcluster.NewStatusFunnel(clusterManager, funnelCfg)
 				if err = mgr.Add(funnel); err != nil {
 					setupLog.Error(err, "unable to add multi-cluster status funnel runnable")
@@ -706,11 +618,11 @@ func main() {
 				}
 				convergeOpts = append(convergeOpts,
 					placement.WithStatusEvents(funnel.Events()),
-					placement.WithStatusSafetyRequeue(options.placementStatusSafetyRequeue),
+					placement.WithStatusSafetyRequeue(mcPlace.StatusSafetyRequeueDuration()),
 				)
 			} else {
 				convergeOpts = append(convergeOpts,
-					placement.WithStatusSafetyRequeue(options.placementRequeueInterval),
+					placement.WithStatusSafetyRequeue(mcPlace.RequeueIntervalDuration()),
 				)
 			}
 
@@ -719,14 +631,14 @@ func main() {
 				Scheme:                  mgr.GetScheme(),
 				Log:                     ctrl.Log.WithName("controllers").WithName("Placement"),
 				Clusters:                clusterManager,
-				Requeue:                 options.placementRequeueInterval,
+				Requeue:                 mcPlace.RequeueIntervalDuration(),
 				ControlPlaneID:          options.placementControlPlaneID,
-				MaxConcurrentReconciles: options.placementMaxConcurrent,
-				PlaceTimeout:            options.placementFanoutTimeout,
-				WinnerLostGracePeriod:   options.placementWinnerLostGrace,
-				DispatcherMode:          placement.DispatcherMode(options.placementDispatcherMode),
-				DispatcherStepSize:      options.placementDispatcherStepSize,
-				DispatcherRoundTimeout:  options.placementDispatcherRoundTimeout,
+				MaxConcurrentReconciles: mcPlace.MaxConcurrentReconciles,
+				PlaceTimeout:            mcPlace.FanoutTimeoutDuration(),
+				WinnerLostGracePeriod:   mcPlace.WinnerLostGraceDuration(),
+				DispatcherMode:          placement.DispatcherMode(mcPlace.DispatcherMode),
+				DispatcherStepSize:      mcPlace.DispatcherStepSize,
+				DispatcherRoundTimeout:  mcPlace.DispatcherRoundTimeoutDuration(),
 			}).SetupWithManager(mgr, convergeOpts...); err != nil {
 				setupLog.Error(err, "unable to create controller", "controller", "Placement")
 				os.Exit(1)
@@ -735,7 +647,7 @@ func main() {
 				APIReader:      mgr.GetAPIReader(),
 				Log:            ctrl.Log.WithName("controllers").WithName("PlacementGC"),
 				Clusters:       clusterManager,
-				Interval:       options.placementGCInterval,
+				Interval:       mcPlace.GCIntervalDuration(),
 				ControlPlaneID: options.placementControlPlaneID,
 			}); err != nil {
 				setupLog.Error(err, "unable to add placement GC runnable")
@@ -748,10 +660,10 @@ func main() {
 			// set for its own (empty) ingress config.
 			utilruntime.Must(gatewayapiv1.Install(mgr.GetScheme()))
 			endpointCfg := placementendpoint.Config{
-				GlobalHostTemplate: options.endpointGlobalHostTmpl,
-				GlobalGateway:      options.endpointGlobalGateway,
-				RouteNamespace:     options.endpointRouteNamespace,
-				BackendPort:        int32(options.endpointBackendPort),
+				GlobalHostTemplate: mcEndpoint.GlobalHostTemplate,
+				GlobalGateway:      mcEndpoint.GlobalGateway,
+				RouteNamespace:     mcEndpoint.RouteNamespace,
+				BackendPort:        int32(mcEndpoint.BackendPort),
 			}
 			setupLog.Info("Setting up multi-cluster endpoint publisher")
 			if err = (&placementendpoint.Reconciler{
