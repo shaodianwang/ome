@@ -172,6 +172,32 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 		migrationSource[idx] = struct{}{}
 	}
 
+	// Ready instances are stable replicas, preferred to keep.
+	readyByIndex := map[int32]bool{}
+	for _, s := range instances {
+		if s.Phase == InstancePhaseReady {
+			readyByIndex[s.Index] = true
+		}
+	}
+
+	// Release a gang-surge SOURCE whose replacement (the instance at its
+	// SurgeIndex) is already Ready: the live replacement now holds the slot,
+	// so pinning/counting the stale source as a steady replica would displace
+	// an already-rolled instance into scale-down — the multi-node double-roll
+	// that troughs capacity and skews RatioBalanced. Released, the superseded
+	// source falls out of the steady budget and becomes the scale-down target.
+	// AllocateSurgeIndex picks a fresh index, so a Ready instance at SurgeIndex
+	// is unambiguously this source's replacement.
+	for _, s := range instances {
+		if s.Operation == nil || s.Operation.SurgeIndex == nil {
+			continue
+		}
+		if readyByIndex[*s.Operation.SurgeIndex] {
+			delete(migrationProtected, s.Index)
+			delete(migrationSource, s.Index)
+		}
+	}
+
 	sorted := make([]int32, 0, len(used))
 	for idx := range used {
 		sorted = append(sorted, idx)
@@ -203,18 +229,28 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 		}
 	}
 
-	// Pass 2: fill the steady replica budget, oldest first.
-	for _, idx := range sorted {
-		if _, already := picked[idx]; already {
-			continue
+	// Pass 2: fill the steady replica budget. Prefer Ready (stable) instances
+	// over not-yet-Ready ones (e.g. a stale surge source mid-drain) so an
+	// already-rolled instance is never dropped to keep one being phased out;
+	// within each readiness tier, oldest (lowest index) first.
+	fill := func(wantReady bool) {
+		for _, idx := range sorted {
+			if steadyCount >= replicas {
+				return
+			}
+			if _, already := picked[idx]; already {
+				continue
+			}
+			if readyByIndex[idx] != wantReady {
+				continue
+			}
+			indices = append(indices, idx)
+			picked[idx] = struct{}{}
+			steadyCount++
 		}
-		if steadyCount >= replicas {
-			break
-		}
-		indices = append(indices, idx)
-		picked[idx] = struct{}{}
-		steadyCount++
 	}
+	fill(true)
+	fill(false)
 
 	// Pass 3: allocate new slots for scale-up.
 	taken := make(map[int32]struct{}, len(used)+len(indices))

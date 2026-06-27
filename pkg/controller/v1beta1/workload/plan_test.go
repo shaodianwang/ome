@@ -361,6 +361,37 @@ func TestInstancePlanIndices_GangSurgePinsPair(t *testing.T) {
 	}
 }
 
+func TestInstancePlanIndices_DoesNotDropRolledInstanceForLowerIndex(t *testing.T) {
+	// Gang-surge DOUBLE-ROLL regression (multinode RatioBalanced). Mid the
+	// second rotation, a window exists where:
+	//   i0: Ready on the NEW rev — the 2nd rotation's just-promoted target
+	//       (its GangSurgeTarget marker already cleared on promote)
+	//   i1: Updating, surge SOURCE on the OLD rev, still draining (surge->0)
+	//   i2: Ready on the NEW rev — the 1st rotation's already-rolled instance
+	// replicas=2. The plan must KEEP the two NEW-rev instances {0,2} and let
+	// the old source 1 drain. The bug keeps the old source 1 (pinned as a
+	// surge source) and drops the already-rolled high-index 2 as "extra" — so
+	// 2 is scaled down and the instance re-rolls into a low index. That
+	// double-roll's second leg isn't capacity-protected, troughing the
+	// Component below N and skewing the live engine:decoder ratio.
+	newRev, oldRev := "comp-rev-newaaaa", "comp-rev-oldbbbb"
+	zero := int32(0)
+	instances := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseReady, RunningRevision: newRev},
+		{Index: 1, Phase: InstancePhaseUpdating, RunningRevision: oldRev,
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge", SurgeIndex: &zero}},
+		{Index: 2, Phase: InstancePhaseReady, RunningRevision: newRev},
+	}
+	got := instancePlanIndices(instances, 2)
+	hit := map[int32]bool{}
+	for _, idx := range got {
+		hit[idx] = true
+	}
+	if !hit[2] {
+		t.Errorf("plan dropped already-rolled new-rev instance 2 (forces a re-roll / RatioBalanced trough); got %v", got)
+	}
+}
+
 func TestInstancePlanIndices_SinglePodSurgeNotPinnedAsPair(t *testing.T) {
 	// A single-pod surge carries Op.Step=Surge but NO SurgeIndex (it
 	// toggles ActiveOrdinal in place). It must NOT be treated as a gang
