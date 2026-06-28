@@ -1646,12 +1646,23 @@ def run_case(case_id):
                 if ratio_pair:
                     ra = agg.get(ratio_pair[0], (0, 0, 0))[1]
                     rb = agg.get(ratio_pair[1], (0, 0, 0))[1]
-                    if ra > 0 or rb > 0:
-                        dev = 9.99 if rb == 0 else abs((ra / rb) / ratio_target - 1.0)
-                        ratio_samples.append((tnow, dev, ra, rb))
+                    # Cap each side's ready at its steady N before measuring the
+                    # deviation. SurgeThenDrain transiently lifts the surging side to
+                    # N+1 (surge headroom) — extra capacity, not an imbalance: the peer
+                    # still has its full N, so nothing is under-served. RatioBalanced
+                    # guards against UNDER-serving a side; a side BELOW N is not capped
+                    # up, so a real trough still registers here (and is also caught by
+                    # the capacity-floor check). Capping only neutralizes the benign
+                    # over-capacity surge peak, whose timing across the two independent
+                    # gang rollouts is not synchronized.
+                    ca = min(ra, N[ratio_pair[0]])
+                    cb = min(rb, N[ratio_pair[1]])
+                    if ca > 0 or cb > 0:
+                        dev = 9.99 if cb == 0 else abs((ca / cb) / ratio_target - 1.0)
+                        ratio_samples.append((tnow, dev, ca, cb))
                         if dev > ratio_dev_max:
                             ratio_dev_max = dev
-                            ratio_worst = (ra, rb)
+                            ratio_worst = (ca, cb)
                 # Gang atomicity (multi-node): a leader+worker Instance must roll
                 # as ONE unit. Track how long any Instance sits with its alive pods
                 # SPLIT across revisions (surge/recreate) or annotations (in-place)
