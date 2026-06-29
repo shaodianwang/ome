@@ -49,7 +49,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if controllerutil.ContainsFinalizer(isvc, EndpointFinalizer) && isvc.DeletionTimestamp.IsZero() {
 			controllerutil.RemoveFinalizer(isvc, EndpointFinalizer)
 			if err := r.Update(ctx, isvc); err != nil {
-				return ctrl.Result{}, err
+				return requeueOnConflict(err)
 			}
 		}
 		return ctrl.Result{}, nil
@@ -75,7 +75,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	if err := r.ensureFinalizer(ctx, isvc); err != nil {
-		return ctrl.Result{}, err
+		return requeueOnConflict(err)
 	}
 	if err := r.Publisher.Publish(ctx, isvc, target); err != nil {
 		return ctrl.Result{}, err
@@ -123,7 +123,7 @@ func (r *Reconciler) reconcileUnpublish(ctx context.Context, isvc *v1beta1.Infer
 	}
 	controllerutil.RemoveFinalizer(isvc, EndpointFinalizer)
 	if err := r.Update(ctx, isvc); err != nil {
-		return ctrl.Result{}, err
+		return requeueOnConflict(err)
 	}
 	return ctrl.Result{}, nil
 }
@@ -137,7 +137,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, isvc *v1beta1.Inferenc
 	}
 	controllerutil.RemoveFinalizer(isvc, EndpointFinalizer)
 	if err := r.Update(ctx, isvc); err != nil {
-		return ctrl.Result{}, err
+		return requeueOnConflict(err)
 	}
 	return ctrl.Result{}, nil
 }
@@ -147,6 +147,21 @@ func (r *Reconciler) ensureFinalizer(ctx context.Context, isvc *v1beta1.Inferenc
 		return r.Update(ctx, isvc)
 	}
 	return nil
+}
+
+// requeueOnConflict turns an optimistic-lock conflict on the ISVC into a clean
+// requeue instead of a returned error. The endpoint publisher and the placement
+// controller both update the same source ISVC — the placer writes status, this
+// writes the finalizer — so the finalizer Update can lose a resourceVersion race
+// during the place transition. That is benign and self-corrects on the requeue
+// (the next pass re-reads the fresh object), so it must NOT surface as an
+// error-level "Reconciler error": that is misleading log noise and trips the
+// suite's write-conflict gate. Any other error is returned unchanged.
+func requeueOnConflict(err error) (ctrl.Result, error) {
+	if apierrors.IsConflict(err) {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return ctrl.Result{}, err
 }
 
 // SetupWithManager wires the controller: reconcile ISVCs, but only react to

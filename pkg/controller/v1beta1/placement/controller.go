@@ -157,7 +157,22 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ome.io,resources=workloadclusters,verbs=get;list;watch
 
+// Reconcile maps an apiserver optimistic-lock conflict to a clean requeue. The
+// control plane runs several controllers that write the same source
+// InferenceService — this placer writes status and its finalizer, the endpoint
+// publisher writes its own finalizer — so a write can lose a resourceVersion
+// race. That is benign and self-corrects on the requeue, so it must not surface
+// as an error-level "Reconciler error" (misleading log noise). All other results
+// pass through unchanged.
 func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
+	res, err := r.reconcile(ctx, request)
+	if apierrors.IsConflict(err) {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return res, err
+}
+
+func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
 	isvc := &v1beta1.InferenceService{}
 	if err := r.Get(ctx, request.NamespacedName, isvc); err != nil {
 		if apierrors.IsNotFound(err) {
