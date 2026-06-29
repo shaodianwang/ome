@@ -498,6 +498,20 @@ func (r *Reconciler) placeOn(ctx context.Context, cl client.Client, src *v1beta1
 	desired := DeriveISVC(src, r.ControlPlaneID)
 	target := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, cl, target, func() error {
+		// Origin-guard the apply, mirroring the origin guard on the delete path
+		// (deleteDerivedOn): a target that already exists (CreateOrUpdate's Get
+		// populated it, so ResourceVersion is set) and is NOT a derived of THIS
+		// source must not be overwritten. Without this, a same-named ISVC a user
+		// created directly on the workload cluster — or another control plane's
+		// object — would have its Spec replaced and origin markers stamped onto
+		// it (cross-tenant data loss). Returning an error makes CreateOrUpdate a
+		// no-op write and surfaces per-cluster like any other fan-out failure. A
+		// first-time create (empty ResourceVersion) and a re-apply of our own
+		// derived (isOurDerived true) both proceed.
+		if target.ResourceVersion != "" && !isOurDerived(target, src) {
+			return fmt.Errorf("refusing to overwrite non-derived InferenceService %s/%s on candidate cluster: not a placement derived of control plane %q",
+				target.Namespace, target.Name, r.ControlPlaneID)
+		}
 		target.Labels = mergeOwnedKeys(target.Labels, desired.Labels)
 		target.Annotations = mergeOwnedKeys(target.Annotations, desired.Annotations)
 		target.Spec = desired.Spec

@@ -753,10 +753,11 @@ func TestReconcile_StickyWinnerTransientGetHoldsPlacement(t *testing.T) {
 // than clobbering worker-added labels/annotations every poll.
 func TestPlaceOn_PreservesWorkerMetadata(t *testing.T) {
 	s := testScheme(t)
-	// Pre-existing derived carrying a worker-added label + annotation.
+	// Pre-existing derived that IS ours (carries the origin marker) plus a
+	// worker-added label + annotation the worker reconciler stamped on it.
 	existing := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
 		Name: "svc", Namespace: "prod",
-		Labels:      map[string]string{"worker.io/managed": "yes"},
+		Labels:      map[string]string{"worker.io/managed": "yes", PlacementOriginLabel: "uid-1"},
 		Annotations: map[string]string{"worker.io/state": "bookkeeping"},
 	}}
 	w := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
@@ -772,6 +773,83 @@ func TestPlaceOn_PreservesWorkerMetadata(t *testing.T) {
 	assert.Equal(t, "yes", got.Labels["worker.io/managed"], "worker label preserved")
 	assert.Equal(t, "bookkeeping", got.Annotations["worker.io/state"], "worker annotation preserved")
 	assert.Equal(t, "uid-1", got.Labels[PlacementOriginLabel], "control-plane origin label set")
+}
+
+// Bug (cross-tenant data loss): placeOn must NOT overwrite a same-named ISVC on
+// the candidate cluster that is NOT a derived of this control plane (a user's
+// own ISVC, or another control plane's object). The apply must abort — leaving
+// the foreign object's Spec untouched and unstamped — mirroring the origin guard
+// already on the delete path.
+func TestPlaceOn_RefusesToClobberForeignISVC(t *testing.T) {
+	s := testScheme(t)
+	// A foreign object: same name/namespace, NO origin markers, a distinct Spec.
+	foreign := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc", Namespace: "prod",
+			Labels:      map[string]string{"owner": "some-user"},
+			Annotations: map[string]string{"note": "hand-rolled"},
+		},
+		Spec: v1beta1.InferenceServiceSpec{
+			Router: &v1beta1.RouterSpec{Runner: &v1beta1.RunnerSpec{Container: corev1.Container{Name: "user-container", Image: "user-img"}}},
+		},
+	}
+	w := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(foreign).Build()
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(w),
+	}}
+	r, _ := newPlacer(s, clusters, srcISVC(""))
+
+	err := r.placeOn(context.Background(), w, srcISVC(""))
+	require.Error(t, err, "placeOn must refuse to clobber a foreign same-named ISVC")
+
+	got := &v1beta1.InferenceService{}
+	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
+	// Foreign Spec is unchanged: still the user's router, no engine stamped in.
+	assert.NotNil(t, got.Spec.Router, "foreign Spec preserved (router intact)")
+	assert.Nil(t, got.Spec.Engine, "foreign Spec preserved (no engine grafted on)")
+	// No origin markers stamped onto the foreign object.
+	assert.Empty(t, got.Labels[PlacementOriginLabel], "origin label not stamped on foreign object")
+	assert.Empty(t, got.Annotations[PlacementOriginUIDAnnotation], "origin annotation not stamped on foreign object")
+	assert.Equal(t, "some-user", got.Labels["owner"], "foreign label untouched")
+}
+
+// placeOn must update OUR OWN existing derived (origin marker present) normally,
+// without erroring — the guard distinguishes our derived from a foreign object.
+func TestPlaceOn_UpdatesOwnDerived(t *testing.T) {
+	s := testScheme(t)
+	existing := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
+		Name: "svc", Namespace: "prod",
+		Labels: map[string]string{PlacementOriginLabel: "uid-1"},
+	}}
+	w := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(w),
+	}}
+	r, _ := newPlacer(s, clusters, srcISVC(""))
+
+	require.NoError(t, r.placeOn(context.Background(), w, srcISVC("")), "re-apply of our own derived must succeed")
+
+	got := &v1beta1.InferenceService{}
+	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
+	assert.NotNil(t, got.Spec.Engine, "desired Spec applied to our derived")
+	assert.Equal(t, "uid-1", got.Labels[PlacementOriginLabel], "origin label retained")
+}
+
+// placeOn must create the derived when no object exists on the candidate.
+func TestPlaceOn_CreatesWhenAbsent(t *testing.T) {
+	s := testScheme(t)
+	w := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(w),
+	}}
+	r, _ := newPlacer(s, clusters, srcISVC(""))
+
+	require.NoError(t, r.placeOn(context.Background(), w, srcISVC("")), "first-time create must succeed")
+
+	got := &v1beta1.InferenceService{}
+	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
+	assert.NotNil(t, got.Spec.Engine, "derived created with desired Spec")
+	assert.Equal(t, "uid-1", got.Labels[PlacementOriginLabel], "origin label stamped on created derived")
 }
 
 // Bug: reconcileDelete must NOT remove the finalizer while a connected cluster
