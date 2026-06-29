@@ -7,13 +7,13 @@ import (
 	"github.com/ome-projects/ome/pkg/xet"
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
-	"github.com/sgl-project/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/logging"
 
 	"github.com/stretchr/testify/assert"
 
 	"github.com/ome-projects/ome/pkg/utils/storage"
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 func TestHFToOCIReplicator_Replicate_Success(t *testing.T) {

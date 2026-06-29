@@ -6,7 +6,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/xet"
 
-	"github.com/sgl-project/ome/pkg/afero"
+	"sigs.k8s.io/ome/pkg/afero"
 
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 )

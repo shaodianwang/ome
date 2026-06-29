@@ -6,7 +6,7 @@ import (
 	"github.com/ome-projects/ome/pkg/xet"
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
-	"github.com/sgl-project/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/logging"
 )
 
 type HFToPVCReplicator struct {

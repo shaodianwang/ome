@@ -7,11 +7,11 @@ import (
 	"time"
 
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
-	"github.com/sgl-project/ome/pkg/logging"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/fx"
+	"sigs.k8s.io/ome/pkg/logging"
 )
 
 func TestHubParams(t *testing.T) {

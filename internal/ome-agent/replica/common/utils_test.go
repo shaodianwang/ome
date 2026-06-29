@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/ome-projects/ome/pkg/xet"
-	"github.com/sgl-project/ome/pkg/afero"
+	"sigs.k8s.io/ome/pkg/afero"
 )
 
 func TestConvertToReplicationObjectsFromObjectSummary(t *testing.T) {

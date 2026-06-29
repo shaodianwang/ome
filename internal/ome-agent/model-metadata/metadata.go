@@ -40,7 +40,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
 	"github.com/ome-projects/ome/pkg/modelparser"
-	"github.com/sgl-project/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/logging"
 )
 
 // MetadataExtractor parses a PVC-mounted model and writes the result to a

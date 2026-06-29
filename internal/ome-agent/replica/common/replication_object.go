@@ -4,8 +4,8 @@ import (
 	"github.com/ome-projects/ome/pkg/utils/storage"
 	"github.com/ome-projects/ome/pkg/xet"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
-	"github.com/sgl-project/ome/pkg/afero"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"sigs.k8s.io/ome/pkg/afero"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 type ReplicationInput struct {

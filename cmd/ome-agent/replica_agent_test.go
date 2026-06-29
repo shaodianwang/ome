@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
-	"github.com/sgl-project/ome/pkg/afero"
+	"sigs.k8s.io/ome/pkg/afero"
 )
 
 func TestOCIOSDataStoreListProvider(t *testing.T) {

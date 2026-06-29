@@ -22,7 +22,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
-	"github.com/sgl-project/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/logging"
 )
 
 func newTestScheme(t *testing.T) *runtime.Scheme {

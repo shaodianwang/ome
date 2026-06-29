@@ -9,8 +9,8 @@ import (
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 	"github.com/ome-projects/ome/pkg/utils/storage"
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
 	"github.com/stretchr/testify/assert"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 // TestOCIToPVCReplicator_Replicate_Success tests successful replication

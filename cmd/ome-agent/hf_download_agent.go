@@ -9,8 +9,8 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/ome-projects/ome/pkg/xet"
-	"github.com/sgl-project/ome/pkg/afero"
-	"github.com/sgl-project/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/afero"
+	"sigs.k8s.io/ome/pkg/logging"
 )
 
 // hfDownloadAgentParams represents the parameters for dependency injection

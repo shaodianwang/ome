@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ome-projects/ome/pkg/utils/storage"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"sigs.k8s.io/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 func TestNewReplicator(t *testing.T) {

@@ -7,10 +7,10 @@ import (
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
-	"github.com/sgl-project/ome/pkg/afero"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/ome/pkg/afero"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 func TestPVCToPVCReplicator_Replicate_Success(t *testing.T) {

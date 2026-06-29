@@ -6,7 +6,7 @@ import (
 	"go.uber.org/fx"
 
 	modelmetadata "github.com/ome-projects/ome/internal/ome-agent/model-metadata"
-	"github.com/sgl-project/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/logging"
 )
 
 // ModelMetadataAgent implements the AgentModule interface for model metadata extraction

@@ -8,7 +8,7 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/sgl-project/ome/pkg/afero"
+	"sigs.k8s.io/ome/pkg/afero"
 )
 
 func TestObjectSummaryReplicationObject(t *testing.T) {

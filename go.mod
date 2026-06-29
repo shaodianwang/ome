@@ -18,7 +18,6 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.66.1
-	github.com/sgl-project/ome v0.1.6-0.20260510082155-6a8fea26adf4
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.11.1
@@ -116,6 +115,9 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	knative.dev/serving v0.39.3 // indirect
 	sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 // indirect
+	sigs.k8s.io/ome v1.0.0
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.6.0 // indirect
 )
+
+replace sigs.k8s.io/ome v1.0.0 => github.com/ome-projects/ome v1.0.0

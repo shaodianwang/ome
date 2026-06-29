@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
-	"github.com/sgl-project/ome/pkg/afero"
-	"github.com/sgl-project/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/afero"
+	"sigs.k8s.io/ome/pkg/logging"
 )
 
 type PVCToPVCReplicator struct {

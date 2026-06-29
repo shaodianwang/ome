@@ -10,7 +10,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/sgl-project/ome/pkg/configutils"
+	"sigs.k8s.io/ome/pkg/configutils"
 )
 
 func configProvider(cli *cobra.Command, module AgentModule) fx.Option {

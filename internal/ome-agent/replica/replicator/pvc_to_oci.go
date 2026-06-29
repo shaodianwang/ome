@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"sigs.k8s.io/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 type PVCToOCIReplicator struct {

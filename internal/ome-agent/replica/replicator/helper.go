@@ -13,8 +13,8 @@ import (
 	"github.com/ome-projects/ome/pkg/xet"
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"sigs.k8s.io/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 const (

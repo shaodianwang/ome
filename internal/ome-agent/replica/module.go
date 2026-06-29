@@ -8,9 +8,9 @@ import (
 	"github.com/spf13/viper"
 	"go.uber.org/fx"
 
-	"github.com/sgl-project/ome/pkg/afero"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"sigs.k8s.io/ome/pkg/afero"
+	"sigs.k8s.io/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 type replicaParams struct {

@@ -8,8 +8,8 @@ import (
 
 	"github.com/ome-projects/ome/internal/ome-agent/replica/common"
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"sigs.k8s.io/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 func TestHFToPVCReplicator_Replicate_Success(t *testing.T) {

@@ -16,7 +16,7 @@ import (
 	modelmetadata "github.com/ome-projects/ome/internal/ome-agent/model-metadata"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/shared"
-	"github.com/sgl-project/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/logging"
 )
 
 // Each It uses a distinct model name so the deterministic per-PVC

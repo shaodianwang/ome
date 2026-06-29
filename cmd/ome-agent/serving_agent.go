@@ -5,9 +5,9 @@ import (
 	"go.uber.org/fx"
 
 	servingAgent "github.com/ome-projects/ome/internal/ome-agent/serving-agent"
-	"github.com/sgl-project/ome/pkg/afero"
-	"github.com/sgl-project/ome/pkg/logging"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"sigs.k8s.io/ome/pkg/afero"
+	"sigs.k8s.io/ome/pkg/logging"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 // ServingAgent implements the AgentModule interface for serving sidecar agent

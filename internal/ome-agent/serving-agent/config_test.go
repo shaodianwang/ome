@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	testingPkg "github.com/ome-projects/ome/pkg/utils/testing"
-	"github.com/sgl-project/ome/pkg/ociobjectstore"
+	"sigs.k8s.io/ome/pkg/ociobjectstore"
 )
 
 func TestNewServingSidecarConfig(t *testing.T) {
