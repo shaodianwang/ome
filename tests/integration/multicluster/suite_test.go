@@ -12,6 +12,7 @@ package multicluster
 
 import (
 	"context"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -22,11 +23,24 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	ometesting "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/framework"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
+
+// realKueueEnvVar gates the full member-manager (ISVC + InferenceReplica +
+// real Kueue) path. When set to "1" the members run real managers that drive
+// derived-ISVC status via the real reconcile→Kueue gate chain, and the sim
+// specs (which fake admission via admitDerivedOn) are skipped. When unset the
+// suite behaves EXACTLY as before: bare members, sim path only.
+const realKueueEnvVar = "OME_MC_REALKUEUE"
+
+// realKueueEnabled reports whether the real-Kueue member-manager path is on.
+func realKueueEnabled() bool {
+	return os.Getenv(realKueueEnvVar) == "1"
+}
 
 // Poll cadences for this suite. envtest apiservers answer in ms, but the
 // placement race is poll-driven (a status refresh every requeue interval) and
@@ -119,13 +133,37 @@ func TestMultiCluster(t *testing.T) {
 	util.RunSuite(t, "Multi-Cluster Integration Suite")
 }
 
-// newFramework builds a framework for one envtest instance. Every instance
-// installs the OME CRDs (the framework default) so a derived InferenceService
-// and a WorkloadCluster can be created on it. No optional-dep CRDs and no
-// webhooks are needed: the placer is the only writer, and the apiserver accepts
-// the raw derived spec without the OME admission chain.
-func newFramework() *framework.Framework {
-	return &framework.Framework{}
+// newFramework builds a framework for one envtest instance. By default every
+// instance installs only the OME CRDs (the framework default) so a derived
+// InferenceService and a WorkloadCluster can be created on it; no optional-dep
+// CRDs and no webhooks are needed because in the sim path the placer is the only
+// writer and the apiserver accepts the raw derived spec without admission.
+//
+// In the real-Kueue path the members ALSO need the Kueue CRD bundle (so the
+// scheme + apiserver know the Kueue types) and the Kueue pod webhook installed
+// (so StartKueue can gate queue-labeled pods). withKueue=true wires both.
+func newFramework(withKueue bool) *framework.Framework {
+	f := &framework.Framework{}
+	if withKueue {
+		// The member runs the full ISVC + InferenceReplica controllers, which
+		// unconditionally Owns(ScaledObject) (KEDA) and the ISVC path reconciles
+		// a PodMonitor (PrometheusOperator). Without those schemes + CRDs the
+		// controllers' caches fail to start the Owns informers ("no kind is
+		// registered for v1alpha1.ScaledObject") and reconciles stall. Mirrors
+		// the singlecluster ISVC suite + kindfix.OMEScheme/OMECRDPaths.
+		f.OptionalCRDs = []framework.OptionalCRDBundle{
+			framework.Kueue,
+			framework.KEDA,
+			framework.PrometheusOperator,
+		}
+		whDir, err := framework.KueueWebhookDir()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "resolve Kueue webhook dir")
+		f.ExtraWebhookPaths = []string{whDir}
+		// The pod webhook gates Pending pods that never reach a kubelet, so a
+		// stray gated pod can linger; do not treat that as a write conflict.
+		f.SkipWriteConflictCheck = true
+	}
+	return f
 }
 
 // createCluster stands up one envtest instance: framework.Init (envtest apiserver
@@ -134,8 +172,10 @@ func newFramework() *framework.Framework {
 // is started separately by startControlPlaneManager once every cluster's Init has
 // completed, so a manager cache informer reading the scheme never races a sibling
 // cluster's Init writing it.
-func createCluster() cluster {
-	c := cluster{fwk: newFramework()}
+//
+// withKueue installs the member-side Kueue CRDs + webhook (real-Kueue path only).
+func createCluster(withKueue bool) cluster {
+	c := cluster{fwk: newFramework(withKueue)}
 
 	schemeMu.Lock()
 	cfg, err := c.fwk.Init()
@@ -181,36 +221,90 @@ func startControlPlaneManager(c *cluster) {
 	c.clusters = cm
 }
 
+// startMemberManager wires + starts a member manager for the real-Kueue path:
+// the InferenceService + InferenceReplica reconcilers (the OMENative path that
+// turns a derived ISVC into queue-labeled pods) plus the full Kueue admission
+// stack (StartKueue gates those pods and ungates them once quota admits). This
+// is the real replacement for the sim-path admitDerivedOn fake: the member now
+// flips InstanceStatus.Admitted itself, driven by real Kueue gate removal.
+//
+// Like startControlPlaneManager it must run only after every cluster's
+// createCluster has returned (scheme stable). The reconcilers read
+// inferenceservice-config at reconcile time, so it is seeded here first.
+func startMemberManager(c *cluster) {
+	gomega.Expect(util.SeedDefaultConfigMaps(c.ctx, c.client)).To(gomega.Succeed(), "seed member inferenceservice-config")
+	err := c.fwk.StartManager(c.ctx, c.cfg, func(setupCtx context.Context, mgr ctrl.Manager) error {
+		// The OMENative pod field index is a hard dependency of the IR
+		// status-aggregation + ISVC coordination read paths (they List pods via
+		// MatchingFields against the cached client). cmd/manager registers it
+		// globally; the member manager must do the same or those reconciles fail
+		// with "Index ... does not exist".
+		if err := query.RegisterOMENativePodIndex(setupCtx, mgr.GetFieldIndexer()); err != nil {
+			return err
+		}
+		if err := components.SetupInferenceService(setupCtx, mgr); err != nil {
+			return err
+		}
+		if err := components.SetupInferenceReplica(setupCtx, mgr); err != nil {
+			return err
+		}
+		return framework.StartKueue(setupCtx, mgr)
+	})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "member StartManager")
+}
+
 var _ = ginkgo.BeforeSuite(func() {
 	// Install the shared Eventually timeout/poll defaults so the bare-default
 	// helpers (CreateAndWaitReady) inherit the suite's cross-apiserver window.
 	ometesting.SetDefaultEventually()
+	// In the real-Kueue path the members additionally install the Kueue CRDs +
+	// pod webhook so their managers can gate queue-labeled pods. The control
+	// plane never runs Kueue.
+	memberWithKueue := realKueueEnabled()
 	ginkgo.By("standing up the control-plane and member envtest clusters", func() {
 		var wg sync.WaitGroup
 		wg.Add(3)
 		go func() {
 			defer ginkgo.GinkgoRecover()
 			defer wg.Done()
-			controlCluster = createCluster()
+			controlCluster = createCluster(false)
+			if memberWithKueue {
+				// The write-conflict log observer is process-global, so the
+				// control-plane's Teardown gate also sees the members' Kueue
+				// controllers' benign transient LocalQueue/Workload 409 retries.
+				// Those are expected (Kueue retries on conflict), so disable the
+				// gate suite-wide in the real-Kueue path.
+				controlCluster.fwk.SkipWriteConflictCheck = true
+			}
 		}()
 		go func() {
 			defer ginkgo.GinkgoRecover()
 			defer wg.Done()
-			member1Cluster = createCluster()
+			member1Cluster = createCluster(memberWithKueue)
 		}()
 		go func() {
 			defer ginkgo.GinkgoRecover()
 			defer wg.Done()
-			member2Cluster = createCluster()
+			member2Cluster = createCluster(memberWithKueue)
 		}()
 		wg.Wait()
 	})
 	// Every cluster's scheme registration (framework.Init) is now complete and the
-	// scheme is stable. Only now start the control-plane manager, so its cache
-	// informers read the scheme without racing a sibling cluster's Init write.
+	// scheme is stable. Only now start the managers, so their cache informers read
+	// the scheme without racing a sibling cluster's Init write.
 	ginkgo.By("starting the control-plane manager", func() {
 		startControlPlaneManager(&controlCluster)
 	})
+	if memberWithKueue {
+		// Real-Kueue path: bring up full member managers (ISVC + IR + Kueue) so
+		// the members drive derived-ISVC admission for real. The sim specs are
+		// skipped in this mode (see realKueueEnabled guards), so there is no
+		// double-writer of derived status.
+		ginkgo.By("starting the member managers (real-Kueue path)", func() {
+			startMemberManager(&member1Cluster)
+			startMemberManager(&member2Cluster)
+		})
+	}
 })
 
 var _ = ginkgo.AfterSuite(func() {

@@ -73,7 +73,7 @@ func (f *Framework) StartManager(ctx context.Context, cfg *rest.Config,
 		LeaderElection: false,
 		Controller:     config.Controller{SkipNameValidation: ptr.To(true)},
 	}
-	if f.WebhookPath != "" {
+	if f.webhooksEnabled() {
 		whOpts := &f.testEnv.WebhookInstallOptions
 		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{
 			Host:    whOpts.LocalServingHost,
@@ -111,7 +111,7 @@ func (f *Framework) StartManager(ctx context.Context, cfg *rest.Config,
 		return fmt.Errorf("framework.StartManager: cache failed to sync")
 	}
 
-	if f.WebhookPath != "" {
+	if f.webhooksEnabled() {
 		if err := waitForWebhookReady(&f.testEnv.WebhookInstallOptions); err != nil {
 			cancel()
 			<-done

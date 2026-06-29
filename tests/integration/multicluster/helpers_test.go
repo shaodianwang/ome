@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -183,6 +184,24 @@ func placementStatusOf(namespace, name string) *v1beta1.PlacementStatus {
 		return nil
 	}
 	return isvc.Status.Placement
+}
+
+// skipIfRealKueue skips a sim-path spec when the real-Kueue member-manager path
+// is enabled. The two paths are mutually exclusive: in the real-Kueue path the
+// members run real managers that write derived status, so the sim-path
+// admitDerivedOn fake (a second writer of the same status) must not run.
+func skipIfRealKueue() {
+	if realKueueEnabled() {
+		ginkgo.Skip(realKueueEnvVar + "=1: real-Kueue member managers own derived status; skipping sim-path spec")
+	}
+}
+
+// skipUnlessRealKueue skips a real-Kueue spec when the gate is off (the members
+// are bare in that mode, so there is no real reconcile→Kueue chain to exercise).
+func skipUnlessRealKueue() {
+	if !realKueueEnabled() {
+		ginkgo.Skip(realKueueEnvVar + " not set: member managers not running; skipping real-Kueue spec")
+	}
 }
 
 // nameCounter backs uniqueName so every spec gets a distinct, DNS-safe resource

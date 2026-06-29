@@ -66,6 +66,16 @@ type Framework struct {
 	// empty since webhooks add latency and require the cert dance.
 	WebhookPath string
 
+	// ExtraWebhookPaths optionally points at ADDITIONAL webhook YAML
+	// directories given as ABSOLUTE paths (unlike WebhookPath, which is
+	// ProjectRoot-relative). Used for dependency-supplied webhook
+	// manifests that live outside the repo — notably Kueue's pod webhook
+	// in the read-only module cache (see framework/kueue.go: StartKueue
+	// needs the Kueue pod webhook installed so it can gate pods). When
+	// either WebhookPath or ExtraWebhookPaths is non-empty, StartManager
+	// wires a webhook server.
+	ExtraWebhookPaths []string
+
 	// APIServerFeatureGates / APIServerRuntimeConfig are passed through
 	// to envtest's apiserver --feature-gates / --runtime-config flags.
 	// Use for tests that depend on alpha APIs.
@@ -157,8 +167,13 @@ func (f *Framework) Init() (*rest.Config, error) {
 			MaxTime: defaultCRDInstallTimeout,
 		},
 	}
-	if f.WebhookPath != "" {
-		f.testEnv.WebhookInstallOptions.Paths = []string{filepath.Join(f.ProjectRoot, f.WebhookPath)}
+	if f.webhooksEnabled() {
+		var paths []string
+		if f.WebhookPath != "" {
+			paths = append(paths, filepath.Join(f.ProjectRoot, f.WebhookPath))
+		}
+		paths = append(paths, f.ExtraWebhookPaths...)
+		f.testEnv.WebhookInstallOptions.Paths = paths
 	}
 	if len(f.APIServerFeatureGates) > 0 {
 		f.testEnv.ControlPlane.GetAPIServer().Configure().Append("feature-gates", joinCommas(f.APIServerFeatureGates))
@@ -255,6 +270,14 @@ func (f *Framework) Teardown() error {
 		VerifyNoWriteConflicts(f.observedLogs)
 	}
 	return stopErr
+}
+
+// webhooksEnabled reports whether any webhook manifests are configured —
+// either OME's (WebhookPath) or a dependency's (ExtraWebhookPaths). When
+// true, Init installs the manifests on envtest and StartManager wires a
+// webhook server + readiness poll.
+func (f *Framework) webhooksEnabled() bool {
+	return f.WebhookPath != "" || len(f.ExtraWebhookPaths) > 0
 }
 
 // findProjectRoot walks up from the file that called the public

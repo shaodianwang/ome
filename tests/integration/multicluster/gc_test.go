@@ -25,6 +25,7 @@ var _ = ginkgo.Describe("Multi-cluster placement GC", func() {
 	)
 
 	ginkgo.BeforeEach(func() {
+		skipIfRealKueue()
 		secretNS = uniqueName("gc-secrets")
 		isvcNS = uniqueName("gc-workload")
 		createNamespace(controlCluster, secretNS)

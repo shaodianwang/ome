@@ -6,6 +6,8 @@ import (
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	kueuealpha "sigs.k8s.io/kueue/apis/kueue/v1alpha1"
+	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta1"
 )
 
 // Pre-defined OptionalCRDBundle constants for OME's optional dependencies.
@@ -82,5 +84,27 @@ var PrometheusOperator = OptionalCRDBundle{
 	CRDDir: "prometheus-operator",
 	Schemes: []func(*apiruntime.Scheme) error{
 		monitoringv1.AddToScheme,
+	},
+}
+
+// Kueue bundle: kueue.x-k8s.io/v1beta1.{ResourceFlavor,ClusterQueue,
+// LocalQueue,Workload,Cohort,AdmissionCheck,…} plus the v1alpha1 types
+// (Topology, etc.). Required for the OEP-0018 real-Kueue placement
+// validation harness, which runs Kueue's full admission stack
+// (StartKueue) in-process against envtest and gates→admits→ungates
+// queue-labeled pods with no kubelet.
+//
+// The CRD YAMLs in dep-crds/kueue/ are module-sourced from
+// sigs.k8s.io/kueue's config/components/crd/bases (vendored by
+// `make kueue-crds`, gitignored). The Kueue pod webhook — needed to
+// actually gate pods — is NOT installed by this bundle; StartKueue's
+// callers wire the webhook server, and the webhook manifests live in
+// the module's config/components/webhook (see framework/kueue.go).
+var Kueue = OptionalCRDBundle{
+	Name:   "kueue",
+	CRDDir: "kueue",
+	Schemes: []func(*apiruntime.Scheme) error{
+		kueue.AddToScheme,
+		kueuealpha.AddToScheme,
 	},
 }

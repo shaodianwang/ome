@@ -574,7 +574,7 @@ coverage: ## Show coverage summary and enforce threshold
 		exit 1; \
 	fi
 .PHONY: dep-crds
-dep-crds: keda-crds gateway-api-crds scheduler-plugins-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
+dep-crds: keda-crds gateway-api-crds scheduler-plugins-crds kueue-crds ## 🧪 Vendor optional-CRD YAMLs from go.mod modules
 
 DEP_CRDS_DIR := tests/integration/dep-crds
 
@@ -614,6 +614,14 @@ scheduler-plugins-crds: ## Vendor sigs.k8s.io/scheduler-plugins CRDs (scheduling
 	if [ -z "$$SP_DIR" ]; then echo "sigs.k8s.io/scheduler-plugins not in go.mod; skipping scheduler-plugins-crds" >&2; exit 0; fi ; \
 	cp -f "$$SP_DIR/config/crd/bases/scheduling.x-k8s.io_podgroups.yaml" $(DEP_CRDS_DIR)/scheduler-plugins/ ; \
 	echo "✅ Vendored scheduler-plugins CRDs to $(DEP_CRDS_DIR)/scheduler-plugins/"
+
+.PHONY: kueue-crds
+kueue-crds: ## Vendor sigs.k8s.io/kueue CRDs (kueue.x-k8s.io — ResourceFlavor, ClusterQueue, LocalQueue, Workload, … for the OEP-0018 real-Kueue envtest harness)
+	@mkdir -p $(DEP_CRDS_DIR)/kueue
+	@KUEUE_DIR=$$(go list -m -mod=readonly -f "{{.Dir}}" sigs.k8s.io/kueue 2>/dev/null) ; \
+	if [ -z "$$KUEUE_DIR" ]; then echo "sigs.k8s.io/kueue not in go.mod; skipping kueue-crds" >&2; exit 0; fi ; \
+	cp -f "$$KUEUE_DIR/config/components/crd/bases/"*.yaml $(DEP_CRDS_DIR)/kueue/ ; \
+	echo "✅ Vendored Kueue CRDs to $(DEP_CRDS_DIR)/kueue/"
 
 .PHONY: integration-test
 integration-test: fmt vet manifests envtest dep-crds ## 🧪 Run integration tests
@@ -741,6 +749,19 @@ test-perf: ## 🏎️  Perf CI step (separate from integration-test): harness un
 	@$(MAKE) test-perf-multicluster \
 		PERF_MC_GENERATOR=tests/perf/multicluster/configs/ci/generator.yaml \
 		PERF_MC_RANGESPEC=tests/perf/multicluster/configs/ci/rangespec.yaml
+
+.PHONY: mc-realkueue
+mc-realkueue: envtest dep-crds ## 🧪 Run the OEP-0018 real-Kueue multi-cluster validation suite (opt-in, envtest)
+	@echo "🧪 Running real-Kueue multi-cluster validation (OME_MC_REALKUEUE=1)..."
+	@# Heavy: 1 control-plane + 2 member envtest apiservers in one process, each
+	@# member running a full OME manager + Kueue's admission stack (core controllers
+	@# + scheduler + pod webhook). Gated behind OME_MC_REALKUEUE so the default
+	@# `make integration-test` run leaves members bare (the sim path in
+	@# placement_test.go / gc_test.go). No kubelet: admission = Kueue gate removal.
+	@# CI runs this soft-fail, like test-kind. Narrow with GINKGO_FOCUS='S1|S3'.
+	@OME_MC_REALKUEUE=1 $(TEST_ENV) \
+		go test ./tests/integration/multicluster/... -run TestMultiCluster -timeout 20m \
+		$(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') $(if $(GINKGO_VERBOSE),-v -ginkgo.v)
 
 .PHONY: test-kind
 test-kind: xet-build dep-crds ## 🧪 Run KIND-backed integration tests (real kubelet — needs docker + kind locally)

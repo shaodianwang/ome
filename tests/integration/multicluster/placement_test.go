@@ -38,6 +38,7 @@ var _ = ginkgo.Describe("Multi-cluster placement fan-out", func() {
 	requirement := func() string { return acceleratorLabel + "=" + acceleratorValue }
 
 	ginkgo.BeforeEach(func() {
+		skipIfRealKueue()
 		// Namespace for the kubeconfig Secrets + WorkloadClusters live on the
 		// control cluster; the workload namespace must exist on the members too,
 		// because the placer creates the derived ISVC there.

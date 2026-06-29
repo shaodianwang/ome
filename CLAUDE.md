@@ -116,6 +116,15 @@ KIND specs use generous timeouts (`kindShortTimeout=30s`, `kindMediumTimeout=2m`
 
 CI runs `make test-kind` as a soft-fail step (mks-cpu agents don't expose a Docker daemon). It's a developer/maintainer signal until the queue gets Docker support; until then, run it locally before merging changes that touch the OMENative reconciler or coordination layer.
 
+**Multi-cluster real-Kueue suite** (`tests/integration/multicluster/`, gated by `OME_MC_REALKUEUE=1`) — validates OEP-0018 single-active placement against a *real* Kueue admission stack. The default `make integration-test` runs this suite's **sim** path (`admitDerivedOn`); with the env gate it stands up 1 control-plane + 2 member envtest apiservers in one process, each member running a full OME manager + Kueue (core controllers + scheduler + pod webhook), and drives fan-out → real quota-gated admission → race → loser-sweep for real (no kubelet — admission = Kueue scheduling-gate removal). Run it via:
+
+```sh
+make mc-realkueue                          # full suite, opt-in
+GINKGO_FOCUS='S1|S3' make mc-realkueue     # narrow to specific scenarios
+```
+
+Opt-in / soft-fail like `test-kind` (it's heavy: 3 apiservers + 3 OME managers + 2 Kueue managers in-process). Loser-sweep assertions check the placer's contract — derived **deleted or Terminating** — not full reaping, because the member's finalizer teardown (IR + Kueue-gated pods) is eventually-consistent and lags under load.
+
 ### Lint & Format
 ```bash
 make fmt                  # gofmt + goimports
