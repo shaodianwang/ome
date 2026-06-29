@@ -2190,12 +2190,11 @@
         "type",
         "step",
         "startedAt",
-        "lastProgressAt",
-        "deadline"
+        "lastProgressAt"
       ],
       "properties": {
         "deadline": {
-          "description": "Deadline is the hard timeout for the current Step.",
+          "description": "Deadline is the hard timeout for the current Step. Zero (null) means the step clock is parked (e.g. while the instance's pods are admission-gated); optional + nullable so the parked null is accepted by the apiserver.",
           "$ref": "#/definitions/v1.Time"
         },
         "fromNode": {

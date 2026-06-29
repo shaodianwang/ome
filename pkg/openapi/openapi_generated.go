@@ -3959,7 +3959,7 @@ func schema_pkg_apis_ome_v1beta1_InstanceOperation(ref common.ReferenceCallback)
 					},
 					"deadline": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Deadline is the hard timeout for the current Step.",
+							Description: "Deadline is the hard timeout for the current Step. Zero (null) means the step clock is parked (e.g. while the instance's pods are admission-gated); optional + nullable so the parked null is accepted by the apiserver.",
 							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
 						},
 					},
@@ -4026,7 +4026,7 @@ func schema_pkg_apis_ome_v1beta1_InstanceOperation(ref common.ReferenceCallback)
 						},
 					},
 				},
-				Required: []string{"id", "type", "step", "startedAt", "lastProgressAt", "deadline"},
+				Required: []string{"id", "type", "step", "startedAt", "lastProgressAt"},
 			},
 		},
 		Dependencies: []string{

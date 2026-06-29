@@ -255,7 +255,11 @@ type InstanceOperation struct {
 	// LastProgressAt is when the operation last advanced. Used for stall detection.
 	LastProgressAt metav1.Time `json:"lastProgressAt"`
 
-	// Deadline is the hard timeout for the current Step.
+	// Deadline is the hard timeout for the current Step. Zero (null) means the
+	// step clock is parked (e.g. while the instance's pods are admission-gated);
+	// optional + nullable so the parked null is accepted by the apiserver.
+	// +optional
+	// +nullable
 	Deadline metav1.Time `json:"deadline"`
 
 	// RetryCount is the per-step escalation counter.

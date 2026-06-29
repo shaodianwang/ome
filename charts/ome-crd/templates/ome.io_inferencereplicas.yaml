@@ -3761,6 +3761,7 @@ spec:
                         properties:
                           deadline:
                             format: date-time
+                            nullable: true
                             type: string
                           fromNode:
                             type: string
@@ -3800,7 +3801,6 @@ spec:
                               - Delete
                             type: string
                         required:
-                          - deadline
                           - id
                           - lastProgressAt
                           - startedAt
