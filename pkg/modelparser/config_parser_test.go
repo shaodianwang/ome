@@ -17,7 +17,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/client/clientset/versioned"
-	"github.com/ome-projects/ome/pkg/modelconfig"
+	"sigs.k8s.io/ome/pkg/modelconfig"
 )
 
 // mockHuggingFaceModel implements the modelconfig.HuggingFaceModel interface for testing
@@ -531,7 +531,7 @@ func TestParseModelConfigFromFiles(t *testing.T) {
 		loadModelConfig: modelconfig.LoadModelConfig,
 	}
 
-	modelDir := filepath.Join("..", "modelconfig", "testdata", "tiny-random-PhiModel")
+	modelDir := filepath.Join("testdata", "tiny-random-PhiModel")
 	files := []ModelConfigFileInput{
 		{Path: DefaultConfigFileName, Data: mustReadTestFile(t, filepath.Join(modelDir, DefaultConfigFileName))},
 		{Path: "model-1-of-2.safetensors", Data: mustReadSafetensorsHeader(t, filepath.Join(modelDir, "model-1-of-2.safetensors"))},

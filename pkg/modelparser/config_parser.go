@@ -18,7 +18,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/client/clientset/versioned"
-	"github.com/ome-projects/ome/pkg/modelconfig"
+	"sigs.k8s.io/ome/pkg/modelconfig"
 )
 
 const (

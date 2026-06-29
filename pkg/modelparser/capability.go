@@ -4,7 +4,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/modelconfig"
+	"sigs.k8s.io/ome/pkg/modelconfig"
 )
 
 // capabilityToOME maps modelconfig's package-internal Capability
