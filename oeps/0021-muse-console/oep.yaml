@@ -1,0 +1,27 @@
+title: "MUSE: a management plane and console for OME"
+oep-number: "0021"
+authors:
+  - "@simo-lin"
+status: provisional
+creation-date: 2026-06-29
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# MUSE is a read+write layer on top of the multi-cluster control plane OME
+# already runs; it does not introduce a new placement or serving path.
+see-also:
+  - "/oeps/0018-multi-cluster-placement"  # the control plane MUSE reuses: WorkloadCluster registry + per-cluster clients + placement fan-out
+  - "/oeps/0018.2-multi-cluster-performance" # the watch-funnel / caching transport the read plane rides on
+  - "/oeps/0019-control-plane-split"      # precedent for running a named subset of the control plane as its own process
+  - "/oeps/0009-ome-cluster-cache-integration" # model distribution / weight movement context (convert + Meta->GCP transfer)
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
