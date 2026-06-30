@@ -9,12 +9,12 @@
 //!   [`Informer`]s. One generic impl covers every kind — including built-ins
 //!   like `Node` — plus typed per-kind accessors for the OME kinds.
 //!
-//! Large-CRD note: types generated from CRDs that inline the pod-template schema
-//! (`InferenceService`, `ServingRuntime`) are huge, and the reflector
-//! deserializes them on its task's thread. Give consumers a generous stack — a
-//! tokio runtime built with a large `thread_stack_size`, or `RUST_MIN_STACK` for
-//! a current-thread runtime — or the watch loop can overflow the default 2 MiB
-//! stack. The integration tests set `RUST_MIN_STACK` (see the Makefile).
+//! Codegen note: the generated OME types keep their inlined pod-template fields
+//! opaque (`serde_json::Value`; see ome-client-rs's `hack/slim_crd.py`), so they
+//! stay small and deserialize cheaply. If you regenerate WITHOUT that slimming,
+//! the inlined PodSpec/Container trees are enormous and can overflow the
+//! reflector task's default 2 MiB stack — give consumers a large tokio
+//! `thread_stack_size` then.
 //!
 //! Gated behind the `runtime` feature.
 
