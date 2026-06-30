@@ -1,0 +1,35 @@
+# MUSE — the management plane + console backend for OME (OEP-0021).
+# A Rust cargo workspace co-located in the OME repo (precedent: pkg/xet). The
+# generated OME client types live OUTSIDE this workspace, at the repo top level
+# (../ome-client-rs), because they are a repo-wide artifact reusable beyond MUSE
+# — the Rust analog of pkg/client. muse-server depends on it by path.
+[workspace]
+resolver = "2"
+members = [
+    "crates/muse-server", # the read-plane API server (axum)
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+
+# Lint policy shared by all members (adopted from smg's production setup). Members
+# opt in with `[lints] workspace = true`. clippy::* fire under `cargo clippy`;
+# rust lints under `cargo build`. Tests are exempted from the panic-y ones via
+# clippy.toml.
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+expect_used = "warn"
+panic = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+allow_attributes = "warn"
+uninlined_format_args = "warn"
+semicolon_if_nothing_returned = "warn"

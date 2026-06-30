@@ -1,0 +1,8 @@
+# Tests legitimately panic on failure — exempt them from the panic-y denies.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+disallowed-methods = [
+    { path = "uuid::Uuid::new_v4", reason = "use Uuid::now_v7 for time-sortable request ids" },
+]

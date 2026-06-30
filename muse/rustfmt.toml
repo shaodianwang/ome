@@ -1,0 +1,4 @@
+# Import hygiene (matches smg). These are nightly-only rustfmt options, so format
+# with `cargo +nightly fmt`; stable `cargo fmt` ignores them with a warning.
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
