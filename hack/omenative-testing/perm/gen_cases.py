@@ -235,7 +235,7 @@ def ceils(topo, ce, n=N, nd=None, surge_d=0, surge_r=0):
 HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r", "to_e", "to_d", "to_r",
              "partition", "mig", "restart", "kill", "inst", "canary", "rollback",
              "analysis", "health", "errorrate", "oninconclusive", "failurelimit", "expect", "reason",
-             "co", "topo", "infeasible"]
+             "co", "topo", "infeasible", "floor_hard"]
 
 
 def header(name, desc, kv):
@@ -249,13 +249,11 @@ COUNTERS = {"migration": 100, "restart": 130, "partition": 160, "scale": 190, "e
 
 
 def C(folder, desc, comps, coord=None, runtime=None, meta_ann=None, **kv):
-    # RollingUpdate.Partition is plumbed through the CRD/conversion but NOT
-    # enforced by the OMENative rollout engine (it never holds Instances < k) —
-    # a known controller gap. Mark the whole folder notimpl so its FAILs record
-    # as XFAIL (documented finding), not red. Flips to PASS automatically if the
-    # controller ever implements the hold.
-    if folder == "partition":
-        kv.setdefault("notimpl", 1)
+    # NOTE: RollingUpdate.Partition IS now enforced by the OMENative rollout
+    # engine (reconcile.go HeldByPartition, #427) — Instances with index < k are
+    # held on the old revision. The old blanket `notimpl` XFAIL on this folder
+    # was removed so partition cases record real PASS/FAIL again. Individual
+    # cases can still set notimpl=1 explicitly if a specific shape is unsupported.
     name = f"p{COUNTERS[folder]}"
     COUNTERS[folder] += 1
     CASES.append((folder, name, desc, comps, coord, kv, {"runtime": runtime, "meta_ann": meta_ann}))
@@ -276,6 +274,11 @@ for topo in ["engine", "pd"]:
     C("migration", f"migrate {topo} middle Instance idx 2",
       comps_for(topo, lifecycle()), mode="migrate", **nds(topo), **ceils(topo, N + 1),
       topo=topo, mig="Auto", inst=2, co="none")
+# Concurrent migrations of inst 0 AND inst 1 (engine) in ONE patch: two requests
+# surge two distinct replacement Instances at once → peak N+2 (distinct-surge-index).
+C("migration", "migrate engine inst 0+1 concurrent (distinct surge index)",
+  comps_for("engine", lifecycle()), mode="migrate", **nds("engine"), **ceils("engine", N + 2),
+  topo="engine", mig="Auto", inst="0,1", co="none")
 for topo in PD_TOPOS:                         # migration under each coordination policy
     for ck in ["rolling", "ratio", "seq", "bluegreen"]:
         C("migration", f"migrate {topo} Auto under {ck} coordination",
@@ -321,6 +324,14 @@ for p in [4, 6]:
       mode="partition", Ne=8, Nd=0, Nr=0, ceil_e=9, ceil_d=0, ceil_r=0, topo="engine", partition=p, co="none")
 C("partition", "engine-mn N=4 W=1 partition=2", comps_for("engine-mn", strat_life("SurgeThenDrain", partition=2)),
   mode="partition", **nds("engine-mn"), **ceils("engine-mn", N + 1), topo="engine-mn", partition=2, co="none")
+# maxSurge UNSET (no-limit) at N=8 partition=4: the held-below 4 stay, the rolling
+# 4 may all surge at once → peak N + (N - partition) = 12.
+C("partition", "engine N=8 partition=4 maxSurge=NoLimit (unset)",
+  [comp("engine", 8, 0, lifecycle(strat="SurgeThenDrain", surge=None, unavail=0, partition=4))],
+  mode="partition", Ne=8, Nd=0, Nr=0, ceil_e=12, ceil_d=0, ceil_r=0, topo="engine", partition=4, co="none")
+# engine-mn RecreatePod partition=2: whole-gang hold on indices < k, no surge (ceil=N).
+C("partition", "engine-mn N=4 W=1 partition=2 RecreatePod", comps_for("engine-mn", strat_life("RecreatePod", partition=2)),
+  mode="partition", **nds("engine-mn"), **ceils("engine-mn", N), topo="engine-mn", partition=2, co="none")
 for topo in PD_TOPOS:                         # PD partition × every coordination policy
     for ck in COORD_KINDS:
         # decoder is also a bumped group member that surges → ceil_d = N+1 too
@@ -330,14 +341,15 @@ for topo in PD_TOPOS:                         # PD partition × every coordinati
 
 # ── scale/  (mode=scaledown; patch min/maxReplicas to to_*, assert drain/grow) ─
 for topo, n, to in [("engine", 4, 1), ("engine", 8, 2), ("engine", 4, 2),
-                    ("pd", 4, 2), ("engine-mn", 4, 1), ("pd-mn", 4, 2)]:
+                    ("pd", 4, 2), ("engine-mn", 4, 1), ("pd-mn", 4, 2),
+                    ("engine-mn", 8, 2), ("pd-mn", 8, 2)]:
     kv = dict(mode="scaledown", **nds(topo, n), **ceils(topo, n, n), topo=topo, to_e=to, co="none")
     if is_pd(topo):
         kv["to_d"], kv["to_r"] = to, NR
     C("scale", f"scaledown {topo} N={n}->{to}", comps_for(topo, lifecycle(), n=n), **kv)
 C("scale", "scaledown PD asymmetric e=4->1 d=4->2 (router holds)", comps_for("pd", lifecycle()),
   mode="scaledown", Ne=4, Nd=4, Nr=NR, to_e=1, to_d=2, to_r=NR, ceil_e=4, ceil_d=4, ceil_r=NR, topo="pd", co="none")
-for topo, to in [("engine", 4), ("engine-mn", 4)]:
+for topo, to in [("engine", 4), ("engine-mn", 4), ("engine-mn", 8)]:
     C("scale", f"scaleup {topo} N=2->{to}", comps_for(topo, lifecycle(), n=2),
       mode="scaledown", **nds(topo, 2), to_e=to, ceil_e=to, ceil_d=0, ceil_r=0, topo=topo, co="none")
 for ck in ["rolling", "ratio"]:               # PD scaledown under coordination
@@ -355,6 +367,12 @@ for ck in ["ratio", "percomp"]:               # %-surge under pacing
     # rolled member at default maxSurge=1 → N+1 (surge_d=1). router not in group.
     C("edge", f"%-budget maxSurge=50% pd under {ck}", comps_for("pd", lifecycle(surge="50%", unavail=0)),
       coord=coord_for(ck), **nds("pd"), **ceils("pd", N + 2, surge_d=1), topo="pd", co=ck)
+# Integer maxSurge>1 single-pod at N=8: a wide concurrent-surge window (peak N+s).
+# floor_hard on: SurgeThenDrain (maxUnavailable=0) must never drop below N ready.
+for s in [3, 2]:
+    C("edge", f"maxSurge={s} engine N=8 SurgeThenDrain (surge {s} -> peak {8 + s})",
+      [comp("engine", 8, 0, lifecycle(surge=s, unavail=0))],
+      Ne=8, Nd=0, Nr=0, ceil_e=8 + s, ceil_d=0, ceil_r=0, topo="engine", co="none", floor_hard=1)
 for topo in ["engine", "pd"]:
     for u in ["25%", "50%"]:
         C("edge", f"%-budget maxUnavailable={u} {topo} RecreatePod",

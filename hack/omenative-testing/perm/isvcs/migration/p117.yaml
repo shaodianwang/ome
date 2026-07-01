@@ -1,4 +1,4 @@
-# p117: migrate pd-mn Auto under ratio coordination  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 mig=Auto co=ratio topo=pd-mn
+# p117: migrate pd-mn Auto under rolling coordination  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 mig=Auto co=rolling topo=pd-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p117 }
@@ -28,4 +28,3 @@ spec:
     groups:
         - components: [engine, decoder]
           rollingUpdate: {}
-          maintainRatio: { tolerance: 25 }

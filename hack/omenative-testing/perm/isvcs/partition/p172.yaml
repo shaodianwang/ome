@@ -1,4 +1,4 @@
-# p172: pd partition=2 percomp  mode=partition Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 partition=2 co=percomp topo=pd notimpl=1
+# p172: pd partition=2 rolling  mode=partition Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 partition=2 co=rolling topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p172 }

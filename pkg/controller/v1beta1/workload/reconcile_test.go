@@ -559,6 +559,104 @@ func TestHeldByPartition(t *testing.T) {
 	}
 }
 
+// TestReconcile_NoBudget_NoGate pins the raw uncapped dispatcher
+// contract: with UpdateGate nil and a nil per-Component RollingUpdate
+// (both PerComponentMax{Surge,Unavailable}Budget resolve to
+// BudgetNoLimit), NOTHING throttles how many Instances start a fresh
+// update in ONE pass. Seed 8 Ready Instances all on a prior revision and
+// the dispatcher starts a fresh surge on ALL 8 in a single reconcile.
+//
+// This is the pre-#619 fleet-dispatch shape with the webhook out of the
+// loop. The real-cluster guard against a mass single-pass dispatch is the
+// #619 25% default-budget defaulter, which stamps a non-nil RollingUpdate
+// (percent MaxSurge/MaxUnavailable) so PerComponentMax*Budget != -1 and
+// the loop's projected-vs-budget check caps fresh starts per pass. When
+// that defaulter is bypassed (nil RollingUpdate here), the dispatcher is
+// uncapped by design — the group-level UpdateGate is the only remaining
+// layer, and it is nil too. We assert the CURRENT behavior explicitly so
+// a regression that silently re-caps (or fails to dispatch) the raw path
+// is caught. No XFAIL: uncapped dispatch is the documented raw contract.
+func TestReconcile_NoBudget_NoGate(t *testing.T) {
+	const replicas = int32(8)
+
+	scheme := makeScheme(t)
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(isvc).Build()
+	deps := workload.Deps{Client: c}
+
+	in := minimalInput(t)
+	// No UpdateGate: the cross-Component coordination layer is out of the
+	// loop, matching the IR adapter and webhook-bypassed shape.
+	in.UpdateGate = nil
+	in.MutateInstance = roundTripMutateInstance(c, isvc, workload.ComponentEngine)
+
+	// 8 Ready Instances, all on a prior revision → DetectUpdateTrigger's
+	// cheap RunningRevision != target.Name fast-path fires for every one,
+	// and startingFresh is true (Phase != Updating).
+	observed := make([]workload.InstanceStatus, 0, replicas)
+	instances := make([]workload.InstancePlan, 0, replicas)
+	for i := int32(0); i < replicas; i++ {
+		observed = append(observed, workload.InstanceStatus{
+			Index: i, Incarnation: 1, Phase: workload.InstancePhaseReady,
+			RunningRevision: "llama-70b-engine-priorrev",
+		})
+		instances = append(instances, workload.InstancePlan{
+			Index: i, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		})
+	}
+	in.ObservedState.InstanceStatuses = observed
+
+	// SurgeThenDrain + nil RollingUpdate → BudgetNoLimit on both layers.
+	plan := workload.ComponentPlan{
+		Component:      workload.ComponentEngine,
+		Replicas:       replicas,
+		Instances:      instances,
+		UpdateStrategy: workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain},
+	}
+	// Sanity-check the premise: both per-Component budgets are uncapped.
+	if got := workload.PerComponentMaxSurgeBudget(plan.UpdateStrategy.RollingUpdate, replicas); got != workload.BudgetNoLimit {
+		t.Fatalf("premise: MaxSurge budget must be BudgetNoLimit for nil RollingUpdate, got %d", got)
+	}
+	if got := workload.PerComponentMaxUnavailableBudget(plan.UpdateStrategy.RollingUpdate, replicas); got != workload.BudgetNoLimit {
+		t.Fatalf("premise: MaxUnavailable budget must be BudgetNoLimit for nil RollingUpdate, got %d", got)
+	}
+
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+
+	result, err := workload.Reconcile(context.Background(), deps, in, plan, target)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	// Every Instance surged this pass → all done=false → requeue.
+	if result.RequeueAfter == 0 {
+		t.Errorf("uncapped fleet dispatch leaves all instances updating; expected requeue, got %+v", result)
+	}
+
+	// Load-bearing: count Instances that started a fresh op in ONE pass.
+	// Each fresh surge stamps Phase=Updating + Operation.Step=Surge. With
+	// no budget and no gate, all 8 start in this single pass.
+	fresh := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+		t.Fatalf("get isvc: %v", err)
+	}
+	started := int32(0)
+	for i := int32(0); i < replicas; i++ {
+		s := instanceStatusByIndex(fresh, v1beta1.EngineComponent, i)
+		if s != nil && s.Phase == v1beta1.OMENativeInstanceUpdating {
+			started++
+		}
+	}
+	if started != replicas {
+		t.Errorf("uncapped dispatcher must start a fresh update on all %d instances in ONE pass; got %d", replicas, started)
+	}
+}
+
 // enginePod fabricates a single-pod "default" engine pod at ordinal 0
 // with the labels Render stamps (managed-by + instance-idx + ordinal +
 // component + isvc), so query selectors and instance-index filters

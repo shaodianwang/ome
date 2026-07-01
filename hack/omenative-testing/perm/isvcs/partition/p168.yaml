@@ -1,4 +1,4 @@
-# p168: engine-mn N=4 W=1 partition=2  mode=partition Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 partition=2 co=none topo=engine-mn notimpl=1
+# p168: engine-mn N=4 W=1 partition=2  mode=partition Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 partition=2 co=none topo=engine-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p168 }

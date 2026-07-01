@@ -230,7 +230,7 @@ def spec_default(info):
     return info
 
 
-def aggregate(state, old_hashes, modes, pods_per_inst):
+def aggregate(state, old_hashes, modes, pods_per_inst, measures=None):
     """state: pod_name → {comp, inst, runner, alive, ready, hash, uid, newanno} | None.
 
     Groups pods into INSTANCES by (comp, instance-index) and returns
@@ -246,6 +246,18 @@ def aggregate(state, old_hashes, modes, pods_per_inst):
     Pre-trigger (old_hashes is None) updated is always 0. Backward-compatible:
     single-pod cases have one pod per Instance, so counts equal the old per-pod
     counts.
+
+    measures (opt-in dict, mutated in place): per-Component distinct-alive-index
+    diagnostics that the raw (alive,ready,updated) tuple cannot express. For each
+    Component c it records {c: (distinct_alive_idx, new_pods, distinct_new_idx)}:
+      * distinct_alive_idx → # of instance indices with >=1 alive pod. A gang
+        surge that COLLAPSES many gangs onto ONE index reads as 1 distinct index
+        even though the alive-pod count is large — the fleet-wipe signature the
+        Instance-count tuple hides.
+      * new_pods           → raw count of alive new-revision pods (post-trigger).
+      * distinct_new_idx   → # of distinct indices carrying >=1 new-revision pod.
+        For a healthy gang roll new_pods == distinct_new_idx * pods_per_inst; a
+        shortfall means two gangs share an index (collision).
     """
     insts = defaultdict(lambda: defaultdict(list))  # comp -> instance-index -> [pod records]
     for p in state.values():
@@ -255,6 +267,7 @@ def aggregate(state, old_hashes, modes, pods_per_inst):
     agg = defaultdict(lambda: [0, 0, 0])
     for c, by_inst in insts.items():
         ppi = max(1, pods_per_inst.get(c, 1))
+        distinct_alive_idx = new_pods = distinct_new_idx = 0
         for pods in by_inst.values():
             # alive: gangs count 1 per Instance (a surge is a whole new instance
             # index → already +1). Single-pod (ppi==1) counts alive PODS so a
@@ -263,6 +276,17 @@ def aggregate(state, old_hashes, modes, pods_per_inst):
             # Instance, update.go:1262) — is visible. Instance-counting alone
             # collapses both pods into 1 and silently misses the surge.
             agg[c][0] += len(pods) if ppi == 1 else 1
+            distinct_alive_idx += 1
+            # Per-pod new-revision signal (independent of whole-Instance updated,
+            # so a collision that leaves an index half-new is still counted).
+            if old_hashes is not None:
+                if modes.get(c) == "inplace":
+                    idx_new = [q for q in pods if q.get("newanno")]
+                else:
+                    idx_new = [q for q in pods if q.get("hash") and q["hash"] not in old_hashes]
+                new_pods += len(idx_new)
+                if idx_new:
+                    distinct_new_idx += 1
             ready_pods = sum(1 for q in pods if q["ready"])
             if len(pods) >= ppi and ready_pods >= ppi:
                 agg[c][1] += 1  # ready Instance: full pod set, all Ready
@@ -274,7 +298,163 @@ def aggregate(state, old_hashes, modes, pods_per_inst):
                     updated = all(q.get("hash") and q["hash"] not in old_hashes for q in pods)
                 if updated:
                     agg[c][2] += 1
+        if measures is not None:
+            measures[c] = (distinct_alive_idx, new_pods, distinct_new_idx)
     return {c: tuple(v) for c, v in agg.items()}
+
+
+def index_collision_checks(ctx, comps, verdict, notes, checks):
+    """Distinct-alive-index invariant (fleet-wipe guard). For each Component in
+    `comps` assert: (a) the number of instance indices with >=1 alive pod is at
+    least the alive Instance count — a shortfall means two DIFFERENT Instances
+    (gangs) collapsed onto one index, the collision the Instance-count tuple
+    hides; and (b) for gangs (pods_per_inst>1) the raw alive new-revision pod
+    count equals distinct_new_index * pods_per_inst — a shortfall means some
+    index holds pods from more than one gang (a shared index). Returns the
+    (possibly FAIL) verdict; appends to notes/checks in place.
+
+    This is the check that would have caught the 64→1 fleet-wipe: N gangs
+    collapsing onto a single index read as one alive Instance to the tuple, but
+    distinct-alive-index falls to 1 and the gang pod count no longer matches
+    distinct_new_index * pods_per_inst.
+    """
+    meas = ctx.get("measures") or {}
+    agg = ctx.get("agg") or {}
+    ppi = ctx["pods_per_inst"]
+    for c in comps:
+        if ctx["N"].get(c, 0) == 0:
+            continue
+        distinct_alive, new_pods, distinct_new = meas.get(c, (0, 0, 0))
+        alive_inst = agg.get(c, (0, 0, 0))[0]
+        # (a) distinct alive indices must cover the alive Instance count. For a
+        # gang (ppi>1) alive_inst is already Instance-counted, so any shortfall
+        # is a collision. For single-pod (ppi==1) alive_inst counts PODS (a
+        # within-instance surge legitimately puts 2 pods on 1 index), so compare
+        # against ceil(alive_inst / ppi_effective) is not meaningful — restrict
+        # the distinct-index floor to gangs where the collapse is the failure.
+        if ppi.get(c, 1) > 1 and distinct_alive < alive_inst:
+            verdict = "FAIL"
+            notes.append(f"{c} index collision: {alive_inst} alive Instances on only {distinct_alive} distinct index(es)")
+            checks.append(f"  ✗ {c} index collision: {alive_inst} alive Instance(s) share only {distinct_alive} distinct index(es) — gangs collapsed onto one index (fleet-wipe shape)")
+        # (b) gang new-revision pods must partition cleanly across distinct new
+        # indices: new_pods == distinct_new * pods_per_inst. A shortfall means an
+        # index carries a partial/second gang's pods (shared index).
+        if ppi.get(c, 1) > 1 and new_pods and new_pods != distinct_new * ppi[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} shared index: {new_pods} new pods across {distinct_new} index(es) (want {distinct_new * ppi[c]})")
+            checks.append(f"  ✗ {c} shared index: {new_pods} new-revision pod(s) span {distinct_new} distinct index(es) but a clean gang roll needs {distinct_new * ppi[c]} (={distinct_new}×{ppi[c]}) — two gangs sharing an index")
+    return verdict
+
+
+def _track_gang_and_floor(ctx, comps):
+    """Mid-loop bookkeeping shared by the _read_one handlers: (1) per-Instance
+    mixed-revision span (gang atomicity) and partial-teardown span (orphan
+    worker), and (2) per-Component min ready Instances (capacity floor). Mirrors
+    the inline tracking in run_case so _partition/_migrate/_canary get the same
+    coverage. Stashes results in ctx: gang_worst, teardown_worst, min_ready."""
+    now = time.time()
+    ppi = ctx["pods_per_inst"]
+    modes = ctx["modes"]
+    agg = ctx.get("agg") or {}
+    gang_mixed_since = ctx.setdefault("gang_mixed_since", {})
+    gang_worst = ctx.setdefault("gang_worst", {})
+    teardown_since = ctx.setdefault("teardown_since", {})
+    teardown_worst = ctx.setdefault("teardown_worst", {})
+    min_ready = ctx.setdefault("min_ready", {})
+    by_comp = defaultdict(lambda: defaultdict(list))
+    for q in ctx["pod_state"].values():
+        if q and q["alive"]:
+            by_comp[q["comp"]][q.get("inst", "0")].append(q)
+    for c in comps:
+        p = ppi.get(c, 1)
+        if p > 1:
+            live_idx = set(by_comp[c].keys())
+            for inst_idx, ipods in by_comp[c].items():
+                if modes.get(c) == "inplace":
+                    sigs = {bool(q.get("newanno")) for q in ipods}
+                else:
+                    sigs = {q.get("hash") for q in ipods if q.get("hash")}
+                key = (c, inst_idx)
+                if len(sigs) >= 2:                       # mixed old+new within one Instance
+                    gang_mixed_since.setdefault(key, now)
+                    span = now - gang_mixed_since[key]
+                    if span > gang_worst.get(key, 0):
+                        gang_worst[key] = span
+                else:
+                    gang_mixed_since.pop(key, None)
+                # Partial-teardown: an index with 0<live<ppi (an orphan worker /
+                # leader) held sustained is a broken gang teardown.
+                nlive = len(ipods)
+                if 0 < nlive < p:
+                    teardown_since.setdefault(key, now)
+                    span = now - teardown_since[key]
+                    if span > teardown_worst.get(key, 0):
+                        teardown_worst[key] = span
+                else:
+                    teardown_since.pop(key, None)
+            for key in [k for k in list(teardown_since) if k[0] == c and k[1] not in live_idx]:
+                teardown_since.pop(key, None)
+        rd = agg.get(c, (0, 0, 0))[1]
+        if c not in min_ready or rd < min_ready[c]:
+            min_ready[c] = rd
+
+
+def gang_atomicity_checks(ctx, comps, verdict, notes, checks):
+    """Check 9 ported to the _read_one handlers: each bumped multi-node gang must
+    roll leader+workers as ONE unit — no Instance sat mixed-revision >= GANG_TOL_S.
+    Requires _track_gang_and_floor to have run over the same comps in the loop."""
+    gang_worst = ctx.get("gang_worst") or {}
+    mn = [c for c in comps if ctx["pods_per_inst"].get(c, 1) > 1]
+    if not mn:
+        return verdict
+    viol = {k: v for k, v in gang_worst.items() if k[0] in mn and v >= GANG_TOL_S}
+    if viol:
+        verdict = "FAIL"
+        wk = max(viol, key=viol.get)
+        notes.append(f"gang atomicity violated: {wk[0]} Instance {wk[1]} mixed-revision {viol[wk]:.0f}s")
+        checks.append(f"  ✗ gang atomicity violated: {len(viol)} Instance(s) sat mixed-revision ≥{GANG_TOL_S:.0f}s — leader+workers did NOT roll as a unit (worst {wk[0]} inst {wk[1]}: {viol[wk]:.0f}s)")
+    else:
+        checks.append(f"  ✓ gang atomicity held: every multi-node Instance ({', '.join(mn)}) rolled leader+workers as a unit")
+    return verdict
+
+
+def surge_before_drain_checks(ctx, comps, verdict, notes, checks):
+    """Surge-before-drain ordering for the _read_one handlers: a source pod must
+    not begin draining before its Ready surge replacement (drained-old must not
+    lead ready-new by more than maxUnavailable). Consumes the running worst breach
+    accumulated in _apply_event (ctx['order_viol']). Surge components only."""
+    ov = ctx.get("order_viol") or {}
+    surge = [c for c in comps if ctx["modes"].get(c) == "surge"]
+    if not surge:
+        return verdict
+    viol = {c: ov.get(c, 0) for c in surge if ov.get(c, 0) > 0}
+    if viol:
+        verdict = "FAIL"
+        wc = max(viol, key=viol.get)
+        notes.append(f"surge-before-drain violated: {wc} drained {viol[wc]} pod(s) ahead of ready surges")
+        checks.append(f"  ✗ surge-before-drain violated: {len(viol)} Component(s) began draining a source before its replacement was Ready (worst {wc}: {viol[wc]} pod(s) ahead)")
+    else:
+        checks.append(f"  ✓ surge-before-drain held: every drain ({', '.join(surge)}) followed a Ready surge replacement")
+    return verdict
+
+
+def min_ready_checks(ctx, comps, verdict, notes, checks, label="capacity floor"):
+    """Capacity-floor: each Component's min ready Instances mid-roll stays >=
+    N - maxUnavailable. Requires _track_gang_and_floor to have run over `comps`."""
+    min_ready = ctx.get("min_ready") or {}
+    mu = ctx["info"].get("max_unavail", {})
+    for c in comps:
+        if ctx["N"].get(c, 0) == 0:
+            continue
+        floor = ctx["N"][c] - mu.get(c, 0)
+        mr = min_ready.get(c, ctx["N"][c])
+        if mr < floor:
+            verdict = "FAIL"
+            notes.append(f"{c} {label} breached: min ready {mr} < N-maxUnavailable={floor}")
+            checks.append(f"  ✗ {c} {label} breached: min ready {mr} < N-maxUnavailable={floor} — did NOT preserve capacity")
+        else:
+            checks.append(f"  ✓ {c} {label} held: min ready {mr} ≥ N-maxUnavailable={floor}")
+    return verdict
 
 
 def fetch_status(case_id):
@@ -385,22 +565,41 @@ def _apply_event(ctx, ev):
     annos = meta.get("annotations", {}) or {}
     cstats = obj.get("status", {}).get("containerStatuses") or []
     ready = any(cs.get("name") == "ome-container" and cs.get("ready") for cs in cstats)
+    comp = labels.get("component", "?")
+    rev = labels.get(REV_LABEL, "")
+    deletion = meta.get("deletionTimestamp")
+    # Surge-before-drain ordering: record (post-trigger, surge mode only) the
+    # cumulative OLD-rev pods draining and NEW-rev pods Ready per component, so a
+    # handler can assert a drain never led its Ready surge replacement. Captured
+    # here (not from pod_state) because a DELETED event drops the record + its rev.
+    if ctx.get("trigger_ts") is not None and ctx.get("old_hashes") is not None and ctx["modes"].get(comp) == "surge":
+        is_new = bool(rev and rev not in ctx["old_hashes"])
+        nr = ctx.setdefault("new_ready", defaultdict(set))
+        od = ctx.setdefault("old_drained", defaultdict(set))
+        if is_new and ready:
+            nr[comp].add(name)
+        if (not is_new) and rev and (ev.get("type") == "DELETED" or deletion is not None):
+            od[comp].add(name)
+        mu_pods = ctx["info"].get("max_unavail", {}).get(comp, 0) * ctx["pods_per_inst"].get(comp, 1)
+        breach = len(od[comp]) - len(nr[comp]) - mu_pods
+        ov = ctx.setdefault("order_viol", {})
+        if breach > ov.get(comp, 0):
+            ov[comp] = breach
     if ev.get("type") == "DELETED":
         ctx["pod_state"][name] = None
     else:
         ctx["pod_state"][name] = {
-            "comp": labels.get("component", "?"),
+            "comp": comp,
             "inst": labels.get("ome.io/instance-index", "0"),
             "runner": labels.get("ome.io/runner", "default"),
-            "alive": meta.get("deletionTimestamp") is None,
-            "ready": ready, "hash": labels.get(REV_LABEL, ""),
+            "alive": deletion is None,
+            "ready": ready, "hash": rev,
             "uid": meta.get("uid", ""),
             "newanno": annos.get(TRIGGER_ANNO) == TRIGGER_VAL,
             "node": (obj.get("spec") or {}).get("nodeName", ""),
         }
-        h = labels.get(REV_LABEL)
-        if h:
-            ctx.setdefault("seen_hashes", set()).add(h)   # every revision-hash ever observed
+        if rev:
+            ctx.setdefault("seen_hashes", set()).add(rev)   # every revision-hash ever observed
 
 
 def _read_one(ctx, timeout=1.0):
@@ -426,12 +625,19 @@ def _read_one(ctx, timeout=1.0):
                         ev = None
                 if ev and ev.get("type") != "BOOKMARK" and ev.get("object"):
                     _apply_event(ctx, ev)
-    agg = aggregate(ctx["pod_state"], ctx["old_hashes"], ctx["modes"], ctx["pods_per_inst"])
+    meas = {}
+    agg = aggregate(ctx["pod_state"], ctx["old_hashes"], ctx["modes"], ctx["pods_per_inst"], measures=meas)
     for c in COMPS:
         a = agg.get(c, (0, 0, 0))[0]
         if a > ctx["peaks"][c]:
             ctx["peaks"][c] = a
     ctx["agg"] = agg
+    ctx["measures"] = meas
+    # Post-trigger (past the INIT→ROTATING boundary grace) accumulate gang/floor
+    # spans over the components the handler flagged for tracking (defaults to all
+    # configured). Handlers set ctx["track_comps"] before their watch loop.
+    if ctx.get("trigger_ts") is not None and time.time() - ctx["trigger_ts"] >= MINREADY_GRACE_S:
+        _track_gang_and_floor(ctx, ctx.get("track_comps") or sorted(ctx["configured"]))
     if ctx.get("trigger_ts") is not None:                       # per-tick progress (post-trigger) for diagnosis
         snap = tuple(agg.get(c, (0, 0, 0)) for c in COMPS)
         if snap != ctx.get("last_snap"):
@@ -566,6 +772,7 @@ def _partition(case_id, yaml_file, desc, hdr):
           " ".join(f"{c}:k={part.get(c, 0)}" for c in sorted(bumped)))
     if not _bump_rev(ctx, bumped):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "patch failed")
+    ctx["track_comps"] = sorted(configured)   # gang/floor bookkeeping in _read_one
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ctx["pods_per_inst"][c] for c in bumped))
     print(f"  Phase 3: watching staged roll (≤{budget}s)")
 
@@ -601,6 +808,13 @@ def _partition(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} > ceiling {ceil[c]}")
         elif N[c]:
             checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
+    # Distinct-alive-index / shared-index (fleet-wipe guard) on the bumped gangs.
+    verdict = index_collision_checks(ctx, sorted(bumped), verdict, notes, checks)
+    # Gang atomicity (Check 9): scoped to bumped multi-node gangs.
+    verdict = gang_atomicity_checks(ctx, sorted(bumped), verdict, notes, checks)
+    # Surge-before-drain ordering on the (N-k) Instances that roll (the held k
+    # never drain, so they don't enter the drain/ready ledger).
+    verdict = surge_before_drain_checks(ctx, sorted(bumped), verdict, notes, checks)
     if state != "CONVERGED":
         verdict = "FAIL"
         for c in sorted(bumped):
@@ -724,51 +938,80 @@ def _migrate(case_id, yaml_file, desc, hdr):
     N = ctx["N"]
     mig_mode = hdr.get("mig", "Auto")
     mcomp = "engine" if "engine" in ctx["configured"] else sorted(ctx["configured"])[0]
-    inst = str(hdr.get("inst", 0))
-    from_node = ctx["old_nodes"].get((mcomp, inst), "")
+    # inst is a comma list ("0,1") for the concurrent multi-instance case; a bare
+    # "0" is the single-instance path (unchanged). Concurrent migrations must
+    # surge DISTINCT replacement indices — many sources collapsing onto one surge
+    # index is the fleet-wipe class at migration scale.
+    req_insts = [s.strip() for s in str(hdr.get("inst", 0)).split(",") if s.strip() != ""]
+    inst = req_insts[0]
     orig_insts = {p["inst"] for p in ctx["pod_state"].values()
                   if p and p["alive"] and p["comp"] == mcomp}
-    req_uuid = str(uuid.uuid4())
-    anno_key = f"ome.io/migration-request-v1-{req_uuid}"
-    payload = json.dumps({"schemaVersion": "v1", "component": mcomp, "instance": int(inst),
-                          "from_node": from_node, "reason": "perm-test"})
-    print(f"  Phase 2: migration request (mig={mig_mode}) component={mcomp} instance={inst} "
-          f"from_node={from_node or '(unknown)'}")
+    reqs = {}   # src inst -> (req_uuid, anno_key, from_node)
+    annos = {}
+    for i in req_insts:
+        ru = str(uuid.uuid4())
+        ak = f"ome.io/migration-request-v1-{ru}"
+        fn = ctx["old_nodes"].get((mcomp, i), "")
+        reqs[i] = (ru, ak, fn)
+        annos[ak] = json.dumps({"schemaVersion": "v1", "component": mcomp, "instance": int(i),
+                                "from_node": fn, "reason": "perm-test"})
+    from_node = reqs[inst][2]
+    print(f"  Phase 2: migration request (mig={mig_mode}) component={mcomp} instances={req_insts}")
     rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
-                 "-p", json.dumps({"metadata": {"annotations": {anno_key: payload}}}))
+                 "-p", json.dumps({"metadata": {"annotations": annos}}))
     if rr.returncode != 0:
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", rr.stderr[:200])
     ctx["trigger_ts"] = time.time()
+    ctx["track_comps"] = sorted(ctx["configured"])   # gang/floor bookkeeping in _read_one
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * N[mcomp] * ctx["pods_per_inst"][mcomp])
     never_grace = 90
     print(f"  Phase 3: watching migration (ledger {case_id}-ome-migration-audit; ≤{budget}s)")
-    surge_inst, surge_node, entry, last_poll, state = None, None, None, 0.0, "WATCHING"
+    surge_seen, surge_nodes, last_poll, state = set(), {}, 0.0, "WATCHING"
     while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
         _read_one(ctx)
         for p in ctx["pod_state"].values():
             if p and p["alive"] and p["comp"] == mcomp and p["inst"] not in orig_insts:
-                surge_inst = p["inst"]
-                surge_node = p.get("node", "") or surge_node
+                surge_seen.add(p["inst"])
+                surge_nodes[p["inst"]] = p.get("node", "") or surge_nodes.get(p["inst"], "")
         now = time.time()
         if now - last_poll >= 5:
             last_poll = now
-            entry = _migration_ledger_entry(case_id, req_uuid)
-            ph = entry.get("phase") if entry else None
-            if mig_mode != "Never" and ph == "Completed":
+            phs = {i: (_migration_ledger_entry(case_id, ru) or {}).get("phase")
+                   for i, (ru, _, _) in reqs.items()}
+            if mig_mode != "Never" and all(v == "Completed" for v in phs.values()):
                 state = "COMPLETED"; break
-            if ph == "Failed":
+            if any(v == "Failed" for v in phs.values()):
                 state = "FAILED"; break
             if mig_mode == "Never" and now - ctx["trigger_ts"] > never_grace:
                 state = "NEVER_GRACE"; break
-    entry = _migration_ledger_entry(case_id, req_uuid) or entry
-    ph = entry.get("phase") if entry else None
+    # Collapse the per-source ledger into the single-inst vars the verdict block
+    # below already consumes; ph=="Completed" only when EVERY request completed.
+    entries = {i: (_migration_ledger_entry(case_id, ru) or {}) for i, (ru, _, _) in reqs.items()}
+    phs = {i: e.get("phase") for i, e in entries.items()}
+    ph = "Completed" if phs and all(v == "Completed" for v in phs.values()) else \
+         ("Failed" if any(v == "Failed" for v in phs.values()) else next(iter(phs.values()), None))
+    entry = entries[inst]
     ledger_surge = entry.get("surgeInstance") if entry else None
-    surged = surge_inst is not None or (ledger_surge is not None and ph == "Completed")
-    anno_cleared = anno_key not in _isvc_annotations(case_id)
-    src_gone = not any(p and p["alive"] and p["comp"] == mcomp and p["inst"] == inst
+    surge_inst = sorted(surge_seen)[0] if surge_seen else None
+    surge_node = surge_nodes.get(surge_inst, "") if surge_inst is not None else None
+    surged = bool(surge_seen) or (ledger_surge is not None and ph == "Completed")
+    anno_cleared = all(ak not in _isvc_annotations(case_id) for (_, ak, _) in reqs.values())
+    src_gone = not any(p and p["alive"] and p["comp"] == mcomp and p["inst"] in req_insts
                        for p in ctx["pod_state"].values())
 
     verdict, notes, checks = "PASS", [], []
+    # Peak/ceiling: a migration surges +1 (ceil = N+1 from the case header; N for
+    # mig=Never). A mass fan-out — many Instances surging at once, the fleet-wipe
+    # shape — blows past the ceiling. Mirror the _partition/_rollout peak gate,
+    # which _migrate previously lacked entirely.
+    mceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+             "router": hdr.get("ceil_r", N["router"])}
+    for c in COMPS:
+        if N[c] and ctx["peaks"][c] > mceil[c]:
+            verdict = "FAIL"; notes.append(f"{c} peak {ctx['peaks'][c]}>ceil {mceil[c]}")
+            checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} > ceiling {mceil[c]}")
+        elif N[c]:
+            checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {mceil[c]}")
     if mig_mode == "Never":
         if surged or ph == "Completed":
             verdict = "FAIL"; notes.append(f"Never but migrated (surge={surge_inst or ledger_surge}, phase={ph})")
@@ -790,8 +1033,24 @@ def _migrate(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✓ surge Instance {surge_inst} on a different node ({surge_node} != {from_node})")
         else:
             checks.append(f"  ⓘ surge happened (watcher inst={surge_inst}, ledger surgeInstance={ledger_surge}); node compare inconclusive")
-        checks.append(f"  {'✓' if src_gone else '⚠'} source Instance {inst} {'drained' if src_gone else 'still present'}")
-        checks.append(f"  {'✓' if anno_cleared else '⚠'} migration-request annotation {'cleared' if anno_cleared else 'still present'}")
+        checks.append(f"  {'✓' if src_gone else '⚠'} source Instance(s) {','.join(req_insts)} {'drained' if src_gone else 'still present'}")
+        checks.append(f"  {'✓' if anno_cleared else '⚠'} migration-request annotation(s) {'cleared' if anno_cleared else 'still present'}")
+        if len(req_insts) > 1:
+            # Concurrent migration: each source must surge its OWN replacement
+            # index — collapsing N sources onto one surge index is the fleet-wipe
+            # shape. Require at least as many distinct surge indices as sources.
+            if len(surge_seen) >= len(req_insts):
+                checks.append(f"  ✓ concurrent migrate surged {len(surge_seen)} distinct index(es) for {len(req_insts)} sources {sorted(surge_seen)}")
+            else:
+                verdict = "FAIL"
+                notes.append(f"migration index collision: {len(req_insts)} sources surged only {len(surge_seen)} distinct index(es) {sorted(surge_seen)}")
+                checks.append(f"  ✗ migration index collision: {len(req_insts)} concurrent migrations surged only {len(surge_seen)} distinct index(es) {sorted(surge_seen)} — sources collapsed onto a shared surge index (fleet-wipe shape)")
+        # A migration surges a replacement before draining the source, so capacity
+        # must never drop below the floor, gangs must stay whole, and no two gangs
+        # may collapse onto one index (the fleet-wipe shape at migration scale).
+        verdict = min_ready_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
+        verdict = index_collision_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
+        verdict = gang_atomicity_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
     ctx["converged_at"] = (time.time() - ctx["trigger_ts"]) if verdict == "PASS" else None
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
@@ -956,6 +1215,7 @@ def _canary(case_id, yaml_file, desc, hdr):
           + ("  +rollback" if do_rollback else ""))
     if not _bump_rev(ctx, group, extra=analysis_extra):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed")
+    ctx["track_comps"] = sorted(ctx["configured"])   # gang/floor bookkeeping in _read_one
     # Budget tracks the whole bumped group, not just the primary: a rollback (or a
     # full roll) drains every member, and the primary is merely where status/traffic
     # is observed. For PD primary=router (2 pods) but the drain covers engine+decoder
@@ -1057,6 +1317,26 @@ def _canary(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✓ {msg_ok}")
         else:
             verdict = "FAIL"; notes.append(msg_bad); checks.append(f"  ✗ {msg_bad}")
+
+    # Peak/ceiling: the canary surges the primary +1 while the stable revision
+    # keeps serving (ceil = N+1 from the case header; NR+1 for PD router). A step
+    # that over-surges — e.g. a 2N fan-out, the fleet-wipe shape — must FAIL.
+    # _canary previously had NO peak gate at all (every other handler has one);
+    # this runs before all three verdict return paths below.
+    cceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+             "router": hdr.get("ceil_r", N["router"])}
+    for c in COMPS:
+        if N[c] and ctx["peaks"][c] > cceil[c]:
+            verdict = "FAIL"; notes.append(f"{c} peak {ctx['peaks'][c]}>ceil {cceil[c]}")
+            checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} > ceiling {cceil[c]}")
+        elif N[c]:
+            checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {cceil[c]}")
+    # A canary surges the primary while the stable revision keeps serving, so
+    # capacity must hold the floor, gangs stay whole, and no two gangs collapse
+    # onto one index (the fleet-wipe shape at canary scale).
+    verdict = min_ready_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
+    verdict = index_collision_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
+    verdict = gang_atomicity_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
 
     want = expect
     good(state == "CONVERGED",
@@ -1222,6 +1502,9 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     state = "INIT"
     pod_state = {}
     peaks = {"engine": 0, "decoder": 0, "router": 0}
+    min_ready = {}                   # comp → min READY Instances seen mid-drain (capacity floor, Check C)
+    teardown_since = {}              # (comp, inst) → ts an index went 0<live<ppi (orphan worker)
+    teardown_worst = {}             # (comp, inst) → longest partial-teardown span (s)
     init_started = time.time()
     trigger_ts = None
     converged_at = None
@@ -1304,6 +1587,35 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                     print(f"\n  Phase 3: draining to targets (peak must stay ≤ {ce}/{cd}/{cr})")
                     state = "DRAINING"
             elif state == "DRAINING":
+                # Check C: capacity floor — every CONFIGURED component (not just the
+                # scaled one) must keep >= its target ready throughout the drain. A
+                # scaled component drains N→target (never below target); a non-scaled
+                # one stays at N=target.
+                for c in configured:
+                    rd = agg.get(c, (0, 0, 0))[1]
+                    if c not in min_ready or rd < min_ready[c]:
+                        min_ready[c] = rd
+                # Partial-teardown atomicity: each gang index's live pod set must be
+                # {0 or ppi}, never 0<live<ppi sustained (an orphan worker/leader).
+                by_comp = defaultdict(lambda: defaultdict(list))
+                for q in pod_state.values():
+                    if q and q["alive"]:
+                        by_comp[q["comp"]][q.get("inst", "0")].append(q)
+                for c in configured:
+                    if pods_per_inst.get(c, 1) <= 1:
+                        continue
+                    live_idx = set(by_comp[c].keys())
+                    for inst_idx, ipods in by_comp[c].items():
+                        key = (c, inst_idx)
+                        if 0 < len(ipods) < pods_per_inst[c]:
+                            teardown_since.setdefault(key, now)
+                            span = now - teardown_since[key]
+                            if span > teardown_worst.get(key, 0):
+                                teardown_worst[key] = span
+                        else:
+                            teardown_since.pop(key, None)
+                    for key in [k for k in list(teardown_since) if k[0] == c and k[1] not in live_idx]:
+                        teardown_since.pop(key, None)
                 if all(agg.get(c, (0, 0, 0))[1] == target[c] for c in configured):
                     if stable_since is None:
                         stable_since = now
@@ -1347,6 +1659,30 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         else:
             al = " ".join(f"{c} {final[c]}/{target[c]}" for c in sorted(configured))
             checks.append(f"  ✓ drained to target ({al})")
+    # Check C: capacity floor — every configured component stayed >= its target
+    # ready throughout the drain (a scaled component never undershoots target, a
+    # non-scaled one never dips below N=target). Catches a scaledown that drops
+    # capacity below the requested floor mid-drain.
+    for c in sorted(configured):
+        mr = min_ready.get(c, N[c])
+        if mr < target[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} capacity floor breached: min ready {mr} < target {target[c]}")
+            checks.append(f"  ✗ {c} capacity dipped to {mr} ready mid-drain (< target {target[c]}) — undershot the floor")
+        else:
+            checks.append(f"  ✓ {c} capacity floor held: min ready {mr} ≥ target {target[c]}")
+    # Check D: partial-teardown atomicity — no gang index sat 0<live<ppi (an
+    # orphan worker/leader) sustained >= GANG_TOL_S during the drain.
+    mn_conf = [c for c in sorted(configured) if pods_per_inst.get(c, 1) > 1]
+    if mn_conf:
+        td_viol = {k: v for k, v in teardown_worst.items() if v >= GANG_TOL_S}
+        if td_viol:
+            verdict = "FAIL"
+            wk = max(td_viol, key=td_viol.get)
+            notes.append(f"partial teardown: {wk[0]} Instance {wk[1]} orphaned {td_viol[wk]:.0f}s")
+            checks.append(f"  ✗ partial teardown: {len(td_viol)} gang Instance(s) sat 0<live<ppi ≥{GANG_TOL_S:.0f}s during drain (worst {wk[0]} inst {wk[1]}: {td_viol[wk]:.0f}s) — orphan worker, not a whole-gang teardown")
+        else:
+            checks.append(f"  ✓ partial-teardown atomicity held: every gang index ({', '.join(mn_conf)}) tore down whole (never a sustained orphan)")
     if (hdr.get("infeasible") or hdr.get("notimpl")) and verdict == "FAIL":
         why = ("a known unimplemented controller feature" if hdr.get("notimpl")
                else "an unsatisfiable config")
@@ -1509,6 +1845,11 @@ def run_case(case_id):
     gang_mixed_since = {}            # (comp, inst) → ts an Instance went mixed-revision (multi-node gang)
     gang_worst = {}                  # (comp, inst) → longest mixed-revision span observed (s)
     min_ready = {}                   # comp → min READY Instances seen mid-roll (capacity floor, Check 10)
+    collide_worst = {}               # comp → worst (alive_inst - distinct_alive_idx) shortfall seen mid-roll
+    collide_share_worst = {}         # comp → worst (distinct_new*ppi - new_pods) gang-share shortfall mid-roll
+    old_drained = defaultdict(set)   # comp → set(old-rev pod names) observed draining (deletionTimestamp)
+    new_ready = defaultdict(set)     # comp → set(new-rev pod names) observed Ready
+    order_viol = {}                  # comp → worst (drained - ready - maxUnavail) surge-before-drain breach
     deadline_init = init_started + init_budget
     deadline_rotate = None
     print(f"\n  Phase 1: waiting for initial Ready (need engine={Ne}, decoder={Nd}, router={Nr} pods all Ready)")
@@ -1578,6 +1919,24 @@ def run_case(case_id):
                     ready = bool(cs.get("ready"))
                     break
 
+            # Surge-before-drain ordering (SurgeThenDrain): a source pod must not
+            # begin draining before its replacement is Ready. Classify by revision
+            # (surge mode only — in-place patches the live pod, no source/surge
+            # pair) and record, per bumped surge Component, the cumulative set of
+            # OLD-rev pods observed draining and NEW-rev pods observed Ready.
+            if trigger_ts is not None and old_hashes is not None and comp in bumped and modes.get(comp) == "surge":
+                is_new = bool(rev and rev not in old_hashes)
+                if is_new and ready:
+                    new_ready[comp].add(name)
+                if (not is_new) and rev and (ev_type == "DELETED" or deletion is not None):
+                    old_drained[comp].add(name)
+                # Instances of headroom: SurgeThenDrain surges maxUnavailable=0, so
+                # drained pods must never lead ready-surge pods (per pods_per_inst).
+                mu_pods = info["max_unavail"].get(comp, 0) * pods_per_inst.get(comp, 1)
+                breach = len(old_drained[comp]) - len(new_ready[comp]) - mu_pods
+                if breach > order_viol.get(comp, 0):
+                    order_viol[comp] = breach
+
             if ev_type == "DELETED":
                 pod_state[name] = None
             else:
@@ -1587,7 +1946,8 @@ def run_case(case_id):
                                    "alive": deletion is None,
                                    "ready": ready, "hash": rev, "uid": uid, "newanno": newanno}
 
-            agg = aggregate(pod_state, old_hashes, modes, pods_per_inst)
+            meas = {}
+            agg = aggregate(pod_state, old_hashes, modes, pods_per_inst, measures=meas)
             for c in COMPS:
                 if agg.get(c, (0, 0, 0))[0] > peaks[c]:
                     peaks[c] = agg[c][0]
@@ -1696,6 +2056,22 @@ def run_case(case_id):
                         rd = agg.get(c, (0, 0, 0))[1]
                         if c not in min_ready or rd < min_ready[c]:
                             min_ready[c] = rd
+                # Distinct-alive-index (fleet-wipe guard): track the WORST shortfall
+                # of distinct alive indices vs alive Instances, and the worst gang
+                # share shortfall, over the whole roll — the collapse is transient
+                # (peaks mid-roll) so the final snapshot alone would miss it.
+                if tnow >= MINREADY_GRACE_S:
+                    for c in bumped:
+                        if pods_per_inst.get(c, 1) <= 1:
+                            continue
+                        distinct_alive, new_pods, distinct_new = meas.get(c, (0, 0, 0))
+                        alive_inst = agg.get(c, (0, 0, 0))[0]
+                        short = alive_inst - distinct_alive
+                        if short > collide_worst.get(c, 0):
+                            collide_worst[c] = short
+                        share_short = distinct_new * pods_per_inst[c] - new_pods
+                        if new_pods and share_short > collide_share_worst.get(c, 0):
+                            collide_share_worst[c] = share_short
                 # Convergence: every configured Component at N alive+ready, AND every
                 # BUMPED Component fully on the new revision. Non-bumped controls only
                 # need to stay at N (they should never roll).
@@ -1885,18 +2261,72 @@ def run_case(case_id):
         else:
             checks.append(f"  ✓ gang atomicity held: every multi-node Instance ({', '.join(mn_bumped)}) rolled leader+workers as a unit (no sustained mixed-revision)")
 
-    # Check 10 (INFORMATIONAL for now): capacity floor during the roll. A bumped
-    # Component should keep >= N - maxUnavailable Instances serving throughout —
-    # SurgeThenDrain (maxUnavailable=0) surges so it never drops below N. A dip
-    # below the floor means it recreated / dropped the gang instead of surging
-    # (the p66 0/2). Reported, NOT yet asserted — promote to a hard FAIL once it's
-    # confirmed not to false-positive on readiness flaps across p01-p65.
+    # Check 9b: distinct-alive-index (the fleet-wipe guard). The Instance-count
+    # tuple buckets pods by index and counts 1 per index, so N DIFFERENT gangs
+    # colliding on ONE index read as a single alive Instance — the exact reason a
+    # 64→1 collapse looked green. Assert per bumped gang that the alive Instance
+    # count is backed by that many DISTINCT alive indices, and that new-revision
+    # pods partition cleanly (new_pods == distinct_new × pods_per_inst); a
+    # shortfall at any point in the roll means gangs shared an index. Hard FAIL
+    # (this is the invariant that made the fleet-wipe invisible — never opt-in).
+    if mn_bumped:
+        collide = {c: collide_worst.get(c, 0) for c in mn_bumped if collide_worst.get(c, 0) > 0}
+        share = {c: collide_share_worst.get(c, 0) for c in mn_bumped if collide_share_worst.get(c, 0) > 0}
+        if collide:
+            verdict = "FAIL"
+            wc = max(collide, key=collide.get)
+            notes.append(f"index collision: {wc} had {collide[wc]} alive Instance(s) with no distinct index")
+            checks.append(f"  ✗ index collision: {len(collide)} Component(s) saw gangs collapse onto shared indices mid-roll (worst {wc}: {collide[wc]} Instance(s) short a distinct index) — the fleet-wipe shape")
+        if share:
+            verdict = "FAIL"
+            ws = max(share, key=share.get)
+            notes.append(f"shared index: {ws} new-revision pods did not partition across distinct indices (short {share[ws]})")
+            checks.append(f"  ✗ shared index: {len(share)} Component(s) had new-revision pods that did not partition cleanly across distinct indices (worst {ws}: {share[ws]} pod(s) short) — two gangs on one index")
+        if not collide and not share:
+            checks.append(f"  ✓ distinct-alive-index held: every bumped gang ({', '.join(mn_bumped)}) kept one gang per index throughout (no fleet-wipe collapse)")
+
+    # Check 9c: surge-before-drain ordering (SurgeThenDrain). A source pod must
+    # not begin draining before its surge replacement is Ready — the number of
+    # old-rev pods that started draining must never lead the ready new-rev pods by
+    # more than maxUnavailable. A breach means the controller drained ahead of the
+    # surge (the capacity-losing ordering a fleet-wipe exhibits).
+    surge_bumped = [c for c in sorted(bumped) if modes.get(c) == "surge"]
+    if surge_bumped:
+        ord_viol = {c: order_viol.get(c, 0) for c in surge_bumped if order_viol.get(c, 0) > 0}
+        if ord_viol:
+            verdict = "FAIL"
+            wc = max(ord_viol, key=ord_viol.get)
+            notes.append(f"surge-before-drain violated: {wc} drained {ord_viol[wc]} pod(s) ahead of ready surges")
+            checks.append(f"  ✗ surge-before-drain violated: {len(ord_viol)} Component(s) began draining a source before its replacement was Ready (worst {wc}: {ord_viol[wc]} pod(s) drained ahead of ready surges)")
+        else:
+            checks.append(f"  ✓ surge-before-drain held: every drain ({', '.join(surge_bumped)}) followed a Ready surge replacement")
+
+    # Check 10: capacity floor during the roll. A bumped Component should keep
+    # >= N - maxUnavailable Instances serving throughout — SurgeThenDrain
+    # (maxUnavailable=0) surges so it never drops below N. A dip below the floor
+    # means it recreated / dropped the gang instead of surging (the p66 0/2 —
+    # the fleet-wipe shape). This is the invariant a fleet-wipe violates that no
+    # perm handler enforced.
+    #
+    # Hard FAIL only when the case opts in via floor_hard=1; otherwise
+    # informational (⚠). Kept opt-in because min_ready here is an INSTANTANEOUS
+    # min (see the min_ready tracking in the watch loop), so a single-sample
+    # readiness flap would false-fail. Turning floor_hard on for the
+    # SurgeThenDrain/maxUnavailable=0 cases is a follow-up that also needs a
+    # sustained-dip debounce (mirror RATIO_SUSTAIN_S) and cluster vetting across
+    # p01-p65. Default OFF => zero change to the current matrix.
+    floor_hard = bool(hdr.get("floor_hard"))
     if state == "CONVERGED":
         for c in sorted(bumped):
             floor = N[c] - info["max_unavail"].get(c, 0)
             mr = min_ready.get(c, N[c])
             if mr < floor:
-                checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) mid-roll (< N-maxUnavailable={floor}) — did NOT preserve capacity (no surge / dropped the gang); informational")
+                if floor_hard:
+                    verdict = "FAIL"
+                    notes.append(f"{c} capacity floor breached: min ready {mr} < N-maxUnavailable={floor}")
+                    checks.append(f"  ✗ {c} capacity dipped to {mr} ready Instance(s) mid-roll (< N-maxUnavailable={floor}) — did NOT preserve capacity (no surge / dropped the gang)")
+                else:
+                    checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) mid-roll (< N-maxUnavailable={floor}) — did NOT preserve capacity (no surge / dropped the gang); informational (set floor_hard=1 to enforce)")
             else:
                 checks.append(f"  ✓ {c} capacity floor held: min ready {mr} ≥ N-maxUnavailable={floor}")
 

@@ -1,4 +1,4 @@
-# p242: mixed-strategy RollingUpdate group: engine=SurgeThenDrain decoder=RecreatePod  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 co=rolling topo=pd
+# p242: InPlaceOnly engine  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p242 }
@@ -9,18 +9,4 @@ spec:
     minReplicas: 4
     maxReplicas: 4
     annotations: { ome.io/deploymentMode: OMENative }
-    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
-  decoder:
-    minReplicas: 4
-    maxReplicas: 4
-    annotations: { ome.io/deploymentMode: OMENative }
-    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
-  router:
-    minReplicas: 2
-    maxReplicas: 2
-    annotations: { ome.io/deploymentMode: OMENative }
-    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
-  rollout:
-    groups:
-        - components: [engine, decoder]
-          rollingUpdate: {}
+    lifecycle: { updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

@@ -1,4 +1,4 @@
-# p114: migrate pd Auto under seq coordination  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 mig=Auto co=seq topo=pd
+# p114: migrate pd Auto under ratio coordination  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 mig=Auto co=ratio topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p114 }
@@ -22,7 +22,6 @@ spec:
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
     groups:
-        - components: [engine]
-          blueGreen: {}
-        - components: [decoder]
-          blueGreen: {}
+        - components: [engine, decoder]
+          rollingUpdate: {}
+          maintainRatio: { tolerance: 25 }

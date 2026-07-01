@@ -597,3 +597,132 @@ func TestReconcile_PerComponentBudget_PercentForm(t *testing.T) {
 		t.Errorf("MaxSurge=25%% on 4 replicas yields budget=1; expected exactly 1 fresh start, got %d (mutations=%v)", started, mutatedIndices)
 	}
 }
+
+// TestReconcile_ConcurrentGangSurge_DistinctIndices pins the
+// distinct-surge-index contract #618 established at the reconcile level.
+// When several multi-pod (gang) Instances start a SurgeThenDrain rollout
+// in the SAME wake-up, each gangSurgeUpdate must allocate a DISTINCT
+// surge index. The fleet-wipe SEV was two colliding gangs sharing one
+// surge index: when the single shared surge became Ready, the drain
+// logic released BOTH sources at once, collapsing capacity.
+//
+// Setup: one multi-pod Component (leader:1 + worker:1 = a gang per
+// Instance), Replicas=3, MaxSurge=2, all three Ready on the prior
+// revision, then a spec bump (target != RunningRevision). The
+// per-Component MaxSurge=2 lets two gangs start this pass; each stamps
+// its source Instance's Operation.SurgeIndex via MutateInstance. We
+// capture every stamped (index, SurgeIndex) and assert:
+//   - no two gangs stamped the SAME SurgeIndex, and
+//   - no stamped SurgeIndex collides with a steady index 0/1/2.
+//
+// Regression direction: pre-#618 both gangs picked the lowest-free index
+// (3), so the captured set would contain a duplicate and this test would
+// fail. On current main AllocateSurgeIndex excludes in-flight
+// Operation.SurgeIndex and gangSurgeUpdate reserves the claim on the
+// source snapshot, so the two gangs pick distinct indices (3 and 4).
+func TestReconcile_ConcurrentGangSurge_DistinctIndices(t *testing.T) {
+	scheme := makeScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	deps := workload.Deps{Client: c}
+
+	const replicas = 3
+	const steadyIndices = replicas // steady indices are 0..replicas-1
+
+	in := minimalInput(t)
+	in.DesiredSpec.Replicas = replicas
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+	}
+
+	// Capture every SurgeIndex the pass stamps onto a source Instance,
+	// keyed by the source index. The gang-surge source stamp
+	// (patchInstanceStatusGangSurging) sets Operation.SurgeIndex; the
+	// GangSurgeTarget stamp on the surge index itself does not, so only
+	// source stamps land here. Apply the mutation against the observed
+	// snapshot so gangSurgeUpdate's in-memory reservation and the next
+	// sibling's AllocateSurgeIndex see the just-claimed slot.
+	stampedSurge := map[int32]int32{}
+	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
+		s := findObserved(&in, idx)
+		if s == nil {
+			// Surge/target index absent from the snapshot — apply against a
+			// scratch status and append so later reads observe it.
+			scratch := workload.InstanceStatus{Index: idx}
+			if fn(&scratch) {
+				in.ObservedState.InstanceStatuses = append(in.ObservedState.InstanceStatuses, scratch)
+				s = findObserved(&in, idx)
+			}
+		} else {
+			fn(s)
+		}
+		if s != nil && s.Operation != nil && s.Operation.SurgeIndex != nil {
+			stampedSurge[idx] = *s.Operation.SurgeIndex
+		}
+		return nil
+	}
+
+	gang := func(idx int32) workload.InstancePlan {
+		return workload.InstancePlan{
+			Index: idx, Incarnation: 1,
+			Runners: []workload.RunnerPlan{
+				{Name: "leader", Size: 1},
+				{Name: "worker", Size: 1},
+			},
+		}
+	}
+	plan := workload.ComponentPlan{
+		Component: workload.ComponentEngine,
+		Replicas:  replicas,
+		Instances: []workload.InstancePlan{gang(0), gang(1), gang(2)},
+		UpdateStrategy: workload.UpdateStrategy{
+			Type: workload.UpdateStrategySurgeThenDrain,
+			RollingUpdate: &workload.RollingUpdate{
+				MaxSurge: intOrStringInt(2),
+			},
+		},
+	}
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+
+	_, err := workload.Reconcile(context.Background(), deps, in, plan, target)
+	if err != nil {
+		t.Logf("Reconcile op error (expected against empty fake client): %v", err)
+	}
+
+	// At least two gangs must have surged this pass (MaxSurge=2) for the
+	// distinctness check to be load-bearing. Fewer means the budget/gate
+	// short-circuited before the collision could ever occur — the test
+	// would silently pass without exercising the contract.
+	if len(stampedSurge) < 2 {
+		t.Fatalf("expected >=2 concurrent gang surges under MaxSurge=2; got %d stamped (surge=%v)", len(stampedSurge), stampedSurge)
+	}
+
+	seen := map[int32]int32{} // surgeIndex -> sourceIndex that claimed it
+	for srcIdx, surgeIdx := range stampedSurge {
+		// No stamped surge index may equal a steady index 0..replicas-1 —
+		// a surge must land on a fresh slot, never atop a serving gang.
+		if surgeIdx < steadyIndices {
+			t.Errorf("source %d stamped surge index %d which collides with steady index range [0,%d)", srcIdx, surgeIdx, steadyIndices)
+		}
+		// No two sources may share a surge index — the fleet-wipe collision.
+		if prev, dup := seen[surgeIdx]; dup {
+			t.Errorf("surge index %d claimed by BOTH source %d and source %d (shared-surge collision, the fleet-wipe bug)", surgeIdx, prev, srcIdx)
+		}
+		seen[surgeIdx] = srcIdx
+	}
+}
+
+// findObserved returns the observed InstanceStatus pointer for idx, or
+// nil. Local to the concurrent-surge test's mutate hook so it can write
+// back through the snapshot the dispatcher reads.
+func findObserved(in *workload.ReconcileInput, idx int32) *workload.InstanceStatus {
+	for i := range in.ObservedState.InstanceStatuses {
+		if in.ObservedState.InstanceStatuses[i].Index == idx {
+			return &in.ObservedState.InstanceStatuses[i]
+		}
+	}
+	return nil
+}

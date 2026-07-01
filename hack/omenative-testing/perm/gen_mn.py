@@ -12,6 +12,7 @@ pods. Ceilings are in Instance units: a SurgeThenDrain surge peaks at N+maxSurge
 Instances; recreate/in-place peak at N. Requires the ome-coordtest-multinode
 runtime (leader.runner + worker.runner). Run: python3 gen_mn.py
 """
+import math
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,8 +23,16 @@ def C(name, N, mx, w, strat, surge, unavail):
     return dict(name=name, N=N, mx=mx, w=w, strat=strat, surge=surge, unavail=unavail)
 
 
+def _surge_count(N, surge):
+    """Resolve maxSurge (int OR "NN%") into an integer count of surged Instances."""
+    if isinstance(surge, str) and surge.endswith("%"):
+        return math.ceil(N * int(surge[:-1]) / 100)
+    return surge
+
+
 def _ceil(c):
-    return c["N"] + c["surge"] if (c["strat"] == "SurgeThenDrain" and c["surge"] > 0) else c["N"]
+    s = _surge_count(c["N"], c["surge"])
+    return c["N"] + s if (c["strat"] == "SurgeThenDrain" and s > 0) else c["N"]
 
 
 def _block(c):
@@ -216,9 +225,26 @@ COMBOS = [
     # RecreatePod at minimal N.
     ("p92", "MN engine leader+1w N=1 RecreatePod (minimal gang recreate)",
      [C("engine", 1, 1, 1, "RecreatePod", 0, 1)], None),
+
+    # === LARGE-N GANG SCALE (p97+): blast radius scales with N; fleet-wipe was
+    # N=64. These push gang counts past N<=4 so distinct-surge-index,
+    # capacity-floor (min-ready), and surge-before-drain are exercised with many
+    # concurrent gangs in flight. maxSurge=2 -> ceil = N+2.
+    ("p97", "MN engine leader+1w N=8 max=10 SurgeThenDrain maxSurge=2 (8 gang Instances, two surges in flight)",
+     [C("engine", 8, 10, 1, "SurgeThenDrain", 2, 0)], None),
+    ("p98", "MN engine leader+2w N=12 max=14 SurgeThenDrain maxSurge=2 (12 3-pod gangs, two surges in flight)",
+     [C("engine", 12, 14, 2, "SurgeThenDrain", 2, 0)], None),
+    ("p99", "PD MN e+d leader+1w N=8 max=10 PerComponent SurgeThenDrain maxSurge=2 (large-N PD gang surge)",
+     [C("engine", 8, 10, 1, "SurgeThenDrain", 2, 0), C("decoder", 8, 10, 1, "SurgeThenDrain", 2, 0), RTR],
+     dict(policy="RollingUpdate", members=["engine", "decoder"], pacing=PC)),
+    ("p100", "MN engine leader+1w N=8 max=12 SurgeThenDrain maxSurge=50% (four gang surges in flight)",
+     [C("engine", 8, 12, 1, "SurgeThenDrain", "50%", 0)], None),
 ]
 
 if __name__ == "__main__":
     for cid, desc, comps, coord in COMBOS:
         emit(cid, desc, comps, coord)
-    print(f"generated {len(COMBOS)} multi-node cases (p66-p{65 + len(COMBOS)})")
+    ids = [cid for cid, *_ in COMBOS]
+    lo = min(int(c[1:]) for c in ids)
+    hi = max(int(c[1:]) for c in ids)
+    print(f"generated {len(COMBOS)} multi-node cases (p{lo}-p{hi})")

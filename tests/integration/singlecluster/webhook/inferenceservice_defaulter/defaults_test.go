@@ -6,6 +6,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -128,6 +129,44 @@ var _ = ginkgo.Describe("InferenceService defaulter webhook", func() {
 		// Falls through to the default deployment mode rather than
 		// being treated as multi-node.
 		Expect(got.Annotations).To(HaveKeyWithValue(constants.DeploymentMode, string(constants.RawDeployment)))
+	})
+
+	ginkgo.It("OMENative + omitted rollingUpdate → MaxSurge and MaxUnavailable default to 25%", func() {
+		// #619 rollout-budget lock: an OMENative Component that omits
+		// lifecycle.updateStrategy.rollingUpdate must not resolve to the
+		// uncapped BudgetNoLimit — that is the fleet-wipe failure mode where
+		// a spec bump drained every Instance at once. The defaulter fills
+		// both budgets with 25%; assert the read-back after real admission.
+		//
+		// The lifecycle defaulter resolves OMENative from the per-Component
+		// annotation (escape hatch) or spec.deploymentMode, NOT the ObjectMeta
+		// mode annotation the multi-node heuristic writes — so set the
+		// per-Component annotation to trigger the OMENative branch.
+		isvc := v1beta1testing.MakeInferenceService("def-rollout-budgets", "isvc-defaulter").
+			Model("any-model").
+			Engine(&v1beta1.EngineSpec{
+				PodSpec: v1beta1.PodSpec{
+					Containers: []corev1.Container{{Name: "ome-container", Image: "ghcr.io/test/runtime:test"}},
+				},
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{
+					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+				},
+			}).Obj()
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
+
+		got := &v1beta1.InferenceService{}
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "def-rollout-budgets", Namespace: "isvc-defaulter"}, got)).To(Succeed())
+		Expect(got.Spec.Engine).NotTo(BeNil())
+		Expect(got.Spec.Engine.Lifecycle).NotTo(BeNil())
+		Expect(got.Spec.Engine.Lifecycle.UpdateStrategy).NotTo(BeNil())
+		ru := got.Spec.Engine.Lifecycle.UpdateStrategy.RollingUpdate
+		Expect(ru).NotTo(BeNil(), "omitted rollingUpdate must be defaulted, not left nil (would resolve to uncapped BudgetNoLimit)")
+		want := intstr.FromString("25%")
+		Expect(ru.MaxSurge).NotTo(BeNil())
+		Expect(*ru.MaxSurge).To(Equal(want), "MaxSurge must default to 25%")
+		Expect(ru.MaxUnavailable).NotTo(BeNil())
+		Expect(*ru.MaxUnavailable).To(Equal(want), "MaxUnavailable must default to 25%")
 	})
 
 	ginkgo.It("explicit DeploymentMode annotation is preserved (defaulter does not overwrite)", func() {

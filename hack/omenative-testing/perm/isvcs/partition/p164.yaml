@@ -1,4 +1,4 @@
-# p164: engine partition=2 RecreatePod  mode=partition Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 partition=2 co=none topo=engine notimpl=1
+# p164: engine partition=2 RecreatePod  mode=partition Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 partition=2 co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p164 }

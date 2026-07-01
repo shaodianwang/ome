@@ -1,4 +1,4 @@
-# p115: migrate pd Auto under bluegreen coordination  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 mig=Auto co=bluegreen topo=pd
+# p115: migrate pd Auto under seq coordination  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 mig=Auto co=seq topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p115 }
@@ -22,5 +22,7 @@ spec:
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
     groups:
-        - components: [engine, decoder]
+        - components: [engine]
+          blueGreen: {}
+        - components: [decoder]
           blueGreen: {}

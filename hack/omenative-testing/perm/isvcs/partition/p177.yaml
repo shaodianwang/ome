@@ -1,4 +1,4 @@
-# p177: pd-mn partition=2 ratio  mode=partition Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 partition=2 co=ratio topo=pd-mn notimpl=1
+# p177: pd-mn partition=2 none  mode=partition Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 partition=2 co=none topo=pd-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p177 }
@@ -24,8 +24,3 @@ spec:
     maxReplicas: 2
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
-  rollout:
-    groups:
-        - components: [engine, decoder]
-          rollingUpdate: {}
-          maintainRatio: { tolerance: 25 }
