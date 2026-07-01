@@ -1,9 +1,11 @@
 package inferencereplica
 
 import (
+	"context"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -390,5 +392,88 @@ func TestManagedByOMENativePredicate_UpdateFieldDiff(t *testing.T) {
 				t.Errorf("Update predicate = %v, want %v", got, tc.wantPass)
 			}
 		})
+	}
+}
+
+// TestIRNameFromDrainServiceName covers the EndpointSlice -> IR name
+// reverse-lookup for both OMENative drain Service shapes plus the reject
+// cases the unfiltered watch relies on the mapper to screen out.
+func TestIRNameFromDrainServiceName(t *testing.T) {
+	tests := []struct {
+		name    string
+		service string
+		wantIR  string
+		wantOK  bool
+	}{
+		{name: "headless engine", service: "my-isvc-engine-headless", wantIR: "my-isvc-engine", wantOK: true},
+		{name: "headless decoder", service: "my-isvc-decoder-headless", wantIR: "my-isvc-decoder", wantOK: true},
+		{name: "headless router", service: "my-isvc-router-headless", wantIR: "my-isvc-router", wantOK: true},
+		{name: "per-revision engine", service: "my-isvc-engine-rev-abcdef", wantIR: "my-isvc-engine", wantOK: true},
+		{name: "per-revision hex hash", service: "my-isvc-decoder-rev-5f7c9a", wantIR: "my-isvc-decoder", wantOK: true},
+		{name: "isvc name with dashes", service: "a-b-c-engine-headless", wantIR: "a-b-c-engine", wantOK: true},
+		{name: "empty", service: "", wantOK: false},
+		{name: "unrelated headless (unknown component)", service: "kubernetes-headless", wantOK: false},
+		{name: "unrelated service", service: "some-random-service", wantOK: false},
+		{name: "headless with empty isvc", service: "engine-headless", wantOK: false},
+		{name: "stable service (no suffix, not drain)", service: "my-isvc-engine", wantOK: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotIR, gotOK := irNameFromDrainServiceName(tc.service)
+			if gotOK != tc.wantOK {
+				t.Fatalf("irNameFromDrainServiceName(%q) ok = %v, want %v", tc.service, gotOK, tc.wantOK)
+			}
+			if gotOK && gotIR != tc.wantIR {
+				t.Errorf("irNameFromDrainServiceName(%q) = %q, want %q", tc.service, gotIR, tc.wantIR)
+			}
+		})
+	}
+}
+
+// TestEndpointSliceToIR verifies the map function emits exactly the
+// owning IR request for an OMENative drain slice and nothing for a
+// foreign slice (or a non-EndpointSlice object).
+func TestEndpointSliceToIR(t *testing.T) {
+	slice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      "my-isvc-engine-headless-xyz",
+			Labels:    map[string]string{discoveryv1.LabelServiceName: "my-isvc-engine-headless"},
+		},
+	}
+	reqs := EndpointSliceToIR(context.Background(), slice)
+	if len(reqs) != 1 {
+		t.Fatalf("EndpointSliceToIR returned %d requests, want 1", len(reqs))
+	}
+	if reqs[0].Namespace != "ns" || reqs[0].Name != "my-isvc-engine" {
+		t.Errorf("EndpointSliceToIR request = %v, want ns/my-isvc-engine", reqs[0].NamespacedName)
+	}
+
+	// Per-revision slice.
+	revSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Labels:    map[string]string{discoveryv1.LabelServiceName: "my-isvc-decoder-rev-deadbeef"},
+		},
+	}
+	revReqs := EndpointSliceToIR(context.Background(), revSlice)
+	if len(revReqs) != 1 || revReqs[0].Name != "my-isvc-decoder" {
+		t.Errorf("EndpointSliceToIR(per-revision) = %v, want ns/my-isvc-decoder", revReqs)
+	}
+
+	// Foreign slice -> no request.
+	foreign := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Labels:    map[string]string{discoveryv1.LabelServiceName: "kube-dns"},
+		},
+	}
+	if got := EndpointSliceToIR(context.Background(), foreign); got != nil {
+		t.Errorf("EndpointSliceToIR(foreign) = %v, want nil", got)
+	}
+
+	// Non-EndpointSlice object -> nil.
+	if got := EndpointSliceToIR(context.Background(), &corev1.Pod{}); got != nil {
+		t.Errorf("EndpointSliceToIR(non-slice) = %v, want nil", got)
 	}
 }

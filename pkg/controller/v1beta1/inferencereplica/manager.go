@@ -5,9 +5,11 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -80,6 +82,16 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.Pod{},
 			newPodEventHandler(r.Expectations),
 			builder.WithPredicates(managedByOMENativePredicate()),
+		).
+		// EndpointSlice events for OMENative drain Services (per-Component
+		// headless + per-revision routed) enqueue the owning IR so the
+		// SurgeThenDrain / RecreatePod drain step reacts to kube-proxy
+		// convergence immediately instead of waiting on the
+		// workloadops.UpdateRequeueInterval poll tick. The mapper rejects
+		// slices that don't target an OMENative drain Service.
+		Watches(
+			&discoveryv1.EndpointSlice{},
+			handler.EnqueueRequestsFromMapFunc(EndpointSliceToIR),
 		).
 		Complete(r)
 }

@@ -2,8 +2,10 @@ package inferencereplica
 
 import (
 	"context"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
@@ -13,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
@@ -23,6 +26,99 @@ import (
 // projector stamps on every Pod the IR-managed path creates. The pod
 // event handler uses it to enqueue the owning InferenceReplica.
 const irKind = "InferenceReplica"
+
+// perRevisionServiceInfix is the segment PerRevisionServiceName inserts
+// between the <isvc>-<component> prefix and the revision hash suffix
+// (`<isvc>-<component>-rev-<hash>`). The EndpointSlice mapper strips it
+// to recover the owning IR name.
+const perRevisionServiceInfix = "-rev-"
+
+// headlessServiceSuffix is the trailing segment of the per-Component
+// headless Service name (`<isvc>-<component>-headless`).
+const headlessServiceSuffix = "-headless"
+
+// EndpointSliceToIR maps an EndpointSlice for an OMENative drain Service
+// (the per-Component headless Service or a per-revision routed Service)
+// back to its owning InferenceReplica reconcile key.
+//
+// The SurgeThenDrain / RecreatePod drain step gates old-pod deletion on
+// drain.IsPodDrained, which reads these Services' EndpointSlices. Without
+// this watch the IR controller only re-observes kube-proxy convergence on
+// the workloadops.UpdateRequeueInterval timer tick — turning every drain
+// into a fixed poll-interval wait instead of an event-driven step. The
+// ISVC controller already watches EndpointSlices (EndpointSliceToISVC),
+// but that enqueues the ISVC, not the IR that actually runs the drain.
+//
+// Returns an empty slice for any slice that doesn't target an
+// OMENative drain Service — the watch is unfiltered, so the mapper does
+// all the filtering by name.
+func EndpointSliceToIR(ctx context.Context, obj client.Object) []reconcile.Request {
+	slice, ok := obj.(*discoveryv1.EndpointSlice)
+	if !ok {
+		return nil
+	}
+	serviceName := slice.Labels[discoveryv1.LabelServiceName]
+	irName, ok := irNameFromDrainServiceName(serviceName)
+	if !ok {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{
+			Namespace: slice.Namespace,
+			Name:      irName,
+		},
+	}}
+}
+
+// irNameFromDrainServiceName parses an OMENative drain Service name into
+// the owning IR name (`<isvc>-<component>`), or ok=false when the name
+// isn't a recognized OMENative drain Service.
+//
+// Two shapes are recognized (query.HeadlessServiceName /
+// query.PerRevisionServiceName):
+//   - `<isvc>-<component>-headless`
+//   - `<isvc>-<component>-rev-<hash>`
+//
+// Both reduce to `<isvc>-<component>`, which is exactly the IR name
+// (irprojector.InferenceReplicaName is `<isvc>-<component>`). The
+// `-<component>` suffix is matched against the known component-type set
+// so an arbitrary `-headless` Service doesn't masquerade as
+// OMENative-owned.
+func irNameFromDrainServiceName(name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	var prefix string
+	switch {
+	case strings.HasSuffix(name, headlessServiceSuffix):
+		prefix = strings.TrimSuffix(name, headlessServiceSuffix)
+	case strings.Contains(name, perRevisionServiceInfix):
+		// Revision hashes are hex (no `-rev-` token), so the FIRST
+		// occurrence bounds the <isvc>-<component> prefix. The
+		// component-suffix match below rejects any false positive.
+		prefix = name[:strings.Index(name, perRevisionServiceInfix)]
+	default:
+		return "", false
+	}
+	for _, component := range []v1beta1.ComponentType{
+		v1beta1.RouterComponent,
+		v1beta1.EngineComponent,
+		v1beta1.DecoderComponent,
+	} {
+		suffix := "-" + string(component)
+		if !strings.HasSuffix(prefix, suffix) {
+			continue
+		}
+		// prefix is already `<isvc>-<component>` == the IR name; the
+		// component-suffix match only validates it's OMENative-owned and
+		// guards against an empty isvc segment.
+		if strings.TrimSuffix(prefix, suffix) == "" {
+			return "", false
+		}
+		return prefix, true
+	}
+	return "", false
+}
 
 // managedByOMENativePredicate keeps the pod watch to OMENative-managed
 // pods only (`ome.io/managed-by=OMENative`), so non-OMENative pod churn
