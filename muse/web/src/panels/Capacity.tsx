@@ -4,11 +4,17 @@ import { api } from "../api";
 import type { AccelGroup, CapacityResp } from "../api";
 import { Bar } from "../components";
 import { useLive } from "../live";
+import { matches } from "../util";
 
 type Dim = "cluster" | "island" | "nvlink" | "instance";
 
 const DIMS: { key: Dim; label: string; col: string; help: string }[] = [
-  { key: "cluster", label: "Cluster", col: "Cluster", help: "Accelerator capacity totalled per workload cluster and kind." },
+  {
+    key: "cluster",
+    label: "Cluster",
+    col: "Cluster",
+    help: "Accelerator capacity totalled per workload cluster and kind.",
+  },
   {
     key: "island",
     label: "Island / block",
@@ -21,7 +27,12 @@ const DIMS: { key: Dim; label: string; col: string; help: string }[] = [
     col: "Domain",
     help: "Inner topology domain within an island — an NVLink domain for GPUs (e.g. an NVL72 rack), an ICI sub-block for TPUs.",
   },
-  { key: "instance", label: "Instance type", col: "Instance type", help: "Capacity grouped by node hardware SKU." },
+  {
+    key: "instance",
+    label: "Instance type",
+    col: "Instance type",
+    help: "Capacity grouped by node hardware SKU.",
+  },
 ];
 
 interface Row {
@@ -38,7 +49,8 @@ interface Row {
 const n = (v: number) => v.toLocaleString();
 const pct = (g: { allocatable: number; allocated: number }) =>
   g.allocatable > 0 ? Math.round((g.allocated / g.allocatable) * 100) : 0;
-const utilTone = (p: number): "green" | "amber" | "red" => (p >= 90 ? "red" : p >= 75 ? "amber" : "green");
+const utilTone = (p: number): "green" | "amber" | "red" =>
+  p >= 90 ? "red" : p >= 75 ? "amber" : "green";
 
 export function Capacity() {
   const [dim, setDim] = useState<Dim>("cluster");
@@ -97,11 +109,8 @@ export function Capacity() {
       });
     }
   }
-  const needle = q.trim().toLowerCase();
   const filtered = rows
-    .filter(
-      (r) => !needle || r.cluster.toLowerCase().includes(needle) || r.name.toLowerCase().includes(needle) || r.kind.includes(needle),
-    )
+    .filter((r) => matches(q, r.cluster, r.name, r.kind))
     .sort((a, b) => b.free - a.free);
 
   const showName = dim !== "cluster";
@@ -128,8 +137,12 @@ export function Capacity() {
         {[...byKind.entries()].map(([kind, t]) => (
           <div className="stat" key={kind}>
             <div className="label">Free {kind.toUpperCase()}</div>
-            <div className="val" style={{ color: "var(--green)" }}>{n(t.free)}</div>
-            <div className="meta">of {n(t.alloc)} · {t.alloc ? Math.round((t.used / t.alloc) * 100) : 0}% used</div>
+            <div className="val" style={{ color: "var(--green)" }}>
+              {n(t.free)}
+            </div>
+            <div className="meta">
+              of {n(t.alloc)} · {t.alloc ? Math.round((t.used / t.alloc) * 100) : 0}% used
+            </div>
           </div>
         ))}
         <div className="stat">
@@ -142,13 +155,21 @@ export function Capacity() {
       <div className="cap-controls">
         <div className="seg">
           {DIMS.map((d) => (
-            <button key={d.key} className={d.key === dim ? "active" : undefined} onClick={() => setDim(d.key)}>
+            <button
+              key={d.key}
+              className={d.key === dim ? "active" : undefined}
+              onClick={() => setDim(d.key)}
+            >
               {d.label}
             </button>
           ))}
         </div>
         <div className="input grow">
-          <input placeholder="Filter by cluster, name, or kind…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input
+            placeholder="Filter by cluster, name, or kind…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
         </div>
       </div>
       <p className="cap-help">{meta.help} Sorted by free capacity, most available first.</p>
@@ -180,7 +201,10 @@ export function Capacity() {
                   <td className="num">{n(r.total)}</td>
                   <td className="num muted">{n(r.used)}</td>
                   <td className="num">
-                    <span className="free-strong" style={{ color: r.free > 0 ? "var(--green)" : "var(--fg-3)" }}>
+                    <span
+                      className="free-strong"
+                      style={{ color: r.free > 0 ? "var(--green)" : "var(--fg-3)" }}
+                    >
                       {n(r.free)}
                     </span>
                   </td>
@@ -194,7 +218,7 @@ export function Capacity() {
               ))}
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={showName ? 8 : 7} className="muted" style={{ textAlign: "center", padding: 24 }}>
+                  <td colSpan={showName ? 8 : 7} className="muted empty-cell">
                     {live.error ?? (live.loading ? "Loading capacity…" : "No capacity data")}
                   </td>
                 </tr>
@@ -204,9 +228,9 @@ export function Capacity() {
         </div>
       </div>
 
-      <div style={{ marginTop: 14, fontSize: "var(--t-sm)", color: "var(--fg-3)" }}>
+      <div className="list-foot">
         {filtered.length} {showName ? "rows" : "cluster/kind rows"}
-        {needle ? ` matching "${q}"` : ""}
+        {q.trim() ? ` matching "${q}"` : ""}
       </div>
     </section>
   );

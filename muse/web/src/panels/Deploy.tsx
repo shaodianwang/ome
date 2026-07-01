@@ -70,8 +70,8 @@ export function Deploy() {
               <h3>Model</h3>
             </div>
             <p className="sec-desc">
-              Pick a Ready model from the registry. Selecting a model seeds architecture, format, and
-              capabilities for runtime matching.
+              Pick a Ready model from the registry. Selecting a model seeds architecture, format,
+              and capabilities for runtime matching.
             </p>
             <div style={{ marginLeft: 29 }}>
               <div className="field">
@@ -81,7 +81,8 @@ export function Deploy() {
                   <input defaultValue="llama-3.1-405b-instruct" />
                 </div>
                 <span className="hint">
-                  arch: llama · format: safetensors · fp8 · 405B · TEXT_GENERATION — Ready in 3 clouds
+                  arch: llama · format: safetensors · fp8 · 405B · TEXT_GENERATION — Ready in 3
+                  clouds
                 </span>
               </div>
             </div>
@@ -120,7 +121,9 @@ export function Deploy() {
                     style={{ color: "var(--green)" }}
                   />
                 </div>
-                <span className="hint">score 0.96 — beats vllm-h100 (0.81) on fp8 + PD support</span>
+                <span className="hint">
+                  score 0.96 — beats vllm-h100 (0.81) on fp8 + PD support
+                </span>
               </div>
             </div>
           </div>
@@ -177,7 +180,9 @@ export function Deploy() {
                   <span className="rk" />
                   Let OME place
                 </div>
-                <div className="rd">Scheduler picks the best-fit cluster by accelerator + free capacity.</div>
+                <div className="rd">
+                  Scheduler picks the best-fit cluster by accelerator + free capacity.
+                </div>
               </label>
               <label className="rcard">
                 <input type="radio" name="place" />
@@ -314,10 +319,31 @@ export function Deploy() {
                 Canary steps preview
               </div>
               <div className="canary-steps">
-                <span className="cstep done" style={{ background: "var(--accent)", borderColor: "var(--accent)" }} />
-                <span className="cstep" style={{ background: "var(--accent-dim)", borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)" }} />
-                <span className="cstep" style={{ background: "var(--accent-dim)", borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)" }} />
-                <span className="cstep" style={{ background: "var(--accent-dim)", borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)" }} />
+                <span
+                  className="cstep done"
+                  style={{ background: "var(--accent)", borderColor: "var(--accent)" }}
+                />
+                <span
+                  className="cstep"
+                  style={{
+                    background: "var(--accent-dim)",
+                    borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)",
+                  }}
+                />
+                <span
+                  className="cstep"
+                  style={{
+                    background: "var(--accent-dim)",
+                    borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)",
+                  }}
+                />
+                <span
+                  className="cstep"
+                  style={{
+                    background: "var(--accent-dim)",
+                    borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)",
+                  }}
+                />
               </div>
               <div
                 style={{
@@ -347,8 +373,8 @@ export function Deploy() {
             <div className="summary-note">
               <Info />
               <div>
-                Deploy creates <b>one</b> InferenceService on the control plane. OME placement fans it
-                out to the chosen workload cluster(s) — you are not creating per-cluster objects.
+                Deploy creates <b>one</b> InferenceService on the control plane. OME placement fans
+                it out to the chosen workload cluster(s) — you are not creating per-cluster objects.
               </div>
             </div>
             <div className="card-body" style={{ padding: "16px 20px" }}>

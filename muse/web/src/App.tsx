@@ -1,14 +1,7 @@
 import { useState } from "react";
 
 import { api } from "./api";
-import {
-  BrandMark,
-  IconCapacity,
-  IconDeploy,
-  IconFleet,
-  IconModels,
-  IconWorkloads,
-} from "./icons";
+import { BrandMark, IconCapacity, IconDeploy, IconFleet, IconModels, IconWorkloads } from "./icons";
 import { useLive } from "./live";
 import { Capacity } from "./panels/Capacity";
 import { Deploy } from "./panels/Deploy";

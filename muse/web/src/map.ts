@@ -5,14 +5,7 @@
 // endpoint (Workloads PD/canary detail, Models onboarding pipeline) are left
 // empty and the panels render a placeholder.
 
-import type {
-  CapacityResp,
-  ClusterItem,
-  EventItem,
-  IsvcItem,
-  ModelItem,
-  RolloutItem,
-} from "./api";
+import type { CapacityResp, ClusterItem, EventItem, IsvcItem, ModelItem, RolloutItem } from "./api";
 import type {
   BarTone,
   Cloud,
@@ -80,7 +73,10 @@ function modePill(mode: string | undefined): Pill {
 
 // ---- Fleet ----------------------------------------------------------------
 
-export function toClusterRows(clusters: ClusterItem[], capacity: CapacityResp | null): ClusterRow[] {
+export function toClusterRows(
+  clusters: ClusterItem[],
+  capacity: CapacityResp | null,
+): ClusterRow[] {
   const byCluster = capacity?.byCluster ?? [];
   return clusters.map((c) => {
     const groups = byCluster.filter((g) => g.name === c.name);
@@ -197,7 +193,9 @@ export function toModelCards(base: ModelItem[], cluster: ModelItem[]): ModelCard
       name: m.name,
       scoped,
       status: statePill(m.state),
-      where: scoped ? `cluster-scoped · ${m.cluster}` : `${m.namespace ?? "default"} · ${m.cluster}`,
+      where: scoped
+        ? `cluster-scoped · ${m.cluster}`
+        : `${m.namespace ?? "default"} · ${m.cluster}`,
       specs,
     };
   };

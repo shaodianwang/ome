@@ -5,20 +5,23 @@ import { Pill } from "../components";
 import { Refresh, Search } from "../icons";
 import { useLive } from "../live";
 import { toModelCards } from "../map";
+import { matches } from "../util";
 
 export function Models() {
-  const base = useLive(api.baseModels, { kinds: ["BaseModel"], throttleMs: 8_000, intervalMs: 30_000 });
-  const cluster = useLive(api.clusterBaseModels, { kinds: ["ClusterBaseModel"], throttleMs: 8_000, intervalMs: 30_000 });
+  const base = useLive(api.baseModels, {
+    kinds: ["BaseModel"],
+    throttleMs: 8_000,
+    intervalMs: 30_000,
+  });
+  const cluster = useLive(api.clusterBaseModels, {
+    kinds: ["ClusterBaseModel"],
+    throttleMs: 8_000,
+    intervalMs: 30_000,
+  });
   const [q, setQ] = useState("");
 
   const all = toModelCards(base.data?.items ?? [], cluster.data?.items ?? []);
-  const needle = q.trim().toLowerCase();
-  const models = all.filter(
-    (m) =>
-      !needle ||
-      m.name.toLowerCase().includes(needle) ||
-      m.specs.some((s) => s.label.toLowerCase().includes(needle)),
-  );
+  const models = all.filter((m) => matches(q, m.name, ...m.specs.map((s) => s.label)));
 
   const empty =
     base.error ??
@@ -36,7 +39,13 @@ export function Models() {
           </p>
         </div>
         <div className="actions">
-          <button className="btn ghost" onClick={() => { base.refetch(); cluster.refetch(); }}>
+          <button
+            className="btn ghost"
+            onClick={() => {
+              base.refetch();
+              cluster.refetch();
+            }}
+          >
             <Refresh />
             Refresh
           </button>
@@ -78,8 +87,8 @@ export function Models() {
         ))}
       </div>
       {models.length === 0 ? (
-        <div className="muted" style={{ padding: 24, fontSize: "var(--t-sm)" }}>
-          {needle && all.length ? `No models match "${q}"` : empty}
+        <div className="muted empty-note">
+          {q.trim() && all.length ? `No models match "${q}"` : empty}
         </div>
       ) : null}
     </section>

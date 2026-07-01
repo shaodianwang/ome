@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.local
 .vite/
+# lockfile left uncommitted (matches muse/Cargo.lock); installs resolve fresh
+package-lock.json

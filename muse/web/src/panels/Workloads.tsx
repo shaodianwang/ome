@@ -6,20 +6,24 @@ import { Pill } from "../components";
 import { Plus, Search } from "../icons";
 import { useLive } from "../live";
 import { toWorkloadRows } from "../map";
+import { matches } from "../util";
 
 export function Workloads({ goto }: { goto: (p: PanelKey) => void }) {
-  const isvcs = useLive(api.inferenceServices, { kinds: ["InferenceService"], throttleMs: 5_000, intervalMs: 30_000 });
-  const rollouts = useLive(api.rollouts, { kinds: ["InferenceService"], throttleMs: 5_000, intervalMs: 30_000 });
+  const isvcs = useLive(api.inferenceServices, {
+    kinds: ["InferenceService"],
+    throttleMs: 5_000,
+    intervalMs: 30_000,
+  });
+  const rollouts = useLive(api.rollouts, {
+    kinds: ["InferenceService"],
+    throttleMs: 5_000,
+    intervalMs: 30_000,
+  });
   const [q, setQ] = useState("");
 
   const all = toWorkloadRows(isvcs.data?.items ?? [], rollouts.data?.items ?? []);
-  const needle = q.trim().toLowerCase();
-  const workloads = all.filter(
-    (w) =>
-      !needle ||
-      [w.name, w.namespace, w.model, w.runtime, w.placement].some((f) =>
-        f.toLowerCase().includes(needle),
-      ),
+  const workloads = all.filter((w) =>
+    matches(q, w.name, w.namespace, w.model, w.runtime, w.placement),
   );
 
   return (
@@ -95,8 +99,8 @@ export function Workloads({ goto }: { goto: (p: PanelKey) => void }) {
               ))}
               {workloads.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="muted" style={{ textAlign: "center", padding: 24 }}>
-                    {needle && all.length
+                  <td colSpan={10} className="muted empty-cell">
+                    {q.trim() && all.length
                       ? `No InferenceServices match "${q}"`
                       : (isvcs.error ??
                         (isvcs.loading ? "Loading InferenceServices…" : "No InferenceServices"))}
@@ -108,9 +112,9 @@ export function Workloads({ goto }: { goto: (p: PanelKey) => void }) {
         </div>
       </div>
 
-      <div style={{ marginTop: 14, fontSize: "var(--t-sm)", color: "var(--fg-3)" }}>
-        Showing <b style={{ color: "var(--fg)" }}>{workloads.length}</b> InferenceServices across the
-        fleet
+      <div className="list-foot">
+        Showing <b style={{ color: "var(--fg)" }}>{workloads.length}</b> InferenceServices across
+        the fleet
       </div>
     </section>
   );

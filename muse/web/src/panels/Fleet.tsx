@@ -29,10 +29,18 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
   // Counts change only on create/delete (rare), so refetch is coalesced and
   // backstopped by a slow interval; capacity isn't on the stream (interval-only);
   // the activity feed streams in place with no refetch.
-  const clusters = useLive(api.clusters, { kinds: ["InferenceService"], throttleMs: 8_000, intervalMs: 30_000 });
+  const clusters = useLive(api.clusters, {
+    kinds: ["InferenceService"],
+    throttleMs: 8_000,
+    intervalMs: 30_000,
+  });
   const capacity = useLive(api.capacity, { kinds: [], intervalMs: 30_000 });
   const events = useEventFeed(60);
-  const rollouts = useLive(api.rollouts, { kinds: ["InferenceService"], throttleMs: 5_000, intervalMs: 30_000 });
+  const rollouts = useLive(api.rollouts, {
+    kinds: ["InferenceService"],
+    throttleMs: 5_000,
+    intervalMs: 30_000,
+  });
 
   const clusterItems = clusters.data?.items ?? [];
   const rows = toClusterRows(clusterItems, capacity.data);
@@ -60,8 +68,8 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
         <div>
           <h1>Fleet overview</h1>
           <p>
-            Single pane across every connected GPU and TPU cluster. The control plane reconciles each
-            InferenceService and fans placement out to workload clusters.
+            Single pane across every connected GPU and TPU cluster. The control plane reconciles
+            each InferenceService and fans placement out to workload clusters.
           </p>
         </div>
         <div className="actions">
@@ -112,7 +120,9 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
             {gpu ? (
               <>
                 <Bar pct={kpct(gpu)} width={120} />
-                <span className="mono" style={{ fontSize: 11 }}>{kpct(gpu)}%</span>
+                <span className="mono" style={{ fontSize: 11 }}>
+                  {kpct(gpu)}%
+                </span>
               </>
             ) : (
               "no GPU clusters"
@@ -129,7 +139,9 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
             {tpu ? (
               <>
                 <Bar pct={kpct(tpu)} width={120} />
-                <span className="mono" style={{ fontSize: 11 }}>{kpct(tpu)}%</span>
+                <span className="mono" style={{ fontSize: 11 }}>
+                  {kpct(tpu)}%
+                </span>
               </>
             ) : (
               "no TPU clusters"
@@ -192,7 +204,7 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
                 ))}
                 {rows.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="muted" style={{ textAlign: "center", padding: 24 }}>
+                    <td colSpan={7} className="muted empty-cell">
                       {clusters.error ?? (clusters.loading ? "Loading clusters…" : "No clusters")}
                     </td>
                   </tr>
@@ -275,7 +287,7 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
               ))}
               {rolloutCards.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="muted" style={{ textAlign: "center", padding: 24 }}>
+                  <td colSpan={6} className="muted empty-cell">
                     {rollouts.loading ? "Loading…" : "No rollouts in progress"}
                   </td>
                 </tr>
