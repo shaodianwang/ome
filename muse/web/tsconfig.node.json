@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    // A referenced (composite) project must emit; emit declarations only, to a
+    // throwaway dir under node_modules — Vite does the real build of this file.
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "node_modules/.tmp/tsc-node",
+    "tsBuildInfoFile": "node_modules/.tmp/tsc-node/tsconfig.tsbuildinfo"
+  },
+  "include": ["vite.config.ts"]
+}
