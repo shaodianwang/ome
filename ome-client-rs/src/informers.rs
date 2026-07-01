@@ -33,11 +33,63 @@ use tokio::sync::broadcast;
 
 pub use kube::runtime::reflector::Store;
 
+use k8s_openapi::api::core::v1::{Node, Pod};
+
 use crate::listers::Lister;
 use crate::{
     BaseModel, ClusterBaseModel, ClusterServingRuntime, FineTunedWeight, InferenceReplica,
     InferenceService, ServingRuntime, WorkloadCluster,
 };
+
+/// Cache pruning: drop fields no reader needs *before* an object enters the
+/// reflector store. On large clusters this is a big memory and deserialize-cost
+/// saving — `Node.status.images` is the single largest field on a node (the full
+/// image inventory, tens of KB each), and `managedFields` is dead weight on every
+/// object. Implemented per watched kind so the generic informer can prune without
+/// knowing the concrete type.
+pub trait Prune {
+    /// Strip unneeded fields in place.
+    fn prune(&mut self);
+}
+
+/// Drop `metadata.managedFields` — server-side-apply bookkeeping no reader uses.
+fn drop_managed_fields<K: Resource>(obj: &mut K) {
+    obj.meta_mut().managed_fields = None;
+}
+
+macro_rules! prune_managed_fields_only {
+    ($($t:ty),+ $(,)?) => {
+        $(impl Prune for $t {
+            fn prune(&mut self) {
+                drop_managed_fields(self);
+            }
+        })+
+    };
+}
+
+// Most kinds only need managedFields stripped; their specs/status are small.
+prune_managed_fields_only!(
+    Pod,
+    InferenceService,
+    BaseModel,
+    ServingRuntime,
+    InferenceReplica,
+    ClusterBaseModel,
+    ClusterServingRuntime,
+    FineTunedWeight,
+    WorkloadCluster,
+);
+
+impl Prune for Node {
+    fn prune(&mut self) {
+        drop_managed_fields(self);
+        // The image inventory feeds no view (capacity reads allocatable/capacity)
+        // and is by far the heaviest part of a Node object — drop it.
+        if let Some(status) = self.status.as_mut() {
+            status.images = None;
+        }
+    }
+}
 
 /// Change-event broadcast buffer per informer. A subscriber that lags past this
 /// many events receives `RecvError::Lagged` and should resync from the lister.
@@ -99,19 +151,30 @@ where
     }
 }
 
-/// Start a shared informer for `api`: a background task drives the
-/// watcher → reflector so the [`Store`] stays current and every change is
-/// broadcast to subscribers. Returns once the initial sync completes. Generic
-/// over any kube resource; must run inside a tokio runtime.
-pub async fn shared_informer<K>(api: Api<K>) -> Informer<K>
+/// Start a shared informer for `api` *without* awaiting initial sync: spawns the
+/// background watcher → reflector task and returns immediately. The [`Store`]
+/// (and any [`Lister`] over it) is live at once and fills as the cache syncs;
+/// await [`Store::wait_until_ready`] to know when the first sync completes. Use
+/// this to serve while caches warm; use [`shared_informer`] when you need a
+/// fully-populated cache before proceeding.
+///
+/// `config` selects the initial-list strategy. On large clusters the streaming
+/// `WatchList` strategy (`watcher::Config::default().streaming_lists()`) is far
+/// cheaper than the default paginated `LIST` and avoids the "too old resource
+/// version" expiry a slow paginated list can hit — but it needs apiserver
+/// WatchList support (beta, on by default since Kubernetes 1.32), so the caller
+/// chooses. Every object is [`Prune`]d before entering the cache regardless.
+/// Generic over any watched kind; must run inside a tokio runtime.
+pub fn shared_informer_lazy<K>(api: Api<K>, config: watcher::Config) -> Informer<K>
 where
-    K: Resource + Clone + DeserializeOwned + Debug + Send + Sync + 'static,
+    K: Resource + Clone + DeserializeOwned + Debug + Send + Sync + Prune + 'static,
     K::DynamicType: Clone + Eq + Hash + Default,
 {
     let (reader, writer) = reflector::store();
     let (events, _) = broadcast::channel(EVENT_BUFFER);
     let tx = events.clone();
-    let stream = reflector(writer, watcher(api, watcher::Config::default()));
+    let pruned = watcher(api, config).map(|event| event.map(|ev| ev.modify(|obj| obj.prune())));
+    let stream = reflector(writer, pruned);
     tokio::spawn(async move {
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
@@ -130,14 +193,27 @@ where
             }
         }
     });
-    reader
-        .wait_until_ready()
-        .await
-        .expect("informer initial sync failed (watcher task dropped)");
     Informer {
         store: reader,
         events,
     }
+}
+
+/// Start a shared informer and await its initial sync before returning — the
+/// [`Lister`] is fully populated when this resolves. See [`shared_informer_lazy`]
+/// for the non-blocking variant, the `config` strategy, and the efficiency notes.
+pub async fn shared_informer<K>(api: Api<K>, config: watcher::Config) -> Informer<K>
+where
+    K: Resource + Clone + DeserializeOwned + Debug + Send + Sync + Prune + 'static,
+    K::DynamicType: Clone + Eq + Hash + Default,
+{
+    let informer = shared_informer_lazy(api, config);
+    informer
+        .store
+        .wait_until_ready()
+        .await
+        .expect("informer initial sync failed (watcher task dropped)");
+    informer
 }
 
 /// Shares one cluster-wide informer per kind and hands out typed `Lister`s and
@@ -150,15 +226,33 @@ pub struct SharedInformerFactory {
 
 struct Inner {
     client: Client,
+    // Initial-list strategy applied to every informer this factory starts.
+    list_config: watcher::Config,
     // One shared Informer per kind, type-erased by TypeId.
     informers: Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
 }
 
 impl SharedInformerFactory {
+    /// A factory whose informers use the default paginated initial-list strategy
+    /// (`ListWatch`), which every apiserver supports.
     pub fn new(client: Client) -> Self {
+        Self::with_streaming_lists(client, false)
+    }
+
+    /// A factory whose informers stream the initial list (`WatchList`) when
+    /// `streaming` is set — far cheaper on large clusters, but requires apiserver
+    /// WatchList support (beta, on by default since Kubernetes 1.32). When unset,
+    /// uses the paginated strategy that works everywhere.
+    pub fn with_streaming_lists(client: Client, streaming: bool) -> Self {
+        let list_config = if streaming {
+            watcher::Config::default().streaming_lists()
+        } else {
+            watcher::Config::default()
+        };
         Self {
             inner: Arc::new(Inner {
                 client,
+                list_config,
                 informers: Mutex::new(HashMap::new()),
             }),
         }
@@ -168,7 +262,14 @@ impl SharedInformerFactory {
     /// initial sync the first time `K` is requested; later calls share it.
     pub async fn informer<K>(&self) -> Informer<K>
     where
-        K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug + Send + Sync + 'static,
+        K: Resource<DynamicType = ()>
+            + Clone
+            + DeserializeOwned
+            + Debug
+            + Send
+            + Sync
+            + Prune
+            + 'static,
     {
         let tid = TypeId::of::<K>();
         if let Some(existing) = self
@@ -183,7 +284,51 @@ impl SharedInformerFactory {
             return existing;
         }
         // Build outside the lock (it awaits initial sync); dedup on insert.
-        let informer = shared_informer(Api::<K>::all(self.inner.client.clone())).await;
+        let informer = shared_informer(
+            Api::<K>::all(self.inner.client.clone()),
+            self.inner.list_config.clone(),
+        )
+        .await;
+        self.inner
+            .informers
+            .lock()
+            .unwrap()
+            .entry(tid)
+            .or_insert_with(|| Box::new(informer.clone()));
+        informer
+    }
+
+    /// Like [`informer`](Self::informer) but returns *without* awaiting initial
+    /// sync — the cache warms in the background. Use for serve-while-warming
+    /// startup, then await the lister's `store().wait_until_ready()` to track
+    /// readiness. Shares the same per-kind informer as [`informer`](Self::informer).
+    pub fn informer_lazy<K>(&self) -> Informer<K>
+    where
+        K: Resource<DynamicType = ()>
+            + Clone
+            + DeserializeOwned
+            + Debug
+            + Send
+            + Sync
+            + Prune
+            + 'static,
+    {
+        let tid = TypeId::of::<K>();
+        if let Some(existing) = self
+            .inner
+            .informers
+            .lock()
+            .unwrap()
+            .get(&tid)
+            .and_then(|b| b.downcast_ref::<Informer<K>>())
+            .cloned()
+        {
+            return existing;
+        }
+        let informer = shared_informer_lazy(
+            Api::<K>::all(self.inner.client.clone()),
+            self.inner.list_config.clone(),
+        );
         self.inner
             .informers
             .lock()
@@ -196,7 +341,14 @@ impl SharedInformerFactory {
     /// The shared `Store` for `K`, creating the informer if needed.
     pub async fn store<K>(&self) -> Store<K>
     where
-        K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug + Send + Sync + 'static,
+        K: Resource<DynamicType = ()>
+            + Clone
+            + DeserializeOwned
+            + Debug
+            + Send
+            + Sync
+            + Prune
+            + 'static,
     {
         self.informer::<K>().await.store()
     }
@@ -204,7 +356,14 @@ impl SharedInformerFactory {
     /// A typed `Lister` for any kind `K`, creating the informer if needed.
     pub async fn lister<K>(&self) -> Lister<K>
     where
-        K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug + Send + Sync + 'static,
+        K: Resource<DynamicType = ()>
+            + Clone
+            + DeserializeOwned
+            + Debug
+            + Send
+            + Sync
+            + Prune
+            + 'static,
     {
         self.informer::<K>().await.lister()
     }
