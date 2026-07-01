@@ -1,16 +1,9 @@
-// View-model types for the MUSE console.
-//
-// These describe what the UI renders. For now they're filled by `mock.ts`; the
-// follow-up that wires the live read plane will map the muse API responses
-// (/v1/clusters, /v1/capacity, /v1/inferenceservices, /v1/{base,cluster}models,
-// /v1/nodes) into these same shapes, so only the data source changes.
+// View-model types for the MUSE console — the shapes the panels render, mapped
+// from the muse read-plane API (see src/map.ts and src/api.ts).
 
 export type Cloud = "meta" | "gcp" | "oci" | "cw";
 export type Tone = "green" | "amber" | "red" | "blue" | "violet" | "cyan" | "slate";
 export type BarTone = "" | "green" | "amber" | "red" | "violet";
-export type CellState = "used" | "free" | "hot" | "down";
-export type StepState = "done" | "cur" | "";
-export type ModelSource = "hf" | "meta" | "s3" | "oci";
 
 export const CLOUD_LABEL: Record<Cloud, string> = {
   meta: "Meta",
@@ -46,38 +39,17 @@ export interface FeedItem {
   when: string;
 }
 
-/** Fleet · active rollouts strip */
+/** Fleet · active rollouts */
 export interface Rollout {
   name: string;
   strategy: Pill;
-  /** "steps" renders the canary step dots; "bar" renders a progress bar. */
-  kind: "steps" | "bar";
-  steps?: StepState[];
-  barTone?: BarTone;
-  barPct?: number;
+  barTone: BarTone;
+  barPct: number;
   barStriped?: boolean;
   note: string;
   gate: Pill;
   cluster: string;
   started: string;
-}
-
-/** Workloads · expandable detail */
-export interface CompCard {
-  badge: Pill;
-  title: string;
-  kv: [string, string][];
-}
-export interface CanaryInfo {
-  steps: StepState[];
-  labels: string[];
-  kv: [string, string][];
-}
-export interface WorkloadDetail {
-  components: CompCard[];
-  placement?: { cols: string[]; rows: string[][] };
-  canary?: CanaryInfo;
-  showActions?: boolean;
 }
 
 /** Workloads · table row */
@@ -86,7 +58,6 @@ export interface WorkloadRow {
   name: string;
   namespace: string;
   model: string;
-  modelSub: string;
   runtime: string;
   mode: Pill;
   placement: string;
@@ -94,65 +65,13 @@ export interface WorkloadRow {
   rollout: Pill;
   age: string;
   status: Pill;
-  detail?: WorkloadDetail;
 }
 
-/** Models · onboarding pipeline node */
-export interface PipelineNode {
-  label: string;
-  state: StepState;
-}
-/** Models · transfer/convert progress block */
-export interface Xfer {
-  routeFrom?: { cloud: Cloud; label: string };
-  routeTo?: { cloud: Cloud; label: string };
-  routeNote?: string;
-  heading?: string;
-  pct: number;
-  tone: BarTone;
-  stats: [string, string][];
-}
+/** Models · registry card (real BaseModel / ClusterBaseModel metadata) */
 export interface ModelCard {
-  source: ModelSource;
   name: string;
+  scoped: boolean;
   status: Pill;
-  uri: string;
+  where: string;
   specs: { label: string; accent?: boolean }[];
-  pipeline: PipelineNode[];
-  /** in-flight convert/transfer progress (mutually exclusive with `replicas`) */
-  xfer?: Xfer;
-  /** replica placement chips for Ready models */
-  replicas?: { cloud: Cloud; label: string }[];
-}
-
-/** Capacity · RDMA island */
-export interface Island {
-  name: string;
-  status: Pill;
-  cells: CellState[];
-  nodes: string;
-  util: string;
-}
-/** Capacity · TPU slice */
-export interface Slice {
-  name: string;
-  status: Pill;
-  topo: string;
-  free: number;
-  total: number;
-  barTone: BarTone;
-  barPct: number;
-  chips: string;
-}
-/** Capacity · GPU pool */
-export interface Pool {
-  name: string;
-  cloud: Cloud;
-  accel: string;
-  status: Pill;
-  total: string;
-  inUse: string;
-  free: string;
-  barTone: BarTone;
-  barPct: number;
 }

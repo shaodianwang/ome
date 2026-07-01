@@ -1,23 +1,20 @@
 import { useState } from "react";
 
-import { CloudDot } from "./components";
+import { api } from "./api";
 import {
-  Bell,
   BrandMark,
-  ChevronDown,
   IconCapacity,
   IconDeploy,
   IconFleet,
   IconModels,
   IconWorkloads,
-  Search,
 } from "./icons";
+import { useLive } from "./live";
 import { Capacity } from "./panels/Capacity";
 import { Deploy } from "./panels/Deploy";
 import { Fleet } from "./panels/Fleet";
 import { Models } from "./panels/Models";
 import { Workloads } from "./panels/Workloads";
-import type { Cloud } from "./types";
 
 export type PanelKey = "fleet" | "workloads" | "models" | "deploy" | "capacity";
 
@@ -29,24 +26,20 @@ const LABELS: Record<PanelKey, string> = {
   capacity: "Capacity",
 };
 
-const CLOUD_CHIPS: { key: "all" | Cloud; label: string }[] = [
-  { key: "all", label: "All" },
-  { key: "meta", label: "Meta" },
-  { key: "gcp", label: "GCP" },
-  { key: "oci", label: "OCI" },
-  { key: "cw", label: "CoreWeave" },
-];
-
 export default function App() {
   const [panel, setPanel] = useState<PanelKey>("fleet");
-  const [cloud, setCloud] = useState<"all" | Cloud>("all");
   const goto = (p: PanelKey) => setPanel(p);
 
-  const navItem = (key: PanelKey, label: string, Icon: typeof IconFleet, badge?: string) => (
+  // Sidebar connection status, from the same read plane the panels use.
+  const clusters = useLive(api.clusters, { kinds: ["InferenceService"], intervalMs: 30_000 });
+  const items = clusters.data?.items ?? [];
+  const ready = items.filter((c) => c.ready).length;
+  const syncing = items.length - ready;
+
+  const navItem = (key: PanelKey, label: string, Icon: typeof IconFleet) => (
     <div className={`nav-item ${panel === key ? "active" : ""}`} onClick={() => setPanel(key)}>
       <Icon className="ico" />
       <span>{label}</span>
-      {badge ? <span className="badge">{badge}</span> : null}
     </div>
   );
 
@@ -65,8 +58,8 @@ export default function App() {
         <nav className="nav">
           <div className="nav-group-label">Operate</div>
           {navItem("fleet", "Fleet", IconFleet)}
-          {navItem("workloads", "Workloads", IconWorkloads, "128")}
-          {navItem("models", "Models", IconModels, "47")}
+          {navItem("workloads", "Workloads", IconWorkloads)}
+          {navItem("models", "Models", IconModels)}
           <div className="nav-group-label">Provision</div>
           {navItem("deploy", "Deploy", IconDeploy)}
           {navItem("capacity", "Capacity", IconCapacity)}
@@ -74,12 +67,17 @@ export default function App() {
 
         <div className="sidebar-foot">
           <div>
-            <span className="dot" />
-            Control plane healthy
+            <span
+              className="dot"
+              style={{ background: syncing ? "var(--amber)" : "var(--green)" }}
+            />
+            {items.length ? `${items.length} clusters connected` : "connecting…"}
           </div>
-          <div style={{ marginTop: 4 }} className="mono">
-            ome-manager · v1beta1 · 4 shards
-          </div>
+          {items.length ? (
+            <div style={{ marginTop: 4 }} className="mono">
+              {syncing ? `${syncing} syncing · ${ready} ready` : "all synced"}
+            </div>
+          ) : null}
         </div>
       </aside>
 
@@ -87,37 +85,9 @@ export default function App() {
         <header className="topbar">
           <div className="crumbs">
             <b>{LABELS[panel]}</b>
-            <span className="sep">/</span>
-            <span>prod</span>
           </div>
           <div className="spacer" />
-
-          <div className="select prod" title="Environment">
-            <span className="env-dot" />
-            <span>prod</span>
-            <ChevronDown className="chev" width={12} height={12} />
-          </div>
-
-          <div className="chipbar">
-            {CLOUD_CHIPS.map((c) => (
-              <div
-                key={c.key}
-                className={`chip ${cloud === c.key ? "active" : ""}`}
-                onClick={() => setCloud(c.key)}
-              >
-                {c.key !== "all" ? <CloudDot cloud={c.key} /> : null}
-                {c.label}
-              </div>
-            ))}
-          </div>
-
-          <button className="icon-btn" title="Search (⌘K)">
-            <Search width={15} height={15} />
-          </button>
-          <button className="icon-btn" title="Notifications">
-            <Bell width={15} height={15} />
-          </button>
-          <div className="avatar" title="s.lin@meta.com">
+          <div className="avatar" title="Signed in">
             SL
           </div>
         </header>

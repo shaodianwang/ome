@@ -52,7 +52,10 @@ use crate::{
     feed::{Feed, FeedEvent},
     health,
     observe::{make_span, track_metrics, MakeRequestUuidV7},
-    views::{node_accel, InferenceServiceView, NodeView, ResourceSummary, RolloutView, Topology},
+    views::{
+        node_accel, BaseModelView, InferenceServiceView, NodeView, ResourceSummary, RolloutView,
+        Topology,
+    },
 };
 
 /// One workload cluster's informer-backed listers.
@@ -637,14 +640,16 @@ async fn list_kind(
                 c.inference_services.list(),
                 InferenceServiceView::of,
             ),
-            "basemodels" => map_view(&c.name, c.base_models.list(), ResourceSummary::of),
+            "basemodels" => map_view(&c.name, c.base_models.list(), BaseModelView::of),
             "servingruntimes" => map_view(&c.name, c.serving_runtimes.list(), ResourceSummary::of),
             "inferencereplicas" => {
                 map_view(&c.name, c.inference_replicas.list(), ResourceSummary::of)
             }
-            "clusterbasemodels" => {
-                map_view(&c.name, c.cluster_base_models.list(), ResourceSummary::of)
-            }
+            "clusterbasemodels" => map_view(
+                &c.name,
+                c.cluster_base_models.list(),
+                BaseModelView::of_cluster,
+            ),
             "clusterservingruntimes" => map_view(
                 &c.name,
                 c.cluster_serving_runtimes.list(),
@@ -699,7 +704,7 @@ async fn get_kind(
                 raw,
                 InferenceServiceView::of,
             ),
-            "basemodels" => one(&c.name, c.base_models.get(&name), raw, ResourceSummary::of),
+            "basemodels" => one(&c.name, c.base_models.get(&name), raw, BaseModelView::of),
             "servingruntimes" => one(
                 &c.name,
                 c.serving_runtimes.get(&name),
@@ -716,7 +721,7 @@ async fn get_kind(
                 &c.name,
                 c.cluster_base_models.get(&name),
                 raw,
-                ResourceSummary::of,
+                BaseModelView::of_cluster,
             ),
             "clusterservingruntimes" => one(
                 &c.name,

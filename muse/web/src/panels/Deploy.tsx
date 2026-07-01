@@ -43,6 +43,24 @@ export function Deploy() {
         </div>
       </div>
 
+      <div
+        className="summary-note"
+        style={{
+          marginBottom: 16,
+          borderRadius: 8,
+          border: "1px solid color-mix(in srgb, var(--amber) 30%, var(--border))",
+          background: "var(--amber-dim)",
+          color: "var(--fg-2)",
+        }}
+      >
+        <Info />
+        <div>
+          <b style={{ color: "var(--amber)" }}>Preview.</b> The write plane isn't wired yet — this
+          form is a design preview with placeholder values and doesn't create anything. When built,
+          Deploy will create one InferenceService on the control plane and let placement fan it out.
+        </div>
+      </div>
+
       <div className="deploy-layout">
         <div className="card">
           {/* 1 model */}
@@ -297,9 +315,9 @@ export function Deploy() {
               </div>
               <div className="canary-steps">
                 <span className="cstep done" style={{ background: "var(--accent)", borderColor: "var(--accent)" }} />
-                <span className="cstep" style={{ background: "var(--accent-dim)", borderColor: "rgba(47,134,255,.4)" }} />
-                <span className="cstep" style={{ background: "var(--accent-dim)", borderColor: "rgba(47,134,255,.4)" }} />
-                <span className="cstep" style={{ background: "var(--accent-dim)", borderColor: "rgba(47,134,255,.4)" }} />
+                <span className="cstep" style={{ background: "var(--accent-dim)", borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)" }} />
+                <span className="cstep" style={{ background: "var(--accent-dim)", borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)" }} />
+                <span className="cstep" style={{ background: "var(--accent-dim)", borderColor: "color-mix(in srgb, var(--accent) 40%, transparent)" }} />
               </div>
               <div
                 style={{
@@ -352,10 +370,19 @@ export function Deploy() {
               </dl>
               <button
                 className="btn primary"
-                style={{ width: "100%", justifyContent: "center", marginTop: 18, padding: 11 }}
+                disabled
+                title="Write plane not yet wired"
+                style={{
+                  width: "100%",
+                  justifyContent: "center",
+                  marginTop: 18,
+                  padding: 11,
+                  opacity: 0.5,
+                  cursor: "not-allowed",
+                }}
               >
                 <Upload />
-                Deploy InferenceService
+                Deploy InferenceService (not yet wired)
               </button>
             </div>
           </div>

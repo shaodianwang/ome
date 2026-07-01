@@ -56,6 +56,14 @@ export interface ModelItem {
   cluster: string;
   name: string;
   namespace?: string;
+  architecture?: string;
+  format?: string;
+  parameterSize?: string;
+  quantization?: string;
+  vendor?: string;
+  capabilities?: string[];
+  state?: string;
+  lifecycle?: string;
   age?: string;
 }
 

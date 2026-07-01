@@ -133,7 +133,6 @@ export function toRollouts(rollouts: RolloutItem[]): Rollout[] {
   return rollouts.map((r) => ({
     name: r.name,
     strategy: modePill(r.deploymentMode),
-    kind: "bar",
     barTone: "amber",
     barPct: r.ready ? 90 : 45,
     barStriped: true,
@@ -162,7 +161,6 @@ export function toWorkloadRows(isvcs: IsvcItem[], rollouts: RolloutItem[]): Work
       name: s.name,
       namespace: s.namespace ?? "—",
       model: s.model ?? "—",
-      modelSub: "",
       runtime: s.runtime ?? "—",
       mode: modePill(s.deploymentMode),
       placement: s.cluster,
@@ -172,25 +170,36 @@ export function toWorkloadRows(isvcs: IsvcItem[], rollouts: RolloutItem[]): Work
         : { label: "Stable", tone: "green" },
       age: s.age ?? "—",
       status,
-      detail: undefined,
     };
   });
 }
 
 // ---- Models ---------------------------------------------------------------
 
+/** Lifecycle state → pill: Ready=green, Failed=red, in-progress=amber, else slate. */
+function statePill(state?: string): Pill {
+  if (!state) return { label: "Unknown", tone: "slate" };
+  if (state === "Ready") return { label: "Ready", tone: "green" };
+  if (state === "Failed") return { label: "Failed", tone: "red" };
+  return { label: state, tone: "amber" }; // Importing / Converting / In Transit / …
+}
+
 export function toModelCards(base: ModelItem[], cluster: ModelItem[]): ModelCard[] {
-  const mk = (m: ModelItem, scoped: boolean): ModelCard => ({
-    source: "hf",
-    name: m.name,
-    status: { label: "Registered", tone: "slate" },
-    uri: scoped ? `clusterbasemodel/${m.name}` : `${m.namespace ?? "default"}/${m.name}`,
-    specs: [
-      { label: scoped ? "cluster-scoped" : (m.namespace ?? "default") },
-      ...(m.age ? [{ label: m.age }] : []),
-    ],
-    pipeline: [],
-    replicas: [{ cloud: cloudOf(m.cluster), label: m.cluster }],
-  });
+  const mk = (m: ModelItem, scoped: boolean): ModelCard => {
+    const specs: { label: string; accent?: boolean }[] = [];
+    if (m.architecture) specs.push({ label: m.architecture, accent: true });
+    if (m.parameterSize && m.parameterSize !== "0") specs.push({ label: m.parameterSize });
+    if (m.format) specs.push({ label: m.format });
+    if (m.quantization) specs.push({ label: m.quantization });
+    if (m.vendor) specs.push({ label: m.vendor });
+    for (const cap of m.capabilities ?? []) if (cap) specs.push({ label: cap });
+    return {
+      name: m.name,
+      scoped,
+      status: statePill(m.state),
+      where: scoped ? `cluster-scoped · ${m.cluster}` : `${m.namespace ?? "default"} · ${m.cluster}`,
+      specs,
+    };
+  };
   return [...cluster.map((m) => mk(m, true)), ...base.map((m) => mk(m, false))];
 }

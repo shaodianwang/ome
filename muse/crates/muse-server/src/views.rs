@@ -15,7 +15,7 @@ use ome_client::{
         api::core::v1::Node,
         apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::ObjectMeta},
     },
-    InferenceService,
+    BaseModel, ClusterBaseModel, InferenceService,
 };
 use serde::Serialize;
 
@@ -122,6 +122,76 @@ impl ResourceSummary {
             age: age(meta),
         }
     }
+}
+
+/// Model-registry overview: the auto-parsed metadata + lifecycle for a BaseModel
+/// or ClusterBaseModel (both share this shape).
+#[derive(Serialize)]
+pub struct BaseModelView {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "parameterSize")]
+    pub parameter_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub capabilities: Vec<String>,
+    /// Lifecycle state from status (e.g. Ready, Importing, Failed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age: Option<String>,
+}
+
+impl BaseModelView {
+    pub fn of(m: &BaseModel) -> Self {
+        Self {
+            name: m.meta().name.clone().unwrap_or_default(),
+            namespace: m.meta().namespace.clone(),
+            architecture: m.spec.model_architecture.clone(),
+            format: m.spec.model_format.as_ref().map(|f| f.name.clone()),
+            parameter_size: m.spec.model_parameter_size.clone(),
+            quantization: m.spec.quantization.clone(),
+            vendor: m.spec.vendor.clone(),
+            capabilities: m.spec.model_capabilities.clone().unwrap_or_default(),
+            state: m.status.as_ref().map(|s| state_string(&s.state)),
+            lifecycle: m.status.as_ref().and_then(|s| s.lifecycle.clone()),
+            age: age(m.meta()),
+        }
+    }
+
+    pub fn of_cluster(m: &ClusterBaseModel) -> Self {
+        Self {
+            name: m.meta().name.clone().unwrap_or_default(),
+            namespace: m.meta().namespace.clone(),
+            architecture: m.spec.model_architecture.clone(),
+            format: m.spec.model_format.as_ref().map(|f| f.name.clone()),
+            parameter_size: m.spec.model_parameter_size.clone(),
+            quantization: m.spec.quantization.clone(),
+            vendor: m.spec.vendor.clone(),
+            capabilities: m.spec.model_capabilities.clone().unwrap_or_default(),
+            state: m.status.as_ref().map(|s| state_string(&s.state)),
+            lifecycle: m.status.as_ref().and_then(|s| s.lifecycle.clone()),
+            age: age(m.meta()),
+        }
+    }
+}
+
+/// Serialize a status `state` enum to its plain string form (e.g. "Ready").
+fn state_string<T: Serialize>(state: &T) -> String {
+    serde_json::to_value(state)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
 }
 
 /// InferenceService overview: the model/runtime it binds, mode, and readiness.
