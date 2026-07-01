@@ -198,6 +198,64 @@ func TestDeploymentModeDetection(t *testing.T) {
 	}
 }
 
+// TestDefaultInferenceService_OMENativeBudgetViaAnnotationAndHeuristic pins the
+// fix for the fleet-wipe defaulter gap: a multi-node engine that resolves to
+// OMENative via the canonical top-level ome.io/deploymentMode annotation OR via
+// the leader+worker heuristic (no spec.deploymentMode, no per-component
+// annotation) must still get the rollout budget defaults. Before the fix,
+// componentResolvesToOMENative only saw the per-component annotation + spec
+// field, so the whole defaulter (including the #619 25% budgets) was skipped for
+// these shapes, leaving the rollout uncapped.
+func TestDefaultInferenceService_OMENativeBudgetViaAnnotationAndHeuristic(t *testing.T) {
+	mnEngine := func() *v1beta1.EngineSpec {
+		return &v1beta1.EngineSpec{
+			Leader: &v1beta1.LeaderSpec{},
+			Worker: &v1beta1.WorkerSpec{Size: intPtr(2)},
+		}
+	}
+	tests := []struct {
+		name string
+		isvc *v1beta1.InferenceService
+	}{
+		{
+			name: "top-level ome.io/deploymentMode=OMENative annotation",
+			isvc: &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
+				},
+				Spec: v1beta1.InferenceServiceSpec{Engine: mnEngine()},
+			},
+		},
+		{
+			name: "leader+worker heuristic (no annotation, no spec.deploymentMode)",
+			isvc: &v1beta1.InferenceService{
+				Spec: v1beta1.InferenceServiceSpec{Engine: mnEngine()},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			c := createFakeClient(t)
+			require.NoError(t, DefaultInferenceService(ctx, c, tt.isvc, nil))
+
+			// Sanity: it resolved to OMENative.
+			assert.Equal(t, string(constants.OMENative),
+				tt.isvc.ObjectMeta.Annotations[constants.DeploymentMode])
+
+			// The defaulter ran → budgets are set to 25% (not left nil/uncapped).
+			lc := tt.isvc.Spec.Engine.Lifecycle
+			require.NotNil(t, lc, "OMENative lifecycle must be defaulted")
+			require.NotNil(t, lc.UpdateStrategy)
+			require.NotNil(t, lc.UpdateStrategy.RollingUpdate)
+			require.NotNil(t, lc.UpdateStrategy.RollingUpdate.MaxSurge)
+			assert.Equal(t, intstr.FromString("25%"), *lc.UpdateStrategy.RollingUpdate.MaxSurge)
+			require.NotNil(t, lc.UpdateStrategy.RollingUpdate.MaxUnavailable)
+			assert.Equal(t, intstr.FromString("25%"), *lc.UpdateStrategy.RollingUpdate.MaxUnavailable)
+		})
+	}
+}
+
 func TestDefaultComponents(t *testing.T) {
 	t.Run("defaultEngine", func(t *testing.T) {
 		tests := []struct {

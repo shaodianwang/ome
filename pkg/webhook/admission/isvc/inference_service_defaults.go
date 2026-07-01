@@ -75,14 +75,29 @@ func DefaultInferenceService(ctx context.Context, c client.Client, isvc *v1beta1
 		}
 	}
 
+	// resolvedMode is the effective deployment mode after the ObjectMeta
+	// resolution above. Components resolve OMENative from it — the canonical
+	// top-level ome.io/deploymentMode annotation (set explicitly by the
+	// operator or by the leader+worker heuristic) — falling back to
+	// spec.DeploymentMode. Without this the component defaulter only saw the
+	// per-component annotation + spec field, so a multi-node engine declared
+	// the normal way (top-level annotation, no spec.deploymentMode) skipped
+	// defaultOMENativeComponent entirely — including the rollout budget
+	// defaults, leaving it uncapped (fleet-wipe shape).
+	resolvedMode := isvc.Spec.DeploymentMode
+	if m := isvc.ObjectMeta.Annotations[constants.DeploymentMode]; m != "" {
+		mm := constants.DeploymentModeType(m)
+		resolvedMode = &mm
+	}
+
 	if isvc.Spec.Engine != nil {
-		defaultEngine(isvc.Spec.Engine, isvc.Spec.DeploymentMode)
+		defaultEngine(isvc.Spec.Engine, resolvedMode)
 	}
 	if isvc.Spec.Decoder != nil {
-		defaultDecoder(isvc.Spec.Decoder, isvc.Spec.DeploymentMode)
+		defaultDecoder(isvc.Spec.Decoder, resolvedMode)
 	}
 	if isvc.Spec.Router != nil {
-		defaultRouter(isvc.Spec.Router, isvc.Spec.DeploymentMode)
+		defaultRouter(isvc.Spec.Router, resolvedMode)
 	}
 	// Rollout pacing/structure defaults are applied at runtime by the resolve
 	// layer (coordination.ResolveGroups), not at admission — see OEP-0017.
