@@ -55,14 +55,20 @@ export interface Rollout {
 /** Workloads · table row */
 export interface WorkloadRow {
   id: string;
+  cluster: string;
   name: string;
   namespace: string;
   model: string;
   runtime: string;
   mode: Pill;
-  placement: string;
-  ready: string;
-  rollout: Pill;
+  /** Servable endpoint (status.url), when ready. */
+  endpoint?: string;
+  /** Rolled-up ready/desired replicas across Components, with a health tone. */
+  replicas: { label: string; tone: Tone };
+  /** Model-load summary (e.g. "12 loaded", "2 failed"), when known. */
+  load?: string;
+  /** Why it isn't ready (coarse reason), shown only when not ready. */
+  reason?: string;
   age: string;
   status: Pill;
 }
@@ -70,8 +76,15 @@ export interface WorkloadRow {
 /** Models · registry card (real BaseModel / ClusterBaseModel metadata) */
 export interface ModelCard {
   name: string;
+  cluster: string;
+  namespace?: string;
   scoped: boolean;
   status: Pill;
   where: string;
+  /** Storage backend scheme (manifold / pvc / hf / …). */
+  source?: string;
+  /** Live count of InferenceServices in the fleet referencing this model. */
+  usedBy: number;
+  disabled: boolean;
   specs: { label: string; accent?: boolean }[];
 }

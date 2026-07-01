@@ -103,7 +103,14 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         "serving read plane; caches warming in background"
     );
 
-    let state = server::AppState::new(clusters, topology, feed, signal);
+    let state = server::AppState::new(
+        clusters,
+        topology,
+        feed,
+        signal,
+        config.chat_enabled,
+        Duration::from_secs(config.chat_timeout_secs.max(1)),
+    );
     server::serve(&config, state).await
 }
 

@@ -68,8 +68,8 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
         <div>
           <h1>Fleet overview</h1>
           <p>
-            Single pane across every connected GPU and TPU cluster. The control plane reconciles
-            each InferenceService and fans placement out to workload clusters.
+            One view across every connected GPU and TPU cluster — what's deployed, and how much
+            accelerator capacity is in use.
           </p>
         </div>
         <div className="actions">
@@ -86,7 +86,7 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
 
       <div className="stat-grid">
         <div className="stat">
-          <div className="label">InferenceServices</div>
+          <div className="label">Deployments</div>
           <div className="val">{n(isvcTotal)}</div>
           <div className="meta">across {clusterItems.length} clusters</div>
           <div className="ico-bg">
@@ -153,17 +153,17 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
           <div className="val" style={{ color: "var(--accent-2)" }}>
             {rolloutCards.length}
           </div>
-          <div className="meta">InferenceServices mid-rollout</div>
+          <div className="meta">Deployments mid-rollout</div>
         </div>
       </div>
 
       <div className="two-col">
         <div className="card">
           <div className="card-head">
-            <h3>Workload clusters</h3>
-            <span className="sub">capacity read live from each cluster's informer cache</span>
+            <h3>Clusters</h3>
+            <span className="sub">live accelerator capacity per cluster</span>
             <div className="right">
-              <span className="tag">{clusterItems.length} registered</span>
+              <span className="tag">{clusterItems.length} connected</span>
             </div>
           </div>
           <div className="tbl-wrap">
@@ -175,7 +175,7 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
                   <th>Region</th>
                   <th className="right">Nodes</th>
                   <th>Accelerator</th>
-                  <th>Allocatable used</th>
+                  <th>Utilization</th>
                   <th>Status</th>
                 </tr>
               </thead>
@@ -249,16 +249,14 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
       <div className="card section-gap">
         <div className="card-head">
           <h3>Active rollouts</h3>
-          <span className="sub">InferenceServices not yet fully rolled out</span>
+          <span className="sub">Deployments still rolling out</span>
         </div>
         <div className="tbl-wrap">
           <table className="tbl">
             <thead>
               <tr>
-                <th>InferenceService</th>
-                <th>Strategy</th>
+                <th>Deployment</th>
                 <th>Progress</th>
-                <th>Gate</th>
                 <th>Cluster</th>
                 <th className="right">Age</th>
               </tr>
@@ -267,10 +265,7 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
               {rolloutCards.map((r) => (
                 <tr key={`${r.cluster}/${r.name}`}>
                   <td className="cell-name mono">{r.name}</td>
-                  <td>
-                    <Pill tone={r.strategy.tone} label={r.strategy.label} />
-                  </td>
-                  <td style={{ width: 230 }}>
+                  <td style={{ width: 260 }}>
                     <div className="canary-track">
                       <Bar pct={r.barPct ?? 0} tone={r.barTone} striped={r.barStriped} />
                       <span className="muted" style={{ fontSize: 11 }}>
@@ -278,16 +273,13 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
                       </span>
                     </div>
                   </td>
-                  <td>
-                    <Pill tone={r.gate.tone} label={r.gate.label} />
-                  </td>
                   <td className="mono muted">{r.cluster}</td>
                   <td className="right muted nowrap">{r.started}</td>
                 </tr>
               ))}
               {rolloutCards.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="muted empty-cell">
+                  <td colSpan={4} className="muted empty-cell">
                     {rollouts.loading ? "Loading…" : "No rollouts in progress"}
                   </td>
                 </tr>

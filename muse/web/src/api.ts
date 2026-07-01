@@ -41,6 +41,25 @@ export interface ListResp<T> {
   items: T[];
 }
 
+/** A status condition, projected (shared by ISVC + model detail). */
+export interface ConditionItem {
+  type: string;
+  status: string;
+  reason?: string;
+  message?: string;
+}
+
+/** One ISVC Component (engine / decoder / router): readiness + live replicas. */
+export interface ComponentItem {
+  name: string;
+  ready?: boolean;
+  currentReplicas?: number;
+  desiredReplicas?: number;
+  rolloutPhase?: string;
+  revision?: string;
+  url?: string;
+}
+
 export interface IsvcItem {
   cluster: string;
   name: string;
@@ -49,21 +68,77 @@ export interface IsvcItem {
   runtime?: string;
   deploymentMode?: string;
   ready?: boolean;
+  url?: string;
+  components?: ComponentItem[];
+  modelState?: string;
+  loadedCopies?: number;
+  failedCopies?: number;
+  reason?: string;
+  message?: string;
   age?: string;
+}
+
+export interface PlacementCandidate {
+  cluster: string;
+  phase?: string;
+}
+export interface PlacementItem {
+  cluster?: string;
+  phase?: string;
+  endpoint?: string;
+  candidates?: PlacementCandidate[];
+}
+export interface CanaryItem {
+  currentStep: number;
+  trafficWeight: number;
+}
+
+/** Full ISVC detail (drawer): the overview plus conditions, placement, canary. */
+export interface IsvcDetail extends IsvcItem {
+  conditions?: ConditionItem[];
+  placement?: PlacementItem;
+  canary?: CanaryItem;
 }
 
 export interface ModelItem {
   cluster: string;
   name: string;
   namespace?: string;
+  displayName?: string;
   architecture?: string;
   format?: string;
   parameterSize?: string;
   quantization?: string;
+  maxTokens?: number;
   vendor?: string;
+  version?: string;
   capabilities?: string[];
+  /** Storage backend scheme: "manifold" | "pvc" | "hf" | "oci" | … */
+  source?: string;
+  storageUri?: string;
+  disabled?: boolean;
   state?: string;
   lifecycle?: string;
+  age?: string;
+}
+
+/** Full model detail (drawer): the overview plus conditions + config + nodes. */
+export interface ModelDetail extends ModelItem {
+  conditions?: ConditionItem[];
+  modelConfiguration?: Record<string, unknown>;
+  nodesReady?: number;
+  nodesFailed?: number;
+}
+
+/** Fine-tuned weight (LoRA / adapter) — links back to a base model. */
+export interface FtwItem {
+  cluster: string;
+  name: string;
+  namespace?: string;
+  baseModel?: string;
+  baseModelNamespace?: string;
+  modelType?: string;
+  version?: string;
   age?: string;
 }
 
@@ -105,6 +180,17 @@ export interface RolloutItem {
   age?: string;
 }
 
+/** Feature flags from `GET /v1/config` (read once at load). */
+export interface AppConfig {
+  chat: boolean;
+}
+
+/** Minimal OpenAI-style chat completion response (only what the console reads). */
+export interface ChatResponse {
+  choices?: { message?: { role?: string; content?: string } }[];
+  [k: string]: unknown;
+}
+
 /** SSE endpoint for live resource-change events (see `live.ts`). */
 export const STREAM_URL = "/v1/stream";
 
@@ -116,6 +202,27 @@ async function getJSON<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function postJSON<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let msg = `${res.status} ${res.statusText}`;
+    try {
+      const j = (await res.json()) as { error?: { message?: string } };
+      if (j.error?.message) msg = j.error.message;
+    } catch {
+      // non-JSON error body — keep the status line
+    }
+    throw new Error(msg);
+  }
+  return (await res.json()) as T;
+}
+
+const enc = encodeURIComponent;
+
 export const api = {
   clusters: () => getJSON<ClustersResp>("/v1/clusters"),
   capacity: () => getJSON<CapacityResp>("/v1/capacity"),
@@ -124,7 +231,20 @@ export const api = {
   inferenceServices: () => getJSON<ListResp<IsvcItem>>("/v1/inferenceservices"),
   baseModels: () => getJSON<ListResp<ModelItem>>("/v1/basemodels"),
   clusterBaseModels: () => getJSON<ListResp<ModelItem>>("/v1/clusterbasemodels"),
+  finetunedWeights: () => getJSON<ListResp<FtwItem>>("/v1/finetunedweights"),
   nodes: () => getJSON<ListResp<NodeItem>>("/v1/nodes"),
   events: () => getJSON<ListResp<EventItem>>("/v1/events"),
   rollouts: () => getJSON<ListResp<RolloutItem>>("/v1/rollouts"),
+  // Per-object detail for the drawers; `cluster` disambiguates same-named
+  // objects across clusters (the server matches the first cluster otherwise).
+  inferenceService: (cluster: string, name: string) =>
+    getJSON<IsvcDetail>(`/v1/inferenceservices/${enc(name)}?cluster=${enc(cluster)}`),
+  baseModel: (cluster: string, name: string) =>
+    getJSON<ModelDetail>(`/v1/basemodels/${enc(name)}?cluster=${enc(cluster)}`),
+  clusterBaseModel: (cluster: string, name: string) =>
+    getJSON<ModelDetail>(`/v1/clusterbasemodels/${enc(name)}?cluster=${enc(cluster)}`),
+  // Console feature flags + the inference test proxy (off unless the server enables it).
+  config: () => getJSON<AppConfig>("/v1/config"),
+  chat: (cluster: string, name: string, body: unknown) =>
+    postJSON<ChatResponse>(`/v1/inferenceservices/${enc(name)}/chat?cluster=${enc(cluster)}`, body),
 };

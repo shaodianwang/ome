@@ -43,3 +43,27 @@ export function UtilCell({ pct, tone = "" }: { pct: number; tone?: BarTone }) {
 export function CloudDot({ cloud }: { cloud: Cloud }) {
   return <span className={`cdot ${cloud}`} />;
 }
+
+/** Cluster scope selector: "" = all clusters, else a specific cluster name. */
+export function ClusterFilter({
+  clusters,
+  value,
+  onChange,
+}: {
+  clusters: string[];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="input cluster-filter">
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">All clusters</option>
+        {clusters.map((c) => (
+          <option key={c} value={c}>
+            {c}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}

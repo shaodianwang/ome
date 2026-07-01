@@ -22,7 +22,7 @@ use axum::{
     http::StatusCode,
     middleware,
     response::sse::{Event as SseEvent, KeepAlive, Sse},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use kube::Resource;
@@ -53,8 +53,8 @@ use crate::{
     health,
     observe::{make_span, track_metrics, MakeRequestUuidV7},
     views::{
-        node_accel, BaseModelView, InferenceServiceView, NodeView, ResourceSummary, RolloutView,
-        Topology,
+        node_accel, BaseModelDetail, BaseModelView, FineTunedWeightView, InferenceServiceDetail,
+        InferenceServiceView, NodeView, ResourceSummary, RolloutView, Topology,
     },
 };
 
@@ -343,6 +343,10 @@ pub struct AppState {
     /// re-walking every Node × Pod on each request.
     capacity: Arc<RwLock<Arc<CapacitySnapshot>>>,
     signal: CapacitySignal,
+    /// Whether the inference test proxy (`POST …/chat`) is enabled.
+    chat_enabled: bool,
+    /// HTTP client for the inference test proxy (timeout baked in). Cheap to clone.
+    http: reqwest::Client,
 }
 
 /// Pre-computed capacity responses (already serialized to JSON).
@@ -357,7 +361,15 @@ impl AppState {
         topology: Topology,
         feed: Feed,
         signal: CapacitySignal,
+        chat_enabled: bool,
+        chat_timeout: Duration,
     ) -> Self {
+        // Client for the inference test proxy. `unwrap_or_default` (not unwrap):
+        // a builder failure falls back to a default client rather than panicking.
+        let http = reqwest::Client::builder()
+            .timeout(chat_timeout)
+            .build()
+            .unwrap_or_default();
         let state = Self {
             clusters: Arc::new(clusters),
             topology,
@@ -367,6 +379,8 @@ impl AppState {
                 per_cluster: HashMap::new(),
             }))),
             signal,
+            chat_enabled,
+            http,
         };
         // Warm the cache once so the first request is served, not computed.
         state.refresh_capacity();
@@ -442,6 +456,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/v1/events", get(list_events))
         .route("/v1/stream", get(stream_events))
         .route("/v1/rollouts", get(list_rollouts))
+        .route("/v1/config", get(get_config))
+        .route("/v1/inferenceservices/{name}/chat", post(chat_proxy))
         .route("/v1/{kind}", get(list_kind))
         .route("/v1/{kind}/{name}", get(get_kind))
         .with_state(state)
@@ -624,6 +640,62 @@ async fn list_rollouts(
     Ok(Json(json!({ "count": items.len(), "items": items })))
 }
 
+/// `GET /v1/config` — feature flags the console reads once at load (currently just
+/// whether the inference test proxy is enabled).
+async fn get_config(State(st): State<AppState>) -> Json<Value> {
+    Json(json!({ "chat": st.chat_enabled }))
+}
+
+/// Query for the inference test proxy: which cluster the ISVC lives on.
+#[derive(Debug, Default, serde::Deserialize)]
+struct ChatParams {
+    cluster: Option<String>,
+}
+
+/// `POST /v1/inferenceservices/{name}/chat` — proxy one OpenAI-style chat request
+/// to the InferenceService's own endpoint (a console test tool, off by default).
+/// The target URL is read from the ISVC's cached `status.url` — never supplied by
+/// the caller — so this can't be turned into an open relay (SSRF-safe). The request
+/// body (model, messages, …) is forwarded verbatim to `<url>/v1/chat/completions`.
+async fn chat_proxy(
+    Path(name): Path<String>,
+    Query(params): Query<ChatParams>,
+    State(st): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    if !st.chat_enabled {
+        return Err(ApiError::Unavailable(
+            "inference test proxy is disabled".to_owned(),
+        ));
+    }
+    let url = st
+        .select(params.cluster.as_deref())?
+        .iter()
+        .find_map(|c| c.inference_services.get(&name))
+        .and_then(|isvc| isvc.status.as_ref().and_then(|s| s.url.clone()))
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| ApiError::Unavailable(format!("{name} has no ready endpoint")))?;
+    let target = format!("{}/v1/chat/completions", url.trim_end_matches('/'));
+    let resp = st
+        .http
+        .post(&target)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| ApiError::BadGateway(format!("request to {target} failed: {e}")))?;
+    let status = resp.status();
+    let payload = resp
+        .json::<Value>()
+        .await
+        .map_err(|e| ApiError::BadGateway(format!("bad response from {target}: {e}")))?;
+    if !status.is_success() {
+        return Err(ApiError::BadGateway(format!(
+            "endpoint returned {status}: {payload}"
+        )));
+    }
+    Ok(Json(payload))
+}
+
 /// `GET /v1/{kind}` — projected overview rows from the informer caches, across
 /// all clusters (or one via `?cluster=`); each row carries its `cluster`.
 async fn list_kind(
@@ -655,9 +727,11 @@ async fn list_kind(
                 c.cluster_serving_runtimes.list(),
                 ResourceSummary::of,
             ),
-            "finetunedweights" => {
-                map_view(&c.name, c.fine_tuned_weights.list(), ResourceSummary::of)
-            }
+            "finetunedweights" => map_view(
+                &c.name,
+                c.fine_tuned_weights.list(),
+                FineTunedWeightView::of,
+            ),
             "workloadclusters" => {
                 map_view(&c.name, c.workload_clusters.list(), ResourceSummary::of)
             }
@@ -702,9 +776,9 @@ async fn get_kind(
                 &c.name,
                 c.inference_services.get(&name),
                 raw,
-                InferenceServiceView::of,
+                InferenceServiceDetail::of,
             ),
-            "basemodels" => one(&c.name, c.base_models.get(&name), raw, BaseModelView::of),
+            "basemodels" => one(&c.name, c.base_models.get(&name), raw, BaseModelDetail::of),
             "servingruntimes" => one(
                 &c.name,
                 c.serving_runtimes.get(&name),
@@ -721,7 +795,7 @@ async fn get_kind(
                 &c.name,
                 c.cluster_base_models.get(&name),
                 raw,
-                BaseModelView::of_cluster,
+                BaseModelDetail::of_cluster,
             ),
             "clusterservingruntimes" => one(
                 &c.name,
@@ -733,7 +807,7 @@ async fn get_kind(
                 &c.name,
                 c.fine_tuned_weights.get(&name),
                 raw,
-                ResourceSummary::of,
+                FineTunedWeightView::of,
             ),
             "workloadclusters" => one(
                 &c.name,

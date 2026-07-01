@@ -19,6 +19,9 @@ kube = { version = "4.0.0", features = ["client", "runtime", "rustls-tls", "http
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 ome-client = { path = "../../../ome-client-rs", features = ["runtime"] }
+# reqwest: the console's inference test proxy forwards one chat request to a
+# model's own endpoint. rustls (no OpenSSL) to match kube; honors HTTP(S)_PROXY.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = "1.0.228"
 serde_json = "1.0.150"
 tokio = { version = "1.52.3", features = ["full"] }

@@ -5,7 +5,15 @@
 // endpoint (Workloads PD/canary detail, Models onboarding pipeline) are left
 // empty and the panels render a placeholder.
 
-import type { CapacityResp, ClusterItem, EventItem, IsvcItem, ModelItem, RolloutItem } from "./api";
+import type {
+  CapacityResp,
+  ClusterItem,
+  ComponentItem,
+  EventItem,
+  IsvcItem,
+  ModelItem,
+  RolloutItem,
+} from "./api";
 import type {
   BarTone,
   Cloud,
@@ -114,13 +122,25 @@ function feedTone(event: EventItem): FeedItem["tone"] {
   if (event.kind.endsWith("Model")) return "violet";
   return "green";
 }
+
+/** Plain-language noun for a CRD kind — the console never shows raw kind names. */
+const HUMAN_KIND: Record<string, string> = {
+  InferenceService: "deployment",
+  BaseModel: "model",
+  ClusterBaseModel: "model",
+  ServingRuntime: "runtime",
+  ClusterServingRuntime: "runtime",
+  FineTunedWeight: "fine-tuned weight",
+  WorkloadCluster: "cluster",
+};
+
 export function toFeed(events: EventItem[]): FeedItem[] {
   return events.map((e) => ({
     tone: feedTone(e),
     icon: e.action === "deleted" ? "warning" : (FEED_ICON[e.kind] ?? "lines"),
     strong: e.name,
-    rest: ` ${e.action} on ${e.cluster}`,
-    meta: e.namespace ? `${e.kind} · ${e.namespace}` : e.kind,
+    rest: ` ${HUMAN_KIND[e.kind] ?? "resource"} ${e.action === "deleted" ? "removed" : "updated"}`,
+    meta: e.cluster,
     when: ago(e.at),
   }));
 }
@@ -141,11 +161,42 @@ export function toRollouts(rollouts: RolloutItem[]): Rollout[] {
 
 // ---- Workloads ------------------------------------------------------------
 
-export function toWorkloadRows(isvcs: IsvcItem[], rollouts: RolloutItem[]): WorkloadRow[] {
-  const rollingOut = new Set(rollouts.map((r) => `${r.cluster}/${r.namespace ?? ""}/${r.name}`));
+/** Roll up ready/desired replicas across an ISVC's Components into one cell. */
+export function replicaRollup(components?: ComponentItem[]): { label: string; tone: Tone } {
+  if (!components || components.length === 0) return { label: "—", tone: "slate" };
+  let current = 0;
+  let desired = 0;
+  let haveCurrent = false;
+  let haveDesired = false;
+  for (const c of components) {
+    if (c.currentReplicas != null) {
+      current += c.currentReplicas;
+      haveCurrent = true;
+    }
+    if (c.desiredReplicas != null) {
+      desired += c.desiredReplicas;
+      haveDesired = true;
+    }
+  }
+  if (!haveCurrent && !haveDesired) return { label: "—", tone: "slate" };
+  if (!haveDesired) return { label: `${current}`, tone: "slate" };
+  const tone: Tone =
+    current >= desired && desired > 0 ? "green" : current < desired ? "amber" : "slate";
+  return { label: `${current}/${desired}`, tone };
+}
+
+/** A short model-load summary: loaded/failed copies, else a non-steady state. */
+export function loadSummary(s: IsvcItem): string | undefined {
+  const parts: string[] = [];
+  if (s.loadedCopies != null) parts.push(`${s.loadedCopies} loaded`);
+  if (s.failedCopies) parts.push(`${s.failedCopies} failed`);
+  if (parts.length) return parts.join(" · ");
+  if (s.modelState && s.modelState !== "UpToDate") return s.modelState;
+  return undefined;
+}
+
+export function toWorkloadRows(isvcs: IsvcItem[]): WorkloadRow[] {
   return isvcs.map((s) => {
-    const key = `${s.cluster}/${s.namespace ?? ""}/${s.name}`;
-    const rolling = rollingOut.has(key);
     const status: Pill =
       s.ready === true
         ? { label: "Ready", tone: "green" }
@@ -153,21 +204,31 @@ export function toWorkloadRows(isvcs: IsvcItem[], rollouts: RolloutItem[]): Work
           ? { label: "Not ready", tone: "red" }
           : { label: "Unknown", tone: "slate" };
     return {
-      id: key,
+      id: `${s.cluster}/${s.namespace ?? ""}/${s.name}`,
+      cluster: s.cluster,
       name: s.name,
       namespace: s.namespace ?? "—",
       model: s.model ?? "—",
       runtime: s.runtime ?? "—",
       mode: modePill(s.deploymentMode),
-      placement: s.cluster,
-      ready: s.ready === true ? "✓" : s.ready === false ? "✗" : "—",
-      rollout: rolling
-        ? { label: "Rolling out", tone: "amber" }
-        : { label: "Stable", tone: "green" },
+      endpoint: s.url,
+      replicas: replicaRollup(s.components),
+      load: loadSummary(s),
+      reason: s.ready === false ? s.reason : undefined,
       age: s.age ?? "—",
       status,
     };
   });
+}
+
+/** Count of InferenceServices referencing each model name, across the fleet. */
+export function modelUsage(isvcs: IsvcItem[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const s of isvcs) {
+    if (!s.model) continue;
+    counts.set(s.model, (counts.get(s.model) ?? 0) + 1);
+  }
+  return counts;
 }
 
 // ---- Models ---------------------------------------------------------------
@@ -180,22 +241,37 @@ function statePill(state?: string): Pill {
   return { label: state, tone: "amber" }; // Importing / Converting / In Transit / …
 }
 
-export function toModelCards(base: ModelItem[], cluster: ModelItem[]): ModelCard[] {
+/** Humanize a max-tokens count as a context-window tag (e.g. 131072 → "128k ctx"). */
+function contextTag(maxTokens?: number): string | undefined {
+  if (!maxTokens || maxTokens <= 0) return undefined;
+  return maxTokens >= 1024 ? `${Math.round(maxTokens / 1024)}k ctx` : `${maxTokens} ctx`;
+}
+
+export function toModelCards(
+  base: ModelItem[],
+  cluster: ModelItem[],
+  usage?: Map<string, number>,
+): ModelCard[] {
   const mk = (m: ModelItem, scoped: boolean): ModelCard => {
     const specs: { label: string; accent?: boolean }[] = [];
     if (m.architecture) specs.push({ label: m.architecture, accent: true });
     if (m.parameterSize && m.parameterSize !== "0") specs.push({ label: m.parameterSize });
     if (m.format) specs.push({ label: m.format });
     if (m.quantization) specs.push({ label: m.quantization });
+    const ctx = contextTag(m.maxTokens);
+    if (ctx) specs.push({ label: ctx });
     if (m.vendor) specs.push({ label: m.vendor });
     for (const cap of m.capabilities ?? []) if (cap) specs.push({ label: cap });
     return {
       name: m.name,
+      cluster: m.cluster,
+      namespace: m.namespace,
       scoped,
       status: statePill(m.state),
-      where: scoped
-        ? `cluster-scoped · ${m.cluster}`
-        : `${m.namespace ?? "default"} · ${m.cluster}`,
+      where: m.cluster,
+      source: m.source,
+      usedBy: usage?.get(m.name) ?? 0,
+      disabled: m.disabled ?? false,
       specs,
     };
   };

@@ -88,7 +88,7 @@ export default function App() {
         <div className="content">
           {panel === "fleet" && <Fleet goto={goto} />}
           {panel === "workloads" && <Workloads goto={goto} />}
-          {panel === "models" && <Models />}
+          {panel === "models" && <Models goto={goto} />}
           {panel === "deploy" && <Deploy />}
           {panel === "capacity" && <Capacity />}
         </div>

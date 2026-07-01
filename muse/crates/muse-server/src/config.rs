@@ -125,6 +125,26 @@ pub struct Config {
         default_value = "cloud.google.com/gce-topology-subblock,nvidia.com/gpu.clique"
     )]
     pub nvlink_domain_labels: Vec<String>,
+
+    /// Enable the console's inference test proxy: `POST /v1/inferenceservices/
+    /// {name}/chat` forwards one OpenAI-style request to that model's own endpoint
+    /// and returns the reply. Off by default — it is a human-driven debug tool, not
+    /// a serving path, so it is opt-in. When off, the console shows a copyable curl
+    /// command instead of a live chat box.
+    #[arg(
+        long = "chat-enabled",
+        env = "MUSE_CHAT_ENABLED",
+        default_value_t = false
+    )]
+    pub chat_enabled: bool,
+
+    /// Timeout (seconds) for one proxied inference test request.
+    #[arg(
+        long = "chat-timeout-secs",
+        env = "MUSE_CHAT_TIMEOUT_SECS",
+        default_value_t = 60
+    )]
+    pub chat_timeout_secs: u64,
 }
 
 impl Config {

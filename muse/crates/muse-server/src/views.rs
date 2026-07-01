@@ -11,11 +11,15 @@ use std::{
 
 use kube::Resource;
 use ome_client::{
+    inferenceservices::{InferenceServiceStatus, InferenceServiceStatusPlacement},
     k8s_openapi::{
         api::core::v1::Node,
-        apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::ObjectMeta},
+        apimachinery::pkg::{
+            api::resource::Quantity,
+            apis::meta::v1::{Condition, ObjectMeta},
+        },
     },
-    BaseModel, ClusterBaseModel, InferenceService,
+    BaseModel, ClusterBaseModel, FineTunedWeight, InferenceService,
 };
 use serde::Serialize;
 
@@ -124,13 +128,23 @@ impl ResourceSummary {
     }
 }
 
+/// The storage backend from a storage URI scheme: `manifold://…` → "manifold",
+/// `pvc://…` → "pvc", `hf://…` → "hf". None when the URI carries no scheme.
+fn source_scheme(uri: &str) -> Option<String> {
+    uri.split_once("://")
+        .map(|(scheme, _)| scheme.to_lowercase())
+        .filter(|s| !s.is_empty())
+}
+
 /// Model-registry overview: the auto-parsed metadata + lifecycle for a BaseModel
-/// or ClusterBaseModel (both share this shape).
+/// or ClusterBaseModel (both share this shape), plus where its weights come from.
 #[derive(Serialize)]
 pub struct BaseModelView {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "displayName")]
+    pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub architecture: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,10 +153,22 @@ pub struct BaseModelView {
     pub parameter_size: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantization: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "maxTokens")]
+    pub max_tokens: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vendor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub capabilities: Vec<String>,
+    /// Storage backend scheme (e.g. "manifold", "pvc", "hf", "oci") — where the
+    /// weights are fetched from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "storageUri")]
+    pub storage_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
     /// Lifecycle state from status (e.g. Ready, Importing, Failed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
@@ -157,12 +183,18 @@ impl BaseModelView {
         Self {
             name: m.meta().name.clone().unwrap_or_default(),
             namespace: m.meta().namespace.clone(),
+            display_name: m.spec.display_name.clone(),
             architecture: m.spec.model_architecture.clone(),
             format: m.spec.model_format.as_ref().map(|f| f.name.clone()),
             parameter_size: m.spec.model_parameter_size.clone(),
             quantization: m.spec.quantization.clone(),
+            max_tokens: m.spec.max_tokens,
             vendor: m.spec.vendor.clone(),
+            version: m.spec.version.clone(),
             capabilities: m.spec.model_capabilities.clone().unwrap_or_default(),
+            source: source_scheme(&m.spec.storage.storage_uri),
+            storage_uri: some_nonempty(&m.spec.storage.storage_uri),
+            disabled: m.spec.disabled,
             state: m.status.as_ref().map(|s| state_string(&s.state)),
             lifecycle: m.status.as_ref().and_then(|s| s.lifecycle.clone()),
             age: age(m.meta()),
@@ -173,12 +205,18 @@ impl BaseModelView {
         Self {
             name: m.meta().name.clone().unwrap_or_default(),
             namespace: m.meta().namespace.clone(),
+            display_name: m.spec.display_name.clone(),
             architecture: m.spec.model_architecture.clone(),
             format: m.spec.model_format.as_ref().map(|f| f.name.clone()),
             parameter_size: m.spec.model_parameter_size.clone(),
             quantization: m.spec.quantization.clone(),
+            max_tokens: m.spec.max_tokens,
             vendor: m.spec.vendor.clone(),
+            version: m.spec.version.clone(),
             capabilities: m.spec.model_capabilities.clone().unwrap_or_default(),
+            source: source_scheme(&m.spec.storage.storage_uri),
+            storage_uri: some_nonempty(&m.spec.storage.storage_uri),
+            disabled: m.spec.disabled,
             state: m.status.as_ref().map(|s| state_string(&s.state)),
             lifecycle: m.status.as_ref().and_then(|s| s.lifecycle.clone()),
             age: age(m.meta()),
@@ -186,15 +224,234 @@ impl BaseModelView {
     }
 }
 
-/// Serialize a status `state` enum to its plain string form (e.g. "Ready").
-fn state_string<T: Serialize>(state: &T) -> String {
-    serde_json::to_value(state)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default()
+/// Full model detail for the console drawer: the overview plus status conditions,
+/// the parsed model configuration, and per-node readiness counts (PerNode models).
+#[derive(Serialize)]
+pub struct BaseModelDetail {
+    #[serde(flatten)]
+    pub view: BaseModelView,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<ConditionView>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "modelConfiguration")]
+    pub model_configuration: Option<BTreeMap<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "nodesReady")]
+    pub nodes_ready: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "nodesFailed")]
+    pub nodes_failed: Option<usize>,
 }
 
-/// InferenceService overview: the model/runtime it binds, mode, and readiness.
+impl BaseModelDetail {
+    pub fn of(m: &BaseModel) -> Self {
+        Self {
+            view: BaseModelView::of(m),
+            conditions: conditions_of(m.status.as_ref().and_then(|s| s.conditions.as_deref())),
+            model_configuration: m.spec.model_configuration.clone().filter(|c| !c.is_empty()),
+            nodes_ready: m
+                .status
+                .as_ref()
+                .and_then(|s| s.nodes_ready.as_ref())
+                .map(|v| v.len()),
+            nodes_failed: m
+                .status
+                .as_ref()
+                .and_then(|s| s.nodes_failed.as_ref())
+                .map(|v| v.len()),
+        }
+    }
+
+    pub fn of_cluster(m: &ClusterBaseModel) -> Self {
+        Self {
+            view: BaseModelView::of_cluster(m),
+            conditions: conditions_of(m.status.as_ref().and_then(|s| s.conditions.as_deref())),
+            model_configuration: m.spec.model_configuration.clone().filter(|c| !c.is_empty()),
+            nodes_ready: m
+                .status
+                .as_ref()
+                .and_then(|s| s.nodes_ready.as_ref())
+                .map(|v| v.len()),
+            nodes_failed: m
+                .status
+                .as_ref()
+                .and_then(|s| s.nodes_failed.as_ref())
+                .map(|v| v.len()),
+        }
+    }
+}
+
+/// Fine-tuned weight (LoRA / adapter / delta) overview: the base model it extends
+/// and its type — enough to link it back to a model in the registry drawer.
+#[derive(Serialize)]
+pub struct FineTunedWeightView {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "baseModel")]
+    pub base_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "baseModelNamespace")]
+    pub base_model_namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "modelType")]
+    pub model_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age: Option<String>,
+}
+
+impl FineTunedWeightView {
+    pub fn of(w: &FineTunedWeight) -> Self {
+        Self {
+            name: w.meta().name.clone().unwrap_or_default(),
+            namespace: w.meta().namespace.clone(),
+            base_model: some_nonempty(&w.spec.base_model_ref.name),
+            base_model_namespace: w.spec.base_model_ref.namespace.clone(),
+            model_type: some_nonempty(&w.spec.model_type),
+            version: w.spec.version.clone(),
+            age: age(w.meta()),
+        }
+    }
+}
+
+/// Serialize an enum (or any value) to its plain string form, treating null and
+/// empty string as absent — e.g. a `deploymentMode`/`phase`/`state` enum → "Ready".
+fn enum_str<T: Serialize>(value: &T) -> Option<String> {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .filter(|s| !s.is_empty())
+}
+
+/// Serialize a status `state` enum to its plain string form (e.g. "Ready").
+fn state_string<T: Serialize>(state: &T) -> String {
+    enum_str(state).unwrap_or_default()
+}
+
+/// Non-empty owned copy of a string, or None.
+fn some_nonempty(s: &str) -> Option<String> {
+    Some(s.to_owned()).filter(|s| !s.is_empty())
+}
+
+/// A status condition, projected to its identity + reason/message.
+#[derive(Serialize)]
+pub struct ConditionView {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Project a slice of conditions into [`ConditionView`]s (empty reason/message
+/// dropped).
+fn conditions_of(conds: Option<&[Condition]>) -> Vec<ConditionView> {
+    conds
+        .unwrap_or_default()
+        .iter()
+        .map(|c| ConditionView {
+            type_: c.type_.clone(),
+            status: c.status.clone(),
+            reason: some_nonempty(&c.reason),
+            message: some_nonempty(&c.message),
+        })
+        .collect()
+}
+
+/// One InferenceService Component (engine / decoder / router): readiness (from
+/// the matching `<Comp>Ready` condition), live replica counts, rollout phase, and
+/// the revision currently owning traffic.
+#[derive(Serialize)]
+pub struct ComponentView {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "currentReplicas")]
+    pub current_replicas: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "desiredReplicas")]
+    pub desired_replicas: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "rolloutPhase")]
+    pub rollout_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Readiness for one Component, read from its `<Comp>Ready` status condition.
+fn component_ready(status: &InferenceServiceStatus, component: &str) -> Option<bool> {
+    let cond_type = match component {
+        "engine" => "EngineReady",
+        "decoder" => "DecoderReady",
+        "router" => "RouterReady",
+        _ => return None,
+    };
+    status
+        .conditions
+        .as_ref()?
+        .iter()
+        .find(|c| c.type_ == cond_type)
+        .map(|c| c.status == "True")
+}
+
+/// Project `status.components` into a stable engine → decoder → router ordering.
+fn components_of(status: &InferenceServiceStatus) -> Vec<ComponentView> {
+    let Some(comps) = status.components.as_ref() else {
+        return Vec::new();
+    };
+    let order = |name: &str| match name {
+        "engine" => 0,
+        "decoder" => 1,
+        "router" => 2,
+        _ => 3,
+    };
+    let mut out: Vec<ComponentView> = comps
+        .iter()
+        .map(|(name, c)| ComponentView {
+            name: name.clone(),
+            ready: component_ready(status, name),
+            current_replicas: c.autoscaler.as_ref().and_then(|a| a.current_replicas),
+            desired_replicas: c.autoscaler.as_ref().and_then(|a| a.desired_replicas),
+            rollout_phase: c.rollout_phase.as_ref().and_then(enum_str),
+            revision: c
+                .latest_rolledout_revision
+                .clone()
+                .or_else(|| c.latest_ready_revision.clone())
+                .filter(|s| !s.is_empty()),
+            url: c.url.clone().filter(|s| !s.is_empty()),
+        })
+        .collect();
+    out.sort_by_key(|c| order(&c.name));
+    out
+}
+
+/// Why the service isn't ready: the `Ready` condition's reason/message when it is
+/// not True, else the model-load failure (if any). `(reason, message)`.
+fn not_ready_info(status: &InferenceServiceStatus) -> (Option<String>, Option<String>) {
+    if let Some(c) = status
+        .conditions
+        .as_ref()
+        .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"))
+    {
+        if c.status != "True" {
+            return (some_nonempty(&c.reason), some_nonempty(&c.message));
+        }
+    }
+    if let Some(f) = status
+        .model_status
+        .as_ref()
+        .and_then(|m| m.last_failure_info.as_ref())
+    {
+        return (
+            f.reason.as_ref().and_then(enum_str),
+            f.message.clone().filter(|s| !s.is_empty()),
+        );
+    }
+    (None, None)
+}
+
+/// InferenceService overview: the model/runtime it binds, mode, readiness, the
+/// servable endpoint, per-Component replicas, and model-load state (with the
+/// reason it is not ready, when applicable).
 #[derive(Serialize)]
 pub struct InferenceServiceView {
     pub name: String,
@@ -208,6 +465,23 @@ pub struct InferenceServiceView {
     pub deployment_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready: Option<bool>,
+    /// Addressable endpoint (`status.url`) once the service is servable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<ComponentView>,
+    /// Model-load transition (`UpToDate` / `InProgress` / `BlockedByFailedLoad` / …).
+    #[serde(skip_serializing_if = "Option::is_none", rename = "modelState")]
+    pub model_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "loadedCopies")]
+    pub loaded_copies: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "failedCopies")]
+    pub failed_copies: Option<i64>,
+    /// When not ready: the coarse reason (e.g. `BaseModelNotReady`, `EngineNotReady`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age: Option<String>,
 }
@@ -215,9 +489,8 @@ pub struct InferenceServiceView {
 impl InferenceServiceView {
     pub fn of(isvc: &InferenceService) -> Self {
         let meta = isvc.meta();
-        let ready = isvc
-            .status
-            .as_ref()
+        let status = isvc.status.as_ref();
+        let ready = status
             .and_then(|s| s.conditions.as_ref())
             .and_then(|conds| {
                 conds
@@ -225,20 +498,106 @@ impl InferenceServiceView {
                     .find(|c| c.type_ == "Ready")
                     .map(|c| c.status == "True")
             });
-        let deployment_mode = isvc
-            .spec
-            .deployment_mode
-            .as_ref()
-            .and_then(|m| serde_json::to_value(m).ok())
-            .and_then(|v| v.as_str().map(String::from));
+        let (reason, message) = status.map(not_ready_info).unwrap_or((None, None));
+        let model = status.and_then(|s| s.model_status.as_ref());
+        let copies = model.and_then(|m| m.model_copies.as_ref());
         Self {
             name: meta.name.clone().unwrap_or_default(),
             namespace: meta.namespace.clone(),
             model: isvc.spec.model.as_ref().map(|m| m.name.clone()),
             runtime: isvc.spec.runtime.as_ref().map(|r| r.name.clone()),
-            deployment_mode,
+            deployment_mode: isvc.spec.deployment_mode.as_ref().and_then(enum_str),
             ready,
+            url: status.and_then(|s| s.url.clone()).filter(|s| !s.is_empty()),
+            components: status.map(components_of).unwrap_or_default(),
+            model_state: model
+                .and_then(|m| m.transition_status.as_ref())
+                .and_then(enum_str),
+            loaded_copies: copies.and_then(|c| c.total_copies),
+            failed_copies: copies.map(|c| c.failed_copies).filter(|&n| n > 0),
+            reason,
+            message,
             age: age(meta),
+        }
+    }
+}
+
+/// One fan-out candidate cluster in an OEP-0018 placement race.
+#[derive(Serialize)]
+pub struct PlacementCandidateView {
+    pub cluster: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+}
+
+/// Multi-cluster placement: where the ISVC landed, the race phase, the winning
+/// endpoint, and the candidate clusters it fanned out to.
+#[derive(Serialize)]
+pub struct PlacementView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<PlacementCandidateView>,
+}
+
+fn placement_of(p: &InferenceServiceStatusPlacement) -> PlacementView {
+    PlacementView {
+        cluster: p.cluster.clone().filter(|s| !s.is_empty()),
+        phase: p.phase.as_ref().and_then(enum_str),
+        endpoint: p.endpoint.clone().filter(|s| !s.is_empty()),
+        candidates: p
+            .candidates
+            .as_ref()
+            .map(|cs| {
+                cs.iter()
+                    .map(|c| PlacementCandidateView {
+                        cluster: c.cluster.clone(),
+                        phase: c.phase.as_ref().and_then(enum_str),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// A canary rollout in flight: which step and the observed traffic weight.
+#[derive(Serialize)]
+pub struct CanaryView {
+    #[serde(rename = "currentStep")]
+    pub current_step: i32,
+    #[serde(rename = "trafficWeight")]
+    pub traffic_weight: i32,
+}
+
+/// Full InferenceService detail for the console drawer: the overview plus all
+/// status conditions, multi-cluster placement, and any in-flight canary.
+#[derive(Serialize)]
+pub struct InferenceServiceDetail {
+    #[serde(flatten)]
+    pub view: InferenceServiceView,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<ConditionView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canary: Option<CanaryView>,
+}
+
+impl InferenceServiceDetail {
+    pub fn of(isvc: &InferenceService) -> Self {
+        let status = isvc.status.as_ref();
+        Self {
+            view: InferenceServiceView::of(isvc),
+            conditions: conditions_of(status.and_then(|s| s.conditions.as_deref())),
+            placement: status.and_then(|s| s.placement.as_ref()).map(placement_of),
+            canary: status.and_then(|s| s.canary.as_ref()).map(|c| CanaryView {
+                current_step: c.current_step,
+                traffic_weight: c.observed_traffic_weight,
+            }),
         }
     }
 }

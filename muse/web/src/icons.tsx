@@ -223,3 +223,28 @@ export const Upload = (p: P) => (
     />
   </svg>
 );
+
+export const Close = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
+  </svg>
+);
+
+export const Copy = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth={1.7} />
+    <path d="M5 15V5a2 2 0 012-2h8" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" />
+  </svg>
+);
+
+export const Link = (p: P) => (
+  <svg {...base(p)}>
+    <path
+      d="M10 14a4 4 0 005.66 0l3-3a4 4 0 10-5.66-5.66l-1.5 1.5M14 10a4 4 0 00-5.66 0l-3 3a4 4 0 105.66 5.66l1.5-1.5"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);

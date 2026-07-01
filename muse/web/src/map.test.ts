@@ -1,7 +1,24 @@
 import { describe, expect, it } from "vitest";
 
-import type { CapacityResp, ClusterItem, EventItem, IsvcItem, ModelItem, RolloutItem } from "./api";
-import { toClusterRows, toFeed, toModelCards, toRollouts, toWorkloadRows } from "./map";
+import type {
+  CapacityResp,
+  ClusterItem,
+  ComponentItem,
+  EventItem,
+  IsvcItem,
+  ModelItem,
+  RolloutItem,
+} from "./api";
+import {
+  loadSummary,
+  modelUsage,
+  replicaRollup,
+  toClusterRows,
+  toFeed,
+  toModelCards,
+  toRollouts,
+  toWorkloadRows,
+} from "./map";
 import { matches } from "./util";
 
 describe("toClusterRows", () => {
@@ -89,7 +106,7 @@ describe("toModelCards", () => {
     const [card] = toModelCards([], cluster);
     expect(card.scoped).toBe(true);
     expect(card.status).toEqual({ label: "Ready", tone: "green" });
-    expect(card.where).toContain("cluster-scoped");
+    expect(card.where).toBe("cw");
     expect(card.specs.map((s) => s.label)).toEqual([
       "Llama",
       "405B",
@@ -110,6 +127,25 @@ describe("toModelCards", () => {
     expect(importing.scoped).toBe(false);
     expect(importing.specs.some((s) => s.label === "0")).toBe(false);
     expect(unknown.status).toEqual({ label: "Unknown", tone: "slate" });
+  });
+
+  it("carries source, disabled, a context tag, and the live used-by count", () => {
+    const base: ModelItem[] = [
+      {
+        cluster: "cw",
+        name: "llama-405b",
+        namespace: "ns",
+        source: "manifold",
+        maxTokens: 131072,
+        disabled: true,
+      },
+    ];
+    const usage = new Map([["llama-405b", 3]]);
+    const [card] = toModelCards(base, [], usage);
+    expect(card.source).toBe("manifold");
+    expect(card.disabled).toBe(true);
+    expect(card.usedBy).toBe(3);
+    expect(card.specs.map((s) => s.label)).toContain("128k ctx");
   });
 });
 
@@ -132,35 +168,84 @@ describe("toRollouts", () => {
 });
 
 describe("toWorkloadRows", () => {
-  const isvcs: IsvcItem[] = [
-    {
-      cluster: "cw",
-      name: "w1",
-      namespace: "ns",
-      model: "m",
-      runtime: "rt",
-      deploymentMode: "RawDeployment",
-      ready: true,
-      age: "3d",
-    },
-  ];
-
-  it("marks a ready, stable workload", () => {
-    const [row] = toWorkloadRows(isvcs, []);
-    expect(row.ready).toBe("✓");
-    expect(row.status.tone).toBe("green");
-    expect(row.rollout.label).toBe("Stable");
+  it("projects endpoint, replica rollup, load, and status for a ready workload", () => {
+    const isvcs: IsvcItem[] = [
+      {
+        cluster: "cw",
+        name: "w1",
+        namespace: "ns",
+        model: "m",
+        runtime: "rt",
+        deploymentMode: "RawDeployment",
+        ready: true,
+        url: "https://w1.example",
+        components: [{ name: "engine", ready: true, currentReplicas: 3, desiredReplicas: 3 }],
+        loadedCopies: 3,
+        age: "3d",
+      },
+    ];
+    const [row] = toWorkloadRows(isvcs);
+    expect(row.status).toEqual({ label: "Ready", tone: "green" });
     expect(row.mode.label).toBe("RawDeployment");
+    expect(row.endpoint).toBe("https://w1.example");
+    expect(row.replicas).toEqual({ label: "3/3", tone: "green" });
+    expect(row.load).toBe("3 loaded");
+    expect(row.reason).toBeUndefined();
   });
 
-  it("flags a workload that is rolling out", () => {
-    const [row] = toWorkloadRows(
-      [{ cluster: "cw", name: "w1", namespace: "ns", ready: false }],
-      [{ cluster: "cw", name: "w1", namespace: "ns", ready: false }],
-    );
-    expect(row.rollout.label).toBe("Rolling out");
+  it("surfaces the reason when a workload is not ready", () => {
+    const [row] = toWorkloadRows([
+      { cluster: "cw", name: "w1", namespace: "ns", ready: false, reason: "BaseModelNotReady" },
+    ]);
     expect(row.status.tone).toBe("red");
-    expect(row.ready).toBe("✗");
+    expect(row.reason).toBe("BaseModelNotReady");
+  });
+});
+
+describe("replicaRollup", () => {
+  const comps = (cs: ComponentItem[]) => cs;
+  it("sums ready/desired across components and picks a health tone", () => {
+    expect(
+      replicaRollup(comps([{ name: "engine", currentReplicas: 2, desiredReplicas: 2 }])),
+    ).toEqual({ label: "2/2", tone: "green" });
+    expect(
+      replicaRollup(
+        comps([
+          { name: "engine", currentReplicas: 1, desiredReplicas: 2 },
+          { name: "decoder", currentReplicas: 1, desiredReplicas: 1 },
+        ]),
+      ),
+    ).toEqual({ label: "2/3", tone: "amber" });
+  });
+
+  it("returns an em dash when there are no components or no counts", () => {
+    expect(replicaRollup(undefined)).toEqual({ label: "—", tone: "slate" });
+    expect(replicaRollup([])).toEqual({ label: "—", tone: "slate" });
+  });
+});
+
+describe("loadSummary", () => {
+  it("summarizes loaded/failed copies, else a non-steady model state", () => {
+    expect(loadSummary({ cluster: "c", name: "n", loadedCopies: 4, failedCopies: 1 })).toBe(
+      "4 loaded · 1 failed",
+    );
+    expect(loadSummary({ cluster: "c", name: "n", modelState: "InProgress" })).toBe("InProgress");
+    expect(loadSummary({ cluster: "c", name: "n", modelState: "UpToDate" })).toBeUndefined();
+    expect(loadSummary({ cluster: "c", name: "n" })).toBeUndefined();
+  });
+});
+
+describe("modelUsage", () => {
+  it("counts InferenceServices per referenced model name", () => {
+    const usage = modelUsage([
+      { cluster: "c", name: "a", model: "llama" },
+      { cluster: "c", name: "b", model: "llama" },
+      { cluster: "c", name: "c", model: "mixtral" },
+      { cluster: "c", name: "d" },
+    ]);
+    expect(usage.get("llama")).toBe(2);
+    expect(usage.get("mixtral")).toBe(1);
+    expect(usage.size).toBe(2);
   });
 });
 

@@ -13,7 +13,7 @@ const DIMS: { key: Dim; label: string; col: string; help: string }[] = [
     key: "cluster",
     label: "Cluster",
     col: "Cluster",
-    help: "Accelerator capacity totalled per workload cluster and kind.",
+    help: "Accelerator capacity totalled per cluster and accelerator kind.",
   },
   {
     key: "island",
@@ -121,9 +121,8 @@ export function Capacity() {
         <div>
           <h1>Capacity</h1>
           <p>
-            Live allocatable accelerator inventory across clusters, ranked by free capacity — the
-            cross-resource rollup (Nodes × Pods) the placer reads when deciding where a model fits.
-            GPUs and TPUs are counted separately.
+            Live accelerator inventory across clusters, ranked by free capacity. GPUs and TPUs are
+            counted separately.
           </p>
         </div>
       </div>
