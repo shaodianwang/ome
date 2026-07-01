@@ -10,6 +10,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -344,6 +345,15 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
 		assert.True(t, *spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
 
+		// Rollout budgets default to 25% so an unset RollingUpdate never
+		// resolves to the uncapped BudgetNoLimit (the fleet-wipe failure
+		// mode). Both surge and drain paths are paced.
+		require.NotNil(t, spec.UpdateStrategy.RollingUpdate)
+		require.NotNil(t, spec.UpdateStrategy.RollingUpdate.MaxSurge)
+		assert.Equal(t, intstr.FromString("25%"), *spec.UpdateStrategy.RollingUpdate.MaxSurge)
+		require.NotNil(t, spec.UpdateStrategy.RollingUpdate.MaxUnavailable)
+		assert.Equal(t, intstr.FromString("25%"), *spec.UpdateStrategy.RollingUpdate.MaxUnavailable)
+
 		require.NotNil(t, spec.ReadyPolicy)
 		assert.Equal(t, v1beta1.InstanceReadyPolicyAllPodReady, *spec.ReadyPolicy)
 
@@ -412,6 +422,35 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		// MarkNotReadyDuringLifecycle was nil → defaulted to true
 		require.NotNil(t, ext.Lifecycle.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
 		assert.True(t, *ext.Lifecycle.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
+		// RollingUpdate was nil → both budgets defaulted to 25%.
+		require.NotNil(t, ext.Lifecycle.UpdateStrategy.RollingUpdate)
+		require.NotNil(t, ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxSurge)
+		assert.Equal(t, intstr.FromString("25%"), *ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxSurge)
+		require.NotNil(t, ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxUnavailable)
+		assert.Equal(t, intstr.FromString("25%"), *ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxUnavailable)
+	})
+
+	t.Run("OMENative + operator-set RollingUpdate budgets — preserved, nil sibling filled", func(t *testing.T) {
+		// An operator who sets only MaxSurge keeps that value; the nil
+		// MaxUnavailable sibling is filled with the 25% default.
+		customSurge := intstr.FromInt(1)
+		ext := &v1beta1.ComponentExtensionSpec{
+			Annotations: omenativeMode,
+			Lifecycle: &v1beta1.LifecycleSpec{
+				UpdateStrategy: &v1beta1.UpdateStrategy{
+					RollingUpdate: &v1beta1.RollingUpdate{
+						MaxSurge: &customSurge,
+					},
+				},
+			},
+		}
+		defaultOMENativeComponent(ext, true, nil)
+
+		require.NotNil(t, ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxSurge)
+		assert.Equal(t, intstr.FromInt(1), *ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxSurge)
+		// nil sibling filled with the default.
+		require.NotNil(t, ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxUnavailable)
+		assert.Equal(t, intstr.FromString("25%"), *ext.Lifecycle.UpdateStrategy.RollingUpdate.MaxUnavailable)
 	})
 
 	t.Run("OMENative + ProgressDeadlineSeconds set — MaxAutoRetries defaults to 3", func(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -240,6 +241,27 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, multiPod boo
 	if spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle == nil {
 		mark := true
 		spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle = &mark
+	}
+
+	// Default the per-Component rollout budgets so an unset RollingUpdate
+	// never resolves to the uncapped BudgetNoLimit. Without a cap the
+	// dispatcher can start every Instance's surge/drain in a single
+	// reconcile pass — the failure mode that collapsed a 64-replica fleet
+	// to one when a spec bump landed with no maxSurge/maxUnavailable set.
+	// 25% mirrors the upstream appsv1.Deployment RollingUpdate defaults and
+	// paces both the surge path (gated on MaxSurge) and the recreate path
+	// (gated on MaxUnavailable). Percent values scale with replica count at
+	// reconcile time, so this is safe from tiny to large Components.
+	if spec.UpdateStrategy.RollingUpdate == nil {
+		spec.UpdateStrategy.RollingUpdate = &v1beta1.RollingUpdate{}
+	}
+	if spec.UpdateStrategy.RollingUpdate.MaxSurge == nil {
+		ms := intstr.FromString("25%")
+		spec.UpdateStrategy.RollingUpdate.MaxSurge = &ms
+	}
+	if spec.UpdateStrategy.RollingUpdate.MaxUnavailable == nil {
+		mu := intstr.FromString("25%")
+		spec.UpdateStrategy.RollingUpdate.MaxUnavailable = &mu
 	}
 
 	if spec.ReadyPolicy == nil {
