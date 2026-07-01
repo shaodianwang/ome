@@ -4,25 +4,38 @@
 //! cluster. Reads aggregate across all clusters by default, or one cluster via
 //! `?cluster=<name>`; every item carries a `cluster` field.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::Infallible,
+    fmt::Debug,
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, RwLock,
+    },
+    time::Duration,
+};
 
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
+    response::sse::{Event as SseEvent, KeepAlive, Sse},
     routing::get,
     Json, Router,
 };
 use kube::Resource;
 use ome_client::{
-    informers::SharedInformerFactory,
+    informers::{InformerEvent, Prune, SharedInformerFactory},
     k8s_openapi::api::core::v1::{Node, Pod},
     listers::Lister,
     BaseModel, ClusterBaseModel, ClusterServingRuntime, FineTunedWeight, InferenceReplica,
     InferenceService, ServingRuntime, WorkloadCluster,
 };
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tower_http::{
     compression::CompressionLayer,
     cors::CorsLayer,
@@ -36,9 +49,10 @@ use crate::{
     capacity,
     config::Config,
     error::ApiError,
+    feed::{Feed, FeedEvent},
     health,
     observe::{make_span, track_metrics, MakeRequestUuidV7},
-    views::{sum_gpu, InferenceServiceView, NodeView, ResourceSummary, Topology},
+    views::{node_accel, InferenceServiceView, NodeView, ResourceSummary, RolloutView, Topology},
 };
 
 /// One workload cluster's informer-backed listers.
@@ -54,39 +68,306 @@ pub struct ClusterState {
     workload_clusters: Lister<WorkloadCluster>,
     nodes: Lister<Node>,
     pods: Lister<Pod>,
+    /// Flipped to `true` once every informer for this cluster has finished its
+    /// first sync. Listers serve (empty, then filling) before this is set, so the
+    /// console can render a "syncing" cluster immediately.
+    pub ready: Arc<AtomicBool>,
 }
 
-/// Build every informer for one cluster (awaiting initial sync).
-pub async fn build_cluster_state(name: String, factory: &SharedInformerFactory) -> ClusterState {
-    ClusterState {
+/// A future that resolves when one informer's cache has completed its first sync.
+type ReadyFut = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Build every informer for one cluster, returning immediately (caches warm in
+/// the background) along with a readiness future per started informer.
+///
+/// `ome` is the set of `ome.io/v1beta1` resource names this cluster actually
+/// serves (from discovery). A kind whose CRD is absent gets an empty lister and
+/// no informer — otherwise it would 404-loop on its initial list forever. This is
+/// the common case for member clusters, which serve the workload CRDs
+/// (InferenceService, BaseModel, …) but not WorkloadCluster, the registry CRD
+/// that lives only on the hub. Nodes/pods (core/v1, always present) are watched
+/// unconditionally, so the cluster still contributes capacity with no OME CRDs.
+///
+/// Nothing here blocks on initial sync: the returned [`ClusterState`] serves
+/// (empty, then filling) right away, and the caller awaits the returned futures
+/// in the background to learn when the cluster is fully warm.
+pub fn build_cluster_state(
+    name: String,
+    factory: &SharedInformerFactory,
+    ome: &HashSet<String>,
+    feed: &Feed,
+    signal: &CapacitySignal,
+) -> (ClusterState, Vec<ReadyFut>) {
+    let mut readies = Vec::new();
+    let cluster = name.clone();
+    // OME kinds feed the activity stream. Nodes/pods drive capacity, so they
+    // signal the recompute task on change instead (never the high-volume feed).
+    let f = |kind| FeedSub {
+        feed: feed.clone(),
+        cluster: cluster.clone(),
+        kind,
+    };
+    let state = ClusterState {
+        inference_services: warm(
+            factory,
+            present::<InferenceService>(ome),
+            &mut readies,
+            Some(f("InferenceService")),
+            None,
+        ),
+        base_models: warm(
+            factory,
+            present::<BaseModel>(ome),
+            &mut readies,
+            Some(f("BaseModel")),
+            None,
+        ),
+        serving_runtimes: warm(
+            factory,
+            present::<ServingRuntime>(ome),
+            &mut readies,
+            Some(f("ServingRuntime")),
+            None,
+        ),
+        inference_replicas: warm(
+            factory,
+            present::<InferenceReplica>(ome),
+            &mut readies,
+            Some(f("InferenceReplica")),
+            None,
+        ),
+        cluster_base_models: warm(
+            factory,
+            present::<ClusterBaseModel>(ome),
+            &mut readies,
+            Some(f("ClusterBaseModel")),
+            None,
+        ),
+        cluster_serving_runtimes: warm(
+            factory,
+            present::<ClusterServingRuntime>(ome),
+            &mut readies,
+            Some(f("ClusterServingRuntime")),
+            None,
+        ),
+        fine_tuned_weights: warm(
+            factory,
+            present::<FineTunedWeight>(ome),
+            &mut readies,
+            Some(f("FineTunedWeight")),
+            None,
+        ),
+        workload_clusters: warm(
+            factory,
+            present::<WorkloadCluster>(ome),
+            &mut readies,
+            Some(f("WorkloadCluster")),
+            None,
+        ),
+        nodes: warm::<Node>(factory, true, &mut readies, None, Some(signal.clone())),
+        pods: warm::<Pod>(factory, true, &mut readies, None, Some(signal.clone())),
         name,
-        inference_services: factory.inference_services().await,
-        base_models: factory.base_models().await,
-        serving_runtimes: factory.serving_runtimes().await,
-        inference_replicas: factory.inference_replicas().await,
-        cluster_base_models: factory.cluster_base_models().await,
-        cluster_serving_runtimes: factory.cluster_serving_runtimes().await,
-        fine_tuned_weights: factory.fine_tuned_weights().await,
-        workload_clusters: factory.workload_clusters().await,
-        nodes: factory.lister::<Node>().await,
-        pods: factory.lister::<Pod>().await,
+        ready: Arc::new(AtomicBool::new(false)),
+    };
+    (state, readies)
+}
+
+/// Wiring for a kind's activity-feed subscriber: where to push, and how to label.
+struct FeedSub {
+    feed: Feed,
+    cluster: String,
+    kind: &'static str,
+}
+
+/// Start (lazily) the informer for kind `K` if the cluster serves it, returning
+/// its live-but-warming lister and pushing a readiness future onto `readies`. A
+/// kind the cluster doesn't serve gets an empty lister and starts no informer.
+/// When `feed` is set, a background task forwards the informer's change events
+/// into the activity feed. When `on_change` is set (nodes/pods), each event marks
+/// the capacity rollup stale so the recompute task reacts to real changes.
+fn warm<K>(
+    factory: &SharedInformerFactory,
+    present: bool,
+    readies: &mut Vec<ReadyFut>,
+    feed: Option<FeedSub>,
+    on_change: Option<CapacitySignal>,
+) -> Lister<K>
+where
+    K: Resource<DynamicType = ()>
+        + Clone
+        + DeserializeOwned
+        + Debug
+        + Send
+        + Sync
+        + Prune
+        + 'static,
+{
+    if !present {
+        return empty_lister::<K>();
     }
+    let informer = factory.informer_lazy::<K>();
+    if let Some(signal) = on_change {
+        let mut rx = informer.subscribe();
+        tokio::spawn(async move {
+            // Any add/update/delete (or a lag) means capacity may have changed;
+            // mark stale (coalesced by the recompute task). Loop ends when the
+            // channel closes (pattern stops matching).
+            while let Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
+                rx.recv().await
+            {
+                signal.mark();
+            }
+        });
+    }
+    if let Some(sub) = feed {
+        let mut rx = informer.subscribe();
+        tokio::spawn(async move {
+            // uid -> last-seen generation. We surface creates, deletes, and spec
+            // changes (generation bumps) only. A repeated Apply whose generation is
+            // unchanged is status churn (heartbeats, conditions, replica counts) —
+            // dropping it keeps the feed and the SSE stream quiet when nothing
+            // meaningful happens, so clients don't refetch on every status write.
+            let mut seen: HashMap<String, Option<i64>> = HashMap::new();
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let (action, obj) = match &event {
+                            InformerEvent::Applied(o) => ("applied", o),
+                            InformerEvent::Deleted(o) => ("deleted", o),
+                        };
+                        let meta = obj.meta();
+                        let uid = meta.uid.clone().unwrap_or_else(|| {
+                            format!(
+                                "{}/{}",
+                                meta.namespace.clone().unwrap_or_default(),
+                                meta.name.clone().unwrap_or_default()
+                            )
+                        });
+                        let emit = if action == "deleted" {
+                            seen.remove(&uid);
+                            true
+                        } else {
+                            match seen.get(&uid) {
+                                Some(prev) if *prev == meta.generation => false,
+                                _ => {
+                                    seen.insert(uid, meta.generation);
+                                    true
+                                }
+                            }
+                        };
+                        if !emit {
+                            continue;
+                        }
+                        sub.feed.push(FeedEvent {
+                            cluster: sub.cluster.clone(),
+                            kind: sub.kind.to_owned(),
+                            namespace: meta.namespace.clone(),
+                            name: meta.name.clone().unwrap_or_default(),
+                            action,
+                            at: crate::feed::now_secs(),
+                        });
+                    }
+                    // A lagging subscriber skips ahead; a closed channel ends the task.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+    let store = informer.store();
+    readies.push(Box::pin(async move {
+        let _ = store.wait_until_ready().await;
+    }));
+    informer.lister()
+}
+
+/// Whether the cluster serves kind `K`, matched by its plural resource name
+/// against the discovered `ome.io` resource set.
+fn present<K: Resource<DynamicType = ()>>(ome: &HashSet<String>) -> bool {
+    ome.contains(K::plural(&()).as_ref())
+}
+
+/// An empty, never-updated lister for a kind a cluster doesn't serve. No watcher
+/// is started, so it stays empty rather than 404-looping on a missing CRD.
+fn empty_lister<K>() -> Lister<K>
+where
+    K: Resource + Clone + 'static,
+    K::DynamicType: Default + Eq + std::hash::Hash + Clone,
+{
+    let (store, _writer) = kube::runtime::reflector::store::<K>();
+    Lister::new(store)
 }
 
 /// Shared state: every cluster's listers plus the topology labels. Cheap to clone
 /// (Arc + small struct).
+/// A coalescing "capacity is stale" signal, fired by the Node/Pod informers when
+/// they observe a change and awaited by the background recompute task. Multiple
+/// marks between waits collapse into one (a burst of pod churn ⇒ one recompute).
+#[derive(Clone)]
+pub struct CapacitySignal {
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl CapacitySignal {
+    pub fn new() -> Self {
+        Self {
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+    /// Mark capacity stale (cheap; safe to call on every informer event).
+    pub fn mark(&self) {
+        self.notify.notify_one();
+    }
+    async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
+
+impl Default for CapacitySignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     clusters: Arc<Vec<ClusterState>>,
     topology: Topology,
+    feed: Feed,
+    /// Materialized capacity: the fleet rollup and each per-cluster rollup, kept
+    /// current by a background task that recomputes on Node/Pod changes. Serving
+    /// from this keeps `/v1/capacity` latency flat as the fleet grows, instead of
+    /// re-walking every Node × Pod on each request.
+    capacity: Arc<RwLock<Arc<CapacitySnapshot>>>,
+    signal: CapacitySignal,
+}
+
+/// Pre-computed capacity responses (already serialized to JSON).
+struct CapacitySnapshot {
+    fleet: Value,
+    per_cluster: HashMap<String, Value>,
 }
 
 impl AppState {
-    pub fn new(clusters: Vec<ClusterState>, topology: Topology) -> Self {
-        Self {
+    pub fn new(
+        clusters: Vec<ClusterState>,
+        topology: Topology,
+        feed: Feed,
+        signal: CapacitySignal,
+    ) -> Self {
+        let state = Self {
             clusters: Arc::new(clusters),
             topology,
-        }
+            feed,
+            capacity: Arc::new(RwLock::new(Arc::new(CapacitySnapshot {
+                fleet: Value::Null,
+                per_cluster: HashMap::new(),
+            }))),
+            signal,
+        };
+        // Warm the cache once so the first request is served, not computed.
+        state.refresh_capacity();
+        state
     }
 
     /// Clusters matching `cluster` (one named cluster, or all when None).
@@ -101,6 +382,48 @@ impl AppState {
             None => Ok(self.clusters.iter().collect()),
         }
     }
+
+    /// Recompute the capacity rollups (fleet + per-cluster) from the current
+    /// informer caches and publish them. Called on a timer by the background
+    /// refresher; walking the caches is CPU-only (no apiserver traffic).
+    fn refresh_capacity(&self) {
+        let all: Vec<capacity::ClusterData> = self
+            .clusters
+            .iter()
+            .map(|c| capacity::ClusterData {
+                name: c.name.clone(),
+                nodes: c.nodes.list(),
+                pods: c.pods.list(),
+            })
+            .collect();
+        let fleet = to_val(capacity::build(&all, &self.topology));
+        let per_cluster = all
+            .iter()
+            .map(|cd| {
+                let report = capacity::build(std::slice::from_ref(cd), &self.topology);
+                (cd.name.clone(), to_val(report))
+            })
+            .collect();
+        *self.capacity.write().unwrap_or_else(|e| e.into_inner()) =
+            Arc::new(CapacitySnapshot { fleet, per_cluster });
+    }
+
+    /// The cached capacity response for one cluster, or the fleet rollup.
+    fn capacity_snapshot(&self, cluster: Option<&str>) -> Result<Value, ApiError> {
+        let snap = self
+            .capacity
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match cluster {
+            None => Ok(snap.fleet.clone()),
+            Some(name) => snap
+                .per_cluster
+                .get(name)
+                .cloned()
+                .ok_or_else(|| ApiError::NotFound(format!("unknown cluster: {name}"))),
+        }
+    }
 }
 
 /// Assemble the router and its middleware stack. The last `.layer()` is the
@@ -113,6 +436,9 @@ pub fn build_app(state: AppState) -> Router {
         .route("/readyz", get(health::readyz))
         .route("/v1/clusters", get(list_clusters))
         .route("/v1/capacity", get(capacity_report))
+        .route("/v1/events", get(list_events))
+        .route("/v1/stream", get(stream_events))
+        .route("/v1/rollouts", get(list_rollouts))
         .route("/v1/{kind}", get(list_kind))
         .route("/v1/{kind}/{name}", get(get_kind))
         .with_state(state)
@@ -134,6 +460,24 @@ pub fn build_app(state: AppState) -> Router {
 
 /// Bind the API listener and serve until a shutdown signal.
 pub async fn serve(config: &Config, state: AppState) -> anyhow::Result<()> {
+    // Recompute the capacity rollups when the Node/Pod informers observe a change
+    // — not on a blind timer or per request. A burst of changes is coalesced into
+    // at most one recompute per `capacity_refresh_secs`; when nothing changes,
+    // nothing is recomputed (a long backstop re-syncs in case an event is missed).
+    let min_interval = Duration::from_secs(config.capacity_refresh_secs.max(1));
+    const BACKSTOP: Duration = Duration::from_secs(120);
+    let bg = state.clone();
+    tokio::spawn(async move {
+        loop {
+            // Wake on a change, or at the backstop.
+            let _ = tokio::time::timeout(BACKSTOP, bg.signal.wait()).await;
+            let s = bg.clone();
+            let _ = tokio::task::spawn_blocking(move || s.refresh_capacity()).await;
+            // Pace: coalesce further changes for one interval before recomputing.
+            tokio::time::sleep(min_interval).await;
+        }
+    });
+
     let app = build_app(state);
     let addr = config.api_addr();
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -190,20 +534,23 @@ async fn list_clusters(State(st): State<AppState>) -> Json<Value> {
         .iter()
         .map(|c| {
             let nodes = c.nodes.list();
-            let gpu_nodes = nodes
+            let accelerator_nodes = nodes
                 .iter()
                 .filter(|n| {
                     n.status
                         .as_ref()
                         .and_then(|s| s.allocatable.as_ref())
-                        .map_or(0, sum_gpu)
-                        > 0
+                        .and_then(node_accel)
+                        .is_some()
                 })
                 .count();
+            let ready = c.ready.load(Ordering::Relaxed);
             json!({
                 "name": c.name,
+                "ready": ready,
+                "status": if ready { "ready" } else { "syncing" },
                 "nodes": nodes.len(),
-                "gpuNodes": gpu_nodes,
+                "acceleratorNodes": accelerator_nodes,
                 "inferenceServices": c.inference_services.list().len(),
             })
         })
@@ -217,16 +564,61 @@ async fn capacity_report(
     Query(params): Query<ListParams>,
     State(st): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
+    // Served from the background-refreshed snapshot — O(1), no per-request walk.
+    st.capacity_snapshot(params.cluster.as_deref()).map(Json)
+}
+
+/// `GET /v1/events` — recent resource changes observed across clusters (newest
+/// first), from the in-memory activity feed. `?cluster=` narrows it.
+async fn list_events(Query(params): Query<ListParams>, State(st): State<AppState>) -> Json<Value> {
+    let mut items = st.feed.recent();
+    if let Some(cluster) = params.cluster.as_deref() {
+        items.retain(|e| e.cluster == cluster);
+    }
+    Json(json!({ "count": items.len(), "items": items }))
+}
+
+/// `GET /v1/stream` — Server-Sent Events of live resource changes (the activity
+/// feed as it happens), so the UI updates on change instead of polling. Each
+/// message is a `FeedEvent` as JSON; `?cluster=` is intentionally not supported
+/// (the client filters), and a keep-alive comment holds idle connections open.
+async fn stream_events(
+    State(st): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
+    let live = BroadcastStream::new(st.feed.subscribe())
+        // Drop lagged-subscriber errors; the next event resyncs the client.
+        .filter_map(|res| res.ok())
+        .map(|event| {
+            let sse = SseEvent::default()
+                .json_data(&event)
+                .unwrap_or_else(|_| SseEvent::default().comment("encode error"));
+            Ok::<_, Infallible>(sse)
+        });
+    // Emit one comment immediately so a buffering proxy in front (e.g. the Vite
+    // dev proxy) flushes the response headers and the client's `onopen` fires
+    // right away, instead of waiting for the first change or the keep-alive.
+    let hello = tokio_stream::once(Ok::<_, Infallible>(
+        SseEvent::default().comment("connected"),
+    ));
+    Sse::new(hello.chain(live)).keep_alive(KeepAlive::default())
+}
+
+/// `GET /v1/rollouts` — InferenceServices currently mid-rollout (not yet Ready,
+/// or spec generation unobserved), across all clusters or one via `?cluster=`.
+async fn list_rollouts(
+    Query(params): Query<ListParams>,
+    State(st): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
     let selected = st.select(params.cluster.as_deref())?;
-    let data: Vec<capacity::ClusterData> = selected
-        .iter()
-        .map(|c| capacity::ClusterData {
-            name: c.name.clone(),
-            nodes: c.nodes.list(),
-            pods: c.pods.list(),
-        })
-        .collect();
-    Ok(Json(to_val(capacity::build(&data, &st.topology))))
+    let mut items: Vec<Value> = Vec::new();
+    for c in selected {
+        for isvc in c.inference_services.list() {
+            if let Some(view) = RolloutView::progressing(isvc.as_ref()) {
+                items.push(tagged(view, &c.name));
+            }
+        }
+    }
+    Ok(Json(json!({ "count": items.len(), "items": items })))
 }
 
 /// `GET /v1/{kind}` — projected overview rows from the informer caches, across
@@ -265,7 +657,7 @@ async fn list_kind(
                 map_view(&c.name, c.workload_clusters.list(), ResourceSummary::of)
             }
             "nodes" => {
-                let allocated = capacity::gpu_allocated_by_node(&c.pods.list());
+                let allocated = capacity::accel_allocated_by_node(&c.pods.list());
                 c.nodes
                     .list()
                     .iter()
@@ -348,7 +740,7 @@ async fn get_kind(
                 if raw {
                     tagged(&*n, &c.name)
                 } else {
-                    let used = capacity::gpu_allocated_by_node(&c.pods.list())
+                    let used = capacity::accel_allocated_by_node(&c.pods.list())
                         .get(&name)
                         .copied()
                         .unwrap_or(0);

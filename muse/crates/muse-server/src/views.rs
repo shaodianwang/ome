@@ -19,7 +19,8 @@ use ome_client::{
 };
 use serde::Serialize;
 
-/// GPU accounting: schedulable total vs. claimed by pods.
+/// Accelerator accounting: schedulable total vs. claimed by pods (a count of
+/// chips of one kind — GPUs or TPUs).
 #[derive(Serialize, Clone, Copy, Default)]
 pub struct GpuView {
     pub allocatable: i64,
@@ -42,19 +43,47 @@ impl GpuView {
     }
 }
 
-/// True for accelerator GPU resource keys, vendor-neutrally (`nvidia.com/gpu`,
-/// `amd.com/gpu`, ...).
-pub fn is_gpu(key: &str) -> bool {
-    key == "gpu" || key.ends_with("/gpu")
+/// The accelerator "kind" of a resource key, or `None` if it isn't an
+/// accelerator. Pattern-based, so it's vendor-neutral: `nvidia.com/gpu`,
+/// `amd.com/gpu` → `"gpu"`; `google.com/tpu` → `"tpu"`. GPUs and TPUs are tracked
+/// separately — different units, never summed into one number.
+pub fn accel_kind(key: &str) -> Option<&'static str> {
+    match key.rsplit('/').next().unwrap_or(key) {
+        "gpu" => Some("gpu"),
+        "tpu" => Some("tpu"),
+        _ => None,
+    }
 }
 
-/// Sum the integer GPU quantities in a resource map (across vendors).
-pub fn sum_gpu(resources: &BTreeMap<String, Quantity>) -> i64 {
+/// Sum the integer counts of accelerators of `kind` in a resource map.
+pub fn sum_accel(resources: &BTreeMap<String, Quantity>, kind: &str) -> i64 {
     resources
         .iter()
-        .filter(|(k, _)| is_gpu(k))
+        .filter(|(k, _)| accel_kind(k) == Some(kind))
         .filter_map(|(_, q)| q.0.parse::<i64>().ok())
         .sum()
+}
+
+/// A node's (or pod's) accelerator: its kind and total count — e.g. `("tpu", 4)`
+/// or `("gpu", 8)`. `None` if it exposes no accelerator; if more than one kind is
+/// present (unusual) the greater count wins.
+pub fn node_accel(resources: &BTreeMap<String, Quantity>) -> Option<(&'static str, i64)> {
+    let gpu = sum_accel(resources, "gpu");
+    let tpu = sum_accel(resources, "tpu");
+    match (gpu, tpu) {
+        (0, 0) => None,
+        (g, t) if t > g => Some(("tpu", t)),
+        (g, _) => Some(("gpu", g)),
+    }
+}
+
+/// A node's accelerator for the API: kind plus schedulable/claimed/free chips.
+#[derive(Serialize)]
+pub struct Accel {
+    pub kind: &'static str,
+    pub allocatable: i64,
+    pub allocated: i64,
+    pub free: i64,
 }
 
 /// The node labels muse groups capacity by: the RDMA island (outer level — the
@@ -144,6 +173,65 @@ impl InferenceServiceView {
     }
 }
 
+/// A rollout in progress: an InferenceService whose latest spec hasn't finished
+/// rolling out (not `Ready`, or its generation isn't observed yet). Steady-state
+/// services are omitted by [`RolloutView::progressing`].
+#[derive(Serialize)]
+pub struct RolloutView {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "deploymentMode")]
+    pub deployment_mode: Option<String>,
+    pub ready: bool,
+    /// `Ready` condition reason (e.g. `RevisionMissing`, `EngineNotReady`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age: Option<String>,
+}
+
+impl RolloutView {
+    /// `Some` when the service is mid-rollout, `None` when it's steady (Ready and
+    /// its spec generation observed).
+    pub fn progressing(isvc: &InferenceService) -> Option<Self> {
+        let meta = isvc.meta();
+        let status = isvc.status.as_ref();
+        let ready_cond = status
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"));
+        let ready = ready_cond.map(|c| c.status == "True").unwrap_or(false);
+        // Spec changed but not yet observed by the controller → still rolling out.
+        let spec_pending = matches!(
+            (status.and_then(|s| s.observed_generation), meta.generation),
+            (Some(observed), Some(generation)) if observed < generation
+        );
+        if ready && !spec_pending {
+            return None;
+        }
+        Some(Self {
+            name: meta.name.clone().unwrap_or_default(),
+            namespace: meta.namespace.clone(),
+            deployment_mode: isvc
+                .spec
+                .deployment_mode
+                .as_ref()
+                .and_then(|m| serde_json::to_value(m).ok())
+                .and_then(|v| v.as_str().map(String::from)),
+            ready,
+            reason: ready_cond
+                .map(|c| c.reason.clone())
+                .filter(|s| !s.is_empty()),
+            message: ready_cond
+                .map(|c| c.message.clone())
+                .filter(|s| !s.is_empty()),
+            age: age(meta),
+        })
+    }
+}
+
 /// Node overview shaped for capacity views: schedulability, instance/island, GPU
 /// accounting, and a vendor-neutral device map.
 #[derive(Serialize)]
@@ -162,9 +250,10 @@ pub struct NodeView {
     pub nvlink_domain: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zone: Option<String>,
-    /// GPU schedulable/claimed/free (absent for non-GPU nodes).
+    /// The node's accelerator: kind + schedulable/claimed/free chips (absent for
+    /// non-accelerator nodes).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gpu: Option<GpuView>,
+    pub accelerator: Option<Accel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,9 +272,10 @@ pub struct NodeView {
 }
 
 impl NodeView {
-    /// `gpu_allocated` is the GPU count claimed by pods on this node (computed from
-    /// the Pod cache); `topo` selects which labels name the island / NVLink domain.
-    pub fn of(node: &Node, gpu_allocated: i64, topo: &Topology) -> Self {
+    /// `accel_allocated` is the accelerator count claimed by pods on this node
+    /// (computed from the Pod cache); `topo` selects which labels name the island /
+    /// NVLink domain (or, for TPUs, the physical block / sub-block).
+    pub fn of(node: &Node, accel_allocated: i64, topo: &Topology) -> Self {
         let meta = node.meta();
         let labels = meta.labels.clone().unwrap_or_default();
         let status = node.status.as_ref();
@@ -207,11 +297,15 @@ impl NodeView {
                     .collect()
             })
             .unwrap_or_default();
-        let gpu_allocatable = status
+        let accelerator = status
             .and_then(|s| s.allocatable.as_ref())
-            .map(sum_gpu)
-            .unwrap_or(0);
-        let gpu = (gpu_allocatable > 0).then(|| GpuView::new(gpu_allocatable, gpu_allocated));
+            .and_then(node_accel)
+            .map(|(kind, allocatable)| Accel {
+                kind,
+                allocatable,
+                allocated: accel_allocated,
+                free: (allocatable - accel_allocated).max(0),
+            });
         Self {
             name: meta.name.clone().unwrap_or_default(),
             ready,
@@ -224,7 +318,7 @@ impl NodeView {
             island: first_label(&labels, &topo.island_labels),
             nvlink_domain: first_label(&labels, &topo.nvlink_labels),
             zone: nonempty(labels.get("topology.kubernetes.io/zone")),
-            gpu,
+            accelerator,
             cpu: cap("cpu"),
             memory: cap("memory").and_then(|m| humanize_mem(&m)),
             pods: cap("pods"),

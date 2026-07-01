@@ -2,9 +2,11 @@
 //! can't do itself (it requires joining Nodes × Pods, and fanning out across
 //! clusters).
 //!
-//! "Allocatable" comes from each Node; "allocated" is summed from the GPU
-//! requests of the Pods scheduled on it. Results roll up fleet-wide and are
-//! grouped by cluster, RDMA island, NVLink domain, and instance type.
+//! "Allocatable" comes from each Node; "allocated" is summed from the accelerator
+//! requests of the Pods scheduled on it. Accelerators are tracked **per kind** —
+//! GPUs and TPUs never share a total (different units). Results roll up fleet-wide
+//! per kind and are grouped by cluster, island, NVLink/ICI domain, and instance
+//! type; every group carries its accelerator `kind`.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -12,7 +14,7 @@ use kube::Resource;
 use ome_client::k8s_openapi::api::core::v1::{Node, Pod};
 use serde::Serialize;
 
-use crate::views::{first_label, sum_gpu, GpuView, Topology};
+use crate::views::{first_label, node_accel, sum_accel, GpuView, Topology};
 
 /// One cluster's cached Nodes + Pods, the input to aggregation.
 pub struct ClusterData {
@@ -25,7 +27,8 @@ pub struct ClusterData {
 #[derive(Serialize)]
 pub struct CapacityReport {
     pub nodes: NodeCounts,
-    pub gpu: GpuView,
+    /// Fleet accelerator totals — one entry per kind (e.g. `gpu`, `tpu`).
+    pub accelerators: Vec<GroupCapacity>,
     #[serde(rename = "byCluster")]
     pub by_cluster: Vec<GroupCapacity>,
     #[serde(rename = "byIsland")]
@@ -41,20 +44,26 @@ pub struct NodeCounts {
     pub total: usize,
     pub ready: usize,
     pub schedulable: usize,
-    #[serde(rename = "gpuNodes")]
-    pub gpu_nodes: usize,
+    #[serde(rename = "acceleratorNodes")]
+    pub accelerator_nodes: usize,
 }
 
-/// GPU capacity for one group (a cluster, island, NVLink domain, or instance type).
+/// Accelerator capacity for one group (a kind total, cluster, island, NVLink/ICI
+/// domain, or instance type), tagged with the accelerator `kind`.
 #[derive(Serialize)]
 pub struct GroupCapacity {
     pub name: String,
+    pub kind: String,
     pub nodes: usize,
-    pub gpu: GpuView,
+    pub allocatable: i64,
+    pub allocated: i64,
+    pub free: i64,
 }
 
-/// GPU count claimed by non-terminal Pods, keyed by node name.
-pub fn gpu_allocated_by_node(pods: &[Arc<Pod>]) -> BTreeMap<String, i64> {
+/// Accelerator count claimed by non-terminal Pods, keyed by node name. Kind-
+/// agnostic: a node's pods request the same accelerator kind the node offers, so
+/// the per-node total lines up with that node's kind in [`build`].
+pub fn accel_allocated_by_node(pods: &[Arc<Pod>]) -> BTreeMap<String, i64> {
     let mut by_node: BTreeMap<String, i64> = BTreeMap::new();
     for pod in pods {
         // Skip pods that have released their resources.
@@ -68,33 +77,34 @@ pub fn gpu_allocated_by_node(pods: &[Arc<Pod>]) -> BTreeMap<String, i64> {
         let Some(node) = spec.node_name.as_ref() else {
             continue;
         };
-        let gpus: i64 = spec
+        let count: i64 = spec
             .containers
             .iter()
             .filter_map(|c| c.resources.as_ref())
             .filter_map(|r| r.requests.as_ref())
-            .map(sum_gpu)
+            .map(|req| sum_accel(req, "gpu") + sum_accel(req, "tpu"))
             .sum();
-        if gpus > 0 {
-            *by_node.entry(node.clone()).or_insert(0) += gpus;
+        if count > 0 {
+            *by_node.entry(node.clone()).or_insert(0) += count;
         }
     }
     by_node
 }
 
+/// Bucket key: a group name plus the accelerator kind (kinds are never merged).
+type Key = (String, &'static str);
+
 /// Build the fleet capacity report across all clusters.
 pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
     let mut counts = NodeCounts::default();
-    let mut total = GpuView::default();
-    let mut by_cluster: Vec<GroupCapacity> = Vec::new();
-    let mut islands: BTreeMap<String, (usize, GpuView)> = BTreeMap::new();
-    let mut nvlink_domains: BTreeMap<String, (usize, GpuView)> = BTreeMap::new();
-    let mut instance_types: BTreeMap<String, (usize, GpuView)> = BTreeMap::new();
+    let mut kinds: BTreeMap<Key, (usize, GpuView)> = BTreeMap::new();
+    let mut by_cluster: BTreeMap<Key, (usize, GpuView)> = BTreeMap::new();
+    let mut islands: BTreeMap<Key, (usize, GpuView)> = BTreeMap::new();
+    let mut nvlink: BTreeMap<Key, (usize, GpuView)> = BTreeMap::new();
+    let mut instance: BTreeMap<Key, (usize, GpuView)> = BTreeMap::new();
 
     for cluster in clusters {
-        let allocated = gpu_allocated_by_node(&cluster.pods);
-        let mut cluster_nodes = 0usize;
-        let mut cluster_gpu = GpuView::default();
+        let allocated = accel_allocated_by_node(&cluster.pods);
 
         for node in &cluster.nodes {
             let name = node.meta().name.clone().unwrap_or_default();
@@ -118,70 +128,76 @@ pub fn build(clusters: &[ClusterData], topo: &Topology) -> CapacityReport {
                 counts.schedulable += 1;
             }
 
-            let allocatable = status
+            let Some((kind, allocatable)) = status
                 .and_then(|s| s.allocatable.as_ref())
-                .map_or(0, sum_gpu);
-            if allocatable == 0 {
-                continue; // non-GPU node: counted in totals above, skip GPU rollups
-            }
-            counts.gpu_nodes += 1;
+                .and_then(node_accel)
+            else {
+                continue; // non-accelerator node: counted in totals, skipped in rollups
+            };
+            counts.accelerator_nodes += 1;
 
-            let gpu = GpuView::new(allocatable, allocated.get(&name).copied().unwrap_or(0));
-            total.add(&gpu);
-            cluster_nodes += 1;
-            cluster_gpu.add(&gpu);
-
+            let stat = GpuView::new(allocatable, allocated.get(&name).copied().unwrap_or(0));
+            accumulate(&mut kinds, (kind.to_owned(), kind), &stat);
+            accumulate(&mut by_cluster, (cluster.name.clone(), kind), &stat);
             accumulate(
                 &mut islands,
-                first_label(&labels, &topo.island_labels),
-                &gpu,
+                (label_or(&labels, &topo.island_labels), kind),
+                &stat,
             );
             accumulate(
-                &mut nvlink_domains,
-                first_label(&labels, &topo.nvlink_labels),
-                &gpu,
+                &mut nvlink,
+                (label_or(&labels, &topo.nvlink_labels), kind),
+                &stat,
             );
             accumulate(
-                &mut instance_types,
-                labels.get("node.kubernetes.io/instance-type").cloned(),
-                &gpu,
+                &mut instance,
+                (
+                    labels
+                        .get("node.kubernetes.io/instance-type")
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                    kind,
+                ),
+                &stat,
             );
         }
-
-        by_cluster.push(GroupCapacity {
-            name: cluster.name.clone(),
-            nodes: cluster_nodes,
-            gpu: cluster_gpu,
-        });
     }
 
-    by_cluster.sort_by(|a, b| b.gpu.free.cmp(&a.gpu.free).then(a.name.cmp(&b.name)));
     CapacityReport {
         nodes: counts,
-        gpu: total,
-        by_cluster,
+        accelerators: into_groups(kinds),
+        by_cluster: into_groups(by_cluster),
         by_island: into_groups(islands),
-        by_nvlink_domain: into_groups(nvlink_domains),
-        by_instance_type: into_groups(instance_types),
+        by_nvlink_domain: into_groups(nvlink),
+        by_instance_type: into_groups(instance),
     }
 }
 
-/// Add a node's GPU to a grouping bucket (keyed by a label value, "unassigned"
-/// if no candidate label was present).
-fn accumulate(map: &mut BTreeMap<String, (usize, GpuView)>, key: Option<String>, gpu: &GpuView) {
-    let name = key.unwrap_or_else(|| "unassigned".to_owned());
-    let entry = map.entry(name).or_insert((0, GpuView::default()));
-    entry.0 += 1;
-    entry.1.add(gpu);
+/// The first present island/domain label value, or "unassigned".
+fn label_or(labels: &BTreeMap<String, String>, keys: &[String]) -> String {
+    first_label(labels, keys).unwrap_or_else(|| "unassigned".to_owned())
 }
 
-/// Flatten a grouping map into rows sorted by free GPUs descending (most
-/// available capacity first).
-fn into_groups(map: BTreeMap<String, (usize, GpuView)>) -> Vec<GroupCapacity> {
+/// Add a node's accelerator to a (name, kind) bucket.
+fn accumulate(map: &mut BTreeMap<Key, (usize, GpuView)>, key: Key, stat: &GpuView) {
+    let entry = map.entry(key).or_insert((0, GpuView::default()));
+    entry.0 += 1;
+    entry.1.add(stat);
+}
+
+/// Flatten a bucket map into rows sorted by free descending (most headroom first).
+fn into_groups(map: BTreeMap<Key, (usize, GpuView)>) -> Vec<GroupCapacity> {
     let mut groups: Vec<GroupCapacity> = map
         .into_iter()
-        .map(|(name, (nodes, gpu))| GroupCapacity { name, nodes, gpu })
+        .map(|((name, kind), (nodes, gpu))| GroupCapacity {
+            name,
+            kind: kind.to_owned(),
+            nodes,
+            allocatable: gpu.allocatable,
+            allocated: gpu.allocated,
+            free: gpu.free,
+        })
         .collect();
-    groups.sort_by(|a, b| b.gpu.free.cmp(&a.gpu.free).then(a.name.cmp(&b.name)));
+    groups.sort_by(|a, b| b.free.cmp(&a.free).then(a.name.cmp(&b.name)));
     groups
 }

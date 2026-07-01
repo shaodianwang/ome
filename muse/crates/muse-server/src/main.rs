@@ -20,13 +20,14 @@
 mod capacity;
 mod config;
 mod error;
+mod feed;
 mod health;
 mod observe;
 mod server;
 mod telemetry;
 mod views;
 
-use std::time::Duration;
+use std::{sync::atomic::Ordering, time::Duration};
 
 use anyhow::Context;
 use clap::Parser;
@@ -35,6 +36,19 @@ use kube::{
     Client,
 };
 use ome_client::informers::SharedInformerFactory;
+
+/// The `ome.io/v1beta1` resource plurals MUSE watches — used only to report which
+/// are absent on a given cluster. Discovery (not this list) gates each informer.
+const OME_PLURALS: [&str; 8] = [
+    "inferenceservices",
+    "basemodels",
+    "servingruntimes",
+    "inferencereplicas",
+    "clusterbasemodels",
+    "clusterservingruntimes",
+    "finetunedweights",
+    "workloadclusters",
+];
 
 fn main() -> anyhow::Result<()> {
     let config = config::Config::parse();
@@ -65,11 +79,16 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         nvlink_labels: config.nvlink_domain_labels.clone(),
     };
 
+    // Shared activity feed: OME informer changes across all clusters flow here.
+    let feed = feed::Feed::new(100);
+    // Shared signal: Node/Pod changes mark the capacity rollup stale.
+    let signal = server::CapacitySignal::new();
+
     // Fan out: one informer set per cluster. An unreachable cluster is skipped
     // (logged), not fatal — the fleet view degrades rather than failing.
     let mut clusters = Vec::new();
     for cluster_ref in config.cluster_refs() {
-        match build_cluster(&cluster_ref).await {
+        match build_cluster(&cluster_ref, config.list_strategy, &feed, &signal).await {
             Ok(state) => clusters.push(state),
             Err(err) => {
                 tracing::error!(cluster = %cluster_ref.name, error = %err, "skipping unreachable cluster");
@@ -81,15 +100,22 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
     }
     tracing::info!(
         clusters = clusters.len(),
-        "informer caches synced; serving read plane"
+        "serving read plane; caches warming in background"
     );
 
-    let state = server::AppState::new(clusters, topology);
+    let state = server::AppState::new(clusters, topology, feed, signal);
     server::serve(&config, state).await
 }
 
-/// Connect to one cluster, preflight it, and build its informer set.
-async fn build_cluster(cluster_ref: &config::ClusterRef) -> anyhow::Result<server::ClusterState> {
+/// Connect to one cluster, preflight it, build its informer set, and kick off the
+/// background cache warm-up. Returns as soon as the listers exist (initially
+/// empty), so a slow-syncing giant cluster never blocks the console from serving.
+async fn build_cluster(
+    cluster_ref: &config::ClusterRef,
+    list_strategy: config::ListStrategy,
+    feed: &feed::Feed,
+    signal: &server::CapacitySignal,
+) -> anyhow::Result<server::ClusterState> {
     let client = client_for(cluster_ref).await?;
     // Preflight so an unreachable cluster fails fast (and gets skipped) rather
     // than hanging on the first informer's initial sync.
@@ -97,9 +123,59 @@ async fn build_cluster(cluster_ref: &config::ClusterRef) -> anyhow::Result<serve
         .await
         .with_context(|| format!("cluster {} unreachable within 15s", cluster_ref.name))?
         .with_context(|| format!("cluster {} version query failed", cluster_ref.name))?;
-    tracing::info!(cluster = %cluster_ref.name, version = %info.git_version, "connected to apiserver");
-    let factory = SharedInformerFactory::new(client);
-    Ok(server::build_cluster_state(cluster_ref.name.clone(), &factory).await)
+    // Decide the initial-list strategy from the configured policy and the
+    // apiserver version (WatchList is beta/on by default only since 1.32).
+    let streaming = list_strategy.use_streaming(server_minor(&info.git_version));
+    tracing::info!(cluster = %cluster_ref.name, version = %info.git_version, streaming, "connected to apiserver");
+
+    // Which ome.io/v1beta1 resources does this cluster actually serve? Gate each
+    // informer on its CRD being present: a missing CRD 404-loops on the initial
+    // list and blocks startup. Member clusters typically serve the workload CRDs
+    // but not WorkloadCluster (hub-only), and a cluster with no OME at all yields
+    // an empty set — capacity (nodes/pods) still works in every case.
+    let ome: std::collections::HashSet<String> = client
+        .list_api_group_resources("ome.io/v1beta1")
+        .await
+        .map(|list| list.resources.into_iter().map(|r| r.name).collect())
+        .unwrap_or_default();
+    let missing: Vec<&str> = OME_PLURALS
+        .iter()
+        .copied()
+        .filter(|p| !ome.contains(*p))
+        .collect();
+    if !missing.is_empty() {
+        tracing::warn!(cluster = %cluster_ref.name, ?missing, "ome.io CRDs absent on this cluster — those kinds will be empty");
+    }
+
+    let factory = SharedInformerFactory::with_streaming_lists(client, streaming);
+    let (state, readies) =
+        server::build_cluster_state(cluster_ref.name.clone(), &factory, &ome, feed, signal);
+    // Serve immediately and warm the caches in the background; flip the cluster's
+    // ready flag once every informer has finished its first sync. Awaiting the
+    // futures in sequence still completes in max(individual) time — the reflector
+    // tasks all run concurrently, so we only observe their completion here.
+    let ready = state.ready.clone();
+    let name = cluster_ref.name.clone();
+    tokio::spawn(async move {
+        for fut in readies {
+            fut.await;
+        }
+        ready.store(true, Ordering::Relaxed);
+        tracing::info!(cluster = %name, "cache sync complete");
+    });
+    Ok(state)
+}
+
+/// Parse the minor version from an apiserver `gitVersion` string, e.g.
+/// `"v1.35.6"` → `35` (tolerates suffixes like `"v1.32.0-gke.1"`). `None` if it
+/// doesn't parse, in which case `ListStrategy::Auto` conservatively paginates.
+fn server_minor(git_version: &str) -> Option<u32> {
+    git_version
+        .trim_start_matches('v')
+        .split('.')
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 /// Build a kube client from an explicit kubeconfig, or the ambient config.

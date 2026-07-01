@@ -31,6 +31,33 @@ fn parse_cluster(spec: &str) -> Result<ClusterRef, String> {
     })
 }
 
+/// How an informer fetches its initial state from an apiserver.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum ListStrategy {
+    /// Stream the initial list (WatchList) on apiservers new enough to support it,
+    /// else paginate — decided per cluster from its reported version. WatchList is
+    /// beta and on by default since Kubernetes 1.32.
+    #[default]
+    Auto,
+    /// Always stream the initial list (WatchList). Will fail to sync on apiservers
+    /// without WatchList support.
+    Streaming,
+    /// Always use paginated list calls. Works on every apiserver.
+    Paginated,
+}
+
+impl ListStrategy {
+    /// Whether to use streaming for an apiserver at this minor version. `Auto`
+    /// enables it for Kubernetes >= 1.32 (WatchList beta, on by default).
+    pub fn use_streaming(self, server_minor: Option<u32>) -> bool {
+        match self {
+            ListStrategy::Streaming => true,
+            ListStrategy::Paginated => false,
+            ListStrategy::Auto => server_minor.is_some_and(|m| m >= 32),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Parser)]
 #[command(name = "muse", about = "MUSE read-plane API server (OEP-0021)")]
 pub struct Config {
@@ -55,28 +82,47 @@ pub struct Config {
     #[arg(long = "cluster", value_parser = parse_cluster)]
     pub clusters: Vec<ClusterRef>,
 
-    /// Node label(s) whose value names the RDMA island (outer topology level — the
-    /// network fabric), for capacity grouping. Comma-separated; the first label
-    /// present on a node wins, so one flag covers clusters that label topology
-    /// differently (e.g. network.meta.com/ai-zone,backend.coreweave.cloud/fabric).
-    /// Default is the standard k8s zone.
+    /// Informer initial-list strategy: `auto` (stream on Kubernetes >= 1.32, else
+    /// paginate), `streaming`, or `paginated`. Streaming (WatchList) is far cheaper
+    /// on large clusters; `auto` picks it per cluster from the apiserver version.
+    #[arg(long = "list-strategy", env = "MUSE_LIST_STRATEGY", value_enum, default_value_t = ListStrategy::Auto)]
+    pub list_strategy: ListStrategy,
+
+    /// Minimum seconds between capacity recomputes. The rollup is recomputed when
+    /// the Node/Pod informers observe a change (coalesced to at most once per this
+    /// interval) — not on a timer or per request — so it's reactive without
+    /// storming under pod churn, and served from a cached snapshot (flat request
+    /// latency). Lower = fresher, higher = cheaper.
+    #[arg(
+        long = "capacity-refresh-secs",
+        env = "MUSE_CAPACITY_REFRESH_SECS",
+        default_value_t = 10
+    )]
+    pub capacity_refresh_secs: u64,
+
+    /// Node label(s) naming the accelerator's outer topology domain — the RDMA
+    /// island / network fabric for GPUs, or the physical block for TPUs — used for
+    /// capacity grouping. Comma-separated; the first label present on a node wins,
+    /// so one flag spans providers that label topology differently (e.g.
+    /// cloud.google.com/gce-topology-block, backend.coreweave.cloud/fabric). Falls
+    /// back to the standard k8s zone.
     #[arg(
         long = "rdma-island-label",
         env = "MUSE_RDMA_ISLAND_LABEL",
         value_delimiter = ',',
-        default_value = "topology.kubernetes.io/zone"
+        default_value = "cloud.google.com/gce-topology-block,topology.kubernetes.io/zone"
     )]
     pub rdma_island_labels: Vec<String>,
 
-    /// Node label(s) whose value names the NVLink domain (inner topology level —
-    /// e.g. a GB300 NVL72's 72-GPU rack, within one island). Comma-separated,
-    /// first-present wins (e.g. network.meta.com/domain,nvidia.com/gpu.clique).
-    /// Default is NVIDIA's standard clique label.
+    /// Node label(s) naming the accelerator's inner topology domain — the NVLink
+    /// domain for GPUs (e.g. an NVL72 rack), or the ICI sub-block for TPUs — within
+    /// one island. Comma-separated, first-present wins (e.g.
+    /// cloud.google.com/gce-topology-subblock, nvidia.com/gpu.clique).
     #[arg(
         long = "nvlink-domain-label",
         env = "MUSE_NVLINK_DOMAIN_LABEL",
         value_delimiter = ',',
-        default_value = "nvidia.com/gpu.clique"
+        default_value = "cloud.google.com/gce-topology-subblock,nvidia.com/gpu.clique"
     )]
     pub nvlink_domain_labels: Vec<String>,
 }
