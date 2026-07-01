@@ -352,6 +352,27 @@ ome-agent-image: fmt vet xet-build ## Build ome-agent image.
 		. -f dockerfiles/ome-agent.Dockerfile -t $(REGISTRY)/ome-agent:$(TAG)
 	@echo "✅ Image built"
 
+.PHONY: muse-server-image
+muse-server-image: ## Build the MUSE read-plane server image.
+	@echo "🚀 Building muse-server image..."
+	$(DOCKER_BUILD_CMD) build --platform=$(ARCH) \
+		. -f dockerfiles/muse-server.Dockerfile -t $(REGISTRY)/muse-server:$(TAG)
+	@echo "✅ Image built"
+
+.PHONY: muse-web-image
+muse-web-image: ## Build the MUSE console (web) image.
+	@echo "🚀 Building muse-web image..."
+	$(DOCKER_BUILD_CMD) build --platform=$(ARCH) \
+		. -f dockerfiles/muse-web.Dockerfile -t $(REGISTRY)/muse-web:$(TAG)
+	@echo "✅ Image built"
+
+.PHONY: build-muse-images
+build-muse-images: ## 🚀 Build both MUSE images for the current architecture
+	@echo "🚀 Building MUSE images for $(ARCH)..."
+	@$(MAKE) muse-server-image
+	@$(MAKE) muse-web-image
+	@echo "✅ MUSE images built"
+
 .PHONY: docker-buildx-setup
 docker-buildx-setup: ## 🔧 Setup Docker buildx for multi-arch builds
 	@echo "🔧 Setting up Docker buildx..."

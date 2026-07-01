@@ -1,0 +1,10 @@
+# Image builds use the repo root as context (`build-context: "."`). Keep it lean
+# and keep build outputs out of the images — every Dockerfile regenerates what it
+# needs (the Go builds rebuild pkg/xet; the muse builds recompile from source).
+.git
+.claude
+**/node_modules
+**/target
+**/dist
+bin
+*.log

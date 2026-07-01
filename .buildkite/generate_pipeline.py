@@ -69,6 +69,10 @@ IMAGES = [
     # CPU-only metrics workload for the OMENative canary-analysis e2e tests
     # (hack/omenative-testing). Pulled by runtime/csr-metrics.yaml.
     ("canary-metrics", "canary-metrics", "dockerfiles/canary-metrics.Dockerfile"),
+    # MUSE console: read-plane API (Rust) + web UI (nginx). Independent of the
+    # OME operator images; built from muse/ + ome-client-rs/.
+    ("muse-server", "muse-server", "dockerfiles/muse-server.Dockerfile"),
+    ("muse-web", "muse-web", "dockerfiles/muse-web.Dockerfile"),
 ]
 
 CHARTS = ["ome-crd", "ome-resources", "ome-isvc"]
