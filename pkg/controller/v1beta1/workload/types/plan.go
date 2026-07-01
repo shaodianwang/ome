@@ -122,16 +122,26 @@ func (i InstancePlan) TotalPods() int32 {
 // surge pod without colliding with steady-state indices or other
 // in-flight surges.
 func AllocateSurgeIndex(instances []InstanceStatus) int32 {
-	used := make(map[int32]struct{}, len(instances))
+	used := make(map[int32]struct{}, len(instances)*2)
 	for _, s := range instances {
 		used[s.Index] = struct{}{}
+		// Also exclude in-flight surge slots. A source mid-surge records its
+		// replacement's index in Operation.SurgeIndex BEFORE the replacement
+		// Instance exists (it's created a pass later, and within a single
+		// reconcile pass a sibling that just claimed a slot has it recorded
+		// here but not yet as a real Index). Without excluding these, every
+		// Instance surging in the same pass collides on the same lowest-free
+		// index; when that single shared surge becomes Ready the drain-on-ready
+		// logic releases ALL sharing sources at once — a full-fleet wipe.
+		if s.Operation != nil && s.Operation.SurgeIndex != nil {
+			used[*s.Operation.SurgeIndex] = struct{}{}
+		}
 	}
-	// Pigeonhole-bounded: for any set of size N at least one of
-	// {0,..,N} must be unused.
-	for i := int32(0); i <= int32(len(used)); i++ {
+	// Lowest-free exists at or below |used| (distinct ints), so an unbounded
+	// scan terminates; keep it unbounded so the 2x-entry set can't off-by-one.
+	for i := int32(0); ; i++ {
 		if _, taken := used[i]; !taken {
 			return i
 		}
 	}
-	return int32(len(used)) // unreachable; keep function total.
 }

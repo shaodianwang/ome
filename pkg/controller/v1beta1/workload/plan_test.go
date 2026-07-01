@@ -418,6 +418,21 @@ func TestAllocateSurgeIndex(t *testing.T) {
 	if got := AllocateSurgeIndex(nil); got != 0 {
 		t.Errorf("empty: got %d want 0", got)
 	}
+	// Regression (shared-surgeIndex fleet-wipe): an in-flight surge slot
+	// recorded in Operation.SurgeIndex must be excluded even though no Instance
+	// with that Index exists yet. Without this, every Instance surging in one
+	// reconcile pass collides on the same lowest-free index, and when that single
+	// shared surge becomes Ready the drain-on-ready logic releases ALL sharing
+	// sources at once — the full-fleet wipe. With instances {0(surge→2), 1},
+	// indices {0,1,2} are taken, so the next surge must land at 3, not 2.
+	surgeAt2 := int32(2)
+	withInflightSurge := []InstanceStatus{
+		{Index: 0, Operation: &InstanceOperation{SurgeIndex: &surgeAt2}},
+		{Index: 1},
+	}
+	if got := AllocateSurgeIndex(withInflightSurge); got != 3 {
+		t.Errorf("in-flight surge slot at 2 must be excluded: got %d want 3", got)
+	}
 }
 
 // TestSkipAsHeld guards the canary surge-stranding fix: a held Instance that is

@@ -92,6 +92,23 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		if err := patchInstanceStatusGangSurgeTarget(ctx, input, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
 			return false, fmt.Errorf("stamp gang surge target (instance=%d): %w", surgeIdx, err)
 		}
+		// Reserve the chosen index in the IN-MEMORY snapshot so sibling
+		// Instances surging in the SAME reconcile pass allocate a DISTINCT
+		// index. The patches above only hit the API; input.ObservedState is the
+		// snapshot taken at the start of the pass, so without this the next
+		// sibling's AllocateSurgeIndex re-picks the same lowest-free index — the
+		// shared-surgeIndex collision that drains the whole fleet when the single
+		// shared surge becomes Ready. AllocateSurgeIndex now excludes
+		// Operation.SurgeIndex, so recording the claim on the source suffices.
+		if src != nil {
+			si := surgeIdx
+			src.Operation = &workload.InstanceOperation{
+				Type:           workload.InstanceOperationUpdate,
+				Step:           updateStepSurge,
+				SurgeIndex:     &si,
+				TargetRevision: surgeTargetName,
+			}
+		}
 		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
 			"OMENative %s gang surge to revision %s (surge-index=%d)",
 			instanceKey(comp, sourceIdx), surgeTargetName, surgeIdx)
