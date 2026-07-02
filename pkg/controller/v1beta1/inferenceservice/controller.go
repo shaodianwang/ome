@@ -962,7 +962,7 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Register the spec.runtime.name field index so runtime change events
 	// fan out to referencing ISVCs through the cache index instead of
 	// scanning every cached InferenceService — see
-	// pinnedISVCsReferencingRuntime.
+	// isvcsReferencingRuntime.
 	if err := registerISVCRuntimeNameIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
 		return err
 	}
@@ -1086,16 +1086,17 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 	}
 
-	// Add watches for ServingRuntime and ClusterServingRuntime. Beyond
-	// populating the cache, runtime events fan out to any ISVC that has
-	// opted into pinning (spec.runtime.autoSync=false) — without this,
-	// drift detection would only fire on the next unrelated ISVC
-	// reconcile, leaving operators unaware their edit was rejected.
+	// Add watches for ServingRuntime and ClusterServingRuntime. Runtime
+	// events fan out to EVERY ISVC referencing the runtime: autoSync=true
+	// (float) ISVCs re-render from the live runtime and roll forward;
+	// autoSync=false (pinned) ISVCs run drift detection and warn. Without
+	// this fan-out a runtime change never triggers a float ISVC's reconcile,
+	// so the edit silently fails to propagate — see isvcsReferencingRuntime.
 	ctrlBuilder = ctrlBuilder.
 		Watches(&v1beta1.ServingRuntime{},
-			handler.EnqueueRequestsFromMapFunc(r.pinnedISVCsReferencingRuntime)).
+			handler.EnqueueRequestsFromMapFunc(r.isvcsReferencingRuntime)).
 		Watches(&v1beta1.ClusterServingRuntime{},
-			handler.EnqueueRequestsFromMapFunc(r.pinnedISVCsReferencingRuntime))
+			handler.EnqueueRequestsFromMapFunc(r.isvcsReferencingRuntime))
 
 	// Re-reconcile an ISVC when its canary analysis sample lands, so the executor
 	// consumes the result immediately instead of waiting on the periodic requeue.
@@ -1134,25 +1135,41 @@ func isvcRuntimeNameIndexExtractor(obj client.Object) []string {
 
 // registerISVCRuntimeNameIndex installs isvcRuntimeNameIndexField on the
 // supplied indexer (mgr.GetFieldIndexer()). Call once during manager
-// setup, before Start, so pinnedISVCsReferencingRuntime resolves
+// setup, before Start, so isvcsReferencingRuntime resolves
 // referencing ISVCs through the index instead of scanning every cached
 // InferenceService.
 func registerISVCRuntimeNameIndex(ctx context.Context, indexer client.FieldIndexer) error {
 	return indexer.IndexField(ctx, &v1beta1.InferenceService{}, isvcRuntimeNameIndexField, isvcRuntimeNameIndexExtractor)
 }
 
-// pinnedISVCsReferencingRuntime returns reconcile requests for ISVCs
-// that pin to the runtime named by obj (spec.runtime.name match +
-// autoSync=false). Empty when nothing pins to it — autoSync=true
-// consumers don't need to be re-reconciled on runtime change because
-// they always read the live spec.
-func (r *InferenceServiceReconciler) pinnedISVCsReferencingRuntime(ctx context.Context, obj client.Object) []reconcile.Request {
+// isvcsReferencingRuntime returns reconcile requests for EVERY ISVC whose
+// spec.runtime.name matches obj (respecting namespaced-SR scope), regardless
+// of autoSync. Both float and pinned consumers must be re-reconciled on a
+// runtime change:
+//
+//   - autoSync=true (default, "float"): the reconcile re-renders the pod
+//     spec from the LIVE runtime, so a runtime edit rolls the ISVC forward.
+//     Fanning these out is the whole point — without it a runtime change
+//     never triggers the float ISVC's reconcile, so it silently fails to
+//     propagate until some unrelated event happens to wake the ISVC. That
+//     used to be masked by frequent incidental reconciles; once those were
+//     trimmed (event-filter predicates, scoped informers), runtime edits
+//     stopped reaching float ISVCs entirely.
+//
+//   - autoSync=false ("pinned"): the reconcile runs drift detection and
+//     warns the operator that the runtime edit was rejected; it does not roll.
+//
+// NOTE (deploy ordering): fanning out float ISVCs means a runtime edit now
+// rolls them. For RawDeployment that is a safe native rolling update; for
+// OMENative it rolls per the Component's updateStrategy — so any OMENative
+// ISVC still on RecreatePod with no rollout budget would be recreated
+// wholesale. Ship the rollout-budget fixes first.
+func (r *InferenceServiceReconciler) isvcsReferencingRuntime(ctx context.Context, obj client.Object) []reconcile.Request {
 	runtimeName := obj.GetName()
 	runtimeNamespace := obj.GetNamespace() // empty for cluster-scoped
 
-	// Narrow to ISVCs whose spec.runtime.name matches via the field
-	// index; the in-memory filters below still apply (kind/namespace
-	// scope + autoSync), preserving the exact enqueued set.
+	// Narrow to ISVCs whose spec.runtime.name matches via the field index;
+	// the in-memory kind/namespace-scope filter below still applies.
 	var isvcs v1beta1.InferenceServiceList
 	if err := r.List(ctx, &isvcs, client.MatchingFields{isvcRuntimeNameIndexField: runtimeName}); err != nil {
 		r.Log.Error(err, "fan-out runtime event: list InferenceServices failed")
@@ -1165,11 +1182,8 @@ func (r *InferenceServiceReconciler) pinnedISVCsReferencingRuntime(ctx context.C
 		if isvc.Spec.Runtime == nil || isvc.Spec.Runtime.Name != runtimeName {
 			continue
 		}
-		// autoSync=true (default) ignores runtime mid-stream changes.
-		if isvc.Spec.Runtime.AutoSync == nil || *isvc.Spec.Runtime.AutoSync {
-			continue
-		}
-		// Namespaced SR only matches same-namespace ISVCs.
+		// Namespaced SR only matches same-namespace ISVCs; a cluster-scoped
+		// runtime (empty namespace) matches ISVCs in any namespace.
 		if runtimeNamespace != "" && isvc.Namespace != runtimeNamespace {
 			continue
 		}
