@@ -352,13 +352,21 @@ prometheus:
     repository: prom/prometheus
     tag: "v3.0.1"
     pullPolicy: IfNotPresent
+  # Memory scales with active series = (scrape targets) x (series per pod).
+  # LLM-serving pods expose high cardinality (per-request histograms, KV-cache,
+  # per-model labels), so a few hundred ISVC pods can push the head block past
+  # 1Gi and OOM-crashloop (the WAL replays the oversized head on every restart).
+  # 3Gi covers a moderate fleet (~500 ISVC pods). LARGER fleets: scope
+  # `scrapeNamespaces` to the namespaces you autoscale, and/or drop the metric
+  # firehose to the KEDA-needed series — this Prometheus is autoscaling input,
+  # not observability. Memory-by-count won't scale forever; cut cardinality.
   resources:
     requests:
       cpu: 100m
-      memory: 256Mi
+      memory: 512Mi
     limits:
       cpu: 500m
-      memory: 1Gi
+      memory: 3Gi
   service:
     type: ClusterIP
     port: 9090

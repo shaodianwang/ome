@@ -80,9 +80,9 @@ OME Resources and Controller
 | prometheus.image.repository | string | `"prom/prometheus"` |  |
 | prometheus.image.tag | string | `"v3.0.1"` |  |
 | prometheus.resources.limits.cpu | string | `"500m"` |  |
-| prometheus.resources.limits.memory | string | `"1Gi"` |  |
+| prometheus.resources.limits.memory | string | `"3Gi"` | Sized for a moderate fleet (~500 ISVC pods); larger fleets should scope `scrapeNamespaces` and/or trim scraped metrics. |
 | prometheus.resources.requests.cpu | string | `"100m"` |  |
-| prometheus.resources.requests.memory | string | `"256Mi"` |  |
+| prometheus.resources.requests.memory | string | `"512Mi"` |  |
 | prometheus.service.port | int | `9090` |  |
 | prometheus.service.type | string | `"ClusterIP"` |  |
 | prometheus.storage.sizeLimit | string | `"2Gi"` | emptyDir size cap. Protects the node from runaway disk use. |
