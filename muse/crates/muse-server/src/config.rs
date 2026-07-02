@@ -145,6 +145,13 @@ pub struct Config {
         default_value_t = 60
     )]
     pub chat_timeout_secs: u64,
+
+    /// Directory of the built web console (the SPA) to serve at `/`, with the
+    /// API under `/v1`. Unset ⇒ API-only (the console is served elsewhere). The
+    /// container image bakes the bundle in and sets this; override to point at
+    /// your own build.
+    #[arg(long = "web-dir", env = "MUSE_WEB_DIR")]
+    pub web_dir: Option<PathBuf>,
 }
 
 impl Config {

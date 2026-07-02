@@ -1,0 +1,80 @@
+# MUSE console — one image (muse-server) serving the read-plane API + web UI.
+replicaCount: 1
+
+image:
+  # Under global.hub when set and repository has no "/", else used as a full ref.
+  repository: muse-server
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Optional registry prefix (matches the ome-resources chart's global.hub).
+global:
+  hub: ""
+
+# Workload clusters muse-server aggregates. Each entry mounts a kubeconfig Secret
+# (key: `kubeconfig`) and passes `--cluster <name>=<path>`. Empty ⇒ muse uses its
+# in-cluster ServiceAccount as a single "default" cluster (the one it runs in).
+clusters: []
+#  - name: cw-use2-1
+#    kubeconfigSecret: muse-kubeconfig-cw-use2-1
+
+# muse-server config — all env/flag driven, no values baked into the image.
+config:
+  webDir: /web # the image bakes the console here; "" ⇒ API-only
+  listStrategy: auto # auto | streaming | paginated
+  capacityRefreshSecs: 10
+  chat: # in-console inference test proxy (POST /v1/.../chat)
+    enabled: false # off by default (forwards to a model endpoint)
+    timeoutSecs: 60
+  extraArgs: [] # any additional muse-server flags
+
+service:
+  port: 8080
+  metricsPort: 9090
+
+# Gateway API exposure: attach an HTTPRoute to an existing (platform-owned) Envoy
+# Gateway. The console is served under pathPrefix; the route strips the prefix
+# before muse-server (which serves the SPA at / and the API at /v1). Disable to
+# manage ingress yourself.
+route:
+  enabled: true
+  gateway:
+    name: ingress-eg-https
+    namespace: envoy-gateway-system
+    # HTTPS listener section names to attach to (mirror the ArgoCD route).
+    sectionNames:
+      - https
+      - https-8443
+  pathPrefix: /muse
+  # Needed only if the backend Service is in a different namespace than the route
+  # (it isn't here — both are in the release namespace).
+  referenceGrant: false
+
+# Optional Cilium policy: only the gateway's data-plane pods may reach muse-server.
+networkPolicy:
+  enabled: false
+  gatewayPodSelector:
+    app.kubernetes.io/managed-by: envoy-gateway
+
+# Read-only ClusterRole (get/list/watch OME CRDs + nodes/pods) for the in-cluster
+# case. Remote clusters are read via their mounted kubeconfig creds instead.
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {} # e.g. a Meta service identity for gateway/manifold auth later
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

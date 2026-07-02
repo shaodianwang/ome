@@ -1,0 +1,39 @@
+{{- if .Values.rbac.create }}
+# Read-only across the cluster muse-server runs in (the in-cluster / "default"
+# case). Remote workload clusters are read via their mounted kubeconfig creds, so
+# their RBAC lives there, not here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "muse.fullname" . }}
+  labels: {{- include "muse.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["ome.io"]
+    resources:
+      - inferenceservices
+      - basemodels
+      - clusterbasemodels
+      - servingruntimes
+      - clusterservingruntimes
+      - finetunedweights
+      - inferencereplicas
+      - workloadclusters
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "muse.fullname" . }}
+  labels: {{- include "muse.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "muse.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "muse.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

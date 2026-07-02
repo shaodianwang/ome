@@ -1,0 +1,37 @@
+{{- if .Values.route.enabled }}
+# Attaches to the shared, platform-owned Envoy Gateway. Serves the console under
+# `pathPrefix` and strips it before muse-server (which serves the SPA at / and the
+# API at /v1). Reached via the gateway's silfra URL, e.g.
+#   https://sv6-<gateway-ipv6-dashed>---8443.silfra.facebook.net{{ .Values.route.pathPrefix }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "muse.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "muse.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    {{- range .Values.route.gateway.sectionNames }}
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $.Values.route.gateway.name }}
+      namespace: {{ $.Values.route.gateway.namespace }}
+      sectionName: {{ . }}
+    {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.route.pathPrefix | quote }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ include "muse.fullname" . }}
+          port: {{ .Values.service.port }}
+{{- end }}

@@ -1,0 +1,81 @@
+# muse — MUSE console
+
+MUSE is the OME management console. This chart deploys it as **one image**
+(`muse-server`) that serves both the read-plane API (`/v1`) and the web UI (`/`),
+and exposes it through an existing Envoy Gateway — no nginx, no separate frontend.
+
+## What it deploys
+
+- **Deployment** `muse-server` (API + UI) + **Service** (ClusterIP `:8080`, metrics `:9090`).
+- **ClusterRole/Binding**: read-only `get/list/watch` on the OME CRDs + `nodes`/`pods`.
+- **HTTPRoute** on the shared Envoy Gateway, serving the console under `/muse` — the
+  route strips the prefix (`URLRewrite`), so muse-server serves at root.
+- Optional **ReferenceGrant** and **CiliumNetworkPolicy**.
+
+## Deploy (GitOps / ArgoCD)
+
+ArgoCD already runs on the management cluster, so point an Application at this chart:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: muse
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mslsrc/ome
+    path: charts/muse
+    targetRevision: main
+    helm:
+      values: |
+        image:
+          repository: <account>.dkr.ecr.us-east-2.amazonaws.com/msl_infra/muse-server
+          tag: latest
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: muse
+  syncPolicy:
+    automated: {}
+    syncOptions: ["CreateNamespace=true"]
+```
+
+Or directly: `helm install muse charts/muse -n muse --create-namespace`.
+
+## Reaching it
+
+The gateway is reached via silfra (corp → the gateway IPv6 + port). Use the same
+port as ArgoCD's HTTPS listener (8443 on `msl-mks-cp-lco-0`):
+
+```
+https://sv6-<gateway-ipv6-dashed>---8443.silfra.facebook.net/muse
+```
+
+Find the gateway IPv6:
+
+```
+kubectl get gateway ingress-eg-https -n envoy-gateway-system \
+  -o jsonpath='{.status.addresses[0].value}'
+```
+
+e.g. `2401:db00:72ff:c8b6::` →
+`https://sv6-2401-db00-72ff-c8b6-0000-0000-0000-0000---8443.silfra.facebook.net/muse`
+
+## Watching workload clusters
+
+By default muse-server watches the cluster it runs in (via its ServiceAccount). To
+aggregate remote clusters, create a Secret per cluster holding its kubeconfig
+(key `kubeconfig`) and list them:
+
+```yaml
+clusters:
+  - name: cw-use2-1
+    kubeconfigSecret: muse-kubeconfig-cw-use2-1
+```
+
+## Inference test (chat)
+
+Off by default (`config.chat.enabled: false`) — it proxies one request to a
+model's own endpoint. Enable per environment; when off, the console shows a
+copyable `curl` instead.

@@ -9,6 +9,7 @@ use std::{
     convert::Infallible,
     fmt::Debug,
     future::Future,
+    path::PathBuf,
     pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -40,6 +41,7 @@ use tower_http::{
     compression::CompressionLayer,
     cors::CorsLayer,
     request_id::{PropagateRequestIdLayer, SetRequestIdLayer},
+    services::{ServeDir, ServeFile},
     timeout::TimeoutLayer,
     trace::{DefaultOnResponse, TraceLayer},
 };
@@ -446,8 +448,8 @@ impl AppState {
 /// Assemble the router and its middleware stack. The last `.layer()` is the
 /// outermost at request time, so the effective order is:
 /// CORS → compression → timeout → request-id → trace → metrics → handler.
-pub fn build_app(state: AppState) -> Router {
-    Router::new()
+pub fn build_app(state: AppState, web_dir: Option<PathBuf>) -> Router {
+    let mut router = Router::new()
         .route("/healthz", get(health::healthz))
         .route("/livez", get(health::livez))
         .route("/readyz", get(health::readyz))
@@ -459,7 +461,16 @@ pub fn build_app(state: AppState) -> Router {
         .route("/v1/config", get(get_config))
         .route("/v1/inferenceservices/{name}/chat", post(chat_proxy))
         .route("/v1/{kind}", get(list_kind))
-        .route("/v1/{kind}/{name}", get(get_kind))
+        .route("/v1/{kind}/{name}", get(get_kind));
+    // When a built console bundle is provided, serve it at `/` with SPA fallback
+    // to index.html. The explicit `/v1` + health routes above take precedence, so
+    // only non-API paths (index, assets) hit the static server. Absent a bundle,
+    // the server is API-only.
+    if let Some(dir) = web_dir {
+        let index = dir.join("index.html");
+        router = router.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)));
+    }
+    router
         .with_state(state)
         .layer(middleware::from_fn(track_metrics))
         .layer(
@@ -497,7 +508,7 @@ pub async fn serve(config: &Config, state: AppState) -> anyhow::Result<()> {
         }
     });
 
-    let app = build_app(state);
+    let app = build_app(state, config.web_dir.clone());
     let addr = config.api_addr();
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "muse read-plane listening");

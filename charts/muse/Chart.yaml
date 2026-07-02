@@ -1,0 +1,6 @@
+apiVersion: v2
+name: muse
+description: MUSE — the OME management console (read-plane API + web UI, one image)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

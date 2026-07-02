@@ -191,11 +191,17 @@ export interface ChatResponse {
   [k: string]: unknown;
 }
 
+// Requests are relative to the app's base path (Vite BASE_URL — "/muse/" in the
+// packaged image, "/" in dev), so the console works behind a gateway that serves
+// it under a sub-path (the gateway strips the prefix before muse-server).
+const BASE = import.meta.env.BASE_URL;
+const at = (path: string) => BASE + path.replace(/^\//, "");
+
 /** SSE endpoint for live resource-change events (see `live.ts`). */
-export const STREAM_URL = "/v1/stream";
+export const STREAM_URL = at("/v1/stream");
 
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(path, { headers: { accept: "application/json" } });
+  const res = await fetch(at(path), { headers: { accept: "application/json" } });
   if (!res.ok) {
     throw new Error(`${path} → ${res.status} ${res.statusText}`);
   }
@@ -203,7 +209,7 @@ async function getJSON<T>(path: string): Promise<T> {
 }
 
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(at(path), {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify(body),

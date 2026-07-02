@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "muse.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "muse.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "muse.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "muse.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "muse.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: muse-server
+          image: {{ include "muse.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            {{- range .Values.clusters }}
+            - "--cluster={{ .name }}=/etc/muse/clusters/{{ .name }}/kubeconfig"
+            {{- end }}
+            {{- range .Values.config.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            # Config is env-driven (clap MUSE_* vars); nothing baked into the image.
+            - name: MUSE_WEB_DIR
+              value: {{ .Values.config.webDir | quote }}
+            - name: MUSE_LIST_STRATEGY
+              value: {{ .Values.config.listStrategy | quote }}
+            - name: MUSE_CAPACITY_REFRESH_SECS
+              value: {{ .Values.config.capacityRefreshSecs | quote }}
+            - name: MUSE_CHAT_ENABLED
+              value: {{ .Values.config.chat.enabled | quote }}
+            - name: MUSE_CHAT_TIMEOUT_SECS
+              value: {{ .Values.config.chat.timeoutSecs | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.clusters }}
+          volumeMounts:
+            {{- range .Values.clusters }}
+            - name: kubeconfig-{{ .name }}
+              mountPath: /etc/muse/clusters/{{ .name }}
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if .Values.clusters }}
+      volumes:
+        # Each workload cluster's kubeconfig Secret (key: `kubeconfig`).
+        {{- range .Values.clusters }}
+        - name: kubeconfig-{{ .name }}
+          secret:
+            secretName: {{ .kubeconfigSecret }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
