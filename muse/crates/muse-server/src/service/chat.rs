@@ -1,0 +1,52 @@
+use axum::{
+    extract::{Path, Query, State},
+    Json,
+};
+use serde_json::Value;
+
+use super::error::ApiError;
+use crate::{app_context::AppState, protocol::ChatParams};
+
+/// `POST /v1/inferenceservices/{name}/chat` — proxy one OpenAI-style chat request
+/// to the InferenceService's own endpoint (a console test tool, off by default).
+/// The target URL is read from the ISVC's cached `status.url` — never the caller —
+/// so it can't be an open relay (SSRF-safe); the body (model, messages, …) is
+/// forwarded verbatim to `<status.url>/v1/chat/completions`.
+pub async fn proxy(
+    Path(name): Path<String>,
+    Query(params): Query<ChatParams>,
+    State(st): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    if !st.chat_enabled {
+        return Err(ApiError::Unavailable(
+            "inference test proxy is disabled".to_owned(),
+        ));
+    }
+    let url = st
+        .select(params.cluster.as_deref())?
+        .iter()
+        .find_map(|c| c.inference_services.get(&name))
+        .and_then(|isvc| isvc.status.as_ref().and_then(|s| s.url.clone()))
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| ApiError::Unavailable(format!("{name} has no ready endpoint")))?;
+    let target = format!("{}/v1/chat/completions", url.trim_end_matches('/'));
+    let resp = st
+        .http
+        .post(&target)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| ApiError::BadGateway(format!("request to {target} failed: {e}")))?;
+    let status = resp.status();
+    let payload = resp
+        .json::<Value>()
+        .await
+        .map_err(|e| ApiError::BadGateway(format!("bad response from {target}: {e}")))?;
+    if !status.is_success() {
+        return Err(ApiError::BadGateway(format!(
+            "endpoint returned {status}: {payload}"
+        )));
+    }
+    Ok(Json(payload))
+}

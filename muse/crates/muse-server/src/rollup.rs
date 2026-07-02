@@ -1,6 +1,8 @@
-//! Cluster capacity aggregation — the cross-resource analytics the frontend
-//! can't do itself (it requires joining Nodes × Pods, and fanning out across
-//! clusters).
+//! Capacity rollup — the cross-resource analytics behind `/v1/capacity` that the
+//! frontend can't do itself (it requires joining Nodes × Pods, and fanning out
+//! across clusters). Domain logic, not an endpoint: it's run by the background
+//! refresh task on informer changes and cached on `AppState`; the endpoint only
+//! serves the snapshot.
 //!
 //! "Allocatable" comes from each Node; "allocated" is summed from the accelerator
 //! requests of the Pods scheduled on it. Accelerators are tracked **per kind** —
@@ -12,52 +14,17 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use kube::Resource;
 use ome_client::k8s_openapi::api::core::v1::{Node, Pod};
-use serde::Serialize;
 
-use crate::views::{first_label, node_accel, sum_accel, GpuView, Topology};
+use crate::protocol::{
+    first_label, node_accel, sum_accel, CapacityReport, GpuView, GroupCapacity, NodeCounts,
+    Topology,
+};
 
 /// One cluster's cached Nodes + Pods, the input to aggregation.
 pub struct ClusterData {
     pub name: String,
     pub nodes: Vec<Arc<Node>>,
     pub pods: Vec<Arc<Pod>>,
-}
-
-/// Fleet-wide capacity report.
-#[derive(Serialize)]
-pub struct CapacityReport {
-    pub nodes: NodeCounts,
-    /// Fleet accelerator totals — one entry per kind (e.g. `gpu`, `tpu`).
-    pub accelerators: Vec<GroupCapacity>,
-    #[serde(rename = "byCluster")]
-    pub by_cluster: Vec<GroupCapacity>,
-    #[serde(rename = "byIsland")]
-    pub by_island: Vec<GroupCapacity>,
-    #[serde(rename = "byNvlinkDomain")]
-    pub by_nvlink_domain: Vec<GroupCapacity>,
-    #[serde(rename = "byInstanceType")]
-    pub by_instance_type: Vec<GroupCapacity>,
-}
-
-#[derive(Serialize, Default)]
-pub struct NodeCounts {
-    pub total: usize,
-    pub ready: usize,
-    pub schedulable: usize,
-    #[serde(rename = "acceleratorNodes")]
-    pub accelerator_nodes: usize,
-}
-
-/// Accelerator capacity for one group (a kind total, cluster, island, NVLink/ICI
-/// domain, or instance type), tagged with the accelerator `kind`.
-#[derive(Serialize)]
-pub struct GroupCapacity {
-    pub name: String,
-    pub kind: String,
-    pub nodes: usize,
-    pub allocatable: i64,
-    pub allocated: i64,
-    pub free: i64,
 }
 
 /// Accelerator count claimed by non-terminal Pods, keyed by node name. Kind-

@@ -4,9 +4,12 @@
 //!
 //! Built on the OME Rust SDK (`ome_client`): one `SharedInformerFactory` per
 //! cluster, each backing a `Lister` per kind (the factory's generic
-//! `lister::<K>()` also covers built-ins like `Node`/`Pod`). See `server` for the
-//! request path + aggregation, `capacity` for the Node×Pod GPU rollup,
-//! `telemetry` for logging/metrics, `observe` for middleware.
+//! `lister::<K>()` also covers built-ins like `Node`/`Pod`). `informers` builds a
+//! cluster's watches (listers + activity feed + capacity signal), `app_context`
+//! holds the shared state, `service` has the HTTP endpoints (one module per
+//! endpoint) and the route table, `protocol` defines the wire types, `rollup`
+//! does the Node×Pod GPU capacity aggregation, `server` runs the listener, and
+//! `telemetry` handles logging, metrics, and the per-request middleware.
 //!
 //! Clusters come from `--cluster name=/path/to/kubeconfig` (repeatable); with
 //! none given, the ambient kube config is used as a single cluster "default". A
@@ -17,15 +20,14 @@
 //!     --rdma-island-label network.meta.com/ai-zone \
 //!     --nvlink-domain-label network.meta.com/domain
 
-mod capacity;
+mod app_context;
 mod config;
-mod error;
-mod feed;
-mod health;
-mod observe;
+mod informers;
+mod protocol;
+mod rollup;
 mod server;
+mod service;
 mod telemetry;
-mod views;
 
 use std::{sync::atomic::Ordering, time::Duration};
 
@@ -74,15 +76,15 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         }
     });
 
-    let topology = views::Topology {
+    let topology = protocol::Topology {
         island_labels: config.rdma_island_labels.clone(),
         nvlink_labels: config.nvlink_domain_labels.clone(),
     };
 
     // Shared activity feed: OME informer changes across all clusters flow here.
-    let feed = feed::Feed::new(100);
+    let feed = informers::Feed::new(100);
     // Shared signal: Node/Pod changes mark the capacity rollup stale.
-    let signal = server::CapacitySignal::new();
+    let signal = informers::CapacitySignal::new();
 
     // Fan out: one informer set per cluster. An unreachable cluster is skipped
     // (logged), not fatal — the fleet view degrades rather than failing.
@@ -103,7 +105,7 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
         "serving read plane; caches warming in background"
     );
 
-    let state = server::AppState::new(
+    let state = app_context::AppState::new(
         clusters,
         topology,
         feed,
@@ -120,9 +122,9 @@ async fn run(config: config::Config) -> anyhow::Result<()> {
 async fn build_cluster(
     cluster_ref: &config::ClusterRef,
     list_strategy: config::ListStrategy,
-    feed: &feed::Feed,
-    signal: &server::CapacitySignal,
-) -> anyhow::Result<server::ClusterState> {
+    feed: &informers::Feed,
+    signal: &informers::CapacitySignal,
+) -> anyhow::Result<informers::ClusterState> {
     let client = client_for(cluster_ref).await?;
     // Preflight so an unreachable cluster fails fast (and gets skipped) rather
     // than hanging on the first informer's initial sync.
@@ -156,7 +158,7 @@ async fn build_cluster(
 
     let factory = SharedInformerFactory::with_streaming_lists(client, streaming);
     let (state, readies) =
-        server::build_cluster_state(cluster_ref.name.clone(), &factory, &ome, feed, signal);
+        informers::build_cluster_state(cluster_ref.name.clone(), &factory, &ome, feed, signal);
     // Serve immediately and warm the caches in the background; flip the cluster's
     // ready flag once every informer has finished its first sync. Awaiting the
     // futures in sequence still completes in max(individual) time — the reflector

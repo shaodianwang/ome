@@ -1,11 +1,32 @@
-//! Logging + Prometheus metrics wiring.
+//! Telemetry: logging + Prometheus metrics setup, and the per-request HTTP
+//! middleware (request-id, tracing span, metrics recording) that feeds them.
+//!
+//! Setup (`init_logging`, `init_metrics`, `serve_metrics`) runs once at boot; the
+//! middleware runs on every request. `server::build_app` installs the middleware;
+//! `serve_metrics` exposes `/metrics` on its own listener, off the API surface.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
-use axum::{routing::get, Router};
+use axum::{
+    extract::{MatchedPath, Request},
+    http::HeaderValue,
+    middleware::Next,
+    response::Response,
+    routing::get,
+    Router,
+};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use tower_http::request_id::{MakeRequestId, RequestId};
+use tracing::Span;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+
+// ===========================================================================
+// Setup — installed once at boot.
+// ===========================================================================
 
 /// Initialise tracing: honour `RUST_LOG`, else a sane default; fmt or JSON.
 pub fn init_logging(json: bool) {
@@ -73,4 +94,65 @@ pub async fn serve_metrics(handle: PrometheusHandle, addr: SocketAddr) -> anyhow
     tracing::info!(%addr, "metrics endpoint listening");
     axum::serve(listener, app).await.context("metrics server")?;
     Ok(())
+}
+
+// ===========================================================================
+// Per-request middleware — installed by `server::build_app`.
+// ===========================================================================
+
+/// Generate time-sortable v7 UUIDs for `x-request-id` when a client didn't send one.
+#[derive(Clone, Default)]
+pub struct MakeRequestUuidV7;
+
+impl MakeRequestId for MakeRequestUuidV7 {
+    fn make_request_id<B>(&mut self, _request: &axum::http::Request<B>) -> Option<RequestId> {
+        let id = uuid::Uuid::now_v7().to_string();
+        HeaderValue::from_str(&id).ok().map(RequestId::new)
+    }
+}
+
+/// Per-request tracing span carrying method, route template, and request id. The
+/// id is already set on the request by `SetRequestIdLayer` (applied outer to this).
+pub fn make_span(request: &axum::http::Request<axum::body::Body>) -> Span {
+    let request_id = request
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or_else(|| request.uri().path(), MatchedPath::as_str);
+    tracing::info_span!(
+        "http",
+        method = %request.method(),
+        path = %path,
+        request_id = %request_id,
+    )
+}
+
+/// axum middleware recording request/response counters, an in-flight gauge, and a
+/// latency histogram — labelled by the matched route template (cardinality-safe).
+pub async fn track_metrics(request: Request, next: Next) -> Response {
+    let method = request.method().to_string();
+    let path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or_else(|| "unknown".to_owned(), |m| m.as_str().to_owned());
+    let start = Instant::now();
+
+    metrics::counter!("muse_http_requests_total", "method" => method.clone(), "path" => path.clone())
+        .increment(1);
+    metrics::gauge!("muse_http_requests_in_flight").increment(1.0);
+
+    let response = next.run(request).await;
+
+    metrics::gauge!("muse_http_requests_in_flight").decrement(1.0);
+    let latency = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+    metrics::histogram!("muse_http_request_duration_seconds", "method" => method, "path" => path.clone())
+        .record(latency);
+    metrics::counter!("muse_http_responses_total", "path" => path, "status" => status).increment(1);
+
+    response
 }

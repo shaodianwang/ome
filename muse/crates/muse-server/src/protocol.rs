@@ -1,8 +1,12 @@
-//! Response DTOs — clean, stable projections of the raw k8s/CRD objects.
+//! The wire protocol: every request query param and response body the console
+//! exchanges with muse-server, in one place.
 //!
-//! The console gets a documented contract decoupled from CRD/Node internals (and
-//! a far smaller payload than the raw objects). The full object is still available
-//! per-object via `GET /v1/{kind}/{name}?raw=true`.
+//! Response bodies are clean, stable projections of the raw k8s/CRD objects — a
+//! documented contract decoupled from CRD/Node internals (and a far smaller
+//! payload); the full object is still available per-object via
+//! `GET /v1/{kind}/{name}?raw=true`. The projection builders (`…::of`) live here
+//! too; the modules that produce these responses (capacity, feed, resources)
+//! reference these types.
 
 use std::{
     collections::BTreeMap,
@@ -21,7 +25,8 @@ use ome_client::{
     },
     BaseModel, ClusterBaseModel, FineTunedWeight, InferenceService,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Accelerator accounting: schedulable total vs. claimed by pods (a count of
 /// chips of one kind — GPUs or TPUs).
@@ -233,7 +238,7 @@ pub struct BaseModelDetail {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<ConditionView>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "modelConfiguration")]
-    pub model_configuration: Option<BTreeMap<String, serde_json::Value>>,
+    pub model_configuration: Option<BTreeMap<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "nodesReady")]
     pub nodes_ready: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "nodesFailed")]
@@ -807,4 +812,157 @@ fn age(meta: &ObjectMeta) -> Option<String> {
     } else {
         format!("{secs}s")
     })
+}
+
+// ===========================================================================
+// Capacity — the `GET /v1/capacity` response, built by `rollup::build`.
+// ===========================================================================
+
+/// Fleet-wide capacity report.
+#[derive(Serialize)]
+pub struct CapacityReport {
+    pub nodes: NodeCounts,
+    /// Fleet accelerator totals — one entry per kind (e.g. `gpu`, `tpu`).
+    pub accelerators: Vec<GroupCapacity>,
+    #[serde(rename = "byCluster")]
+    pub by_cluster: Vec<GroupCapacity>,
+    #[serde(rename = "byIsland")]
+    pub by_island: Vec<GroupCapacity>,
+    #[serde(rename = "byNvlinkDomain")]
+    pub by_nvlink_domain: Vec<GroupCapacity>,
+    #[serde(rename = "byInstanceType")]
+    pub by_instance_type: Vec<GroupCapacity>,
+}
+
+#[derive(Serialize, Default)]
+pub struct NodeCounts {
+    pub total: usize,
+    pub ready: usize,
+    pub schedulable: usize,
+    #[serde(rename = "acceleratorNodes")]
+    pub accelerator_nodes: usize,
+}
+
+/// Accelerator capacity for one group (a kind total, cluster, island, NVLink/ICI
+/// domain, or instance type), tagged with the accelerator `kind`.
+#[derive(Serialize)]
+pub struct GroupCapacity {
+    pub name: String,
+    pub kind: String,
+    pub nodes: usize,
+    pub allocatable: i64,
+    pub allocated: i64,
+    pub free: i64,
+}
+
+// ===========================================================================
+// Activity feed — `GET /v1/events` rows + `GET /v1/stream` messages, stored and
+// broadcast by `informers::Feed`.
+// ===========================================================================
+
+/// One observed change to a watched resource.
+#[derive(Clone, Serialize)]
+pub struct FeedEvent {
+    pub cluster: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    pub name: String,
+    /// `"applied"` (add or update) or `"deleted"`.
+    pub action: &'static str,
+    /// Wall-clock seconds since the Unix epoch when muse observed the change.
+    pub at: u64,
+}
+
+// ===========================================================================
+// Request query params.
+// ===========================================================================
+
+/// Query params common to the aggregating endpoints.
+#[derive(Debug, Default, Deserialize)]
+pub struct ListParams {
+    /// Restrict to a single cluster by name.
+    pub cluster: Option<String>,
+}
+
+/// Query params for `GET /v1/{kind}/{name}`.
+#[derive(Debug, Default, Deserialize)]
+pub struct ViewParams {
+    /// Return the full underlying object instead of the projected view.
+    #[serde(default)]
+    pub raw: bool,
+    /// Restrict the lookup to a single cluster by name.
+    pub cluster: Option<String>,
+}
+
+/// Query params for the inference test proxy: which cluster the ISVC lives on.
+#[derive(Debug, Default, Deserialize)]
+pub struct ChatParams {
+    pub cluster: Option<String>,
+}
+
+// ===========================================================================
+// Response envelopes.
+// ===========================================================================
+
+/// A list response: `{ kind?, count, items }`. Items are pre-projected (each
+/// already carries its owning `cluster`), so they're held as raw JSON.
+#[derive(Serialize)]
+pub struct Listing {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub count: usize,
+    pub items: Vec<Value>,
+}
+
+impl Listing {
+    pub fn new(items: Vec<Value>) -> Self {
+        Self {
+            kind: None,
+            count: items.len(),
+            items,
+        }
+    }
+    pub fn of_kind(kind: impl Into<String>, items: Vec<Value>) -> Self {
+        Self {
+            kind: Some(kind.into()),
+            count: items.len(),
+            items,
+        }
+    }
+}
+
+/// Per-cluster summary row for `GET /v1/clusters`.
+#[derive(Serialize)]
+pub struct ClusterSummary {
+    pub name: String,
+    pub ready: bool,
+    pub status: &'static str,
+    pub nodes: usize,
+    #[serde(rename = "acceleratorNodes")]
+    pub accelerator_nodes: usize,
+    #[serde(rename = "inferenceServices")]
+    pub inference_services: usize,
+}
+
+/// Console feature flags for `GET /v1/config`.
+#[derive(Serialize)]
+pub struct ConfigResp {
+    pub chat: bool,
+}
+
+/// Serialize any value to JSON, or `Null` on failure.
+pub fn to_val<T: Serialize>(value: T) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+/// Serialize a projected view and stamp the owning `cluster` onto it. Every list
+/// row and detail object carries which cluster it came from; injecting it here
+/// keeps the view types cluster-agnostic. A non-object view is returned unchanged.
+pub fn tagged<T: Serialize>(view: T, cluster: &str) -> Value {
+    let mut value = to_val(view);
+    if let Value::Object(map) = &mut value {
+        map.insert("cluster".to_owned(), Value::String(cluster.to_owned()));
+    }
+    value
 }
