@@ -1,0 +1,14 @@
+# p208: gang engine-mn W=3 N=8->16 RecreatePod  mode=scaledown Ne=8 Nd=0 Nr=0 ceil_e=16 ceil_d=0 ceil_r=0 to_e=16 co=none topo=engine-mn
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p208 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 3 }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

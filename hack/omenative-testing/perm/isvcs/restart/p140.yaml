@@ -1,4 +1,4 @@
-# p140: kill engine-mn worker, DEFAULT policy — whole gang recreates  mode=kill Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=RecreateInstance kill=worker co=none topo=engine-mn
+# p140: kill engine-mn worker, DEFAULT policy — whole gang recreates  mode=kill Ne=8 Nd=0 Nr=0 ceil_e=8 ceil_d=0 ceil_r=0 restart=RecreateInstance kill=worker co=none topo=engine-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p140 }
@@ -6,8 +6,8 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     leader: {}
     worker: { size: 1 }

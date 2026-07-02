@@ -1,4 +1,4 @@
-# p115: migrate pd Auto under seq coordination  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 mig=Auto co=seq topo=pd
+# p115: migrate pd Auto under seq coordination  mode=migrate Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=8 ceil_r=2 mig=Auto co=seq topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p115 }
@@ -6,13 +6,13 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   decoder:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   router:

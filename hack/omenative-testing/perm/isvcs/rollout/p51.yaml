@@ -1,4 +1,4 @@
-# p51: PD e=4 d=4 r=2 RatioBalanced STRESS: engine RecreatePod drains 3 (maxUnavail=3) while decoder only surges; tol=25 — the ratio gate must hold engine serving >=3  Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=5 ceil_r=3 topo=pd
+# p51: PD e=4 d=4 r=2 RatioBalanced STRESS: engine RecreatePod drains 3 (maxUnavail=3) while decoder only surges; tol=25 — the ratio gate must hold engine serving >=3  Ne=8 Nd=8 Nr=2 ceil_e=8 ceil_d=9 ceil_r=3 topo=pd
 # Without the CheckRatio gate (IR-path bypass) the engine recreates 3 at once -> serving 1 while decoder stays 4 -> ratio 1:4 (75% dev >> 25% tol) -> ratio-band check FAILs.
 # With the gate, engine is held to serving >=3 (75% of decoder's 4) and recreates one at a time -> PASS.
 apiVersion: ome.io/v1beta1
@@ -8,13 +8,13 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,        name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime,   name: ome-coordtest-cpu, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: RecreatePod, rollingUpdate: { maxSurge: 0, maxUnavailable: 3 } } }
   decoder:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   router:

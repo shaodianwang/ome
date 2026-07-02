@@ -1,4 +1,4 @@
-# p08: engine-only N=4 SurgeThenDrain maxSurge=100% maxUnavail=0  Ne=4 Nd=0 Nr=0 ceil_e=8 ceil_d=0 ceil_r=0 topo=engine
+# p08: engine-only N=4 SurgeThenDrain maxSurge=100% maxUnavail=0  Ne=8 Nd=0 Nr=0 ceil_e=16 ceil_d=0 ceil_r=0 topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p08 }
@@ -6,8 +6,8 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,        name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime,   name: ome-coordtest-cpu, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle:
       updateStrategy:

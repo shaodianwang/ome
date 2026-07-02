@@ -27,12 +27,13 @@ CRD field paths (pkg/apis/ome/v1beta1/lifecycle_types.go):
   ...rollingUpdate.{maxSurge,maxUnavailable}  int OR "NN%" ; ...rollingUpdate.partition  int
   ...inPlaceUpdateStrategy.{gracePeriodSeconds,markNotReadyDuringLifecycle}
 """
+import math
 from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
 ISVCS = HERE / "isvcs"
 CBM, CSR, CSR_MN = "ome-coordtest-noop", "ome-coordtest-cpu", "ome-coordtest-multinode"
-N = 4    # default replica Instances (bumped from the toy N=2)
+N = 8    # default replica Instances (scaled up from 4 so most cases stress >=8)
 NR = 2   # router replicas (router is single-pod, never the bumped member here)
 TOPOS = ["engine", "pd", "engine-mn", "pd-mn"]
 PD_TOPOS = ["pd", "pd-mn"]
@@ -314,7 +315,7 @@ for topo in PD_TOPOS:                         # restart under coordination
 
 # ── partition/  (mode=partition; rollout-like → full strategy × coordination) ──
 for p in [0, 1, 2, 3]:
-    C("partition", f"engine N=4 partition={p}", comps_for("engine", strat_life("SurgeThenDrain", partition=p)),
+    C("partition", f"engine N={N} partition={p}", comps_for("engine", strat_life("SurgeThenDrain", partition=p)),
       mode="partition", **nds("engine"), **ceils("engine", N + 1), topo="engine", partition=p, co="none")
 for strat in ["RecreatePod", "InPlaceIfPossible"]:
     C("partition", f"engine partition=2 {strat}", comps_for("engine", strat_life(strat, partition=2)),
@@ -322,7 +323,7 @@ for strat in ["RecreatePod", "InPlaceIfPossible"]:
 for p in [4, 6]:
     C("partition", f"engine N=8 partition={p}", [comp("engine", 8, 0, strat_life("SurgeThenDrain", partition=p))],
       mode="partition", Ne=8, Nd=0, Nr=0, ceil_e=9, ceil_d=0, ceil_r=0, topo="engine", partition=p, co="none")
-C("partition", "engine-mn N=4 W=1 partition=2", comps_for("engine-mn", strat_life("SurgeThenDrain", partition=2)),
+C("partition", f"engine-mn N={N} W=1 partition=2", comps_for("engine-mn", strat_life("SurgeThenDrain", partition=2)),
   mode="partition", **nds("engine-mn"), **ceils("engine-mn", N + 1), topo="engine-mn", partition=2, co="none")
 # maxSurge UNSET (no-limit) at N=8 partition=4: the held-below 4 stay, the rolling
 # 4 may all surge at once → peak N + (N - partition) = 12.
@@ -330,7 +331,7 @@ C("partition", "engine N=8 partition=4 maxSurge=NoLimit (unset)",
   [comp("engine", 8, 0, lifecycle(strat="SurgeThenDrain", surge=None, unavail=0, partition=4))],
   mode="partition", Ne=8, Nd=0, Nr=0, ceil_e=12, ceil_d=0, ceil_r=0, topo="engine", partition=4, co="none")
 # engine-mn RecreatePod partition=2: whole-gang hold on indices < k, no surge (ceil=N).
-C("partition", "engine-mn N=4 W=1 partition=2 RecreatePod", comps_for("engine-mn", strat_life("RecreatePod", partition=2)),
+C("partition", f"engine-mn N={N} W=1 partition=2 RecreatePod", comps_for("engine-mn", strat_life("RecreatePod", partition=2)),
   mode="partition", **nds("engine-mn"), **ceils("engine-mn", N), topo="engine-mn", partition=2, co="none")
 for topo in PD_TOPOS:                         # PD partition × every coordination policy
     for ck in COORD_KINDS:
@@ -347,26 +348,54 @@ for topo, n, to in [("engine", 4, 1), ("engine", 8, 2), ("engine", 4, 2),
     if is_pd(topo):
         kv["to_d"], kv["to_r"] = to, NR
     C("scale", f"scaledown {topo} N={n}->{to}", comps_for(topo, lifecycle(), n=n), **kv)
-C("scale", "scaledown PD asymmetric e=4->1 d=4->2 (router holds)", comps_for("pd", lifecycle()),
+C("scale", "scaledown PD asymmetric e=4->1 d=4->2 (router holds)", comps_for("pd", lifecycle(), n=4),
   mode="scaledown", Ne=4, Nd=4, Nr=NR, to_e=1, to_d=2, to_r=NR, ceil_e=4, ceil_d=4, ceil_r=NR, topo="pd", co="none")
 for topo, to in [("engine", 4), ("engine-mn", 4), ("engine-mn", 8)]:
     C("scale", f"scaleup {topo} N=2->{to}", comps_for(topo, lifecycle(), n=2),
       mode="scaledown", **nds(topo, 2), to_e=to, ceil_e=to, ceil_d=0, ceil_r=0, topo=topo, co="none")
 for ck in ["rolling", "ratio"]:               # PD scaledown under coordination
-    C("scale", f"scaledown pd e=4->2 d=4->2 under {ck}", comps_for("pd", lifecycle()),
+    C("scale", f"scaledown pd e=4->2 d=4->2 under {ck}", comps_for("pd", lifecycle(), n=4),
       coord=coord_for(ck), mode="scaledown", Ne=4, Nd=4, Nr=NR, to_e=2, to_d=2, to_r=NR,
       ceil_e=4, ceil_d=4, ceil_r=NR, topo="pd", co=ck)
 
+# ── gang scale at production shape (leader + 3 workers) ──────────────────────
+# The avocado-tier5 prod case: scaling MUST delete only the tail (scaledown) /
+# add only new indices (scaleup) and leave surviving gangs UNTOUCHED (Check E) —
+# never recreate them. Both directions, engine-only + PD (engine+decoder both
+# 3-worker gangs), across lifecycle strategies: a strategy that recreates
+# everything is a massive-outage bug. 8 replicas = the common tier5 shape.
+for strat in ["SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"]:
+    glife = strat_life(strat)
+    for to in [16, 4]:
+        C("scale", f"gang engine-mn W=3 N=8->{to} {strat}", [comp("engine", 8, 3, glife)],
+          mode="scaledown", Ne=8, Nd=0, Nr=0, to_e=to,
+          ceil_e=max(8, to), ceil_d=0, ceil_r=0, topo="engine-mn", co="none")
+        C("scale", f"gang pd-mn e+d W=3 N=8->{to} {strat}",
+          [comp("engine", 8, 3, glife), comp("decoder", 8, 3, glife), comp("router", NR, 0, lifecycle())],
+          mode="scaledown", Ne=8, Nd=8, Nr=NR, to_e=to, to_d=to, to_r=NR,
+          ceil_e=max(8, to), ceil_d=max(8, to), ceil_r=NR, topo="pd-mn", co="none")
+# Missing lifecycle: no updateStrategy block -> the webhook MUST inject the
+# OMENative defaults (SurgeThenDrain + 25% budgets). Absent defaults (old OME /
+# the annotation-mode gap #621 closed) leave scaling uncapped -> outage risk.
+C("scale", "gang engine-mn W=3 N=8->4 NO-lifecycle (webhook must default)",
+  [comp("engine", 8, 3, life="")],
+  mode="scaledown", Ne=8, Nd=0, Nr=0, to_e=4, ceil_e=8, ceil_d=0, ceil_r=0, topo="engine-mn", co="none")
+C("scale", "gang pd-mn e+d W=3 N=8->4 NO-lifecycle (webhook must default)",
+  [comp("engine", 8, 3, life=""), comp("decoder", 8, 3, life=""), comp("router", NR, 0, life="")],
+  mode="scaledown", Ne=8, Nd=8, Nr=NR, to_e=4, to_d=4, to_r=NR, ceil_e=8, ceil_d=8, ceil_r=NR, topo="pd-mn", co="none")
+
 # ── edge/  (mode=rollout — runs today; %-budgets / ReadyPolicy / in-place / mixed) ──
 for topo in ["engine", "pd"]:
-    for s, sr in [("25%", 1), ("50%", 2), ("100%", 4)]:
+    for s in ["25%", "50%", "100%"]:
+        sr = math.ceil(N * int(s[:-1]) / 100)   # surge count scales with N (was hardcoded for N=4)
         C("edge", f"%-budget maxSurge={s} {topo} (surge {sr} -> peak {N + sr})",
           comps_for(topo, lifecycle(surge=s, unavail=0)), **nds(topo), **ceils(topo, N + sr), topo=topo, co="none")
 for ck in ["ratio", "percomp"]:               # %-surge under pacing
-    # group=[engine, decoder] → both roll. engine 50% surge → N+2; decoder is a
-    # rolled member at default maxSurge=1 → N+1 (surge_d=1). router not in group.
+    # group=[engine, decoder] → both roll. engine 50% surge → N+ceil(N/2); decoder is
+    # a rolled member at default maxSurge=1 → N+1 (surge_d=1). router not in group.
+    _sr50 = math.ceil(N * 50 / 100)
     C("edge", f"%-budget maxSurge=50% pd under {ck}", comps_for("pd", lifecycle(surge="50%", unavail=0)),
-      coord=coord_for(ck), **nds("pd"), **ceils("pd", N + 2, surge_d=1), topo="pd", co=ck)
+      coord=coord_for(ck), **nds("pd"), **ceils("pd", N + _sr50, surge_d=1), topo="pd", co=ck)
 # Integer maxSurge>1 single-pod at N=8: a wide concurrent-surge window (peak N+s).
 # floor_hard on: SurgeThenDrain (maxUnavailable=0) must never drop below N ready.
 for s in [3, 2]:

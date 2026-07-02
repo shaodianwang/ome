@@ -1,4 +1,4 @@
-# p224: %-budget maxSurge=50% pd (surge 2 -> peak 6)  Ne=4 Nd=4 Nr=2 ceil_e=6 ceil_d=4 ceil_r=2 co=none topo=pd
+# p224: %-budget maxSurge=50% pd (surge 4 -> peak 12)  Ne=8 Nd=8 Nr=2 ceil_e=12 ceil_d=8 ceil_r=2 co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p224 }
@@ -6,13 +6,13 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: "50%", maxUnavailable: 0 } } }
   decoder:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   router:

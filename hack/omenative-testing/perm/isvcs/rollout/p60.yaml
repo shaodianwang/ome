@@ -1,4 +1,4 @@
-# p60: PD BlueGreen 3-component group [engine,decoder,router] (surge) — gang flip across all three  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=3 topo=pd
+# p60: PD BlueGreen 3-component group [engine,decoder,router] (surge) — gang flip across all three  Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p60 }
@@ -6,13 +6,13 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,        name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime,   name: ome-coordtest-cpu, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   decoder:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   router:

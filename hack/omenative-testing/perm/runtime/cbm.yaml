@@ -13,6 +13,7 @@ spec:
   modelParameterSize: "0"
   modelType: test
   storage:
-    # PVC lives in sandbox; OME's CBM finalizer mounts read-only via a
-    # short-lived metadata-extraction Job to validate the BaseModel.
-    storageUri: pvc://sandbox:ome-coordtest-noop-pvc/.
+    # PVC lives in the dedicated coordtest namespace; OME's CBM finalizer
+    # mounts read-only via a short-lived metadata-extraction Job to validate
+    # the BaseModel. The serving runtime is nginx and never reads the model.
+    storageUri: pvc://omenative-eval:ome-coordtest-noop-pvc/.

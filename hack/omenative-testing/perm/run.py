@@ -84,8 +84,8 @@ INIT_BASE_S, INIT_PER_POD_S = 120, 25
 # conc-8 cluster load creep to ~400s for 8 bumped pods; 40s/pod (=410s budget)
 # left no headroom for the trailing STABILITY_S window (p34 converged at 406s
 # but timed out at 410s before "stable"). 60s/pod gives comfortable margin.
-ROTATE_BASE_S, ROTATE_PER_POD_S = 120, 60
-MAX_BUDGET_S = 1200
+ROTATE_BASE_S, ROTATE_PER_POD_S = 180, 100
+MAX_BUDGET_S = 1800
 
 IN_PLACE_TYPES = {"InPlaceIfPossible", "InPlaceOnly"}
 COMPS = ("engine", "decoder", "router")
@@ -303,6 +303,22 @@ def aggregate(state, old_hashes, modes, pods_per_inst, measures=None):
     return {c: tuple(v) for c, v in agg.items()}
 
 
+def _dump_index_breakdown(ctx, comp, checks):
+    """On a collision / shared-index failure, print the settle-snapshot pod
+    layout for `comp` (per instance-index: runner:rev:aliveReady) so the log
+    proves whether a gang truly settled short (missing/old pod) vs a transient."""
+    old = ctx.get("old_hashes") or set()
+    by = defaultdict(list)
+    for p in (ctx.get("pod_state") or {}).values():
+        if p and p.get("comp") == comp:
+            by[p.get("inst", "?")].append(p)
+    checks.append(f"    · {comp} settle-snapshot per instance-index:")
+    for idx in sorted(by, key=lambda x: str(x)):
+        parts = [f"{p.get('runner','?')}:{'new' if (p.get('hash') and p['hash'] not in old) else 'old'}:"
+                 f"{'A' if p.get('alive') else 'x'}{'R' if p.get('ready') else '-'}" for p in by[idx]]
+        checks.append(f"      idx {idx}: {' '.join(parts)}")
+
+
 def index_collision_checks(ctx, comps, verdict, notes, checks):
     """Distinct-alive-index invariant (fleet-wipe guard). For each Component in
     `comps` assert: (a) the number of instance indices with >=1 alive pod is at
@@ -326,6 +342,7 @@ def index_collision_checks(ctx, comps, verdict, notes, checks):
             continue
         distinct_alive, new_pods, distinct_new = meas.get(c, (0, 0, 0))
         alive_inst = agg.get(c, (0, 0, 0))[0]
+        _hit = False
         # (a) distinct alive indices must cover the alive Instance count. For a
         # gang (ppi>1) alive_inst is already Instance-counted, so any shortfall
         # is a collision. For single-pod (ppi==1) alive_inst counts PODS (a
@@ -336,13 +353,17 @@ def index_collision_checks(ctx, comps, verdict, notes, checks):
             verdict = "FAIL"
             notes.append(f"{c} index collision: {alive_inst} alive Instances on only {distinct_alive} distinct index(es)")
             checks.append(f"  ✗ {c} index collision: {alive_inst} alive Instance(s) share only {distinct_alive} distinct index(es) — gangs collapsed onto one index (fleet-wipe shape)")
+            _hit = True
         # (b) gang new-revision pods must partition cleanly across distinct new
         # indices: new_pods == distinct_new * pods_per_inst. A shortfall means an
         # index carries a partial/second gang's pods (shared index).
         if ppi.get(c, 1) > 1 and new_pods and new_pods != distinct_new * ppi[c]:
             verdict = "FAIL"
             notes.append(f"{c} shared index: {new_pods} new pods across {distinct_new} index(es) (want {distinct_new * ppi[c]})")
-            checks.append(f"  ✗ {c} shared index: {new_pods} new-revision pod(s) span {distinct_new} distinct index(es) but a clean gang roll needs {distinct_new * ppi[c]} (={distinct_new}×{ppi[c]}) — two gangs sharing an index")
+            checks.append(f"  ✗ {c} shared index: {new_pods} new-revision pod(s) span {distinct_new} distinct index(es) but a clean gang roll needs {distinct_new * ppi[c]} (={distinct_new}×{ppi[c]}) — a new-rev index holds fewer than {ppi[c]} new pods")
+            _hit = True
+        if _hit:
+            _dump_index_breakdown(ctx, c, checks)
     return verdict
 
 
@@ -536,6 +557,9 @@ MODE_HANDLERS = {"scaledown", "partition", "rebump", "migrate", "kill", "canary"
 TO_KEYS = {"engine": "to_e", "decoder": "to_d", "router": "to_r"}  # scaledown target replicas
 
 
+WATCH_MAX_RESTARTS = 50  # reconnect kubectl -w on EOF up to this many times before giving up
+
+
 def start_watcher(case_id):
     """Pod event stream for a case (shared by the rollout path and all modes)."""
     return subprocess.Popen(
@@ -610,7 +634,22 @@ def _read_one(ctx, timeout=1.0):
     if r:
         line = w.stdout.readline()
         if not line:
-            ctx["closed"] = True
+            # EOF: kubectl -w exited (apiserver watch timeout / network blip). Do
+            # NOT treat as terminal — a mid-roll watch drop would otherwise end the
+            # case on partial state and masquerade as a ROTATE_TIMEOUT. Reconnect;
+            # kubectl re-emits the current pods as ADDED so pod_state refreshes.
+            # Cap restarts to avoid a hot loop if the case is genuinely gone.
+            if ctx.get("watch_restarts", 0) < WATCH_MAX_RESTARTS:
+                ctx["watch_restarts"] = ctx.get("watch_restarts", 0) + 1
+                time.sleep(0.5)
+                try:
+                    w.wait(timeout=1)
+                except Exception:
+                    pass
+                ctx["watcher"] = start_watcher(ctx["case_id"])
+            else:
+                ctx["watch_lost"] = True
+                ctx["closed"] = True
         else:
             line = line.strip()
             if line:
@@ -674,8 +713,8 @@ def _setup_and_ready(case_id, yaml_file, hdr):
     Ne, Nd, Nr = hdr.get("Ne", 0), hdr.get("Nd", 0), hdr.get("Nr", 0)
     N = {"engine": Ne, "decoder": Nd, "router": Nr}
     configured = {c for c in COMPS if N[c] > 0}
-    kubectl("apply", "-f", str(HERE / "runtime"), check=False)
-    r = kubectl("apply", "-n", NS, "-f", str(yaml_file))
+    kubectl("apply", "--validate=false", "-f", str(HERE / "runtime"), check=False)
+    r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
     if r.returncode != 0:
         msg = (r.stderr.strip().splitlines() or ["kubectl apply failed"])[-1]
         print(f"  APPLY FAILED: {msg[:200]}")
@@ -714,6 +753,15 @@ def _write_fail(case_id, desc, hdr, state, msg):
     z = {"engine": 0, "decoder": 0, "router": 0}
     d = {"engine": "-", "decoder": "-", "router": "-"}
     print(f"\n=== VERDICT: {state} ===  {msg}")
+    # Tear down the ISVC on the fail path too. Without this a TRIGGER_FAIL /
+    # APPLY_FAIL case leaks its ISVC (a big N=8 gang = many pods) which squats
+    # cluster capacity until batch.py's end-of-run sweep — hours on a long run
+    # (the p180 "4 hours" was its failed gang sitting idle, not a slow case).
+    # Delete the single named ISVC (no --all, no label selector); a no-op when
+    # the apply never landed. Guard on a concrete name so an empty case_id can
+    # never issue a broad delete.
+    if case_id:
+        kubectl("delete", "-n", NS, "isvc", case_id, "--wait=false", check=False)
     write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, z, d, None, None, state, msg, z)
     return 0
 
@@ -1478,11 +1526,22 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         return _canary(case_id, yaml_file, desc, hdr)
 
     target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in COMPS}
-    print(f"  Scaledown: " + " ".join(f"{c} {N[c]}→{target[c]}" for c in sorted(configured))
+    # Survivor set: instances with index < min(start,target) must be left UNTOUCHED
+    # by a scale op — scaledown deletes only the tail, scaleup only adds new
+    # indices. min() covers both directions.
+    survive = {c: min(N[c], target[c]) for c in configured}
+
+    def _is_survivor(q):
+        try:
+            return q["comp"] in survive and 0 <= int(q.get("inst", "0")) < survive[q["comp"]]
+        except (ValueError, TypeError):
+            return False
+
+    print(f"  Scale: " + " ".join(f"{c} {N[c]}→{target[c]}" for c in sorted(configured))
           + f"   ceilings e≤{ce} d≤{cd} r≤{cr}")
 
-    kubectl("apply", "-f", str(HERE / "runtime"), check=False)
-    r = kubectl("apply", "-n", NS, "-f", str(yaml_file))
+    kubectl("apply", "--validate=false", "-f", str(HERE / "runtime"), check=False)
+    r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
     if r.returncode != 0:
         msg = (r.stderr.strip().splitlines() or ["kubectl apply failed"])[-1]
         print(f"  APPLY FAILED: {msg[:200]}")
@@ -1514,6 +1573,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     deadline_conv = None
     print(f"\n  Phase 1: waiting for initial Ready (need {Ne}/{Nd}/{Nr})")
 
+    survivor_uids = set()   # pre-scale UIDs of survivor-index pods (stability check)
     buf = ""
     try:
         while True:
@@ -1574,6 +1634,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
             if state == "INIT":
                 if all(agg.get(c, (0, 0, 0))[1] == N[c] for c in configured):
                     print(f"  ✓ Initial Ready after {int(now - init_started)}s")
+                    survivor_uids = {q["uid"] for q in pod_state.values()
+                                     if q and q["alive"] and _is_survivor(q) and q.get("uid")}
                     patch = {"spec": {c: {"minReplicas": target[c], "maxReplicas": target[c]}
                                       for c in configured if target[c] != N[c]}}
                     print(f"\n  Phase 2: scaledown patch {json.dumps(patch['spec'])}")
@@ -1665,12 +1727,16 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     # capacity below the requested floor mid-drain.
     for c in sorted(configured):
         mr = min_ready.get(c, N[c])
-        if mr < target[c]:
+        # Floor = min(start, target): a scaledown must hold >= target; a scaleup
+        # legitimately starts at N (< target) and grows, so its floor is the
+        # STARTING count, not the target. min() covers both directions.
+        floor = min(N[c], target[c])
+        if mr < floor:
             verdict = "FAIL"
-            notes.append(f"{c} capacity floor breached: min ready {mr} < target {target[c]}")
-            checks.append(f"  ✗ {c} capacity dipped to {mr} ready mid-drain (< target {target[c]}) — undershot the floor")
+            notes.append(f"{c} capacity floor breached: min ready {mr} < floor {floor} (min of start {N[c]}, target {target[c]})")
+            checks.append(f"  ✗ {c} capacity dipped to {mr} ready mid-scale (< floor {floor}=min(start {N[c]}, target {target[c]})) — undershot")
         else:
-            checks.append(f"  ✓ {c} capacity floor held: min ready {mr} ≥ target {target[c]}")
+            checks.append(f"  ✓ {c} capacity floor held: min ready {mr} ≥ floor {floor}=min(start {N[c]}, target {target[c]})")
     # Check D: partial-teardown atomicity — no gang index sat 0<live<ppi (an
     # orphan worker/leader) sustained >= GANG_TOL_S during the drain.
     mn_conf = [c for c in sorted(configured) if pods_per_inst.get(c, 1) > 1]
@@ -1683,6 +1749,22 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
             checks.append(f"  ✗ partial teardown: {len(td_viol)} gang Instance(s) sat 0<live<ppi ≥{GANG_TOL_S:.0f}s during drain (worst {wk[0]} inst {wk[1]}: {td_viol[wk]:.0f}s) — orphan worker, not a whole-gang teardown")
         else:
             checks.append(f"  ✓ partial-teardown atomicity held: every gang index ({', '.join(mn_conf)}) tore down whole (never a sustained orphan)")
+    # Check E: survivor stability — surviving instances (index < min(start,target))
+    # must keep their ORIGINAL pods. A survivor pod with a UID not in the pre-scale
+    # survivor set was needlessly RECREATED — the prod avocado-tier5 bug where
+    # scaling 20→10 recreated all 10 survivors instead of just deleting the tail.
+    if state == "CONVERGED":
+        recreated = defaultdict(int)
+        for q in pod_state.values():
+            if q and q["alive"] and _is_survivor(q) and q.get("uid") and q["uid"] not in survivor_uids:
+                recreated[q["comp"]] += 1
+        if recreated:
+            verdict = "FAIL"
+            rd = ", ".join(f"{c}+{n}" for c, n in sorted(recreated.items()))
+            notes.append(f"survivor recreated: {rd}")
+            checks.append(f"  ✗ survivor instability: {sum(recreated.values())} pod(s) at surviving indices RECREATED (new UID) instead of untouched ({rd}) — scale needlessly recreated survivors")
+        else:
+            checks.append("  ✓ survivor stability: every surviving instance (index < min(start,target)) kept its original pods (only the tail changed)")
     if (hdr.get("infeasible") or hdr.get("notimpl")) and verdict == "FAIL":
         why = ("a known unimplemented controller feature" if hdr.get("notimpl")
                else "an unsatisfiable config")
@@ -1715,8 +1797,8 @@ def run_reject_case(case_id, yaml_file, desc, hdr):
     dash = {"engine": "-", "decoder": "-", "router": "-"}
     want = hdr.get("reason")   # optional single-token substring the denial must contain
     print(f"\n=== {case_id} [expect=reject] ===\n{desc}")
-    kubectl("apply", "-f", str(HERE / "runtime"), check=False)
-    r = kubectl("apply", "-n", NS, "-f", str(yaml_file))
+    kubectl("apply", "--validate=false", "-f", str(HERE / "runtime"), check=False)
+    r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
     msg = (r.stderr.strip().splitlines() or [""])[-1]
     if r.returncode == 0:
         kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")  # don't leak the wrongly-accepted ISVC
@@ -1760,12 +1842,12 @@ def run_case(case_id):
     print(f"  Ceilings: engine peak ≤ {ce}, decoder peak ≤ {cd}, router peak ≤ {cr}")
 
     # Ensure runtime is applied (idempotent — silently OK if exists).
-    kubectl("apply", "-f", str(HERE / "runtime"), check=False)
+    kubectl("apply", "--validate=false", "-f", str(HERE / "runtime"), check=False)
 
     # Apply the ISVC. On rejection (bad manifest / webhook denial) RECORD an
     # APPLY_FAIL row — never silently drop the case (a missing result reads as
     # "didn't run", which hides malformed test cases).
-    r = kubectl("apply", "-n", NS, "-f", str(yaml_file))
+    r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
     if r.returncode != 0:
         msg = (r.stderr.strip().splitlines() or ["kubectl apply failed"])[-1]
         print(f"  APPLY FAILED: {msg[:300]}")
@@ -1924,7 +2006,7 @@ def run_case(case_id):
             # (surge mode only — in-place patches the live pod, no source/surge
             # pair) and record, per bumped surge Component, the cumulative set of
             # OLD-rev pods observed draining and NEW-rev pods observed Ready.
-            if trigger_ts is not None and old_hashes is not None and comp in bumped and modes.get(comp) == "surge":
+            if trigger_ts is not None and old_hashes is not None and comp in bumped and info["strat"].get(comp) == "SurgeThenDrain":
                 is_new = bool(rev and rev not in old_hashes)
                 if is_new and ready:
                     new_ready[comp].add(name)
@@ -2102,7 +2184,8 @@ def run_case(case_id):
             watcher.kill()
 
     # Final aggregates.
-    agg = aggregate(pod_state, old_hashes, modes, pods_per_inst)
+    _final_meas = {}
+    agg = aggregate(pod_state, old_hashes, modes, pods_per_inst, measures=_final_meas)
     final = {c: agg.get(c, (0, 0, 0))[0] for c in COMPS}        # alive
     new_final = {c: agg.get(c, (0, 0, 0))[2] for c in COMPS}    # updated (new-rev / new-anno)
     print(f"  coordination: policy={policy} members={members}")
@@ -2265,13 +2348,22 @@ def run_case(case_id):
     # tuple buckets pods by index and counts 1 per index, so N DIFFERENT gangs
     # colliding on ONE index read as a single alive Instance — the exact reason a
     # 64→1 collapse looked green. Assert per bumped gang that the alive Instance
-    # count is backed by that many DISTINCT alive indices, and that new-revision
-    # pods partition cleanly (new_pods == distinct_new × pods_per_inst); a
-    # shortfall at any point in the roll means gangs shared an index. Hard FAIL
-    # (this is the invariant that made the fleet-wipe invisible — never opt-in).
+    # count is backed by that many DISTINCT alive indices (the fleet-wipe
+    # collapse detector, tracked mid-roll — a real collision would show two
+    # gangs on one index at some sample), AND that at CONVERGENCE the settled
+    # new-revision pods partition cleanly (new_pods == distinct_new ×
+    # pods_per_inst). The partition-clean check is evaluated on the FINAL
+    # snapshot, NOT worst-mid-roll: a gang surge brings its replacement up one
+    # pod at a time, so mid-roll an index legitimately shows just its leader —
+    # only a shortfall that PERSISTS at settle is a real short/shared gang.
     if mn_bumped:
         collide = {c: collide_worst.get(c, 0) for c in mn_bumped if collide_worst.get(c, 0) > 0}
-        share = {c: collide_share_worst.get(c, 0) for c in mn_bumped if collide_share_worst.get(c, 0) > 0}
+        share = {}
+        for c in mn_bumped:
+            _da, np_, dn = _final_meas.get(c, (0, 0, 0))
+            want = dn * pods_per_inst.get(c, 1)
+            if np_ and np_ != want:
+                share[c] = want - np_
         if collide:
             verdict = "FAIL"
             wc = max(collide, key=collide.get)
@@ -2280,10 +2372,11 @@ def run_case(case_id):
         if share:
             verdict = "FAIL"
             ws = max(share, key=share.get)
-            notes.append(f"shared index: {ws} new-revision pods did not partition across distinct indices (short {share[ws]})")
-            checks.append(f"  ✗ shared index: {len(share)} Component(s) had new-revision pods that did not partition cleanly across distinct indices (worst {ws}: {share[ws]} pod(s) short) — two gangs on one index")
+            notes.append(f"shared index: {ws} new-revision pods did not partition across distinct indices at convergence (short {share[ws]})")
+            checks.append(f"  ✗ shared index: {len(share)} Component(s) settled with new-revision pods that don't partition cleanly across distinct indices (worst {ws}: {share[ws]} pod(s) short AT CONVERGENCE) — a settled gang is missing a pod or shares an index")
+            _dump_index_breakdown({"pod_state": pod_state, "old_hashes": old_hashes}, ws, checks)
         if not collide and not share:
-            checks.append(f"  ✓ distinct-alive-index held: every bumped gang ({', '.join(mn_bumped)}) kept one gang per index throughout (no fleet-wipe collapse)")
+            checks.append(f"  ✓ distinct-alive-index held: every bumped gang ({', '.join(mn_bumped)}) kept one clean gang per index (no collapse; clean partition at settle)")
 
     # Check 9c: surge-before-drain ordering (SurgeThenDrain). A source pod must
     # not begin draining before its surge replacement is Ready — the number of

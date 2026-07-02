@@ -1,4 +1,4 @@
-# p164: engine partition=2 RecreatePod  mode=partition Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 partition=2 co=none topo=engine
+# p164: engine partition=2 RecreatePod  mode=partition Ne=8 Nd=0 Nr=0 ceil_e=8 ceil_d=0 ceil_r=0 partition=2 co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p164 }
@@ -6,7 +6,7 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1, partition: 2 } } }

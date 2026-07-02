@@ -1,4 +1,4 @@
-# p118: migrate pd-mn Auto under ratio coordination  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 mig=Auto co=ratio topo=pd-mn
+# p118: migrate pd-mn Auto under ratio coordination  mode=migrate Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=8 ceil_r=2 mig=Auto co=ratio topo=pd-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p118 }
@@ -6,15 +6,15 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     leader: {}
     worker: { size: 1 }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   decoder:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     leader: {}
     worker: { size: 1 }

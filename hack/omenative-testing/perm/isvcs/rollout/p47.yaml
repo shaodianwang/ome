@@ -1,4 +1,4 @@
-# p47: ASYMMETRIC PD e=4 d=8 r=2 BlueGreen surge=1  Ne=4 Nd=8 Nr=2 ceil_e=5 ceil_d=9 ceil_r=3 topo=pd
+# p47: ASYMMETRIC PD e=4 d=8 r=2 BlueGreen surge=1  Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p47 }
@@ -6,8 +6,8 @@ spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,        name: ome-coordtest-noop }
   runtime: { apiGroup: ome.io, kind: ClusterServingRuntime,   name: ome-coordtest-cpu, autoSync: true }
   engine:
-    minReplicas: 4
-    maxReplicas: 4
+    minReplicas: 8
+    maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
     lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   decoder:
