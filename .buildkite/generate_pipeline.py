@@ -73,7 +73,7 @@ IMAGES = [
     ("muse-server", "muse-server", "dockerfiles/muse-server.Dockerfile"),
 ]
 
-CHARTS = ["ome-crd", "ome-resources", "ome-isvc"]
+CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse"]
 
 
 # ---------------------------------------------------------------------------

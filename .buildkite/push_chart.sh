@@ -54,6 +54,13 @@ if [ "${CHART}" = "ome-resources" ]; then
   # point at an upstream-published image themselves.
 fi
 
+# The muse-server image is mirrored to the prod ECR from this same commit, so
+# point the chart's default hub/tag at it — gitops then needs no image overrides.
+if [ "${CHART}" = "muse" ]; then
+  sed -i "s|hub: \"\"|hub: \"${PROD_ECR_REGISTRY}/msl_infra\"|" "charts/${CHART}/values.yaml"
+  sed -i "s|tag: latest|tag: \"${SHORT_SHA}\"|" "charts/${CHART}/values.yaml"
+fi
+
 helm package "charts/${CHART}"
 
 . "$(dirname "$0")/_ecr_login.sh"
