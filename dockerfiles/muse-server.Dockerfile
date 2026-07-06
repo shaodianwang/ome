@@ -10,7 +10,7 @@ ARG BASE_IMAGE=oraclelinux:10-slim
 # 1) Build the web console. Runs on the native builder arch (BUILDPLATFORM) since
 #    the output is arch-independent JS. MUSE_WEB_BASE is the sub-path the console
 #    is served under behind the gateway (default /muse/); override to re-route.
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web
+FROM --platform=$BUILDPLATFORM node:26-bookworm-slim AS web
 ARG MUSE_WEB_BASE=/muse/
 ENV MUSE_WEB_BASE=${MUSE_WEB_BASE}
 WORKDIR /web
