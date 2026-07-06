@@ -81,6 +81,19 @@ export const IconCapacity = (p: P) => (
   </svg>
 );
 
+export const IconRuntimes = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="5" y="5" width="14" height="14" rx="2" stroke="currentColor" strokeWidth={1.7} />
+    <rect x="9" y="9" width="6" height="6" rx="1" stroke="currentColor" strokeWidth={1.5} />
+    <path
+      d="M9 3v2M15 3v2M9 19v2M15 19v2M3 9h2M3 15h2M19 9h2M19 15h2"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
 export const Search = (p: P) => (
   <svg {...base(p)}>
     <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth={1.8} />

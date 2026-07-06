@@ -158,10 +158,23 @@ export function ResourceTable<T>({
                       }
                       onClick={() => toggleSort(c.key)}
                     >
-                      {c.label}
-                      <span className="sort-arrow">
-                        {sortKey === c.key ? (sortDir === "asc" ? "▲" : "▼") : ""}
-                      </span>
+                      {/* On right-aligned columns the arrow goes before the label so
+                          the label stays flush right, aligning with the numeric cell. */}
+                      {c.right ? (
+                        <>
+                          <span className="sort-arrow">
+                            {sortKey === c.key ? (sortDir === "asc" ? "▲" : "▼") : ""}
+                          </span>
+                          {c.label}
+                        </>
+                      ) : (
+                        <>
+                          {c.label}
+                          <span className="sort-arrow">
+                            {sortKey === c.key ? (sortDir === "asc" ? "▲" : "▼") : ""}
+                          </span>
+                        </>
+                      )}
                     </th>
                   ) : (
                     <th key={c.key} className={c.right ? "right" : undefined}>

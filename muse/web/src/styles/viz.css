@@ -606,6 +606,11 @@ th.sortable:hover {
   color: var(--accent-2);
   font-size: 9px;
 }
+/* Right-aligned columns render the arrow before the label, so flip the gap. */
+th.right .sort-arrow {
+  margin-left: 0;
+  margin-right: 3px;
+}
 .pager {
   display: flex;
   align-items: center;

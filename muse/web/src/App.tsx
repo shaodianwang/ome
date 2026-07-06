@@ -1,41 +1,49 @@
-import { useState } from "react";
-
 import { api } from "./api";
-import { BrandMark, IconCapacity, IconDeploy, IconFleet, IconModels, IconWorkloads } from "./icons";
+import {
+  BrandMark,
+  IconCapacity,
+  IconDeploy,
+  IconFleet,
+  IconModels,
+  IconRuntimes,
+  IconWorkloads,
+} from "./icons";
 import { useLive } from "./live";
 import { Capacity } from "./panels/Capacity";
 import { Deploy } from "./panels/Deploy";
 import { Fleet } from "./panels/Fleet";
 import type { Selected } from "./panels/DeploymentDetail";
 import { Models } from "./panels/Models";
+import { Runtimes } from "./panels/Runtimes";
 import { Workloads } from "./panels/Workloads";
+import { useRoute } from "./route";
 
-export type PanelKey = "fleet" | "workloads" | "models" | "deploy" | "capacity";
+export type PanelKey = "fleet" | "workloads" | "models" | "runtimes" | "deploy" | "capacity";
 export type DepFilter = "all" | "attention" | "ready";
 
 const LABELS: Record<PanelKey, string> = {
   fleet: "Fleet",
   workloads: "Deployments",
   models: "Models",
+  runtimes: "Runtimes",
   deploy: "Deploy",
   capacity: "Capacity",
 };
 
 export default function App() {
-  const [panel, setPanel] = useState<PanelKey>("fleet");
-  const [depFilter, setDepFilter] = useState<DepFilter>("all");
-  const [selectedDep, setSelectedDep] = useState<Selected | null>(null);
-  // Any top-level nav clears an open deployment detail, so returning to
-  // Deployments (or leaving and coming back) always lands on the list.
-  const goto = (p: PanelKey) => {
-    setSelectedDep(null);
-    setPanel(p);
-  };
-  const openDeployments = (f: DepFilter) => {
-    setSelectedDep(null);
-    setDepFilter(f);
-    setPanel("workloads");
-  };
+  // The URL is the source of truth for navigation, so browser back/forward,
+  // refresh, and deep-links all work; each nav pushes a history entry.
+  const [route, navigate] = useRoute();
+  const panel = route.panel;
+  const depFilter: DepFilter = route.filter ?? "all";
+  const selectedDep = route.dep ?? null;
+
+  const goto = (p: PanelKey) => navigate({ panel: p });
+  const openDeployments = (f: DepFilter) => navigate({ panel: "workloads", filter: f });
+  const openDeployment = (sel: Selected) => navigate({ panel: "workloads", dep: sel });
+  const setDepFilter = (f: DepFilter) => navigate({ panel: "workloads", filter: f });
+  const setSelectedDep = (sel: Selected | null) =>
+    navigate({ panel: "workloads", dep: sel ?? undefined, filter: depFilter });
 
   // Sidebar connection status, from the same read plane the panels use.
   const clusters = useLive(api.clusters, { kinds: ["InferenceService"], intervalMs: 30_000 });
@@ -67,9 +75,10 @@ export default function App() {
           {navItem("fleet", "Fleet", IconFleet)}
           {navItem("workloads", "Deployments", IconWorkloads)}
           {navItem("models", "Models", IconModels)}
+          {navItem("runtimes", "Runtimes", IconRuntimes)}
+          {navItem("capacity", "Capacity", IconCapacity)}
           <div className="nav-group-label">Provision</div>
           {navItem("deploy", "Deploy", IconDeploy)}
-          {navItem("capacity", "Capacity", IconCapacity)}
         </nav>
 
         <div className="sidebar-foot">
@@ -111,6 +120,7 @@ export default function App() {
             />
           )}
           {panel === "models" && <Models goto={goto} />}
+          {panel === "runtimes" && <Runtimes openDeployment={openDeployment} />}
           {panel === "deploy" && <Deploy />}
           {panel === "capacity" && <Capacity />}
         </div>

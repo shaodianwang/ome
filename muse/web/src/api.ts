@@ -130,6 +130,32 @@ export interface ModelDetail extends ModelItem {
   nodesFailed?: number;
 }
 
+/** A serving-runtime component (engine / decoder / router) and its node topology. */
+export interface RuntimeComponent {
+  role: string;
+  multiNode: boolean;
+  nodes?: number;
+}
+
+/** ServingRuntime / ClusterServingRuntime overview (both share this shape). */
+export interface RuntimeItem {
+  cluster: string;
+  name: string;
+  namespace?: string;
+  /** Serving-engine container image. */
+  image?: string;
+  architectures?: string[];
+  formats?: string[];
+  quantizations?: string[];
+  /** Wire protocols served (openAI, cohere, …). */
+  protocols?: string[];
+  /** Components (engine, and when disaggregated decoder / router), each with its
+   *  own node topology. */
+  components?: RuntimeComponent[];
+  disabled?: boolean;
+  age?: string;
+}
+
 /** Fine-tuned weight (LoRA / adapter) — links back to a base model. */
 export interface FtwItem {
   cluster: string;
@@ -238,6 +264,8 @@ export const api = {
   baseModels: () => getJSON<ListResp<ModelItem>>("/v1/basemodels"),
   clusterBaseModels: () => getJSON<ListResp<ModelItem>>("/v1/clusterbasemodels"),
   finetunedWeights: () => getJSON<ListResp<FtwItem>>("/v1/finetunedweights"),
+  servingRuntimes: () => getJSON<ListResp<RuntimeItem>>("/v1/servingruntimes"),
+  clusterServingRuntimes: () => getJSON<ListResp<RuntimeItem>>("/v1/clusterservingruntimes"),
   nodes: () => getJSON<ListResp<NodeItem>>("/v1/nodes"),
   events: () => getJSON<ListResp<EventItem>>("/v1/events"),
   rollouts: () => getJSON<ListResp<RolloutItem>>("/v1/rollouts"),
@@ -249,6 +277,10 @@ export const api = {
     getJSON<ModelDetail>(`/v1/basemodels/${enc(name)}?cluster=${enc(cluster)}`),
   clusterBaseModel: (cluster: string, name: string) =>
     getJSON<ModelDetail>(`/v1/clusterbasemodels/${enc(name)}?cluster=${enc(cluster)}`),
+  servingRuntime: (cluster: string, name: string) =>
+    getJSON<RuntimeItem>(`/v1/servingruntimes/${enc(name)}?cluster=${enc(cluster)}`),
+  clusterServingRuntime: (cluster: string, name: string) =>
+    getJSON<RuntimeItem>(`/v1/clusterservingruntimes/${enc(name)}?cluster=${enc(cluster)}`),
   // Console feature flags + the inference test proxy (off unless the server enables it).
   config: () => getJSON<AppConfig>("/v1/config"),
   chat: (cluster: string, name: string, body: unknown) =>

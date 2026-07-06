@@ -23,7 +23,8 @@ use ome_client::{
             apis::meta::v1::{Condition, ObjectMeta},
         },
     },
-    BaseModel, ClusterBaseModel, FineTunedWeight, InferenceService,
+    BaseModel, ClusterBaseModel, ClusterServingRuntime, FineTunedWeight, InferenceService,
+    ServingRuntime,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -279,6 +280,179 @@ impl BaseModelDetail {
                 .as_ref()
                 .and_then(|s| s.nodes_failed.as_ref())
                 .map(|v| v.len()),
+        }
+    }
+}
+
+/// The `image` of an opaque pod-template container map.
+fn image_of(c: &BTreeMap<String, Value>) -> Option<String> {
+    c.get("image").and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Best-effort image from an opaque container list (first that declares one).
+fn runtime_image(containers: &Option<Vec<BTreeMap<String, Value>>>) -> Option<String> {
+    containers.as_ref()?.iter().find_map(image_of)
+}
+
+/// Drop empty strings and duplicates, preserving first-seen order.
+fn uniq_nonempty(items: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+        .collect()
+}
+
+/// A worker-scalable serving component (engine or decoder) and its node topology.
+#[derive(Serialize)]
+pub struct RuntimeComponent {
+    /// "engine" | "decoder".
+    pub role: &'static str,
+    /// Multi-node (runs a worker pod group) vs single-node.
+    #[serde(rename = "multiNode")]
+    pub multi_node: bool,
+    /// Worker-group node count, when multi-node and declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<i64>,
+}
+
+/// Build the node-topology component list from each config's presence + worker
+/// size. `*_worker` is `Some(size?)` when that component runs a multi-node worker
+/// group (the inner value is its node count). The engine is always present; a
+/// decoder means prefill/decode disaggregation, and the two scale independently.
+/// The router is intentionally excluded — it's a routing layer, not a worker group.
+fn runtime_components(
+    engine_worker: Option<Option<i64>>,
+    has_decoder: bool,
+    decoder_worker: Option<Option<i64>>,
+) -> Vec<RuntimeComponent> {
+    let mut v = vec![RuntimeComponent {
+        role: "engine",
+        multi_node: engine_worker.is_some(),
+        nodes: engine_worker.flatten(),
+    }];
+    if has_decoder {
+        v.push(RuntimeComponent {
+            role: "decoder",
+            multi_node: decoder_worker.is_some(),
+            nodes: decoder_worker.flatten(),
+        });
+    }
+    v
+}
+
+/// ServingRuntime overview: the serving-engine image, what models it can serve
+/// (formats / architectures / quantizations), the
+/// wire protocols, and its components (engine + optional decoder/router), each with
+/// its own node topology. ServingRuntime and ClusterServingRuntime share this shape.
+#[derive(Serialize)]
+pub struct RuntimeView {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub architectures: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub formats: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub quantizations: Vec<String>,
+    /// Wire protocols served (e.g. openAI, cohere).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub protocols: Vec<String>,
+    /// The runtime's worker-scalable components (engine, and — when disaggregated —
+    /// decoder), each with its own node topology.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub components: Vec<RuntimeComponent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age: Option<String>,
+}
+
+impl RuntimeView {
+    pub fn of(r: &ServingRuntime) -> Self {
+        let s = &r.spec;
+        let f = s.supported_model_formats.as_deref().unwrap_or_default();
+        Self {
+            name: r.meta().name.clone().unwrap_or_default(),
+            namespace: r.meta().namespace.clone(),
+            image: runtime_image(&s.containers)
+                .or_else(|| {
+                    s.engine_config
+                        .as_ref()
+                        .and_then(|e| runtime_image(&e.containers))
+                })
+                .or_else(|| {
+                    s.engine_config
+                        .as_ref()
+                        .and_then(|e| e.runner.as_ref())
+                        .and_then(image_of)
+                }),
+            architectures: uniq_nonempty(
+                f.iter()
+                    .filter_map(|x| x.model_architecture.clone())
+                    .collect(),
+            ),
+            formats: uniq_nonempty(f.iter().map(|x| x.model_format.name.clone()).collect()),
+            quantizations: uniq_nonempty(f.iter().filter_map(|x| x.quantization.clone()).collect()),
+            protocols: s.protocol_versions.clone().unwrap_or_default(),
+            components: runtime_components(
+                s.engine_config
+                    .as_ref()
+                    .and_then(|e| e.worker.as_ref())
+                    .map(|w| w.size),
+                s.decoder_config.is_some(),
+                s.decoder_config
+                    .as_ref()
+                    .and_then(|d| d.worker.as_ref())
+                    .map(|w| w.size),
+            ),
+            disabled: s.disabled,
+            age: age(r.meta()),
+        }
+    }
+
+    pub fn of_cluster(r: &ClusterServingRuntime) -> Self {
+        let s = &r.spec;
+        let f = s.supported_model_formats.as_deref().unwrap_or_default();
+        Self {
+            name: r.meta().name.clone().unwrap_or_default(),
+            namespace: r.meta().namespace.clone(),
+            image: runtime_image(&s.containers)
+                .or_else(|| {
+                    s.engine_config
+                        .as_ref()
+                        .and_then(|e| runtime_image(&e.containers))
+                })
+                .or_else(|| {
+                    s.engine_config
+                        .as_ref()
+                        .and_then(|e| e.runner.as_ref())
+                        .and_then(image_of)
+                }),
+            architectures: uniq_nonempty(
+                f.iter()
+                    .filter_map(|x| x.model_architecture.clone())
+                    .collect(),
+            ),
+            formats: uniq_nonempty(f.iter().map(|x| x.model_format.name.clone()).collect()),
+            quantizations: uniq_nonempty(f.iter().filter_map(|x| x.quantization.clone()).collect()),
+            protocols: s.protocol_versions.clone().unwrap_or_default(),
+            components: runtime_components(
+                s.engine_config
+                    .as_ref()
+                    .and_then(|e| e.worker.as_ref())
+                    .map(|w| w.size),
+                s.decoder_config.is_some(),
+                s.decoder_config
+                    .as_ref()
+                    .and_then(|d| d.worker.as_ref())
+                    .map(|w| w.size),
+            ),
+            disabled: s.disabled,
+            age: age(r.meta()),
         }
     }
 }
