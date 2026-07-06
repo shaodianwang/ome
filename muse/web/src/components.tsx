@@ -1,5 +1,5 @@
 // Small reusable presentational pieces shared across panels.
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import type { BarTone, Cloud, Tone } from "./types";
 
@@ -65,5 +65,16 @@ export function ClusterFilter({
         ))}
       </select>
     </div>
+  );
+}
+
+/** Full-width placeholder row for a table body (loading / error / empty). */
+export function EmptyRow({ colSpan, children }: { colSpan: number; children: ReactNode }) {
+  return (
+    <tr>
+      <td colSpan={colSpan} className="muted empty-cell">
+        {children}
+      </td>
+    </tr>
   );
 }

@@ -15,7 +15,6 @@ import type {
   RolloutItem,
 } from "./api";
 import type {
-  BarTone,
   Cloud,
   ClusterRow,
   FeedItem,
@@ -25,19 +24,9 @@ import type {
   Tone,
   WorkloadRow,
 } from "./types";
+import { ago, utilPct, utilTone } from "./util";
 
 // ---- small helpers -------------------------------------------------------
-
-/** Accelerator utilization percent (allocated / allocatable). */
-function util(g: { allocatable: number; allocated: number }): number {
-  return g.allocatable > 0 ? Math.round((g.allocated / g.allocatable) * 100) : 0;
-}
-
-function barToneFor(pct: number): BarTone {
-  if (pct >= 90) return "red";
-  if (pct >= 75) return "amber";
-  return "green";
-}
 
 /** Best-effort cloud from a cluster name. */
 function cloudOf(name: string): Cloud {
@@ -56,15 +45,6 @@ function regionOf(name: string): string {
   if (n.includes("use1")) return "us-east-1";
   if (n.includes("usw2")) return "us-west-2";
   return "—";
-}
-
-/** Relative "Ns/Nm/Nh/Nd ago" from an epoch-seconds timestamp. */
-function ago(atSecs: number): string {
-  const secs = Math.max(0, Math.floor(Date.now() / 1000) - atSecs);
-  if (secs >= 86_400) return `${Math.floor(secs / 86_400)}d ago`;
-  if (secs >= 3_600) return `${Math.floor(secs / 3_600)}h ago`;
-  if (secs >= 60) return `${Math.floor(secs / 60)}m ago`;
-  return `${secs}s ago`;
 }
 
 const MODE_TONE: Record<string, Tone> = {
@@ -90,7 +70,7 @@ export function toClusterRows(
     const groups = byCluster.filter((g) => g.name === c.name);
     const alloc = groups.reduce((s, g) => s + g.allocatable, 0);
     const used = groups.reduce((s, g) => s + g.allocated, 0);
-    const pct = util({ allocatable: alloc, allocated: used });
+    const pct = utilPct({ allocatable: alloc, allocated: used });
     const kinds = [...new Set(groups.map((g) => g.kind))];
     const kindLabel = kinds.length === 1 ? kinds[0].toUpperCase() : "accel";
     return {
@@ -101,7 +81,7 @@ export function toClusterRows(
       nodes: `${c.acceleratorNodes} ${kindLabel} · ${c.nodes} total`,
       accel: groups.length === 0 ? "—" : `${alloc} ${kindLabel}`,
       utilPct: pct,
-      barTone: barToneFor(pct),
+      barTone: utilTone(pct),
       status: c.ready ? { label: "Ready", tone: "green" } : { label: "Syncing", tone: "amber" },
     };
   });
@@ -233,12 +213,17 @@ export function modelUsage(isvcs: IsvcItem[]): Map<string, number> {
 
 // ---- Models ---------------------------------------------------------------
 
-/** Lifecycle state → pill: Ready=green, Failed=red, in-progress=amber, else slate. */
+/** Lifecycle state → tone: Ready=green, Failed=red, in-progress=amber, else slate. */
+export function stateTone(state?: string): Tone {
+  if (!state) return "slate";
+  if (state === "Ready") return "green";
+  if (state === "Failed") return "red";
+  return "amber"; // Importing / Converting / In Transit / …
+}
+
+/** Lifecycle state → pill (label is the raw state, "Unknown" when absent). */
 function statePill(state?: string): Pill {
-  if (!state) return { label: "Unknown", tone: "slate" };
-  if (state === "Ready") return { label: "Ready", tone: "green" };
-  if (state === "Failed") return { label: "Failed", tone: "red" };
-  return { label: state, tone: "amber" }; // Importing / Converting / In Transit / …
+  return { label: state ?? "Unknown", tone: stateTone(state) };
 }
 
 /** Humanize a max-tokens count as a context-window tag (e.g. 131072 → "128k ctx"). */

@@ -3,12 +3,12 @@ import { useState } from "react";
 import type { PanelKey } from "../App";
 import { api } from "../api";
 import type { IsvcDetail } from "../api";
-import { ClusterFilter, Pill } from "../components";
+import { ClusterFilter, EmptyRow, Pill } from "../components";
 import { Copyable, Drawer, Facts, Section } from "../drawer";
 import { Copy, Link, Plus, Search } from "../icons";
 import { useEventFeed, useLive } from "../live";
 import { replicaRollup, toWorkloadRows } from "../map";
-import { matches } from "../util";
+import { ago, emptyText, hostOf, matches } from "../util";
 
 interface Selected {
   cluster: string;
@@ -112,14 +112,11 @@ export function Workloads({ goto }: { goto: (p: PanelKey) => void }) {
                 </tr>
               ))}
               {workloads.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="muted empty-cell">
-                    {q.trim() && all.length
-                      ? `No deployments match "${q}"`
-                      : (isvcs.error ??
-                        (isvcs.loading ? "Loading deployments…" : "No deployments"))}
-                  </td>
-                </tr>
+                <EmptyRow colSpan={6}>
+                  {q.trim() && all.length
+                    ? `No deployments match "${q}"`
+                    : emptyText(isvcs, "Loading deployments…", "No deployments")}
+                </EmptyRow>
               ) : null}
             </tbody>
           </table>
@@ -134,23 +131,6 @@ export function Workloads({ goto }: { goto: (p: PanelKey) => void }) {
       {selected ? <WorkloadDrawer sel={selected} onClose={() => setSelected(null)} /> : null}
     </section>
   );
-}
-
-/** Host portion of a URL for a compact endpoint chip. */
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-}
-
-function ago(atSecs: number): string {
-  const secs = Math.max(0, Math.floor(Date.now() / 1000) - atSecs);
-  if (secs >= 86_400) return `${Math.floor(secs / 86_400)}d ago`;
-  if (secs >= 3_600) return `${Math.floor(secs / 3_600)}h ago`;
-  if (secs >= 60) return `${Math.floor(secs / 60)}m ago`;
-  return `${secs}s ago`;
 }
 
 function WorkloadDrawer({ sel, onClose }: { sel: Selected; onClose: () => void }) {

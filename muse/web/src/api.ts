@@ -2,7 +2,7 @@
 //
 // During `npm run dev`, Vite proxies `/v1` (and `/v1/stream`) to the muse-server
 // on :8080, so these are same-origin fetches with no CORS setup. Shapes mirror
-// the server's view DTOs (see crates/muse-server/src/{views,capacity,feed}.rs).
+// the server's wire protocol (see crates/muse-server/src/protocol.rs).
 
 export interface ClusterItem {
   name: string;

@@ -2,9 +2,9 @@ import { useState } from "react";
 
 import { api } from "../api";
 import type { AccelGroup, CapacityResp } from "../api";
-import { Bar } from "../components";
+import { Bar, EmptyRow } from "../components";
 import { useLive } from "../live";
-import { matches } from "../util";
+import { emptyText, matches, utilPct, utilTone } from "../util";
 
 type Dim = "cluster" | "island" | "nvlink" | "instance";
 
@@ -47,10 +47,6 @@ interface Row {
 }
 
 const n = (v: number) => v.toLocaleString();
-const pct = (g: { allocatable: number; allocated: number }) =>
-  g.allocatable > 0 ? Math.round((g.allocated / g.allocatable) * 100) : 0;
-const utilTone = (p: number): "green" | "amber" | "red" =>
-  p >= 90 ? "red" : p >= 75 ? "amber" : "green";
 
 export function Capacity() {
   const [dim, setDim] = useState<Dim>("cluster");
@@ -105,7 +101,7 @@ export function Capacity() {
         total: g.allocatable,
         used: g.allocated,
         free: g.free,
-        util: pct(g),
+        util: utilPct(g),
       });
     }
   }
@@ -216,11 +212,9 @@ export function Capacity() {
                 </tr>
               ))}
               {filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={showName ? 8 : 7} className="muted empty-cell">
-                    {live.error ?? (live.loading ? "Loading capacity…" : "No capacity data")}
-                  </td>
-                </tr>
+                <EmptyRow colSpan={showName ? 8 : 7}>
+                  {emptyText(live, "Loading capacity…", "No capacity data")}
+                </EmptyRow>
               ) : null}
             </tbody>
           </table>

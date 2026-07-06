@@ -1,0 +1,7 @@
+/* MUSE console styles, split by concern. Imported in cascade order — later
+   sections intentionally override earlier ones, so do not reorder. */
+@import "./base.css";
+@import "./shell.css";
+@import "./components.css";
+@import "./panels.css";
+@import "./drawer.css";

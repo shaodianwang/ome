@@ -8,8 +8,8 @@ import { ClusterFilter, Pill } from "../components";
 import { Copyable, Drawer, Facts, Section } from "../drawer";
 import { Plus, Refresh, Search } from "../icons";
 import { useLive } from "../live";
-import { modelUsage, toModelCards } from "../map";
-import { matches } from "../util";
+import { modelUsage, stateTone, toModelCards } from "../map";
+import { emptyText, matches } from "../util";
 
 interface Selected {
   cluster: string;
@@ -50,11 +50,6 @@ export function Models({ goto }: { goto: (p: PanelKey) => void }) {
       (clusterSel === "" || m.cluster === clusterSel) &&
       matches(q, m.name, m.source, ...m.specs.map((s) => s.label)),
   );
-
-  const empty =
-    base.error ??
-    cluster.error ??
-    (base.loading || cluster.loading ? "Loading models…" : "No models registered");
 
   return (
     <section className="panel active" id="panel-models">
@@ -127,7 +122,13 @@ export function Models({ goto }: { goto: (p: PanelKey) => void }) {
       </div>
       {models.length === 0 ? (
         <div className="muted empty-note">
-          {q.trim() && all.length ? `No models match "${q}"` : empty}
+          {q.trim() && all.length
+            ? `No models match "${q}"`
+            : emptyText(
+                { loading: base.loading || cluster.loading, error: base.error ?? cluster.error },
+                "Loading models…",
+                "No models registered",
+              )}
         </div>
       ) : null}
 
@@ -186,7 +187,7 @@ function ModelDrawer({
       ) : (
         <>
           <div className="drawer-toprow">
-            {d.state ? <Pill tone={statePillTone(d.state)} label={d.state} /> : null}
+            {d.state ? <Pill tone={stateTone(d.state)} label={d.state} /> : null}
             <span className={`use-chip ${serving.length ? "on" : ""}`}>
               {serving.length ? `${serving.length} serving` : "unused"}
             </span>
@@ -268,11 +269,4 @@ function ModelDrawer({
       )}
     </Drawer>
   );
-}
-
-/** Lifecycle state → pill tone (mirrors map.ts statePill, without a relabel). */
-function statePillTone(state: string): "green" | "red" | "amber" | "slate" {
-  if (state === "Ready") return "green";
-  if (state === "Failed") return "red";
-  return "amber";
 }

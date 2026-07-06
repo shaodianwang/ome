@@ -1,0 +1,142 @@
+/* ============================================================
+   MUSE design system  (ported verbatim from the OEP-0021 mockup)
+   ============================================================ */
+:root {
+  /* surfaces — warm charcoal / stone (warm-neutral, not blue-black) */
+  --bg: #14120f; /* app background, warm near-black */
+  --bg-2: #1a1713; /* sunken (table header, code) */
+  --panel: #201c17; /* elevated panel / card */
+  --panel-2: #262019; /* card header / nested */
+  --hover: #2b251d; /* row / item hover */
+  --border: #322c23; /* hairline border */
+  --border-2: #423a2e; /* stronger border / focus */
+
+  /* text — warm whites / stone */
+  --fg: #ece7df; /* primary text */
+  --fg-2: #b1a899; /* secondary text */
+  --fg-3: #84796a; /* tertiary / labels */
+  --fg-faint: #5b5447; /* faint */
+
+  /* accent — a single muted warm (terracotta/amber) */
+  --accent: #d68a4e;
+  --accent-2: #e7a973;
+  --accent-dim: #352617; /* accent chip background */
+  --accent-fg: #f1c79f; /* accent text on dim */
+
+  /* semantic — muted, used only for real status (not decoration) */
+  --green: #6fae84;
+  --green-dim: #1e2a20;
+  --amber: #d2a64a;
+  --amber-dim: #2e2612;
+  --red: #d97a68;
+  --red-dim: #321d18;
+  /* legacy decorative tones, desaturated toward neutral so nothing pops */
+  --violet: #a99ec0;
+  --violet-dim: #272232;
+  --cyan: #7fb0b3;
+  --cyan-dim: #18272a;
+
+  /* type scale */
+  --t-xs: 11px;
+  --t-sm: 12px;
+  --t-md: 13px;
+  --t-base: 14px;
+  --t-lg: 16px;
+  --t-xl: 20px;
+  --t-2xl: 26px;
+  --t-3xl: 34px;
+  --t-4xl: 44px;
+
+  /* spacing scale */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 32px;
+  --s8: 40px;
+
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+  --sans:
+    "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+
+  /* soft, rare shadow — no glow */
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.22);
+  --sidebar-w: 232px;
+  --topbar-h: 54px;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: var(--t-base);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+/* faint warm sheen at the top — barely there, no neon glow */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(
+    1100px 420px at 50% -300px,
+    rgba(214, 138, 78, 0.05),
+    transparent 70%
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+.mono {
+  font-family: var(--mono);
+  font-feature-settings:
+    "tnum" 1,
+    "zero" 1;
+}
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+/* uppercase micro eyebrow label (smg "section-label" pattern) */
+.eyebrow {
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+::selection {
+  background: rgba(214, 138, 78, 0.3);
+}
+
+/* scrollbars */
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a241c;
+  border-radius: 8px;
+  border: 3px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3228;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

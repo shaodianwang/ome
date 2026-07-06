@@ -1,10 +1,11 @@
 import type { PanelKey } from "../App";
 import { api } from "../api";
-import { Bar, CloudDot, Pill, UtilCell } from "../components";
+import { Bar, CloudDot, EmptyRow, Pill, UtilCell } from "../components";
 import { ArrowRight, Check, IconModels, Lines, Plus, Refresh, Upload, Warning } from "../icons";
 import { useEventFeed, useLive } from "../live";
 import { toClusterRows, toFeed, toRollouts } from "../map";
 import { CLOUD_LABEL, type FeedItem } from "../types";
+import { emptyText, utilPct } from "../util";
 
 function feedIcon(icon: FeedItem["icon"]) {
   switch (icon) {
@@ -53,8 +54,6 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
   const gpu = accel.find((a) => a.kind === "gpu");
   const tpu = accel.find((a) => a.kind === "tpu");
   const accelNodes = capacity.data?.nodes.acceleratorNodes;
-  const kpct = (a?: { allocatable: number; allocated: number }) =>
-    a && a.allocatable > 0 ? Math.round((a.allocated / a.allocatable) * 100) : 0;
 
   const refresh = () => {
     clusters.refetch();
@@ -119,9 +118,9 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
           <div className="meta">
             {gpu ? (
               <>
-                <Bar pct={kpct(gpu)} width={120} />
+                <Bar pct={utilPct(gpu)} width={120} />
                 <span className="mono" style={{ fontSize: 11 }}>
-                  {kpct(gpu)}%
+                  {utilPct(gpu)}%
                 </span>
               </>
             ) : (
@@ -138,9 +137,9 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
           <div className="meta">
             {tpu ? (
               <>
-                <Bar pct={kpct(tpu)} width={120} />
+                <Bar pct={utilPct(tpu)} width={120} />
                 <span className="mono" style={{ fontSize: 11 }}>
-                  {kpct(tpu)}%
+                  {utilPct(tpu)}%
                 </span>
               </>
             ) : (
@@ -203,11 +202,9 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
                   </tr>
                 ))}
                 {rows.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="muted empty-cell">
-                      {clusters.error ?? (clusters.loading ? "Loading clusters…" : "No clusters")}
-                    </td>
-                  </tr>
+                  <EmptyRow colSpan={7}>
+                    {emptyText(clusters, "Loading clusters…", "No clusters")}
+                  </EmptyRow>
                 ) : null}
               </tbody>
             </table>
@@ -239,7 +236,7 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
             ))}
             {feed.length === 0 ? (
               <div className="muted" style={{ padding: 16, fontSize: "var(--t-sm)" }}>
-                {events.error ?? (events.loading ? "Loading activity…" : "No recent activity")}
+                {emptyText(events, "Loading activity…", "No recent activity")}
               </div>
             ) : null}
           </div>
@@ -278,11 +275,9 @@ export function Fleet({ goto }: { goto: (p: PanelKey) => void }) {
                 </tr>
               ))}
               {rolloutCards.length === 0 ? (
-                <tr>
-                  <td colSpan={4} className="muted empty-cell">
-                    {rollouts.loading ? "Loading…" : "No rollouts in progress"}
-                  </td>
-                </tr>
+                <EmptyRow colSpan={4}>
+                  {emptyText(rollouts, "Loading…", "No rollouts in progress")}
+                </EmptyRow>
               ) : null}
             </tbody>
           </table>
