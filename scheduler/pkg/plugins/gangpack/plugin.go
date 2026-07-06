@@ -36,9 +36,16 @@ var (
 	_ framework.FilterPlugin    = &GangPack{}
 )
 
-// New is the plugin factory registered via app.WithPlugin.
-func New(_ context.Context, _ runtime.Object, h framework.Handle) (framework.Plugin, error) {
-	return &GangPack{handle: h, pins: placement.New()}, nil
+// New is the plugin factory registered via app.WithPlugin. It stands up the
+// PodGroup informer from the scheduler's shared kubeconfig, so PreFilter can
+// resolve gang facts (minMember + declared topology key). Wiring pgReader here is
+// what activates the plugin (before this, PreFilter returned Skip).
+func New(ctx context.Context, _ runtime.Object, h framework.Handle) (framework.Plugin, error) {
+	reader, err := newInformerReader(ctx, h.KubeConfig())
+	if err != nil {
+		return nil, err
+	}
+	return &GangPack{handle: h, pins: placement.New(), pgReader: reader}, nil
 }
 
 // Name returns the plugin's registered name.
