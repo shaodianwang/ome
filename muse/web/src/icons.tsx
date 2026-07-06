@@ -81,34 +81,10 @@ export const IconCapacity = (p: P) => (
   </svg>
 );
 
-export const ChevronDown = (p: P) => (
-  <svg {...base(p)}>
-    <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
-  </svg>
-);
-
-export const ChevronRight = (p: P) => (
-  <svg {...base(p)}>
-    <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
-  </svg>
-);
-
 export const Search = (p: P) => (
   <svg {...base(p)}>
     <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth={1.8} />
     <path d="M21 21l-4-4" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" />
-  </svg>
-);
-
-export const Bell = (p: P) => (
-  <svg {...base(p)}>
-    <path
-      d="M6 9a6 6 0 1112 0c0 5 2 6 2 6H4s2-1 2-6z"
-      stroke="currentColor"
-      strokeWidth={1.7}
-      strokeLinejoin="round"
-    />
-    <path d="M10 21h4" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" />
   </svg>
 );
 
@@ -130,79 +106,10 @@ export const Plus = (p: P) => (
   </svg>
 );
 
-export const ArrowRight = (p: P) => (
-  <svg {...base(p)}>
-    <path
-      d="M5 12h14M13 6l6 6-6 6"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-
-export const Check = (p: P) => (
-  <svg {...base(p)}>
-    <path
-      d="M5 13l4 4L19 7"
-      stroke="currentColor"
-      strokeWidth={2.2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-
-export const Columns = (p: P) => (
-  <svg {...base(p)}>
-    <path d="M3 5h18M6 12h12M10 19h4" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
-  </svg>
-);
-
-export const Filter = (p: P) => (
-  <svg {...base(p)}>
-    <path
-      d="M3 5h18l-7 8v6l-4 2v-8L3 5z"
-      stroke="currentColor"
-      strokeWidth={1.7}
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-
 export const Info = (p: P) => (
   <svg {...base(p)}>
     <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth={1.7} />
     <path d="M12 8v5m0 3h.01" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" />
-  </svg>
-);
-
-export const Spinner = (p: P) => (
-  <svg {...base(p)}>
-    <path d="M12 3a9 9 0 109 9" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" />
-  </svg>
-);
-
-export const Warning = (p: P) => (
-  <svg {...base(p)}>
-    <path
-      d="M12 9v4m0 4h.01M10.3 4.3L2.6 18a2 2 0 001.7 3h15.4a2 2 0 001.7-3L13.7 4.3a2 2 0 00-3.4 0z"
-      stroke="currentColor"
-      strokeWidth={1.7}
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-
-export const Lines = (p: P) => (
-  <svg {...base(p)}>
-    <path
-      d="M4 7h16M4 12h16M4 17h10"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-    />
   </svg>
 );
 
@@ -234,17 +141,5 @@ export const Copy = (p: P) => (
   <svg {...base(p)}>
     <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth={1.7} />
     <path d="M5 15V5a2 2 0 012-2h8" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" />
-  </svg>
-);
-
-export const Link = (p: P) => (
-  <svg {...base(p)}>
-    <path
-      d="M10 14a4 4 0 005.66 0l3-3a4 4 0 10-5.66-5.66l-1.5 1.5M14 10a4 4 0 00-5.66 0l-3 3a4 4 0 105.66 5.66l1.5-1.5"
-      stroke="currentColor"
-      strokeWidth={1.7}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
   </svg>
 );

@@ -11,6 +11,7 @@ import { useLive } from "../live";
 import { modelUsage, stateTone } from "../map";
 import type { Column, Tab } from "../ResourceTable";
 import { ResourceTable } from "../ResourceTable";
+import { num } from "../util";
 
 type ModelRow = ModelItem & { scoped: boolean; used: number };
 
@@ -245,7 +246,7 @@ function ModelDrawer({
                 ["Parameters", d.parameterSize],
                 ["Format", d.format],
                 ["Quantization", d.quantization],
-                ["Max tokens", d.maxTokens != null ? d.maxTokens.toLocaleString() : null],
+                ["Max tokens", d.maxTokens != null ? num(d.maxTokens) : null],
                 ["Vendor", d.vendor],
                 ["Version", d.version],
               ]}

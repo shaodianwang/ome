@@ -4,7 +4,7 @@ import { api } from "../api";
 import type { AccelGroup, CapacityResp } from "../api";
 import { Bar, EmptyRow, Pager } from "../components";
 import { useLive } from "../live";
-import { matches, shortId, UNASSIGNED_GROUP, utilPct, utilTone } from "../util";
+import { matches, num as n, shortId, UNASSIGNED_GROUP, utilPct, utilTone } from "../util";
 import { Gauge, StatTile } from "../viz";
 
 type Dim = "cluster" | "island" | "nvlink" | "instance";
@@ -40,9 +40,8 @@ interface Row {
 
 type SortKey = keyof Row;
 
-const n = (v: number) => v.toLocaleString();
 const kpct = (t?: { alloc: number; used: number }) =>
-  t && t.alloc > 0 ? Math.round((t.used / t.alloc) * 100) : 0;
+  t ? utilPct({ allocatable: t.alloc, allocated: t.used }) : 0;
 const sortVal = (r: Row, k: SortKey): string | number =>
   k === "cluster" || k === "name" || k === "kind" ? String(r[k]).toLowerCase() : r[k];
 

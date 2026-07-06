@@ -1,7 +1,8 @@
 // Small reusable presentational pieces shared across panels.
 import type { CSSProperties, ReactNode } from "react";
 
-import type { BarTone, Cloud, Tone } from "./types";
+import type { BarTone, Tone } from "./types";
+import { num } from "./util";
 
 export function Pill({ tone, label, style }: { tone: Tone; label: string; style?: CSSProperties }) {
   return (
@@ -29,19 +30,6 @@ export function Bar({
       <i style={{ width: `${pct}%` }} />
     </div>
   );
-}
-
-export function UtilCell({ pct, tone = "" }: { pct: number; tone?: BarTone }) {
-  return (
-    <div className="util-cell">
-      <Bar pct={pct} tone={tone} />
-      <span className="pct">{pct}%</span>
-    </div>
-  );
-}
-
-export function CloudDot({ cloud }: { cloud: Cloud }) {
-  return <span className={`cdot ${cloud}`} />;
 }
 
 /** Cluster scope selector: "" = all clusters, else a specific cluster name. */
@@ -102,12 +90,11 @@ export function Pager({
   onPage: (p: number) => void;
   onPageSize: (s: number) => void;
 }) {
-  const fmt = (v: number) => v.toLocaleString();
   return (
     <div className="list-foot pager">
       <span>
         {total
-          ? `${fmt(start + 1)}–${fmt(Math.min(start + pageSize, total))} of ${fmt(total)}`
+          ? `${num(start + 1)}–${num(Math.min(start + pageSize, total))} of ${num(total)}`
           : "0"}{" "}
         {noun}
       </span>

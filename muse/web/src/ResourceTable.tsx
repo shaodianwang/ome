@@ -7,7 +7,7 @@ import type { ReactNode } from "react";
 import { ClusterFilter, EmptyRow, Pager } from "./components";
 import { Search } from "./icons";
 import type { Tone } from "./types";
-import { emptyText, matches } from "./util";
+import { emptyText, matches, num } from "./util";
 import { Dot } from "./viz";
 
 export interface Column<T> {
@@ -127,8 +127,7 @@ export function ResourceTable<T>({
               className={filter === t.key ? "active" : undefined}
               onClick={() => setFilter(t.key)}
             >
-              {t.label}{" "}
-              <span className="seg-count">{scoped.filter(t.match).length.toLocaleString()}</span>
+              {t.label} <span className="seg-count">{num(scoped.filter(t.match).length)}</span>
             </button>
           ))}
         </div>

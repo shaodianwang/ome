@@ -7,15 +7,13 @@ import { Copyable, Facts } from "../drawer";
 import { Copy } from "../icons";
 import { useEventFeed, useLive } from "../live";
 import { replicaRollup } from "../map";
-import { ago } from "../util";
+import { ago, num as n } from "../util";
 import { Dot, UtilRow } from "../viz";
 
 export interface Selected {
   cluster: string;
   name: string;
 }
-
-const n = (v: number) => v.toLocaleString();
 
 /** Full-page detail for one deployment: health, replicas, model/runtime,
  *  placement, a test box, and recent activity. No k8s conditions or deployment

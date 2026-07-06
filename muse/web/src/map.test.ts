@@ -6,7 +6,6 @@ import type {
   ComponentItem,
   EventItem,
   IsvcItem,
-  ModelItem,
   RolloutItem,
 } from "./api";
 import {
@@ -15,7 +14,6 @@ import {
   replicaRollup,
   toClusterRows,
   toFeed,
-  toModelCards,
   toRollouts,
   toWorkloadRows,
 } from "./map";
@@ -86,66 +84,6 @@ describe("toClusterRows", () => {
     const [row] = toClusterRows([clusters[0]], null);
     expect(row.accel).toBe("—");
     expect(row.utilPct).toBe(0);
-  });
-});
-
-describe("toModelCards", () => {
-  it("projects real metadata into ordered spec tags and a state pill", () => {
-    const cluster: ModelItem[] = [
-      {
-        cluster: "cw",
-        name: "llama-405b",
-        architecture: "Llama",
-        format: "safetensors",
-        parameterSize: "405B",
-        quantization: "fp8",
-        capabilities: ["TEXT_TO_TEXT"],
-        state: "Ready",
-      },
-    ];
-    const [card] = toModelCards([], cluster);
-    expect(card.scoped).toBe(true);
-    expect(card.status).toEqual({ label: "Ready", tone: "green" });
-    expect(card.where).toBe("cw");
-    expect(card.specs.map((s) => s.label)).toEqual([
-      "Llama",
-      "405B",
-      "safetensors",
-      "fp8",
-      "TEXT_TO_TEXT",
-    ]);
-    expect(card.specs[0].accent).toBe(true); // architecture is accented
-  });
-
-  it("maps lifecycle state to pill tone and drops a zero param size", () => {
-    const base: ModelItem[] = [
-      { cluster: "cw", name: "importing", namespace: "ns", state: "Importing", parameterSize: "0" },
-      { cluster: "cw", name: "unknown-state", namespace: "ns" },
-    ];
-    const [importing, unknown] = toModelCards(base, []);
-    expect(importing.status).toEqual({ label: "Importing", tone: "amber" });
-    expect(importing.scoped).toBe(false);
-    expect(importing.specs.some((s) => s.label === "0")).toBe(false);
-    expect(unknown.status).toEqual({ label: "Unknown", tone: "slate" });
-  });
-
-  it("carries source, disabled, a context tag, and the live used-by count", () => {
-    const base: ModelItem[] = [
-      {
-        cluster: "cw",
-        name: "llama-405b",
-        namespace: "ns",
-        source: "manifold",
-        maxTokens: 131072,
-        disabled: true,
-      },
-    ];
-    const usage = new Map([["llama-405b", 3]]);
-    const [card] = toModelCards(base, [], usage);
-    expect(card.source).toBe("manifold");
-    expect(card.disabled).toBe(true);
-    expect(card.usedBy).toBe(3);
-    expect(card.specs.map((s) => s.label)).toContain("128k ctx");
   });
 });
 

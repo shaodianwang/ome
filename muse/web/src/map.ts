@@ -11,19 +11,9 @@ import type {
   ComponentItem,
   EventItem,
   IsvcItem,
-  ModelItem,
   RolloutItem,
 } from "./api";
-import type {
-  Cloud,
-  ClusterRow,
-  FeedItem,
-  ModelCard,
-  Pill,
-  Rollout,
-  Tone,
-  WorkloadRow,
-} from "./types";
+import type { Cloud, ClusterRow, FeedItem, Pill, Rollout, Tone, WorkloadRow } from "./types";
 import { ago, utilPct, utilTone } from "./util";
 
 // ---- small helpers -------------------------------------------------------
@@ -239,46 +229,4 @@ export function stateTone(state?: string): Tone {
   if (state === "Ready") return "green";
   if (state === "Failed") return "red";
   return "amber"; // Importing / Converting / In Transit / …
-}
-
-/** Lifecycle state → pill (label is the raw state, "Unknown" when absent). */
-function statePill(state?: string): Pill {
-  return { label: state ?? "Unknown", tone: stateTone(state) };
-}
-
-/** Humanize a max-tokens count as a context-window tag (e.g. 131072 → "128k ctx"). */
-function contextTag(maxTokens?: number): string | undefined {
-  if (!maxTokens || maxTokens <= 0) return undefined;
-  return maxTokens >= 1024 ? `${Math.round(maxTokens / 1024)}k ctx` : `${maxTokens} ctx`;
-}
-
-export function toModelCards(
-  base: ModelItem[],
-  cluster: ModelItem[],
-  usage?: Map<string, number>,
-): ModelCard[] {
-  const mk = (m: ModelItem, scoped: boolean): ModelCard => {
-    const specs: { label: string; accent?: boolean }[] = [];
-    if (m.architecture) specs.push({ label: m.architecture, accent: true });
-    if (m.parameterSize && m.parameterSize !== "0") specs.push({ label: m.parameterSize });
-    if (m.format) specs.push({ label: m.format });
-    if (m.quantization) specs.push({ label: m.quantization });
-    const ctx = contextTag(m.maxTokens);
-    if (ctx) specs.push({ label: ctx });
-    if (m.vendor) specs.push({ label: m.vendor });
-    for (const cap of m.capabilities ?? []) if (cap) specs.push({ label: cap });
-    return {
-      name: m.name,
-      cluster: m.cluster,
-      namespace: m.namespace,
-      scoped,
-      status: statePill(m.state),
-      where: m.cluster,
-      source: m.source,
-      usedBy: usage?.get(m.name) ?? 0,
-      disabled: m.disabled ?? false,
-      specs,
-    };
-  };
-  return [...cluster.map((m) => mk(m, true)), ...base.map((m) => mk(m, false))];
 }

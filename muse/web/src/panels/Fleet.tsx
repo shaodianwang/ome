@@ -2,12 +2,10 @@ import type { DepFilter } from "../App";
 import { api } from "../api";
 import { useEventFeed, useLive } from "../live";
 import { deploymentHealth, toClusterRows, toFeed, toRollouts } from "../map";
-import { emptyText, UNASSIGNED_GROUP, utilTone } from "../util";
+import { emptyText, num as n, UNASSIGNED_GROUP, utilPct, utilTone } from "../util";
 import { Distribution, Dot, Gauge, UtilRow } from "../viz";
 
-const n = (v: number) => v.toLocaleString();
-const kpct = (a?: { allocatable: number; allocated: number }) =>
-  a && a.allocatable > 0 ? Math.round((a.allocated / a.allocatable) * 100) : 0;
+const kpct = (a?: { allocatable: number; allocated: number }) => (a ? utilPct(a) : 0);
 
 export function Fleet({ openDeployments }: { openDeployments: (f: DepFilter) => void }) {
   const clusters = useLive(api.clusters, {

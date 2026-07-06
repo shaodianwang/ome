@@ -22,6 +22,9 @@ export function matches(query: string, ...fields: (string | undefined)[]): boole
   return fields.some((f) => f != null && f.toLowerCase().includes(q));
 }
 
+/** Format an integer with locale grouping (e.g. 11556 → "11,556"). */
+export const num = (v: number): string => v.toLocaleString();
+
 /** Shorten an opaque/long identifier (e.g. a topology-label hash) for display,
  *  keeping the head and tail so it's still recognisable. */
 export function shortId(s: string, max = 16): string {

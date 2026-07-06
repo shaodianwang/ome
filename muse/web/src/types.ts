@@ -5,13 +5,6 @@ export type Cloud = "meta" | "gcp" | "oci" | "cw";
 export type Tone = "green" | "amber" | "red" | "blue" | "violet" | "cyan" | "slate";
 export type BarTone = "" | "green" | "amber" | "red" | "violet";
 
-export const CLOUD_LABEL: Record<Cloud, string> = {
-  meta: "Meta",
-  gcp: "GCP",
-  oci: "OCI",
-  cw: "CoreWeave",
-};
-
 export interface Pill {
   label: string;
   tone: Tone;
@@ -73,20 +66,4 @@ export interface WorkloadRow {
   reason?: string;
   age: string;
   status: Pill;
-}
-
-/** Models · registry card (real BaseModel / ClusterBaseModel metadata) */
-export interface ModelCard {
-  name: string;
-  cluster: string;
-  namespace?: string;
-  scoped: boolean;
-  status: Pill;
-  where: string;
-  /** Storage backend scheme (manifold / pvc / hf / …). */
-  source?: string;
-  /** Live count of InferenceServices in the fleet referencing this model. */
-  usedBy: number;
-  disabled: boolean;
-  specs: { label: string; accent?: boolean }[];
 }
