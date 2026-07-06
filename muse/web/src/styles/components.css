@@ -92,7 +92,6 @@
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   gap: var(--s4);
-  margin-bottom: var(--s6);
 }
 .stat {
   background: var(--panel);
@@ -480,7 +479,6 @@ table.tbl .num {
   display: flex;
   align-items: center;
   gap: var(--s3);
-  margin-bottom: var(--s4);
   flex-wrap: wrap;
 }
 .input {

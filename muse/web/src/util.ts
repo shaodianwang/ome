@@ -14,6 +14,12 @@ export function matches(query: string, ...fields: (string | undefined)[]): boole
   return fields.some((f) => f != null && f.toLowerCase().includes(q));
 }
 
+/** Shorten an opaque/long identifier (e.g. a topology-label hash) for display,
+ *  keeping the head and tail so it's still recognisable. */
+export function shortId(s: string, max = 16): string {
+  return s.length > max ? `${s.slice(0, 6)}…${s.slice(-4)}` : s;
+}
+
 /** Host portion of a URL (for a compact endpoint chip), or the raw string if it
  *  doesn't parse. */
 export function hostOf(url: string): string {
@@ -31,6 +37,15 @@ export function ago(atSecs: number): string {
   if (secs >= 3_600) return `${Math.floor(secs / 3_600)}h ago`;
   if (secs >= 60) return `${Math.floor(secs / 60)}m ago`;
   return `${secs}s ago`;
+}
+
+/** Parse a formatted age ("7d" / "3h" / "10m" / "30s") back to seconds, for
+ *  sorting. Returns -1 when it doesn't parse. */
+export function ageToSecs(age?: string): number {
+  const m = /^(\d+)\s*([smhd])/.exec(age ?? "");
+  if (!m) return -1;
+  const v = Number(m[1]);
+  return m[2] === "d" ? v * 86400 : m[2] === "h" ? v * 3600 : m[2] === "m" ? v * 60 : v;
 }
 
 /** Accelerator utilization percent (allocated / allocatable), 0 when empty. */

@@ -4,7 +4,6 @@
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 
-import type { ConditionItem } from "./api";
 import { Close, Copy } from "./icons";
 
 /** Right-side slide-over. Click-scrim or Escape closes; body scrolls. */
@@ -106,26 +105,5 @@ export function Copyable({ text }: { text: string }) {
         {copied ? "✓" : <Copy />}
       </button>
     </span>
-  );
-}
-
-/** A list of status conditions, tone-coded True/False/Unknown. */
-export function Conditions({ conditions }: { conditions?: ConditionItem[] }) {
-  if (!conditions || conditions.length === 0) return null;
-  const tone = (status: string) =>
-    status === "True" ? "ok" : status === "False" ? "bad" : "unknown";
-  return (
-    <ul className="conds">
-      {conditions.map((c) => (
-        <li key={c.type} className={tone(c.status)}>
-          <div className="cond-top">
-            <span className="cond-dot" />
-            <b>{c.type}</b>
-            {c.reason ? <span className="cond-reason">{c.reason}</span> : null}
-          </div>
-          {c.message ? <div className="cond-msg">{c.message}</div> : null}
-        </li>
-      ))}
-    </ul>
   );
 }

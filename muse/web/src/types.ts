@@ -24,6 +24,10 @@ export interface ClusterRow {
   region: string;
   nodes: string;
   accel: string;
+  /** Accelerator kind label (e.g. "GPU", "TPU", or "accel" when mixed). */
+  kind: string;
+  /** Free accelerators (allocatable − allocated) on this cluster. */
+  free: number;
   utilPct: number;
   barTone: BarTone;
   status: Pill;
@@ -42,7 +46,6 @@ export interface FeedItem {
 /** Fleet · active rollouts */
 export interface Rollout {
   name: string;
-  strategy: Pill;
   barTone: BarTone;
   barPct: number;
   barStriped?: boolean;
@@ -60,7 +63,6 @@ export interface WorkloadRow {
   namespace: string;
   model: string;
   runtime: string;
-  mode: Pill;
   /** Servable endpoint (status.url), when ready. */
   endpoint?: string;
   /** Rolled-up ready/desired replicas across Components, with a health tone. */

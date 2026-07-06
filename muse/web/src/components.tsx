@@ -78,3 +78,64 @@ export function EmptyRow({ colSpan, children }: { colSpan: number; children: Rea
     </tr>
   );
 }
+
+const PAGE_SIZES = [25, 50, 100];
+
+/** List footer: "X–Y of Z <noun>" plus a page-size selector and prev/next paging.
+ *  Shared by the Deployments and Models tables so they page identically. */
+export function Pager({
+  total,
+  page,
+  totalPages,
+  pageSize,
+  start,
+  noun,
+  onPage,
+  onPageSize,
+}: {
+  total: number;
+  page: number;
+  totalPages: number;
+  pageSize: number;
+  start: number;
+  noun: string;
+  onPage: (p: number) => void;
+  onPageSize: (s: number) => void;
+}) {
+  const fmt = (v: number) => v.toLocaleString();
+  return (
+    <div className="list-foot pager">
+      <span>
+        {total
+          ? `${fmt(start + 1)}–${fmt(Math.min(start + pageSize, total))} of ${fmt(total)}`
+          : "0"}{" "}
+        {noun}
+      </span>
+      <div className="pager-ctrls">
+        <label className="page-size">
+          per page
+          <select value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))}>
+            {PAGE_SIZES.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className="btn ghost sm" disabled={page === 0} onClick={() => onPage(page - 1)}>
+          ‹ Prev
+        </button>
+        <span className="page-of tnum">
+          {page + 1} / {totalPages}
+        </span>
+        <button
+          className="btn ghost sm"
+          disabled={page >= totalPages - 1}
+          onClick={() => onPage(page + 1)}
+        >
+          Next ›
+        </button>
+      </div>
+    </div>
+  );
+}

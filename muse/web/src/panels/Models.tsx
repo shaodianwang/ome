@@ -3,19 +3,105 @@ import { useState } from "react";
 
 import type { PanelKey } from "../App";
 import { api } from "../api";
-import type { FtwItem, IsvcItem, ModelDetail } from "../api";
-import { ClusterFilter, Pill } from "../components";
+import type { FtwItem, IsvcItem, ModelDetail, ModelItem } from "../api";
+import { Pill } from "../components";
 import { Copyable, Drawer, Facts, Section } from "../drawer";
-import { Plus, Refresh, Search } from "../icons";
+import { Plus, Refresh } from "../icons";
 import { useLive } from "../live";
-import { modelUsage, stateTone, toModelCards } from "../map";
-import { emptyText, matches } from "../util";
+import { modelUsage, stateTone } from "../map";
+import type { Column, Tab } from "../ResourceTable";
+import { ResourceTable } from "../ResourceTable";
+
+type ModelRow = ModelItem & { scoped: boolean; used: number };
 
 interface Selected {
   cluster: string;
   name: string;
   scoped: boolean;
 }
+
+/** Parameter size ("405B" / "47B" / "350M") to a comparable number, for sorting. */
+const sizeVal = (s?: string): number => {
+  const m = /^([\d.]+)\s*([bmk]?)/i.exec(s ?? "");
+  if (!m) return -1;
+  const v = parseFloat(m[1]);
+  const u = m[2].toLowerCase();
+  return u === "b" ? v * 1e9 : u === "m" ? v * 1e6 : u === "k" ? v * 1e3 : v;
+};
+
+const COLUMNS: Column<ModelRow>[] = [
+  {
+    key: "name",
+    label: "Name",
+    cellClass: "cell-name mono",
+    render: (m) => (
+      <>
+        {m.name}
+        {m.disabled ? <span className="tag warn">disabled</span> : null}
+      </>
+    ),
+    sort: (m) => m.name.toLowerCase(),
+  },
+  {
+    key: "arch",
+    label: "Architecture",
+    render: (m) => m.architecture ?? "—",
+    sort: (m) => (m.architecture ?? "").toLowerCase(),
+  },
+  {
+    key: "size",
+    label: "Size",
+    right: true,
+    cellClass: "num",
+    render: (m) => (m.parameterSize && m.parameterSize !== "0" ? m.parameterSize : "—"),
+    sort: (m) => sizeVal(m.parameterSize),
+  },
+  {
+    key: "quant",
+    label: "Quant",
+    cellClass: "cell-sm",
+    render: (m) => m.quantization ?? "—",
+    sort: (m) => (m.quantization ?? "").toLowerCase(),
+  },
+  {
+    key: "format",
+    label: "Format",
+    cellClass: "cell-sm muted",
+    render: (m) => m.format ?? "—",
+    sort: (m) => (m.format ?? "").toLowerCase(),
+  },
+  {
+    key: "source",
+    label: "Source",
+    render: (m) => (m.source ? <span className={`src-badge ${m.source}`}>{m.source}</span> : "—"),
+    sort: (m) => (m.source ?? "").toLowerCase(),
+  },
+  {
+    key: "used",
+    label: "Used by",
+    right: true,
+    cellClass: "num",
+    render: (m) => <span className={`use-chip ${m.used ? "on" : ""}`}>{m.used || "—"}</span>,
+    sort: (m) => m.used,
+  },
+];
+
+const TABS: Tab<ModelRow>[] = [
+  { key: "all", label: "All", match: () => true },
+  { key: "ready", label: "Ready", match: (m) => m.state === "Ready", empty: "No ready models." },
+  {
+    key: "progress",
+    label: "In progress",
+    match: (m) => !!m.state && m.state !== "Ready" && m.state !== "Failed",
+    empty: "Nothing importing.",
+  },
+  {
+    key: "failed",
+    label: "Failed",
+    match: (m) => m.state === "Failed",
+    empty: "No failed models.",
+  },
+];
 
 export function Models({ goto }: { goto: (p: PanelKey) => void }) {
   const base = useLive(api.baseModels, {
@@ -38,30 +124,25 @@ export function Models({ goto }: { goto: (p: PanelKey) => void }) {
     throttleMs: 8_000,
     intervalMs: 60_000,
   });
-  const [q, setQ] = useState("");
-  const [clusterSel, setClusterSel] = useState("");
+  const [filter, setFilter] = useState("all");
   const [selected, setSelected] = useState<Selected | null>(null);
 
   const usage = modelUsage(isvcs.data?.items ?? []);
-  const all = toModelCards(base.data?.items ?? [], cluster.data?.items ?? [], usage);
-  const clusters = [...new Set(all.map((m) => m.cluster))].sort();
-  const models = all.filter(
-    (m) =>
-      (clusterSel === "" || m.cluster === clusterSel) &&
-      matches(q, m.name, m.source, ...m.specs.map((s) => s.label)),
-  );
+  const rows: ModelRow[] = [
+    ...(cluster.data?.items ?? []).map((m) => ({
+      ...m,
+      scoped: true,
+      used: usage.get(m.name) ?? 0,
+    })),
+    ...(base.data?.items ?? []).map((m) => ({ ...m, scoped: false, used: usage.get(m.name) ?? 0 })),
+  ];
 
   return (
-    <section className="panel active" id="panel-models">
-      <div className="page-head">
-        <div>
-          <h1>Models</h1>
-          <p>
-            Models registered across the fleet, with the architecture, size and capabilities OME
-            parses at onboarding. Click one to see where it's served and what can run it.
-          </p>
-        </div>
-        <div className="actions">
+    <>
+      <ResourceTable<ModelRow>
+        title="Models"
+        subtitle="Models registered across the fleet — architecture, size, quantization and where served."
+        actions={
           <button
             className="btn ghost"
             onClick={() => {
@@ -72,66 +153,24 @@ export function Models({ goto }: { goto: (p: PanelKey) => void }) {
             <Refresh />
             Refresh
           </button>
-        </div>
-      </div>
-
-      <div className="filterbar">
-        <ClusterFilter clusters={clusters} value={clusterSel} onChange={setClusterSel} />
-        <div className="input grow">
-          <Search />
-          <input
-            placeholder="Filter by name, architecture, size, capability…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-        </div>
-      </div>
-
-      <div className="model-grid">
-        {models.map((m) => (
-          <button
-            type="button"
-            className="mcard"
-            key={`${m.scoped ? "c" : "n"}/${m.cluster}/${m.name}`}
-            onClick={() => setSelected({ cluster: m.cluster, name: m.name, scoped: m.scoped })}
-          >
-            <div className="mh">
-              <div className="nm">
-                {m.name} <Pill tone={m.status.tone} label={m.status.label} />
-                {m.disabled ? <span className="tag warn">disabled</span> : null}
-              </div>
-              <div className="src">{m.where}</div>
-            </div>
-            <div className="mmeta">
-              {m.source ? <span className={`src-badge ${m.source}`}>{m.source}</span> : null}
-              <span className={`use-chip ${m.usedBy ? "on" : ""}`}>
-                {m.usedBy ? `${m.usedBy} serving` : "unused"}
-              </span>
-            </div>
-            {m.specs.length ? (
-              <div className="specs">
-                {m.specs.map((s, i) => (
-                  <span key={i} className={`tag ${s.accent ? "accent" : ""}`}>
-                    {s.label}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-          </button>
-        ))}
-      </div>
-      {models.length === 0 ? (
-        <div className="muted empty-note">
-          {q.trim() && all.length
-            ? `No models match "${q}"`
-            : emptyText(
-                { loading: base.loading || cluster.loading, error: base.error ?? cluster.error },
-                "Loading models…",
-                "No models registered",
-              )}
-        </div>
-      ) : null}
-
+        }
+        rows={rows}
+        status={{
+          loading: base.loading || cluster.loading,
+          error: base.error ?? cluster.error,
+        }}
+        noun="models"
+        searchPlaceholder="Filter by name, architecture, size, quantization…"
+        searchFields={(m) => [m.name, m.architecture, m.source, m.quantization, m.format]}
+        clusterOf={(m) => m.cluster}
+        rowKey={(m) => `${m.scoped ? "c" : "n"}/${m.cluster}/${m.name}`}
+        rowTone={(m) => stateTone(m.state)}
+        onRowClick={(m) => setSelected({ cluster: m.cluster, name: m.name, scoped: m.scoped })}
+        columns={COLUMNS}
+        tabs={TABS}
+        filter={filter}
+        setFilter={setFilter}
+      />
       {selected ? (
         <ModelDrawer
           sel={selected}
@@ -141,7 +180,7 @@ export function Models({ goto }: { goto: (p: PanelKey) => void }) {
           onClose={() => setSelected(null)}
         />
       ) : null}
-    </section>
+    </>
   );
 }
 

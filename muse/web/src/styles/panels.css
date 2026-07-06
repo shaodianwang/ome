@@ -593,9 +593,6 @@
   grid-template-columns: 1.55fr 1fr;
   gap: var(--s4);
 }
-.section-gap {
-  margin-top: var(--s6);
-}
 hr.div {
   border: none;
   border-top: 1px solid var(--border);
@@ -621,7 +618,6 @@ hr.div {
 }
 /* repeated list chrome (footers + empty states) — pair with .muted for color */
 .list-foot {
-  margin-top: 14px;
   font-size: var(--t-sm);
   color: var(--fg-3);
 }
@@ -671,7 +667,6 @@ hr.div {
   align-items: center;
   gap: var(--s3);
   flex-wrap: wrap;
-  margin-bottom: var(--s3);
 }
 .cap-controls .grow {
   flex: 1 1 auto;
@@ -679,7 +674,7 @@ hr.div {
 .cap-help {
   font-size: var(--t-sm);
   color: var(--fg-3);
-  margin: 0 0 var(--s4);
+  margin: 0;
 }
 .bar-cell {
   display: flex;

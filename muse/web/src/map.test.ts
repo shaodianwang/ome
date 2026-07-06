@@ -161,7 +161,6 @@ describe("toRollouts", () => {
       },
     ];
     const [r] = toRollouts(items);
-    expect(r.strategy.label).toBe("OMENative");
     expect(r.gate.tone).toBe("amber");
     expect(r.note).toBe("EngineNotReady");
   });
@@ -186,7 +185,6 @@ describe("toWorkloadRows", () => {
     ];
     const [row] = toWorkloadRows(isvcs);
     expect(row.status).toEqual({ label: "Ready", tone: "green" });
-    expect(row.mode.label).toBe("RawDeployment");
     expect(row.endpoint).toBe("https://w1.example");
     expect(row.replicas).toEqual({ label: "3/3", tone: "green" });
     expect(row.load).toBe("3 loaded");

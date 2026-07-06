@@ -47,18 +47,6 @@ function regionOf(name: string): string {
   return "—";
 }
 
-const MODE_TONE: Record<string, Tone> = {
-  RawDeployment: "slate",
-  MultiNode: "blue",
-  PDDisaggregated: "violet",
-  PDisaggregated: "violet",
-  OMENative: "cyan",
-  Serverless: "green",
-};
-function modePill(mode: string | undefined): Pill {
-  return { label: mode ?? "—", tone: (mode && MODE_TONE[mode]) || "slate" };
-}
-
 // ---- Fleet ----------------------------------------------------------------
 
 export function toClusterRows(
@@ -80,6 +68,8 @@ export function toClusterRows(
       // e.g. "51 GPU · 57 total" — 51 GPU nodes of 57 (the rest are CPU/system).
       nodes: `${c.acceleratorNodes} ${kindLabel} · ${c.nodes} total`,
       accel: groups.length === 0 ? "—" : `${alloc} ${kindLabel}`,
+      kind: kindLabel,
+      free: alloc - used,
       utilPct: pct,
       barTone: utilTone(pct),
       status: c.ready ? { label: "Ready", tone: "green" } : { label: "Syncing", tone: "amber" },
@@ -128,7 +118,6 @@ export function toFeed(events: EventItem[]): FeedItem[] {
 export function toRollouts(rollouts: RolloutItem[]): Rollout[] {
   return rollouts.map((r) => ({
     name: r.name,
-    strategy: modePill(r.deploymentMode),
     barTone: "amber",
     barPct: r.ready ? 90 : 45,
     barStriped: true,
@@ -190,7 +179,6 @@ export function toWorkloadRows(isvcs: IsvcItem[]): WorkloadRow[] {
       namespace: s.namespace ?? "—",
       model: s.model ?? "—",
       runtime: s.runtime ?? "—",
-      mode: modePill(s.deploymentMode),
       endpoint: s.url,
       replicas: replicaRollup(s.components),
       load: loadSummary(s),
@@ -209,6 +197,38 @@ export function modelUsage(isvcs: IsvcItem[]): Map<string, number> {
     counts.set(s.model, (counts.get(s.model) ?? 0) + 1);
   }
   return counts;
+}
+
+/** Fleet-wide deployment readiness rollup, plus the not-ready ones to surface. */
+export interface FleetHealth {
+  ready: number;
+  notReady: number;
+  unknown: number;
+  total: number;
+  attention: { name: string; cluster: string; namespace?: string; reason?: string }[];
+}
+
+export function deploymentHealth(isvcs: IsvcItem[]): FleetHealth {
+  let ready = 0;
+  let notReady = 0;
+  let unknown = 0;
+  const attention: FleetHealth["attention"] = [];
+  for (const s of isvcs) {
+    if (s.ready === true) {
+      ready++;
+    } else if (s.ready === false) {
+      notReady++;
+      attention.push({
+        name: s.name,
+        cluster: s.cluster,
+        namespace: s.namespace,
+        reason: s.reason,
+      });
+    } else {
+      unknown++;
+    }
+  }
+  return { ready, notReady, unknown, total: isvcs.length, attention };
 }
 
 // ---- Models ---------------------------------------------------------------

@@ -4,7 +4,8 @@ import { api } from "../api";
 import type { AccelGroup, CapacityResp } from "../api";
 import { Bar, EmptyRow } from "../components";
 import { useLive } from "../live";
-import { emptyText, matches, utilPct, utilTone } from "../util";
+import { emptyText, matches, shortId, utilPct, utilTone } from "../util";
+import { Gauge, HeatGrid, StatTile } from "../viz";
 
 type Dim = "cluster" | "island" | "nvlink" | "instance";
 
@@ -78,6 +79,8 @@ export function Capacity() {
       byKind.set(a.kind, e);
     }
   }
+  const gpu = byKind.get("gpu");
+  const tpu = byKind.get("tpu");
   const accelNodes = caps.reduce((s, { cap }) => s + cap.nodes.acceleratorNodes, 0);
 
   const meta = DIMS.find((d) => d.key === dim)!;
@@ -110,9 +113,10 @@ export function Capacity() {
     .sort((a, b) => b.free - a.free);
 
   const showName = dim !== "cluster";
+  const maxFree = filtered.reduce((m, r) => Math.max(m, r.free), 0) || 1;
 
   return (
-    <section className="panel active" id="panel-capacity">
+    <section className="panel active">
       <div className="page-head">
         <div>
           <h1>Capacity</h1>
@@ -123,28 +127,33 @@ export function Capacity() {
         </div>
       </div>
 
-      <div className="stat-grid" style={{ gridTemplateColumns: `repeat(${2 + byKind.size},1fr)` }}>
-        <div className="stat">
-          <div className="label">Accelerator nodes</div>
-          <div className="val">{n(accelNodes)}</div>
-          <div className="meta">across {caps.length} clusters</div>
-        </div>
-        {[...byKind.entries()].map(([kind, t]) => (
-          <div className="stat" key={kind}>
-            <div className="label">Free {kind.toUpperCase()}</div>
-            <div className="val" style={{ color: "var(--green)" }}>
-              {n(t.free)}
-            </div>
-            <div className="meta">
-              of {n(t.alloc)} · {t.alloc ? Math.round((t.used / t.alloc) * 100) : 0}% used
-            </div>
-          </div>
-        ))}
-        <div className="stat">
-          <div className="label">Clusters</div>
-          <div className="val">{caps.length || "—"}</div>
-          <div className="meta">reporting capacity</div>
-        </div>
+      <div className="tiles cap-tiles">
+        <StatTile
+          label="GPU in use"
+          value={`${gpu ? utilPct({ allocatable: gpu.alloc, allocated: gpu.used }) : 0}%`}
+          sub={gpu ? `${n(gpu.used)} / ${n(gpu.alloc)} · ${n(gpu.free)} free` : "no GPU clusters"}
+        >
+          <Gauge
+            pct={gpu ? utilPct({ allocatable: gpu.alloc, allocated: gpu.used }) : 0}
+            tone={utilTone(gpu ? utilPct({ allocatable: gpu.alloc, allocated: gpu.used }) : 0)}
+          />
+        </StatTile>
+        <StatTile
+          label="TPU in use"
+          value={`${tpu ? utilPct({ allocatable: tpu.alloc, allocated: tpu.used }) : 0}%`}
+          sub={tpu ? `${n(tpu.used)} / ${n(tpu.alloc)} · ${n(tpu.free)} free` : "no TPU clusters"}
+        >
+          <Gauge
+            pct={tpu ? utilPct({ allocatable: tpu.alloc, allocated: tpu.used }) : 0}
+            tone={utilTone(tpu ? utilPct({ allocatable: tpu.alloc, allocated: tpu.used }) : 0)}
+          />
+        </StatTile>
+        <StatTile
+          label="Accelerator nodes"
+          value={n(accelNodes)}
+          sub={`across ${caps.length} clusters`}
+        />
+        <StatTile label="Clusters" value={caps.length || "—"} sub="reporting capacity" />
       </div>
 
       <div className="cap-controls">
@@ -169,7 +178,25 @@ export function Capacity() {
       </div>
       <p className="cap-help">{meta.help} Sorted by free capacity, most available first.</p>
 
-      <div className="card">
+      {filtered.length ? (
+        <div className="card section-gap">
+          <div className="card-head">
+            <h3>Free capacity</h3>
+            <span className="sub">brighter = more headroom</span>
+          </div>
+          <div className="card-body">
+            <HeatGrid
+              cells={filtered.slice(0, 40).map((r) => ({
+                label: `${shortId(showName ? r.name || r.cluster : r.cluster)} ${n(r.free)}`,
+                intensity: r.free / maxFree,
+                title: `${r.cluster}${r.name ? ` · ${r.name}` : ""} · ${n(r.free)} ${r.kind} free`,
+              }))}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      <div className="card section-gap">
         <div className="tbl-wrap">
           <table className="tbl">
             <thead>

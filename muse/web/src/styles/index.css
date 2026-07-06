@@ -3,5 +3,6 @@
 @import "./base.css";
 @import "./shell.css";
 @import "./components.css";
+@import "./viz.css";
 @import "./panels.css";
 @import "./drawer.css";
