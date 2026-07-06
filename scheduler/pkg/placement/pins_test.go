@@ -1,0 +1,76 @@
+package placement
+
+import (
+	"testing"
+
+	"github.com/ome-projects/ome/scheduler/pkg/topology"
+)
+
+// TestChoosePinsThenFollows is the core pinning contract: the first pod of a
+// placement group chooses a domain via best-fit; every later call for the same
+// group returns that pinned domain regardless of current free counts — the
+// group is committed. This is what makes per-pod scheduling a group decision.
+func TestChoosePinsThenFollows(t *testing.T) {
+	p := New()
+	d, ok := p.Choose("svc", topology.FreeByDomain{"a": 18, "b": 6, "c": 4}, 4)
+	if !ok || d != "c" { // fullest that fits
+		t.Fatalf("first Choose = %q,%v want c,true", d, ok)
+	}
+	// A later member follows the pin even though c isn't even offered now.
+	d2, ok := p.Choose("svc", topology.FreeByDomain{"a": 18}, 4)
+	if !ok || d2 != "c" {
+		t.Fatalf("follow Choose = %q,%v want c,true (pinned)", d2, ok)
+	}
+}
+
+// TestChooseNoFitNotPinned: when nothing fits and the group isn't pinned yet, no
+// domain is returned and no pin is recorded (the gang waits, unpinned).
+func TestChooseNoFitNotPinned(t *testing.T) {
+	p := New()
+	if d, ok := p.Choose("svc", topology.FreeByDomain{"a": 2}, 4); ok || d != "" {
+		t.Fatalf("no-fit Choose = %q,%v want \"\",false", d, ok)
+	}
+	if _, pinned := p.Get("svc"); pinned {
+		t.Fatal("group must not be pinned when nothing fit")
+	}
+}
+
+// TestSetRebuildsPinOnFailover: Set seeds a pin without best-fit — used on leader
+// failover to rebuild "group -> domain" from where bound pods already sit.
+func TestSetRebuildsPinOnFailover(t *testing.T) {
+	p := New()
+	p.Set("svc", "b")
+	// Would best-fit to "a", but the rebuilt pin wins.
+	if d, ok := p.Choose("svc", topology.FreeByDomain{"a": 18}, 4); !ok || d != "b" {
+		t.Fatalf("Choose after Set = %q,%v want b,true", d, ok)
+	}
+}
+
+// TestReleaseAllowsRechoose: Release drops the pin (gang completed, or timed out
+// and unwound), so the next Choose re-runs best-fit and may pick differently.
+func TestReleaseAllowsRechoose(t *testing.T) {
+	p := New()
+	if d, _ := p.Choose("svc", topology.FreeByDomain{"a": 8, "b": 4}, 4); d != "b" {
+		t.Fatalf("initial Choose = %q want b", d)
+	}
+	p.Release("svc")
+	if _, pinned := p.Get("svc"); pinned {
+		t.Fatal("Release must forget the pin")
+	}
+	if d, ok := p.Choose("svc", topology.FreeByDomain{"a": 8}, 4); !ok || d != "a" {
+		t.Fatalf("re-Choose after Release = %q,%v want a,true", d, ok)
+	}
+}
+
+// TestPartnerGangFollowsSharedGroup: prefill and decode share one placement
+// group, so the partner gang lands in the same domain the first gang pinned —
+// this is the co-location mechanism (OEP-0022 R2), even with a different size.
+func TestPartnerGangFollowsSharedGroup(t *testing.T) {
+	p := New()
+	free := topology.FreeByDomain{"x": 20, "y": 8}
+	d1, _ := p.Choose("svc-a", free, 8)  // prefill gang -> y (fullest that fits 8)
+	d2, ok := p.Choose("svc-a", free, 4) // decode gang, same group, smaller
+	if !ok || d2 != d1 {
+		t.Fatalf("partner Choose = %q,%v want %q (co-located via shared group)", d2, ok, d1)
+	}
+}
