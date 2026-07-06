@@ -20,7 +20,10 @@ deliberately — the same structure scheduler-plugins / Volcano / KAI use.
 scheduler/
 ├── go.mod                        # own module; k8s 1.33 staging replace block
 ├── cmd/ome-scheduler/main.go     # entry point: kube-scheduler + our plugin
-└── pkg/plugins/gangpack/         # OMEGangPack placement plugin (Phase A)
+├── pkg/topology/                 # pure best-fit domain accounting (no k8s deps)
+├── pkg/placement/                # per-gang domain pins
+├── pkg/plugins/gangpack/         # OMEGangPack placement plugin (Phase A)
+└── test/integration/             # envtest + real in-process scheduler
 ```
 
 ## Build & test
@@ -29,20 +32,39 @@ scheduler/
 cd scheduler
 go build ./...                                     # compile-check every package (no binary emitted)
 go build -o bin/ome-scheduler ./cmd/ome-scheduler  # produce the scheduler binary
-go test ./...
+go test ./...                                       # unit tests
 ```
 
 Note: `go build ./...` only *checks* that everything compiles — for a multi-package
 build Go discards the executable. Use the explicit `-o` form (or `go install
 ./cmd/ome-scheduler`) to get the binary.
 
+### Integration tests
+
+`test/integration/` runs the plugin inside a **real in-process kube-scheduler**
+against an [envtest](https://book.kubebuilder.io/reference/envtest) API server —
+the authoritative proof that the choose → pin → enforce → gate → bind loop
+actually schedules a gang, covering the informer/`New`/snapshot glue the unit
+tests fake. The scheduler-plugins `PodGroup` CRD is sourced from the go.mod
+module at test time (not vendored — go.mod is the source of truth, matching OME's
+dep-crds policy).
+
+```sh
+export KUBEBUILDER_ASSETS="$(../bin/setup-envtest use 1.33 -p path)"   # envtest binaries
+go test ./test/integration/... -v
+```
+
 ## Status
 
-**Phase A walking skeleton.** The plugin registers and passes every node through
-`Filter` as a no-op — the point of the skeleton is to prove the
-kube-scheduler-as-library build and plugin registration end to end. Domain
-choice, pinning, the gang gate (Permit), and best-fit packing land on top of this
-scaffold; see OEP-0022 § Placement.
+**Phase A.** The placement loop is live end to end: `PreFilter` best-fits and
+pins the gang's domain, `Filter` enforces it, `Permit` gates the gang until all
+members are present, and `Unreserve` unwinds a half-formed gang. Gang membership
++ size come from the standard scheduler-plugins `PodGroup`; the domain label is
+declared per-workload via the PodGroup's `ome.io/topology-key` annotation; and
+node free-ness is inferred from the gang pod's own resource requests — the
+scheduler bakes in no workload conventions or fabric values. Still ahead: a
+per-gang capacity claim in `Reserve` (so two gangs can't race into one domain),
+replica spreading, and metrics; see OEP-0022 § Placement.
 
 ## Version policy
 
