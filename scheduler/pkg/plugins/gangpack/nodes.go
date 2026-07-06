@@ -7,22 +7,15 @@ import (
 	"github.com/ome-projects/ome/scheduler/pkg/topology"
 )
 
-// The scheduler bakes in no workload conventions. Gang membership comes from the
-// standard scheduler-plugins PodGroup (its minMember + the standard pod-group
-// label) — the scheduler reads that directly, no OME config. The only inputs it
-// must be told are fabric facts, supplied as plugin args: which label denotes a
-// domain (topologyKey — e.g. nvidia.com/gpu.clique or a TPU slice label) and
-// which resource is the accelerator. Those are infrastructure config, not OME
-// conventions, and there is deliberately no in-code default.
-//
-// Cross-gang co-location (prefill+decode in one domain, R2) is the one thing that
-// can't be inferred — two independent PodGroups being "one service" only exists
-// if the workload declares it. Its mechanism (standard podAffinity with a
-// topologyKey, or a link on the PodGroup) is decided when R2 lands; deliberately
-// not a bespoke per-pod label baked in now.
+// The scheduler bakes in no workload conventions and no fabric values. Gang
+// membership + size come from the standard scheduler-plugins PodGroup; the domain
+// label is declared per-workload on the PodGroup (see gang.go); and "is a node
+// free for this gang" is inferred from the GANG POD'S OWN resource requests — the
+// pod already declares what it needs, so the scheduler is never told an
+// accelerator resource name.
 
-// domainOf returns the node's domain — the value of the configured topology
-// label — or "" when the node has no such label (not part of any domain).
+// domainOf returns the node's domain — the value of the given topology label — or
+// "" when the node has no such label (not part of any domain).
 func domainOf(node *v1.Node, topologyKey string) string {
 	if node == nil {
 		return ""
@@ -30,44 +23,75 @@ func domainOf(node *v1.Node, topologyKey string) string {
 	return node.Labels[topologyKey]
 }
 
-// nodeFree reports, for an accelerator node, whether it is available for a
-// whole-node gang pod. isAccel is true only when the node actually has the
-// accelerator (allocatable > 0); free is true when none of that accelerator is
-// currently requested. Whole-node model: any accelerator pod on the node makes
-// it occupied for a gang (OEP-0022 § Placement).
-func nodeFree(ni *framework.NodeInfo, accel v1.ResourceName) (isAccel, free bool) {
+// podScalarRequests sums a pod's requested extended (scalar) resources across its
+// containers — the accelerator(s) it needs (e.g. nvidia.com/gpu, a TPU resource).
+// framework.NewResource splits standard resources (cpu/memory) from scalar ones;
+// the whole-node gang model binds on the scalar accelerator, so that is what
+// placement counts.
+func podScalarRequests(pod *v1.Pod) map[v1.ResourceName]int64 {
+	total := v1.ResourceList{}
+	if pod != nil {
+		for i := range pod.Spec.Containers {
+			for name, q := range pod.Spec.Containers[i].Resources.Requests {
+				cur := total[name]
+				cur.Add(q)
+				total[name] = cur
+			}
+		}
+	}
+	return framework.NewResource(total).ScalarResources
+}
+
+// nodeRelevant reports whether a node could ever hold this gang pod — it has
+// allocatable capacity for at least one resource the pod requests. This is what
+// makes a node part of an accelerator domain (a labeled node with none of the
+// gang's resource is not a member).
+func nodeRelevant(ni *framework.NodeInfo, req map[v1.ResourceName]int64) bool {
 	if ni == nil || ni.Allocatable == nil {
-		return false, false
+		return false
 	}
-	if ni.Allocatable.ScalarResources[accel] <= 0 {
-		return false, false
+	for name := range req {
+		if ni.Allocatable.ScalarResources[name] > 0 {
+			return true
+		}
 	}
-	var requested int64
-	if ni.Requested != nil {
-		requested = ni.Requested.ScalarResources[accel]
+	return false
+}
+
+// nodeFits reports whether the gang pod's scalar requests fit the node's
+// remaining capacity (allocatable - requested) for every requested resource.
+// Whole-node model: a node already running the accelerator is not free.
+func nodeFits(ni *framework.NodeInfo, req map[v1.ResourceName]int64) bool {
+	for name, q := range req {
+		var requested int64
+		if ni.Requested != nil {
+			requested = ni.Requested.ScalarResources[name]
+		}
+		if ni.Allocatable.ScalarResources[name]-requested < q {
+			return false
+		}
 	}
-	return true, requested == 0
+	return true
 }
 
 // freeByDomain projects a framework node snapshot onto the pure accounting type:
-// free whole accelerator nodes per domain. Only accelerator nodes carrying a
-// domain label participate; an accelerator domain with no free node still
-// appears at 0 so "full" is distinguishable from "absent" (see
-// topology.CountFree). Non-accelerator and unlabeled nodes are ignored.
-func freeByDomain(nodeInfos []*framework.NodeInfo, topologyKey string, accel v1.ResourceName) topology.FreeByDomain {
+// free nodes per domain for the given gang pod. A node participates only if it
+// carries a domain label AND could hold the pod (nodeRelevant); it is counted
+// free when the pod fits (nodeFits). A domain with no free node still appears at
+// 0 so "full" is distinguishable from "absent" (see topology.CountFree).
+func freeByDomain(nodeInfos []*framework.NodeInfo, topologyKey string, pod *v1.Pod) topology.FreeByDomain {
+	req := podScalarRequests(pod)
 	out := topology.FreeByDomain{}
 	for _, info := range nodeInfos {
-		node := info.Node()
-		dom := domainOf(node, topologyKey)
+		dom := domainOf(info.Node(), topologyKey)
 		if dom == "" {
 			continue
 		}
-		isAccel, free := nodeFree(info, accel)
-		if !isAccel {
+		if !nodeRelevant(info, req) {
 			continue
 		}
 		out[dom] += 0 // register the domain even if all nodes are occupied
-		if free {
+		if nodeFits(info, req) {
 			out[dom]++
 		}
 	}

@@ -52,10 +52,11 @@ func TestDomainOf(t *testing.T) {
 	}
 }
 
-// TestFreeByDomain: build topology.FreeByDomain from a framework node snapshot.
-// Only accelerator nodes (allocatable > 0) with a domain label participate; a
-// node is free when none of its accelerator is requested; an all-occupied
-// accelerator domain still appears at 0; non-accel and no-label nodes are ignored.
+// TestFreeByDomain: build topology.FreeByDomain from a framework node snapshot,
+// free-ness inferred from whether the GANG POD's own requests fit — no configured
+// accelerator name. Only nodes that both carry a domain label and could hold the
+// pod's resource (allocatable > 0 for it) participate; free = the pod fits; an
+// all-occupied domain still appears at 0; irrelevant and no-label nodes ignored.
 func TestFreeByDomain(t *testing.T) {
 	nodes := []*framework.NodeInfo{
 		nodeInfo(gpuNode("n1", "a", "4")),              // free
@@ -66,7 +67,8 @@ func TestFreeByDomain(t *testing.T) {
 		nodeInfo(gpuNode("n6", "c", "")),               // labeled but no GPU -> ignored
 		nodeInfo(gpuNode("n7", "", "4")),               // no domain -> ignored
 	}
-	got := freeByDomain(nodes, testKey, gpu)
+	// The gang pod declares what it needs (gpu: 4); free-ness comes from that fit.
+	got := freeByDomain(nodes, testKey, gpuPod("4"))
 	want := topology.FreeByDomain{"a": 2, "b": 1, "d": 0}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("freeByDomain = %v want %v", got, want)
