@@ -36,9 +36,20 @@ func New(_ context.Context, _ runtime.Object, h framework.Handle) (framework.Plu
 // Name returns the plugin's registered name.
 func (g *GangPack) Name() string { return Name }
 
-// Filter is a per-node yes/no check. The skeleton admits every node (nil Status
-// == Success); domain pinning — rejecting nodes outside the gang's chosen
-// domain — is the first real behavior to land here.
-func (g *GangPack) Filter(_ context.Context, _ *framework.CycleState, _ *v1.Pod, _ *framework.NodeInfo) *framework.Status {
+// Filter enforces the gang's pinned domain: once PreFilter has recorded a pin in
+// CycleState, only nodes in that domain pass; every other node is rejected as
+// UnschedulableAndUnresolvable (a wrong-domain node cannot be made right by
+// preempting on it, so the scheduler must not attempt preemption there). When no
+// pin is recorded — the pod is not a pinned gang member — Filter imposes no
+// constraint and admits the node.
+func (g *GangPack) Filter(_ context.Context, state *framework.CycleState, _ *v1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
+	pin := readPin(state)
+	if pin == nil {
+		return nil // no pinned domain this cycle -> no constraint
+	}
+	if domainOf(nodeInfo.Node(), pin.topologyKey) != pin.domain {
+		return framework.NewStatus(framework.UnschedulableAndUnresolvable,
+			"node not in gang's pinned domain "+pin.domain)
+	}
 	return nil
 }
