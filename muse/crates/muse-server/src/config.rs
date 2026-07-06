@@ -101,28 +101,29 @@ pub struct Config {
     pub capacity_refresh_secs: u64,
 
     /// Node label(s) naming the accelerator's outer topology domain — the RDMA
-    /// island / network fabric for GPUs, or the physical block for TPUs — used for
-    /// capacity grouping. Comma-separated; the first label present on a node wins,
-    /// so one flag spans providers that label topology differently (e.g.
-    /// cloud.google.com/gce-topology-block, backend.coreweave.cloud/fabric). Falls
-    /// back to the standard k8s zone.
+    /// island / network fabric for GPUs, or the physical block for TPUs — used to
+    /// group capacity. Comma-separated; the first label present on a node wins, so
+    /// one setting spans providers that label topology differently. No baked
+    /// default: supply the label key(s) for your environment via deployment config
+    /// (flag / env / GitOps). A node carrying none of these labels groups as
+    /// "unassigned" and is excluded from placement rather than guessed at.
     #[arg(
         long = "rdma-island-label",
         env = "MUSE_RDMA_ISLAND_LABEL",
-        value_delimiter = ',',
-        default_value = "cloud.google.com/gce-topology-block,topology.kubernetes.io/zone"
+        value_delimiter = ','
     )]
     pub rdma_island_labels: Vec<String>,
 
     /// Node label(s) naming the accelerator's inner topology domain — the NVLink
     /// domain for GPUs (e.g. an NVL72 rack), or the ICI sub-block for TPUs — within
-    /// one island. Comma-separated, first-present wins (e.g.
-    /// cloud.google.com/gce-topology-subblock, nvidia.com/gpu.clique).
+    /// one island. Comma-separated, first-present wins. No baked default: supply the
+    /// label key(s) for your environment via deployment config (flag / env /
+    /// GitOps). A node carrying none of these labels groups as "unassigned" and is
+    /// excluded from placement.
     #[arg(
         long = "nvlink-domain-label",
         env = "MUSE_NVLINK_DOMAIN_LABEL",
-        value_delimiter = ',',
-        default_value = "cloud.google.com/gce-topology-subblock,nvidia.com/gpu.clique"
+        value_delimiter = ','
     )]
     pub nvlink_domain_labels: Vec<String>,
 

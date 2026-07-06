@@ -2,7 +2,7 @@ import type { DepFilter } from "../App";
 import { api } from "../api";
 import { useEventFeed, useLive } from "../live";
 import { deploymentHealth, toClusterRows, toFeed, toRollouts } from "../map";
-import { emptyText, utilTone } from "../util";
+import { emptyText, UNASSIGNED_GROUP, utilTone } from "../util";
 import { Distribution, Dot, Gauge, UtilRow } from "../viz";
 
 const n = (v: number) => v.toLocaleString();
@@ -39,12 +39,18 @@ export function Fleet({ openDeployments }: { openDeployments: (f: DepFilter) => 
   const gpu = accel.find((a) => a.kind === "gpu");
   const tpu = accel.find((a) => a.kind === "tpu");
 
-  // Largest single fabric block free per kind — the biggest tightly-coupled job
-  // you could place right now (a job must fit within one block).
-  const maxBlock = new Map<string, number>();
-  for (const g of capacity.data?.byIsland ?? []) {
-    maxBlock.set(g.kind, Math.max(maxBlock.get(g.kind) ?? 0, g.free));
-  }
+  // Largest free block per kind at each topology tier — the biggest tightly-coupled
+  // job you could place right now. A job must fit within one block: the rack tier
+  // (NVLink/ICI) is the tight bound, the fabric tier (island) the loose one.
+  const maxAt = (groups: { kind: string; free: number; name: string }[]) => {
+    const m = new Map<string, number>();
+    for (const g of groups)
+      if (g.name !== UNASSIGNED_GROUP) m.set(g.kind, Math.max(m.get(g.kind) ?? 0, g.free));
+    return m;
+  };
+  const maxRack = maxAt(capacity.data?.byNvlinkDomain ?? []);
+  const maxFabric = maxAt(capacity.data?.byIsland ?? []);
+  const placeKinds = [...new Set([...maxRack.keys(), ...maxFabric.keys()])].sort();
 
   return (
     <section className="panel active">
@@ -152,22 +158,53 @@ export function Fleet({ openDeployments }: { openDeployments: (f: DepFilter) => 
         <div className="card">
           <div className="card-head">
             <h3>Largest placeable job</h3>
-            <span className="sub">in one fabric block</span>
+            <span className="sub">free now, per tier</span>
           </div>
           <div className="card-body">
-            <div className="place-vals">
-              <div className="place-val">
-                <span className="place-num tnum">{n(maxBlock.get("gpu") ?? 0)}</span>
-                <span className="place-unit">GPU</span>
-              </div>
-              <div className="place-val">
-                <span className="place-num tnum">{n(maxBlock.get("tpu") ?? 0)}</span>
-                <span className="place-unit">TPU</span>
-              </div>
-            </div>
+            <table className="place-tbl">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>
+                    Rack <span className="muted">NVLink / ICI</span>
+                  </th>
+                  <th>
+                    Fabric <span className="muted">island</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {placeKinds.map((k) => (
+                  <tr key={k}>
+                    <td className="place-kind">{k.toUpperCase()}</td>
+                    <td>
+                      {maxRack.has(k) ? (
+                        <b className="tnum">{n(maxRack.get(k) ?? 0)}</b>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                    <td>
+                      {maxFabric.has(k) ? (
+                        <b className="tnum">{n(maxFabric.get(k) ?? 0)}</b>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {placeKinds.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="muted">
+                      —
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
             <p className="panel-note">
-              The biggest tightly-coupled job schedulable now — capped by the largest single
-              network-fabric block. See <b>Capacity</b> for where.
+              Biggest tightly-coupled job that fits in one block — rack is the tight limit, fabric
+              the loose one. See <b>Capacity</b> for where.
             </p>
           </div>
         </div>

@@ -23,6 +23,12 @@ topology flag accepts a comma-separated candidate list (first present wins), so
 one config covers clusters that label topology differently. An unreachable
 cluster is skipped, not fatal.
 
+The topology flags have **no default** — the correct label keys are
+provider/cluster-specific, so they must be supplied for your environment (flag,
+`MUSE_RDMA_ISLAND_LABEL` / `MUSE_NVLINK_DOMAIN_LABEL` env, or GitOps). Nodes
+carrying none of the configured labels group as `unassigned` and are excluded
+from the placement planner rather than collapsed into a fabricated domain.
+
 ## Endpoints
 
 | Method/Path | Description |

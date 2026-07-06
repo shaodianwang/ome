@@ -89,29 +89,3 @@ export function UtilRow({
     </div>
   );
 }
-
-/** A compact heat grid: each cell tinted green by `intensity` (0..1 = free
- *  headroom), labelled, with a hover title. */
-export function HeatGrid({
-  cells,
-}: {
-  cells: { label: string; intensity: number; title?: string }[];
-}) {
-  return (
-    <div className="heatgrid">
-      {cells.map((c, i) => {
-        const a = 0.14 + 0.66 * Math.max(0, Math.min(1, c.intensity));
-        return (
-          <div
-            key={i}
-            className="heatcell"
-            title={c.title ?? c.label}
-            style={{ background: `rgba(111, 174, 132, ${a})` }} /* --green tinted by headroom */
-          >
-            {c.label}
-          </div>
-        );
-      })}
-    </div>
-  );
-}

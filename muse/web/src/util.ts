@@ -4,6 +4,14 @@
 import type { BarTone } from "./types";
 
 /**
+ * Sentinel the capacity rollup assigns to nodes with no configured topology label.
+ * Such nodes aren't a real placement domain (they'd collapse a whole cluster into
+ * one bucket), so the placement planner must exclude this group rather than treat
+ * it as a schedulable block.
+ */
+export const UNASSIGNED_GROUP = "unassigned";
+
+/**
  * Case-insensitive "does any field contain the query?" — the filter behind every
  * panel search box. An empty query matches everything; `undefined` fields are
  * skipped, so callers can spread optional/derived fields freely.
